@@ -4,13 +4,10 @@
 //          (embedded, path-less connection).
 
 import React, { useEffect, useState } from "react";
-import {
-  biModelCreateBlank,
-  biModelImportTables,
-  biModelListSourceTables,
-} from "@api";
+import { biModelImportTables, biModelListSourceTables } from "@api";
 import type { ConnectionInfo, ModelOverview, SourceTableInfo } from "@api";
-import { Field, styles } from "../editorShared";
+import { styles } from "../editorShared";
+import { NewModelDialog } from "../NewModelDialog";
 
 export function ImportSection({
   connectionId,
@@ -32,10 +29,8 @@ export function ImportSection({
   const [listing, setListing] = useState(false);
   const [importing, setImporting] = useState(false);
 
-  // ── New blank model ───────────────────────────────────────────────────────
-  const [newName, setNewName] = useState("");
-  const [connStr, setConnStr] = useState("");
-  const [creating, setCreating] = useState(false);
+  // ── New model dialog ──────────────────────────────────────────────────────
+  const [showNew, setShowNew] = useState(false);
 
   useEffect(() => {
     setSource(null);
@@ -75,20 +70,6 @@ export function ImportSection({
       reportError(err);
     } finally {
       setImporting(false);
-    }
-  };
-
-  const create = async () => {
-    setCreating(true);
-    try {
-      const conn = await biModelCreateBlank(newName.trim(), connStr.trim() || undefined);
-      setNewName("");
-      setConnStr("");
-      onModelCreated(conn);
-    } catch (err: unknown) {
-      reportError(err);
-    } finally {
-      setCreating(false);
     }
   };
 
@@ -199,40 +180,27 @@ export function ImportSection({
         )}
       </div>
 
-      {/* ── Card 2: New blank model ───────────────────────────────────────── */}
+      {/* ── Card 2: New model ─────────────────────────────────────────────── */}
       <div style={{ ...styles.card, maxWidth: 560 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>New blank model</div>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>New model</div>
         <div style={{ ...styles.hint, marginBottom: 8 }}>
-          Create an empty model as a new connection — embedded in this workbook
-          from birth, no model file on disk.
+          Create a model as a new connection — embedded in this workbook from birth, no model file
+          on disk. Choose a data source (or start blank) in the dialog.
         </div>
-        <Field label="Name">
-          <input
-            style={styles.input}
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="My Model"
-          />
-        </Field>
-        <Field
-          label="Connection string (optional)"
-          hint="Only needed if you later want to import tables from a database."
-        >
-          <input
-            style={styles.input}
-            value={connStr}
-            onChange={(e) => setConnStr(e.target.value)}
-            placeholder="host=localhost dbname=sales user=..."
-          />
-        </Field>
-        <button
-          style={styles.primaryBtn}
-          disabled={creating || !newName.trim()}
-          onClick={() => void create()}
-        >
-          {creating ? "Creating…" : "Create"}
+        <button style={styles.primaryBtn} onClick={() => setShowNew(true)}>
+          New model&hellip;
         </button>
       </div>
+
+      {showNew && (
+        <NewModelDialog
+          onClose={() => setShowNew(false)}
+          onCreated={(conn) => {
+            setShowNew(false);
+            onModelCreated(conn);
+          }}
+        />
+      )}
     </div>
   );
 }

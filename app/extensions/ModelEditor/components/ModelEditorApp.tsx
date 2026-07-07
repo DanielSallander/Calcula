@@ -44,6 +44,7 @@ import { ScriptFunctionsSection } from "./sections/ScriptFunctionsSection";
 import { SettingsSection } from "./sections/SettingsSection";
 import { TestingGroundSection } from "./sections/TestingGroundSection";
 import { LineageSection } from "./sections/LineageSection";
+import { NewModelDialog } from "./NewModelDialog";
 
 // ============================================================================
 // Navigation
@@ -163,6 +164,7 @@ export function ModelEditorApp(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<SectionId>("overview");
   const [undoState, setUndoState] = useState<ModelUndoState>({ canUndo: false, canRedo: false });
+  const [showNewModel, setShowNewModel] = useState(false);
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
@@ -353,8 +355,8 @@ export function ModelEditorApp(): React.ReactElement {
         <div style={{ ...styles.muted, padding: 8 }}>
           No BI connection. Load a model via Data &gt; Connections in the main
           window, or{" "}
-          <button style={styles.btn} onClick={() => setActive("import")}>
-            create a blank model
+          <button style={styles.btn} onClick={() => setShowNewModel(true)}>
+            create a model
           </button>
         </div>
       );
@@ -424,7 +426,7 @@ export function ModelEditorApp(): React.ReactElement {
             </option>
           ))}
         </select>
-        <button style={styles.btn} onClick={() => setActive("import")}>
+        <button style={styles.btn} onClick={() => setShowNewModel(true)}>
           New Model&hellip;
         </button>
         <button
@@ -466,6 +468,16 @@ export function ModelEditorApp(): React.ReactElement {
         </nav>
         <main style={contentStyle}>{renderSection()}</main>
       </div>
+
+      {showNewModel && (
+        <NewModelDialog
+          onClose={() => setShowNewModel(false)}
+          onCreated={(conn) => {
+            setShowNewModel(false);
+            handleModelCreated(conn);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -4096,6 +4096,8 @@ pub fn run() {
             bi::model_editor::bi_model_list_source_tables,
             bi::model_editor::bi_model_import_tables,
             bi::model_editor::bi_model_create_blank,
+            bi::model_editor::bi_model_test_connection,
+            bi::model_editor::bi_model_connect,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

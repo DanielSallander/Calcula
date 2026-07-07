@@ -3159,6 +3159,92 @@ pub async fn bi_model_create_blank(
     Ok(info)
 }
 
+/// Dry-run a connection: build a throwaway engine, actually connect with the
+/// given connection string (PostgreSQL), and report success + the source table
+/// count. Persists nothing. Used by the New-Model dialog's Test button.
+#[tauri::command]
+pub async fn bi_model_test_connection(
+    connection_string: String,
+    window: tauri::Window,
+) -> Result<String, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    if connection_string.trim().is_empty() {
+        return Err("Enter the connection details first.".to_string());
+    }
+    let (target, auth) = super::commands::parse_connection_string(&connection_string);
+    let empty = bi_engine::DataModel::builder()
+        .build()
+        .map_err(|e| format!("{}", e))?;
+    let mut engine = bi_engine::Engine::new(empty);
+    let idx = engine
+        .add_postgres(target, auth)
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    // Prove the connection is usable and report how many tables it exposes.
+    match engine.registry().connector_by_index(idx) {
+        Some(connector) => match connector.list_tables().await {
+            Ok(tables) => Ok(format!(
+                "Connected successfully — {} source table{} available.",
+                tables.len(),
+                if tables.len() == 1 { "" } else { "s" }
+            )),
+            Err(_) => Ok("Connected successfully.".to_string()),
+        },
+        None => Ok("Connected successfully.".to_string()),
+    }
+}
+
+/// Live-connect a connection using its stored connection string (PostgreSQL
+/// only). Sets the connector so `bi_model_list_source_tables`/import work
+/// immediately after creating a model. Used by the New-Model dialog's
+/// create → connect flow.
+#[tauri::command]
+pub async fn bi_model_connect(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<super::types::ConnectionInfo, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (engine_arc, conn_str) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        if conn.connection_type != super::types::ConnectionType::PostgreSQL {
+            return Err(format!(
+                "Live connect supports PostgreSQL only right now (this connection is {}).",
+                conn.connection_type.as_str()
+            ));
+        }
+        (
+            conn.engine
+                .clone()
+                .ok_or("No model loaded for this connection")?,
+            conn.connection_string.clone(),
+        )
+    };
+    if conn_str.trim().is_empty() {
+        return Err(
+            "This connection has no connection details — set a data source when creating the model."
+                .to_string(),
+        );
+    }
+    let (target, auth) = super::commands::parse_connection_string(&conn_str);
+    let idx = {
+        let mut engine = engine_arc.lock().await;
+        engine
+            .add_postgres(target, auth)
+            .await
+            .map_err(|e| format!("Connection failed: {}", e))?
+    };
+    let info = {
+        let mut conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get_mut(&connection_id).ok_or("Connection not found")?;
+        conn.connector_index = Some(idx);
+        conn.is_connected = true;
+        conn.to_info()
+    };
+    Ok(info)
+}
+
 // ---------------------------------------------------------------------------
 // ME-7: Testing Ground — ad-hoc query preview over the model
 // ---------------------------------------------------------------------------

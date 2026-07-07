@@ -129,6 +129,8 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_list_source_tables",
     "bi_model_import_tables",
     "bi_model_create_blank",
+    "bi_model_test_connection",
+    "bi_model_connect",
   ],
 };
 

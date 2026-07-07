@@ -453,6 +453,8 @@ export {
   biModelListSourceTables,
   biModelImportTables,
   biModelCreateBlank,
+  biModelTestConnection,
+  biModelConnect,
 } from "./backend";
 export type {
   ModelMeasureInfo,

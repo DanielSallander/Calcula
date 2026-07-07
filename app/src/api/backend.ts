@@ -4445,6 +4445,17 @@ export async function biModelCreateBlank(
   });
 }
 
+/** Dry-run a connection string (PostgreSQL); returns a success message with the
+ * source table count, or throws with the connection error. Persists nothing. */
+export async function biModelTestConnection(connectionString: string): Promise<string> {
+  return invoke<string>("bi_model_test_connection", { connectionString });
+}
+
+/** Live-connect a connection by its stored connection string (PostgreSQL). */
+export async function biModelConnect(connectionId: string): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_model_connect", { connectionId });
+}
+
 /** Delete a connection by ID. */
 export async function biDeleteConnection(
   connectionId: string,
