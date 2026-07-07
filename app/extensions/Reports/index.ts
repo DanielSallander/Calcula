@@ -18,6 +18,7 @@ import { CreateReportDialog } from "./components/CreateReportDialog";
 import { ManageReportsDialog } from "./components/ManageReportsDialog";
 import { reportsBackend } from "./lib/reportsBackend";
 import { refreshControlBoundReports } from "./lib/reportRefresh";
+import { registerReportDistribution } from "./lib/reportDistribution";
 
 const CREATE_DIALOG_ID = "create-report-dialog";
 const MANAGE_DIALOG_ID = "manage-reports-dialog";
@@ -88,6 +89,9 @@ function activate(context: ExtensionContext): void {
     if (refreshTimer) window.clearTimeout(refreshTimer);
     unsubControls();
   });
+
+  // Publish/subscribe reports in .calp packages via the distributable-object channel.
+  cleanupFns.push(registerReportDistribution());
 }
 
 function deactivate(): void {

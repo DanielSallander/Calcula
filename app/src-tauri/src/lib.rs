@@ -3999,6 +3999,7 @@ pub fn run() {
             report::refresh_report,
             report::delete_report,
             report::list_reports,
+            report::restore_report,
             pivot::set_bi_lookup_columns,
             pivot::show_report_filter_pages,
             pivot::add_calculated_field,

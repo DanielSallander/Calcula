@@ -49,6 +49,24 @@ pub struct SavedReport {
     /// re-registered on load without re-running the query.
     pub end_row: u32,
     pub end_col: u32,
+    /// Stable BI data-source id for cross-machine rebind on `.calp` pull (the
+    /// connection's package data-source id, or its local id). Absent for grid
+    /// reports without a package origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source_id: Option<String>,
+}
+
+/// The stable data-source id for a connection: its package data-source id if it
+/// was pulled from a package, else its local id (which becomes the package
+/// data-source id when this workbook is itself published).
+fn connection_data_source_id(bi_state: &BiState, connection_id: identity::EntityId) -> Option<String> {
+    let connections = bi_state.connections.lock().ok()?;
+    let conn = connections.get(&connection_id)?;
+    Some(
+        conn.package_data_source_id
+            .clone()
+            .unwrap_or_else(|| connection_id.to_string()),
+    )
 }
 
 /// Mirror the in-memory report definitions into extension_data so they persist
@@ -392,6 +410,7 @@ pub async fn create_report(
         &view,
     );
 
+    let data_source_id = connection_data_source_id(&bi_state, request.query.connection_id);
     state.report_definitions.lock().unwrap().push(SavedReport {
         id: report_id,
         name: request.name,
@@ -402,6 +421,7 @@ pub async fn create_report(
         anchor_col: request.anchor_col,
         end_row,
         end_col,
+        data_source_id,
     });
     sync_reports_to_extension_data(&state);
 
@@ -509,4 +529,45 @@ pub fn delete_report(
 #[tauri::command]
 pub fn list_reports(state: State<'_, AppState>) -> Result<Vec<SavedReport>, String> {
     Ok(state.report_definitions.lock().unwrap().clone())
+}
+
+/// Materialize a report on a `.calp` subscriber (via the distributable-object
+/// channel): rebind its BI connection by the stable data-source id and register
+/// the definition + protected region. The report's CELLS travel with the
+/// package's sheet content, so no query runs here — the subscriber sees the data
+/// immediately, and a Refresh re-runs against the rebound connection.
+#[tauri::command]
+pub fn restore_report(
+    state: State<'_, AppState>,
+    bi_state: State<'_, BiState>,
+    report: SavedReport,
+) -> Result<(), String> {
+    let mut report = report;
+
+    // Rebind the connection: find the local connection whose stable data-source
+    // id matches the report's (the publisher's connection id is stale here).
+    let ds_opt = report.data_source_id.clone();
+    if let Some(ds) = ds_opt.as_deref() {
+        if let Ok(connections) = bi_state.connections.lock() {
+            let rebound = connections.iter().find_map(|(cid, c)| {
+                if c.package_data_source_id.as_deref() == Some(ds) || cid.to_string() == ds {
+                    Some(*cid)
+                } else {
+                    None
+                }
+            });
+            if let Some(cid) = rebound {
+                report.connection_id = cid;
+            }
+        }
+    }
+
+    {
+        let mut defs = state.report_definitions.lock().unwrap();
+        defs.retain(|d| d.id != report.id);
+        defs.push(report.clone());
+    }
+    reregister_report_region(&state, &report);
+    sync_reports_to_extension_data(&state);
+    Ok(())
 }

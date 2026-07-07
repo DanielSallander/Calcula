@@ -12,4 +12,6 @@ export interface ReportInfo {
   anchorCol: number;
   endRow: number;
   endCol: number;
+  /** Stable BI data-source id for cross-machine rebind on .calp pull. */
+  dataSourceId?: string;
 }
