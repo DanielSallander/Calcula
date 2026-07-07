@@ -3814,6 +3814,11 @@ export interface ModelOverview {
   dateTable: string | null;
   /** Model-level default lookup-resolution expression, or null. */
   defaultLookupResolution: string | null;
+  /** Descriptive metadata (presentation only). */
+  modelName: string | null;
+  modelVersion: string | null;
+  modelAuthor: string | null;
+  modelDescription: string | null;
 }
 
 export interface SourceTableInfo {
@@ -4165,6 +4170,68 @@ export async function biModelValidate(
   return invoke<ValidationIssueDto[]>("bi_model_validate", { connectionId });
 }
 
+export async function biModelSetTableStorageMode(
+  connectionId: string,
+  tableName: string,
+  storageMode: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_table_storage_mode", {
+    connectionId,
+    tableName,
+    storageMode,
+  });
+}
+
+export async function biModelRefreshTable(
+  connectionId: string,
+  tableName: string,
+): Promise<void> {
+  return invoke<void>("bi_model_refresh_table", { connectionId, tableName });
+}
+
+export interface FunctionDefDto {
+  name: string;
+  description: string;
+  signature: string;
+}
+
+export async function biModelFunctionCatalog(): Promise<FunctionDefDto[]> {
+  return invoke<FunctionDefDto[]>("bi_model_function_catalog", {});
+}
+
+export interface ModelUndoState {
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+export async function biModelUndoState(connectionId: string): Promise<ModelUndoState> {
+  return invoke<ModelUndoState>("bi_model_undo_state", { connectionId });
+}
+
+export async function biModelUndo(connectionId: string): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_undo", { connectionId });
+}
+
+export async function biModelRedo(connectionId: string): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_redo", { connectionId });
+}
+
+export async function biModelSetMetadata(params: {
+  connectionId: string;
+  name?: string | null;
+  version?: string | null;
+  author?: string | null;
+  description?: string | null;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_metadata", {
+    connectionId: params.connectionId,
+    name: params.name ?? null,
+    version: params.version ?? null,
+    author: params.author ?? null,
+    description: params.description ?? null,
+  });
+}
+
 // --- Testing Ground (ad-hoc query preview) ---
 
 export interface ColumnRefDto {
@@ -4223,11 +4290,43 @@ export interface TestQueryResult {
   plan: ExecutionPlanDto | null;
 }
 
+export interface PivotSortDto {
+  /** "measure" | "column" */
+  kind: string;
+  table?: string | null;
+  field: string;
+  descending: boolean;
+}
+
+export interface MeasureFilterDto {
+  measure: string;
+  /** "=" | "!=" | ">" | ">=" | "<" | "<=" */
+  operator: string;
+  value: number;
+}
+
+export interface TopNDto {
+  measure: string;
+  limit: number;
+  ascending: boolean;
+}
+
+export interface RankByDto {
+  measure: string;
+  outputColumn: string;
+  dense: boolean;
+  ascending: boolean;
+}
+
 export async function biModelTestQuery(params: {
   connectionId: string;
   measures: string[];
   groupBy: ColumnRefDto[];
   filters: TestFilterDto[];
+  sort?: PivotSortDto[];
+  measureFilters?: MeasureFilterDto[];
+  topN?: TopNDto | null;
+  rankBy?: RankByDto | null;
   rowLimit?: number | null;
   rollup: boolean;
   includePlan: boolean;
@@ -4241,6 +4340,10 @@ export async function biModelTestQuery(params: {
     measures: params.measures,
     groupBy: params.groupBy,
     filters: params.filters,
+    sort: params.sort ?? [],
+    measureFilters: params.measureFilters ?? [],
+    topN: params.topN ?? null,
+    rankBy: params.rankBy ?? null,
     rowLimit: params.rowLimit ?? null,
     rollup: params.rollup,
     includePlan: params.includePlan,

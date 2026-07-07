@@ -155,6 +155,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         <MeasureEditorModal
           connectionId={connectionId}
           existing={editing.measure}
+          overview={overview}
           onClose={() => setEditing(null)}
           onSaved={(list) => {
             applyMeasures(list);

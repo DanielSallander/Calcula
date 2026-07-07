@@ -5,7 +5,7 @@
 //          ModelOverview which is installed via ctx.applyOverview.
 
 import React, { useEffect, useState } from "react";
-import { biModelSetDateTable, biModelSetDefaultLookupResolution } from "@api";
+import { biModelSetDateTable, biModelSetDefaultLookupResolution, biModelSetMetadata } from "@api";
 import { Field, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 
@@ -14,12 +14,57 @@ export function SettingsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const [busy, setBusy] = useState(false);
   const [lookupDraft, setLookupDraft] = useState(overview.defaultLookupResolution ?? "");
 
+  // Descriptive metadata drafts (name/version/author/description).
+  const [meta, setMeta] = useState({
+    name: overview.modelName ?? "",
+    version: overview.modelVersion ?? "",
+    author: overview.modelAuthor ?? "",
+    description: overview.modelDescription ?? "",
+  });
+
   // Resync the lookup draft when the connection changes or the model's stored
   // value changes underneath us (e.g. another section's mutation refreshed the
   // overview). Kept simple: reset the draft to the incoming value.
   useEffect(() => {
     setLookupDraft(overview.defaultLookupResolution ?? "");
   }, [connectionId, overview.defaultLookupResolution]);
+
+  // Resync metadata drafts when the connection changes or the stored values
+  // change (only this section edits them, so an in-progress edit is not
+  // clobbered by unrelated overview refreshes).
+  useEffect(() => {
+    setMeta({
+      name: overview.modelName ?? "",
+      version: overview.modelVersion ?? "",
+      author: overview.modelAuthor ?? "",
+      description: overview.modelDescription ?? "",
+    });
+  }, [
+    connectionId,
+    overview.modelName,
+    overview.modelVersion,
+    overview.modelAuthor,
+    overview.modelDescription,
+  ]);
+
+  const applyMetadata = async () => {
+    setBusy(true);
+    try {
+      applyOverview(
+        await biModelSetMetadata({
+          connectionId,
+          name: meta.name.trim() || null,
+          version: meta.version.trim() || null,
+          author: meta.author.trim() || null,
+          description: meta.description.trim() || null,
+        }),
+      );
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleDateTableChange = async (value: string) => {
     setBusy(true);
@@ -99,6 +144,54 @@ export function SettingsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           Cache/refresh settings (memory budget, storage-mode scheduling, incremental
           refresh) are managed by the engine runtime and are not part of the
           embedded-model editor.
+        </div>
+      </div>
+
+      {/* Descriptive metadata */}
+      <div style={styles.card}>
+        <div style={{ ...styles.sectionTitle, fontSize: 13, marginBottom: 6 }}>Model metadata</div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Field label="Name" flex={1}>
+            <input
+              style={styles.input}
+              disabled={disabled}
+              value={meta.name}
+              onChange={(e) => setMeta((m) => ({ ...m, name: e.target.value }))}
+            />
+          </Field>
+          <Field label="Version" flex={1}>
+            <input
+              style={styles.input}
+              disabled={disabled}
+              value={meta.version}
+              onChange={(e) => setMeta((m) => ({ ...m, version: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <Field label="Author">
+          <input
+            style={styles.input}
+            disabled={disabled}
+            value={meta.author}
+            onChange={(e) => setMeta((m) => ({ ...m, author: e.target.value }))}
+          />
+        </Field>
+        <Field label="Description">
+          <textarea
+            style={{ ...styles.textarea, minHeight: 50 }}
+            disabled={disabled}
+            value={meta.description}
+            onChange={(e) => setMeta((m) => ({ ...m, description: e.target.value }))}
+          />
+        </Field>
+        <div>
+          <button style={styles.btn} disabled={disabled} onClick={() => void applyMetadata()}>
+            Save metadata
+          </button>
+        </div>
+        <div style={{ ...styles.muted, fontSize: 12, marginTop: 4 }}>
+          Descriptive only (no query effect); travels with the model when published as a dataset
+          package.
         </div>
       </div>
     </div>

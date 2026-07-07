@@ -8,8 +8,36 @@
 //          respecting slicers. See docs/guide/gvar-query-scoped-variables.md.
 
 import * as monaco from "monaco-editor";
+import type { FunctionDefDto } from "@api";
 
 export const MEASURE_LANGUAGE_ID = "calcula-measure";
+
+// ============================================================================
+// Live editor context (functions + model schema), fed from the model overview.
+// The providers are registered once per window and read this module-level
+// state, so refreshing the context updates completion/hover without
+// re-registering.
+// ============================================================================
+
+export interface MeasureLanguageContext {
+  /** Tables and their column names (physical + calculated). */
+  tables: { name: string; columns: string[] }[];
+  /** Measure names (offered as `[Measure]` references). */
+  measures: string[];
+}
+
+let functionCatalog: FunctionDefDto[] = [];
+let modelContext: MeasureLanguageContext = { tables: [], measures: [] };
+
+/** Feed the editor the engine function catalog + the current model schema so
+ *  completion/hover/signature help reflect the live model. */
+export function setMeasureLanguageContext(
+  catalog: FunctionDefDto[],
+  context: MeasureLanguageContext,
+): void {
+  functionCatalog = catalog;
+  modelContext = context;
+}
 
 /** Block / query keywords highlighted like VAR. Uppercase; tokenizer is case-insensitive. */
 const KEYWORDS = [
@@ -114,8 +142,11 @@ export function registerMeasureLanguage(): void {
     },
   });
 
-  // Keyword autocomplete (VAR / GVAR / RETURN). GVAR expands the %-of-total snippet.
+  // Context-aware autocomplete: keywords + engine functions + table names, and
+  // — inside `[…]` — the columns of the preceding table (or measure names for a
+  // bare `[`).
   monaco.languages.registerCompletionItemProvider(MEASURE_LANGUAGE_ID, {
+    triggerCharacters: ["[", "(", "."],
     provideCompletionItems(model, position) {
       const word = model.getWordUntilPosition(position);
       const range = {
@@ -124,7 +155,54 @@ export function registerMeasureLanguage(): void {
         startColumn: word.startColumn,
         endColumn: word.endColumn,
       };
+      const lineText = model.getValueInRange({
+        startLineNumber: position.lineNumber,
+        startColumn: 1,
+        endLineNumber: position.lineNumber,
+        endColumn: position.column,
+      });
       const suggestions: monaco.languages.CompletionItem[] = [];
+
+      // Inside an unclosed `[` → column or measure references.
+      const lastOpen = lineText.lastIndexOf("[");
+      const lastClose = lineText.lastIndexOf("]");
+      if (lastOpen > lastClose) {
+        const bracketRange = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: lastOpen + 2,
+          endColumn: position.column,
+        };
+        const tableMatch = /([A-Za-z_]\w*)\s*$/.exec(lineText.slice(0, lastOpen));
+        const table = tableMatch
+          ? modelContext.tables.find((t) => t.name === tableMatch[1])
+          : undefined;
+        if (table) {
+          for (const col of table.columns) {
+            suggestions.push({
+              label: col,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: col,
+              sortText: "1col_" + col,
+              range: bracketRange,
+            });
+          }
+        } else {
+          for (const m of modelContext.measures) {
+            suggestions.push({
+              label: m,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              detail: "measure",
+              insertText: m,
+              sortText: "1meas_" + m,
+              range: bracketRange,
+            });
+          }
+        }
+        return { suggestions };
+      }
+
+      // Otherwise: keywords, functions, then table names.
       for (const [kw, doc] of Object.entries(KEYWORD_DOCS)) {
         suggestions.push({
           label: kw,
@@ -139,26 +217,107 @@ export function registerMeasureLanguage(): void {
           range,
         });
       }
+      for (const f of functionCatalog) {
+        suggestions.push({
+          label: f.name,
+          kind: monaco.languages.CompletionItemKind.Function,
+          detail: f.signature,
+          documentation: { value: `**${f.name}** — ${f.description}\n\n\`${f.signature}\`` },
+          insertText: f.name + "(",
+          sortText: "2fn_" + f.name,
+          range,
+        });
+      }
+      for (const t of modelContext.tables) {
+        suggestions.push({
+          label: t.name,
+          kind: monaco.languages.CompletionItemKind.Struct,
+          detail: "table",
+          insertText: t.name,
+          sortText: "3tbl_" + t.name,
+          range,
+        });
+      }
       return { suggestions };
     },
   });
 
-  // Hover tooltips for the block keywords.
+  // Hover: block keywords + engine functions.
   monaco.languages.registerHoverProvider(MEASURE_LANGUAGE_ID, {
     provideHover(model, position) {
       const word = model.getWordAtPosition(position);
       if (!word) return null;
-      const doc = KEYWORD_DOCS[word.word.toUpperCase()];
-      if (!doc) return null;
+      const wordRange = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn,
+      };
+      const kwDoc = KEYWORD_DOCS[word.word.toUpperCase()];
+      if (kwDoc) return { range: wordRange, contents: [{ value: kwDoc.markdown }] };
+      const fn = functionCatalog.find((f) => f.name.toUpperCase() === word.word.toUpperCase());
+      if (fn) {
+        return {
+          range: wordRange,
+          contents: [{ value: `**${fn.name}**\n\n${fn.description}\n\n\`${fn.signature}\`` }],
+        };
+      }
+      return null;
+    },
+  });
+
+  // Signature help: show the enclosing function's signature while typing args.
+  monaco.languages.registerSignatureHelpProvider(MEASURE_LANGUAGE_ID, {
+    signatureHelpTriggerCharacters: ["(", ","],
+    signatureHelpRetriggerCharacters: [","],
+    provideSignatureHelp(model, position) {
+      const lineText = model.getValueInRange({
+        startLineNumber: position.lineNumber,
+        startColumn: 1,
+        endLineNumber: position.lineNumber,
+        endColumn: position.column,
+      });
+      const call = enclosingCall(lineText);
+      if (!call) return null;
+      const def = functionCatalog.find(
+        (f) => f.name.toUpperCase() === call.name.toUpperCase(),
+      );
+      if (!def) return null;
       return {
-        range: {
-          startLineNumber: position.lineNumber,
-          endLineNumber: position.lineNumber,
-          startColumn: word.startColumn,
-          endColumn: word.endColumn,
+        value: {
+          signatures: [
+            {
+              label: def.signature,
+              documentation: { value: def.description },
+              parameters: [],
+            },
+          ],
+          activeSignature: 0,
+          activeParameter: call.argIndex,
         },
-        contents: [{ value: doc.markdown }],
+        dispose: () => {},
       };
     },
   });
+}
+
+/** Find the function call enclosing the end of `text` and which argument index
+ *  the cursor is in (walks back tracking paren depth). */
+function enclosingCall(text: string): { name: string; argIndex: number } | null {
+  let depth = 0;
+  let argIndex = 0;
+  for (let i = text.length - 1; i >= 0; i--) {
+    const c = text[i];
+    if (c === ")") depth++;
+    else if (c === "(") {
+      if (depth === 0) {
+        const m = /([A-Za-z_]\w*)\s*$/.exec(text.slice(0, i));
+        return m ? { name: m[1], argIndex } : null;
+      }
+      depth--;
+    } else if (c === "," && depth === 0) {
+      argIndex++;
+    }
+  }
+  return null;
 }

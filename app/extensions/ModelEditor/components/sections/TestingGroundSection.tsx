@@ -8,7 +8,15 @@
 
 import React, { useState } from "react";
 import { biModelCancelQuery, biModelTestQuery } from "@api";
-import type { ExecutionPlanDto, PlanNodeDto, TestQueryResult } from "@api";
+import type {
+  ExecutionPlanDto,
+  MeasureFilterDto,
+  PivotSortDto,
+  PlanNodeDto,
+  RankByDto,
+  TestQueryResult,
+  TopNDto,
+} from "@api";
 import { Badge, Field, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 
@@ -22,6 +30,19 @@ interface DimDraft {
 interface FilterRow {
   table: string;
   column: string;
+  operator: string;
+  value: string;
+}
+
+interface SortRow {
+  kind: string; // "measure" | "column"
+  table: string;
+  field: string;
+  descending: boolean;
+}
+
+interface MeasureFilterRow {
+  measure: string;
   operator: string;
   value: string;
 }
@@ -40,6 +61,16 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   const [rowLimit, setRowLimit] = useState("100");
   const [rollup, setRollup] = useState(false);
   const [includePlan, setIncludePlan] = useState(false);
+
+  const [sort, setSort] = useState<SortRow[]>([]);
+  const [measureFilters, setMeasureFilters] = useState<MeasureFilterRow[]>([]);
+  const [topN, setTopN] = useState<{ on: boolean; measure: string; limit: string; ascending: boolean }>(
+    { on: false, measure: "", limit: "10", ascending: false },
+  );
+  const [rankBy, setRankBy] = useState<{ on: boolean; measure: string; ascending: boolean; dense: boolean }>(
+    { on: false, measure: "", ascending: false, dense: false },
+  );
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [previewRole, setPreviewRole] = useState("");
   const [previewUser, setPreviewUser] = useState("");
@@ -66,6 +97,30 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
     setError(null);
     setRunningId(qid);
     const parsedLimit = parseInt(rowLimit, 10);
+    const sortDtos: PivotSortDto[] = sort
+      .filter((s) => s.field !== "")
+      .map((s) => ({
+        kind: s.kind,
+        table: s.kind === "column" ? s.table : null,
+        field: s.field,
+        descending: s.descending,
+      }));
+    const mfDtos: MeasureFilterDto[] = measureFilters
+      .filter((m) => m.measure !== "" && m.value.trim() !== "" && Number.isFinite(Number(m.value)))
+      .map((m) => ({ measure: m.measure, operator: m.operator, value: Number(m.value) }));
+    const topNDto: TopNDto | null =
+      topN.on && topN.measure && Number(topN.limit) > 0
+        ? { measure: topN.measure, limit: Number(topN.limit), ascending: topN.ascending }
+        : null;
+    const rankByDto: RankByDto | null =
+      rankBy.on && rankBy.measure
+        ? {
+            measure: rankBy.measure,
+            outputColumn: "Rank",
+            dense: rankBy.dense,
+            ascending: rankBy.ascending,
+          }
+        : null;
     try {
       const r = await biModelTestQuery({
         connectionId,
@@ -74,6 +129,10 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         filters: filters
           .filter((f) => f.column && f.value.trim() !== "")
           .map((f) => ({ column: f.column, operator: f.operator, value: f.value })),
+        sort: sortDtos,
+        measureFilters: mfDtos,
+        topN: topNDto,
+        rankBy: rankByDto,
         rowLimit: Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null,
         rollup,
         includePlan,
@@ -280,6 +339,222 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             />
           </div>
         </div>
+      </div>
+
+      {/* Advanced: sort, HAVING, TOP-N, RANKX */}
+      <div style={styles.card}>
+        <button
+          style={{ ...styles.smallBtn, border: "none", background: "transparent", padding: 0 }}
+          onClick={() => setShowAdvanced((v) => !v)}
+        >
+          {showAdvanced ? "▾" : "▸"} Advanced (sort, measure filters, top-N, ranking)
+        </button>
+        {showAdvanced && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+            {/* Sort */}
+            <div>
+              <label style={styles.label}>Sort</label>
+              {sort.length === 0 && <div style={styles.hint}>No sort — default order.</div>}
+              {sort.map((s, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}>
+                  <select
+                    style={{ ...styles.input, width: 90 }}
+                    value={s.kind}
+                    onChange={(e) =>
+                      setSort((ss) => ss.map((x, j) => (j === i ? { ...x, kind: e.target.value, field: "" } : x)))
+                    }
+                  >
+                    <option value="measure">measure</option>
+                    <option value="column">column</option>
+                  </select>
+                  {s.kind === "column" && (
+                    <select
+                      style={{ ...styles.input, flex: 1, minWidth: 0 }}
+                      value={s.table}
+                      onChange={(e) =>
+                        setSort((ss) => ss.map((x, j) => (j === i ? { ...x, table: e.target.value, field: "" } : x)))
+                      }
+                    >
+                      <option value="">(table)</option>
+                      {overview.tables.map((t) => (
+                        <option key={t.name} value={t.name}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <select
+                    style={{ ...styles.input, flex: 1, minWidth: 0 }}
+                    value={s.field}
+                    onChange={(e) => setSort((ss) => ss.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))}
+                  >
+                    <option value="">({s.kind})</option>
+                    {(s.kind === "measure"
+                      ? selectedMeasures
+                      : columnsOf(s.table)
+                    ).map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                  </select>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={s.descending}
+                      onChange={(e) =>
+                        setSort((ss) => ss.map((x, j) => (j === i ? { ...x, descending: e.target.checked } : x)))
+                      }
+                    />
+                    desc
+                  </label>
+                  <button style={styles.smallBtn} onClick={() => setSort((ss) => ss.filter((_, j) => j !== i))}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                style={{ ...styles.smallBtn, marginTop: 4 }}
+                onClick={() => setSort((ss) => [...ss, { kind: "measure", table: "", field: "", descending: true }])}
+              >
+                Add sort
+              </button>
+            </div>
+
+            {/* Measure-value filters (HAVING) */}
+            <div>
+              <label style={styles.label}>Measure filters (HAVING)</label>
+              {measureFilters.length === 0 && <div style={styles.hint}>No measure filters.</div>}
+              {measureFilters.map((m, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}>
+                  <select
+                    style={{ ...styles.input, flex: 1, minWidth: 0 }}
+                    value={m.measure}
+                    onChange={(e) =>
+                      setMeasureFilters((ms) => ms.map((x, j) => (j === i ? { ...x, measure: e.target.value } : x)))
+                    }
+                  >
+                    <option value="">(measure)</option>
+                    {selectedMeasures.map((mm) => (
+                      <option key={mm} value={mm}>
+                        {mm}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    style={{ ...styles.input, width: 54, flexShrink: 0 }}
+                    value={m.operator}
+                    onChange={(e) =>
+                      setMeasureFilters((ms) => ms.map((x, j) => (j === i ? { ...x, operator: e.target.value } : x)))
+                    }
+                  >
+                    {FILTER_OPERATORS.map((op) => (
+                      <option key={op} value={op}>
+                        {op}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    style={{ ...styles.input, width: 90, flexShrink: 0 }}
+                    value={m.value}
+                    placeholder="0"
+                    onChange={(e) =>
+                      setMeasureFilters((ms) => ms.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))
+                    }
+                  />
+                  <button
+                    style={styles.smallBtn}
+                    onClick={() => setMeasureFilters((ms) => ms.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                style={{ ...styles.smallBtn, marginTop: 4 }}
+                onClick={() => setMeasureFilters((ms) => [...ms, { measure: "", operator: ">", value: "" }])}
+              >
+                Add measure filter
+              </button>
+              <div style={styles.hint}>Only selected measures can be filtered.</div>
+            </div>
+
+            {/* Top-N */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input type="checkbox" checked={topN.on} onChange={(e) => setTopN((t) => ({ ...t, on: e.target.checked }))} />
+                Top-N by
+              </label>
+              <select
+                style={{ ...styles.input, minWidth: 120 }}
+                disabled={!topN.on}
+                value={topN.measure}
+                onChange={(e) => setTopN((t) => ({ ...t, measure: e.target.value }))}
+              >
+                <option value="">(measure)</option>
+                {selectedMeasures.map((mm) => (
+                  <option key={mm} value={mm}>
+                    {mm}
+                  </option>
+                ))}
+              </select>
+              <input
+                style={{ ...styles.input, width: 60 }}
+                disabled={!topN.on}
+                value={topN.limit}
+                onChange={(e) => setTopN((t) => ({ ...t, limit: e.target.value }))}
+              />
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  disabled={!topN.on}
+                  checked={topN.ascending}
+                  onChange={(e) => setTopN((t) => ({ ...t, ascending: e.target.checked }))}
+                />
+                bottom
+              </label>
+            </div>
+
+            {/* Ranking */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input type="checkbox" checked={rankBy.on} onChange={(e) => setRankBy((r) => ({ ...r, on: e.target.checked }))} />
+                Add rank column by
+              </label>
+              <select
+                style={{ ...styles.input, minWidth: 120 }}
+                disabled={!rankBy.on}
+                value={rankBy.measure}
+                onChange={(e) => setRankBy((r) => ({ ...r, measure: e.target.value }))}
+              >
+                <option value="">(measure)</option>
+                {selectedMeasures.map((mm) => (
+                  <option key={mm} value={mm}>
+                    {mm}
+                  </option>
+                ))}
+              </select>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  disabled={!rankBy.on}
+                  checked={rankBy.dense}
+                  onChange={(e) => setRankBy((r) => ({ ...r, dense: e.target.checked }))}
+                />
+                dense
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  disabled={!rankBy.on}
+                  checked={rankBy.ascending}
+                  onChange={(e) => setRankBy((r) => ({ ...r, ascending: e.target.checked }))}
+                />
+                ascending
+              </label>
+            </div>
+          </div>
+        )}
       </div>
 
       {error && <div style={{ color: "red", fontSize: 12 }}>{error}</div>}

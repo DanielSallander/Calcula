@@ -8,8 +8,19 @@
 //          mutation we emit model-changed so the main window recalcs CUBE.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { biGetConnections, biModelGetOverview } from "@api";
-import type { ConnectionInfo, ModelMeasureInfo, ModelOverview } from "@api";
+import {
+  biGetConnections,
+  biModelGetOverview,
+  biModelRedo,
+  biModelUndo,
+  biModelUndoState,
+} from "@api";
+import type {
+  ConnectionInfo,
+  ModelMeasureInfo,
+  ModelOverview,
+  ModelUndoState,
+} from "@api";
 import {
   emitEditorReady,
   emitModelChanged,
@@ -151,9 +162,22 @@ export function ModelEditorApp(): React.ReactElement {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<SectionId>("overview");
+  const [undoState, setUndoState] = useState<ModelUndoState>({ canUndo: false, canRedo: false });
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
+
+  const refreshUndoState = useCallback(async (connId: string) => {
+    if (!connId) {
+      setUndoState({ canUndo: false, canRedo: false });
+      return;
+    }
+    try {
+      setUndoState(await biModelUndoState(connId));
+    } catch {
+      setUndoState({ canUndo: false, canRedo: false });
+    }
+  }, []);
 
   // Monotonic sequence for overview installs. Every code path that installs
   // an overview bumps it first; an async refresh may only apply its result if
@@ -224,7 +248,8 @@ export function ModelEditorApp(): React.ReactElement {
     setError(null);
     setOverview(null);
     void refreshOverview(connectionId);
-  }, [connectionId, refreshOverview]);
+    void refreshUndoState(connectionId);
+  }, [connectionId, refreshOverview, refreshUndoState]);
 
   // Cross-window bridge: register the listener FIRST, then announce
   // readiness so the main window can hand over the initial connection.
@@ -244,13 +269,19 @@ export function ModelEditorApp(): React.ReactElement {
   // Every mutation endpoint returns the fresh ModelOverview: one setter keeps
   // all sections in sync, and the main window is notified (it recalcs CUBE).
 
-  const applyOverview = useCallback((o: ModelOverview) => {
-    overviewSeqRef.current += 1;
-    setOverview(o);
-    setError(null);
-    const id = connectionIdRef.current;
-    if (id) void emitModelChanged(id);
-  }, []);
+  const applyOverview = useCallback(
+    (o: ModelOverview) => {
+      overviewSeqRef.current += 1;
+      setOverview(o);
+      setError(null);
+      const id = connectionIdRef.current;
+      if (id) {
+        void emitModelChanged(id);
+        void refreshUndoState(id);
+      }
+    },
+    [refreshUndoState],
+  );
 
   // The measure endpoints return only the measure list — patch it in, then
   // refresh the full overview in the background (renames can affect KPIs).
@@ -263,10 +294,31 @@ export function ModelEditorApp(): React.ReactElement {
       if (id) {
         void emitModelChanged(id);
         void refreshOverviewInBackground(id);
+        void refreshUndoState(id);
       }
     },
-    [refreshOverviewInBackground],
+    [refreshOverviewInBackground, refreshUndoState],
   );
+
+  const handleUndo = useCallback(async () => {
+    const id = connectionIdRef.current;
+    if (!id) return;
+    try {
+      applyOverview(await biModelUndo(id));
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }, [applyOverview]);
+
+  const handleRedo = useCallback(async () => {
+    const id = connectionIdRef.current;
+    if (!id) return;
+    try {
+      applyOverview(await biModelRedo(id));
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }, [applyOverview]);
 
   const reportError = useCallback((err: unknown) => {
     setError(String(err));
@@ -374,6 +426,22 @@ export function ModelEditorApp(): React.ReactElement {
         </select>
         <button style={styles.btn} onClick={() => setActive("import")}>
           New Model&hellip;
+        </button>
+        <button
+          style={styles.btn}
+          disabled={!undoState.canUndo || readOnly}
+          title="Undo the last model edit"
+          onClick={() => void handleUndo()}
+        >
+          Undo
+        </button>
+        <button
+          style={styles.btn}
+          disabled={!undoState.canRedo || readOnly}
+          title="Redo"
+          onClick={() => void handleRedo()}
+        >
+          Redo
         </button>
         <div style={{ flex: 1 }} />
         {loading && <span style={{ ...styles.muted, fontSize: 12 }}>Loading&hellip;</span>}

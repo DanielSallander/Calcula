@@ -12,6 +12,8 @@ import type {
 } from "@api";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { RelationshipDiagram } from "../diagram/RelationshipDiagram";
+import type { ColumnDropResult } from "../diagram/RelationshipDiagram";
 
 const CARDINALITIES = ["manyToOne", "oneToMany", "oneToOne", "manyToMany"];
 const JOIN_OPERATORS = ["=", ">", ">=", "<", "<="];
@@ -21,9 +23,16 @@ const PROPAGATIONS = [
   { value: "both", label: "Both (bidirectional)" },
 ];
 
+type EditState = {
+  original: ModelRelationshipInfo | null;
+  prefill?: ColumnDropResult;
+};
+
 export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
-  const [editing, setEditing] = useState<{ original: ModelRelationshipInfo | null } | null>(null);
+  const [editing, setEditing] = useState<EditState | null>(null);
+  const [view, setView] = useState<"list" | "diagram">("list");
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
 
   const handleDelete = async (r: ModelRelationshipInfo) => {
     if (!window.confirm(`Delete relationship '${r.name}'?`)) return;
@@ -34,12 +43,86 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
     }
   };
 
+  const openEdit = (name: string) => {
+    const rel = overview.relationships.find((r) => r.name === name);
+    if (rel) setEditing({ original: rel });
+  };
+
+  const viewToggle = (
+    <div style={{ display: "flex", gap: 0, border: `1px solid #bbb`, borderRadius: 3, overflow: "hidden" }}>
+      {(["list", "diagram"] as const).map((v) => (
+        <button
+          key={v}
+          style={{
+            ...styles.smallBtn,
+            border: "none",
+            borderRadius: 0,
+            background: view === v ? "#2f6fce" : "#fff",
+            color: view === v ? "#fff" : "#222",
+          }}
+          onClick={() => setView(v)}
+        >
+          {v === "list" ? "List" : "Diagram"}
+        </button>
+      ))}
+    </div>
+  );
+
+  const modal = editing && (
+    <RelationshipModal
+      connectionId={connectionId}
+      overview={overview}
+      original={editing.original}
+      prefill={editing.prefill}
+      onClose={() => setEditing(null)}
+      onSaved={(o) => {
+        applyOverview(o);
+        setEditing(null);
+      }}
+    />
+  );
+
+  if (view === "diagram") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0 }}>
+        <div style={styles.sectionHeader}>
+          <span style={styles.sectionTitle}>Relationships ({overview.relationships.length})</span>
+          {viewToggle}
+          <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
+            New
+          </button>
+        </div>
+        <div style={{ ...styles.card, flex: 1, minHeight: 0, padding: 0, overflow: "auto" }}>
+          <RelationshipDiagram
+            tables={overview.tables}
+            relationships={overview.relationships}
+            selectedTable={selectedTable}
+            onSelectTable={setSelectedTable}
+            onEditRelationship={openEdit}
+            onColumnDrop={
+              readOnly
+                ? undefined
+                : (r) => setEditing({ original: null, prefill: r })
+            }
+            layoutKey={connectionId}
+          />
+        </div>
+        <div style={styles.hint}>
+          Drag a column onto another table&apos;s column to create a relationship; double-click an
+          edge to edit it. Node positions are saved locally per connection.
+        </div>
+        {modal}
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0 }}>
       <div style={styles.sectionHeader}>
         <span style={styles.sectionTitle}>
           Relationships ({overview.relationships.length})
         </span>
+        {viewToggle}
         <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
           New
         </button>
@@ -97,18 +180,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         ))}
       </div>
 
-      {editing && (
-        <RelationshipModal
-          connectionId={connectionId}
-          overview={overview}
-          original={editing.original}
-          onClose={() => setEditing(null)}
-          onSaved={(o) => {
-            applyOverview(o);
-            setEditing(null);
-          }}
-        />
-      )}
+      {modal}
     </div>
   );
 }
@@ -121,18 +193,23 @@ function RelationshipModal({
   connectionId,
   overview,
   original,
+  prefill,
   onClose,
   onSaved,
 }: {
   connectionId: string;
   overview: ModelOverview;
   original: ModelRelationshipInfo | null;
+  /** Seed a brand-new relationship from a diagram column-drop. */
+  prefill?: ColumnDropResult;
   onClose: () => void;
   onSaved: (overview: ModelOverview) => void;
 }): React.ReactElement {
-  const [name, setName] = useState(original?.name ?? "");
-  const [fromTable, setFromTable] = useState(original?.fromTable ?? "");
-  const [toTable, setToTable] = useState(original?.toTable ?? "");
+  const [name, setName] = useState(
+    original?.name ?? (prefill ? `${prefill.fromTable}_to_${prefill.toTable}` : ""),
+  );
+  const [fromTable, setFromTable] = useState(original?.fromTable ?? prefill?.fromTable ?? "");
+  const [toTable, setToTable] = useState(original?.toTable ?? prefill?.toTable ?? "");
   // Seed operator explicitly so existing non-equi joins round-trip through
   // the edit modal instead of being coerced back to equality on save.
   const [conditions, setConditions] = useState<RelationshipConditionDto[]>(
@@ -142,7 +219,9 @@ function RelationshipModal({
           toColumn: c.toColumn,
           operator: c.operator ?? "=",
         }))
-      : [{ fromColumn: "", toColumn: "", operator: "=" }],
+      : prefill
+        ? [{ fromColumn: prefill.fromColumn, toColumn: prefill.toColumn, operator: "=" }]
+        : [{ fromColumn: "", toColumn: "", operator: "=" }],
   );
   const [cardinality, setCardinality] = useState(original?.cardinality ?? "manyToOne");
   const [active, setActive] = useState(original?.active ?? true);

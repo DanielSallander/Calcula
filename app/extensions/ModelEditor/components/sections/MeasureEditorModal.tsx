@@ -5,14 +5,18 @@
 //          bi_model_upsert_measure on save. Ported from the old main-window
 //          MeasureEditorDialog.
 
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import type { ModelMeasureInfo } from "@api";
-import { biModelUpsertMeasure, biModelValidateMeasure } from "@api";
+import type { ModelMeasureInfo, ModelOverview } from "@api";
+import { biModelFunctionCatalog, biModelUpsertMeasure, biModelValidateMeasure } from "@api";
 import { Field, Modal, styles } from "../editorShared";
-import { MEASURE_LANGUAGE_ID, registerMeasureLanguage } from "../../lib/measureLanguage";
+import {
+  MEASURE_LANGUAGE_ID,
+  registerMeasureLanguage,
+  setMeasureLanguageContext,
+} from "../../lib/measureLanguage";
 
 // Preserve any prior worker handler so this editor never clobbers another
 // Monaco setup living in the same window.
@@ -41,11 +45,15 @@ function byteToUtf16Offset(text: string, byteOffset: number): number {
 export function MeasureEditorModal({
   connectionId,
   existing,
+  overview,
   onClose,
   onSaved,
 }: {
   connectionId: string;
   existing: ModelMeasureInfo | null;
+  /** The current model — feeds the editor's function/table/column/measure
+   *  autocomplete + hover + signature help. */
+  overview: ModelOverview;
   onClose: () => void;
   onSaved: (measures: ModelMeasureInfo[]) => void;
 }): React.ReactElement {
@@ -62,6 +70,29 @@ export function MeasureEditorModal({
     editorRef.current = editor;
     registerMeasureLanguage();
   };
+
+  // Feed the language its live context: the engine function catalog (static)
+  // plus this model's tables/columns/measures. Refreshes if the model changes.
+  useEffect(() => {
+    let cancelled = false;
+    const context = {
+      tables: overview.tables.map((t) => ({
+        name: t.name,
+        columns: t.columns.map((c) => c.name),
+      })),
+      measures: overview.measures.map((m) => m.name),
+    };
+    biModelFunctionCatalog()
+      .then((cat) => {
+        if (!cancelled) setMeasureLanguageContext(cat, context);
+      })
+      .catch(() => {
+        if (!cancelled) setMeasureLanguageContext([], context);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [overview]);
 
   const setMarker = useCallback((position: number | null, message: string | null) => {
     const model = editorRef.current?.getModel();

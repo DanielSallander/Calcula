@@ -4,8 +4,15 @@
 //          physical-column editing plus calculated-column add/edit/delete.
 
 import React, { useEffect, useState } from "react";
-import { biModelDeleteCalcColumn, biModelUpdateTable } from "@api";
+import {
+  biModelDeleteCalcColumn,
+  biModelRefreshTable,
+  biModelSetTableStorageMode,
+  biModelUpdateTable,
+} from "@api";
 import type { ModelColumnInfo, ModelOverview, ModelTableInfo } from "@api";
+
+const STORAGE_MODES = ["DirectQuery", "InMemory"];
 import { Badge, Field, SELECTION_BG, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
@@ -239,11 +246,68 @@ function TableMetaForm({
     }
   };
 
+  const changeStorageMode = async (mode: string) => {
+    setBusy(true);
+    try {
+      applyOverview(await biModelSetTableStorageMode(connectionId, table.name, mode));
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const refreshData = async () => {
+    setBusy(true);
+    setRefreshMsg(null);
+    try {
+      await biModelRefreshTable(connectionId, table.name);
+      setRefreshMsg("Cache dropped — next query re-fetches from source.");
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={styles.card}>
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>
-        {table.name} <Badge>{table.storageMode}</Badge>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontWeight: 600 }}>{table.name}</span>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+          <span style={styles.muted}>Storage</span>
+          <select
+            style={{ ...styles.input, fontSize: 12 }}
+            disabled={readOnly || busy}
+            value={STORAGE_MODES.includes(table.storageMode) ? table.storageMode : ""}
+            onChange={(e) => void changeStorageMode(e.target.value)}
+          >
+            {!STORAGE_MODES.includes(table.storageMode) && (
+              <option value="">{table.storageMode}</option>
+            )}
+            {STORAGE_MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div style={{ flex: 1 }} />
+        <button
+          style={styles.smallBtn}
+          disabled={readOnly || busy || !table.bound}
+          title={
+            table.bound
+              ? "Drop the in-memory cache so the next query re-fetches from source"
+              : "Bind the table to a live source first"
+          }
+          onClick={() => void refreshData()}
+        >
+          Refresh data
+        </button>
       </div>
+      {refreshMsg && <div style={{ ...styles.hint, marginBottom: 6 }}>{refreshMsg}</div>}
       <div style={{ display: "flex", gap: 8 }}>
         <Field label="Display name" flex={1}>
           <input

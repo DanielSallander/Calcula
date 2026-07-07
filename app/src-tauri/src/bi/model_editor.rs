@@ -18,6 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::Serialize;
 use tauri::State;
 
+use super::engine_registry::ModelKey;
 use super::measures::build_combined_model;
 use super::types::{BiState, ConnectionId};
 use crate::persistence::FileState;
@@ -276,6 +277,79 @@ fn editable_base(
 /// mirrored onto every model-sharing connection all while the lock is held,
 /// so a concurrent writer can neither interleave between snapshot and install
 /// nor observe a half-applied state.
+// ---------------------------------------------------------------------------
+// Model-edit undo/redo
+// ---------------------------------------------------------------------------
+//
+// Model edits are NOT part of the grid's cell-transaction undo stack (they
+// mutate a shared engine model, not the workbook grid). Instead every mutation
+// that flows through `apply_model_edit` records the PRE-edit base_model on a
+// per-`model_key` snapshot stack; undo/redo reinstall a snapshot on the shared
+// engine and mirror it to every connection sharing that model (the same
+// install path apply_model_edit uses). Keyed by model_key because connections
+// sharing a model share edits.
+
+#[derive(Default)]
+struct ModelUndoStacks {
+    undo: Vec<bi_engine::DataModel>,
+    redo: Vec<bi_engine::DataModel>,
+}
+
+/// Cap the snapshot depth (each entry is a full model clone).
+const MAX_MODEL_UNDO: usize = 50;
+
+fn model_undo_store() -> &'static Mutex<HashMap<Option<ModelKey>, ModelUndoStacks>> {
+    static STORE: OnceLock<Mutex<HashMap<Option<ModelKey>, ModelUndoStacks>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a pre-edit snapshot for a model_key and clear its redo stack (a new
+/// edit invalidates the redo branch).
+fn record_model_undo(model_key: &Option<ModelKey>, pre_edit: bi_engine::DataModel) {
+    if let Ok(mut store) = model_undo_store().lock() {
+        let stacks = store.entry(model_key.clone()).or_default();
+        stacks.undo.push(pre_edit);
+        if stacks.undo.len() > MAX_MODEL_UNDO {
+            stacks.undo.remove(0);
+        }
+        stacks.redo.clear();
+    }
+}
+
+/// Install a base model on the connection's shared engine and mirror it onto
+/// every connection sharing that model. Shared by undo and redo (does NOT touch
+/// the undo stacks). Lock order engine -> connections, as elsewhere.
+async fn install_base_model(
+    bi_state: &BiState,
+    connection_id: &ConnectionId,
+    new_base: &bi_engine::DataModel,
+) -> Result<(), String> {
+    let (engine_arc, calculated, model_key) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(connection_id).ok_or("Connection not found")?;
+        (
+            conn.engine
+                .clone()
+                .ok_or("No model loaded for this connection")?,
+            conn.calculated_measures.clone(),
+            conn.model_key.clone(),
+        )
+    };
+    let mut guard = engine_arc.lock().await;
+    let combined = build_combined_model(new_base, &calculated)?;
+    guard.set_model(combined).map_err(|e| format!("{}", e))?;
+    {
+        let mut conns = bi_state.connections.lock().unwrap();
+        for c in conns.values_mut() {
+            if c.model_key == model_key {
+                c.base_model = Some(new_base.clone());
+            }
+        }
+    }
+    drop(guard);
+    Ok(())
+}
+
 async fn apply_model_edit<F>(
     bi_state: &BiState,
     connection_id: ConnectionId,
@@ -325,6 +399,8 @@ where
         }
     }
     drop(guard);
+    // Record the pre-edit state for undo (after a successful install).
+    record_model_undo(&model_key, base);
     Ok(new_base)
 }
 
@@ -925,6 +1001,11 @@ pub struct ModelOverview {
     pub date_table: Option<String>,
     /// Model-level default lookup-resolution expression, or null.
     pub default_lookup_resolution: Option<String>,
+    /// Descriptive metadata (presentation only).
+    pub model_name: Option<String>,
+    pub model_version: Option<String>,
+    pub model_author: Option<String>,
+    pub model_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1060,6 +1141,14 @@ fn script_type_to_str(t: bi_engine::ScriptType) -> &'static str {
         bi_engine::ScriptType::Bool => "Bool",
         bi_engine::ScriptType::String => "String",
     }
+}
+
+fn storage_mode_from_str(s: &str) -> Result<bi_engine::StorageMode, String> {
+    Ok(match s {
+        "DirectQuery" => bi_engine::StorageMode::DirectQuery,
+        "InMemory" => bi_engine::StorageMode::InMemory,
+        other => return Err(format!("Unknown storage mode '{}'", other)),
+    })
 }
 
 fn clear_target_from_dto(t: &ClearTargetDto) -> Result<bi_engine::ClearTarget, String> {
@@ -1473,6 +1562,10 @@ fn build_overview(
         script_functions,
         date_table: base.date_table().map(|s| s.to_string()),
         default_lookup_resolution: base.default_lookup_resolution().map(|s| s.to_string()),
+        model_name: base.model_name().map(|s| s.to_string()),
+        model_version: base.model_version().map(|s| s.to_string()),
+        model_author: base.model_author().map(|s| s.to_string()),
+        model_description: base.model_description().map(|s| s.to_string()),
     }
 }
 
@@ -2473,6 +2566,219 @@ pub async fn bi_model_set_default_lookup_resolution(
     .await
 }
 
+/// Set the model's descriptive metadata (name/version/author/description).
+/// Presentation only — travels with the model on publish. Each empty/blank
+/// field clears that metadata.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_set_metadata(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: Option<String>,
+    version: Option<String>,
+    author: Option<String>,
+    description: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        Ok(base.with_model_metadata(
+            clean(name),
+            clean(version),
+            clean(author),
+            clean(description),
+        ))
+    })
+    .await
+}
+
+/// Toggle a table's storage mode (DirectQuery <-> InMemory).
+#[tauri::command]
+pub async fn bi_model_set_table_storage_mode(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    storage_mode: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mode = storage_mode_from_str(&storage_mode)?;
+        let mut tables = base.tables().to_vec();
+        let Some(table) = tables.iter_mut().find(|t| t.name() == table_name) else {
+            return Err(format!("Table '{}' not found", table_name));
+        };
+        table.set_storage_mode(mode);
+        let edited = base.with_tables(tables);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Force a table's in-memory cache to be dropped so the next query re-fetches
+/// it from the source (a manual refresh). No model mutation. Requires the
+/// connection to be live for the re-fetch to succeed.
+#[tauri::command]
+pub async fn bi_model_refresh_table(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let engine_arc = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        conn.engine
+            .clone()
+            .ok_or("No model loaded for this connection")?
+    };
+    let mut engine = engine_arc.lock().await;
+    engine
+        .refresh_table(&table_name)
+        .await
+        .map_err(|e| format!("{}", e))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUndoStateDto {
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+/// Undo/redo availability for the current connection's model (drives the
+/// editor's Undo/Redo button enablement).
+#[tauri::command]
+pub fn bi_model_undo_state(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<ModelUndoStateDto, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let model_key = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns
+            .get(&connection_id)
+            .ok_or("Connection not found")?
+            .model_key
+            .clone()
+    };
+    let (can_undo, can_redo) = {
+        let store = model_undo_store().lock().map_err(|e| e.to_string())?;
+        store
+            .get(&model_key)
+            .map(|s| (!s.undo.is_empty(), !s.redo.is_empty()))
+            .unwrap_or((false, false))
+    };
+    Ok(ModelUndoStateDto { can_undo, can_redo })
+}
+
+/// Undo the last model edit: reinstall the previous base_model snapshot on the
+/// shared engine (and push the current state onto the redo stack).
+#[tauri::command]
+pub async fn bi_model_undo(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (model_key, current_base, bindings) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.model_key.clone(),
+            conn.base_model
+                .clone()
+                .ok_or("This connection has no editable base model")?,
+            conn.bindings.clone(),
+        )
+    };
+    let prev = {
+        let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
+        let stacks = store.entry(model_key).or_default();
+        let Some(prev) = stacks.undo.pop() else {
+            return Err("Nothing to undo".to_string());
+        };
+        stacks.redo.push(current_base);
+        if stacks.redo.len() > MAX_MODEL_UNDO {
+            stacks.redo.remove(0);
+        }
+        prev
+    };
+    install_base_model(&bi_state, &connection_id, &prev).await?;
+    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    Ok(build_overview(&prev, &bindings, true, None))
+}
+
+/// Redo a previously undone model edit.
+#[tauri::command]
+pub async fn bi_model_redo(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (model_key, current_base, bindings) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.model_key.clone(),
+            conn.base_model
+                .clone()
+                .ok_or("This connection has no editable base model")?,
+            conn.bindings.clone(),
+        )
+    };
+    let next = {
+        let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
+        let stacks = store.entry(model_key).or_default();
+        let Some(next) = stacks.redo.pop() else {
+            return Err("Nothing to redo".to_string());
+        };
+        stacks.undo.push(current_base);
+        if stacks.undo.len() > MAX_MODEL_UNDO {
+            stacks.undo.remove(0);
+        }
+        next
+    };
+    install_base_model(&bi_state, &connection_id, &next).await?;
+    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    Ok(build_overview(&next, &bindings, true, None))
+}
+
+/// One entry of the engine's built-in function catalog (for editor
+/// autocompletion/hover/signature help).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionDefDto {
+    pub name: String,
+    pub description: String,
+    pub signature: String,
+}
+
+/// The engine's built-in function catalog (static; drives the formula editor's
+/// completion/hover/signature-help providers).
+#[tauri::command]
+pub fn bi_model_function_catalog(window: tauri::Window) -> Result<Vec<FunctionDefDto>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    Ok(bi_engine::function_catalog()
+        .iter()
+        .map(|f| FunctionDefDto {
+            name: f.name.to_string(),
+            description: f.description.to_string(),
+            signature: f.signature.to_string(),
+        })
+        .collect())
+}
+
 /// A single model-validation issue for the Overview panel.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2878,6 +3184,49 @@ fn execution_plan_to_dto(p: &bi_engine::ExecutionPlan) -> ExecutionPlanDto {
     }
 }
 
+/// Server-side sort directive (a measure sort + row cap is a TOP-N query the
+/// engine evaluates over the full dataset).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotSortDto {
+    /// "measure" to sort by a measure result, or "column" for a group-by column.
+    pub kind: String,
+    /// Table name (used only when kind == "column").
+    pub table: Option<String>,
+    /// Measure name (kind == "measure") or column name (kind == "column").
+    pub field: String,
+    pub descending: bool,
+}
+
+/// Measure-value filter (HAVING).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureFilterDto {
+    pub measure: String,
+    /// "=" | "!=" | ">" | ">=" | "<" | "<="
+    pub operator: String,
+    pub value: f64,
+}
+
+/// Keep the top-N groups by a measure (tie-inclusive).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopNDto {
+    pub measure: String,
+    pub limit: usize,
+    pub ascending: bool,
+}
+
+/// Append a measure-value ranking column (RANKX).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankByDto {
+    pub measure: String,
+    pub output_column: String,
+    pub dense: bool,
+    pub ascending: bool,
+}
+
 /// Run an ad-hoc query against a connection's model for the Testing Ground.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -2887,6 +3236,10 @@ pub async fn bi_model_test_query(
     measures: Vec<String>,
     group_by: Vec<ColumnRefDto>,
     filters: Vec<TestFilterDto>,
+    sort: Vec<PivotSortDto>,
+    measure_filters: Vec<MeasureFilterDto>,
+    top_n: Option<TopNDto>,
+    rank_by: Option<RankByDto>,
     row_limit: Option<usize>,
     rollup: bool,
     include_plan: bool,
@@ -2925,11 +3278,60 @@ pub async fn bi_model_test_query(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    // Rollup subtotals cannot be combined with RANKX/TOPN (the engine rejects
+    // it; fail early with a clear message).
+    if rollup && (top_n.is_some() || rank_by.is_some()) {
+        return Err(
+            "Rollup subtotals cannot be combined with TOPN or RANKX. Turn off one of them."
+                .to_string(),
+        );
+    }
+
+    let order_by: Vec<bi_engine::OrderByClause> = sort
+        .iter()
+        .map(|s| {
+            let mut clause = if s.kind == "measure" {
+                bi_engine::OrderByClause::measure(&s.field)
+            } else {
+                bi_engine::OrderByClause::column(s.table.clone().unwrap_or_default(), &s.field)
+            };
+            clause.descending = s.descending;
+            clause
+        })
+        .collect();
+
+    let measure_filter_conds: Vec<bi_engine::MeasureFilter> = measure_filters
+        .iter()
+        .map(|m| {
+            Ok(bi_engine::MeasureFilter::new(
+                m.measure.clone(),
+                filter_operator_from_str(&m.operator)?,
+                m.value,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let top_n_req = top_n.as_ref().map(|t| {
+        let mut r = bi_engine::TopN::new(t.measure.clone(), t.limit);
+        r.ascending = t.ascending;
+        r
+    });
+    let rank_by_req = rank_by.as_ref().map(|r| {
+        let mut rb = bi_engine::RankBy::new(r.measure.clone(), r.output_column.clone());
+        rb.dense = r.dense;
+        rb.ascending = r.ascending;
+        rb
+    });
+
     let cap = row_limit.map_or(MAX_TEST_ROWS, |n| n.min(MAX_TEST_ROWS).max(1));
     let request = bi_engine::QueryRequest {
         measures,
         group_by: group_refs,
         filters: filter_conds,
+        order_by,
+        measure_filters: measure_filter_conds,
+        top_n: top_n_req,
+        rank_by: rank_by_req,
         limit: Some(cap.saturating_add(1)),
         totals: if rollup {
             bi_engine::TotalsMode::Rollup
@@ -3269,5 +3671,36 @@ mod tests {
         }
         assert!(propagation_from_str("sideways").is_err());
         assert!(script_type_from_str("Decimal").is_err());
+    }
+
+    #[test]
+    fn model_undo_stack_records_pushes_and_clears_redo() {
+        let key = Some(ModelKey::from_model_path("unit-test-undo-key-8f3a"));
+        {
+            // Isolate from any other test touching the global store.
+            let mut store = model_undo_store().lock().unwrap();
+            store.remove(&key);
+        }
+        record_model_undo(&key, base_model());
+        record_model_undo(&key, base_model());
+        {
+            let mut store = model_undo_store().lock().unwrap();
+            let stacks = store.get_mut(&key).unwrap();
+            assert_eq!(stacks.undo.len(), 2);
+            assert!(stacks.redo.is_empty());
+            // Simulate an undo moving one snapshot to redo.
+            stacks.redo.push(stacks.undo.pop().unwrap());
+            assert_eq!(stacks.undo.len(), 1);
+            assert_eq!(stacks.redo.len(), 1);
+        }
+        // A fresh edit clears the redo branch.
+        record_model_undo(&key, base_model());
+        {
+            let mut store = model_undo_store().lock().unwrap();
+            let stacks = store.get_mut(&key).unwrap();
+            assert_eq!(stacks.undo.len(), 2);
+            assert!(stacks.redo.is_empty());
+            store.remove(&key); // cleanup
+        }
     }
 }
