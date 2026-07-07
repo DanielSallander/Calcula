@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/Reports/index.ts
 // PURPOSE: Reports extension entry point. A report is a design-query (pivot-layout
 //   DSL) materialized into a range of grid cells — "a report directly into the
-//   grid," no pivot table. Slice 1: create a report from the Data menu.
+//   grid," no pivot table. Create + manage reports from the Data menu; reports
+//   with @Control filter params auto-refresh when a Controls-pane value changes.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
@@ -12,10 +13,14 @@ import {
   ExtensionRegistry,
   getSheets,
 } from "@api";
+import { onControlValueChange } from "@api/controlValues";
 import { CreateReportDialog } from "./components/CreateReportDialog";
+import { ManageReportsDialog } from "./components/ManageReportsDialog";
 import { reportsBackend } from "./lib/reportsBackend";
+import { refreshControlBoundReports } from "./lib/reportRefresh";
 
-const DIALOG_ID = "create-report-dialog";
+const CREATE_DIALOG_ID = "create-report-dialog";
+const MANAGE_DIALOG_ID = "manage-reports-dialog";
 
 const cleanupFns: (() => void)[] = [];
 
@@ -26,7 +31,6 @@ interface Selection {
 let currentSelection: Selection | null = null;
 
 async function openCreateReportDialog(): Promise<void> {
-  // Default the destination to the active cell / selection top-left.
   let anchorRow = 0;
   let anchorCol = 0;
   if (currentSelection) {
@@ -40,19 +44,17 @@ async function openCreateReportDialog(): Promise<void> {
   } catch {
     /* default sheet 0 */
   }
-  showDialog(DIALOG_ID, { sheetIndex, anchorRow, anchorCol });
+  showDialog(CREATE_DIALOG_ID, { sheetIndex, anchorRow, anchorCol });
 }
 
 function activate(context: ExtensionContext): void {
   // Bind the capability-scoped backend door (A3).
   reportsBackend.set(context.invokeBackend);
 
-  registerDialog({
-    id: DIALOG_ID,
-    component: CreateReportDialog,
-    priority: 50,
-  });
-  cleanupFns.push(() => unregisterDialog(DIALOG_ID));
+  registerDialog({ id: CREATE_DIALOG_ID, component: CreateReportDialog, priority: 50 });
+  cleanupFns.push(() => unregisterDialog(CREATE_DIALOG_ID));
+  registerDialog({ id: MANAGE_DIALOG_ID, component: ManageReportsDialog, priority: 50 });
+  cleanupFns.push(() => unregisterDialog(MANAGE_DIALOG_ID));
 
   const unsub = ExtensionRegistry.onSelectionChange((sel) => {
     currentSelection = sel
@@ -65,6 +67,26 @@ function activate(context: ExtensionContext): void {
     id: "data:createReport",
     label: "Report from Design Query...",
     action: () => openCreateReportDialog(),
+  });
+  registerMenuItem("data", {
+    id: "data:manageReports",
+    label: "Manage Reports...",
+    action: () => showDialog(MANAGE_DIALOG_ID, {}),
+  });
+
+  // Auto-refresh reports bound to Controls-pane values when a control changes.
+  // Skip transient (mid-drag) previews; debounce bursts of changes.
+  let refreshTimer: number | undefined;
+  const unsubControls = onControlValueChange((detail) => {
+    if (detail.transient) return;
+    if (refreshTimer) window.clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(() => {
+      void refreshControlBoundReports();
+    }, 150);
+  });
+  cleanupFns.push(() => {
+    if (refreshTimer) window.clearTimeout(refreshTimer);
+    unsubControls();
   });
 }
 

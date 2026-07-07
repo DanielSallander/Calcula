@@ -12,7 +12,9 @@ import {
   type DesignQueryRequest,
 } from "../../_shared/dsl/pivotLayout/designQuery";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
+import { getControlValue } from "@api/controlValues";
 import { reportsBackend } from "../lib/reportsBackend";
+import { substituteControlParams } from "../lib/paramSubstitution";
 
 const DSL_TEMPLATE =
   "# Report — ROWS become row groups, VALUES become measure columns.\n" +
@@ -103,7 +105,9 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
       setError("The connection's model is still loading. Try again in a moment.");
       return;
     }
-    const compiled = compileDesignQuery(dslText, connectionId, biModel);
+    // Resolve any @ControlName params against current pane-control values, then compile.
+    const substituted = substituteControlParams(dslText, getControlValue);
+    const compiled = compileDesignQuery(substituted, connectionId, biModel);
     if (!compiled.request) {
       setError(
         compiled.errors.map((e) => `Line ${e.location.line}: ${e.message}`).join("\n") ||
@@ -209,7 +213,8 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Design query</label>
         <DesignQueryEditor value={dslText} onChange={setDslText} biModel={biModel} height="180px" />
         <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
-          Materializes at <strong>{destination}</strong>. Ctrl+Space suggests fields and measures.
+          Materializes at <strong>{destination}</strong>. Bind a Controls-pane value in FILTERS with{" "}
+          <code>@ControlName</code> (the report re-runs when it changes). Ctrl+Space suggests fields.
         </div>
 
         {error && (
