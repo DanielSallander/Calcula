@@ -26,10 +26,47 @@ use crate::bi::types::{BiState, ConnectionId};
 use crate::pivot::commands::{expand_bi_value_fields, extract_bi_model_metadata};
 use crate::pivot::operations::{build_cache_from_arrow_batches, safe_calculate_pivot};
 use crate::pivot::types::{
-    BiFieldRef, BiValueFieldRef, CalculatedFieldDef, LayoutConfig, PivotViewResponse,
-    ValueColumnRefDef,
+    BiFieldRef, BiPivotModelInfo, BiValueFieldRef, CalculatedFieldDef, LayoutConfig,
+    PivotViewResponse, ValueColumnRefDef,
 };
 use crate::pivot::utils::{apply_layout_config, view_to_response};
+
+/// Return the BI model (tables / columns / measures / hierarchies / calc groups)
+/// for a connection, in the same `BiPivotModelInfo` shape a pivot exposes. Used
+/// by the chart "design query" editor + reader to build a DSL compile context
+/// WITHOUT there being a pivot. Returns `None` if the connection has no model.
+#[tauri::command]
+pub async fn get_connection_bi_model(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+) -> Result<Option<BiPivotModelInfo>, String> {
+    let engine_arc = {
+        let connections = bi_state
+            .connections
+            .lock()
+            .map_err(|e| format!("connections lock poisoned: {}", e))?;
+        match connections.get(&connection_id) {
+            Some(conn) => conn.engine.clone(),
+            None => return Ok(None),
+        }
+    };
+    let engine_arc = match engine_arc {
+        Some(arc) => arc,
+        None => return Ok(None),
+    };
+    let engine = engine_arc.lock().await;
+    let (tables, measures, hierarchies, calculation_groups) = extract_bi_model_metadata(&engine);
+    Ok(Some(BiPivotModelInfo {
+        connection_id,
+        tables,
+        measures,
+        lookup_columns: Vec::new(),
+        hierarchies,
+        calculation_groups,
+        applied_calculation_group: None,
+        data_as_of: None,
+    }))
+}
 
 /// A compiled design-query spec. Mirrors the field-assignment subset of
 /// `UpdateBiPivotFieldsRequest` but carries a `connectionId` (there is no pivot).

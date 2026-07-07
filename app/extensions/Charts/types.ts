@@ -486,13 +486,28 @@ export interface PivotDataSource {
 }
 
 /**
+ * A "design query" data source: the chart holds pivot-layout DSL text and runs
+ * it directly against a BI model connection (headless, no pivot table). The data
+ * lives in the chart object; it is recompiled + re-queried on read/refresh.
+ */
+export interface DesignQueryDataSource {
+  /** Discriminant tag. */
+  type: "designQuery";
+  /** The pivot-layout DSL text (ROWS/COLUMNS/VALUES/FILTERS/CALC …). */
+  dslText: string;
+  /** The BI connection whose model the query runs against. */
+  connectionId: string;
+}
+
+/**
  * Data source for a chart. Can be:
  * - A `DataRangeRef` object (explicit cell coordinates)
  * - A string in A1 notation (e.g., "Sheet1!A1:D10")
  * - A named range name (e.g., "SalesData")
  * - A `PivotDataSource` object (reads from a pivot table's aggregated data)
+ * - A `DesignQueryDataSource` object (runs DSL against a BI model, data in the chart)
  */
-export type DataSource = DataRangeRef | string | PivotDataSource;
+export type DataSource = DataRangeRef | string | PivotDataSource | DesignQueryDataSource;
 
 /** Type guard: check if a DataSource is a resolved DataRangeRef. */
 export function isDataRangeRef(source: DataSource): source is DataRangeRef {
@@ -502,6 +517,11 @@ export function isDataRangeRef(source: DataSource): source is DataRangeRef {
 /** Type guard: check if a DataSource is a PivotDataSource. */
 export function isPivotDataSource(source: DataSource): source is PivotDataSource {
   return typeof source === "object" && source !== null && "type" in source && (source as PivotDataSource).type === "pivot";
+}
+
+/** Type guard: check if a DataSource is a DesignQueryDataSource. */
+export function isDesignQueryDataSource(source: DataSource): source is DesignQueryDataSource {
+  return typeof source === "object" && source !== null && "type" in source && (source as DesignQueryDataSource).type === "designQuery";
 }
 
 // ============================================================================

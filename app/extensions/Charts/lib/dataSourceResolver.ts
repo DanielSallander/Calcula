@@ -10,7 +10,7 @@ import {
 } from "@api";
 import { getViewportCells } from "@api/lib";
 import type { ChartSpec, DataSource, DataRangeRef } from "../types";
-import { isDataRangeRef, isPivotDataSource } from "../types";
+import { isDataRangeRef, isPivotDataSource, isDesignQueryDataSource } from "../types";
 
 // ============================================================================
 // Public API
@@ -35,9 +35,10 @@ export async function resolveDataSource(
     return source;
   }
 
-  // Pivot data sources are handled separately by pivotChartDataReader
-  if (isPivotDataSource(source)) {
-    throw new Error("PivotDataSource should be handled by pivotChartDataReader, not resolveDataSource.");
+  // Aggregated sources (pivot view / design query) are handled by their own
+  // readers, not by range resolution.
+  if (isPivotDataSource(source) || isDesignQueryDataSource(source)) {
+    throw new Error("Aggregated data sources (pivot / design query) are handled by their readers, not resolveDataSource.");
   }
 
   const ref = source.trim();

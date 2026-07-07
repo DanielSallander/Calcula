@@ -18,13 +18,14 @@ import type {
   TidyData,
   TidyField,
 } from "../types";
-import { isPivotDataSource } from "../types";
+import { isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransformsAsync, type SandboxTransformRunner } from "./chartTransforms";
 import { resolveParams, selectionFilterCategories, applyAxisParamBindings } from "./chartParams";
 import { getPointSelection } from "../handlers/chartPointSelection";
 import type { FormulaValue } from "./chartFormula";
 import { readPivotChartData } from "./pivotChartDataReader";
+import { readDesignQueryData } from "./designQueryChartDataReader";
 import { applyChartFilters, applySelectionKeep } from "./chartFilters";
 import { parseDisplayNumber, detectCategoryField } from "./chartFieldTypes";
 import { lowerEncoding } from "./lowerEncoding";
@@ -110,9 +111,13 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
   // level grid chart has a chartId; previews/export/concat children get none.
   const selection = chartId ? getPointSelection(chartId) : undefined;
 
-  // Handle pivot data source: read directly from pivot view
-  if (isPivotDataSource(resolvedSpec.data)) {
-    let parsedData = await readPivotChartData(resolvedSpec.data);
+  // Handle pivot / design-query data sources: both yield aggregated data
+  // directly as a pivot view (a design query runs the DSL headlessly). The
+  // downstream transform/filter/selection pipeline is identical for both.
+  if (isPivotDataSource(resolvedSpec.data) || isDesignQueryDataSource(resolvedSpec.data)) {
+    let parsedData = isPivotDataSource(resolvedSpec.data)
+      ? await readPivotChartData(resolvedSpec.data)
+      : await readDesignQueryData(resolvedSpec.data);
 
     // Apply data transforms if specified
     if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {

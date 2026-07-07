@@ -93,9 +93,9 @@ export async function autoDetectPivotSeries(
  * [Grand total row]      ← optional (included if source.includeGrandTotal)
  * ```
  */
-function extractChartData(
+export function extractChartData(
   view: PivotViewResponse,
-  source: PivotDataSource,
+  source: { includeSubtotals?: boolean; includeGrandTotal?: boolean },
 ): ParsedChartData {
   const { rowLabelColCount, columnHeaderRowCount, filterRowCount } = view;
   const includeSubtotals = source.includeSubtotals ?? false;

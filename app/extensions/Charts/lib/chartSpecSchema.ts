@@ -48,11 +48,12 @@ export const chartSpecJsonSchema: object = {
       description: "Chart type. Built-in marks (bar, line, pie, ...) autocomplete; a registered custom mark id is also valid.",
     },
     data: {
-      description: "Data source. Can be a DataRangeRef object (cell coordinates), an A1 reference string (e.g. \"Sheet1!A1:D10\"), a named range name (e.g. \"SalesData\"), or a PivotDataSource for PivotCharts.",
+      description: "Data source. Can be a DataRangeRef object (cell coordinates), an A1 reference string (e.g. \"Sheet1!A1:D10\"), a named range name (e.g. \"SalesData\"), a PivotDataSource for PivotCharts, or a DesignQueryDataSource (DSL run against a BI model).",
       oneOf: [
         { $ref: "#/definitions/DataRangeRef" },
         { type: "string", description: "A1 reference (e.g. \"Sheet1!A1:D10\") or named range name." },
         { $ref: "#/definitions/PivotDataSource" },
+        { $ref: "#/definitions/DesignQueryDataSource" },
       ],
     },
     hasHeaders: {
@@ -190,6 +191,17 @@ export const chartSpecJsonSchema: object = {
         pivotId: { type: "string", description: "The pivot table ID (UUID string) to read data from." },
         includeSubtotals: { type: "boolean", description: "Whether to include subtotal rows as chart categories. Default: false." },
         includeGrandTotal: { type: "boolean", description: "Whether to include grand total row as a chart category. Default: false." },
+      },
+      additionalProperties: false,
+    },
+    DesignQueryDataSource: {
+      type: "object",
+      description: "Data source that runs pivot-layout DSL directly against a BI model connection (headless, no pivot table). The data lives in the chart object.",
+      required: ["type", "dslText", "connectionId"],
+      properties: {
+        type: { type: "string", const: "designQuery", description: "Discriminant tag. Must be \"designQuery\"." },
+        dslText: { type: "string", description: "The pivot-layout DSL text (ROWS/COLUMNS/VALUES/FILTERS/CALC …)." },
+        connectionId: { type: "string", description: "The BI connection ID (UUID string) whose model the query runs against." },
       },
       additionalProperties: false,
     },

@@ -6,7 +6,7 @@
 
 import { columnToLetter } from "@api";
 import type { ChartSpec, DataRangeRef } from "../types";
-import { isPivotDataSource } from "../types";
+import { isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { resolveDataSource } from "./dataSourceResolver";
 
 // ============================================================================
@@ -62,8 +62,8 @@ export async function buildSeriesFormula(
   }
 
   // Compute references from the data range + sourceIndex
-  if (isPivotDataSource(spec.data)) {
-    // Pivot charts don't have cell references
+  if (isPivotDataSource(spec.data) || isDesignQueryDataSource(spec.data)) {
+    // Pivot / design-query charts don't have cell references
     return `=SERIES("${escapeSeriesName(series.name)}",,,${order})`;
   }
 
@@ -110,7 +110,7 @@ export async function getSeriesReferences(
   }
 
   // Compute from data range
-  if (isPivotDataSource(spec.data)) return {};
+  if (isPivotDataSource(spec.data) || isDesignQueryDataSource(spec.data)) return {};
 
   try {
     const dataRef = await resolveDataSource(spec.data);

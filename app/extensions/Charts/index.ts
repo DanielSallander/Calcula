@@ -146,7 +146,7 @@ import { onAppEvent } from "@api/events";
 import { listenTauriEvent } from "@api/backend";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
-import { isPivotDataSource } from "./types";
+import { isPivotDataSource, isDesignQueryDataSource } from "./types";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 
@@ -656,9 +656,12 @@ function activate(context: ExtensionContext): void {
     // is not yet populated. A spec-less entry is simply not a pivot chart, so
     // skip it rather than crash this event handler (fired on every pivot:refresh
     // / PIVOT_REGIONS_UPDATED).
-    const pivotCharts = charts.filter((c) => isPivotDataSource(c.spec?.data));
-    if (pivotCharts.length > 0) {
-      for (const chart of pivotCharts) {
+    // Design-query charts read the same BI model, so refresh them here too.
+    const aggregatedCharts = charts.filter(
+      (c) => isPivotDataSource(c.spec?.data) || isDesignQueryDataSource(c.spec?.data),
+    );
+    if (aggregatedCharts.length > 0) {
+      for (const chart of aggregatedCharts) {
         invalidateChartCache(chart.chartId);
       }
       resetSubSelection();
