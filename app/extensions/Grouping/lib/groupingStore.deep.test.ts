@@ -17,8 +17,10 @@ const BUTTON_SIZE = 13;
 const LEVEL_BTN_SIZE = 14;
 const LEVEL_BTN_GAP = 2;
 
+// Bar is sized to fit (maxLevel + 1) level buttons in the corner — Excel shows
+// a "collapse all" button plus one per level. Mirrors updateOutlineBarWidth.
 function computeOutlineBarWidth(maxRowLevel: number): number {
-  return maxRowLevel > 0 ? LEFT_PAD + maxRowLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxRowLevel > 0 ? LEFT_PAD + (maxRowLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 function computeRowHeaderWidth(maxRowLevel: number): number {
@@ -26,7 +28,7 @@ function computeRowHeaderWidth(maxRowLevel: number): number {
 }
 
 function computeOutlineBarHeight(maxColLevel: number): number {
-  return maxColLevel > 0 ? LEFT_PAD + maxColLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxColLevel > 0 ? LEFT_PAD + (maxColLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 function computeColHeaderHeight(maxColLevel: number): number {
@@ -109,20 +111,20 @@ describe("8 outline levels (Excel max)", () => {
   it("computeOutlineBarWidth handles all 8 levels", () => {
     for (let level = 1; level <= 8; level++) {
       const width = computeOutlineBarWidth(level);
-      expect(width).toBe(LEFT_PAD + level * PIXELS_PER_LEVEL + 4);
+      expect(width).toBe(LEFT_PAD + (level + 1) * PIXELS_PER_LEVEL);
     }
   });
 
   it("outline bar at level 8 has reasonable width", () => {
     const width = computeOutlineBarWidth(8);
-    // 4 + 8*16 + 4 = 136 pixels
-    expect(width).toBe(136);
+    // 4 + 9*16 = 148 pixels (9 level buttons)
+    expect(width).toBe(148);
   });
 
   it("row header width at level 8 does not exceed reasonable bounds", () => {
     const headerWidth = computeRowHeaderWidth(8);
-    // 50 + 136 = 186
-    expect(headerWidth).toBe(186);
+    // 50 + 148 = 198
+    expect(headerWidth).toBe(198);
     expect(headerWidth).toBeLessThan(250); // sanity check
   });
 
@@ -138,7 +140,7 @@ describe("8 outline levels (Excel max)", () => {
   });
 
   it("col header height at 8 levels is correct", () => {
-    expect(computeColHeaderHeight(8)).toBe(DEFAULT_COL_HEADER_HEIGHT + 136);
+    expect(computeColHeaderHeight(8)).toBe(DEFAULT_COL_HEADER_HEIGHT + 148);
   });
 });
 
@@ -250,7 +252,7 @@ describe("summary row placement above vs below", () => {
 
 describe("nested groups overlapping", () => {
   it("3 levels of nesting compute correct outline bar width", () => {
-    expect(computeOutlineBarWidth(3)).toBe(LEFT_PAD + 3 * PIXELS_PER_LEVEL + 4); // 56
+    expect(computeOutlineBarWidth(3)).toBe(LEFT_PAD + 4 * PIXELS_PER_LEVEL); // 68 (4 level buttons)
   });
 
   it("deeply nested structure: 8 levels with each containing fewer rows", () => {
@@ -314,15 +316,13 @@ describe("button positioning at all 8 levels", () => {
     }
   });
 
-  it("level buttons (1-8) all fit in outline bar corner area", () => {
+  it("all level buttons fit in outline bar corner area (maxLevel+1 buttons)", () => {
+    // With 8 levels, 9 level buttons are shown (labels 1..9); the bar is sized
+    // to fit them all.
     const barWidth = computeOutlineBarWidth(8);
-    for (let level = 1; level <= 8; level++) {
-      const rightEdge = levelButtonX(level) + LEVEL_BTN_SIZE;
-      // Level 8 button might not fit in outline bar corner
-      // (this checks if the level button layout works at max levels)
-      if (level <= 5) {
-        expect(rightEdge).toBeLessThanOrEqual(barWidth);
-      }
+    for (let btn = 1; btn <= 9; btn++) {
+      const rightEdge = levelButtonX(btn) + LEVEL_BTN_SIZE;
+      expect(rightEdge).toBeLessThanOrEqual(barWidth);
     }
   });
 

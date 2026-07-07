@@ -122,18 +122,25 @@ export function getLastRenderedState(): {
 
 /**
  * Adjust rowHeaderWidth and outlineBarWidth in GridConfig based on max row level.
+ *
+ * The corner hosts (maxRowLevel + 1) horizontal level buttons (Excel shows a
+ * "collapse all" button plus one per level), so the bar must be wide enough for
+ * all of them — otherwise the last button spills into the row-number header.
  */
 export function updateOutlineBarWidth(maxRowLevel: number): void {
-  const outlineBarWidth = maxRowLevel > 0 ? LEFT_PAD + maxRowLevel * PIXELS_PER_LEVEL + 4 : 0;
+  const outlineBarWidth = maxRowLevel > 0 ? LEFT_PAD + (maxRowLevel + 1) * PIXELS_PER_LEVEL : 0;
   const rowHeaderWidth = DEFAULT_ROW_HEADER_WIDTH + outlineBarWidth;
   dispatchGridAction(updateConfig({ rowHeaderWidth, outlineBarWidth }));
 }
 
 /**
  * Adjust colHeaderHeight and outlineBarHeight in GridConfig based on max column level.
+ *
+ * The corner hosts (maxColLevel + 1) vertically-stacked level buttons, so the
+ * bar must be tall enough for all of them.
  */
 export function updateOutlineBarHeight(maxColLevel: number): void {
-  const outlineBarHeight = maxColLevel > 0 ? LEFT_PAD + maxColLevel * PIXELS_PER_LEVEL + 4 : 0;
+  const outlineBarHeight = maxColLevel > 0 ? LEFT_PAD + (maxColLevel + 1) * PIXELS_PER_LEVEL : 0;
   const colHeaderHeight = DEFAULT_COL_HEADER_HEIGHT + outlineBarHeight;
   dispatchGridAction(updateConfig({ colHeaderHeight, outlineBarHeight }));
 }

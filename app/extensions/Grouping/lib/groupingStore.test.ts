@@ -14,8 +14,10 @@ const DEFAULT_COL_HEADER_HEIGHT = 24;
 const PIXELS_PER_LEVEL = 16;
 const LEFT_PAD = 4;
 
+// Bar is sized to fit (maxLevel + 1) level buttons in the corner — Excel shows
+// a "collapse all" button plus one per level. Mirrors updateOutlineBarWidth.
 function computeOutlineBarWidth(maxRowLevel: number): number {
-  return maxRowLevel > 0 ? LEFT_PAD + maxRowLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxRowLevel > 0 ? LEFT_PAD + (maxRowLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 function computeRowHeaderWidth(maxRowLevel: number): number {
@@ -23,7 +25,7 @@ function computeRowHeaderWidth(maxRowLevel: number): number {
 }
 
 function computeOutlineBarHeight(maxColLevel: number): number {
-  return maxColLevel > 0 ? LEFT_PAD + maxColLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxColLevel > 0 ? LEFT_PAD + (maxColLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 function computeColHeaderHeight(maxColLevel: number): number {
@@ -76,17 +78,17 @@ describe("computeOutlineBarWidth", () => {
   });
 
   it("returns correct width for 1 level", () => {
-    const expected = LEFT_PAD + 1 * PIXELS_PER_LEVEL + 4; // 4 + 16 + 4 = 24
+    const expected = LEFT_PAD + 2 * PIXELS_PER_LEVEL; // 4 + 32 = 36 (2 level buttons)
     expect(computeOutlineBarWidth(1)).toBe(expected);
   });
 
   it("returns correct width for 2 levels", () => {
-    const expected = LEFT_PAD + 2 * PIXELS_PER_LEVEL + 4; // 4 + 32 + 4 = 40
+    const expected = LEFT_PAD + 3 * PIXELS_PER_LEVEL; // 4 + 48 = 52 (3 level buttons)
     expect(computeOutlineBarWidth(2)).toBe(expected);
   });
 
   it("returns correct width for 3 levels", () => {
-    const expected = LEFT_PAD + 3 * PIXELS_PER_LEVEL + 4; // 4 + 48 + 4 = 56
+    const expected = LEFT_PAD + 4 * PIXELS_PER_LEVEL; // 4 + 64 = 68 (4 level buttons)
     expect(computeOutlineBarWidth(3)).toBe(expected);
   });
 
@@ -257,7 +259,9 @@ describe("outline level button layout", () => {
   it("all level buttons fit within the outline bar for that many levels", () => {
     for (let maxLevel = 1; maxLevel <= 5; maxLevel++) {
       const barWidth = computeOutlineBarWidth(maxLevel);
-      const lastBtnRight = levelButtonX(maxLevel) + LEVEL_BTN_SIZE;
+      // (maxLevel + 1) buttons are shown (button "1" collapses to the top
+      // summary), so the last button is number maxLevel+1.
+      const lastBtnRight = levelButtonX(maxLevel + 1) + LEVEL_BTN_SIZE;
       // Level buttons go in the corner area, which is bar width.
       // They should fit within the outline bar width.
       expect(lastBtnRight).toBeLessThanOrEqual(barWidth);

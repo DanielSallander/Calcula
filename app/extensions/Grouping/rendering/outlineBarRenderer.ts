@@ -221,13 +221,17 @@ export function renderOutlineBar(
     ctx.fillRect(0, 0, outlineBarW, colHeaderH);
 
     // Row level buttons in top-left corner, positioned in the row-header
-    // portion of the column header area
+    // portion of the column header area.
+    // Excel shows (maxLevel + 1) buttons: button "1" collapses everything to
+    // the top-level summary, and button (maxLevel + 1) expands all detail.
+    // Button i (0-based, label i+1) maps to showOutlineLevel(i).
     const rowLevelBtnY = outlineBarH > 0 ? outlineBarH : 0;
     const rowLevelBtnAreaH = colHeaderH - rowLevelBtnY;
-    for (let lvl = 1; lvl <= info.maxRowLevel; lvl++) {
-      const btnX = (lvl - 1) * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
+    const rowLevelBtnCount = info.maxRowLevel + 1;
+    for (let i = 0; i < rowLevelBtnCount; i++) {
+      const btnX = i * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
       const btnY = rowLevelBtnY + (rowLevelBtnAreaH - LEVEL_BTN_SIZE) / 2;
-      drawLevelButton(ctx, btnX, btnY, lvl);
+      drawLevelButton(ctx, btnX, btnY, i + 1);
     }
 
     // Clip to row outline bar area
@@ -380,13 +384,16 @@ export function renderOutlineBar(
     ctx.fillRect(0, 0, rowHeaderW, outlineBarH);
 
     // Column level buttons in top-left corner, positioned in the col-header
-    // portion of the row header area
+    // portion of the row header area.
+    // As with rows, Excel shows (maxLevel + 1) buttons; button i (0-based,
+    // label i+1) maps to showOutlineLevel(col = i).
     const colLevelBtnX = outlineBarW > 0 ? outlineBarW : 0;
     const colLevelBtnAreaW = rowHeaderW - colLevelBtnX;
-    for (let lvl = 1; lvl <= info.maxColLevel; lvl++) {
-      const btnY = (lvl - 1) * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
+    const colLevelBtnCount = info.maxColLevel + 1;
+    for (let i = 0; i < colLevelBtnCount; i++) {
+      const btnY = i * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
       const btnX = colLevelBtnX + (colLevelBtnAreaW - LEVEL_BTN_SIZE) / 2;
-      drawLevelButton(ctx, btnX, btnY, lvl);
+      drawLevelButton(ctx, btnX, btnY, i + 1);
     }
 
     // Clip to column outline bar area

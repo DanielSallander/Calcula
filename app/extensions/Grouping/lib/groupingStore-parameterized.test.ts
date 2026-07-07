@@ -13,9 +13,13 @@ const DEFAULT_COL_HEADER_HEIGHT = 24;
 const PIXELS_PER_LEVEL = 16;
 const LEFT_PAD = 4;
 
-/** Calculate outline bar width for a given max level. */
+/**
+ * Calculate outline bar width for a given max level.
+ * Sized to fit (maxLevel + 1) level buttons in the corner (Excel shows a
+ * "collapse all" button plus one per level). Mirrors updateOutlineBarWidth.
+ */
 function outlineBarWidth(maxLevel: number): number {
-  return maxLevel > 0 ? LEFT_PAD + maxLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxLevel > 0 ? LEFT_PAD + (maxLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 /** Calculate total row header width. */
@@ -23,9 +27,9 @@ function rowHeaderWidth(maxLevel: number): number {
   return DEFAULT_ROW_HEADER_WIDTH + outlineBarWidth(maxLevel);
 }
 
-/** Calculate outline bar height for a given max column level. */
+/** Calculate outline bar height for a given max column level. Mirrors updateOutlineBarHeight. */
 function outlineBarHeight(maxLevel: number): number {
-  return maxLevel > 0 ? LEFT_PAD + maxLevel * PIXELS_PER_LEVEL + 4 : 0;
+  return maxLevel > 0 ? LEFT_PAD + (maxLevel + 1) * PIXELS_PER_LEVEL : 0;
 }
 
 /** Calculate total column header height. */
@@ -67,7 +71,7 @@ describe("Grouping: Outline bar width for levels 1-8", () => {
 
   it.each(levels)("level %i", (level) => {
     const barW = outlineBarWidth(level);
-    const expected = LEFT_PAD + level * PIXELS_PER_LEVEL + 4;
+    const expected = LEFT_PAD + (level + 1) * PIXELS_PER_LEVEL;
     expect(barW).toBe(expected);
     expect(barW).toBeGreaterThan(0);
 

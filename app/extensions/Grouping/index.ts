@@ -7,6 +7,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   AppEvents,
   ExtensionRegistry,
+  registerPostHeaderOverlay,
 } from "@api";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
@@ -88,12 +89,15 @@ function handleOutlineBarClick(event: MouseEvent): void {
     event.preventDefault();
     event.stopPropagation();
 
-    // Level buttons (in corner area, y < colHeaderH)
+    // Level buttons (in corner area, y < colHeaderH).
+    // (maxRowLevel + 1) buttons: button i (0-based, label i+1) shows outline
+    // level i (collapsing all groups deeper than i). Must mirror the renderer.
     if (clickY < colHeaderH && info.maxRowLevel > 0) {
-      for (let lvl = 1; lvl <= info.maxRowLevel; lvl++) {
-        const btnX = (lvl - 1) * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
+      const rowLevelBtnCount = info.maxRowLevel + 1;
+      for (let i = 0; i < rowLevelBtnCount; i++) {
+        const btnX = i * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
         if (clickX >= btnX && clickX < btnX + LEVEL_BTN_SIZE) {
-          performShowLevel(lvl);
+          performShowLevel(i);
           return;
         }
       }
@@ -145,12 +149,15 @@ function handleOutlineBarClick(event: MouseEvent): void {
     event.preventDefault();
     event.stopPropagation();
 
-    // Level buttons (in corner area, x < rowHeaderW)
+    // Level buttons (in corner area, x < rowHeaderW).
+    // (maxColLevel + 1) buttons: button i (0-based, label i+1) shows outline
+    // level i (collapsing all groups deeper than i). Must mirror the renderer.
     if (clickX < rowHeaderW && info.maxColLevel > 0) {
-      for (let lvl = 1; lvl <= info.maxColLevel; lvl++) {
-        const btnY = (lvl - 1) * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
+      const colLevelBtnCount = info.maxColLevel + 1;
+      for (let i = 0; i < colLevelBtnCount; i++) {
+        const btnY = i * (LEVEL_BTN_SIZE + LEVEL_BTN_GAP) + 2;
         if (clickY >= btnY && clickY < btnY + LEVEL_BTN_SIZE) {
-          performShowColLevel(lvl);
+          performShowColLevel(i);
           return;
         }
       }
@@ -256,11 +263,17 @@ function activate(context: ExtensionContext): void {
 
   console.log("[Grouping] Activating...");
 
-  // 1. Register the post-header overlay renderer
-  const unregOverlay = context.grid.overlays.register({
-    type: "grouping-outline-bar",
-    render: (ctx) => renderOutlineBar(ctx.ctx, ctx.config, ctx.viewport, ctx.dimensions, ctx.canvasWidth, ctx.canvasHeight),
-  });
+  // 1. Register the post-header overlay renderer.
+  //    The outline bar paints ON TOP of the row/column headers, in the header
+  //    margin that updateOutlineBarWidth/Height widens. It is NOT anchored to a
+  //    GridRegion, so it must use the post-header overlay path — NOT the
+  //    region-based `context.grid.overlays.register` API, whose renderers only
+  //    fire for a matching GridRegion. (Registering there widens the margin but
+  //    never draws the brackets / +/- buttons / level buttons.)
+  const unregOverlay = registerPostHeaderOverlay(
+    "grouping-outline-bar",
+    renderOutlineBar,
+  );
   cleanupFns.push(unregOverlay);
 
   // 2. Register group settings dialog
