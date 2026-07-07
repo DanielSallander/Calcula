@@ -15,6 +15,11 @@ import type { SectionCtx } from "../editorShared";
 
 const CARDINALITIES = ["manyToOne", "oneToMany", "oneToOne", "manyToMany"];
 const JOIN_OPERATORS = ["=", ">", ">=", "<", "<="];
+const PROPAGATIONS = [
+  { value: "auto", label: "Auto (to → from)" },
+  { value: "none", label: "None (explicit traverse)" },
+  { value: "both", label: "Both (bidirectional)" },
+];
 
 export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -141,6 +146,9 @@ function RelationshipModal({
   );
   const [cardinality, setCardinality] = useState(original?.cardinality ?? "manyToOne");
   const [active, setActive] = useState(original?.active ?? true);
+  const [filterPropagation, setFilterPropagation] = useState(
+    original?.filterPropagation ?? "auto",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -174,6 +182,7 @@ function RelationshipModal({
           conditions,
           cardinality,
           active,
+          filterPropagation,
         }),
       );
     } catch (err: unknown) {
@@ -308,6 +317,19 @@ function RelationshipModal({
             {CARDINALITIES.map((c) => (
               <option key={c} value={c}>
                 {c}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Filter propagation" flex={1}>
+          <select
+            style={styles.input}
+            value={filterPropagation}
+            onChange={(e) => setFilterPropagation(e.target.value)}
+          >
+            {PROPAGATIONS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
               </option>
             ))}
           </select>

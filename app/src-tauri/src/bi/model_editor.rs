@@ -12,7 +12,8 @@
 //! `measure_to_formula` rendering for measures without source text (e.g.
 //! Studio models imported before Studio stamped sources).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::State;
@@ -521,6 +522,153 @@ pub fn bi_model_measure_lineage(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Model-wide dependency graph (Lineage section)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyNodeDto {
+    /// Stable id: "measure:{name}" | "global:{name}" |
+    /// "cc:{table}.{name}" | "ctxcol:{table}.{name}".
+    pub id: String,
+    /// "measure" | "globalVariable" | "calculatedColumn" | "contextColumn".
+    pub node_type: String,
+    pub name: String,
+    pub table: Option<String>,
+    pub expression: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyEdgeDto {
+    /// The dependant.
+    pub from_id: String,
+    /// The referenced node (a measure or global that this node depends on).
+    pub to_id: String,
+    /// "measure" | "global".
+    pub edge_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyGraphDto {
+    pub nodes: Vec<DependencyNodeDto>,
+    pub edges: Vec<DependencyEdgeDto>,
+}
+
+/// Model-wide dependency graph over the expression-bearing entities (measures,
+/// global variables, calculated columns, context columns). Edges point from a
+/// dependant to each measure/global it references (via `extract_dependencies`).
+#[tauri::command]
+pub fn bi_model_dependency_graph(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<DependencyGraphDto, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let conns = bi_state.connections.lock().unwrap();
+    let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+    let base = conn
+        .base_model
+        .as_ref()
+        .ok_or("This connection has no loaded model")?;
+
+    let measure_names: HashSet<String> =
+        base.measures().iter().map(|m| m.name().to_string()).collect();
+    let global_names: HashSet<String> = base
+        .global_variables()
+        .iter()
+        .map(|g| g.name().to_string())
+        .collect();
+
+    let mut nodes: Vec<DependencyNodeDto> = Vec::new();
+    let mut edges: Vec<DependencyEdgeDto> = Vec::new();
+
+    // Push a node's outgoing edges from its expression's referenced measures +
+    // globals.
+    let mut add_edges = |from_id: &str, expr: &bi_engine::Expression| {
+        let deps = bi_engine::extract_dependencies(expr, &measure_names, &global_names);
+        for m in deps.measures {
+            edges.push(DependencyEdgeDto {
+                from_id: from_id.to_string(),
+                to_id: format!("measure:{}", m),
+                edge_type: "measure".to_string(),
+            });
+        }
+        for g in deps.globals {
+            edges.push(DependencyEdgeDto {
+                from_id: from_id.to_string(),
+                to_id: format!("global:{}", g),
+                edge_type: "global".to_string(),
+            });
+        }
+    };
+
+    for m in base.measures() {
+        let id = format!("measure:{}", m.name());
+        add_edges(&id, m.expression());
+        nodes.push(DependencyNodeDto {
+            id,
+            node_type: "measure".to_string(),
+            name: m.name().to_string(),
+            table: Some(m.table().to_string()),
+            expression: Some(
+                m.source()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| bi_engine::measure_to_formula(m)),
+            ),
+        });
+    }
+
+    for g in base.global_variables() {
+        let id = format!("global:{}", g.name());
+        add_edges(&id, g.expression());
+        nodes.push(DependencyNodeDto {
+            id,
+            node_type: "globalVariable".to_string(),
+            name: g.name().to_string(),
+            table: Some(g.table().to_string()),
+            expression: Some(bi_engine::expression_to_formula(g.expression(), g.table())),
+        });
+    }
+
+    for cc in base.calculated_columns() {
+        let id = format!("cc:{}.{}", cc.table(), cc.name());
+        add_edges(&id, cc.expression());
+        nodes.push(DependencyNodeDto {
+            id,
+            node_type: "calculatedColumn".to_string(),
+            name: cc.name().to_string(),
+            table: Some(cc.table().to_string()),
+            expression: Some(bi_engine::expression_to_formula(cc.expression(), cc.table())),
+        });
+    }
+
+    for cc in base.context_columns() {
+        let id = format!("ctxcol:{}.{}", cc.table(), cc.name());
+        add_edges(&id, cc.expression());
+        nodes.push(DependencyNodeDto {
+            id,
+            node_type: "contextColumn".to_string(),
+            name: cc.name().to_string(),
+            table: Some(cc.table().to_string()),
+            expression: Some(bi_engine::expression_to_formula(cc.expression(), cc.table())),
+        });
+    }
+
+    // Keep only edges whose target node exists, and drop duplicates.
+    let node_ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    edges.retain(|e| {
+        node_ids.contains(&e.to_id)
+            && e.from_id != e.to_id
+            && seen.insert((e.from_id.clone(), e.to_id.clone()))
+    });
+
+    Ok(DependencyGraphDto { nodes, edges })
+}
+
 // ===========================================================================
 // ME-2..5: tables/columns, calculated columns, relationships, hierarchies,
 // KPIs, security roles, calculation groups, schema import, blank models.
@@ -578,6 +726,8 @@ pub struct ModelRelationshipInfo {
     pub conditions: Vec<RelationshipConditionDto>,
     pub cardinality: String,
     pub active: bool,
+    /// "auto" | "none" | "both" — round-tripped so editing never drops it.
+    pub filter_propagation: String,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -655,6 +805,107 @@ pub struct ModelCalcGroupInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelGlobalVariableInfo {
+    pub name: String,
+    pub table: String,
+    /// Rendered expression text (the model stores an AST; there is no author
+    /// source string for globals — same lossless concern as measures).
+    pub expression: String,
+    /// True when the expression is a table-producing QUERY(...) global.
+    pub is_query: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTableVariableInfo {
+    pub name: String,
+    /// Base table or another table-variable name.
+    pub source: String,
+    pub filters: Vec<RoleFilterDto>,
+}
+
+/// A clear/reset target within a context operation.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTargetDto {
+    /// "column" | "table".
+    pub kind: String,
+    pub table: String,
+    /// Present only for a "column" target.
+    #[serde(default)]
+    pub column: Option<String>,
+}
+
+/// An IN-membership predicate (`table.column IN var_name.var_column`) for a
+/// context KeepIn operation.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InPredicateDto {
+    pub table: String,
+    pub column: String,
+    pub var_name: String,
+    pub var_column: String,
+}
+
+/// A single context operation, flattened into a discriminated struct so the
+/// engine `ContextOp` enum crosses IPC losslessly (see the enum⇄struct bridge
+/// helpers). Only the fields relevant to `type` are populated.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextOpDto {
+    /// "keep" | "keepIn" | "clear" | "clearInner" | "clearOuter" | "reset" |
+    /// "resetInner" | "resetOuter" | "inherit" | "useRelationship".
+    pub r#type: String,
+    #[serde(default)]
+    pub filters: Vec<RoleFilterDto>,
+    #[serde(default)]
+    pub clear_targets: Vec<ClearTargetDto>,
+    #[serde(default)]
+    pub in_predicates: Vec<InPredicateDto>,
+    #[serde(default)]
+    pub inherit_context: Option<String>,
+    #[serde(default)]
+    pub relationship_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelContextInfo {
+    pub name: String,
+    pub operations: Vec<ContextOpDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelContextColumnInfo {
+    pub name: String,
+    pub table: String,
+    /// Rendered row-level expression (may embed a scalar [Measure]).
+    pub expression: String,
+    pub data_type: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptParamDto {
+    pub name: String,
+    /// "Int" | "Float" | "Bool" | "String".
+    pub ty: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelScriptFunctionInfo {
+    pub name: String,
+    pub params: Vec<ScriptParamDto>,
+    pub return_type: String,
+    /// The Rhai source body (stored verbatim, so no AST round-trip risk).
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelOverview {
     pub editable: bool,
     pub read_only_reason: Option<String>,
@@ -665,6 +916,15 @@ pub struct ModelOverview {
     pub security_roles: Vec<ModelRoleInfo>,
     pub calculation_groups: Vec<ModelCalcGroupInfo>,
     pub measures: Vec<ModelMeasureInfo>,
+    pub contexts: Vec<ModelContextInfo>,
+    pub context_columns: Vec<ModelContextColumnInfo>,
+    pub table_variables: Vec<ModelTableVariableInfo>,
+    pub global_variables: Vec<ModelGlobalVariableInfo>,
+    pub script_functions: Vec<ModelScriptFunctionInfo>,
+    /// Name of the marked date table (drives time intelligence), or null.
+    pub date_table: Option<String>,
+    /// Model-level default lookup-resolution expression, or null.
+    pub default_lookup_resolution: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -727,6 +987,230 @@ fn comparison_op_from_str(s: &str) -> Result<bi_engine::ComparisonOp, String> {
         "<=" => bi_engine::ComparisonOp::LessThanOrEqual,
         other => return Err(format!("Unknown operator '{}'", other)),
     })
+}
+
+fn dynamic_kind_to_str(d: &bi_engine::expression::DynamicValue) -> String {
+    match d {
+        bi_engine::expression::DynamicValue::Username => "username".to_string(),
+        bi_engine::expression::DynamicValue::CustomData => "customData".to_string(),
+    }
+}
+
+/// Convert a filter DTO (shared by roles, table variables and context Keep ops)
+/// into an engine predicate, honoring the static/dynamic (USERNAME/CUSTOMDATA)
+/// distinction.
+fn predicate_from_dto(f: &RoleFilterDto) -> Result<bi_engine::FilterPredicate, String> {
+    let op = comparison_op_from_str(&f.operator)?;
+    Ok(match f.dynamic.as_deref() {
+        Some("username") => {
+            bi_engine::FilterPredicate::username(f.table.clone(), f.column.clone(), op)
+        }
+        Some("customData") => {
+            bi_engine::FilterPredicate::custom_data(f.table.clone(), f.column.clone(), op)
+        }
+        Some(other) => return Err(format!("Unknown dynamic kind '{}'", other)),
+        None => {
+            bi_engine::FilterPredicate::new(f.table.clone(), f.column.clone(), op, f.value.clone())
+        }
+    })
+}
+
+/// Convert an engine predicate back into the filter DTO (lossless round-trip).
+fn predicate_to_dto(f: &bi_engine::FilterPredicate) -> RoleFilterDto {
+    RoleFilterDto {
+        table: f.table.clone(),
+        column: f.column.clone(),
+        operator: f.operator.as_sql().to_string(),
+        value: f.value.clone(),
+        dynamic: f.dynamic.as_ref().map(dynamic_kind_to_str),
+    }
+}
+
+fn propagation_to_str(p: bi_engine::FilterPropagation) -> &'static str {
+    match p {
+        bi_engine::FilterPropagation::Auto => "auto",
+        bi_engine::FilterPropagation::None => "none",
+        bi_engine::FilterPropagation::Both => "both",
+    }
+}
+
+fn propagation_from_str(s: &str) -> Result<bi_engine::FilterPropagation, String> {
+    Ok(match s {
+        "auto" => bi_engine::FilterPropagation::Auto,
+        "none" => bi_engine::FilterPropagation::None,
+        "both" => bi_engine::FilterPropagation::Both,
+        other => return Err(format!("Unknown filter propagation '{}'", other)),
+    })
+}
+
+fn script_type_from_str(s: &str) -> Result<bi_engine::ScriptType, String> {
+    Ok(match s {
+        "Int" => bi_engine::ScriptType::Int,
+        "Float" => bi_engine::ScriptType::Float,
+        "Bool" => bi_engine::ScriptType::Bool,
+        "String" => bi_engine::ScriptType::String,
+        other => return Err(format!("Unknown script type '{}'", other)),
+    })
+}
+
+fn script_type_to_str(t: bi_engine::ScriptType) -> &'static str {
+    match t {
+        bi_engine::ScriptType::Int => "Int",
+        bi_engine::ScriptType::Float => "Float",
+        bi_engine::ScriptType::Bool => "Bool",
+        bi_engine::ScriptType::String => "String",
+    }
+}
+
+fn clear_target_from_dto(t: &ClearTargetDto) -> Result<bi_engine::ClearTarget, String> {
+    match t.kind.as_str() {
+        "column" => {
+            let column = t
+                .column
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or("A column clear-target needs a column")?;
+            Ok(bi_engine::ClearTarget::Column {
+                table: t.table.clone(),
+                column,
+            })
+        }
+        "table" => Ok(bi_engine::ClearTarget::Table(t.table.clone())),
+        other => Err(format!("Unknown clear-target kind '{}'", other)),
+    }
+}
+
+fn clear_target_to_dto(t: &bi_engine::ClearTarget) -> ClearTargetDto {
+    match t {
+        bi_engine::ClearTarget::Column { table, column } => ClearTargetDto {
+            kind: "column".to_string(),
+            table: table.clone(),
+            column: Some(column.clone()),
+        },
+        bi_engine::ClearTarget::Table(table) => ClearTargetDto {
+            kind: "table".to_string(),
+            table: table.clone(),
+            column: None,
+        },
+    }
+}
+
+fn in_predicate_from_dto(p: &InPredicateDto) -> bi_engine::InPredicate {
+    bi_engine::InPredicate::new(
+        p.table.clone(),
+        p.column.clone(),
+        p.var_name.clone(),
+        p.var_column.clone(),
+    )
+}
+
+fn in_predicate_to_dto(p: &bi_engine::InPredicate) -> InPredicateDto {
+    InPredicateDto {
+        table: p.table.clone(),
+        column: p.column.clone(),
+        var_name: p.var_name.clone(),
+        var_column: p.var_column.clone(),
+    }
+}
+
+/// Build an engine [`ContextOp`] from the flat, discriminated DTO. The engine
+/// type is an enum; the DTO carries every operand field and selects one by
+/// `type`, so the bridge must hand-construct the correct variant (a naive serde
+/// round-trip would not work).
+fn context_op_from_dto(op: &ContextOpDto) -> Result<bi_engine::ContextOp, String> {
+    Ok(match op.r#type.as_str() {
+        "keep" => bi_engine::ContextOp::Keep(
+            op.filters
+                .iter()
+                .map(predicate_from_dto)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        "keepIn" => bi_engine::ContextOp::KeepIn(
+            op.in_predicates.iter().map(in_predicate_from_dto).collect(),
+        ),
+        "clear" => bi_engine::ContextOp::Clear(
+            op.clear_targets
+                .iter()
+                .map(clear_target_from_dto)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        "clearInner" => bi_engine::ContextOp::ClearInner(
+            op.clear_targets
+                .iter()
+                .map(clear_target_from_dto)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        "clearOuter" => bi_engine::ContextOp::ClearOuter(
+            op.clear_targets
+                .iter()
+                .map(clear_target_from_dto)
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        "reset" => bi_engine::ContextOp::Reset,
+        "resetInner" => bi_engine::ContextOp::ResetInner,
+        "resetOuter" => bi_engine::ContextOp::ResetOuter,
+        "inherit" => bi_engine::ContextOp::Inherit(
+            op.inherit_context
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or("An inherit operation needs a context name")?,
+        ),
+        "useRelationship" => bi_engine::ContextOp::UseRelationship(
+            op.relationship_name
+                .clone()
+                .filter(|c| !c.trim().is_empty())
+                .ok_or("A use-relationship operation needs a relationship name")?,
+        ),
+        other => return Err(format!("Unknown context operation '{}'", other)),
+    })
+}
+
+/// Flatten an engine [`ContextOp`] back into the discriminated DTO for the
+/// editor (the read half of the enum⇄struct bridge; must handle every variant
+/// so a loaded model never panics or silently drops an operation).
+fn context_op_to_dto(op: &bi_engine::ContextOp) -> ContextOpDto {
+    let mut dto = ContextOpDto {
+        r#type: String::new(),
+        filters: Vec::new(),
+        clear_targets: Vec::new(),
+        in_predicates: Vec::new(),
+        inherit_context: None,
+        relationship_name: None,
+    };
+    match op {
+        bi_engine::ContextOp::Keep(filters) => {
+            dto.r#type = "keep".to_string();
+            dto.filters = filters.iter().map(predicate_to_dto).collect();
+        }
+        bi_engine::ContextOp::KeepIn(preds) => {
+            dto.r#type = "keepIn".to_string();
+            dto.in_predicates = preds.iter().map(in_predicate_to_dto).collect();
+        }
+        bi_engine::ContextOp::Clear(targets) => {
+            dto.r#type = "clear".to_string();
+            dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
+        }
+        bi_engine::ContextOp::ClearInner(targets) => {
+            dto.r#type = "clearInner".to_string();
+            dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
+        }
+        bi_engine::ContextOp::ClearOuter(targets) => {
+            dto.r#type = "clearOuter".to_string();
+            dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
+        }
+        bi_engine::ContextOp::Reset => dto.r#type = "reset".to_string(),
+        bi_engine::ContextOp::ResetInner => dto.r#type = "resetInner".to_string(),
+        bi_engine::ContextOp::ResetOuter => dto.r#type = "resetOuter".to_string(),
+        bi_engine::ContextOp::Inherit(name) => {
+            dto.r#type = "inherit".to_string();
+            dto.inherit_context = Some(name.clone());
+        }
+        bi_engine::ContextOp::UseRelationship(name) => {
+            dto.r#type = "useRelationship".to_string();
+            dto.relationship_name = Some(name.clone());
+        }
+    }
+    dto
 }
 
 fn kpi_status_to_str(s: &bi_engine::KpiStatus) -> &'static str {
@@ -835,6 +1319,7 @@ fn build_overview(
                 .collect(),
             cardinality: cardinality_to_str(r.cardinality()).to_string(),
             active: r.is_active(),
+            filter_propagation: propagation_to_str(r.propagation()).to_string(),
         })
         .collect();
 
@@ -888,22 +1373,7 @@ fn build_overview(
         .iter()
         .map(|r| ModelRoleInfo {
             name: r.name().to_string(),
-            filters: r
-                .table_filters()
-                .iter()
-                .map(|f| RoleFilterDto {
-                    table: f.table.clone(),
-                    column: f.column.clone(),
-                    operator: f.operator.as_sql().to_string(),
-                    value: f.value.clone(),
-                    dynamic: f.dynamic.as_ref().map(|d| match d {
-                        bi_engine::expression::DynamicValue::Username => "username".to_string(),
-                        bi_engine::expression::DynamicValue::CustomData => {
-                            "customData".to_string()
-                        }
-                    }),
-                })
-                .collect(),
+            filters: r.table_filters().iter().map(predicate_to_dto).collect(),
         })
         .collect();
 
@@ -926,6 +1396,66 @@ fn build_overview(
         })
         .collect();
 
+    let contexts = base
+        .contexts()
+        .iter()
+        .map(|c| ModelContextInfo {
+            name: c.name().to_string(),
+            operations: c.operations().iter().map(context_op_to_dto).collect(),
+        })
+        .collect();
+
+    let context_columns = base
+        .context_columns()
+        .iter()
+        .map(|cc| ModelContextColumnInfo {
+            name: cc.name().to_string(),
+            table: cc.table().to_string(),
+            expression: bi_engine::expression_to_formula(cc.expression(), cc.table()),
+            data_type: format!("{:?}", cc.data_type()),
+            description: cc.description().map(|s| s.to_string()),
+        })
+        .collect();
+
+    let table_variables = base
+        .table_variables()
+        .iter()
+        .map(|tv| ModelTableVariableInfo {
+            name: tv.name().to_string(),
+            source: tv.source().to_string(),
+            filters: tv.filters().iter().map(predicate_to_dto).collect(),
+        })
+        .collect();
+
+    let global_variables = base
+        .global_variables()
+        .iter()
+        .map(|gv| ModelGlobalVariableInfo {
+            name: gv.name().to_string(),
+            table: gv.table().to_string(),
+            expression: bi_engine::expression_to_formula(gv.expression(), gv.table()),
+            is_query: gv.is_query(),
+        })
+        .collect();
+
+    let script_functions = base
+        .script_functions()
+        .iter()
+        .map(|sf| ModelScriptFunctionInfo {
+            name: sf.name().to_string(),
+            params: sf
+                .params()
+                .iter()
+                .map(|p| ScriptParamDto {
+                    name: p.name().to_string(),
+                    ty: script_type_to_str(p.ty()).to_string(),
+                })
+                .collect(),
+            return_type: script_type_to_str(sf.return_type()).to_string(),
+            body: sf.body().to_string(),
+        })
+        .collect();
+
     ModelOverview {
         editable,
         read_only_reason,
@@ -936,6 +1466,13 @@ fn build_overview(
         security_roles,
         calculation_groups,
         measures: base.measures().iter().map(measure_info).collect(),
+        contexts,
+        context_columns,
+        table_variables,
+        global_variables,
+        script_functions,
+        date_table: base.date_table().map(|s| s.to_string()),
+        default_lookup_resolution: base.default_lookup_resolution().map(|s| s.to_string()),
     }
 }
 
@@ -1149,6 +1686,8 @@ pub async fn bi_model_upsert_relationship(
     conditions: Vec<RelationshipConditionDto>,
     cardinality: String,
     active: bool,
+    // "auto" | "none" | "both". None falls back to the cardinality default.
+    filter_propagation: Option<String>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -1157,9 +1696,9 @@ pub async fn bi_model_upsert_relationship(
         if trimmed.is_empty() {
             return Err("Relationship name cannot be empty".to_string());
         }
-        let Some(first) = conditions.first() else {
+        if conditions.is_empty() {
             return Err("A relationship needs at least one join condition".to_string());
-        };
+        }
         let card = cardinality_from_str(&cardinality)?;
         let built_conditions: Vec<bi_engine::JoinCondition> = conditions
             .iter()
@@ -1171,9 +1710,6 @@ pub async fn bi_model_upsert_relationship(
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        // Suppress the unused warning path: `first` is only needed for the
-        // single-condition constructor which with_conditions supersedes.
-        let _ = first;
         let mut rel = bi_engine::Relationship::with_conditions(
             trimmed,
             from_table.clone(),
@@ -1183,18 +1719,30 @@ pub async fn bi_model_upsert_relationship(
         )
         .with_active(active);
 
+        // Explicit propagation from the editor takes precedence; otherwise
+        // preserve the existing relationship's setting when the cardinality is
+        // unchanged, and fall back to the cardinality-derived default only when
+        // neither is available.
+        let existing_prop = original_name
+            .as_deref()
+            .and_then(|orig| base.relationships().iter().find(|r| r.name() == orig))
+            .filter(|r| r.cardinality() == card)
+            .map(|r| r.propagation());
+        if let Some(p) = filter_propagation
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            rel = rel.with_propagation(propagation_from_str(p)?);
+        } else if let Some(p) = existing_prop {
+            rel = rel.with_propagation(p);
+        }
+
         let mut rels = base.relationships().to_vec();
         match original_name.as_deref() {
             Some(orig) => {
                 let Some(idx) = rels.iter().position(|r| r.name() == orig) else {
                     return Err(format!("Relationship '{}' not found", orig));
                 };
-                // The DTO does not carry filter propagation: preserve the old
-                // relationship's setting when the cardinality is unchanged
-                // (a cardinality change falls back to the derived default).
-                if rels[idx].cardinality() == card {
-                    rel = rel.with_propagation(rels[idx].propagation());
-                }
                 rels[idx] = rel;
             }
             None => rels.push(rel),
@@ -1406,25 +1954,10 @@ pub async fn bi_model_upsert_role(
         if trimmed.is_empty() {
             return Err("Role name cannot be empty".to_string());
         }
-        let mut predicates = Vec::with_capacity(filters.len());
-        for f in &filters {
-            let op = comparison_op_from_str(&f.operator)?;
-            predicates.push(match f.dynamic.as_deref() {
-                Some("username") => {
-                    bi_engine::FilterPredicate::username(f.table.clone(), f.column.clone(), op)
-                }
-                Some("customData") => {
-                    bi_engine::FilterPredicate::custom_data(f.table.clone(), f.column.clone(), op)
-                }
-                Some(other) => return Err(format!("Unknown dynamic kind '{}'", other)),
-                None => bi_engine::FilterPredicate::new(
-                    f.table.clone(),
-                    f.column.clone(),
-                    op,
-                    f.value.clone(),
-                ),
-            });
-        }
+        let predicates = filters
+            .iter()
+            .map(predicate_from_dto)
+            .collect::<Result<Vec<_>, String>>()?;
         let role = bi_engine::SecurityRole::new(trimmed).with_filters(predicates);
 
         let mut roles = base.security_roles().to_vec();
@@ -1533,6 +2066,445 @@ pub async fn bi_model_delete_calc_group(
         Ok(edited)
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// ME-6: global variables
+// ---------------------------------------------------------------------------
+
+/// Add or update a global variable (a model-level reusable expression; scalar
+/// or table-producing QUERY(...)). Parsed by the engine `parse_global`.
+#[tauri::command]
+pub async fn bi_model_upsert_global_variable(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    table: String,
+    expression: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Global variable name cannot be empty".to_string());
+        }
+        if table.trim().is_empty() {
+            return Err("Global variable must specify a table".to_string());
+        }
+        if expression.trim().is_empty() {
+            return Err(format!("Global variable '{}' has an empty expression", trimmed));
+        }
+        let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
+            .map_err(|e| format!("Global variable '{}': {}", trimmed, e))?;
+
+        let mut globals = base.global_variables().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = globals.iter().position(|g| g.name() == orig) else {
+                    return Err(format!("Global variable '{}' not found", orig));
+                };
+                globals[idx] = gv;
+            }
+            None => globals.push(gv),
+        }
+        let edited = base.with_global_variables(globals);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_global_variable(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut globals = base.global_variables().to_vec();
+        let before = globals.len();
+        globals.retain(|g| g.name() != name);
+        if globals.len() == before {
+            return Err(format!("Global variable '{}' not found", name));
+        }
+        let edited = base.with_global_variables(globals);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// ME-6: table variables
+// ---------------------------------------------------------------------------
+
+/// Add or update a table variable (a named, pre-filtered view of a base table
+/// or another variable). Filters reuse the shared static/dynamic predicate DTO.
+#[tauri::command]
+pub async fn bi_model_upsert_table_variable(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    source: String,
+    filters: Vec<RoleFilterDto>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Table variable name cannot be empty".to_string());
+        }
+        if source.trim().is_empty() {
+            return Err("Table variable must specify a source table".to_string());
+        }
+        let predicates = filters
+            .iter()
+            .map(predicate_from_dto)
+            .collect::<Result<Vec<_>, String>>()?;
+        let tv = bi_engine::TableVariable::new(trimmed, source.trim(), predicates);
+
+        let mut vars = base.table_variables().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = vars.iter().position(|v| v.name() == orig) else {
+                    return Err(format!("Table variable '{}' not found", orig));
+                };
+                vars[idx] = tv;
+            }
+            None => vars.push(tv),
+        }
+        let edited = base.with_table_variables(vars);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_table_variable(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut vars = base.table_variables().to_vec();
+        let before = vars.len();
+        vars.retain(|v| v.name() != name);
+        if vars.len() == before {
+            return Err(format!("Table variable '{}' not found", name));
+        }
+        let edited = base.with_table_variables(vars);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// ME-6: script functions (sandboxed Rhai UDFs)
+// ---------------------------------------------------------------------------
+
+/// Add or update a script function. Constructed programmatically (no parser);
+/// the body is compiled and sandbox-validated by `DataModel::validate()`.
+#[tauri::command]
+pub async fn bi_model_upsert_script_function(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    params: Vec<ScriptParamDto>,
+    return_type: String,
+    body: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Script function name cannot be empty".to_string());
+        }
+        let ret = script_type_from_str(&return_type)?;
+        let mut builder = bi_engine::ScriptFunction::builder(trimmed);
+        for p in &params {
+            builder = builder.param(p.name.trim(), script_type_from_str(&p.ty)?);
+        }
+        let func = builder.returns(ret).body(body.clone()).build();
+
+        let mut funcs = base.script_functions().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = funcs.iter().position(|f| f.name() == orig) else {
+                    return Err(format!("Script function '{}' not found", orig));
+                };
+                funcs[idx] = func;
+            }
+            None => funcs.push(func),
+        }
+        let edited = base.with_script_functions(funcs);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_script_function(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut funcs = base.script_functions().to_vec();
+        let before = funcs.len();
+        funcs.retain(|f| f.name() != name);
+        if funcs.len() == before {
+            return Err(format!("Script function '{}' not found", name));
+        }
+        let edited = base.with_script_functions(funcs);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// ME-6: contexts + context columns
+// ---------------------------------------------------------------------------
+
+/// Add or update a named context (a composable set of filter operations
+/// referenced by measures via `using(expr, context)`). The flat operation DTOs
+/// are bridged into the engine `ContextOp` enum.
+#[tauri::command]
+pub async fn bi_model_upsert_context(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    operations: Vec<ContextOpDto>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Context name cannot be empty".to_string());
+        }
+        let ops = operations
+            .iter()
+            .map(context_op_from_dto)
+            .collect::<Result<Vec<_>, String>>()?;
+        let ctx = bi_engine::ContextDefinition::new(trimmed, ops);
+
+        let mut contexts = base.contexts().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = contexts.iter().position(|c| c.name() == orig) else {
+                    return Err(format!("Context '{}' not found", orig));
+                };
+                contexts[idx] = ctx;
+            }
+            None => contexts.push(ctx),
+        }
+        let edited = base.with_contexts(contexts);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_context(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut contexts = base.contexts().to_vec();
+        let before = contexts.len();
+        contexts.retain(|c| c.name() != name);
+        if contexts.len() == before {
+            return Err(format!("Context '{}' not found", name));
+        }
+        let edited = base.with_contexts(contexts);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Add or update a context-driven calculated column (a groupable column whose
+/// per-row value derives from a scalar measure resolved against the query's
+/// filter context). Name is unique model-wide.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_upsert_context_column(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    table: String,
+    expression: String,
+    data_type: String,
+    description: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Context column name cannot be empty".to_string());
+        }
+        if table.trim().is_empty() {
+            return Err("Context column must specify a table".to_string());
+        }
+        if expression.trim().is_empty() {
+            return Err(format!("Context column '{}' has an empty expression", trimmed));
+        }
+        let expr = bi_engine::parse_measure_expression(&expression)
+            .map_err(|e| format!("Context column '{}': {}", trimmed, e))?;
+        let dt = data_type_from_str(&data_type)?;
+        let mut cc = bi_engine::ContextColumn::new(trimmed, table.trim(), expr, dt);
+        if let Some(d) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            cc = cc.with_description(d);
+        }
+
+        let mut cols = base.context_columns().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = cols.iter().position(|c| c.name() == orig) else {
+                    return Err(format!("Context column '{}' not found", orig));
+                };
+                cols[idx] = cc;
+            }
+            None => cols.push(cc),
+        }
+        let edited = base.with_context_columns(cols);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_context_column(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut cols = base.context_columns().to_vec();
+        let before = cols.len();
+        cols.retain(|c| c.name() != name);
+        if cols.len() == before {
+            return Err(format!("Context column '{}' not found", name));
+        }
+        let edited = base.with_context_columns(cols);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// ME-6: model settings (date table, default lookup resolution) + validation
+// ---------------------------------------------------------------------------
+
+/// Mark (or clear, when `table` is null/empty) the model's date table, enabling
+/// time-intelligence over its DateRole-tagged columns.
+#[tauri::command]
+pub async fn bi_model_set_date_table(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let marked = table.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        let edited = base.with_date_table(marked.map(|s| s.to_string()));
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Set (or clear, when null/empty) the model-level default lookup-resolution
+/// expression used when a column has no per-column resolution.
+#[tauri::command]
+pub async fn bi_model_set_default_lookup_resolution(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    expression: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let expr = expression.as_deref().map(str::trim).filter(|e| !e.is_empty());
+        let edited = base.with_default_lookup_resolution(expr.map(|s| s.to_string()));
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// A single model-validation issue for the Overview panel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationIssueDto {
+    /// "error" | "warning".
+    pub level: String,
+    pub message: String,
+}
+
+/// Read-only model validation for the Overview "Validate" button: a full
+/// builder rebuild (name collisions, dangling refs, circular measure deps,
+/// relationship/hierarchy/role/group rules). Returns an empty list when valid.
+#[tauri::command]
+pub fn bi_model_validate(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<Vec<ValidationIssueDto>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let conns = bi_state.connections.lock().unwrap();
+    let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+    let base = conn
+        .base_model
+        .as_ref()
+        .ok_or("This connection has no loaded model")?;
+    Ok(match base.validate() {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![ValidationIssueDto {
+            level: "error".to_string(),
+            message: format!("{}", e),
+        }],
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1745,6 +2717,321 @@ pub async fn bi_model_create_blank(
 }
 
 // ---------------------------------------------------------------------------
+// ME-7: Testing Ground — ad-hoc query preview over the model
+// ---------------------------------------------------------------------------
+//
+// A read-only query runner: pick measures + group-by dimensions + filters,
+// optionally preview a security role (dynamic RLS identities), and see the
+// rows the engine returns, the per-column metadata, and (optionally) the
+// execution plan. It never mutates the model. RLS preview is EPHEMERAL: the
+// role/identity/custom-data set on the shared engine is saved and restored
+// around the query under the engine lock, so a preview never leaks into CUBE
+// cells or a sibling connection's results.
+
+/// Client-supplied query ids -> cancellation tokens for in-flight test queries.
+/// A module-level registry keeps cancellation off the BiState hot path.
+fn query_tokens() -> &'static Mutex<HashMap<String, bi_engine::CancellationToken>> {
+    static TOKENS: OnceLock<Mutex<HashMap<String, bi_engine::CancellationToken>>> = OnceLock::new();
+    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Hard cap on preview rows (an unbounded high-cardinality group-by would
+/// otherwise materialize every row). One extra row is fetched to detect
+/// truncation without computing the whole set.
+const MAX_TEST_ROWS: usize = 5000;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnRefDto {
+    pub table: String,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestFilterDto {
+    /// Column name (the engine matches it to the owning table).
+    pub column: String,
+    /// "=" | "!=" | ">" | ">=" | "<" | "<="
+    pub operator: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultColumnDto {
+    pub name: String,
+    /// "Dimension" | "Measure" | "GroupingId" | "Rank"
+    pub kind: String,
+    pub data_type: Option<String>,
+    pub source_table: Option<String>,
+    pub source_column: Option<String>,
+    pub measure: Option<String>,
+    pub format_string: Option<String>,
+    pub display_name: Option<String>,
+    pub kpi_name: Option<String>,
+    pub is_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPropertyDto {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanNodeDto {
+    pub operation: String,
+    pub label: String,
+    pub duration_ms: f64,
+    pub properties: Vec<PlanPropertyDto>,
+    pub children: Vec<PlanNodeDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPlanDto {
+    pub summary: String,
+    pub total_ms: f64,
+    pub root: PlanNodeDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub row_count: usize,
+    /// True when the source produced more rows than the cap (more exist).
+    pub truncated: bool,
+    pub result_columns: Vec<ResultColumnDto>,
+    pub plan: Option<ExecutionPlanDto>,
+}
+
+fn filter_operator_from_str(s: &str) -> Result<bi_engine::FilterOperator, String> {
+    Ok(match s {
+        "=" => bi_engine::FilterOperator::Equal,
+        "!=" => bi_engine::FilterOperator::NotEqual,
+        ">" => bi_engine::FilterOperator::GreaterThan,
+        ">=" => bi_engine::FilterOperator::GreaterThanOrEqual,
+        "<" => bi_engine::FilterOperator::LessThan,
+        "<=" => bi_engine::FilterOperator::LessThanOrEqual,
+        other => return Err(format!("Unknown filter operator '{}'", other)),
+    })
+}
+
+fn result_column_to_dto(rc: &bi_engine::ResultColumn) -> ResultColumnDto {
+    let kind = match rc.kind {
+        bi_engine::ResultColumnKind::Dimension => "Dimension",
+        bi_engine::ResultColumnKind::Measure => "Measure",
+        bi_engine::ResultColumnKind::GroupingId => "GroupingId",
+        bi_engine::ResultColumnKind::Rank => "Rank",
+    }
+    .to_string();
+    ResultColumnDto {
+        name: rc.name.clone(),
+        kind,
+        data_type: rc.data_type.as_ref().map(|dt| format!("{:?}", dt)),
+        source_table: rc.source_table.clone(),
+        source_column: rc.source_column.clone(),
+        measure: rc.measure.clone(),
+        format_string: rc.format_string.clone(),
+        display_name: rc.display_name.clone(),
+        kpi_name: rc.kpi_name.clone(),
+        is_hidden: rc.is_hidden,
+    }
+}
+
+fn plan_value_to_string(v: &bi_engine::PlanValue) -> String {
+    match v {
+        bi_engine::PlanValue::Text(s) => s.clone(),
+        bi_engine::PlanValue::Number(n) => n.to_string(),
+        bi_engine::PlanValue::Bool(b) => b.to_string(),
+        bi_engine::PlanValue::List(items) => items.join(", "),
+    }
+}
+
+fn plan_node_to_dto(n: &bi_engine::PlanNode) -> PlanNodeDto {
+    PlanNodeDto {
+        operation: format!("{:?}", n.operation),
+        label: n.label.clone(),
+        duration_ms: n.duration.ms,
+        properties: n
+            .properties
+            .iter()
+            .map(|p| PlanPropertyDto {
+                key: p.key.clone(),
+                value: plan_value_to_string(&p.value),
+            })
+            .collect(),
+        children: n.children.iter().map(plan_node_to_dto).collect(),
+    }
+}
+
+fn execution_plan_to_dto(p: &bi_engine::ExecutionPlan) -> ExecutionPlanDto {
+    ExecutionPlanDto {
+        summary: p.summary.clone(),
+        total_ms: p.total_duration.ms,
+        root: plan_node_to_dto(&p.root),
+    }
+}
+
+/// Run an ad-hoc query against a connection's model for the Testing Ground.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_test_query(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    measures: Vec<String>,
+    group_by: Vec<ColumnRefDto>,
+    filters: Vec<TestFilterDto>,
+    row_limit: Option<usize>,
+    rollup: bool,
+    include_plan: bool,
+    preview_role: Option<String>,
+    preview_user_identity: Option<String>,
+    preview_custom_data: Option<String>,
+    query_id: Option<String>,
+    window: tauri::Window,
+) -> Result<TestQueryResult, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+
+    if measures.is_empty() {
+        return Err("Select at least one measure to run a query.".to_string());
+    }
+
+    let engine_arc = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        conn.engine
+            .clone()
+            .ok_or("No model loaded for this connection")?
+    };
+
+    let group_refs: Vec<bi_engine::ColumnRef> = group_by
+        .iter()
+        .map(|g| bi_engine::ColumnRef::new(&g.table, &g.column))
+        .collect();
+    let filter_conds: Vec<bi_engine::FilterCondition> = filters
+        .iter()
+        .map(|f| {
+            Ok(bi_engine::FilterCondition::new(
+                f.column.clone(),
+                filter_operator_from_str(&f.operator)?,
+                f.value.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let cap = row_limit.map_or(MAX_TEST_ROWS, |n| n.min(MAX_TEST_ROWS).max(1));
+    let request = bi_engine::QueryRequest {
+        measures,
+        group_by: group_refs,
+        filters: filter_conds,
+        limit: Some(cap.saturating_add(1)),
+        totals: if rollup {
+            bi_engine::TotalsMode::Rollup
+        } else {
+            bi_engine::TotalsMode::None
+        },
+        ..Default::default()
+    };
+
+    // Register a cancellation token so bi_model_cancel_query can abort this run.
+    let token = bi_engine::CancellationToken::new();
+    if let Some(qid) = query_id.clone() {
+        if let Ok(mut map) = query_tokens().lock() {
+            map.insert(qid, token.clone());
+        }
+    }
+
+    let mut engine = engine_arc.lock().await;
+
+    // Save the shared engine's sticky RLS state, apply the preview, and ALWAYS
+    // restore it before releasing the lock so the preview is ephemeral.
+    let saved_role = engine.active_role().map(|s| s.to_string());
+    let saved_user = engine.user_identity().map(|s| s.to_string());
+    let saved_custom = engine.custom_data().map(|s| s.to_string());
+    let clean = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    engine.set_active_role(clean(preview_role));
+    engine.set_user_identity(clean(preview_user_identity));
+    engine.set_custom_data(clean(preview_custom_data));
+
+    let run: Result<(super::types::BiQueryResult, Vec<bi_engine::ResultColumn>, Option<bi_engine::ExecutionPlan>), String> =
+        if include_plan {
+            engine
+                .query_explained(request)
+                .await
+                .map(|(batches, plan)| {
+                    (super::commands::batches_to_result(&batches), Vec::new(), Some(plan))
+                })
+                .map_err(|e| format!("{}", e))
+        } else {
+            engine
+                .query_with_meta_and_cancellation(request, token)
+                .await
+                .map(|(batches, meta)| {
+                    (super::commands::batches_to_result(&batches), meta, None)
+                })
+                .map_err(|e| format!("{}", e))
+        };
+
+    // Restore the engine's pre-preview RLS state unconditionally.
+    engine.set_active_role(saved_role);
+    engine.set_user_identity(saved_user);
+    engine.set_custom_data(saved_custom);
+    drop(engine);
+
+    if let Some(qid) = query_id.as_ref() {
+        if let Ok(mut map) = query_tokens().lock() {
+            map.remove(qid);
+        }
+    }
+
+    let (mut result, meta, plan) = run?;
+
+    // Detect + trim the one over-fetched truncation-probe row.
+    let truncated = result.rows.len() > cap;
+    if truncated {
+        result.rows.truncate(cap);
+    }
+    let row_count = result.rows.len();
+
+    // Drop the synthetic grouping-id column's metadata so result_columns aligns
+    // positionally with the emitted `columns` for the common (no-rollup) path.
+    let result_columns: Vec<ResultColumnDto> = meta
+        .iter()
+        .filter(|rc| rc.kind != bi_engine::ResultColumnKind::GroupingId)
+        .map(result_column_to_dto)
+        .collect();
+
+    Ok(TestQueryResult {
+        columns: result.columns,
+        rows: result.rows,
+        row_count,
+        truncated,
+        result_columns,
+        plan: plan.as_ref().map(execution_plan_to_dto),
+    })
+}
+
+/// Cancel an in-flight Testing Ground query by its client-supplied id. Touches
+/// only the token registry (never the engine lock), so it never blocks on the
+/// running query; the query aborts cooperatively.
+#[tauri::command]
+pub fn bi_model_cancel_query(query_id: String, window: tauri::Window) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    if let Ok(map) = query_tokens().lock() {
+        if let Some(token) = map.get(&query_id) {
+            token.cancel();
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1864,5 +3151,123 @@ mod tests {
     #[test]
     fn delete_missing_measure_errors() {
         assert!(delete_measure_model(&base_model(), &[], "Nope").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // ME-6 DTO bridge round-trips
+    // -----------------------------------------------------------------------
+
+    fn rf(table: &str, column: &str, op: &str, value: &str, dynamic: Option<&str>) -> RoleFilterDto {
+        RoleFilterDto {
+            table: table.into(),
+            column: column.into(),
+            operator: op.into(),
+            value: value.into(),
+            dynamic: dynamic.map(|s| s.into()),
+        }
+    }
+
+    #[test]
+    fn predicate_dto_roundtrips_static_and_dynamic() {
+        // Static predicate: operator + value preserved, no dynamic kind.
+        let s = predicate_to_dto(&predicate_from_dto(&rf("S", "region", ">=", "10", None)).unwrap());
+        assert_eq!((s.operator.as_str(), s.value.as_str(), s.dynamic), (">=", "10", None));
+        // Dynamic predicate: the dynamic kind survives (value is the engine
+        // placeholder — the identity is substituted at query time).
+        let d = predicate_to_dto(
+            &predicate_from_dto(&rf("S", "email", "=", "ignored", Some("username"))).unwrap(),
+        );
+        assert_eq!(d.dynamic.as_deref(), Some("username"));
+        assert_eq!(d.operator, "=");
+    }
+
+    fn op_dto(ty: &str) -> ContextOpDto {
+        ContextOpDto {
+            r#type: ty.into(),
+            filters: vec![],
+            clear_targets: vec![],
+            in_predicates: vec![],
+            inherit_context: None,
+            relationship_name: None,
+        }
+    }
+
+    #[test]
+    fn context_op_bridge_roundtrips_every_variant() {
+        // Unit variants: type string survives the enum round-trip.
+        for ty in ["reset", "resetInner", "resetOuter"] {
+            let back = context_op_to_dto(&context_op_from_dto(&op_dto(ty)).unwrap());
+            assert_eq!(back.r#type, ty);
+        }
+
+        // Keep with a filter.
+        let mut keep = op_dto("keep");
+        keep.filters = vec![rf("Sales", "country", "=", "US", None)];
+        let back = context_op_to_dto(&context_op_from_dto(&keep).unwrap());
+        assert_eq!(back.r#type, "keep");
+        assert_eq!(back.filters.len(), 1);
+        assert_eq!(back.filters[0].column, "country");
+
+        // Clear (column + table targets).
+        let mut clear = op_dto("clear");
+        clear.clear_targets = vec![
+            ClearTargetDto { kind: "column".into(), table: "Cal".into(), column: Some("Year".into()) },
+            ClearTargetDto { kind: "table".into(), table: "Products".into(), column: None },
+        ];
+        let back = context_op_to_dto(&context_op_from_dto(&clear).unwrap());
+        assert_eq!(back.clear_targets.len(), 2);
+        assert_eq!(back.clear_targets[0].kind, "column");
+        assert_eq!(back.clear_targets[0].column.as_deref(), Some("Year"));
+        assert_eq!(back.clear_targets[1].kind, "table");
+        assert_eq!(back.clear_targets[1].column, None);
+
+        // KeepIn membership.
+        let mut keep_in = op_dto("keepIn");
+        keep_in.in_predicates = vec![InPredicateDto {
+            table: "Sales".into(),
+            column: "cust".into(),
+            var_name: "TopCustomers".into(),
+            var_column: "id".into(),
+        }];
+        let back = context_op_to_dto(&context_op_from_dto(&keep_in).unwrap());
+        assert_eq!(back.r#type, "keepIn");
+        assert_eq!(back.in_predicates[0].var_name, "TopCustomers");
+
+        // Inherit + UseRelationship carry their single operand.
+        let mut inherit = op_dto("inherit");
+        inherit.inherit_context = Some("base".into());
+        assert_eq!(
+            context_op_to_dto(&context_op_from_dto(&inherit).unwrap()).inherit_context.as_deref(),
+            Some("base")
+        );
+        let mut use_rel = op_dto("useRelationship");
+        use_rel.relationship_name = Some("Sales_Date".into());
+        assert_eq!(
+            context_op_to_dto(&context_op_from_dto(&use_rel).unwrap()).relationship_name.as_deref(),
+            Some("Sales_Date")
+        );
+    }
+
+    #[test]
+    fn context_op_from_dto_rejects_unknown_and_missing_operands() {
+        assert!(context_op_from_dto(&op_dto("bogus")).is_err());
+        assert!(context_op_from_dto(&op_dto("inherit")).is_err()); // no context name
+        assert!(context_op_from_dto(&op_dto("useRelationship")).is_err());
+    }
+
+    #[test]
+    fn string_enum_maps_are_consistent() {
+        for op in ["=", "!=", ">", ">=", "<", "<="] {
+            assert!(comparison_op_from_str(op).is_ok());
+            assert!(filter_operator_from_str(op).is_ok());
+        }
+        for p in ["auto", "none", "both"] {
+            assert_eq!(propagation_to_str(propagation_from_str(p).unwrap()), p);
+        }
+        for t in ["Int", "Float", "Bool", "String"] {
+            assert_eq!(script_type_to_str(script_type_from_str(t).unwrap()), t);
+        }
+        assert!(propagation_from_str("sideways").is_err());
+        assert!(script_type_from_str("Decimal").is_err());
     }
 }

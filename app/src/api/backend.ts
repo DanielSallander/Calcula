@@ -3657,6 +3657,8 @@ export interface ModelRelationshipInfo {
   /** "manyToOne" | "oneToMany" | "oneToOne" | "manyToMany" */
   cardinality: string;
   active: boolean;
+  /** "auto" | "none" | "both" — round-tripped so editing never drops it. */
+  filterPropagation: string;
 }
 
 export interface HierarchyLevelDto {
@@ -3713,6 +3715,86 @@ export interface ModelCalcGroupInfo {
   items: CalcGroupItemDto[];
 }
 
+export interface ModelGlobalVariableInfo {
+  name: string;
+  table: string;
+  /** Rendered expression text. */
+  expression: string;
+  /** True when the expression is a table-producing QUERY(...) global. */
+  isQuery: boolean;
+}
+
+export interface ModelTableVariableInfo {
+  name: string;
+  /** Base table or another table-variable name. */
+  source: string;
+  filters: RoleFilterDto[];
+}
+
+/** A clear/reset target within a context operation. */
+export interface ClearTargetDto {
+  /** "column" | "table" */
+  kind: string;
+  table: string;
+  /** Present only for a "column" target. */
+  column?: string | null;
+}
+
+/** An IN-membership predicate for a context KeepIn operation. */
+export interface InPredicateDto {
+  table: string;
+  column: string;
+  varName: string;
+  varColumn: string;
+}
+
+/** A single context operation (discriminated by `type`; only the relevant
+ * operand fields are populated). */
+export interface ContextOpDto {
+  /** "keep" | "keepIn" | "clear" | "clearInner" | "clearOuter" | "reset" |
+   * "resetInner" | "resetOuter" | "inherit" | "useRelationship" */
+  type: string;
+  filters: RoleFilterDto[];
+  clearTargets: ClearTargetDto[];
+  inPredicates: InPredicateDto[];
+  inheritContext?: string | null;
+  relationshipName?: string | null;
+}
+
+export interface ModelContextInfo {
+  name: string;
+  operations: ContextOpDto[];
+}
+
+export interface ModelContextColumnInfo {
+  name: string;
+  table: string;
+  /** Rendered row-level expression (may embed a scalar [Measure]). */
+  expression: string;
+  dataType: string;
+  description: string | null;
+}
+
+export interface ScriptParamDto {
+  name: string;
+  /** "Int" | "Float" | "Bool" | "String" */
+  ty: string;
+}
+
+export interface ModelScriptFunctionInfo {
+  name: string;
+  params: ScriptParamDto[];
+  returnType: string;
+  /** The Rhai source body (stored verbatim). */
+  body: string;
+}
+
+export interface ValidationIssueDto {
+  /** "error" | "warning" */
+  level: string;
+  message: string;
+}
+
 export interface ModelOverview {
   editable: boolean;
   readOnlyReason: string | null;
@@ -3723,6 +3805,15 @@ export interface ModelOverview {
   securityRoles: ModelRoleInfo[];
   calculationGroups: ModelCalcGroupInfo[];
   measures: ModelMeasureInfo[];
+  contexts: ModelContextInfo[];
+  contextColumns: ModelContextColumnInfo[];
+  tableVariables: ModelTableVariableInfo[];
+  globalVariables: ModelGlobalVariableInfo[];
+  scriptFunctions: ModelScriptFunctionInfo[];
+  /** Name of the marked date table, or null. */
+  dateTable: string | null;
+  /** Model-level default lookup-resolution expression, or null. */
+  defaultLookupResolution: string | null;
 }
 
 export interface SourceTableInfo {
@@ -3805,6 +3896,8 @@ export async function biModelUpsertRelationship(params: {
   conditions: RelationshipConditionDto[];
   cardinality: string;
   active: boolean;
+  /** "auto" | "none" | "both"; omit to keep/derive the default. */
+  filterPropagation?: string | null;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_relationship", {
     connectionId: params.connectionId,
@@ -3815,6 +3908,7 @@ export async function biModelUpsertRelationship(params: {
     conditions: params.conditions,
     cardinality: params.cardinality,
     active: params.active,
+    filterPropagation: params.filterPropagation ?? null,
   });
 }
 
@@ -3917,6 +4011,278 @@ export async function biModelDeleteCalcGroup(
   name: string,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_delete_calc_group", { connectionId, name });
+}
+
+// --- Global variables ---
+
+export async function biModelUpsertGlobalVariable(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  table: string;
+  expression: string;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_global_variable", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    table: params.table,
+    expression: params.expression,
+  });
+}
+
+export async function biModelDeleteGlobalVariable(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_global_variable", { connectionId, name });
+}
+
+// --- Table variables ---
+
+export async function biModelUpsertTableVariable(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  source: string;
+  filters: RoleFilterDto[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_table_variable", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    source: params.source,
+    filters: params.filters,
+  });
+}
+
+export async function biModelDeleteTableVariable(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_table_variable", { connectionId, name });
+}
+
+// --- Script functions ---
+
+export async function biModelUpsertScriptFunction(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  params: ScriptParamDto[];
+  returnType: string;
+  body: string;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_script_function", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    params: params.params,
+    returnType: params.returnType,
+    body: params.body,
+  });
+}
+
+export async function biModelDeleteScriptFunction(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_script_function", { connectionId, name });
+}
+
+// --- Contexts + context columns ---
+
+export async function biModelUpsertContext(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  operations: ContextOpDto[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_context", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    operations: params.operations,
+  });
+}
+
+export async function biModelDeleteContext(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_context", { connectionId, name });
+}
+
+export async function biModelUpsertContextColumn(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  table: string;
+  expression: string;
+  dataType: string;
+  description?: string | null;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_context_column", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    table: params.table,
+    expression: params.expression,
+    dataType: params.dataType,
+    description: params.description ?? null,
+  });
+}
+
+export async function biModelDeleteContextColumn(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_context_column", { connectionId, name });
+}
+
+// --- Model settings (date table, default lookup resolution) + validation ---
+
+export async function biModelSetDateTable(
+  connectionId: string,
+  table: string | null,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_date_table", { connectionId, table });
+}
+
+export async function biModelSetDefaultLookupResolution(
+  connectionId: string,
+  expression: string | null,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_default_lookup_resolution", {
+    connectionId,
+    expression,
+  });
+}
+
+export async function biModelValidate(
+  connectionId: string,
+): Promise<ValidationIssueDto[]> {
+  return invoke<ValidationIssueDto[]>("bi_model_validate", { connectionId });
+}
+
+// --- Testing Ground (ad-hoc query preview) ---
+
+export interface ColumnRefDto {
+  table: string;
+  column: string;
+}
+
+export interface TestFilterDto {
+  /** Column name (the engine matches it to the owning table). */
+  column: string;
+  /** "=" | "!=" | ">" | ">=" | "<" | "<=" */
+  operator: string;
+  value: string;
+}
+
+export interface ResultColumnDto {
+  name: string;
+  /** "Dimension" | "Measure" | "GroupingId" | "Rank" */
+  kind: string;
+  dataType: string | null;
+  sourceTable: string | null;
+  sourceColumn: string | null;
+  measure: string | null;
+  formatString: string | null;
+  displayName: string | null;
+  kpiName: string | null;
+  isHidden: boolean;
+}
+
+export interface PlanPropertyDto {
+  key: string;
+  value: string;
+}
+
+export interface PlanNodeDto {
+  operation: string;
+  label: string;
+  durationMs: number;
+  properties: PlanPropertyDto[];
+  children: PlanNodeDto[];
+}
+
+export interface ExecutionPlanDto {
+  summary: string;
+  totalMs: number;
+  root: PlanNodeDto;
+}
+
+export interface TestQueryResult {
+  columns: string[];
+  /** Row-major cells; null = engine NULL. */
+  rows: (string | null)[][];
+  rowCount: number;
+  truncated: boolean;
+  resultColumns: ResultColumnDto[];
+  plan: ExecutionPlanDto | null;
+}
+
+export async function biModelTestQuery(params: {
+  connectionId: string;
+  measures: string[];
+  groupBy: ColumnRefDto[];
+  filters: TestFilterDto[];
+  rowLimit?: number | null;
+  rollup: boolean;
+  includePlan: boolean;
+  previewRole?: string | null;
+  previewUserIdentity?: string | null;
+  previewCustomData?: string | null;
+  queryId?: string | null;
+}): Promise<TestQueryResult> {
+  return invoke<TestQueryResult>("bi_model_test_query", {
+    connectionId: params.connectionId,
+    measures: params.measures,
+    groupBy: params.groupBy,
+    filters: params.filters,
+    rowLimit: params.rowLimit ?? null,
+    rollup: params.rollup,
+    includePlan: params.includePlan,
+    previewRole: params.previewRole ?? null,
+    previewUserIdentity: params.previewUserIdentity ?? null,
+    previewCustomData: params.previewCustomData ?? null,
+    queryId: params.queryId ?? null,
+  });
+}
+
+export async function biModelCancelQuery(queryId: string): Promise<void> {
+  return invoke<void>("bi_model_cancel_query", { queryId });
+}
+
+// --- Lineage / dependency graph ---
+
+export interface DependencyNodeDto {
+  /** "measure:{name}" | "global:{name}" | "cc:{table}.{name}" | "ctxcol:{table}.{name}" */
+  id: string;
+  /** "measure" | "globalVariable" | "calculatedColumn" | "contextColumn" */
+  nodeType: string;
+  name: string;
+  table: string | null;
+  expression: string | null;
+}
+
+export interface DependencyEdgeDto {
+  fromId: string;
+  toId: string;
+  /** "measure" | "global" */
+  edgeType: string;
+}
+
+export interface DependencyGraphDto {
+  nodes: DependencyNodeDto[];
+  edges: DependencyEdgeDto[];
+}
+
+export async function biModelDependencyGraph(
+  connectionId: string,
+): Promise<DependencyGraphDto> {
+  return invoke<DependencyGraphDto>("bi_model_dependency_graph", { connectionId });
 }
 
 /** List the source database's tables (requires a connected connection). */

@@ -4,7 +4,7 @@
 //          primitives (Modal, ErrorBanner, Badge, Field) used by all sections.
 
 import React, { useRef } from "react";
-import type { ModelMeasureInfo, ModelOverview } from "@api";
+import type { ModelMeasureInfo, ModelOverview, RoleFilterDto } from "@api";
 
 // ============================================================================
 // Section contract (provided by ModelEditorApp to every model section)
@@ -212,6 +212,162 @@ export function Field({
       <label style={styles.label}>{label}</label>
       {children}
       {hint && <div style={styles.hint}>{hint}</div>}
+    </div>
+  );
+}
+
+// ============================================================================
+// FilterPredicateList — shared row-filter editor
+// ============================================================================
+// The engine `FilterPredicate` (table/column/operator/value + optional dynamic
+// USERNAME()/CUSTOMDATA()) is reused verbatim by Security Roles, Table
+// Variables and Context "Keep" operations. This widget + the draft<->DTO
+// mappers keep the operator strings and dynamic handling in ONE place.
+
+export const FILTER_OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
+
+const DYNAMIC_OPTIONS = [
+  { value: "", label: "None" },
+  { value: "username", label: "USERNAME()" },
+  { value: "customData", label: "CUSTOMDATA()" },
+];
+
+export interface FilterDraft {
+  table: string;
+  column: string;
+  operator: string;
+  /** Static comparison value; ignored (blanked) when `dynamic` is set. */
+  value: string;
+  /** "" = static; "username" | "customData" = dynamic RLS. */
+  dynamic: string;
+}
+
+export function emptyFilterDraft(): FilterDraft {
+  return { table: "", column: "", operator: "=", value: "", dynamic: "" };
+}
+
+export function filterDtoToDraft(f: RoleFilterDto): FilterDraft {
+  return {
+    table: f.table,
+    column: f.column,
+    operator: f.operator,
+    value: f.value,
+    dynamic: f.dynamic ?? "",
+  };
+}
+
+export function filterDraftToDto(f: FilterDraft): RoleFilterDto {
+  return {
+    table: f.table,
+    column: f.column,
+    operator: f.operator,
+    value: f.dynamic !== "" ? "" : f.value,
+    dynamic: f.dynamic === "" ? null : f.dynamic,
+  };
+}
+
+/** A draft filter is complete when it has a table, a column, and either a
+ * dynamic kind or a non-empty static value. */
+export function isFilterDraftComplete(f: FilterDraft): boolean {
+  return f.table !== "" && f.column !== "" && (f.dynamic !== "" || f.value.trim() !== "");
+}
+
+export function FilterPredicateList({
+  overview,
+  filters,
+  onChange,
+  allowDynamic = true,
+  addLabel = "Add filter",
+  emptyHint = "No filters.",
+}: {
+  overview: ModelOverview;
+  filters: FilterDraft[];
+  onChange: (filters: FilterDraft[]) => void;
+  /** Roles/contexts allow dynamic RLS; table-variable filters are static. */
+  allowDynamic?: boolean;
+  addLabel?: string;
+  emptyHint?: string;
+}): React.ReactElement {
+  const columnsOf = (tableName: string): string[] =>
+    overview.tables.find((t) => t.name === tableName)?.columns.map((c) => c.name) ?? [];
+
+  const update = (index: number, patch: Partial<FilterDraft>) => {
+    onChange(filters.map((f, i) => (i === index ? { ...f, ...patch } : f)));
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {filters.length === 0 && <div style={styles.hint}>{emptyHint}</div>}
+      {filters.map((f, i) => (
+        <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <select
+            style={{ ...styles.input, flex: 2, minWidth: 0 }}
+            value={f.table}
+            onChange={(e) => update(i, { table: e.target.value, column: "" })}
+          >
+            <option value="">(table)</option>
+            {overview.tables.map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+          <select
+            style={{ ...styles.input, flex: 2, minWidth: 0 }}
+            value={f.column}
+            onChange={(e) => update(i, { column: e.target.value })}
+          >
+            <option value="">(column)</option>
+            {columnsOf(f.table).map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+          <select
+            style={{ ...styles.input, width: 58, flexShrink: 0 }}
+            value={f.operator}
+            onChange={(e) => update(i, { operator: e.target.value })}
+          >
+            {FILTER_OPERATORS.map((op) => (
+              <option key={op} value={op}>
+                {op}
+              </option>
+            ))}
+          </select>
+          <input
+            style={{ ...styles.input, flex: 2, minWidth: 0 }}
+            value={f.value}
+            disabled={f.dynamic !== ""}
+            onChange={(e) => update(i, { value: e.target.value })}
+            placeholder={f.dynamic !== "" ? "(dynamic)" : "Value"}
+          />
+          {allowDynamic && (
+            <select
+              style={{ ...styles.input, flex: 2, minWidth: 0 }}
+              value={f.dynamic}
+              onChange={(e) => update(i, { dynamic: e.target.value })}
+            >
+              {DYNAMIC_OPTIONS.map((d) => (
+                <option key={d.value} value={d.value}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            style={styles.smallBtn}
+            onClick={() => onChange(filters.filter((_, j) => j !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div>
+        <button style={styles.smallBtn} onClick={() => onChange([...filters, emptyFilterDraft()])}>
+          {addLabel}
+        </button>
+      </div>
     </div>
   );
 }

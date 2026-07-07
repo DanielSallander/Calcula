@@ -25,29 +25,53 @@ import { KpisSection } from "./sections/KpisSection";
 import { RolesSection } from "./sections/RolesSection";
 import { CalcGroupsSection } from "./sections/CalcGroupsSection";
 import { ImportSection } from "./sections/ImportSection";
+import { OverviewSection } from "./sections/OverviewSection";
+import { ContextsSection } from "./sections/ContextsSection";
+import { GlobalsSection } from "./sections/GlobalsSection";
+import { TableVariablesSection } from "./sections/TableVariablesSection";
+import { ScriptFunctionsSection } from "./sections/ScriptFunctionsSection";
+import { SettingsSection } from "./sections/SettingsSection";
+import { TestingGroundSection } from "./sections/TestingGroundSection";
+import { LineageSection } from "./sections/LineageSection";
 
 // ============================================================================
 // Navigation
 // ============================================================================
 
 type SectionId =
-  | "measures"
+  | "overview"
   | "tables"
   | "relationships"
   | "hierarchies"
+  | "measures"
+  | "contexts"
   | "kpis"
-  | "roles"
   | "calcGroups"
+  | "globals"
+  | "tableVariables"
+  | "scriptFunctions"
+  | "roles"
+  | "lineage"
+  | "testing"
+  | "settings"
   | "import";
 
 const NAV: Array<{ id: SectionId; label: string }> = [
-  { id: "measures", label: "Measures" },
+  { id: "overview", label: "Overview" },
   { id: "tables", label: "Tables" },
   { id: "relationships", label: "Relationships" },
   { id: "hierarchies", label: "Hierarchies" },
+  { id: "measures", label: "Measures" },
+  { id: "contexts", label: "Contexts" },
   { id: "kpis", label: "KPIs" },
-  { id: "roles", label: "Roles" },
   { id: "calcGroups", label: "Calculation Groups" },
+  { id: "globals", label: "Global Variables" },
+  { id: "tableVariables", label: "Table Variables" },
+  { id: "scriptFunctions", label: "Script Functions" },
+  { id: "roles", label: "Security Roles" },
+  { id: "lineage", label: "Lineage" },
+  { id: "testing", label: "Testing Ground" },
+  { id: "settings", label: "Settings" },
   { id: "import", label: "Import" },
 ];
 
@@ -126,7 +150,7 @@ export function ModelEditorApp(): React.ReactElement {
   const [overview, setOverview] = useState<ModelOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [active, setActive] = useState<SectionId>("measures");
+  const [active, setActive] = useState<SectionId>("overview");
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
@@ -299,6 +323,8 @@ export function ModelEditorApp(): React.ReactElement {
       reportError,
     };
     switch (active) {
+      case "overview":
+        return <OverviewSection ctx={ctx} />;
       case "measures":
         return <MeasuresSection ctx={ctx} />;
       case "tables":
@@ -307,12 +333,26 @@ export function ModelEditorApp(): React.ReactElement {
         return <RelationshipsSection ctx={ctx} />;
       case "hierarchies":
         return <HierarchiesSection ctx={ctx} />;
+      case "contexts":
+        return <ContextsSection ctx={ctx} />;
       case "kpis":
         return <KpisSection ctx={ctx} />;
-      case "roles":
-        return <RolesSection ctx={ctx} />;
       case "calcGroups":
         return <CalcGroupsSection ctx={ctx} />;
+      case "globals":
+        return <GlobalsSection ctx={ctx} />;
+      case "tableVariables":
+        return <TableVariablesSection ctx={ctx} />;
+      case "scriptFunctions":
+        return <ScriptFunctionsSection ctx={ctx} />;
+      case "roles":
+        return <RolesSection ctx={ctx} />;
+      case "lineage":
+        return <LineageSection ctx={ctx} />;
+      case "testing":
+        return <TestingGroundSection ctx={ctx} />;
+      case "settings":
+        return <SettingsSection ctx={ctx} />;
     }
   };
 
