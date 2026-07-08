@@ -274,6 +274,11 @@ pub struct FetchRequest {
     pub schema: Option<String>,
     /// Table name.
     pub table: String,
+    /// When set, the source is this SQL SELECT rather than `schema.table`. The
+    /// builder renders the FROM clause as a wrapped derived table
+    /// (`(<source_query>) AS t`), so `columns`/`filters`/`group_by`/`aggregates`
+    /// (all unqualified) compose on top of the query's result columns.
+    pub source_query: Option<String>,
     /// Columns to select. Empty means `SELECT *`. Ignored when `aggregates` is non-empty.
     pub columns: Vec<String>,
     /// Filter conditions, combined with `AND`.

@@ -212,6 +212,7 @@ impl Engine {
         let request = FetchRequest {
             schema: Some(binding.schema.clone()),
             table: binding.table.clone(),
+            source_query: binding.source_query.clone(),
             filters,
             ..Default::default()
         };

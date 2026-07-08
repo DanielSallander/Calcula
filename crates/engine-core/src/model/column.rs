@@ -121,6 +121,12 @@ pub struct Column {
     /// data types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     date_role: Option<DateRole>,
+    /// Optional Excel-style number-format string a host applies when rendering
+    /// this column's values (e.g. `"#,##0.00"`, `"0.0%"`, `"yyyy-mm-dd"`).
+    /// Presentation only — the engine never interprets it; it is surfaced in
+    /// result-column metadata so hosts format dimension values consistently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string: Option<String>,
 }
 
 impl Column {
@@ -137,6 +143,7 @@ impl Column {
             is_hidden: false,
             default_aggregation: None,
             date_role: None,
+            format_string: None,
         }
     }
 
@@ -206,6 +213,29 @@ impl Column {
     /// See [`Column::set_display_name`].
     pub fn set_hidden(&mut self, hidden: bool) {
         self.is_hidden = hidden;
+    }
+
+    /// See [`Column::set_display_name`]. `None` clears the lookup resolution
+    /// (falling back to the model-level default / built-in).
+    pub fn set_lookup_resolution(&mut self, expr: Option<String>) {
+        self.lookup_resolution = expr;
+    }
+
+    /// See [`Column::set_display_name`]. `None` clears the sort-by column
+    /// (natural sort by the column's own values). The referenced column must
+    /// belong to the same table — validated at model build time.
+    pub fn set_sort_by(&mut self, column: Option<String>) {
+        self.sort_by_column = column;
+    }
+
+    /// See [`Column::set_display_name`]. `None` clears the format string.
+    pub fn set_format_string(&mut self, format_string: Option<String>) {
+        self.format_string = format_string;
+    }
+
+    /// Returns the Excel-style number-format string, if set (presentation only).
+    pub fn format_string(&self) -> Option<&str> {
+        self.format_string.as_deref()
     }
 
     /// Set the human-readable description of this column.

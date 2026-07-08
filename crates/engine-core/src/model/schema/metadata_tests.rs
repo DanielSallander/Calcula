@@ -41,10 +41,12 @@ fn model_format_version_is_current() {
     // Version 9 introduced semi-additive balances CLOSINGBALANCE/OPENINGBALANCE
     // (SemiAdditiveBalance expression variant). v10 added KPIs; v11 added the
     // dynamic-RLS predicate field; v12 added context-driven calculated columns;
-    // v13 added query-scoped (GVAR) variables (Block query_scoped_bindings).
+    // v13 added query-scoped (GVAR) variables (Block query_scoped_bindings);
+    // v14 added persisted multi-source bindings (model sources catalog + table
+    // source_binding) and finalized the model metadata fields.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 13);
+    assert_eq!(MODEL_FORMAT_VERSION, 14);
 }
 
 #[test]

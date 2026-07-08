@@ -16,21 +16,39 @@ use crate::parquet_connector::ParquetConnector;
 
 use crate::error::{QueryError, QueryResult};
 
-/// Identifies a table within a data source (schema + table name).
+/// Identifies where a model table's rows come from in a data source: either a
+/// physical `schema.table`, or a user-authored SQL query (`source_query`) that
+/// the SQL builder wraps as a derived table — `(<source_query>) AS t` — so every
+/// downstream filter / aggregate composes on top of it.
 #[derive(Debug, Clone)]
 pub struct SourceBinding {
-    /// Source schema name (e.g., `"sales"`, `"BI"`).
+    /// Source schema name (e.g., `"sales"`, `"BI"`). Empty for a query source.
     pub schema: String,
-    /// Source table name (e.g., `"salesorderheader"`).
+    /// Source table name (e.g., `"salesorderheader"`). For a query source this
+    /// is the model table name (a label only — never rendered into SQL).
     pub table: String,
+    /// When set, the rows come from this SQL SELECT instead of `schema.table`.
+    /// The SQL builder renders it as a wrapped subquery.
+    pub source_query: Option<String>,
 }
 
 impl SourceBinding {
-    /// Create a new source binding.
+    /// Create a physical `schema.table` source binding.
     pub fn new(schema: impl Into<String>, table: impl Into<String>) -> Self {
         Self {
             schema: schema.into(),
             table: table.into(),
+            source_query: None,
+        }
+    }
+
+    /// Create a SQL-query source binding. `model_table` is a label; the SQL is
+    /// rendered as `(<sql>) AS t` wherever the table's source is referenced.
+    pub fn new_query(model_table: impl Into<String>, sql: impl Into<String>) -> Self {
+        Self {
+            schema: String::new(),
+            table: model_table.into(),
+            source_query: Some(sql.into()),
         }
     }
 }
@@ -66,6 +84,18 @@ macro_rules! define_any_connector {
             /// hardcoded connector name — to decide what to push.
             pub fn capabilities(&self) -> ConnectorCapabilities {
                 match self { $( AnyConnector::$variant(c) => c.capabilities(), )+ }
+            }
+
+            /// The persisted [`SourceKind`](engine_core::model::SourceKind) of
+            /// this connector, used by the facade to record a source in the
+            /// model's persisted catalog. The macro maps each `AnyConnector`
+            /// variant to the `SourceKind` variant of the **same name**, so a
+            /// future connector added without a matching `SourceKind` variant
+            /// is a compile error here — keeping the two enums in lockstep.
+            pub fn kind(&self) -> engine_core::model::SourceKind {
+                match self {
+                    $( AnyConnector::$variant(_) => engine_core::model::SourceKind::$variant, )+
+                }
             }
 
             /// Fetch data from this connector.
@@ -158,6 +188,12 @@ pub struct SourceRegistry {
     bindings: HashMap<String, (usize, SourceBinding)>,
     /// Connectors, referenced by index.
     connectors: Vec<AnyConnector>,
+    /// Map from a persisted source id to the connector index it was registered
+    /// under. Populated when a connector is added with an id (e.g. by the
+    /// facade's `wire_sources` / composite-model helpers), letting a table's
+    /// persisted `source_binding.source_id` be resolved to a connector without
+    /// the host tracking indices. Anonymous connectors (no id) are absent.
+    source_ids: HashMap<String, usize>,
 }
 
 impl SourceRegistry {
@@ -166,6 +202,7 @@ impl SourceRegistry {
         Self {
             bindings: HashMap::new(),
             connectors: Vec::new(),
+            source_ids: HashMap::new(),
         }
     }
 
@@ -174,6 +211,31 @@ impl SourceRegistry {
         let idx = self.connectors.len();
         self.connectors.push(connector);
         idx
+    }
+
+    /// Register a connector under an optional stable source id, returning its
+    /// index. When an id is given it is recorded so
+    /// [`connector_index_by_source_id`](Self::connector_index_by_source_id) can
+    /// later resolve a table's persisted `source_binding.source_id` to this
+    /// connector. A repeated id overwrites the previous mapping (the caller —
+    /// the facade — rejects duplicate ids before reaching here).
+    pub fn add_connector_with_id(
+        &mut self,
+        source_id: Option<String>,
+        connector: AnyConnector,
+    ) -> usize {
+        let idx = self.add_connector(connector);
+        if let Some(id) = source_id {
+            self.source_ids.insert(id, idx);
+        }
+        idx
+    }
+
+    /// Resolve a persisted source id to the connector index it was registered
+    /// under, if any. Returns `None` for an unknown id (e.g. a source that the
+    /// host chose to skip when wiring).
+    pub fn connector_index_by_source_id(&self, source_id: &str) -> Option<usize> {
+        self.source_ids.get(source_id).copied()
     }
 
     /// Bind a model table name to a connector and source location.

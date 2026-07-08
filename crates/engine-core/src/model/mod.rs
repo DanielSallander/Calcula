@@ -11,6 +11,7 @@ pub mod kpi;
 pub mod relationship;
 pub mod schema;
 pub mod security_role;
+pub mod source;
 pub mod table;
 pub mod table_variable;
 
@@ -27,5 +28,8 @@ pub use kpi::{Kpi, KpiStatus, KpiTarget, StatusBand};
 pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
 pub use schema::{DataModel, DataModelBuilder};
 pub use security_role::SecurityRole;
+pub use source::{
+    PersistedAuthKind, PersistedConnection, PersistedSource, SourceKind, TableSourceBinding,
+};
 pub use table::{IncrementalRefresh, RefreshStrategy, StorageMode, Table};
 pub use table_variable::TableVariable;

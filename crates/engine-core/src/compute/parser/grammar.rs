@@ -284,6 +284,8 @@ impl Parser {
             "CLEAREXCEPT" | "CLEAR_EXCEPT" => self.parse_clearexcept_call(),
             // Iterator
             "ITERATE" => self.parse_iterate_call(),
+            // Explicit relationship traversal
+            "TRAVERSE" => self.parse_traverse_call(),
             // Percentile
             "PERCENTILE" => self.parse_percentile_call(),
             // Text functions

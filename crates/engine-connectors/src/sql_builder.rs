@@ -206,9 +206,16 @@ impl SqlDialect for SqlServerDialect {
     }
 }
 
-/// Render the quoted `schema.table` reference for a request, falling back to
-/// the dialect's default schema.
+/// Render the FROM-clause source for a request. A physical source renders the
+/// quoted `schema.table` (falling back to the dialect's default schema); a SQL
+/// query source renders a wrapped derived table `(<source_query>) AS t`, so all
+/// of the request's (unqualified) columns/filters/group-by compose on top of it.
 fn table_reference(dialect: &impl SqlDialect, request: &FetchRequest) -> String {
+    if let Some(sql) = &request.source_query {
+        // Strip a trailing `;` so it nests cleanly as a subquery.
+        let inner = sql.trim().trim_end_matches(';').trim();
+        return format!("({}) AS {}", inner, dialect.quote_ident("t"));
+    }
     let schema_name = request
         .schema
         .as_deref()
@@ -1429,6 +1436,41 @@ mod tests {
         let (pg_sql, params) = build_select_sql(&PostgresDialect, &request);
         assert_eq!(pg_sql, "SELECT * FROM \"s\".\"t\"");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn source_query_renders_wrapped_derived_table() {
+        // A SQL-query source renders as a wrapped subquery, and the request's
+        // (unqualified) columns select from the derived table's result.
+        let request = FetchRequest {
+            table: "sales".into(),
+            source_query: Some("SELECT * FROM legacy WHERE year >= 2020".into()),
+            columns: vec!["region".into(), "amount".into()],
+            ..Default::default()
+        };
+        let (sql, _) = build_select_sql(&PostgresDialect, &request);
+        assert_eq!(
+            sql,
+            "SELECT \"region\", \"amount\" FROM (SELECT * FROM legacy WHERE year >= 2020) AS \"t\""
+        );
+    }
+
+    #[test]
+    fn source_query_composes_with_downstream_where() {
+        // A downstream WHERE wraps AROUND the import SQL (the whole point), and a
+        // trailing semicolon on the source SQL is stripped so it nests cleanly.
+        let request = FetchRequest {
+            table: "sales".into(),
+            source_query: Some("SELECT * FROM legacy WHERE year >= 2020;".into()),
+            columns: vec!["region".into()],
+            ..Default::default()
+        };
+        let conditions = vec!["\"region\" = $1".to_string()];
+        let sql = build_select_sql_with_conditions(&PostgresDialect, &request, &conditions);
+        assert_eq!(
+            sql,
+            "SELECT \"region\" FROM (SELECT * FROM legacy WHERE year >= 2020) AS \"t\" WHERE \"region\" = $1"
+        );
     }
 
     #[test]

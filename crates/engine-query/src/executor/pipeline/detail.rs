@@ -292,6 +292,7 @@ impl QueryExecutor {
                 let fetch = FetchRequest {
                     schema: Some(binding.schema.clone()),
                     table: binding.table.clone(),
+                    source_query: binding.source_query.clone(),
                     columns: vec![dim_col.clone()],
                     filters: dim_restrict,
                     max_inline_in_values,
@@ -438,6 +439,7 @@ impl QueryExecutor {
             let fetch = FetchRequest {
                 schema: Some(binding.schema.clone()),
                 table: binding.table.clone(),
+                source_query: binding.source_query.clone(),
                 columns: detail_fetch_columns,
                 filters: detail_fetch_filters,
                 in_filters,
@@ -673,6 +675,7 @@ async fn join_dimension_attributes(
             let fetch = FetchRequest {
                 schema: Some(binding.schema.clone()),
                 table: binding.table.clone(),
+                source_query: binding.source_query.clone(),
                 columns: fetch_columns.clone(),
                 filters: role_restrict,
                 max_inline_in_values,

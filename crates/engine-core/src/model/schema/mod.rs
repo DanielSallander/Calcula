@@ -35,6 +35,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::Kpi;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
 
@@ -136,9 +137,24 @@ use crate::model::table_variable::TableVariable;
 ///   group-by axis. A pre-v13 engine that ignored the field would silently drop
 ///   the `GVAR` bindings and leave their references dangling (a wrong number),
 ///   so the [`ModelFormatTooNew`] gate refuses v13 files on a pre-v13 engine.
+/// - `14` — persisted multi-source bindings: the model gained
+///   [`sources`](DataModel::sources), a secret-free catalog of
+///   [`PersistedSource`](crate::model::PersistedSource) descriptors (each an id,
+///   kind, connection target, and preferred-auth *hint* — never a credential),
+///   and tables gained an optional
+///   [`source_binding`](crate::model::Table::source_binding)
+///   ([`TableSourceBinding`](crate::model::TableSourceBinding): source id +
+///   schema + table). Together these let a multi-source model be reopened and
+///   auto-reconnected (`Engine::wire_sources`) instead of the host re-wiring
+///   every table by hand. This is authored, behavior-bearing content a pre-v14
+///   engine would silently drop on a load→save round-trip (losing the model's
+///   data-source wiring), so the [`ModelFormatTooNew`] gate refuses v14 files on
+///   a pre-v14 engine. This bump also finalizes the presentation-only model
+///   metadata fields (`model_name`/`model_version`/`model_author`/
+///   `model_description`) added earlier in anticipation of v14.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 13;
+pub const MODEL_FORMAT_VERSION: u32 = 14;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -201,6 +217,26 @@ pub struct DataModel {
     /// files). See [`ContextColumn`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     context_columns: Vec<ContextColumn>,
+    /// Persisted data-source catalog: secret-free [`PersistedSource`]
+    /// descriptors that let a multi-source model be reopened and reconnected
+    /// (`Engine::wire_sources`) without the host re-wiring every table. Each
+    /// table's [`Table::source_binding`] references an entry here by id. Empty
+    /// by default and skipped on serialization when empty (back-compat with
+    /// pre-v14 model files). No secrets are stored. See [`PersistedSource`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<PersistedSource>,
+    /// Optional descriptive metadata (name/version/author/description) for the
+    /// model. Presentation only — no query effect. Set post-build via
+    /// [`DataModel::with_model_metadata`]; `None` by default and skipped on
+    /// serialization when absent (back-compat with models written before v14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_description: Option<String>,
 }
 
 impl DataModel {
@@ -223,6 +259,7 @@ impl DataModel {
             calculation_groups: Vec::new(),
             kpis: Vec::new(),
             context_columns: Vec::new(),
+            sources: Vec::new(),
         }
     }
 
@@ -247,6 +284,37 @@ impl DataModel {
             .iter()
             .find(|t| t.name() == name)
             .ok_or_else(|| EngineError::TableNotFound(name.to_string()))
+    }
+
+    /// Returns the persisted data-source catalog.
+    ///
+    /// Each entry is a secret-free [`PersistedSource`] descriptor. A host
+    /// reconnects them via `Engine::wire_sources`; a table binds to one by id
+    /// through its [`Table::source_binding`]. Empty for single-source or
+    /// runtime-wired models.
+    pub fn sources(&self) -> &[PersistedSource] {
+        &self.sources
+    }
+
+    /// Look up a persisted data source by its id.
+    pub fn source(&self, id: &str) -> Option<&PersistedSource> {
+        self.sources.iter().find(|s| s.id == id)
+    }
+
+    /// Append a persisted data source to the catalog, rejecting a duplicate id.
+    ///
+    /// Used by the engine facade's composite-model helpers when a host
+    /// registers a source that should be persisted with the model. Prefer
+    /// [`DataModelBuilder::add_source`] at build time.
+    pub fn push_source(&mut self, source: PersistedSource) -> EngineResult<()> {
+        if self.sources.iter().any(|s| s.id == source.id) {
+            return Err(EngineError::DuplicateName(format!(
+                "Duplicate data source id '{}'",
+                source.id
+            )));
+        }
+        self.sources.push(source);
+        Ok(())
     }
 
     /// Returns all relationships in the model.
@@ -576,6 +644,103 @@ impl DataModel {
         model
     }
 
+    /// Returns a copy of the model with its context list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_contexts(&self, contexts: Vec<ContextDefinition>) -> DataModel {
+        let mut model = self.clone();
+        model.contexts = contexts;
+        model
+    }
+
+    /// Returns a copy of the model with its context-column list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_context_columns(&self, context_columns: Vec<ContextColumn>) -> DataModel {
+        let mut model = self.clone();
+        model.context_columns = context_columns;
+        model
+    }
+
+    /// Returns a copy of the model with its table-variable list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_table_variables(&self, table_variables: Vec<TableVariable>) -> DataModel {
+        let mut model = self.clone();
+        model.table_variables = table_variables;
+        model
+    }
+
+    /// Returns a copy of the model with its global-variable list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_global_variables(&self, global_variables: Vec<GlobalVariable>) -> DataModel {
+        let mut model = self.clone();
+        model.global_variables = global_variables;
+        model
+    }
+
+    /// Returns a copy of the model with its script-function list REPLACED
+    /// (caller-validates contract, see [`DataModel::with_measures`]).
+    pub fn with_script_functions(&self, script_functions: Vec<ScriptFunction>) -> DataModel {
+        let mut model = self.clone();
+        model.script_functions = script_functions;
+        model
+    }
+
+    /// Returns a copy of the model with the marked date-table name REPLACED
+    /// (`None` clears the marking). No validation itself — callers run
+    /// [`DataModel::validate`] on the result (see [`DataModel::with_measures`]).
+    pub fn with_date_table(&self, date_table: Option<String>) -> DataModel {
+        let mut model = self.clone();
+        model.date_table = date_table;
+        model
+    }
+
+    /// Returns a copy of the model with the model-level default lookup
+    /// resolution expression REPLACED (`None` clears it; falls back to the
+    /// built-in `MIN(col)`). Caller-validates contract (see
+    /// [`DataModel::with_measures`]).
+    pub fn with_default_lookup_resolution(&self, expr: Option<String>) -> DataModel {
+        let mut model = self.clone();
+        model.default_lookup_resolution = expr;
+        model
+    }
+
+    /// Optional descriptive model name (presentation only).
+    pub fn model_name(&self) -> Option<&str> {
+        self.model_name.as_deref()
+    }
+
+    /// Optional model version string (presentation only).
+    pub fn model_version(&self) -> Option<&str> {
+        self.model_version.as_deref()
+    }
+
+    /// Optional model author (presentation only).
+    pub fn model_author(&self) -> Option<&str> {
+        self.model_author.as_deref()
+    }
+
+    /// Optional model description (presentation only).
+    pub fn model_description(&self) -> Option<&str> {
+        self.model_description.as_deref()
+    }
+
+    /// Returns a copy of the model with its descriptive metadata REPLACED (each
+    /// field independently; `None` clears it). Presentation only — no
+    /// validation needed.
+    pub fn with_model_metadata(
+        &self,
+        name: Option<String>,
+        version: Option<String>,
+        author: Option<String>,
+        description: Option<String>,
+    ) -> DataModel {
+        let mut model = self.clone();
+        model.model_name = name;
+        model.model_version = version;
+        model.model_author = author;
+        model.model_description = description;
+        model
+    }
+
     /// Returns all hierarchies that belong to a specific table.
     pub fn hierarchies_for_table(&self, table_name: &str) -> Vec<&Hierarchy> {
         self.hierarchies
@@ -785,6 +950,9 @@ impl DataModel {
         }
         for cc in &self.context_columns {
             builder = builder.add_context_column(cc.clone());
+        }
+        for source in &self.sources {
+            builder = builder.add_source(source.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

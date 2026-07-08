@@ -24,6 +24,9 @@ pub(super) enum Token {
     Plus,
     /// `-`
     Minus,
+    /// `->` (relationship-path arrow inside a `TRAVERSE(expr, a -> b -> c)`
+    /// path). Recognized before `-` so binary subtraction is unaffected.
+    Arrow,
     /// `*`
     Star,
     /// `/`
@@ -103,6 +106,12 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
             '+' => {
                 tokens.push((Token::Plus, tok_start));
                 i += 1;
+            }
+            // `->` relationship-path arrow, checked before bare `-` so binary
+            // subtraction (`a - b`) is unaffected.
+            '-' if i + 1 < len && chars[i + 1] == '>' => {
+                tokens.push((Token::Arrow, tok_start));
+                i += 2;
             }
             '-' => {
                 tokens.push((Token::Minus, tok_start));

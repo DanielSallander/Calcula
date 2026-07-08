@@ -84,6 +84,7 @@ mod disk_cache;
 mod model_io;
 mod query_cache;
 mod refresh;
+mod source_wiring;
 
 #[cfg(test)]
 mod calc_group_tests;
@@ -163,8 +164,9 @@ pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
     ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
     FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
-    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, RaggedBehavior, RefreshStrategy,
-    Relationship, SecurityRole, StatusBand, StorageMode, Table, TableVariable,
+    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PersistedAuthKind, PersistedConnection,
+    PersistedSource, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, SourceKind,
+    StatusBand, StorageMode, Table, TableSourceBinding, TableVariable,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -199,6 +201,7 @@ pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
     QueryExecutor, QueryPlan,
 };
+pub use source_wiring::{SourceCredential, WireReport};
 
 // ---------------------------------------------------------------------------
 
@@ -956,6 +959,7 @@ fn build_result_metadata(
                     c.display_name = column.display_name().map(str::to_string);
                     c.description = column.description().map(str::to_string);
                     c.is_hidden = column.is_hidden();
+                    c.format_string = column.format_string().map(str::to_string);
                 } else if let Some(cc) = model
                     .context_column(&col_ref.column)
                     .filter(|cc| cc.table().eq_ignore_ascii_case(&col_ref.table))

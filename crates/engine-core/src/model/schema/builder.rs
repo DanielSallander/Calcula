@@ -13,6 +13,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::{Kpi, KpiTarget};
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
 
@@ -39,12 +40,27 @@ pub struct DataModelBuilder {
     pub(super) calculation_groups: Vec<CalculationGroup>,
     pub(super) kpis: Vec<Kpi>,
     pub(super) context_columns: Vec<ContextColumn>,
+    pub(super) sources: Vec<PersistedSource>,
 }
 
 impl DataModelBuilder {
     /// Add a table to the model.
     pub fn add_table(mut self, table: Table) -> Self {
         self.tables.push(table);
+        self
+    }
+
+    /// Add a persisted data source to the model's catalog.
+    ///
+    /// Records a secret-free [`PersistedSource`] descriptor (id, kind,
+    /// connection target, preferred-auth hint) so a multi-source model can be
+    /// reopened and reconnected without the host re-wiring every table. A
+    /// table binds to a source by id via [`Table::with_source_binding`].
+    /// Validated at [`build`](Self::build): source ids must be unique and every
+    /// [`TableSourceBinding`](crate::model::TableSourceBinding) must reference a
+    /// declared source.
+    pub fn add_source(mut self, source: PersistedSource) -> Self {
+        self.sources.push(source);
         self
     }
 
@@ -285,6 +301,33 @@ impl DataModelBuilder {
         }
         for measure in &self.measures {
             validate_identifier(measure.name(), "measure")?;
+        }
+
+        // 0-source. Persisted data-source catalog integrity. Source ids must be
+        // unique (they are the key a table's `source_binding` resolves against
+        // and the key the facade registers connectors under), and every table
+        // binding must reference a declared source — a dangling `source_id`
+        // would leave the table unwireable at load, so reject it at build.
+        let mut seen_source_ids = std::collections::HashSet::new();
+        for source in &self.sources {
+            if !seen_source_ids.insert(source.id.as_str()) {
+                return Err(EngineError::DuplicateName(format!(
+                    "Duplicate data source id '{}'",
+                    source.id
+                )));
+            }
+        }
+        for table in &self.tables {
+            if let Some(binding) = table.source_binding() {
+                if !seen_source_ids.contains(binding.source_id.as_str()) {
+                    return Err(EngineError::InvalidData(format!(
+                        "Table '{}' binds to data source '{}', which is not declared in the \
+                         model's source catalog",
+                        table.name(),
+                        binding.source_id
+                    )));
+                }
+            }
         }
 
         // 0a. Presentation metadata validation. Display names, descriptions,
@@ -1594,6 +1637,13 @@ impl DataModelBuilder {
             calculation_groups: self.calculation_groups,
             kpis: self.kpis,
             context_columns: self.context_columns,
+            sources: self.sources,
+            // Descriptive metadata is set post-build (with_model_metadata); a
+            // freshly built model carries none.
+            model_name: None,
+            model_version: None,
+            model_author: None,
+            model_description: None,
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

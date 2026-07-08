@@ -1,7 +1,9 @@
-//! Measure references, USERELATIONSHIP, ISINSCOPE, and CLEAR_EXCEPT parsing.
+//! Measure references, USERELATIONSHIP, ISINSCOPE, CLEAR_EXCEPT, and TRAVERSE
+//! parsing.
 
 use super::context::wrap_context_op;
 use super::*;
+use crate::compute::expression::RelationshipPath;
 
 impl Parser {
     /// Parse `[MeasureName]` or `[MeasureName](context_args...)`.
@@ -149,6 +151,51 @@ impl Parser {
             except_columns,
         })
     }
+
+    /// Parse a relationship path `table1 -> table2 [-> table3 ...]` used inside
+    /// `TRAVERSE`. The hops are bare table identifiers separated by `->`.
+    pub(super) fn parse_relationship_path(&mut self) -> EngineResult<RelationshipPath> {
+        let mut hops: Vec<String> = Vec::new();
+        match self.advance()?.clone() {
+            Token::Ident(s) => hops.push(s),
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "TRAVERSE: expected a table name in the relationship path, got {tok:?}"
+                )));
+            }
+        }
+        while self.peek() == Some(&Token::Arrow) {
+            self.advance()?; // consume ->
+            match self.advance()?.clone() {
+                Token::Ident(s) => hops.push(s),
+                tok => {
+                    return Err(self.parse_err_prev(format!(
+                        "TRAVERSE: expected a table name after '->', got {tok:?}"
+                    )));
+                }
+            }
+        }
+        Ok(RelationshipPath::new(hops))
+    }
+
+    /// Parse `TRAVERSE(expr, table1 -> table2 [-> ...])` — force explicit
+    /// relationship traversal along the named path. This is the inverse of the
+    /// `format.rs` rendering (`TRAVERSE(inner, a -> b -> c)`), so a rendered
+    /// TRAVERSE measure re-parses.
+    pub(super) fn parse_traverse_call(&mut self) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let path = self.parse_relationship_path()?;
+        if path.hops.len() < 2 {
+            return Err(self.parse_err_prev(
+                "TRAVERSE: the relationship path needs at least two tables \
+                 (e.g. Sales -> Products)"
+                    .to_string(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(expr::traverse(inner, path))
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +256,54 @@ mod tests {
             assert!(matches!(**left, Expression::MeasureRef(ref n) if n == "A"));
             assert!(matches!(**right, Expression::MeasureRef(ref n) if n == "B"));
         }
+    }
+
+    // --- TRAVERSE tests ---
+
+    #[test]
+    fn parse_traverse_two_hops() {
+        let expr =
+            parse_measure_expression("TRAVERSE(SUM(Sales[amount]), Sales -> Products)").unwrap();
+        match expr {
+            Expression::Traverse { path, .. } => {
+                assert_eq!(path.hops, vec!["Sales".to_string(), "Products".to_string()]);
+            }
+            other => panic!("expected Traverse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_traverse_three_hops() {
+        let expr = parse_measure_expression(
+            "TRAVERSE(SUM(Sales[amount]), Sales -> Warehouse -> Products)",
+        )
+        .unwrap();
+        if let Expression::Traverse { path, .. } = expr {
+            assert_eq!(path.hops.len(), 3);
+        } else {
+            panic!("expected Traverse");
+        }
+    }
+
+    #[test]
+    fn traverse_single_hop_is_rejected() {
+        assert!(parse_measure_expression("TRAVERSE(SUM(Sales[amount]), Sales)").is_err());
+    }
+
+    #[test]
+    fn arrow_token_does_not_break_binary_minus() {
+        // `-` must still tokenize as subtraction when not followed by `>`.
+        let expr = parse_measure_expression("SUM(Sales[a]) - SUM(Sales[b])").unwrap();
+        assert!(matches!(expr, Expression::BinaryOp { .. }));
+    }
+
+    #[test]
+    fn traverse_render_reparses() {
+        use crate::compute::expression::expression_to_formula;
+        let src = "TRAVERSE(SUM(Sales[amount]), Sales -> Products)";
+        let parsed = parse_measure_expression(src).unwrap();
+        let rendered = expression_to_formula(&parsed, "Sales");
+        let reparsed = parse_measure_expression(&rendered).unwrap();
+        assert!(matches!(reparsed, Expression::Traverse { .. }));
     }
 }

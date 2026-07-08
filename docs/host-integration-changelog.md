@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 13; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 14; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -47,8 +47,29 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `11` | Dynamic row-level security — a role's `FilterPredicate` gained a `dynamic` field (`USERNAME()` / `CUSTOMDATA()` identity tokens). |
 | `12` | Context-driven calculated columns — model gained `context_columns` (a groupable column whose row-level expression resolves a scalar measure from the query's filter context). |
 | `13` | Query-scoped variables (`GVAR`) — the `Block` (VAR/RETURN) expression gained `query_scoped_bindings`: variables evaluated once per query filter context, ignoring the group-by axis. |
+| `14` | Persisted multi-source bindings — model gained `sources` (secret-free `PersistedSource` catalog); tables gained optional `source_binding` (`TableSourceBinding`: source id + schema + table). Also finalizes the presentation-only model metadata fields (`model_name`/`model_version`/`model_author`/`model_description`). |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
+
+---
+
+## Persisted multi-source bindings (format version 14)
+
+A model can now record **which data source each table comes from**, so a multi-source ("composite") model — including one that answers cross-source queries in Direct Query mode — can be saved and reopened without the host re-registering and re-binding every table by hand. The engine was already able to hold many connectors at once (`SourceRegistry` is a `Vec` of connectors, and a query spanning sources already falls back to a local cross-source join); this release makes that wiring **persistent, ergonomic, and secret-free**.
+
+- **Model JSON (`format_version` 14, additive).**
+  - The model gained `sources`: a catalog of `PersistedSource { id, kind, connection, preferred_auth, display_name? }`. `connection` is `PersistedConnection { host, port?, database, default_schema?, trust_server_certificate }` — the secret-free half of a `ConnectionTarget`. `preferred_auth` is an auth **kind** hint (`integrated` / `username_password` / `environment_variable`), never a credential. `kind` is one of `postgres` / `sql_server` / `in_memory` / `csv` / `parquet`.
+  - Each `Table` gained an optional `source_binding` (`TableSourceBinding { source_id, schema, table }`) naming the catalog source and the physical `(schema, table)` it maps to.
+  - Both fields are additive (serde `default` + `skip_serializing_if`); a pre-v14 file loads with an empty catalog and no bindings and behaves exactly as before (host wires sources at runtime). **No secrets are ever written** — only the connection target and the preferred-auth kind. Writing a model that uses these fields must stamp `format_version >= 14`.
+- **Public API — new types.** `PersistedSource`, `PersistedConnection`, `PersistedAuthKind`, `SourceKind`, `TableSourceBinding` (engine-core, re-exported from `bi_engine`); `SourceCredential` and `WireReport` (facade). `Table::with_source_binding` / `set_source_binding` / `source_binding`; `DataModel::sources` / `source` / `push_source`; `DataModelBuilder::add_source`; `AnyConnector::kind`; `SourceRegistry::add_connector_with_id` / `connector_index_by_source_id`.
+- **Public API — new facade methods.** Composite-model authoring: `Engine::add_postgres_source` / `add_sqlserver_source` (async) and `add_csv_source_with_id` / `add_parquet_source_with_id` / `add_in_memory_source_with_id` (sync) — each registers a connector under a stable id and records it in the catalog, returning the connector index; `Engine::bind_source_table` (bind one existing model table) and `Engine::bind_source_tables` (introspect a source, add missing tables, bind all). Reopen: `Engine::wire_sources(resolve)` and `Engine::wire_sources_with_auth(&map)` rebuild the live registry from the persisted catalog. The existing `add_postgres` / `add_sqlserver` / `add_*_source` / `bind_table` are unchanged (they simply do not persist).
+- **Behavior / semantics.** `load_model` and `set_model` open **no** connections and require no secrets — reconnection is an explicit `wire_sources` step where the host re-supplies each source's `AuthMethod` (which is never persisted). An in-memory source cannot be rebuilt from the descriptor (its data lives in the host), so it must be wired with `SourceCredential::Connector`; `wire_sources_with_auth` skips in-memory sources and reports them. A source the host chooses to `Skip` — or a table whose `source_binding` names an unwired/unknown source — leaves those tables **unbound** (reported in `WireReport.unbound_tables`); they fail closed at query time, unchanged, with `QueryError::SourceNotRegistered`.
+- **Errors the host can observe.** `EngineError::DuplicateName` (a source id already in the catalog). `EngineError::InvalidData` (a `source_binding` referencing an undeclared source — also rejected at `DataModel::build`/`validate`; an in-memory source given `SourceCredential::Auth`; binding to an unregistered source; or a connector connect/build failure, wrapping the underlying `ConnectorError` message such as `AuthMethodNotSupported`). Unchanged: `QueryError::SourceNotRegistered` for an unbound/unwired table at query time.
+- **Studio / Calcula action.** To persist a composite model, register sources with the `*_source*`/`*_with_id` methods (or add `PersistedSource`s and bind tables), then `save_model` (stamps v14). On open, call `wire_sources` (or `wire_sources_with_auth`) to reconnect, prompting the user for credentials per source, and treat any `unbound_tables` as "reconnect required" rather than a load failure.
+
+### Direct Query multi-source limitations (unchanged, documented)
+
+A model spanning multiple **live** sources answers cross-source joins by fetching each table from its own source and joining locally (no cross-source pushed aggregation). A few existing Direct-Query fail-closed rules specifically affect such models and are **not** changed here: filter-context time-intelligence (`YTD`/`PRIORYEAR`/…) requires the marked date table to be `InMemory` (a calendar in a live source is refused with `EngineError::TimeIntelligence`); row-level security requires an enforceable single-hop equi relationship to the role's table; and cross-source relationship filter-propagation is single-condition equi-only. Host models that need time-intelligence should mark the date table `InMemory`.
 
 ---
 

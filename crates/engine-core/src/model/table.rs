@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{EngineError, EngineResult};
 use crate::model::column::Column;
+use crate::model::source::TableSourceBinding;
 
 /// Controls how table data is sourced at query time.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +289,13 @@ pub struct Table {
     /// the cache. See [`IncrementalRefresh`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incremental_refresh: Option<IncrementalRefresh>,
+    /// Optional persisted binding to a data source location. Neutral strings
+    /// only (source id + schema + table); the engine facade translates it into
+    /// a live connector binding at wire time (`Engine::wire_sources`). `None`
+    /// for tables whose data the host supplies directly. Additive: pre-v14
+    /// model files simply have no binding here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_binding: Option<TableSourceBinding>,
 }
 
 impl Table {
@@ -316,6 +324,7 @@ impl Table {
             description: None,
             is_hidden: false,
             incremental_refresh: None,
+            source_binding: None,
         })
     }
 
@@ -353,6 +362,26 @@ impl Table {
     /// See [`Table::set_display_name`].
     pub fn set_hidden(&mut self, hidden: bool) {
         self.is_hidden = hidden;
+    }
+
+    /// Set the storage mode in place (unlike [`Table::with_storage_mode`],
+    /// which consumes `self`). Used by the model editor to toggle a table
+    /// between DirectQuery and InMemory.
+    pub fn set_storage_mode(&mut self, mode: StorageMode) {
+        self.storage_mode = mode;
+    }
+
+    /// Replace the table's refresh strategies in place (unlike the consuming
+    /// [`Table::with_refresh_strategy`], which appends one). Used by the model
+    /// editor to edit the strategy list. Only meaningful for InMemory tables.
+    pub fn set_refresh_strategies(&mut self, strategies: Vec<RefreshStrategy>) {
+        self.refresh_strategies = strategies;
+    }
+
+    /// Set (or clear) the incremental-refresh policy in place. Only meaningful
+    /// for InMemory tables.
+    pub fn set_incremental_refresh(&mut self, incremental: Option<IncrementalRefresh>) {
+        self.incremental_refresh = incremental;
     }
 
     /// Set the human-readable description of this table.
@@ -475,6 +504,29 @@ impl Table {
     /// Returns the incremental-refresh policy, if configured.
     pub fn incremental_refresh(&self) -> Option<&IncrementalRefresh> {
         self.incremental_refresh.as_ref()
+    }
+
+    /// Set the persisted data-source binding for this table.
+    ///
+    /// Records which persisted source (by id) and physical `(schema, table)`
+    /// location this model table's data comes from, so a multi-source model can
+    /// be saved and reopened. The facade rebuilds the live connector binding
+    /// from this at load time (`Engine::wire_sources`).
+    pub fn with_source_binding(mut self, binding: TableSourceBinding) -> Self {
+        self.source_binding = Some(binding);
+        self
+    }
+
+    /// Set (or clear) the persisted data-source binding in place (unlike the
+    /// consuming [`Table::with_source_binding`]). Used by the model editor and
+    /// by the facade's source-binding helpers.
+    pub fn set_source_binding(&mut self, binding: Option<TableSourceBinding>) {
+        self.source_binding = binding;
+    }
+
+    /// Returns the persisted data-source binding, if any.
+    pub fn source_binding(&self) -> Option<&TableSourceBinding> {
+        self.source_binding.as_ref()
     }
 
     /// Returns only the strategies that can be evaluated locally (no I/O).
