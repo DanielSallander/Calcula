@@ -5,15 +5,11 @@
 
 import React, { useState } from "react";
 import { biModelDeleteRelationship, biModelUpsertRelationship } from "@api";
-import type {
-  ModelOverview,
-  ModelRelationshipInfo,
-  RelationshipConditionDto,
-} from "@api";
+import type { ModelOverview, ModelRelationshipInfo, RelationshipConditionDto } from "@api";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { RelationshipDiagram } from "../diagram/RelationshipDiagram";
-import type { ColumnDropResult } from "../diagram/RelationshipDiagram";
+import type { ColumnDropResult, DiagramLayoutMode } from "../diagram/RelationshipDiagram";
 
 const CARDINALITIES = ["manyToOne", "oneToMany", "oneToOne", "manyToMany"];
 const JOIN_OPERATORS = ["=", ">", ">=", "<", "<="];
@@ -33,6 +29,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   const [editing, setEditing] = useState<EditState | null>(null);
   const [view, setView] = useState<"list" | "diagram">("list");
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>("auto");
 
   const handleDelete = async (r: ModelRelationshipInfo) => {
     if (!window.confirm(`Delete relationship '${r.name}'?`)) return;
@@ -49,7 +46,15 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   };
 
   const viewToggle = (
-    <div style={{ display: "flex", gap: 0, border: `1px solid #bbb`, borderRadius: 3, overflow: "hidden" }}>
+    <div
+      style={{
+        display: "flex",
+        gap: 0,
+        border: `1px solid #bbb`,
+        borderRadius: 3,
+        overflow: "hidden",
+      }}
+    >
       {(["list", "diagram"] as const).map((v) => (
         <button
           key={v}
@@ -63,6 +68,52 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
           onClick={() => setView(v)}
         >
           {v === "list" ? "List" : "Diagram"}
+        </button>
+      ))}
+    </div>
+  );
+
+  // Layout picker (diagram view only). "Auto" centers the fact table for
+  // star/snowflake models and falls back to a layered arrangement; the user can
+  // force either shape, or switch to "Free" to drag tables around manually.
+  const LAYOUT_OPTIONS: { mode: DiagramLayoutMode; label: string; title: string }[] = [
+    { mode: "auto", label: "Auto", title: "Auto: radial for star schemas, layered otherwise" },
+    { mode: "radial", label: "Radial", title: "Radial: fact table centered, dimensions orbiting" },
+    {
+      mode: "layered",
+      label: "Layered",
+      title: "Layered: dimensions flow into facts across columns",
+    },
+    {
+      mode: "free",
+      label: "Free",
+      title: "Free-float: drag tables around (starts from the current arrangement)",
+    },
+  ];
+  const layoutToggle = (
+    <div
+      style={{
+        display: "flex",
+        gap: 0,
+        border: `1px solid #bbb`,
+        borderRadius: 3,
+        overflow: "hidden",
+      }}
+    >
+      {LAYOUT_OPTIONS.map((opt) => (
+        <button
+          key={opt.mode}
+          title={opt.title}
+          style={{
+            ...styles.smallBtn,
+            border: "none",
+            borderRadius: 0,
+            background: layoutMode === opt.mode ? "#2f6fce" : "#fff",
+            color: layoutMode === opt.mode ? "#fff" : "#222",
+          }}
+          onClick={() => setLayoutMode(opt.mode)}
+        >
+          {opt.label}
         </button>
       ))}
     </div>
@@ -88,7 +139,12 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         <div style={styles.sectionHeader}>
           <span style={styles.sectionTitle}>Relationships ({overview.relationships.length})</span>
           {viewToggle}
-          <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
+          {layoutToggle}
+          <button
+            style={styles.btn}
+            disabled={readOnly}
+            onClick={() => setEditing({ original: null })}
+          >
             New
           </button>
         </div>
@@ -99,17 +155,16 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             selectedTable={selectedTable}
             onSelectTable={setSelectedTable}
             onEditRelationship={openEdit}
-            onColumnDrop={
-              readOnly
-                ? undefined
-                : (r) => setEditing({ original: null, prefill: r })
-            }
-            layoutKey={connectionId}
+            onColumnDrop={readOnly ? undefined : (r) => setEditing({ original: null, prefill: r })}
+            layoutMode={layoutMode}
           />
         </div>
         <div style={styles.hint}>
+          {layoutMode === "free"
+            ? "Free-float: drag a table's header to move it. "
+            : "The diagram is arranged automatically. "}
           Drag a column onto another table&apos;s column to create a relationship; double-click an
-          edge to edit it. Node positions are saved locally per connection.
+          edge to edit it.
         </div>
         {modal}
       </div>
@@ -119,11 +174,13 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0 }}>
       <div style={styles.sectionHeader}>
-        <span style={styles.sectionTitle}>
-          Relationships ({overview.relationships.length})
-        </span>
+        <span style={styles.sectionTitle}>Relationships ({overview.relationships.length})</span>
         {viewToggle}
-        <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
+        <button
+          style={styles.btn}
+          disabled={readOnly}
+          onClick={() => setEditing({ original: null })}
+        >
           New
         </button>
       </div>
@@ -136,7 +193,13 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         {overview.relationships.map((r) => (
           <div
             key={r.name}
-            style={{ ...styles.listRow, cursor: "default", display: "flex", alignItems: "center", gap: 8 }}
+            style={{
+              ...styles.listRow,
+              cursor: "default",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
           >
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -163,17 +226,24 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
                   </>
                 ) : (
                   <>
-                    {r.fromTable}[{r.conditions.map((c) => c.fromColumn).join(", ")}]
-                    {" -> "}
+                    {r.fromTable}[{r.conditions.map((c) => c.fromColumn).join(", ")}]{" -> "}
                     {r.toTable}[{r.conditions.map((c) => c.toColumn).join(", ")}]
                   </>
                 )}
               </div>
             </div>
-            <button style={styles.smallBtn} disabled={readOnly} onClick={() => setEditing({ original: r })}>
+            <button
+              style={styles.smallBtn}
+              disabled={readOnly}
+              onClick={() => setEditing({ original: r })}
+            >
               Edit
             </button>
-            <button style={styles.smallBtn} disabled={readOnly} onClick={() => void handleDelete(r)}>
+            <button
+              style={styles.smallBtn}
+              disabled={readOnly}
+              onClick={() => void handleDelete(r)}
+            >
               Delete
             </button>
           </div>
@@ -225,9 +295,7 @@ function RelationshipModal({
   );
   const [cardinality, setCardinality] = useState(original?.cardinality ?? "manyToOne");
   const [active, setActive] = useState(original?.active ?? true);
-  const [filterPropagation, setFilterPropagation] = useState(
-    original?.filterPropagation ?? "auto",
-  );
+  const [filterPropagation, setFilterPropagation] = useState(original?.filterPropagation ?? "auto");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -238,6 +306,39 @@ function RelationshipModal({
 
   const updateCondition = (index: number, patch: Partial<RelationshipConditionDto>) => {
     setConditions((cs) => cs.map((c, i) => (i === index ? { ...c, ...patch } : c)));
+  };
+
+  // Swap the two tables: exchange from/to tables + each condition's columns,
+  // mirror the join operators (a > b becomes b < a), and invert the cardinality.
+  const mirrorOperator = (op: string): string => {
+    switch (op) {
+      case ">":
+        return "<";
+      case ">=":
+        return "<=";
+      case "<":
+        return ">";
+      case "<=":
+        return ">=";
+      default:
+        return op; // "=" and "!=" are symmetric
+    }
+  };
+  const mirrorCardinality = (c: string): string =>
+    c === "manyToOne" ? "oneToMany" : c === "oneToMany" ? "manyToOne" : c;
+
+  const swapTables = () => {
+    const prevFrom = fromTable;
+    setFromTable(toTable);
+    setToTable(prevFrom);
+    setConditions((cs) =>
+      cs.map((c) => ({
+        fromColumn: c.toColumn,
+        toColumn: c.fromColumn,
+        operator: mirrorOperator(c.operator ?? "="),
+      })),
+    );
+    setCardinality(mirrorCardinality);
   };
 
   const canSave =
@@ -317,10 +418,17 @@ function RelationshipModal({
           placeholder="Sales_to_Date"
         />
       </Field>
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
         <Field label="From table (many side)" flex={1}>
           {tableSelect(fromTable, setFromTable, "fromColumn")}
         </Field>
+        <button
+          style={{ ...styles.btn, marginBottom: 8, flexShrink: 0 }}
+          title="Swap the two tables (also swaps join columns, mirrors operators, and inverts cardinality)"
+          onClick={swapTables}
+        >
+          ⇄
+        </button>
         <Field label="To table (one side)" flex={1}>
           {tableSelect(toTable, setToTable, "toColumn")}
         </Field>
@@ -413,7 +521,9 @@ function RelationshipModal({
             ))}
           </select>
         </Field>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 12 }}>
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginBottom: 12 }}
+        >
           <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
           Active
         </label>

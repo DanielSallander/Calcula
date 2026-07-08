@@ -756,6 +756,7 @@ pub(crate) fn capture_local_bi_connections(
                     model_table: b.model_table.clone(),
                     schema: b.schema.clone(),
                     source_table: b.source_table.clone(),
+                    source_query: b.source_query.clone(),
                 })
                 .collect(),
             calculated_measures: conn
@@ -956,6 +957,7 @@ pub(crate) fn restore_local_bi_connections(
                 model_table: b.model_table.clone(),
                 schema: b.schema.clone(),
                 source_table: b.source_table.clone(),
+                source_query: b.source_query.clone(),
             })
             .collect();
         let connection = Connection {
@@ -1849,7 +1851,10 @@ pub async fn bi_bind_table(
 
     {
         let mut engine = engine_arc.lock().await;
-        let binding = bi_engine::SourceBinding::new(&request.schema, &request.source_table);
+        let binding = match &request.source_query {
+            Some(sql) => bi_engine::SourceBinding::new_query(&request.model_table, sql),
+            None => bi_engine::SourceBinding::new(&request.schema, &request.source_table),
+        };
         engine.bind_table(&request.model_table, connector_index, binding);
     }
 
@@ -2949,14 +2954,25 @@ pub async fn auto_bind_tables_on_connection(
     for table_name in table_names {
         if !engine.registry().has_table(table_name) {
             // Check stored bindings first for the correct schema/source_table
-            let (schema, source_table) = stored_bindings.iter()
-                .find(|b| b.model_table.eq_ignore_ascii_case(table_name))
-                .map(|b| (b.schema.as_str(), b.source_table.as_str()))
-                .unwrap_or(("BI", *table_name));
-            let source_table_lower = source_table.to_lowercase();
-            let binding = bi_engine::SourceBinding::new(schema, &source_table_lower);
+            // (or a SQL-query source, which binds as a wrapped subquery).
+            let stored = stored_bindings
+                .iter()
+                .find(|b| b.model_table.eq_ignore_ascii_case(table_name));
+            let binding = match stored.and_then(|b| b.source_query.clone()) {
+                Some(sql) => {
+                    log_info!("BI", "auto_bind: conn={}, {} -> (sql source)", connection_id, table_name);
+                    bi_engine::SourceBinding::new_query(*table_name, sql)
+                }
+                None => {
+                    let (schema, source_table) = stored
+                        .map(|b| (b.schema.as_str(), b.source_table.as_str()))
+                        .unwrap_or(("BI", *table_name));
+                    let source_table_lower = source_table.to_lowercase();
+                    log_info!("BI", "auto_bind: conn={}, {} -> {}.{}", connection_id, table_name, schema, source_table_lower);
+                    bi_engine::SourceBinding::new(schema, &source_table_lower)
+                }
+            };
             engine.bind_table(*table_name, connector_index, binding);
-            log_info!("BI", "auto_bind: conn={}, {} -> {}.{}", connection_id, table_name, schema, source_table_lower);
         }
     }
 

@@ -407,6 +407,10 @@ pub struct PackageBinding {
     pub schema: String,
     /// Physical table name in the database.
     pub source_table: String,
+    /// When set, the table's rows come from this SQL SELECT (a wrapped subquery)
+    /// rather than `schema.source_table`. Defaulted so older packages load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_query: Option<String>,
 }
 
 /// Subscriber-local connection configuration for a data source.

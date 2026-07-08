@@ -6,17 +6,13 @@
 import React, { useEffect, useState } from "react";
 import {
   biModelDeleteCalcColumn,
+  biModelDeleteTable,
   biModelRefreshTable,
   biModelSetTableRefresh,
   biModelSetTableStorageMode,
   biModelUpdateTable,
 } from "@api";
-import type {
-  ModelColumnInfo,
-  ModelOverview,
-  ModelTableInfo,
-  RefreshStrategyDto,
-} from "@api";
+import type { ModelColumnInfo, ModelOverview, ModelTableInfo, RefreshStrategyDto } from "@api";
 
 const STORAGE_MODES = ["DirectQuery", "InMemory"];
 const STRATEGY_TYPES = [
@@ -28,6 +24,7 @@ const STRATEGY_TYPES = [
 import { Badge, Field, SELECTION_BG, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
+import { SqlEditorModal } from "../SqlEditorModal";
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -37,11 +34,14 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   const [physicalEdit, setPhysicalEdit] = useState<ModelColumnInfo | null>(null);
   const [calcEdit, setCalcEdit] = useState<{ existing: ModelColumnInfo | null } | null>(null);
 
-  useEffect(() => {
-    setSelectedName((prev) =>
-      prev && tables.some((t) => t.name === prev) ? prev : (tables[0]?.name ?? null),
-    );
-  }, [tables]);
+  // Keep the selection valid when the table set changes (e.g. a table was just
+  // deleted or imported) — the render-time "adjust state on prop change" pattern
+  // rather than a useEffect.
+  const selectionValid = selectedName !== null && tables.some((t) => t.name === selectedName);
+  if (!selectionValid) {
+    const next = tables[0]?.name ?? null;
+    if (next !== selectedName) setSelectedName(next);
+  }
 
   const table = tables.find((t) => t.name === selectedName) ?? null;
 
@@ -135,8 +135,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                   {table.columns.map((c) => (
                     <tr key={c.name}>
                       <td style={styles.td}>
-                        <strong>{c.name}</strong>{" "}
-                        {c.isCalculated && <Badge tone="ok">calc</Badge>}
+                        <strong>{c.name}</strong> {c.isCalculated && <Badge tone="ok">calc</Badge>}
                       </td>
                       <td style={styles.td}>{c.dataType}</td>
                       <td style={styles.td}>{c.displayName ?? ""}</td>
@@ -197,6 +196,8 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
           connectionId={connectionId}
           table={table.name}
           column={physicalEdit}
+          siblingColumns={table.columns.map((c) => c.name)}
+          overview={overview}
           onClose={() => setPhysicalEdit(null)}
           onSaved={(o) => {
             applyOverview(o);
@@ -293,6 +294,23 @@ function TableMetaForm({
     }
   };
 
+  const deleteTable = async () => {
+    if (
+      !window.confirm(
+        `Delete table '${table.name}' from the model? Any relationships that reference it are also removed.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      applyOverview(await biModelDeleteTable(connectionId, table.name));
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={styles.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -328,6 +346,14 @@ function TableMetaForm({
         >
           Refresh data
         </button>
+        <button
+          style={{ ...styles.smallBtn, color: "#a4262c" }}
+          disabled={readOnly || busy}
+          title="Remove this table from the model"
+          onClick={() => void deleteTable()}
+        >
+          Delete table
+        </button>
       </div>
       {refreshMsg && <div style={{ ...styles.hint, marginBottom: 6 }}>{refreshMsg}</div>}
       <div style={{ display: "flex", gap: 8 }}>
@@ -357,11 +383,7 @@ function TableMetaForm({
           Hidden
         </label>
         <div style={{ flex: 1 }} />
-        <button
-          style={styles.primaryBtn}
-          disabled={readOnly || busy}
-          onClick={() => void save()}
-        >
+        <button style={styles.primaryBtn} disabled={readOnly || busy} onClick={() => void save()}>
           {busy ? "Saving…" : "Save table"}
         </button>
       </div>
@@ -387,7 +409,15 @@ interface StrategyDraft {
 }
 
 function emptyStrategyDraft(): StrategyDraft {
-  return { type: "interval", secs: "3600", column: "", hour: "6", minute: "0", sql: "", sourceTable: "" };
+  return {
+    type: "interval",
+    secs: "3600",
+    column: "",
+    hour: "6",
+    minute: "0",
+    sql: "",
+    sourceTable: "",
+  };
 }
 
 function strategyDtoToDraft(d: RefreshStrategyDto): StrategyDraft {
@@ -435,6 +465,7 @@ function RefreshStrategyCard({
   );
   const [incr, setIncr] = useState(table.incrementalRefresh ?? "");
   const [busy, setBusy] = useState(false);
+  const [sqlEditIndex, setSqlEditIndex] = useState<number | null>(null);
 
   // Re-seed when the selected table (or a saved overview) changes.
   useEffect(() => {
@@ -471,8 +502,8 @@ function RefreshStrategyCard({
     <div style={{ ...styles.card, marginTop: 10 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>Refresh strategies</div>
       <div style={{ ...styles.hint, marginBottom: 8 }}>
-        Evaluated on each query — a table a strategy marks stale is re-fetched from source
-        before the query runs. No strategy = cache once, reuse until manually refreshed.
+        Evaluated on each query — a table a strategy marks stale is re-fetched from source before
+        the query runs. No strategy = cache once, reuse until manually refreshed.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {drafts.length === 0 && <div style={styles.hint}>No strategies.</div>}
@@ -530,12 +561,24 @@ function RefreshStrategyCard({
               </label>
             )}
             {s.type === "sourceQuery" && (
-              <input
-                style={{ ...styles.input, flex: 1, minWidth: 160 }}
-                value={s.sql}
-                placeholder="SELECT MAX(loaded_at) FROM etl_log …"
-                onChange={(e) => update(i, { sql: e.target.value })}
-              />
+              <button
+                style={{
+                  ...styles.input,
+                  flex: 1,
+                  minWidth: 160,
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontFamily: "Consolas, monospace",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color: s.sql.trim() ? "#222" : "#999",
+                }}
+                title="Edit the source query"
+                onClick={() => setSqlEditIndex(i)}
+              >
+                {s.sql.trim() ? s.sql.trim() : "Write the source query…"}
+              </button>
             )}
             <button
               style={styles.smallBtn}
@@ -569,6 +612,19 @@ function RefreshStrategyCard({
           {busy ? "Saving…" : "Save refresh strategies"}
         </button>
       </div>
+
+      {sqlEditIndex !== null && (
+        <SqlEditorModal
+          title={`Source query — ${table.name}`}
+          initialSql={drafts[sqlEditIndex]?.sql ?? ""}
+          hint="Runs against the source; must return a single scalar (one row, one column). A changed value triggers a refresh. e.g. SELECT MAX(loaded_at) FROM etl_log WHERE table_name = 'products'"
+          onClose={() => setSqlEditIndex(null)}
+          onSave={(sql) => {
+            update(sqlEditIndex, { sql });
+            setSqlEditIndex(null);
+          }}
+        />
+      )}
     </div>
   );
 }

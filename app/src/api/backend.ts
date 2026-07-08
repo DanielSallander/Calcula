@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { CellData, DimensionData, FormattingResult } from "../core/types";
 
 // ============================================================================
@@ -3629,6 +3630,12 @@ export interface ModelColumnInfo {
   isHidden: boolean;
   isCalculated: boolean;
   formula: string | null;
+  /** Lookup resolution expression (physical columns only). */
+  lookupResolution: string | null;
+  /** Column to sort this column's values by (physical columns only). */
+  sortByColumn: string | null;
+  /** Excel-style number format applied to this column's values in pivots. */
+  formatString: string | null;
 }
 
 /** One InMemory refresh strategy (`type`-discriminated; only the fields for
@@ -3872,6 +3879,9 @@ export async function biModelUpdateColumn(params: {
   displayName?: string | null;
   description?: string | null;
   isHidden: boolean;
+  lookupResolution?: string | null;
+  sortByColumn?: string | null;
+  formatString?: string | null;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_update_column", {
     connectionId: params.connectionId,
@@ -3880,6 +3890,9 @@ export async function biModelUpdateColumn(params: {
     displayName: params.displayName ?? null,
     description: params.description ?? null,
     isHidden: params.isHidden,
+    lookupResolution: params.lookupResolution ?? null,
+    sortByColumn: params.sortByColumn ?? null,
+    formatString: params.formatString ?? null,
   });
 }
 
@@ -4434,6 +4447,26 @@ export async function biModelImportTables(
   return invoke<ModelOverview>("bi_model_import_tables", { connectionId, tables });
 }
 
+/** Import a table whose rows come from a SQL SELECT (wrapped as a subquery so
+ *  downstream filters/measures compose on top of it). Introspects the result
+ *  columns, adds an InMemory table, and returns the refreshed overview. */
+export async function biModelImportSqlSource(
+  connectionId: string,
+  tableName: string,
+  sql: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_import_sql_source", { connectionId, tableName, sql });
+}
+
+/** Remove a table from the model (cascade-drops relationships referencing it).
+ *  Fails if a measure/column still references the table. */
+export async function biModelDeleteTable(
+  connectionId: string,
+  tableName: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_table", { connectionId, tableName });
+}
+
 /** Create a NEW blank model as a path-less connection (embedded from birth). */
 export async function biModelCreateBlank(
   name: string,
@@ -4454,6 +4487,48 @@ export async function biModelTestConnection(connectionString: string): Promise<s
 /** Live-connect a connection by its stored connection string (PostgreSQL). */
 export async function biModelConnect(connectionId: string): Promise<ConnectionInfo> {
   return invoke<ConnectionInfo>("bi_model_connect", { connectionId });
+}
+
+/** Export a connection's model to a user-chosen file as a ModelBundle
+ *  (`{ formatVersion, model }`, Studio-compatible). Opens a native save dialog;
+ *  returns the written path, or null if the user cancelled. The model still
+ *  lives in the workbook — this writes a standalone copy for sharing. */
+export async function biModelExportToFile(
+  connectionId: string,
+  defaultName?: string,
+): Promise<string | null> {
+  const stem = (defaultName ?? "model").replace(/[\\/:*?"<>|]+/g, "_").trim() || "model";
+  const path = await saveFileDialog({
+    title: "Export Model",
+    defaultPath: `${stem}.json`,
+    filters: [{ name: "Calcula Model", extensions: ["json"] }],
+  });
+  if (!path) return null;
+  await invoke<void>("bi_model_export_to_file", { connectionId, path });
+  return path;
+}
+
+/** Import a model from a user-chosen file (a raw DataModel or a Studio
+ *  ModelBundle) as a new workbook-embedded connection. Opens a native open
+ *  dialog; returns the new connection, or null if the user cancelled. */
+export async function biModelImportFromFile(): Promise<ConnectionInfo | null> {
+  const selected = await openFileDialog({
+    title: "Import Model",
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Calcula Model", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+  if (typeof selected !== "string") return null;
+  const stem =
+    selected
+      .split(/[\\/]/)
+      .pop()
+      ?.replace(/\.[^.]+$/, "") ?? "";
+  const name = stem.trim() || "Imported Model";
+  return invoke<ConnectionInfo>("bi_model_import_from_file", { name, path: selected });
 }
 
 /** Delete a connection by ID. */

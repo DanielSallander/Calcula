@@ -4,10 +4,17 @@
 //          (embedded, path-less connection).
 
 import React, { useEffect, useState } from "react";
-import { biModelImportTables, biModelListSourceTables } from "@api";
+import { biModelImportSqlSource, biModelImportTables, biModelListSourceTables } from "@api";
 import type { ConnectionInfo, ModelOverview, SourceTableInfo } from "@api";
 import { styles } from "../editorShared";
 import { NewModelDialog } from "../NewModelDialog";
+import { SqlEditorModal } from "../SqlEditorModal";
+
+/** First non-empty line of a query, truncated for an inline preview. */
+function firstLine(sql: string): string {
+  const line = sql.trim().split("\n")[0] ?? "";
+  return line.length > 60 ? `${line.slice(0, 58)}…` : line;
+}
 
 export function ImportSection({
   connectionId,
@@ -29,6 +36,13 @@ export function ImportSection({
   const [listing, setListing] = useState(false);
   const [importing, setImporting] = useState(false);
 
+  // ── SQL query source ──────────────────────────────────────────────────────
+  const [sqlName, setSqlName] = useState("");
+  const [sqlText, setSqlText] = useState("");
+  const [sqlImporting, setSqlImporting] = useState(false);
+  const [sqlError, setSqlError] = useState<string | null>(null);
+  const [showSqlEditor, setShowSqlEditor] = useState(false);
+
   // ── New model dialog ──────────────────────────────────────────────────────
   const [showNew, setShowNew] = useState(false);
 
@@ -36,6 +50,10 @@ export function ImportSection({
     setSource(null);
     setSourceError(null);
     setChecked(new Set());
+    setSqlName("");
+    setSqlText("");
+    setSqlError(null);
+    setShowSqlEditor(false);
   }, [connectionId]);
 
   const keyOf = (t: { schema: string; name: string }): string => `${t.schema}.${t.name}`;
@@ -62,14 +80,29 @@ export function ImportSection({
     try {
       applyOverview(await biModelImportTables(connectionId, tables));
       // Mark the imported tables locally instead of re-hitting the database.
-      setSource((prev) =>
-        prev?.map((t) => (checked.has(keyOf(t)) ? { ...t, imported: true } : t)) ?? null,
+      setSource(
+        (prev) => prev?.map((t) => (checked.has(keyOf(t)) ? { ...t, imported: true } : t)) ?? null,
       );
       setChecked(new Set());
     } catch (err: unknown) {
       reportError(err);
     } finally {
       setImporting(false);
+    }
+  };
+
+  const importSqlSource = async () => {
+    if (!sqlName.trim() || !sqlText.trim()) return;
+    setSqlImporting(true);
+    setSqlError(null);
+    try {
+      applyOverview(await biModelImportSqlSource(connectionId, sqlName.trim(), sqlText));
+      setSqlName("");
+      setSqlText("");
+    } catch (err: unknown) {
+      setSqlError(String(err));
+    } finally {
+      setSqlImporting(false);
     }
   };
 
@@ -88,8 +121,8 @@ export function ImportSection({
       <div style={{ ...styles.card, maxWidth: 560 }}>
         <div style={{ fontWeight: 600, marginBottom: 6 }}>Import tables</div>
         <div style={{ ...styles.hint, marginBottom: 8 }}>
-          Pull table schemas from the current connection&apos;s source database
-          into the model (introspect, append and bind).
+          Pull table schemas from the current connection&apos;s source database into the model
+          (introspect, append and bind).
         </div>
         <button
           style={styles.btn}
@@ -107,9 +140,8 @@ export function ImportSection({
           <div style={{ marginTop: 8, fontSize: 12, color: "#a4262c" }}>
             <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{sourceError}</div>
             <div style={{ ...styles.hint, marginTop: 4 }}>
-              Listing source tables requires a live database connection. Connect
-              this connection via Data &gt; Connections in the main window, then
-              try again.
+              Listing source tables requires a live database connection. Connect this connection via
+              Data &gt; Connections in the main window, then try again.
             </div>
           </div>
         )}
@@ -180,7 +212,54 @@ export function ImportSection({
         )}
       </div>
 
-      {/* ── Card 2: New model ─────────────────────────────────────────────── */}
+      {/* ── Card 2: SQL query source ──────────────────────────────────────── */}
+      <div style={{ ...styles.card, maxWidth: 560 }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>SQL query source</div>
+        <div style={{ ...styles.hint, marginBottom: 8 }}>
+          Define a table from a SQL <code>SELECT</code> instead of a physical table — e.g. to
+          pre-filter rows, join, or import the same table twice under different names. Every
+          downstream filter and measure composes on top of this query (the engine wraps it as a
+          subquery). Loaded in-memory.
+        </div>
+        <input
+          style={{ ...styles.input, marginBottom: 8 }}
+          placeholder="Table name (e.g. RecentSales)"
+          value={sqlName}
+          disabled={!connectionId || readOnly || sqlImporting}
+          onChange={(e) => setSqlName(e.target.value)}
+        />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <button
+            style={styles.btn}
+            disabled={!connectionId || readOnly || sqlImporting}
+            onClick={() => setShowSqlEditor(true)}
+          >
+            {sqlText.trim() ? "Edit SQL query…" : "Write SQL query…"}
+          </button>
+          <span style={{ ...styles.muted, fontSize: 12, minWidth: 0, flex: 1 }}>
+            {sqlText.trim() ? firstLine(sqlText) : "No query written yet."}
+          </span>
+        </div>
+        {sqlError && (
+          <div style={{ marginBottom: 8, fontSize: 12, color: "#a4262c", whiteSpace: "pre-wrap" }}>
+            {sqlError}
+          </div>
+        )}
+        <button
+          style={styles.primaryBtn}
+          disabled={!connectionId || readOnly || sqlImporting || !sqlName.trim() || !sqlText.trim()}
+          onClick={() => void importSqlSource()}
+        >
+          {sqlImporting ? "Importing…" : "Import SQL source"}
+        </button>
+        {!connectionId && (
+          <div style={{ ...styles.hint, marginTop: 6 }}>
+            Select a connection first. A live database connection is required.
+          </div>
+        )}
+      </div>
+
+      {/* ── Card 3: New model ─────────────────────────────────────────────── */}
       <div style={{ ...styles.card, maxWidth: 560 }}>
         <div style={{ fontWeight: 600, marginBottom: 6 }}>New model</div>
         <div style={{ ...styles.hint, marginBottom: 8 }}>
@@ -198,6 +277,23 @@ export function ImportSection({
           onCreated={(conn) => {
             setShowNew(false);
             onModelCreated(conn);
+          }}
+        />
+      )}
+
+      {showSqlEditor && (
+        <SqlEditorModal
+          title={sqlName.trim() ? `SQL source: ${sqlName.trim()}` : "SQL query source"}
+          initialSql={sqlText}
+          hint={
+            "A single SELECT (or WITH …) that becomes the table's source. The engine wraps it as " +
+            "(…) AS t, so every downstream filter and measure composes on top of it."
+          }
+          onClose={() => setShowSqlEditor(false)}
+          onSave={(sql) => {
+            setSqlText(sql);
+            setSqlError(null);
+            setShowSqlEditor(false);
           }}
         />
       )}

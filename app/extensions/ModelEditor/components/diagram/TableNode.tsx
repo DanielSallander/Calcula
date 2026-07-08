@@ -1,13 +1,22 @@
 // FILENAME: app/extensions/ModelEditor/components/diagram/TableNode.tsx
-// PURPOSE: One draggable table node in the relationship diagram. Ported from
-//          Calcula Studio's diagram/TableNode: header is the drag handle,
-//          columns are drag sources for creating relationships. Memoized so
-//          moving one table re-renders only that node.
+// PURPOSE: One table node in the relationship diagram. Sized to fit its header
+//          and columns (getNodeWidth). Clicking selects the table; columns are
+//          drag sources for creating relationships. In Free-float layout mode the
+//          header is also a drag handle (onHeaderMouseDown), letting the user
+//          reposition the node. Memoized so a re-layout re-renders only moved
+//          nodes.
 
 import React, { memo } from "react";
 import type { ModelTableInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
-import { HEADER_HEIGHT, NODE_WIDTH, ROW_HEIGHT, getNodeHeight } from "./nodeGeometry";
+import {
+  columnLabel,
+  getNodeHeight,
+  getNodeWidth,
+  headerLabel,
+  HEADER_HEIGHT,
+  ROW_HEIGHT,
+} from "./nodeGeometry";
 
 export interface ColumnDragInfo {
   tableName: string;
@@ -21,8 +30,9 @@ interface TableNodeProps {
   isSelected: boolean;
   // Callbacks receive the table name so parents can pass stable handlers (the
   // component is memoized — fresh closures per render would defeat it).
-  onMouseDown: (tableName: string, e: React.MouseEvent) => void;
   onSelect: (tableName: string) => void;
+  /** Free-float mode only: drag the header to reposition the node. */
+  onHeaderMouseDown?: (tableName: string, e: React.MouseEvent) => void;
   onColumnDragStart?: (info: ColumnDragInfo, e: React.MouseEvent) => void;
   dragOverColumn?: ColumnDragInfo | null;
   isDragSource?: ColumnDragInfo | null;
@@ -33,50 +43,55 @@ export const TableNode = memo(function TableNode({
   x,
   y,
   isSelected,
-  onMouseDown,
   onSelect,
+  onHeaderMouseDown,
   onColumnDragStart,
   dragOverColumn,
   isDragSource,
 }: TableNodeProps): React.ReactElement {
   const height = getNodeHeight(table);
+  const width = getNodeWidth(table);
   const isInMemory = table.storageMode === "InMemory";
-  const handleHeaderMouseDown = (e: React.MouseEvent) => onMouseDown(table.name, e);
 
   const headerFill = isSelected ? C.accent : isInMemory ? C.inMemoryHeader : C.bgSurfaceHover;
   const borderColor = isSelected ? C.accent : isInMemory ? C.inMemoryBorder : C.border;
 
+  const headerCursor = onHeaderMouseDown ? "grab" : "pointer";
+  const handleHeaderMouseDown = onHeaderMouseDown
+    ? (e: React.MouseEvent) => onHeaderMouseDown(table.name, e)
+    : undefined;
+
   return (
     <g transform={`translate(${x}, ${y})`} onClick={() => onSelect(table.name)}>
       <rect
-        width={NODE_WIDTH}
+        width={width}
         height={height}
         rx={6}
         fill={C.bgSurface}
         stroke={borderColor}
         strokeWidth={isSelected ? 2 : 1}
       />
-      {/* Header — drag handle for moving the table. */}
+      {/* Header — click to select the table (drag to move in Free-float mode). */}
       <rect
-        width={NODE_WIDTH}
+        width={width}
         height={HEADER_HEIGHT}
         rx={6}
         fill={headerFill}
         onMouseDown={handleHeaderMouseDown}
-        style={{ cursor: "grab" }}
+        style={{ cursor: headerCursor }}
       />
       <rect
         y={HEADER_HEIGHT - 6}
-        width={NODE_WIDTH}
+        width={width}
         height={6}
         fill={headerFill}
         onMouseDown={handleHeaderMouseDown}
-        style={{ cursor: "grab" }}
+        style={{ cursor: headerCursor }}
       />
       {isInMemory && (
         <g>
           <rect
-            x={NODE_WIDTH - 30}
+            x={width - 30}
             y={5}
             width={22}
             height={16}
@@ -85,7 +100,7 @@ export const TableNode = memo(function TableNode({
             opacity={0.9}
           />
           <text
-            x={NODE_WIDTH - 19}
+            x={width - 19}
             y={13}
             textAnchor="middle"
             dominantBaseline="central"
@@ -106,11 +121,9 @@ export const TableNode = memo(function TableNode({
         fontSize={12}
         fontWeight={600}
         onMouseDown={handleHeaderMouseDown}
-        style={{ cursor: "grab" }}
+        style={{ cursor: headerCursor }}
       >
-        {table.name.length > (isInMemory ? 16 : 20)
-          ? table.name.slice(0, isInMemory ? 14 : 18) + ".."
-          : table.name}
+        {headerLabel(table, width)}
       </text>
       {/* Columns. */}
       {table.columns.length === 0 ? (
@@ -143,12 +156,12 @@ export const TableNode = memo(function TableNode({
               }}
               style={{ cursor: onColumnDragStart ? "crosshair" : "default" }}
             >
-              <rect x={0} y={0} width={NODE_WIDTH} height={ROW_HEIGHT} fill="transparent" />
+              <rect x={0} y={0} width={width} height={ROW_HEIGHT} fill="transparent" />
               {(isOver || isSource) && (
                 <rect
                   x={1}
                   y={0}
-                  width={NODE_WIDTH - 2}
+                  width={width - 2}
                   height={ROW_HEIGHT}
                   fill={isOver ? C.accent : C.bgSurfaceHover}
                   opacity={isOver ? 0.25 : 0.5}
@@ -165,11 +178,11 @@ export const TableNode = memo(function TableNode({
                 fontWeight={isOver ? 600 : 400}
                 style={{ pointerEvents: "none" }}
               >
-                {col.name.length > 14 ? col.name.slice(0, 12) + ".." : col.name}
+                {columnLabel(col, width)}
               </text>
               {col.isCalculated && (
                 <text
-                  x={NODE_WIDTH - 52}
+                  x={width - 52}
                   y={ROW_HEIGHT / 2}
                   dominantBaseline="central"
                   textAnchor="end"
@@ -182,7 +195,7 @@ export const TableNode = memo(function TableNode({
                 </text>
               )}
               <text
-                x={NODE_WIDTH - 10}
+                x={width - 10}
                 y={ROW_HEIGHT / 2}
                 dominantBaseline="central"
                 textAnchor="end"

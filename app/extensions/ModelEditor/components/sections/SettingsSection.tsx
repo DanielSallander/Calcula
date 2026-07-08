@@ -9,6 +9,16 @@ import { biModelSetDateTable, biModelSetDefaultLookupResolution, biModelSetMetad
 import { Field, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 
+// The model-level default lookup resolution must be a `__column`-generic
+// expression (measure syntax). Common choices as presets — including the
+// "single value, else #" fallback (the friendly way to get a "#").
+const LOOKUP_PRESETS: { value: string; label: string }[] = [
+  { value: "", label: "Built-in default (MIN / SELECTEDVALUE)" },
+  { value: "MIN(__column)", label: "Minimum value — MIN(__column)" },
+  { value: "MAX(__column)", label: "Maximum value — MAX(__column)" },
+  { value: 'SELECTEDVALUE(__column, "#")', label: 'Single value, else # — SELECTEDVALUE(__column, "#")' },
+];
+
 export function SettingsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [busy, setBusy] = useState(false);
@@ -120,15 +130,35 @@ export function SettingsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 
         <Field
           label="Default lookup resolution"
-          hint="Expression used to resolve a lookup column when it has no per-column resolution (defaults to MIN)."
+          hint={
+            'A column-generic expression using the __column placeholder, applied when a lookup ' +
+            'column has no per-column resolution. It must reference __column (a bare constant is ' +
+            'not allowed — it would hide every value). Examples: MIN(__column), MAX(__column), ' +
+            'SELECTEDVALUE(__column, "#") (single value, else #). Blank = built-in default.'
+          }
         >
+          <select
+            style={{ ...styles.input, marginBottom: 6 }}
+            disabled={disabled}
+            value={LOOKUP_PRESETS.some((p) => p.value === lookupDraft) ? lookupDraft : "__custom__"}
+            onChange={(e) => {
+              if (e.target.value !== "__custom__") setLookupDraft(e.target.value);
+            }}
+          >
+            {LOOKUP_PRESETS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+            <option value="__custom__">Custom…</option>
+          </select>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <input
               style={{ ...styles.input, flex: 1, minWidth: 0 }}
               disabled={disabled}
               value={lookupDraft}
               onChange={(e) => setLookupDraft(e.target.value)}
-              placeholder="MIN"
+              placeholder='MIN(__column) or SELECTEDVALUE(__column, "#")'
             />
             <button
               style={styles.btn}

@@ -220,6 +220,10 @@ pub struct SavedBiBinding {
     pub model_table: String,
     pub schema: String,
     pub source_table: String,
+    /// When set, the table's rows come from this SQL SELECT rather than
+    /// `schema.source_table`. Defaulted so older workbooks load unchanged.
+    #[serde(default)]
+    pub source_query: Option<String>,
 }
 
 /// A persisted RLS "view as" role selection for one BI connection.

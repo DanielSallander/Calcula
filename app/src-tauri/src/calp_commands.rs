@@ -6667,6 +6667,7 @@ fn load_embedded_data_sources(
                 model_table: b.model_table.clone(),
                 schema: b.schema.clone(),
                 source_table: b.source_table.clone(),
+                source_query: b.source_query.clone(),
             }
         }).collect();
 
@@ -7025,6 +7026,7 @@ fn capture_bi_data_sources(
                 model_table: b.model_table.clone(),
                 schema: b.schema.clone(),
                 source_table: b.source_table.clone(),
+                source_query: b.source_query.clone(),
             }
         }).collect();
 

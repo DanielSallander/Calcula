@@ -7,6 +7,7 @@ import React, { useState } from "react";
 import { biModelUpdateColumn, biModelUpsertCalcColumn } from "@api";
 import type { ModelColumnInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
+import { ExpressionEditorModal } from "../ExpressionEditorModal";
 
 export const CALC_COLUMN_DATA_TYPES = [
   "String",
@@ -18,6 +19,22 @@ export const CALC_COLUMN_DATA_TYPES = [
   "Timestamp",
 ];
 
+// Excel-style number formats applied to a column's values in pivots (the pivot
+// renderer honors the column's format string via result-column metadata).
+const FORMAT_PRESETS: { value: string; label: string }[] = [
+  { value: "", label: "General" },
+  { value: "0", label: "Integer (1235)" },
+  { value: "#,##0", label: "Integer, grouped (1,235)" },
+  { value: "#,##0.00", label: "Number (1,234.50)" },
+  { value: "$#,##0.00", label: "Currency ($1,234.50)" },
+  { value: "[$SEK] #,##0.00", label: "Currency (SEK 1,234.50)" },
+  { value: "0.0%", label: "Percent (12.3%)" },
+  { value: "0.00%", label: "Percent (12.35%)" },
+  { value: "yyyy-mm-dd", label: "Date (2024-12-31)" },
+  { value: "yyyy-mm-dd hh:mm", label: "Date-time" },
+];
+const CUSTOM_FORMAT = "__custom__";
+
 // ============================================================================
 // Physical column metadata
 // ============================================================================
@@ -26,20 +43,32 @@ export function PhysicalColumnModal({
   connectionId,
   table,
   column,
+  siblingColumns,
+  overview,
   onClose,
   onSaved,
 }: {
   connectionId: string;
   table: string;
   column: ModelColumnInfo;
+  /** Other column names of this table (for the sort-by dropdown). */
+  siblingColumns: string[];
+  /** The model — feeds the lookup-expression editor's completion/hover. */
+  overview: ModelOverview;
   onClose: () => void;
   onSaved: (overview: ModelOverview) => void;
 }): React.ReactElement {
   const [displayName, setDisplayName] = useState(column.displayName ?? "");
   const [description, setDescription] = useState(column.description ?? "");
   const [isHidden, setIsHidden] = useState(column.isHidden);
+  const [lookupResolution, setLookupResolution] = useState(column.lookupResolution ?? "");
+  const [sortByColumn, setSortByColumn] = useState(column.sortByColumn ?? "");
+  const [format, setFormat] = useState(column.formatString ?? "");
+  const [lookupEditorOpen, setLookupEditorOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const formatIsPreset = FORMAT_PRESETS.some((p) => p.value === format);
 
   const save = async () => {
     setBusy(true);
@@ -53,6 +82,9 @@ export function PhysicalColumnModal({
           displayName: displayName.trim() || null,
           description: description.trim() || null,
           isHidden,
+          lookupResolution: lookupResolution.trim() || null,
+          sortByColumn: sortByColumn.trim() || null,
+          formatString: format.trim() || null,
         }),
       );
     } catch (err: unknown) {
@@ -100,7 +132,87 @@ export function PhysicalColumnModal({
         />
         Hidden
       </label>
+
+      <Field
+        label="Number format"
+        hint="Excel-style format applied to this column's values in pivots."
+      >
+        <div style={{ display: "flex", gap: 6 }}>
+          <select
+            style={{ ...styles.input, flex: 1, minWidth: 0 }}
+            value={formatIsPreset ? format : CUSTOM_FORMAT}
+            onChange={(e) => {
+              if (e.target.value !== CUSTOM_FORMAT) setFormat(e.target.value);
+            }}
+          >
+            {FORMAT_PRESETS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+            <option value={CUSTOM_FORMAT}>Custom…</option>
+          </select>
+          <input
+            style={{ ...styles.input, flex: 1, minWidth: 0 }}
+            value={format}
+            placeholder="e.g. #,##0.00"
+            onChange={(e) => setFormat(e.target.value)}
+          />
+        </div>
+      </Field>
+
+      <Field
+        label="Sort by column"
+        hint="Order this column's values by another column (e.g. MonthName sorted by MonthNumber)."
+      >
+        <select
+          style={styles.input}
+          value={siblingColumns.includes(sortByColumn) ? sortByColumn : ""}
+          onChange={(e) => setSortByColumn(e.target.value)}
+        >
+          <option value="">(natural — its own values)</option>
+          {siblingColumns
+            .filter((n) => n !== column.name)
+            .map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Lookup default value"
+        hint='Resolution when this column is used as a lookup (1:many). Measure syntax, e.g. MIN(col) or IF(DISTINCTCOUNT(col) > 1, "*", MIN(col)). Blank = model default.'
+      >
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            style={{ ...styles.input, flex: 1, minWidth: 0 }}
+            value={lookupResolution}
+            onChange={(e) => setLookupResolution(e.target.value)}
+            placeholder="MIN(col)"
+          />
+          <button style={styles.btn} onClick={() => setLookupEditorOpen(true)}>
+            Edit…
+          </button>
+        </div>
+      </Field>
+
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+
+      {lookupEditorOpen && (
+        <ExpressionEditorModal
+          title={`Lookup default value — ${table}[${column.name}]`}
+          initialValue={lookupResolution}
+          overview={overview}
+          hint='Measure-syntax expression resolving 1:many lookup values to one, e.g. MIN(col) or IF(DISTINCTCOUNT(col) > 1, "*", MIN(col)).'
+          onClose={() => setLookupEditorOpen(false)}
+          onSave={(v) => {
+            setLookupResolution(v);
+            setLookupEditorOpen(false);
+          }}
+        />
+      )}
     </Modal>
   );
 }

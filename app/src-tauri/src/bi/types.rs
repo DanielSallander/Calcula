@@ -289,6 +289,11 @@ pub struct BiBindRequest {
     pub model_table: String,
     pub schema: String,
     pub source_table: String,
+    /// When set, the table's rows come from this SQL SELECT (wrapped as a
+    /// derived table by the engine) rather than `schema.source_table`. Defaulted
+    /// so physical bindings and older payloads deserialize unchanged.
+    #[serde(default)]
+    pub source_query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

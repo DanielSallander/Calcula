@@ -763,6 +763,13 @@ pub struct ModelColumnInfo {
     pub is_calculated: bool,
     /// The calculated column's formula rendering (None for physical columns).
     pub formula: Option<String>,
+    /// Resolution expression when this column is used as a lookup (physical
+    /// columns only; None for calculated columns).
+    pub lookup_resolution: Option<String>,
+    /// Column to sort this column's values by (physical columns only).
+    pub sort_by_column: Option<String>,
+    /// Excel-style number format applied to this column's values in pivots.
+    pub format_string: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1450,6 +1457,9 @@ fn build_overview(
                     is_hidden: c.is_hidden(),
                     is_calculated: false,
                     formula: None,
+                    lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
+                    sort_by_column: c.sort_by_column().map(|s| s.to_string()),
+                    format_string: c.format_string().map(|s| s.to_string()),
                 })
                 .collect();
             columns.extend(
@@ -1467,6 +1477,9 @@ fn build_overview(
                             cc.expression(),
                             cc.table(),
                         )),
+                        lookup_resolution: None,
+                        sort_by_column: None,
+                        format_string: None,
                     }),
             );
             ModelTableInfo {
@@ -1758,6 +1771,7 @@ pub async fn bi_model_update_table(
 
 /// Update a PHYSICAL column's presentation metadata.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn bi_model_update_column(
     bi_state: State<'_, BiState>,
     file_state: State<'_, FileState>,
@@ -1767,6 +1781,9 @@ pub async fn bi_model_update_column(
     display_name: Option<String>,
     description: Option<String>,
     is_hidden: bool,
+    lookup_resolution: Option<String>,
+    sort_by_column: Option<String>,
+    format_string: Option<String>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -1778,9 +1795,13 @@ pub async fn bi_model_update_column(
         let Some(c) = t.columns_mut().iter_mut().find(|c| c.name() == column) else {
             return Err(format!("Column '{}[{}]' not found", table, column));
         };
-        c.set_display_name(display_name.filter(|s| !s.trim().is_empty()));
-        c.set_description(description.filter(|s| !s.trim().is_empty()));
+        let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        c.set_display_name(clean(display_name));
+        c.set_description(clean(description));
         c.set_hidden(is_hidden);
+        c.set_lookup_resolution(clean(lookup_resolution));
+        c.set_sort_by(clean(sort_by_column));
+        c.set_format_string(clean(format_string));
         let edited = base.with_tables(tables);
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
@@ -1967,6 +1988,67 @@ pub async fn bi_model_delete_relationship(
         Ok(edited)
     })
     .await
+}
+
+/// Remove a table from the model. Relationships referencing the table (either
+/// side) are cascade-dropped; the table's source binding is pruned from every
+/// model-sharing connection so it does not linger across save/reload. Fails
+/// (with the validation error) if a measure/column still references the table.
+#[tauri::command]
+pub async fn bi_model_delete_table(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let target = table_name.clone();
+    let overview = mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        if !base.tables().iter().any(|t| t.name() == target) {
+            return Err(format!("Table '{}' not found in the model", target));
+        }
+        let tables: Vec<_> = base
+            .tables()
+            .iter()
+            .filter(|t| t.name() != target)
+            .cloned()
+            .collect();
+        let rels: Vec<_> = base
+            .relationships()
+            .iter()
+            .filter(|r| r.from_table() != target && r.to_table() != target)
+            .cloned()
+            .collect();
+        let edited = base.with_tables(tables).with_relationships(rels);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await?;
+
+    // Prune the persisted source binding for the removed table on every
+    // connection that shares this model (mirrors how imports add it).
+    {
+        let mut conns = bi_state.connections.lock().unwrap();
+        let model_key = conns.get(&connection_id).map(|c| c.model_key.clone());
+        if let Some(mk) = model_key {
+            for c in conns.values_mut() {
+                if c.model_key == mk {
+                    c.bindings.retain(|b| b.model_table != table_name);
+                }
+            }
+        }
+    }
+    crate::log_info!(
+        "BI",
+        "model editor: deleted table '{}' (conn {})",
+        table_name,
+        connection_id
+    );
+    Ok(overview)
 }
 
 /// Add or update a hierarchy.
@@ -2963,7 +3045,7 @@ pub async fn bi_model_list_source_tables(
     window: tauri::Window,
 ) -> Result<Vec<SourceTableInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
-    let (engine_arc, connector_index, model_tables) = {
+    let (engine_arc, connector_index, model_tables, schema_filter) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         let idx = conn.connector_index.ok_or(
@@ -2974,12 +3056,17 @@ pub async fn bi_model_list_source_tables(
             .as_ref()
             .map(|m| m.tables().iter().map(|t| t.name().to_string()).collect())
             .unwrap_or_default();
+        // If the connection specifies a schema, only that schema's objects are
+        // listed (a database exposes many schemas; scope to the chosen one).
+        let (target, _auth) = super::commands::parse_connection_string(&conn.connection_string);
+        let schema_filter = target.default_schema.filter(|s| !s.trim().is_empty());
         (
             conn.engine
                 .clone()
                 .ok_or("No model loaded for this connection")?,
             idx,
             tables,
+            schema_filter,
         )
     };
     let guard = engine_arc.lock().await;
@@ -2993,6 +3080,11 @@ pub async fn bi_model_list_source_tables(
         .map_err(|e| format!("Failed to list source tables: {}", e))?;
     Ok(source_tables
         .into_iter()
+        .filter(|t| {
+            schema_filter
+                .as_deref()
+                .map_or(true, |s| t.schema.eq_ignore_ascii_case(s))
+        })
         .map(|t| SourceTableInfo {
             imported: model_tables.contains(&t.name),
             schema: t.schema,
@@ -3086,6 +3178,7 @@ pub async fn bi_model_import_tables(
             model_table: table.name().to_string(),
             schema: src.schema.clone(),
             source_table: src.name.clone(),
+            source_query: None,
         })
         .collect();
     for b in &new_bindings {
@@ -3127,6 +3220,167 @@ pub async fn bi_model_import_tables(
     Ok(build_overview(&new_base, &bindings_snapshot, true, None))
 }
 
+/// Map an Arrow result-set type (from probing a SQL source) to the model's
+/// column data type. Widening is deliberate (any integer that fits → Int32/64,
+/// any float → Float64); unknowns fall back to String.
+fn arrow_to_model_type(dt: &arrow::datatypes::DataType) -> bi_engine::DataType {
+    use arrow::datatypes::DataType as A;
+    match dt {
+        A::Int8 | A::Int16 | A::Int32 | A::UInt8 | A::UInt16 => bi_engine::DataType::Int32,
+        A::Int64 | A::UInt32 | A::UInt64 => bi_engine::DataType::Int64,
+        A::Float16 | A::Float32 | A::Float64 => bi_engine::DataType::Float64,
+        A::Decimal128(p, s) | A::Decimal256(p, s) => bi_engine::DataType::Decimal(*p, *s),
+        A::Boolean => bi_engine::DataType::Boolean,
+        A::Date32 | A::Date64 => bi_engine::DataType::Date,
+        A::Timestamp(_, _) => bi_engine::DataType::Timestamp,
+        _ => bi_engine::DataType::String,
+    }
+}
+
+/// Import a table whose rows come from a user-authored SQL SELECT rather than a
+/// physical table (e.g. to pre-filter, or to load the same table twice under
+/// different names). The query's result columns are introspected via a LIMIT-0
+/// probe, the table is added as InMemory, and it is bound as a wrapped subquery
+/// so every downstream filter/measure composes on top of the import SQL. The
+/// table lives in — and distributes with — the workbook like any other.
+#[tauri::command]
+pub async fn bi_model_import_sql_source(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    sql: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let _ = editable_base(&bi_state, connection_id)?;
+
+    let table_name = table_name.trim().to_string();
+    if table_name.is_empty() {
+        return Err("Enter a name for the table".to_string());
+    }
+    // Normalize: a single SELECT/WITH, trailing semicolon stripped so it nests
+    // as a subquery. A light guard, not a full SQL validator.
+    let source_sql = sql.trim().trim_end_matches(';').trim().to_string();
+    if source_sql.is_empty() {
+        return Err("Enter a SQL query for the source".to_string());
+    }
+    let lower = source_sql.to_ascii_lowercase();
+    if !(lower.starts_with("select") || lower.starts_with("with")) {
+        return Err("The source query must be a SELECT statement".to_string());
+    }
+
+    let (engine_arc, connector_index) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let idx = conn.connector_index.ok_or(
+            "Not connected to the database — open Data > Connections and click Connect first.",
+        )?;
+        (
+            conn.engine
+                .clone()
+                .ok_or("No model loaded for this connection")?,
+            idx,
+        )
+    };
+
+    let mut guard = engine_arc.lock().await;
+
+    // Introspect the result columns by probing the wrapped query with LIMIT 0.
+    let columns: Vec<bi_engine::Column> = {
+        let connector = guard
+            .registry()
+            .connector_by_index(connector_index)
+            .ok_or("Connector not found — reconnect and retry")?;
+        let probe = format!("SELECT * FROM ({}) AS _probe LIMIT 0", source_sql);
+        let batches = connector
+            .execute_query(&probe)
+            .await
+            .map_err(|e| format!("The source query failed: {}", e))?;
+        let schema = batches
+            .first()
+            .map(|b| b.schema())
+            .ok_or("The source query returned no columns")?;
+        if schema.fields().is_empty() {
+            return Err("The source query returned no columns".to_string());
+        }
+        schema
+            .fields()
+            .iter()
+            .map(|f| bi_engine::Column::new(f.name().clone(), arrow_to_model_type(f.data_type())))
+            .collect()
+    };
+
+    let (base, calculated, model_key) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.base_model
+                .clone()
+                .ok_or("This connection has no editable base model")?,
+            conn.calculated_measures.clone(),
+            conn.model_key.clone(),
+        )
+    };
+
+    if base.tables().iter().any(|t| t.name() == table_name) {
+        return Err(format!("The model already has a table named '{}'", table_name));
+    }
+    let mut new_table =
+        bi_engine::Table::new(&table_name, columns).map_err(|e| format!("{}", e))?;
+    new_table.set_storage_mode(bi_engine::StorageMode::InMemory);
+
+    let mut model_tables = base.tables().to_vec();
+    model_tables.push(new_table);
+    let new_base = base.with_tables(model_tables);
+    new_base.validate().map_err(|e| format!("{}", e))?;
+    let combined = build_combined_model(&new_base, &calculated)?;
+    guard.set_model(combined).map_err(|e| format!("{}", e))?;
+
+    // Bind the table to its SQL source (rendered as a wrapped subquery whenever
+    // the InMemory cache loads/refreshes).
+    guard.bind_table(
+        table_name.clone(),
+        connector_index,
+        bi_engine::SourceBinding::new_query(&table_name, &source_sql),
+    );
+
+    let bind_req = super::types::BiBindRequest {
+        model_table: table_name.clone(),
+        schema: String::new(),
+        source_table: String::new(),
+        source_query: Some(source_sql.clone()),
+    };
+    let bindings_snapshot = {
+        let mut conns = bi_state.connections.lock().unwrap();
+        for c in conns.values_mut() {
+            if c.model_key == model_key {
+                c.base_model = Some(new_base.clone());
+                if !c.bindings.iter().any(|x| x.model_table == bind_req.model_table) {
+                    c.bindings.push(bind_req.clone());
+                }
+            }
+        }
+        conns
+            .get(&connection_id)
+            .map(|c| c.bindings.clone())
+            .unwrap_or_default()
+    };
+    drop(guard);
+
+    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    crate::log_info!(
+        "BI",
+        "model editor: imported SQL source '{}' (conn {})",
+        table_name,
+        connection_id
+    );
+    Ok(build_overview(&new_base, &bindings_snapshot, true, None))
+}
+
 /// Create a NEW blank model as a path-less connection (the model lives
 /// embedded in the workbook from the start; publish it as a dataset package
 /// to distribute). Import tables via bi_model_import_tables after connecting.
@@ -3145,7 +3399,10 @@ pub async fn bi_model_create_blank(
     }
     let empty = bi_engine::DataModel::builder()
         .build()
-        .map_err(|e| format!("{}", e))?;
+        .map_err(|e| format!("{}", e))?
+        // Prefill the model's descriptive name from the name given at creation
+        // (editable later under Settings ▸ Model metadata).
+        .with_model_metadata(Some(trimmed.to_string()), None, None, None);
     let model_json = serde_json::to_value(&empty).map_err(|e| format!("{}", e))?;
     let info = super::commands::create_connection_from_json(
         &bi_state,
@@ -3153,6 +3410,82 @@ pub async fn bi_model_create_blank(
         None,
         connection_string.unwrap_or_default(),
         model_json,
+    )
+    .await?;
+    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    Ok(info)
+}
+
+/// Export a connection's model to a standalone file as a ModelBundle
+/// (`{ formatVersion, model }`) — the same Studio-compatible wrapper the import
+/// path understands. The model still lives in the workbook (this writes a COPY
+/// for sharing/versioning), so exporting changes nothing about the workbook's
+/// own persistence.
+#[tauri::command]
+pub fn bi_model_export_to_file(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    path: String,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    // Build the bundle while holding the connections lock, then release it
+    // before the blocking file write.
+    let bundle = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let base = conn
+            .base_model
+            .as_ref()
+            .ok_or("This connection has no loaded model")?;
+        let mut model_json =
+            serde_json::to_value(base).map_err(|e| format!("Failed to serialize model: {}", e))?;
+        // Stamp the inner model's format_version exactly like workbook save does,
+        // so a subscriber on an older Calcula gets a clear version error.
+        super::commands::stamp_feature_format_version(base, &mut model_json);
+        serde_json::json!({
+            "formatVersion": bi_engine::MODEL_FORMAT_VERSION,
+            "model": model_json,
+        })
+    };
+    let bytes = serde_json::to_vec_pretty(&bundle)
+        .map_err(|e| format!("Failed to serialize model bundle: {}", e))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Failed to write model file: {}", e))?;
+    Ok(())
+}
+
+/// Import a model from a standalone file (a raw DataModel or a Studio ModelBundle
+/// `{ formatVersion, model }`) as a NEW path-less connection. The imported model
+/// becomes workbook-embedded, so it travels inside a `.calp` like any other
+/// in-app model. Reuses the same create-connection path as blank/new models,
+/// which unwraps the ModelBundle wrapper and validates the model.
+#[tauri::command]
+pub async fn bi_model_import_from_file(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    name: String,
+    path: String,
+    window: tauri::Window,
+) -> Result<super::types::ConnectionInfo, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let trimmed = name.trim();
+    let model_name = if trimmed.is_empty() { "Imported Model" } else { trimmed };
+    let json_str =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let json_value: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Not a valid model file (invalid JSON): {}", e))?;
+    let info = super::commands::create_connection_from_json(
+        &bi_state,
+        model_name.to_string(),
+        None,
+        String::new(),
+        json_value,
     )
     .await?;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
@@ -3172,6 +3505,12 @@ pub async fn bi_model_test_connection(
         return Err("Enter the connection details first.".to_string());
     }
     let (target, auth) = super::commands::parse_connection_string(&connection_string);
+    // If a schema was specified, the reported count must be scoped to it — the
+    // same filter bi_model_list_source_tables uses (a DB exposes many schemas).
+    let schema_filter = target
+        .default_schema
+        .clone()
+        .filter(|s| !s.trim().is_empty());
     let empty = bi_engine::DataModel::builder()
         .build()
         .map_err(|e| format!("{}", e))?;
@@ -3180,14 +3519,30 @@ pub async fn bi_model_test_connection(
         .add_postgres(target, auth)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
-    // Prove the connection is usable and report how many tables it exposes.
+    // Prove the connection is usable and report how many tables it exposes
+    // (scoped to the chosen schema, if any).
     match engine.registry().connector_by_index(idx) {
         Some(connector) => match connector.list_tables().await {
-            Ok(tables) => Ok(format!(
-                "Connected successfully — {} source table{} available.",
-                tables.len(),
-                if tables.len() == 1 { "" } else { "s" }
-            )),
+            Ok(tables) => {
+                let count = tables
+                    .iter()
+                    .filter(|t| {
+                        schema_filter
+                            .as_deref()
+                            .map_or(true, |s| t.schema.eq_ignore_ascii_case(s))
+                    })
+                    .count();
+                let scope = match &schema_filter {
+                    Some(s) => format!(" in schema \"{}\"", s),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "Connected successfully — {} source table{} available{}.",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    scope
+                ))
+            }
             Err(_) => Ok("Connected successfully.".to_string()),
         },
         None => Ok("Connected successfully.".to_string()),

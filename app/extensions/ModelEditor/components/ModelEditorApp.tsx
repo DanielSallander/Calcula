@@ -10,7 +10,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   biGetConnections,
+  biModelExportToFile,
   biModelGetOverview,
+  biModelImportFromFile,
   biModelRedo,
   biModelUndo,
   biModelUndoState,
@@ -281,8 +283,11 @@ export function ModelEditorApp(): React.ReactElement {
         void emitModelChanged(id);
         void refreshUndoState(id);
       }
+      // Refresh the connection list so the top-bar table/measure counts stay
+      // current after a mutation that changes them (e.g. importing tables).
+      void loadConnections();
     },
-    [refreshUndoState],
+    [refreshUndoState, loadConnections],
   );
 
   // The measure endpoints return only the measure list — patch it in, then
@@ -333,6 +338,37 @@ export function ModelEditorApp(): React.ReactElement {
     },
     [loadConnections],
   );
+
+  // Export the current model to a standalone file (workbook copy for
+  // sharing/versioning); the model still lives in — and saves with — the
+  // workbook. Import brings a model file in as a new workbook-embedded model.
+  const [ioBusy, setIoBusy] = useState(false);
+  const currentModelName =
+    connections.find((c) => c.id === connectionId)?.name ?? overview?.modelName ?? "model";
+
+  const handleExportModel = useCallback(async () => {
+    if (!connectionId) return;
+    setIoBusy(true);
+    try {
+      await biModelExportToFile(connectionId, currentModelName);
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      setIoBusy(false);
+    }
+  }, [connectionId, currentModelName]);
+
+  const handleImportModel = useCallback(async () => {
+    setIoBusy(true);
+    try {
+      const conn = await biModelImportFromFile();
+      if (conn) handleModelCreated(conn);
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      setIoBusy(false);
+    }
+  }, [handleModelCreated]);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -411,7 +447,9 @@ export function ModelEditorApp(): React.ReactElement {
   };
 
   return (
-    <div style={appStyle}>
+    // spellCheck is inheritable: disabling it here stops the WebView underlining
+    // formula tokens / identifiers (e.g. __column) in every input/textarea below.
+    <div style={appStyle} spellCheck={false}>
       <div style={topBarStyle}>
         <span style={{ fontWeight: 600, fontSize: 13 }}>Model Editor</span>
         <select
@@ -431,6 +469,22 @@ export function ModelEditorApp(): React.ReactElement {
         </button>
         <button
           style={styles.btn}
+          disabled={ioBusy}
+          title="Import a model from a file (.json / Studio ModelBundle) as a new workbook model"
+          onClick={() => void handleImportModel()}
+        >
+          Import&hellip;
+        </button>
+        <button
+          style={styles.btn}
+          disabled={ioBusy || !connectionId}
+          title="Export this model to a standalone file (it still saves with the workbook)"
+          onClick={() => void handleExportModel()}
+        >
+          Export&hellip;
+        </button>
+        <button
+          style={styles.btn}
           disabled={!undoState.canUndo || readOnly}
           title="Undo the last model edit"
           onClick={() => void handleUndo()}
@@ -447,6 +501,15 @@ export function ModelEditorApp(): React.ReactElement {
         </button>
         <div style={{ flex: 1 }} />
         {loading && <span style={{ ...styles.muted, fontSize: 12 }}>Loading&hellip;</span>}
+        {/* Models have no separate file: edits live in this workbook and are
+            written to disk when the workbook is saved. Surfaced so users don't
+            hunt for a "Save model" action that doesn't exist. */}
+        <span
+          style={{ ...styles.muted, fontSize: 12, whiteSpace: "nowrap" }}
+          title="Model changes are kept in this workbook and written to disk when you save the workbook (Ctrl+S). There is no separate model file to save."
+        >
+          Changes save with the workbook (Ctrl+S)
+        </span>
       </div>
 
       {overview?.readOnlyReason && (

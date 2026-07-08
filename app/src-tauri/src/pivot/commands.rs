@@ -5530,6 +5530,29 @@ pub async fn update_bi_pivot_fields(
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
 
+    // Dimension number formats from the model column (query_with_meta populates
+    // ResultColumn.format_string for dimension columns). Keyed case-insensitively
+    // by (table, column); applied to each row/column field so its header/item
+    // values render with the model-defined format.
+    let dim_format: std::collections::HashMap<(String, String), String> = result_columns
+        .iter()
+        .filter(|rc| matches!(rc.kind, bi_engine::ResultColumnKind::Dimension))
+        .filter_map(|rc| {
+            Some((
+                (
+                    rc.source_table.clone()?.to_lowercase(),
+                    rc.source_column.clone()?.to_lowercase(),
+                ),
+                rc.format_string.clone()?,
+            ))
+        })
+        .collect();
+    let dim_format_for = |table: &str, column: &str| -> Option<String> {
+        dim_format
+            .get(&(table.to_lowercase(), column.to_lowercase()))
+            .cloned()
+    };
+
     // Row fields (preserving collapse state for fields that remain)
     // Lookup fields share the same hierarchy depth as the preceding GROUP field
     // from the same table (they are attributes, not new grouping levels).
@@ -5554,6 +5577,7 @@ pub async fn update_bi_pivot_fields(
                     PivotField::new(idx, name)
                 };
                 pf.sort_by_field_index = resolve_sort_by(f);
+                pf.number_format = dim_format_for(&f.table, &f.column);
                 pf
             })
             .collect();
@@ -5590,6 +5614,7 @@ pub async fn update_bi_pivot_fields(
                 PivotField::new(idx, name)
             };
             pf.sort_by_field_index = resolve_sort_by(f);
+            pf.number_format = dim_format_for(&f.table, &f.column);
             pf
         })
         .collect();

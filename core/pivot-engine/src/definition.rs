@@ -97,6 +97,13 @@ pub struct PivotField {
     /// A user-applied Manual sort overrides this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_by_field_index: Option<FieldIndex>,
+
+    /// Optional Excel-style number format applied to this dimension field's
+    /// header/item values (e.g. a numeric or date column used on an axis). For
+    /// a BI pivot this is carried from the model column's format. `None` renders
+    /// the raw value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<String>,
 }
 
 impl PivotField {
@@ -113,6 +120,7 @@ impl PivotField {
             grouping: FieldGrouping::None,
             is_attribute: false,
             sort_by_field_index: None,
+            number_format: None,
         }
     }
 
@@ -130,6 +138,7 @@ impl PivotField {
             grouping: FieldGrouping::None,
             is_attribute: true,
             sort_by_field_index: None,
+            number_format: None,
         }
     }
 }

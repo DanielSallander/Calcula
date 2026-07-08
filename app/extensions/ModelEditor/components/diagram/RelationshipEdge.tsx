@@ -1,12 +1,15 @@
 // FILENAME: app/extensions/ModelEditor/components/diagram/RelationshipEdge.tsx
-// PURPOSE: One relationship edge in the diagram: a bezier between two table
-//          nodes with cardinality glyphs, a name label, and a double-click hit
-//          area to open the edit modal. Ported from Calcula Studio (cardinality
-//          strings adapted to Calcula's camelCase, colors inlined).
+// PURPOSE: One relationship edge in the auto-arranged diagram: an ORTHOGONAL
+//          (right-angle / Manhattan) connector between two table nodes with
+//          cardinality glyphs, a name label, and a double-click hit area to open
+//          the edit modal. Self-relationships (fromTable === toTable) render a
+//          small loop off the node's right edge. Cardinality strings are
+//          Calcula's camelCase; colors inlined from diagramTheme.
 
 import React, { memo } from "react";
 import type { ModelRelationshipInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
+import { GRID } from "./layoutEngine";
 
 interface NodePos {
   x: number;
@@ -22,6 +25,16 @@ interface RelationshipEdgeProps {
   /** Vertical/horizontal offset to separate parallel edges between a pair. */
   offset?: number;
   onDoubleClick?: (relationshipName: string) => void;
+}
+
+const snapBend = (v: number): number => Math.round(v / GRID) * GRID;
+
+/** A point `dist` pixels from (px,py) toward (qx,qy). */
+function along(px: number, py: number, qx: number, qy: number, dist: number): { x: number; y: number } {
+  const dx = qx - px;
+  const dy = qy - py;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: px + (dx / len) * dist, y: py + (dy / len) * dist };
 }
 
 function getConnectionPoints(from: NodePos, to: NodePos, offset: number) {
@@ -74,6 +87,64 @@ function cardinalityGlyphs(cardinality: string): [string, string] {
   }
 }
 
+// Geometry of the drawn connector, plus glyph/label anchor points. Split out so
+// the render stays declarative and the self-loop / normal cases share it.
+interface EdgeGeometry {
+  d: string;
+  fromGlyph: { x: number; y: number };
+  toGlyph: { x: number; y: number };
+  label: { x: number; y: number };
+  endDot: { x: number; y: number };
+}
+
+function orthogonalGeometry(from: NodePos, to: NodePos, offset: number): EdgeGeometry {
+  const { x1, y1, x2, y2, isHorizontal } = getConnectionPoints(from, to, offset);
+  let d: string;
+  let b1x: number, b1y: number, b2x: number, b2y: number; // the two bend corners
+  let label: { x: number; y: number };
+  if (isHorizontal) {
+    const bx = snapBend((x1 + x2) / 2);
+    b1x = bx;
+    b1y = y1;
+    b2x = bx;
+    b2y = y2;
+    d = `M ${x1} ${y1} L ${bx} ${y1} L ${bx} ${y2} L ${x2} ${y2}`;
+    label = { x: bx, y: (y1 + y2) / 2 - 8 };
+  } else {
+    const by = snapBend((y1 + y2) / 2);
+    b1x = x1;
+    b1y = by;
+    b2x = x2;
+    b2y = by;
+    d = `M ${x1} ${y1} L ${x1} ${by} L ${x2} ${by} L ${x2} ${y2}`;
+    label = { x: (x1 + x2) / 2, y: by - 8 };
+  }
+  const fromGlyph = along(x1, y1, b1x, b1y, 16);
+  const toGlyph = along(x2, y2, b2x, b2y, 16);
+  return {
+    d,
+    fromGlyph: { x: fromGlyph.x, y: fromGlyph.y - 6 },
+    toGlyph: { x: toGlyph.x, y: toGlyph.y - 6 },
+    label,
+    endDot: { x: x2, y: y2 },
+  };
+}
+
+function selfLoopGeometry(node: NodePos): EdgeGeometry {
+  const rx = node.x + node.width;
+  const cy = node.y + node.height / 2;
+  const ext = 24;
+  const half = 16;
+  const d = `M ${rx} ${cy - half} L ${rx + ext} ${cy - half} L ${rx + ext} ${cy + half} L ${rx} ${cy + half}`;
+  return {
+    d,
+    fromGlyph: { x: rx + 8, y: cy - half - 4 },
+    toGlyph: { x: rx + 8, y: cy + half + 10 },
+    label: { x: rx + ext + 6, y: cy },
+    endDot: { x: rx, y: cy + half },
+  };
+}
+
 export const RelationshipEdge = memo(function RelationshipEdge({
   relationship,
   fromPos,
@@ -81,22 +152,13 @@ export const RelationshipEdge = memo(function RelationshipEdge({
   offset = 0,
   onDoubleClick,
 }: RelationshipEdgeProps): React.ReactElement {
-  const { x1, y1, x2, y2, isHorizontal } = getConnectionPoints(fromPos, toPos, offset);
-  const dx = x2 - x1;
-  const cx1 = x1 + dx * 0.4;
-  const cy1 = y1;
-  const cx2 = x2 - dx * 0.4;
-  const cy2 = y2;
-  const midX = (x1 + x2) / 2;
-  const midY = (y1 + y2) / 2;
-  const labelX = midX;
-  const labelY = isHorizontal ? midY - 8 : midY - 8 + offset;
+  const isSelf = fromPos.x === toPos.x && fromPos.y === toPos.y;
+  const geo = isSelf ? selfLoopGeometry(fromPos) : orthogonalGeometry(fromPos, toPos, offset);
 
   const [fromLabel, toLabel] = cardinalityGlyphs(relationship.cardinality);
   const isActive = relationship.active;
   const strokeColor = isActive ? C.accent : C.textMuted;
   const strokeOpacity = isActive ? 0.7 : 0.35;
-  const d = `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`;
 
   const handleDbl = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -106,37 +168,40 @@ export const RelationshipEdge = memo(function RelationshipEdge({
   return (
     <g>
       <path
-        d={d}
+        d={geo.d}
         fill="none"
         stroke={strokeColor}
         strokeWidth={1.5}
+        strokeLinejoin="round"
         strokeDasharray={isActive ? undefined : "6 3"}
         opacity={strokeOpacity}
       />
-      <circle cx={x2} cy={y2} r={3} fill={strokeColor} opacity={isActive ? 0.85 : 0.4} />
+      <circle cx={geo.endDot.x} cy={geo.endDot.y} r={3} fill={strokeColor} opacity={isActive ? 0.85 : 0.4} />
       <text
-        x={x1 + (cx1 - x1) * 0.3}
-        y={y1 + (cy1 - y1) * 0.3 - 8}
+        x={geo.fromGlyph.x}
+        y={geo.fromGlyph.y}
         textAnchor="middle"
         fill={strokeColor}
         fontSize={10}
         fontWeight={600}
+        style={{ pointerEvents: "none" }}
       >
         {fromLabel}
       </text>
       <text
-        x={x2 - (x2 - cx2) * 0.3}
-        y={y2 - (y2 - cy2) * 0.3 - 8}
+        x={geo.toGlyph.x}
+        y={geo.toGlyph.y}
         textAnchor="middle"
         fill={strokeColor}
         fontSize={10}
         fontWeight={600}
+        style={{ pointerEvents: "none" }}
       >
         {toLabel}
       </text>
       {/* Wider invisible hit area for double-click. */}
       <path
-        d={d}
+        d={geo.d}
         fill="none"
         stroke="transparent"
         strokeWidth={14}
@@ -144,8 +209,8 @@ export const RelationshipEdge = memo(function RelationshipEdge({
         onDoubleClick={handleDbl}
       />
       <text
-        x={labelX}
-        y={labelY}
+        x={geo.label.x}
+        y={geo.label.y}
         textAnchor="middle"
         fill={isActive ? C.textSecondary : C.textMuted}
         fontSize={9}

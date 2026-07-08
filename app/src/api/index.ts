@@ -452,9 +452,13 @@ export {
   biModelDependencyGraph,
   biModelListSourceTables,
   biModelImportTables,
+  biModelImportSqlSource,
+  biModelDeleteTable,
   biModelCreateBlank,
   biModelTestConnection,
   biModelConnect,
+  biModelExportToFile,
+  biModelImportFromFile,
 } from "./backend";
 export type {
   ModelMeasureInfo,

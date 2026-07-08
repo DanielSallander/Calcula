@@ -4098,6 +4098,10 @@ pub fn run() {
             bi::model_editor::bi_model_create_blank,
             bi::model_editor::bi_model_test_connection,
             bi::model_editor::bi_model_connect,
+            bi::model_editor::bi_model_export_to_file,
+            bi::model_editor::bi_model_import_from_file,
+            bi::model_editor::bi_model_import_sql_source,
+            bi::model_editor::bi_model_delete_table,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

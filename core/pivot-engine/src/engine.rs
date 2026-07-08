@@ -2231,6 +2231,12 @@ impl<'a> PivotCalculator<'a> {
                             ch.is_expandable = item.has_children;
                             ch.is_collapsed = item.is_collapsed;
                             ch.indent_level = item.depth as u8;
+                            // Format the dimension value with the field's number
+                            // format (e.g. a numeric/date column on the axis).
+                            ch.number_format = self
+                                .effective_col_fields
+                                .get(value_depth)
+                                .and_then(|f| f.number_format.clone());
                             ch
                         }
                     } else if item.depth > value_depth {
@@ -2391,6 +2397,12 @@ impl<'a> PivotCalculator<'a> {
                         cell = cell.as_total();
                         cell.background_style = BackgroundStyle::GrandTotal;
                         cell.cell_type = PivotCellType::GrandTotalRow;
+                    } else {
+                        // Format the dimension value with the field's number format.
+                        cell.number_format = self
+                            .effective_row_fields
+                            .get(item.depth)
+                            .and_then(|f| f.number_format.clone());
                     }
 
                     cells.push(cell);
@@ -2437,6 +2449,11 @@ impl<'a> PivotCalculator<'a> {
                             } else if item.is_grand_total {
                                 cell = cell.as_total();
                                 cell.background_style = BackgroundStyle::GrandTotal;
+                            } else {
+                                cell.number_format = self
+                                    .effective_row_fields
+                                    .get(item.depth)
+                                    .and_then(|f| f.number_format.clone());
                             }
 
                             cells.push(cell);
