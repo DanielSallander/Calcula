@@ -120,6 +120,16 @@ pub struct ConnectionTarget {
     /// policy field on [`ConnectionTarget`].
     #[serde(default)]
     pub trust_server_certificate: bool,
+
+    /// Explicit TLS/SSL mode override (case-insensitive): `"disable"` (never
+    /// use TLS — required for servers with no TLS support), `"prefer"` (attempt
+    /// TLS, fall back to plaintext), or `"require"` (TLS mandatory). `None` =
+    /// the connector default (`prefer` for PostgreSQL). Takes precedence over
+    /// `trust_server_certificate` for choosing whether TLS is attempted;
+    /// certificate validation is still skipped when `trust_server_certificate`
+    /// is set. Only PostgreSQL honors this today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_mode: Option<String>,
 }
 
 impl ConnectionTarget {
@@ -131,7 +141,15 @@ impl ConnectionTarget {
             database: database.into(),
             default_schema: None,
             trust_server_certificate: false,
+            ssl_mode: None,
         }
+    }
+
+    /// Set the explicit TLS/SSL mode (`"disable"` | `"prefer"` | `"require"`).
+    pub fn with_ssl_mode(mut self, mode: impl Into<String>) -> Self {
+        let mode = mode.into();
+        self.ssl_mode = if mode.trim().is_empty() { None } else { Some(mode) };
+        self
     }
 
     /// Set the port number.

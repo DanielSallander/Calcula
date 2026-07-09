@@ -92,6 +92,7 @@ fn builder_save_load_round_trips_sources_and_binding() {
                 database: "warehouse".into(),
                 default_schema: Some("sales".into()),
                 trust_server_certificate: false,
+                ssl_mode: None,
             },
             PersistedAuthKind::UsernamePassword,
         ))

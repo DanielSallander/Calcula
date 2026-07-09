@@ -84,6 +84,9 @@ fn persisted_to_target(conn: &PersistedConnection) -> ConnectionTarget {
     if let Some(schema) = &conn.default_schema {
         target = target.with_default_schema(schema.clone());
     }
+    if let Some(mode) = &conn.ssl_mode {
+        target = target.with_ssl_mode(mode.clone());
+    }
     target
 }
 
@@ -96,6 +99,7 @@ fn target_to_persisted(target: &ConnectionTarget) -> PersistedConnection {
         database: target.database.clone(),
         default_schema: target.default_schema.clone(),
         trust_server_certificate: target.trust_server_certificate,
+        ssl_mode: target.ssl_mode.clone(),
     }
 }
 

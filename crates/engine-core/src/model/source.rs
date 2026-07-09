@@ -78,6 +78,11 @@ pub struct PersistedConnection {
     /// Whether to trust the server's TLS certificate without validation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trust_server_certificate: bool,
+    /// Explicit TLS/SSL mode: `"disable"` | `"prefer"` | `"require"` (or `None`
+    /// for the connector default). Lets a model reconnect to a server with no
+    /// TLS support. Secret-free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_mode: Option<String>,
 }
 
 /// One persisted data source: a stable id, its kind, where it connects
@@ -204,6 +209,7 @@ mod tests {
                 database: "warehouse".into(),
                 default_schema: Some("sales".into()),
                 trust_server_certificate: false,
+                ssl_mode: Some("disable".into()),
             },
             PersistedAuthKind::UsernamePassword,
         )

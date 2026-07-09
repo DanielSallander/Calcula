@@ -136,29 +136,37 @@ impl PostgresConnector {
             .username(&username)
             .password(&password);
 
-        if let Some(mode) = Self::ssl_mode_override(target.trust_server_certificate) {
+        if let Some(mode) = Self::ssl_mode_override(target) {
             options = options.ssl_mode(mode);
         }
 
         Ok(options)
     }
 
-    /// Map [`ConnectionTarget::trust_server_certificate`] to an ssl-mode
-    /// override.
+    /// Choose the PostgreSQL ssl-mode from the target's explicit `ssl_mode`
+    /// override, falling back to `trust_server_certificate`.
     ///
-    /// - `true` → [`PgSslMode::Require`]: TLS is mandatory, but the server
-    ///   certificate is not verified.
-    /// - `false` → `None`: sqlx's default applies (`prefer`, or the
-    ///   `PGSSLMODE` environment variable when set), matching the behavior
-    ///   of previous releases.
+    /// - explicit `"disable"` → [`PgSslMode::Disable`]: TLS is never used
+    ///   (required for servers that do not support TLS at all).
+    /// - explicit `"require"`, or `trust_server_certificate == true` →
+    ///   [`PgSslMode::Require`]: TLS mandatory, server certificate not verified.
+    /// - explicit `"prefer"` → [`PgSslMode::Prefer`]: attempt TLS, fall back to
+    ///   plaintext.
+    /// - otherwise `None`: sqlx's default applies (`prefer`, or `PGSSLMODE`).
     ///
-    /// Stricter modes (`verify-ca` / `verify-full`) are future work — they
-    /// require a CA / encryption policy field on [`ConnectionTarget`].
-    fn ssl_mode_override(trust_server_certificate: bool) -> Option<PgSslMode> {
-        if trust_server_certificate {
-            Some(PgSslMode::Require)
-        } else {
-            None
+    /// Stricter modes (`verify-ca` / `verify-full`) are future work.
+    fn ssl_mode_override(target: &ConnectionTarget) -> Option<PgSslMode> {
+        match target
+            .ssl_mode
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("disable") => Some(PgSslMode::Disable),
+            Some("require") => Some(PgSslMode::Require),
+            Some("prefer") => Some(PgSslMode::Prefer),
+            _ if target.trust_server_certificate => Some(PgSslMode::Require),
+            _ => None,
         }
     }
 
@@ -1228,11 +1236,34 @@ mod tests {
 
     #[test]
     fn ssl_mode_override_maps_trust_flag() {
+        let trust = ConnectionTarget::new("h", "d").with_trust_server_certificate(true);
         assert!(matches!(
-            PostgresConnector::ssl_mode_override(true),
+            PostgresConnector::ssl_mode_override(&trust),
             Some(PgSslMode::Require)
         ));
-        assert!(PostgresConnector::ssl_mode_override(false).is_none());
+        assert!(PostgresConnector::ssl_mode_override(&ConnectionTarget::new("h", "d")).is_none());
+    }
+
+    #[test]
+    fn ssl_mode_override_honors_explicit_mode() {
+        let disable = ConnectionTarget::new("h", "d").with_ssl_mode("disable");
+        assert!(matches!(
+            PostgresConnector::ssl_mode_override(&disable),
+            Some(PgSslMode::Disable)
+        ));
+        // Explicit "disable" wins even if trust is set.
+        let disable_trust = ConnectionTarget::new("h", "d")
+            .with_trust_server_certificate(true)
+            .with_ssl_mode("disable");
+        assert!(matches!(
+            PostgresConnector::ssl_mode_override(&disable_trust),
+            Some(PgSslMode::Disable)
+        ));
+        let prefer = ConnectionTarget::new("h", "d").with_ssl_mode("prefer");
+        assert!(matches!(
+            PostgresConnector::ssl_mode_override(&prefer),
+            Some(PgSslMode::Prefer)
+        ));
     }
 
     #[test]
