@@ -146,6 +146,67 @@ fn build_target_from_connection_info(server: &str, database: &str) -> bi_engine:
     target
 }
 
+/// Deterministic, stable id for a data source derived from its kind + target.
+/// Two connections to the same kind+server+database share one `PersistedSource`
+/// id, so the model's source catalog never duplicates a source.
+pub(crate) fn source_id_for(
+    connection_type: &ConnectionType,
+    server: &str,
+    database: &str,
+) -> String {
+    let raw = format!(
+        "{}|{}|{}",
+        connection_type.as_str(),
+        server.trim(),
+        database.trim()
+    );
+    let sanitized: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    format!("src_{}", sanitized)
+}
+
+/// Map the app's preferred-auth string to the engine's secret-free auth hint.
+pub(crate) fn persisted_auth_kind(preferred_auth: &str) -> bi_engine::PersistedAuthKind {
+    match preferred_auth.trim().to_ascii_lowercase().as_str() {
+        "integrated" | "windows" | "kerberos" => bi_engine::PersistedAuthKind::Integrated,
+        "environmentvariable" | "environment" | "env" => {
+            bi_engine::PersistedAuthKind::EnvironmentVariable
+        }
+        _ => bi_engine::PersistedAuthKind::UsernamePassword,
+    }
+}
+
+/// The secret-free [`bi_engine::PersistedSource`] descriptor for a connection,
+/// recorded in the model's catalog so its tables bind to it and survive
+/// save/export/publish (`SourceKind` mirrors the connection type).
+pub(crate) fn persisted_source_for(conn: &Connection) -> bi_engine::PersistedSource {
+    let kind = match conn.connection_type {
+        ConnectionType::PostgreSQL => bi_engine::SourceKind::Postgres,
+        ConnectionType::SqlServer => bi_engine::SourceKind::SqlServer,
+    };
+    let target = build_target_from_connection_info(&conn.server, &conn.database);
+    let connection = bi_engine::PersistedConnection {
+        host: target.host.clone(),
+        port: target.port,
+        database: target.database.clone(),
+        default_schema: target.default_schema.clone(),
+        trust_server_certificate: target.trust_server_certificate,
+    };
+    let id = source_id_for(&conn.connection_type, &conn.server, &conn.database);
+    let mut src = bi_engine::PersistedSource::new(
+        id,
+        kind,
+        connection,
+        persisted_auth_kind(&conn.preferred_auth),
+    );
+    if !conn.name.trim().is_empty() {
+        src = src.with_display_name(conn.name.clone());
+    }
+    src
+}
+
 /// Map an engine KPI status to its wire string.
 fn kpi_status_str(s: bi_engine::KpiStatus) -> String {
     match s {
@@ -1489,6 +1550,27 @@ async fn create_connection_core(
     } else {
         (Vec::new(), None)
     };
+    // Rebuild the app-side table→source bindings from the model's persisted
+    // source catalog (engine format v14). This is what makes an imported or
+    // reopened model's tables BOUND: create_connection previously left bindings
+    // empty, so a model that arrived via export→import (or a dataset .calp
+    // whose bindings weren't carried) had no source mapping and showed every
+    // table as "unbound". Each table that names a source in its persisted
+    // source_binding becomes an app binding here.
+    let derived_bindings: Vec<BiBindRequest> = sibling_base
+        .as_ref()
+        .unwrap_or(&base_model)
+        .tables()
+        .iter()
+        .filter_map(|t| {
+            t.source_binding().map(|sb| BiBindRequest {
+                model_table: t.name().to_string(),
+                schema: sb.schema.clone(),
+                source_table: sb.table.clone(),
+                source_query: None,
+            })
+        })
+        .collect();
     let connection = Connection {
         id,
         name,
@@ -1502,7 +1584,7 @@ async fn create_connection_core(
         engine: Some(engine_arc),
         model_key: Some(model_key),
         connector_index: None,
-        bindings: Vec::new(),
+        bindings: derived_bindings,
         last_refreshed: None,
         created_at: now_iso(),
         is_connected: false,

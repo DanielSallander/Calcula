@@ -782,6 +782,8 @@ pub struct ModelTableInfo {
     pub storage_mode: String,
     /// Whether this connection has a source binding for the table.
     pub bound: bool,
+    /// The persisted-source id this table binds to (model catalog), or null.
+    pub source_id: Option<String>,
     pub columns: Vec<ModelColumnInfo>,
     /// InMemory cache refresh strategies (empty = never auto-refresh; the cache
     /// is populated on first query and reused).
@@ -1104,6 +1106,92 @@ pub struct ModelOverview {
     pub model_version: Option<String>,
     pub model_author: Option<String>,
     pub model_description: Option<String>,
+    /// The model's persisted data-source catalog (engine v14). Drives the
+    /// Connections tab; a model may bind different tables to different sources.
+    pub sources: Vec<ModelSourceInfo>,
+}
+
+/// One entry in the model's persisted data-source catalog (secret-free).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSourceInfo {
+    pub id: String,
+    /// "postgres" | "sqlServer" | "inMemory" | "csv" | "parquet"
+    pub kind: String,
+    pub display_name: Option<String>,
+    pub host: String,
+    pub port: Option<u16>,
+    pub database: String,
+    pub default_schema: Option<String>,
+    /// "integrated" | "usernamePassword" | "environmentVariable"
+    pub preferred_auth: String,
+    /// How many model tables bind to this source.
+    pub table_count: usize,
+}
+
+/// Wire string for an engine [`bi_engine::SourceKind`].
+fn source_kind_str(kind: bi_engine::SourceKind) -> &'static str {
+    match kind {
+        bi_engine::SourceKind::Postgres => "postgres",
+        bi_engine::SourceKind::SqlServer => "sqlServer",
+        bi_engine::SourceKind::InMemory => "inMemory",
+        bi_engine::SourceKind::Csv => "csv",
+        bi_engine::SourceKind::Parquet => "parquet",
+    }
+}
+
+/// Parse a wire kind string back to an engine [`bi_engine::SourceKind`].
+fn source_kind_from_str(s: &str) -> Result<bi_engine::SourceKind, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" => Ok(bi_engine::SourceKind::Postgres),
+        "sqlserver" | "sql server" | "mssql" => Ok(bi_engine::SourceKind::SqlServer),
+        "inmemory" | "in-memory" => Ok(bi_engine::SourceKind::InMemory),
+        "csv" => Ok(bi_engine::SourceKind::Csv),
+        "parquet" => Ok(bi_engine::SourceKind::Parquet),
+        other => Err(format!("Unknown data source kind '{}'", other)),
+    }
+}
+
+/// Wire string for an engine [`bi_engine::PersistedAuthKind`].
+fn persisted_auth_str(kind: bi_engine::PersistedAuthKind) -> &'static str {
+    match kind {
+        bi_engine::PersistedAuthKind::Integrated => "integrated",
+        bi_engine::PersistedAuthKind::UsernamePassword => "usernamePassword",
+        bi_engine::PersistedAuthKind::EnvironmentVariable => "environmentVariable",
+    }
+}
+
+/// Parse a wire auth string back to an engine [`bi_engine::PersistedAuthKind`].
+fn persisted_auth_from_str(s: &str) -> bi_engine::PersistedAuthKind {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "integrated" | "windows" | "kerberos" => bi_engine::PersistedAuthKind::Integrated,
+        "environmentvariable" | "environment" | "env" => {
+            bi_engine::PersistedAuthKind::EnvironmentVariable
+        }
+        _ => bi_engine::PersistedAuthKind::UsernamePassword,
+    }
+}
+
+/// Build the overview's source-catalog entries from the model.
+fn build_source_infos(base: &bi_engine::DataModel) -> Vec<ModelSourceInfo> {
+    base.sources()
+        .iter()
+        .map(|s| ModelSourceInfo {
+            id: s.id.clone(),
+            kind: source_kind_str(s.kind).to_string(),
+            display_name: s.display_name.clone(),
+            host: s.connection.host.clone(),
+            port: s.connection.port,
+            database: s.connection.database.clone(),
+            default_schema: s.connection.default_schema.clone(),
+            preferred_auth: persisted_auth_str(s.preferred_auth).to_string(),
+            table_count: base
+                .tables()
+                .iter()
+                .filter(|t| t.source_binding().map(|b| b.source_id == s.id).unwrap_or(false))
+                .count(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1488,7 +1576,11 @@ fn build_overview(
                 description: t.description().map(|s| s.to_string()),
                 is_hidden: t.is_hidden(),
                 storage_mode: format!("{:?}", t.storage_mode()),
-                bound: bindings.iter().any(|b| b.model_table == t.name()),
+                // Bound if the model records a source for it (catalog) or the
+                // connection has a live/app binding.
+                bound: t.source_binding().is_some()
+                    || bindings.iter().any(|b| b.model_table == t.name()),
+                source_id: t.source_binding().map(|b| b.source_id.clone()),
                 columns,
                 refresh_strategies: t
                     .refresh_strategies()
@@ -1678,6 +1770,7 @@ fn build_overview(
         model_version: base.model_version().map(|s| s.to_string()),
         model_author: base.model_author().map(|s| s.to_string()),
         model_description: base.model_description().map(|s| s.to_string()),
+        sources: build_source_infos(base),
     }
 }
 
@@ -3142,29 +3235,41 @@ pub async fn bi_model_import_tables(
         }
     }
 
-    let (base, calculated, model_key) = {
+    let (base, calculated, model_key, persisted_source, source_id) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let persisted_source = super::commands::persisted_source_for(conn);
+        let source_id = persisted_source.id.clone();
         (
             conn.base_model
                 .clone()
                 .ok_or("This connection has no editable base model")?,
             conn.calculated_measures.clone(),
             conn.model_key.clone(),
+            persisted_source,
+            source_id,
         )
     };
 
+    // Append the introspected tables, stamping each with its persisted source
+    // binding (source id + physical schema/table) so the model self-describes
+    // where its data comes from and survives save/export/publish.
     let mut model_tables = base.tables().to_vec();
-    for table in &introspected {
+    for (src, table) in tables.iter().zip(introspected.iter()) {
         if model_tables.iter().any(|t| t.name() == table.name()) {
             return Err(format!(
                 "The model already has a table named '{}'",
                 table.name()
             ));
         }
-        model_tables.push(table.clone());
+        model_tables.push(table.clone().with_source_binding(
+            bi_engine::TableSourceBinding::new(&source_id, &src.schema, &src.name),
+        ));
     }
-    let new_base = base.with_tables(model_tables);
+    let mut new_base = base.with_tables(model_tables);
+    // Record the source in the model's persisted catalog (idempotent — a repeat
+    // import from the same connection reuses the existing entry).
+    let _ = new_base.push_source(persisted_source);
     new_base.validate().map_err(|e| format!("{}", e))?;
     let combined = build_combined_model(&new_base, &calculated)?;
     guard.set_model(combined).map_err(|e| format!("{}", e))?;
@@ -3379,6 +3484,236 @@ pub async fn bi_model_import_sql_source(
         connection_id
     );
     Ok(build_overview(&new_base, &bindings_snapshot, true, None))
+}
+
+// ---------------------------------------------------------------------------
+// Connections tab: the model's persisted data-source catalog (engine v14)
+// ---------------------------------------------------------------------------
+
+/// Add or update (by id) a persisted data source in the model's catalog. The
+/// descriptor is secret-free (host/port/database/schema + auth *hint*); the id
+/// is stable across edits so table bindings never dangle. Returns the overview.
+#[tauri::command]
+pub async fn bi_model_upsert_source(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    id: String,
+    kind: String,
+    host: Option<String>,
+    port: Option<u16>,
+    database: Option<String>,
+    default_schema: Option<String>,
+    trust_server_certificate: bool,
+    preferred_auth: String,
+    display_name: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("A data source id is required".to_string());
+    }
+    let kind = source_kind_from_str(&kind)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let connection = bi_engine::PersistedConnection {
+            host: host.clone().unwrap_or_default(),
+            port,
+            database: database.clone().unwrap_or_default(),
+            default_schema: default_schema.clone().filter(|s| !s.trim().is_empty()),
+            trust_server_certificate,
+        };
+        let mut src = bi_engine::PersistedSource::new(
+            id.clone(),
+            kind,
+            connection,
+            persisted_auth_from_str(&preferred_auth),
+        );
+        if let Some(dn) = display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            src = src.with_display_name(dn.to_string());
+        }
+        // Replace an existing source with the same id, else append.
+        let mut sources: Vec<bi_engine::PersistedSource> =
+            base.sources().iter().filter(|s| s.id != id).cloned().collect();
+        sources.push(src);
+        let edited = base.with_sources(sources);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Remove a data source from the model's catalog and clear every table binding
+/// that names it (those tables become unbound). Returns the overview.
+#[tauri::command]
+pub async fn bi_model_delete_source(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    source_id: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let overview = mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        if base.source(&source_id).is_none() {
+            return Err(format!("Data source '{}' not found", source_id));
+        }
+        let sources: Vec<bi_engine::PersistedSource> =
+            base.sources().iter().filter(|s| s.id != source_id).cloned().collect();
+        let tables: Vec<bi_engine::Table> = base
+            .tables()
+            .iter()
+            .map(|t| {
+                if t.source_binding().map(|b| b.source_id == source_id).unwrap_or(false) {
+                    let mut t = t.clone();
+                    t.set_source_binding(None);
+                    t
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+        let edited = base.with_sources(sources).with_tables(tables);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await?;
+    Ok(overview)
+}
+
+/// Bind a model table to a location within a catalog source (or clear its
+/// binding when `source_id` is null). Records the persisted binding on the
+/// model; the runtime binding is (re)established when the source is connected.
+#[tauri::command]
+pub async fn bi_model_set_table_source_binding(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    table_name: String,
+    source_id: Option<String>,
+    schema: String,
+    source_table: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        if base.tables().iter().all(|t| t.name() != table_name) {
+            return Err(format!("Table '{}' not found in the model", table_name));
+        }
+        let binding = match source_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(sid) => {
+                if base.source(sid).is_none() {
+                    return Err(format!("Data source '{}' is not in the catalog", sid));
+                }
+                Some(bi_engine::TableSourceBinding::new(sid, schema.trim(), source_table.trim()))
+            }
+            None => None,
+        };
+        let tables: Vec<bi_engine::Table> = base
+            .tables()
+            .iter()
+            .map(|t| {
+                if t.name() == table_name {
+                    let mut t = t.clone();
+                    t.set_source_binding(binding.clone());
+                    t
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+        let edited = base.with_tables(tables);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Connect ONE catalog source: wire it into the live engine registry using the
+/// supplied credentials (from `connection_string`) and the source's secret-free
+/// persisted target, then bind every table that names it. In-memory sources
+/// cannot be rebuilt from a descriptor and are rejected. Returns the overview.
+#[tauri::command]
+pub async fn bi_model_connect_source(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    source_id: String,
+    connection_string: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let (engine_arc, base) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.engine.clone().ok_or("No model loaded for this connection")?,
+            conn.base_model.clone().ok_or("This connection has no loaded model")?,
+        )
+    };
+    if base.source(&source_id).is_none() {
+        return Err(format!("Data source '{}' is not in the catalog", source_id));
+    }
+    let (_, auth) = super::commands::parse_connection_string(&connection_string);
+    let sid = source_id.clone();
+    let report = {
+        let mut engine = engine_arc.lock().await;
+        engine
+            .wire_sources(|s| {
+                if s.id != sid {
+                    return bi_engine::SourceCredential::Skip;
+                }
+                match s.kind {
+                    bi_engine::SourceKind::InMemory => bi_engine::SourceCredential::Skip,
+                    bi_engine::SourceKind::Csv | bi_engine::SourceKind::Parquet => {
+                        bi_engine::SourceCredential::Auth(bi_engine::AuthMethod::Integrated)
+                    }
+                    _ => bi_engine::SourceCredential::Auth(auth.clone()),
+                }
+            })
+            .await
+            .map_err(|e| format!("Connect failed: {}", e))?
+    };
+    if report.wired.is_empty() {
+        return Err(
+            "This source kind can't be reconnected from the model (in-memory data lives in the host)."
+                .to_string(),
+        );
+    }
+    // Mark connected on every connection sharing this model.
+    {
+        let mut conns = bi_state.connections.lock().unwrap();
+        if let Some(mk) = conns.get(&connection_id).and_then(|c| c.model_key.clone()) {
+            for c in conns.values_mut() {
+                if c.model_key.as_ref() == Some(&mk) {
+                    c.is_connected = true;
+                }
+            }
+        }
+    }
+    crate::log_info!(
+        "BI",
+        "model editor: wired source '{}' ({} tables) on conn {}",
+        source_id,
+        report.bound_tables.len(),
+        connection_id
+    );
+    let bindings = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns.get(&connection_id).map(|c| c.bindings.clone()).unwrap_or_default()
+    };
+    Ok(build_overview(&base, &bindings, true, None))
 }
 
 /// Create a NEW blank model as a path-less connection (the model lives

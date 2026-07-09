@@ -33,6 +33,7 @@ import type { SectionCtx } from "./editorShared";
 import { MeasuresSection } from "./sections/MeasuresSection";
 import { TablesSection } from "./sections/TablesSection";
 import { RelationshipsSection } from "./sections/RelationshipsSection";
+import { ConnectionsSection } from "./sections/ConnectionsSection";
 import { HierarchiesSection } from "./sections/HierarchiesSection";
 import { KpisSection } from "./sections/KpisSection";
 import { RolesSection } from "./sections/RolesSection";
@@ -55,6 +56,7 @@ import { NewModelDialog } from "./NewModelDialog";
 type SectionId =
   | "overview"
   | "tables"
+  | "connections"
   | "relationships"
   | "hierarchies"
   | "measures"
@@ -73,6 +75,7 @@ type SectionId =
 const NAV: Array<{ id: SectionId; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "tables", label: "Tables" },
+  { id: "connections", label: "Connections" },
   { id: "relationships", label: "Relationships" },
   { id: "hierarchies", label: "Hierarchies" },
   { id: "measures", label: "Measures" },
@@ -419,6 +422,8 @@ export function ModelEditorApp(): React.ReactElement {
         return <MeasuresSection ctx={ctx} />;
       case "tables":
         return <TablesSection ctx={ctx} />;
+      case "connections":
+        return <ConnectionsSection ctx={ctx} />;
       case "relationships":
         return <RelationshipsSection ctx={ctx} />;
       case "hierarchies":

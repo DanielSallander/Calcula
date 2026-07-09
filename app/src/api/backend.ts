@@ -3658,6 +3658,8 @@ export interface ModelTableInfo {
   isHidden: boolean;
   storageMode: string;
   bound: boolean;
+  /** Persisted-source id this table binds to (model catalog), or null. */
+  sourceId: string | null;
   columns: ModelColumnInfo[];
   /** InMemory cache refresh strategies (empty = never auto-refresh). */
   refreshStrategies: RefreshStrategyDto[];
@@ -3843,6 +3845,24 @@ export interface ModelOverview {
   modelVersion: string | null;
   modelAuthor: string | null;
   modelDescription: string | null;
+  /** The model's persisted data-source catalog (drives the Connections tab). */
+  sources: ModelSourceInfo[];
+}
+
+/** One entry in the model's persisted data-source catalog (secret-free). */
+export interface ModelSourceInfo {
+  id: string;
+  /** "postgres" | "sqlServer" | "inMemory" | "csv" | "parquet" */
+  kind: string;
+  displayName: string | null;
+  host: string;
+  port: number | null;
+  database: string;
+  defaultSchema: string | null;
+  /** "integrated" | "usernamePassword" | "environmentVariable" */
+  preferredAuth: string;
+  /** How many model tables bind to this source. */
+  tableCount: number;
 }
 
 export interface SourceTableInfo {
@@ -4465,6 +4485,79 @@ export async function biModelDeleteTable(
   tableName: string,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_delete_table", { connectionId, tableName });
+}
+
+/** Parameters for adding/updating a persisted data source (secret-free). */
+export interface UpsertSourceParams {
+  connectionId: string;
+  /** Stable id (kept across edits so table bindings never dangle). */
+  id: string;
+  /** "postgres" | "sqlServer" | "inMemory" | "csv" | "parquet" */
+  kind: string;
+  host?: string | null;
+  port?: number | null;
+  /** Database name, or the directory path for csv/parquet. */
+  database?: string | null;
+  defaultSchema?: string | null;
+  trustServerCertificate?: boolean;
+  /** "integrated" | "usernamePassword" | "environmentVariable" */
+  preferredAuth: string;
+  displayName?: string | null;
+}
+
+/** Add or update (by id) a persisted data source in the model's catalog. */
+export async function biModelUpsertSource(params: UpsertSourceParams): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_source", {
+    connectionId: params.connectionId,
+    id: params.id,
+    kind: params.kind,
+    host: params.host ?? null,
+    port: params.port ?? null,
+    database: params.database ?? null,
+    defaultSchema: params.defaultSchema ?? null,
+    trustServerCertificate: params.trustServerCertificate ?? false,
+    preferredAuth: params.preferredAuth,
+    displayName: params.displayName ?? null,
+  });
+}
+
+/** Remove a data source; clears bindings of tables that name it. */
+export async function biModelDeleteSource(
+  connectionId: string,
+  sourceId: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_source", { connectionId, sourceId });
+}
+
+/** Bind a model table to a catalog source (or clear its binding when sourceId is null). */
+export async function biModelSetTableSourceBinding(
+  connectionId: string,
+  tableName: string,
+  sourceId: string | null,
+  schema: string,
+  sourceTable: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_set_table_source_binding", {
+    connectionId,
+    tableName,
+    sourceId,
+    schema,
+    sourceTable,
+  });
+}
+
+/** Connect one catalog source with the supplied credentials (wires it live and
+ *  binds its tables). In-memory sources cannot be reconnected. */
+export async function biModelConnectSource(
+  connectionId: string,
+  sourceId: string,
+  connectionString: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_connect_source", {
+    connectionId,
+    sourceId,
+    connectionString,
+  });
 }
 
 /** Create a NEW blank model as a path-less connection (embedded from birth). */

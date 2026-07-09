@@ -4102,6 +4102,10 @@ pub fn run() {
             bi::model_editor::bi_model_import_from_file,
             bi::model_editor::bi_model_import_sql_source,
             bi::model_editor::bi_model_delete_table,
+            bi::model_editor::bi_model_upsert_source,
+            bi::model_editor::bi_model_delete_source,
+            bi::model_editor::bi_model_set_table_source_binding,
+            bi::model_editor::bi_model_connect_source,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,
