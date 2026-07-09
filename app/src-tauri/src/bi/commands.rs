@@ -95,6 +95,7 @@ pub(crate) fn parse_connection_string(conn_str: &str) -> (bi_engine::ConnectionT
         let mut user = String::new();
         let mut password = String::new();
         let mut schema: Option<String> = None;
+        let mut ssl_mode: Option<String> = None;
 
         for part in conn_str.split_whitespace() {
             if let Some((key, value)) = part.split_once('=') {
@@ -105,6 +106,7 @@ pub(crate) fn parse_connection_string(conn_str: &str) -> (bi_engine::ConnectionT
                     "user" | "username" => user = value.to_string(),
                     "password" => password = value.to_string(),
                     "schema" | "search_path" | "options" => schema = Some(value.to_string()),
+                    "sslmode" | "ssl_mode" | "ssl-mode" => ssl_mode = Some(value.to_string()),
                     _ => {}
                 }
             }
@@ -116,6 +118,9 @@ pub(crate) fn parse_connection_string(conn_str: &str) -> (bi_engine::ConnectionT
         }
         if let Some(s) = schema {
             target = target.with_default_schema(&s);
+        }
+        if let Some(m) = ssl_mode {
+            target = target.with_ssl_mode(m);
         }
         let auth = if !user.is_empty() {
             bi_engine::AuthMethod::UsernamePassword {
@@ -186,13 +191,21 @@ pub(crate) fn persisted_source_for(conn: &Connection) -> bi_engine::PersistedSou
         ConnectionType::PostgreSQL => bi_engine::SourceKind::Postgres,
         ConnectionType::SqlServer => bi_engine::SourceKind::SqlServer,
     };
-    let target = build_target_from_connection_info(&conn.server, &conn.database);
+    // Prefer the connection string (carries default schema + sslmode) so the
+    // persisted descriptor reconnects with the same TLS mode; fall back to
+    // server/database for path-less/blank connections.
+    let target = if conn.connection_string.trim().is_empty() {
+        build_target_from_connection_info(&conn.server, &conn.database)
+    } else {
+        parse_connection_string(&conn.connection_string).0
+    };
     let connection = bi_engine::PersistedConnection {
         host: target.host.clone(),
         port: target.port,
         database: target.database.clone(),
         default_schema: target.default_schema.clone(),
         trust_server_certificate: target.trust_server_certificate,
+        ssl_mode: target.ssl_mode.clone(),
     };
     let id = source_id_for(&conn.connection_type, &conn.server, &conn.database);
     let mut src = bi_engine::PersistedSource::new(

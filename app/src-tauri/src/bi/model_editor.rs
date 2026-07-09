@@ -1125,6 +1125,8 @@ pub struct ModelSourceInfo {
     pub default_schema: Option<String>,
     /// "integrated" | "usernamePassword" | "environmentVariable"
     pub preferred_auth: String,
+    /// Explicit TLS mode: "disable" | "prefer" | "require", or null (default).
+    pub ssl_mode: Option<String>,
     /// How many model tables bind to this source.
     pub table_count: usize,
 }
@@ -1185,6 +1187,7 @@ fn build_source_infos(base: &bi_engine::DataModel) -> Vec<ModelSourceInfo> {
             database: s.connection.database.clone(),
             default_schema: s.connection.default_schema.clone(),
             preferred_auth: persisted_auth_str(s.preferred_auth).to_string(),
+            ssl_mode: s.connection.ssl_mode.clone(),
             table_count: base
                 .tables()
                 .iter()
@@ -3505,6 +3508,7 @@ pub async fn bi_model_upsert_source(
     database: Option<String>,
     default_schema: Option<String>,
     trust_server_certificate: bool,
+    ssl_mode: Option<String>,
     preferred_auth: String,
     display_name: Option<String>,
     window: tauri::Window,
@@ -3525,6 +3529,7 @@ pub async fn bi_model_upsert_source(
             database: database.clone().unwrap_or_default(),
             default_schema: default_schema.clone().filter(|s| !s.trim().is_empty()),
             trust_server_certificate,
+            ssl_mode: ssl_mode.clone().filter(|s| !s.trim().is_empty()),
         };
         let mut src = bi_engine::PersistedSource::new(
             id.clone(),

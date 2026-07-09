@@ -3861,6 +3861,8 @@ export interface ModelSourceInfo {
   defaultSchema: string | null;
   /** "integrated" | "usernamePassword" | "environmentVariable" */
   preferredAuth: string;
+  /** Explicit TLS mode: "disable" | "prefer" | "require", or null (default). */
+  sslMode: string | null;
   /** How many model tables bind to this source. */
   tableCount: number;
 }
@@ -4500,6 +4502,8 @@ export interface UpsertSourceParams {
   database?: string | null;
   defaultSchema?: string | null;
   trustServerCertificate?: boolean;
+  /** Explicit TLS mode: "disable" | "prefer" | "require" (null/omit = default). */
+  sslMode?: string | null;
   /** "integrated" | "usernamePassword" | "environmentVariable" */
   preferredAuth: string;
   displayName?: string | null;
@@ -4516,6 +4520,7 @@ export async function biModelUpsertSource(params: UpsertSourceParams): Promise<M
     database: params.database ?? null,
     defaultSchema: params.defaultSchema ?? null,
     trustServerCertificate: params.trustServerCertificate ?? false,
+    sslMode: params.sslMode ?? null,
     preferredAuth: params.preferredAuth,
     displayName: params.displayName ?? null,
   });

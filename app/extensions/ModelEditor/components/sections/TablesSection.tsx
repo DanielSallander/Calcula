@@ -9,10 +9,17 @@ import {
   biModelDeleteTable,
   biModelRefreshTable,
   biModelSetTableRefresh,
+  biModelSetTableSourceBinding,
   biModelSetTableStorageMode,
   biModelUpdateTable,
 } from "@api";
-import type { ModelColumnInfo, ModelOverview, ModelTableInfo, RefreshStrategyDto } from "@api";
+import type {
+  ModelColumnInfo,
+  ModelOverview,
+  ModelSourceInfo,
+  ModelTableInfo,
+  RefreshStrategyDto,
+} from "@api";
 
 const STORAGE_MODES = ["DirectQuery", "InMemory"];
 const STRATEGY_TYPES = [
@@ -97,6 +104,17 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
               applyOverview={applyOverview}
               reportError={reportError}
             />
+
+            {!table.sourceId && (
+              <BindTableCard
+                connectionId={connectionId}
+                table={table}
+                sources={overview.sources}
+                readOnly={readOnly}
+                applyOverview={applyOverview}
+                reportError={reportError}
+              />
+            )}
 
             {table.storageMode === "InMemory" && (
               <RefreshStrategyCard
@@ -224,6 +242,104 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
 // ============================================================================
 // Table metadata form (displayName / description / isHidden)
 // ============================================================================
+
+/** Shown for an unbound table: pick a catalog source + physical location to
+ *  bind it (mirrors the Connections tab, kept here for convenience). */
+function BindTableCard({
+  connectionId,
+  table,
+  sources,
+  readOnly,
+  applyOverview,
+  reportError,
+}: {
+  connectionId: string;
+  table: ModelTableInfo;
+  sources: ModelSourceInfo[];
+  readOnly: boolean;
+  applyOverview: (overview: ModelOverview) => void;
+  reportError: (err: unknown) => void;
+}): React.ReactElement {
+  const [sourceId, setSourceId] = useState(sources[0]?.id ?? "");
+  const [schema, setSchema] = useState("public");
+  const [sourceTable, setSourceTable] = useState(table.name);
+  const [busy, setBusy] = useState(false);
+
+  const bind = async () => {
+    if (!sourceId || !sourceTable.trim()) return;
+    setBusy(true);
+    try {
+      applyOverview(
+        await biModelSetTableSourceBinding(
+          connectionId,
+          table.name,
+          sourceId,
+          schema.trim(),
+          sourceTable.trim(),
+        ),
+      );
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{ ...styles.card, border: "1px solid #e2b04a", background: "#fdf6e3", marginTop: 8 }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>Unbound table</div>
+      {sources.length === 0 ? (
+        <div style={styles.hint}>
+          This table isn&apos;t bound to a data source. Add a source under the Connections tab, then
+          bind it here.
+        </div>
+      ) : (
+        <>
+          <div style={{ ...styles.hint, marginBottom: 6 }}>
+            Bind this table to a data source so it can be queried.
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              style={{ ...styles.input, fontSize: 12 }}
+              value={sourceId}
+              disabled={readOnly || busy}
+              onChange={(e) => setSourceId(e.target.value)}
+            >
+              {sources.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.displayName ?? s.id}
+                </option>
+              ))}
+            </select>
+            <input
+              style={{ ...styles.input, fontSize: 12, width: 100 }}
+              placeholder="schema"
+              value={schema}
+              disabled={readOnly || busy}
+              onChange={(e) => setSchema(e.target.value)}
+            />
+            <input
+              style={{ ...styles.input, fontSize: 12, width: 150 }}
+              placeholder="source table"
+              value={sourceTable}
+              disabled={readOnly || busy}
+              onChange={(e) => setSourceTable(e.target.value)}
+            />
+            <button
+              style={styles.primaryBtn}
+              disabled={readOnly || busy || !sourceId || !sourceTable.trim()}
+              onClick={() => void bind()}
+            >
+              {busy ? "Binding…" : "Bind"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 function TableMetaForm({
   connectionId,

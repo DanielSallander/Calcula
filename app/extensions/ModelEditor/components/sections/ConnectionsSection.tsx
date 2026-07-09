@@ -30,9 +30,26 @@ const AUTHS = [
   { value: "environmentVariable", label: "Environment variable" },
 ];
 
+// SSL mode presets map a single choice to (sslMode, trustServerCertificate).
+// "Prefer" attempts TLS but falls back to plaintext (works with non-TLS
+// servers); "Disable" never uses TLS; "Require" mandates TLS.
+const SSL_MODES = [
+  { value: "prefer", label: "Prefer TLS, else plaintext (default)", ssl: "", trust: false },
+  { value: "disable", label: "Disable TLS (no encryption)", ssl: "disable", trust: false },
+  { value: "require", label: "Require TLS", ssl: "require", trust: false },
+  { value: "requireTrust", label: "Require TLS, trust certificate", ssl: "require", trust: true },
+];
+
 const isFileKind = (k: string) => k === "csv" || k === "parquet";
 const isDbKind = (k: string) => k === "postgres" || k === "sqlServer";
 const kindLabel = (k: string) => KINDS.find((o) => o.value === k)?.label ?? k;
+
+/** Which SSL_MODES preset matches an (sslMode, trust) pair. */
+function sslPresetValue(ssl: string, trust: boolean): string {
+  if (ssl === "disable") return "disable";
+  if (ssl === "require") return trust ? "requireTrust" : "require";
+  return "prefer";
+}
 
 type SourceDraft = {
   original: ModelSourceInfo | null;
@@ -43,6 +60,7 @@ type SourceDraft = {
   database: string;
   defaultSchema: string;
   trustServerCertificate: boolean;
+  sslMode: string;
   preferredAuth: string;
   displayName: string;
 };
@@ -57,6 +75,7 @@ function emptyDraft(): SourceDraft {
     database: "",
     defaultSchema: "",
     trustServerCertificate: false,
+    sslMode: "",
     preferredAuth: "usernamePassword",
     displayName: "",
   };
@@ -72,6 +91,7 @@ function draftFrom(s: ModelSourceInfo): SourceDraft {
     database: s.database,
     defaultSchema: s.defaultSchema ?? "",
     trustServerCertificate: false,
+    sslMode: s.sslMode ?? "",
     preferredAuth: s.preferredAuth,
     displayName: s.displayName ?? "",
   };
@@ -291,6 +311,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                   database: d.database || null,
                   defaultSchema: d.defaultSchema || null,
                   trustServerCertificate: d.trustServerCertificate,
+                  sslMode: isDbKind(d.kind) ? d.sslMode || null : null,
                   preferredAuth: d.preferredAuth,
                   displayName: d.displayName || null,
                 }),
@@ -485,27 +506,42 @@ function SourceModal({
               />
             </Field>
           </div>
-          <Field label="Authentication">
-            <select
-              style={styles.input}
-              value={d.preferredAuth}
-              onChange={(e) => set("preferredAuth", e.target.value)}
+          <div style={{ display: "flex", gap: 10 }}>
+            <Field label="Authentication" flex={1}>
+              <select
+                style={styles.input}
+                value={d.preferredAuth}
+                onChange={(e) => set("preferredAuth", e.target.value)}
+              >
+                {AUTHS.map((a) => (
+                  <option key={a.value} value={a.value}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field
+              label="TLS / SSL"
+              flex={1}
+              hint="Use Disable for a local server with no TLS support."
             >
-              {AUTHS.map((a) => (
-                <option key={a.value} value={a.value}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={d.trustServerCertificate}
-              onChange={(e) => set("trustServerCertificate", e.target.checked)}
-            />
-            Trust server certificate
-          </label>
+              <select
+                style={styles.input}
+                value={sslPresetValue(d.sslMode, d.trustServerCertificate)}
+                onChange={(e) => {
+                  const preset = SSL_MODES.find((m) => m.value === e.target.value) ?? SSL_MODES[0];
+                  set("sslMode", preset.ssl);
+                  set("trustServerCertificate", preset.trust);
+                }}
+              >
+                {SSL_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
         </>
       )}
 
