@@ -103,6 +103,8 @@ When a data model spans multiple sources (e.g., sales data in PostgreSQL, produc
 - Performs the join locally in the columnar store
 - Resolves relationships defined in the data model across source boundaries
 
+A single model can register **many** connectors at once (`SourceRegistry` holds a `Vec` of connectors; each table binds to one), so multi-source ("composite") models work in both import and Direct Query mode. The wiring is **persisted** in the model file — see [§8](#8-authentication-and-data-source-persistence) — and reconnected on load via `Engine::wire_sources`. As an **opt-in** optimization (`Engine::set_semi_join_config`, default off), a restricted fact's join keys can be pushed to a large, unfiltered, connector-backed dimension so it pulls only the rows that will survive the join; it applies only in the provably result-preserving single-fact case.
+
 ### 7. Data Source Connectors
 
 The engine provides a connector abstraction for different data sources:
@@ -116,17 +118,26 @@ Each connector is responsible for:
 - Query dialect translation (the planner generates abstract queries; the connector translates to source-specific SQL)
 - Result set deserialization into columnar format
 
-### 8. Authentication Architecture
+### 8. Authentication and Data Source Persistence
 
 Authentication is separated from connection targeting so that **model files never contain secrets**. This mirrors how SSAS models work: the model declares *where* to connect, and each user's own identity resolves the actual authentication.
 
 #### Core Types (in `engine-connectors/src/auth.rs`)
 
-- **`ConnectionTarget`** — host, port, database, schema, TLS settings. Serializable. This is what gets stored in model files.
+- **`ConnectionTarget`** — host, port, database, schema, TLS settings. Secret-free. The runtime "where to connect" the facade hands a connector.
 - **`AuthMethod`** — how to authenticate (Integrated, UsernamePassword, EnvironmentVariable). **Not serializable** because it may contain secrets.
-- **`AuthMethodKind`** — secret-free discriminant of `AuthMethod`. Serializable. Stored as a hint in model files.
-- **`ConnectionSpec`** — bundles `ConnectionTarget` + `AuthMethodKind`. The complete model-file representation of a data source.
+- **`AuthMethodKind`** — secret-free discriminant of `AuthMethod`. Serializable; persisted as a preferred-auth *hint*.
+- **`ConnectionSpec`** — a connectors-level convenience bundling `ConnectionTarget` + `AuthMethodKind` (used at the facade boundary; it is **not** itself the serialized model form — see below).
 - **`ConnectorAuth`** trait — declares which auth methods a connector type supports.
+
+#### Persisted source catalog (model format ≥ 14)
+
+Because `engine-core` (which owns `DataModel`) must not depend on `engine-connectors`, the model file stores a **neutral, secret-free mirror** rather than `ConnectionTarget`/`ConnectionSpec` directly:
+
+- **`DataModel.sources`** — a catalog of `PersistedSource { id, kind, connection, preferred_auth }` (engine-core). `connection` is a `PersistedConnection` (the secret-free half of a `ConnectionTarget`); `preferred_auth` is an auth-kind hint. No credentials.
+- **`Table.source_binding`** — `TableSourceBinding { source_id, schema, table }` naming which catalog source a table's rows come from and where.
+
+The engine facade translates `PersistedSource` ↔ `ConnectionTarget`/`AnyConnector` and rebuilds the live `SourceRegistry` via **`Engine::wire_sources`** (the host re-supplies each source's `AuthMethod` at that point — never persisted; in-memory sources are re-supplied as a connector). Loading a model opens **no** connections. The composite-model authoring helpers (`Engine::add_<kind>_source_with_id`, `bind_source_table`/`bind_source_tables`) record the catalog and bindings as sources are added, so a multi-source model round-trips through save/reopen without the host re-binding every table.
 
 #### Auth Methods
 
@@ -138,9 +149,9 @@ Authentication is separated from connection targeting so that **model files neve
 
 #### Flow
 
-1. **Model file** stores `ConnectionSpec` (target + preferred auth kind).
-2. **Host application** reads the spec and resolves an `AuthMethod` from the user's environment (e.g., for `Integrated`, it just passes through; for `UsernamePassword`, it may prompt the user).
-3. **Engine** receives `ConnectionTarget` + `AuthMethod` via `Engine::add_<type>_source()`.
+1. **Model file** stores a secret-free `PersistedSource` per data source (target + preferred auth kind) plus each table's `source_binding`.
+2. **Host application** loads the model, then calls `Engine::wire_sources`, resolving an `AuthMethod` per source from the user's environment (e.g., for `Integrated`, it passes through; for `UsernamePassword`, it may prompt the user).
+3. **Engine** builds each connector from the persisted `ConnectionTarget` + the supplied `AuthMethod` and re-binds every table whose `source_binding` names a wired source.
 4. **Connector** builds its native connection string from the structured parts via `Config::from_target()`.
 
 #### Checklist for New Connector Authors
@@ -256,7 +267,7 @@ Each stage produces a usable library that the other projects can start integrati
 
 **Current status:** The engine supports columnar storage, star/snowflake relationships (including many-to-many via EXISTS semi-joins, active/inactive relationships and `USERELATIONSHIP`), PostgreSQL and SQL Server connectors with an in-memory connector for testing, query pushdown (filter/aggregation/context/relationship), measure computation with context manipulation, table variables, execution plan visualization, text-based measure definition via a DAX-like parser, DAX-inspired functions (IF, SWITCH, DIVIDE, ROUND, math functions, etc.), named context definitions (CONTEXT), scalar variables (VAR/RETURN), two-stage aggregation via QUERY-in-VAR, per-query lookup columns, and ragged hierarchies.
 
-Beyond that baseline, the engine adds the host-facing capabilities catalogued in [host-integration-changelog.md](host-integration-changelog.md): presentation metadata; pivot-shaped results (`order_by`/`limit`/sort-by-column and `ROLLUP` totals with a `__grouping_id` indicator); multi-select (`in_filters`) and cross-column `OR` (`or_filters`) slicers; measure-value filters (`HAVING`) and `RANKX`-style `rank_by` ranking; window/time-intelligence measures requested **alongside ordinary measures** in one query; a result-column metadata sidecar (`query_with_meta`) and editor-time measure validation + dependency-graph APIs for Studio; sargable integer filter pushdown; `&self` concurrent queries with cooperative cancellation; **time intelligence** (axis and filter-context modes, including semi-additive balances); **row-level security** (single role or multi-role union); **drillthrough / detail rows** with dimension-attribute output; **incremental refresh** (user-defined volatility filter) with structured `RefreshReport`; **calculation groups**; a **CSV file connector** for flat-file sources; and **scripting** (native UDF registry + sandboxed Rhai script functions). The shared model file is now a hardened trust boundary with `MODEL_FORMAT_VERSION` evolution (currently `9`). Across these waves the overriding rule is **never return a silently-wrong number — fail closed instead**.
+Beyond that baseline, the engine adds the host-facing capabilities catalogued in [host-integration-changelog.md](host-integration-changelog.md): presentation metadata; pivot-shaped results (`order_by`/`limit`/sort-by-column and `ROLLUP` totals with a `__grouping_id` indicator); multi-select (`in_filters`) and cross-column `OR` (`or_filters`) slicers; measure-value filters (`HAVING`) and `RANKX`-style `rank_by` ranking; window/time-intelligence measures requested **alongside ordinary measures** in one query; a result-column metadata sidecar (`query_with_meta`) and editor-time measure validation + dependency-graph APIs for Studio; sargable integer filter pushdown; `&self` concurrent queries with cooperative cancellation; **time intelligence** (axis and filter-context modes, including semi-additive balances); **row-level security** (single role or multi-role union); **drillthrough / detail rows** with dimension-attribute output; **incremental refresh** (user-defined volatility filter) with structured `RefreshReport`; **calculation groups**; a **CSV file connector** for flat-file sources; **scripting** (native UDF registry + sandboxed Rhai script functions); **persisted multi-source (composite) models** (a secret-free `sources` catalog + per-table `source_binding`, reconnected on load via `Engine::wire_sources`); and an **opt-in cross-source semi-join pushdown** that shrinks large dimension fetches. The shared model file is now a hardened trust boundary with `MODEL_FORMAT_VERSION` evolution (currently `14`). Across these waves the overriding rule is **never return a silently-wrong number — fail closed instead**.
 
 ## Ingest-Time Optimization and Caching Architecture
 

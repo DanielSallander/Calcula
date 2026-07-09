@@ -59,6 +59,37 @@ engine.bind_table("Sales", pg_idx, SourceBinding::new("public", "sales"));
 engine.bind_table("Products", ss_idx, SourceBinding::new("dbo", "product"));
 ```
 
+`add_postgres` / `add_sqlserver` / `add_*_source` + `bind_table` wire sources **at runtime only** — nothing is written to the model file, so the host must re-issue them every load.
+
+### Persisted Multi-Source (Composite) Models
+
+To let a multi-source model **save and reopen** without re-wiring, register sources under a stable id (recorded in the model's secret-free `sources` catalog) and bind tables through the composite API. Model format ≥ 14.
+
+```rust
+// Author time — register + persist, then bind (records Table.source_binding):
+engine.add_postgres_source("sales_pg", pg_target, pg_auth).await?;   // async; also add_sqlserver_source
+engine.add_csv_source_with_id("catalog_csv", csv_target, AuthMethod::Integrated)?; // sync file/in-memory variants
+engine.bind_source_table("sales_pg", "public", "sales", Some("Sales"))?;
+engine.bind_source_tables("catalog_csv").await?;  // introspect + add + bind every table the source exposes
+engine.save_model(path)?;                          // catalog + bindings persisted; NO secrets
+
+// Load time — reconnect; the host re-supplies each source's AuthMethod here:
+let model = Engine::load_model(path)?;             // opens no connections
+let mut engine = Engine::new(model);
+let report = engine.wire_sources_with_auth(&auth_by_source_id).await?;  // or wire_sources(|src| ...)
+// report.unbound_tables → surface as "reconnect required" (they fail closed at query time).
+```
+
+`SourceCredential` (`Auth(AuthMethod)` | `Connector(AnyConnector)` — required for in-memory sources | `Skip`) drives the `wire_sources(resolver)` form. Secrets are **never** persisted — only a `ConnectionTarget`-equivalent and a preferred-auth *kind* hint. See the persisted-source types (`PersistedSource`, `TableSourceBinding`, `SourceKind`) under [Connectors](#connectors).
+
+### Cross-Source Semi-Join Pushdown (opt-in)
+
+For composite models with large cross-source dimensions, enable reverse (fact → dimension) key pushdown so a restricted fact shrinks the dimension's fetch. Off by default; result-preserving (single-fact case only). See the [changelog](host-integration-changelog.md#cross-source-semi-join-pushdown-opt-in--no-format-change).
+
+```rust
+engine.set_semi_join_config(SemiJoinConfig { reverse_pushdown: true, ..Default::default() });
+```
+
 ### Querying
 
 ```rust
@@ -708,10 +739,30 @@ let auth = AuthMethod::UsernamePassword {
 
 ### SourceBinding
 
-Maps a model table to a physical source location:
+Maps a model table to a physical source location (runtime registry):
 
 ```rust
 let binding = SourceBinding::new("schema_name", "table_name");
+```
+
+### Persisted source types (model format ≥ 14)
+
+Secret-free descriptors serialized into the model for composite models (see [Persisted Multi-Source Models](#persisted-multi-source-composite-models)):
+
+| Type | Purpose |
+|------|---------|
+| `PersistedSource { id, kind, connection, preferred_auth, display_name? }` | One entry in `DataModel.sources`. `connection` is a `PersistedConnection` (secret-free `ConnectionTarget` mirror); `preferred_auth` is a `PersistedAuthKind` hint. |
+| `TableSourceBinding { source_id, schema, table }` | `Table.source_binding` — which catalog source a table maps to, and where. |
+| `SourceKind` | `Postgres` \| `SqlServer` \| `InMemory` \| `Csv` \| `Parquet`. |
+| `SourceCredential` | Passed back from a `wire_sources` resolver: `Auth(AuthMethod)` \| `Connector(AnyConnector)` \| `Skip`. |
+| `WireReport { wired, skipped, bound_tables, unbound_tables }` | Result of `wire_sources`; `unbound_tables` = "reconnect required". |
+
+### SemiJoinConfig
+
+Opt-in cross-source reverse pushdown tuning (default: disabled). Set via `Engine::set_semi_join_config`.
+
+```rust
+SemiJoinConfig { reverse_pushdown: false, key_set_abort_max: 100_000 } // defaults
 ```
 
 ---

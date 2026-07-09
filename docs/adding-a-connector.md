@@ -82,11 +82,16 @@ dialect.
 
 6. **One line in `define_any_connector!`** (`crates/engine-query/src/registry.rs`)
    — add `MyVendor => MyConnector,`. The macro generates the `AnyConnector`
-   variant, every dispatch arm, and the `From<MyConnector>` conversion. The
-   generated `supported_auth_methods` arm statically calls
-   `MyConnector::supported_auth_methods()`, so **forgetting `ConnectorAuth`
-   fails to compile**. Then register with `engine.add_source(my_connector)` (or
-   add a typed `Engine::add_my_vendor_source` wrapper for ergonomics).
+   variant, every dispatch arm, the `From<MyConnector>` conversion, and the
+   `kind()` arm that maps the variant to `SourceKind::MyVendor`. Two things then
+   fail to compile until you finish the checklist: the `supported_auth_methods`
+   arm (so **forgetting `ConnectorAuth` is a compile error**), and `kind()` (so
+   you **must add a matching `SourceKind::MyVendor` variant** in
+   `engine-core/src/model/source.rs` — this is how a source is recorded in a
+   persisted composite model). Then register with `engine.add_source(my_connector)`
+   (runtime only) or, for a **persisted** composite model, add typed
+   `Engine::add_my_vendor_source` / `add_my_vendor_source_with_id` wrappers so the
+   source is written to the model's `sources` catalog.
 
 ## What the engine gives you for free
 
