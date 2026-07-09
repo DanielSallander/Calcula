@@ -117,15 +117,9 @@ fn build_measure(
     if let Some(f) = format_string.map(str::trim).filter(|f| !f.is_empty()) {
         measure = measure.with_format_string(f);
     }
-    if measure.table().trim().is_empty() {
-        return Err(format!(
-            "Measure '{}' must reference at least one column so it can be \
-             associated with a table — write it in column form (e.g. \
-             SUM(Sales[profit]) / SUM(Sales[revenue])) rather than referencing \
-             only other measures.",
-            name
-        ));
-    }
+    // The home-table check is deferred to upsert_measure_model, which has the
+    // model needed to resolve a measure that references only OTHER measures
+    // (e.g. `[Total Sales] + 1000`) to their home table.
     Ok(measure)
 }
 
@@ -137,6 +131,7 @@ fn upsert_measure_model(
     measure: bi_engine::Measure,
 ) -> Result<bi_engine::DataModel, String> {
     let mut measures: Vec<bi_engine::Measure> = base.measures().to_vec();
+    let measure_name = measure.name().to_string();
     match original_name {
         Some(orig) => {
             let Some(idx) = measures.iter().position(|m| m.name() == orig) else {
@@ -166,7 +161,24 @@ fn upsert_measure_model(
             measures.push(measure);
         }
     }
-    let edited = base.with_measures(measures);
+    let mut edited = base.with_measures(measures);
+    // A measure that references only OTHER measures (e.g. `[Total Sales] + 1000`)
+    // has no column of its own; associate it with the home table of the measures
+    // it builds on so the model can validate.
+    edited.resolve_measure_home_tables();
+    if edited
+        .measures()
+        .iter()
+        .any(|m| m.name() == measure_name && m.table().trim().is_empty())
+    {
+        return Err(format!(
+            "Measure '{}' must reference at least one column so it can be \
+             associated with a table — either write it in column form (e.g. \
+             SUM(Sales[profit]) / SUM(Sales[revenue])) or reference a measure \
+             that resolves to a table.",
+            measure_name
+        ));
+    }
     // validate() rebuilds the model and catches dangling references (e.g. a
     // rename leaving another measure's [OldName] behind), circular measure
     // refs, and unknown columns.

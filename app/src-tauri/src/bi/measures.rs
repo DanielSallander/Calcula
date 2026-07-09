@@ -42,21 +42,21 @@ pub(crate) fn build_combined_model(
             .map_err(|e| format!("Measure '{}': {}", m.name, e))?;
         built.push(bi_engine::expression_measure(&m.name, expr));
     }
-    let combined = base.with_overlay_measures(built).map_err(|e| format!("{}", e))?;
+    let mut combined = base.with_overlay_measures(built).map_err(|e| format!("{}", e))?;
     // Validate references (unknown column / measure) against the whole model.
     combined.validate().map_err(|e| format!("{}", e))?;
-    // The engine derives a measure's fact table from the COLUMNS its expression
-    // references; a purely measure-referential expression (e.g. `[Profit]/[Revenue]`
-    // with no direct column) gets an empty table and fails at query time. Reject
-    // it here with guidance toward the column form.
+    // A purely measure-referential expression (e.g. `[Profit]/[Revenue]`) has no
+    // direct column, so its fact table is inferred from the measures it builds
+    // on; only one that resolves to NO table at all is rejected below.
+    combined.resolve_measure_home_tables();
     for m in measures {
         if let Some(rm) = combined.measures().iter().find(|x| x.name() == m.name) {
             if rm.table().trim().is_empty() {
                 return Err(format!(
                     "Measure '{}' must reference at least one column so it can be \
-                     associated with a table — write it in column form (e.g. \
-                     SUM(Sales[profit]) / SUM(Sales[revenue])) rather than referencing \
-                     only other measures.",
+                     associated with a table — either write it in column form (e.g. \
+                     SUM(Sales[profit]) / SUM(Sales[revenue])) or reference a measure \
+                     that resolves to a table.",
                     m.name
                 ));
             }

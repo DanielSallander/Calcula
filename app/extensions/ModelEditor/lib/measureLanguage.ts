@@ -127,9 +127,12 @@ export function registerMeasureLanguage(): void {
         [/\b\d+(\.\d+)?([eE][+-]?\d+)?\b/, "number"],
         // Function call: NAME immediately followed by '('
         [/[A-Za-z_][\w.]*(?=\s*\()/, "type.identifier"],
-        // Keywords vs bare identifiers (table names)
+        // Keywords vs bare identifiers (table names, incl. schema-qualified like
+        // `BI.fact_sales`). `@keywords`/`@default` are Monaco Monarch's required
+        // literal case keys — not renameable.
         [
-          /[A-Za-z_]\w*/,
+          /[A-Za-z_][\w.]*/,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           { cases: { "@keywords": "keyword", "@default": "identifier" } },
         ],
         // [Name] — measure reference (no table prefix); the highlighter can't tell
@@ -173,7 +176,10 @@ export function registerMeasureLanguage(): void {
           startColumn: lastOpen + 2,
           endColumn: position.column,
         };
-        const tableMatch = /([A-Za-z_]\w*)\s*$/.exec(lineText.slice(0, lastOpen));
+        // Table names include the schema prefix (e.g. `BI.fact_sales`), so the
+        // identifier pattern must allow dots — `\w` alone would capture only
+        // `fact_sales` and never match the real table name.
+        const tableMatch = /([A-Za-z_][\w.]*)\s*$/.exec(lineText.slice(0, lastOpen));
         const table = tableMatch
           ? modelContext.tables.find((t) => t.name === tableMatch[1])
           : undefined;
