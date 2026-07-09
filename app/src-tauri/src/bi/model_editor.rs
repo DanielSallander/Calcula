@@ -162,6 +162,14 @@ fn upsert_measure_model(
         }
     }
     let mut edited = base.with_measures(measures);
+    // Renaming a measure propagates into its dependents: an expression like
+    // `[Revenue] + 1000` follows `Revenue` -> `Total Sales` so the reference
+    // doesn't dangle (column refs `Table[Revenue]` are left untouched).
+    if let Some(orig) = original_name {
+        if orig != measure_name.as_str() {
+            edited.rewrite_measure_references(orig, &measure_name);
+        }
+    }
     // A measure that references only OTHER measures (e.g. `[Total Sales] + 1000`)
     // has no column of its own; associate it with the home table of the measures
     // it builds on so the model can validate.
