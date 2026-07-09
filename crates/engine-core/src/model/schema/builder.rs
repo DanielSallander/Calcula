@@ -706,6 +706,18 @@ impl DataModelBuilder {
                 continue;
             }
 
+            // A measure that references no columns is a constant (e.g. `BLANK()`,
+            // `42`) — a valid placeholder with no home table, so skip the
+            // table/column checks (validate its group and move on).
+            if measure.column_references().is_empty() {
+                if let Some(group_name) = measure.group() {
+                    if !seen_groups.contains(group_name) {
+                        return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
+                    }
+                }
+                continue;
+            }
+
             // Table must exist.
             let table = self
                 .tables

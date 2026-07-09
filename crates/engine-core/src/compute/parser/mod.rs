@@ -203,10 +203,9 @@ impl Parser {
 pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
-        return Err(EngineError::ParseError {
-            position: 0,
-            message: "empty expression".into(),
-        });
+        // An empty (or comment-only) expression is BLANK() — a valid placeholder
+        // that evaluates to NULL, so a measure can be created and filled in later.
+        return Ok(Expression::Blank);
     }
     let mut parser = Parser::new(tokens, input.len());
 
@@ -674,8 +673,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_returns_error() {
-        assert!(parse_measure_expression("").is_err());
+    fn empty_measure_input_is_blank_but_empty_table_variable_still_errors() {
+        // Empty measure expression -> BLANK() placeholder (valid).
+        assert!(parse_measure_expression("").is_ok());
+        // Empty table-variable input is still an error (needs a KEEP(...)).
+        assert!(parse_table_variable("").is_err());
     }
 
     // --- Table variable parsing tests ---
@@ -894,15 +896,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_reports_parse_error_at_position_zero() {
-        let err = parse_measure_expression("").unwrap_err();
-        match err {
-            EngineError::ParseError { position, message } => {
-                assert_eq!(position, 0);
-                assert!(message.contains("empty expression"));
-            }
-            other => panic!("expected ParseError, got {other:?}"),
-        }
+    fn empty_input_parses_to_blank() {
+        // An empty measure expression is a valid BLANK() placeholder.
+        assert!(matches!(parse_measure_expression("").unwrap(), Expression::Blank));
+        assert!(matches!(parse_measure_expression("   ").unwrap(), Expression::Blank));
+    }
+
+    #[test]
+    fn comment_only_input_parses_to_blank() {
+        assert!(matches!(parse_measure_expression("/* just a note */").unwrap(), Expression::Blank));
+        assert!(matches!(parse_measure_expression("// a note").unwrap(), Expression::Blank));
+    }
+
+    #[test]
+    fn block_and_line_comments_are_ignored() {
+        let render =
+            |s: &str| crate::compute::expression::expression_to_formula(&parse_measure_expression(s).unwrap(), "T");
+        let base = render("SUM(Sales[amount]) + 1");
+        assert_eq!(render("SUM(Sales[amount]) /* total */ + 1"), base);
+        assert_eq!(render("SUM(Sales[amount]) // trailing\n + 1"), base);
     }
 
     #[test]

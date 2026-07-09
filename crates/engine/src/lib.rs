@@ -81,6 +81,7 @@
 
 mod auto_tier;
 mod disk_cache;
+pub mod function_docs;
 mod model_io;
 mod query_cache;
 mod refresh;
@@ -132,6 +133,7 @@ pub use tokio_util::sync::CancellationToken;
 // --- Re-exports from engine-core ---
 
 pub use engine_core::catalog::{function_catalog, FunctionInfo};
+pub use function_docs::{function_docs, FunctionDoc};
 pub use engine_core::compute::aggregate::AggregateOp;
 pub use engine_core::compute::context::{
     ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,

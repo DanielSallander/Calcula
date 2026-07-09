@@ -137,6 +137,22 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 tokens.push((Token::Star, tok_start));
                 i += 1;
             }
+            // Block comment `/* ... */` — skipped entirely so measures can be
+            // documented inline. An unterminated comment runs to end of input.
+            '/' if i + 1 < len && chars[i + 1] == '*' => {
+                i += 2;
+                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i = if i + 1 < len { i + 2 } else { len };
+            }
+            // Line comment `// ...` — skipped to the end of the line.
+            '/' if i + 1 < len && chars[i + 1] == '/' => {
+                i += 2;
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
             '/' => {
                 tokens.push((Token::Slash, tok_start));
                 i += 1;

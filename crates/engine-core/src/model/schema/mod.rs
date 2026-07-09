@@ -587,6 +587,40 @@ impl DataModel {
         model
     }
 
+    /// Returns a copy of the model with its measure-group (display-folder) list
+    /// REPLACED (caller-validates contract, see [`DataModel::with_measures`]).
+    /// A measure's `group` must name one of these, so hosts assigning a measure
+    /// to a new folder should declare the group here too — see
+    /// [`DataModel::ensure_measure_groups`].
+    pub fn with_measure_groups(&self, measure_groups: Vec<MeasureGroup>) -> DataModel {
+        let mut model = self.clone();
+        model.measure_groups = measure_groups;
+        model
+    }
+
+    /// Declare (in place) a [`MeasureGroup`] for every group name referenced by
+    /// a measure that is not already declared, so the model validates after a
+    /// measure is filed into a new folder. Names are matched case-sensitively
+    /// and existing groups (and their descriptions) are preserved. Returns the
+    /// number of groups added.
+    pub fn ensure_measure_groups(&mut self) -> usize {
+        let declared: std::collections::HashSet<String> =
+            self.measure_groups.iter().map(|g| g.name().to_string()).collect();
+        let mut to_add: Vec<String> = Vec::new();
+        for m in &self.measures {
+            if let Some(name) = m.group() {
+                if !declared.contains(name) && !to_add.iter().any(|n| n == name) {
+                    to_add.push(name.to_string());
+                }
+            }
+        }
+        let added = to_add.len();
+        for name in to_add {
+            self.measure_groups.push(MeasureGroup::new(name));
+        }
+        added
+    }
+
     /// Returns a copy of the model with its table list REPLACED (model
     /// editing primitive; same caller-validates contract as
     /// [`DataModel::with_measures`]).
@@ -1313,6 +1347,42 @@ mod tests {
         // The original is untouched (copy-on-edit).
         assert_eq!(model.measures().len(), 1);
         assert_eq!(model.measures()[0].name(), "Revenue");
+    }
+
+    #[test]
+    fn ensure_measure_groups_declares_referenced_folders_so_validate_passes() {
+        use crate::compute::measure::sum_measure;
+
+        // A measure filed into folder "Sales" whose group is NOT declared fails
+        // validation with MeasureGroupNotFound...
+        let grouped = sum_measure("Revenue", "Sales", "amount")
+            .with_source("SUM(Sales[amount])")
+            .with_group("Sales");
+        let model = DataModel::builder().add_table(sales_table()).build().unwrap();
+        let mut edited = model.with_measures(vec![grouped]);
+        assert!(edited.validate().is_err());
+
+        // ...until the group is declared, which ensure_measure_groups does.
+        assert_eq!(edited.ensure_measure_groups(), 1);
+        assert_eq!(edited.measure_groups().len(), 1);
+        assert_eq!(edited.measure_groups()[0].name(), "Sales");
+        edited.validate().unwrap();
+
+        // Idempotent: a second call adds nothing.
+        assert_eq!(edited.ensure_measure_groups(), 0);
+    }
+
+    #[test]
+    fn constant_blank_measure_validates_without_a_home_table() {
+        use crate::compute::parser::parse_measure_expression;
+
+        // An empty formula is a BLANK() placeholder: no columns, no home table.
+        let blank = Measure::new("Placeholder", parse_measure_expression("").unwrap())
+            .with_source("");
+        let model = DataModel::builder().add_table(sales_table()).build().unwrap();
+        let edited = model.with_measures(vec![blank]);
+        assert_eq!(edited.measures()[0].table(), "");
+        edited.validate().unwrap();
     }
 
     #[test]
