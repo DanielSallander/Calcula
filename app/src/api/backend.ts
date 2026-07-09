@@ -3527,6 +3527,8 @@ export interface ModelMeasureInfo {
   description: string | null;
   formatString: string | null;
   isHidden: boolean;
+  /** Display folder (Studio-style measure group), or null when ungrouped. */
+  group: string | null;
 }
 
 /** Dry-run validation result for the measure editor. */
@@ -3584,6 +3586,8 @@ export async function biModelUpsertMeasure(params: {
   formula: string;
   description?: string | null;
   formatString?: string | null;
+  /** Display folder (Studio-style measure group); null/empty = ungrouped. */
+  group?: string | null;
 }): Promise<ModelMeasureInfo[]> {
   return invoke<ModelMeasureInfo[]>("bi_model_upsert_measure", {
     connectionId: params.connectionId,
@@ -3592,6 +3596,7 @@ export async function biModelUpsertMeasure(params: {
     formula: params.formula,
     description: params.description ?? null,
     formatString: params.formatString ?? null,
+    group: params.group ?? null,
   });
 }
 
@@ -4263,6 +4268,19 @@ export interface FunctionDefDto {
 
 export async function biModelFunctionCatalog(): Promise<FunctionDefDto[]> {
   return invoke<FunctionDefDto[]>("bi_model_function_catalog", {});
+}
+
+/** One function's reference documentation (raw Markdown), for the measure
+ *  editor's function-reference (wiki) pane. */
+export interface FunctionDocDto {
+  name: string;
+  markdown: string;
+}
+
+/** The engine's per-function reference docs (read from docs/functions at
+ *  runtime; empty when the docs folder isn't present). */
+export async function biModelFunctionDocs(): Promise<FunctionDocDto[]> {
+  return invoke<FunctionDocDto[]>("bi_model_function_docs", {});
 }
 
 export interface ModelUndoState {

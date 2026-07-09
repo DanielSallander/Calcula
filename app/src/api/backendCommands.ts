@@ -120,6 +120,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_set_table_refresh",
     "bi_model_refresh_table",
     "bi_model_function_catalog",
+    "bi_model_function_docs",
     "bi_model_undo",
     "bi_model_redo",
     "bi_model_undo_state",

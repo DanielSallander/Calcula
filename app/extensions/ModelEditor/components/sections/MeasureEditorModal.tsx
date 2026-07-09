@@ -5,14 +5,26 @@
 //          bi_model_upsert_measure on save. Ported from the old main-window
 //          MeasureEditorDialog.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import type { ModelMeasureInfo, ModelOverview } from "@api";
-import { biModelFunctionCatalog, biModelUpsertMeasure, biModelValidateMeasure } from "@api";
+import type { FunctionDocDto, ModelMeasureInfo, ModelOverview } from "@api";
+import {
+  biModelFunctionCatalog,
+  biModelFunctionDocs,
+  biModelUpsertMeasure,
+  biModelValidateMeasure,
+} from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import { NUMBER_FORMAT_PRESETS } from "../../../_shared/components/NumberFormatModal";
+import {
+  folderDepth,
+  folderPathsWithAncestors,
+  normalizeFolderPath,
+  splitFolderPath,
+} from "../../lib/measureFolders";
+import { FunctionDocsPanel } from "./FunctionDocsPanel";
 import {
   MEASURE_LANGUAGE_ID,
   registerMeasureLanguage,
@@ -91,6 +103,63 @@ function FormatField({
   );
 }
 
+/** Folder (measure-group) picker: choose an existing folder, none, or type a
+ *  new one. Groups measures into folders in the measures list; the group ships
+ *  with the model when it is published as a package. */
+function FolderField({
+  value,
+  onChange,
+  groups,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  groups: string[];
+}): React.ReactElement {
+  const known = groups.includes(value);
+  const [custom, setCustom] = useState(value !== "" && !known);
+  // If a name typed as "new" turns out to be a real folder (e.g. it was added
+  // in another window while this modal was open), stop showing it as new so the
+  // dropdown reflects the actual selection. Converges: once custom is false the
+  // condition is false too.
+  if (custom && value !== "" && known) {
+    setCustom(false);
+  }
+  return (
+    <Field label="Folder (optional)">
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select
+          style={{ ...styles.input, maxWidth: 340 }}
+          value={custom ? "__new__" : value}
+          onChange={(e) => {
+            if (e.target.value === "__new__") {
+              setCustom(true);
+            } else {
+              setCustom(false);
+              onChange(e.target.value);
+            }
+          }}
+        >
+          <option value="">(No folder)</option>
+          {groups.map((g) => (
+            <option key={g} value={g} title={g}>
+              {`${"  ".repeat(folderDepth(g))}${splitFolderPath(g).slice(-1)[0]}`}
+            </option>
+          ))}
+          <option value="__new__">New folder…</option>
+        </select>
+        {custom && (
+          <input
+            style={{ ...styles.input, flex: 1, minWidth: 160 }}
+            value={value}
+            placeholder="e.g. Sales\KPIs"
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )}
+      </div>
+    </Field>
+  );
+}
+
 // Preserve any prior worker handler so this editor never clobbers another
 // Monaco setup living in the same window.
 const prevGetWorker = self.MonacoEnvironment?.getWorker;
@@ -131,11 +200,54 @@ export function MeasureEditorModal({
   const [name, setName] = useState(existing?.name ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [formatString, setFormatString] = useState(existing?.formatString ?? "");
+  const [group, setGroup] = useState(normalizeFolderPath(existing?.group ?? ""));
   const [formula, setFormula] = useState(existing?.formula ?? "");
+
+  // Existing folders in this model (including intermediate/nested ones) — offered
+  // in the folder dropdown so the user can file this measure into a folder that
+  // already exists.
+  const existingGroups = useMemo(
+    () => folderPathsWithAncestors(overview.measures.map((m) => m.group)),
+    [overview.measures],
+  );
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+
+  // Function-reference (wiki) pane — lazily loaded from the engine's docs the
+  // first time it is opened, then kept for the life of the dialog.
+  const [showDocs, setShowDocs] = useState(false);
+  const [docs, setDocs] = useState<FunctionDocDto[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const docsLoadedRef = useRef(false);
+  // Guards the lazy docs fetch (kicked off from an event handler) against
+  // resolving after the dialog has already closed.
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+
+  const toggleDocs = useCallback(() => {
+    setShowDocs((prev) => !prev);
+    if (!docsLoadedRef.current) {
+      docsLoadedRef.current = true;
+      setDocsLoading(true);
+      void biModelFunctionDocs()
+        .then((d) => {
+          if (mountedRef.current) setDocs(d);
+        })
+        .catch(() => {
+          if (mountedRef.current) setDocs([]);
+        })
+        .finally(() => {
+          if (mountedRef.current) setDocsLoading(false);
+        });
+    }
+  }, []);
 
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
@@ -251,6 +363,7 @@ export function MeasureEditorModal({
         formula,
         description: description.trim() || null,
         formatString: formatString.trim() || null,
+        group: group.trim() || null,
       });
       // The parent applies the fresh measure list and notifies the main
       // window (which recalcs CUBE) — the grid lives in the other window.
@@ -260,12 +373,12 @@ export function MeasureEditorModal({
     } finally {
       setBusy(false);
     }
-  }, [connectionId, existing, name, formula, description, formatString, onSaved]);
+  }, [connectionId, existing, name, formula, description, formatString, group, onSaved]);
 
   return (
     <Modal
       title={existing ? `Edit Measure: ${existing.name}` : "New Measure"}
-      width={900}
+      width={showDocs ? 1300 : 900}
       onClose={onClose}
       footer={
         <>
@@ -278,7 +391,8 @@ export function MeasureEditorModal({
           <button
             style={styles.primaryBtn}
             onClick={() => void handleSave()}
-            disabled={busy || !name.trim() || !formula.trim() || !connectionId}
+            // An empty formula is allowed — it saves as a BLANK() placeholder.
+            disabled={busy || !name.trim() || !connectionId}
           >
             {busy ? "Saving…" : "Save Measure"}
           </button>
@@ -320,12 +434,18 @@ export function MeasureEditorModal({
           onChange={(e) => setDescription(e.target.value)}
         />
       </Field>
+      <FolderField value={group} onChange={setGroup} groups={existingGroups} />
       <FormatField value={formatString} onChange={setFormatString} />
 
       <Field
         label="Formula"
-        hint="e.g. SUM(Sales[amount]) or ([Profit] / [Revenue]) * SUM(Sales[qty]) — reference other measures as [Name], columns as Table[column]. Use GVAR for a query-scoped value (evaluated once per query, ignores the row axis, respects slicers) — e.g. GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)."
+        hint="Leave empty for a BLANK() placeholder. Reference other measures as [Name], columns as Table[column]; add notes with /* … */ or // comments. Use GVAR for a query-scoped value — e.g. GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)."
       >
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+          <button style={styles.smallBtn} onClick={toggleDocs}>
+            {showDocs ? "Hide function reference" : "\u{1F4D6} Function reference"}
+          </button>
+        </div>
         <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
           <MeasureTreePanel overview={overview} onInsert={insertRef} />
           <div
@@ -351,6 +471,9 @@ export function MeasureEditorModal({
               }}
             />
           </div>
+          {showDocs && (
+            <FunctionDocsPanel docs={docs} loading={docsLoading} onClose={() => setShowDocs(false)} />
+          )}
         </div>
       </Field>
 

@@ -224,6 +224,21 @@ export function Field({
 // Variables and Context "Keep" operations. This widget + the draft<->DTO
 // mappers keep the operator strings and dynamic handling in ONE place.
 
+/** The bare remote-table guess for a model table: tables imported from a
+ *  schema are NAMED "<schema>.<table>", but a source binding's table must be
+ *  the bare remote name — the SQL builder qualifies it with the schema itself,
+ *  so a doubled prefix renders as "BI"."BI.fact_sales" and the database
+ *  rejects it. The backend applies the same normalization on save. */
+export function stripSchemaPrefix(name: string, schema: string): string {
+  const s = schema.trim();
+  if (!s) return name;
+  const dot = name.indexOf(".");
+  if (dot > 0 && name.slice(0, dot).toLowerCase() === s.toLowerCase() && dot + 1 < name.length) {
+    return name.slice(dot + 1);
+  }
+  return name;
+}
+
 export const FILTER_OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
 
 const DYNAMIC_OPTIONS = [

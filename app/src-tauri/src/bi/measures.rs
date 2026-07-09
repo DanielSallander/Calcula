@@ -51,7 +51,11 @@ pub(crate) fn build_combined_model(
     combined.resolve_measure_home_tables();
     for m in measures {
         if let Some(rm) = combined.measures().iter().find(|x| x.name() == m.name) {
-            if rm.table().trim().is_empty() {
+            // A pure constant (e.g. `BLANK()`, `42`) legitimately has no home
+            // table and is allowed — matching the base model's builder. Only a
+            // measure that references OTHER measures but still resolves to no
+            // table is rejected.
+            if rm.table().trim().is_empty() && !rm.referenced_measures().is_empty() {
                 return Err(format!(
                     "Measure '{}' must reference at least one column so it can be \
                      associated with a table — either write it in column form (e.g. \

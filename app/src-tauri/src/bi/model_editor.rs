@@ -41,6 +41,9 @@ pub struct ModelMeasureInfo {
     pub description: Option<String>,
     pub format_string: Option<String>,
     pub is_hidden: bool,
+    /// Display folder this measure belongs to (Studio-style measure groups),
+    /// or `None` for an ungrouped measure.
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +91,7 @@ fn measure_info(m: &bi_engine::Measure) -> ModelMeasureInfo {
         description: m.description().map(|s| s.to_string()),
         format_string: m.format_string().map(|s| s.to_string()),
         is_hidden: m.is_hidden(),
+        group: m.group().map(|s| s.to_string()),
     }
 }
 
@@ -105,9 +109,8 @@ fn build_measure(
     if name.is_empty() {
         return Err("Measure name cannot be empty".to_string());
     }
-    if formula.trim().is_empty() {
-        return Err(format!("Measure '{}' has an empty formula", name));
-    }
+    // An empty (or comment-only) formula is allowed — it parses to BLANK(), a
+    // valid placeholder measure the user can fill in later.
     let expr = bi_engine::parse_measure_expression(formula)
         .map_err(|e| format!("Measure '{}': {}", name, e))?;
     let mut measure = bi_engine::Measure::new(name, expr).with_source(formula);
@@ -174,11 +177,14 @@ fn upsert_measure_model(
     // has no column of its own; associate it with the home table of the measures
     // it builds on so the model can validate.
     edited.resolve_measure_home_tables();
-    if edited
-        .measures()
-        .iter()
-        .any(|m| m.name() == measure_name && m.table().trim().is_empty())
-    {
+    // A measure that references OTHER measures but still resolves to no home
+    // table is rejected with guidance. Pure constants (e.g. `BLANK()`, `42`)
+    // legitimately have no table, so they are exempt.
+    if edited.measures().iter().any(|m| {
+        m.name() == measure_name
+            && m.table().trim().is_empty()
+            && !m.referenced_measures().is_empty()
+    }) {
         return Err(format!(
             "Measure '{}' must reference at least one column so it can be \
              associated with a table — either write it in column form (e.g. \
@@ -187,6 +193,10 @@ fn upsert_measure_model(
             measure_name
         ));
     }
+    // A measure's folder (group) must be a DECLARED measure group, or validate()
+    // fails with "Measure group '…' not found". Declare any group a measure was
+    // just filed into (display folders are free-form, created on demand).
+    edited.ensure_measure_groups();
     // validate() rebuilds the model and catches dangling references (e.g. a
     // rename leaving another measure's [OldName] behind), circular measure
     // refs, and unknown columns.
@@ -499,6 +509,7 @@ pub async fn bi_model_upsert_measure(
     formula: String,
     description: Option<String>,
     format_string: Option<String>,
+    group: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<ModelMeasureInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -514,7 +525,7 @@ pub async fn bi_model_upsert_measure(
         let original = orig
             .as_deref()
             .and_then(|o| base.measures().iter().find(|m| m.name() == o).cloned());
-        let measure = match &original {
+        let mut measure = match &original {
             Some(orig_m)
                 if orig_m.source().is_none()
                     && formula == bi_engine::measure_to_formula(orig_m) =>
@@ -539,6 +550,11 @@ pub async fn bi_model_upsert_measure(
                 format_string.as_deref(),
             )?,
         };
+        // Assign the display folder (Studio-style measure groups). A blank or
+        // whitespace-only group means "ungrouped".
+        if let Some(g) = group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+            measure = measure.with_group(g);
+        }
         upsert_measure_model(base, orig.as_deref(), measure)
     })
     .await?;
@@ -3114,6 +3130,27 @@ pub fn bi_model_function_catalog(window: tauri::Window) -> Result<Vec<FunctionDe
         .collect())
 }
 
+/// One function's reference documentation (raw Markdown), for the measure
+/// editor's function-reference (wiki) pane.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionDocDto {
+    pub name: String,
+    pub markdown: String,
+}
+
+/// The engine's per-function reference docs, read from `docs/functions` at
+/// runtime so edits there reflect without recompiling the engine. Returns an
+/// empty list when the docs folder is not present (e.g. a packaged build).
+#[tauri::command]
+pub fn bi_model_function_docs(window: tauri::Window) -> Result<Vec<FunctionDocDto>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    Ok(bi_engine::function_docs()
+        .into_iter()
+        .map(|d| FunctionDocDto { name: d.name, markdown: d.markdown })
+        .collect())
+}
+
 /// A single model-validation issue for the Overview panel.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3639,7 +3676,22 @@ pub async fn bi_model_set_table_source_binding(
                 if base.source(sid).is_none() {
                     return Err(format!("Data source '{}' is not in the catalog", sid));
                 }
-                Some(bi_engine::TableSourceBinding::new(sid, schema.trim(), source_table.trim()))
+                // Model tables imported from a schema are NAMED "<schema>.<table>"
+                // and that name is the natural thing to paste here — but the
+                // binding's `table` must be the bare remote name (the SQL builder
+                // qualifies it with `schema` itself; a doubled prefix renders as
+                // "BI"."BI.fact_sales" and the database rejects it). Strip a
+                // leading "<schema>." that matches the chosen schema.
+                let schema = schema.trim();
+                let mut remote = source_table.trim();
+                if !schema.is_empty() {
+                    if let Some((head, rest)) = remote.split_once('.') {
+                        if head.eq_ignore_ascii_case(schema) && !rest.is_empty() {
+                            remote = rest;
+                        }
+                    }
+                }
+                Some(bi_engine::TableSourceBinding::new(sid, schema, remote))
             }
             None => None,
         };
