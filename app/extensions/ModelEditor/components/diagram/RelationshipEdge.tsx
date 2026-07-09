@@ -10,64 +10,57 @@ import React, { memo } from "react";
 import type { ModelRelationshipInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
 import { GRID } from "./layoutEngine";
-
-interface NodePos {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+import { edgeSides } from "./nodeGeometry";
+import type { NodePos } from "./nodeGeometry";
 
 interface RelationshipEdgeProps {
   relationship: ModelRelationshipInfo;
   fromPos: NodePos;
   toPos: NodePos;
-  /** Vertical/horizontal offset to separate parallel edges between a pair. */
-  offset?: number;
+  /** Perpendicular offset of the connection point along the FROM node's face —
+   *  spreads edges that meet the same face so they don't stack. */
+  fromOffset?: number;
+  /** Same, for the TO node's face. */
+  toOffset?: number;
   onDoubleClick?: (relationshipName: string) => void;
 }
 
 const snapBend = (v: number): number => Math.round(v / GRID) * GRID;
 
 /** A point `dist` pixels from (px,py) toward (qx,qy). */
-function along(px: number, py: number, qx: number, qy: number, dist: number): { x: number; y: number } {
+function along(
+  px: number,
+  py: number,
+  qx: number,
+  qy: number,
+  dist: number,
+): { x: number; y: number } {
   const dx = qx - px;
   const dy = qy - py;
   const len = Math.hypot(dx, dy) || 1;
   return { x: px + (dx / len) * dist, y: py + (dy / len) * dist };
 }
 
-function getConnectionPoints(from: NodePos, to: NodePos, offset: number) {
+function getConnectionPoints(from: NodePos, to: NodePos, fromOffset: number, toOffset: number) {
   const fromCx = from.x + from.width / 2;
   const fromCy = from.y + from.height / 2;
   const toCx = to.x + to.width / 2;
   const toCy = to.y + to.height / 2;
+  const { isHorizontal, fromSide, toSide } = edgeSides(from, to);
 
   let x1: number, y1: number, x2: number, y2: number;
-  let isHorizontal: boolean;
-
-  if (Math.abs(fromCx - toCx) > Math.abs(fromCy - toCy)) {
-    isHorizontal = true;
-    if (fromCx < toCx) {
-      x1 = from.x + from.width;
-      x2 = to.x;
-    } else {
-      x1 = from.x;
-      x2 = to.x + to.width;
-    }
-    y1 = fromCy + offset;
-    y2 = toCy + offset;
+  if (isHorizontal) {
+    // Left/right faces — the offset moves the point up/down along the face.
+    x1 = fromSide === "right" ? from.x + from.width : from.x;
+    x2 = toSide === "left" ? to.x : to.x + to.width;
+    y1 = fromCy + fromOffset;
+    y2 = toCy + toOffset;
   } else {
-    isHorizontal = false;
-    x1 = fromCx + offset;
-    x2 = toCx + offset;
-    if (fromCy < toCy) {
-      y1 = from.y + from.height;
-      y2 = to.y;
-    } else {
-      y1 = from.y;
-      y2 = to.y + to.height;
-    }
+    // Top/bottom faces — the offset moves the point left/right along the face.
+    y1 = fromSide === "bottom" ? from.y + from.height : from.y;
+    y2 = toSide === "top" ? to.y : to.y + to.height;
+    x1 = fromCx + fromOffset;
+    x2 = toCx + toOffset;
   }
   return { x1, y1, x2, y2, isHorizontal };
 }
@@ -97,8 +90,13 @@ interface EdgeGeometry {
   endDot: { x: number; y: number };
 }
 
-function orthogonalGeometry(from: NodePos, to: NodePos, offset: number): EdgeGeometry {
-  const { x1, y1, x2, y2, isHorizontal } = getConnectionPoints(from, to, offset);
+function orthogonalGeometry(
+  from: NodePos,
+  to: NodePos,
+  fromOffset: number,
+  toOffset: number,
+): EdgeGeometry {
+  const { x1, y1, x2, y2, isHorizontal } = getConnectionPoints(from, to, fromOffset, toOffset);
   let d: string;
   let b1x: number, b1y: number, b2x: number, b2y: number; // the two bend corners
   let label: { x: number; y: number };
@@ -149,11 +147,14 @@ export const RelationshipEdge = memo(function RelationshipEdge({
   relationship,
   fromPos,
   toPos,
-  offset = 0,
+  fromOffset = 0,
+  toOffset = 0,
   onDoubleClick,
 }: RelationshipEdgeProps): React.ReactElement {
   const isSelf = fromPos.x === toPos.x && fromPos.y === toPos.y;
-  const geo = isSelf ? selfLoopGeometry(fromPos) : orthogonalGeometry(fromPos, toPos, offset);
+  const geo = isSelf
+    ? selfLoopGeometry(fromPos)
+    : orthogonalGeometry(fromPos, toPos, fromOffset, toOffset);
 
   const [fromLabel, toLabel] = cardinalityGlyphs(relationship.cardinality);
   const isActive = relationship.active;
@@ -176,7 +177,13 @@ export const RelationshipEdge = memo(function RelationshipEdge({
         strokeDasharray={isActive ? undefined : "6 3"}
         opacity={strokeOpacity}
       />
-      <circle cx={geo.endDot.x} cy={geo.endDot.y} r={3} fill={strokeColor} opacity={isActive ? 0.85 : 0.4} />
+      <circle
+        cx={geo.endDot.x}
+        cy={geo.endDot.y}
+        r={3}
+        fill={strokeColor}
+        opacity={isActive ? 0.85 : 0.4}
+      />
       <text
         x={geo.fromGlyph.x}
         y={geo.fromGlyph.y}
@@ -234,7 +241,8 @@ function arePropsEqual(prev: RelationshipEdgeProps, next: RelationshipEdgeProps)
     prev.relationship === next.relationship &&
     samePos(prev.fromPos, next.fromPos) &&
     samePos(prev.toPos, next.toPos) &&
-    (prev.offset ?? 0) === (next.offset ?? 0) &&
+    (prev.fromOffset ?? 0) === (next.fromOffset ?? 0) &&
+    (prev.toOffset ?? 0) === (next.toOffset ?? 0) &&
     prev.onDoubleClick === next.onDoubleClick
   );
 }

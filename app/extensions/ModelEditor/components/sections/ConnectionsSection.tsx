@@ -271,6 +271,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                   ))}
                   <BindRow
                     unbound={unbound}
+                    defaultSchema={s.defaultSchema}
                     disabled={readOnly || busy}
                     onBind={(tableName, schema, sourceTable) =>
                       void run(async () =>
@@ -342,15 +343,19 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
 /** Inline "bind an unbound table to this source" row. */
 function BindRow({
   unbound,
+  defaultSchema,
   disabled,
   onBind,
 }: {
   unbound: ModelTableInfo[];
+  defaultSchema: string | null;
   disabled: boolean;
   onBind: (tableName: string, schema: string, sourceTable: string) => void;
 }): React.ReactElement {
   const [table, setTable] = useState("");
-  const [schema, setSchema] = useState("public");
+  // Pre-filled from the source's default schema (set on the connection) so it
+  // never has to be re-typed; still editable for a table in another schema.
+  const [schema, setSchema] = useState(defaultSchema ?? "public");
   const [sourceTable, setSourceTable] = useState("");
   if (unbound.length === 0) return <></>;
   return (

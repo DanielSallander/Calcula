@@ -13,7 +13,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelRelationshipInfo, ModelTableInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
-import { getNodeHeight, getNodeWidth, HEADER_HEIGHT, ROW_HEIGHT } from "./nodeGeometry";
+import { edgeSides, getNodeHeight, getNodeWidth, HEADER_HEIGHT, ROW_HEIGHT } from "./nodeGeometry";
+import type { EdgeSide, NodePos } from "./nodeGeometry";
 import { computeLayout } from "./layoutEngine";
 import type { LayoutMode, Position } from "./layoutEngine";
 import { TableNode } from "./TableNode";
@@ -92,14 +93,11 @@ function getColumnEdgePoint(
   return { x: cx, y: cy };
 }
 
-const EDGE_OFFSET_STEP = 18;
 const CANVAS_PAD = 40;
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 2;
-
-function tablePairKey(a: string, b: string): string {
-  return a < b ? `${a}::${b}` : `${b}::${a}`;
-}
+const EDGE_GAP = 12; // gap between edges that meet the same node face
+const EDGE_FACE_MARGIN = 16; // keep spread points away from a face's corners
 
 export function RelationshipDiagram({
   tables,
@@ -295,23 +293,92 @@ export function RelationshipDiagram({
     }
   }
 
-  // Group parallel edges by table pair to fan them out.
-  const pairGroups = new Map<string, ModelRelationshipInfo[]>();
+  // Resolve each edge's node rectangles + which face it meets, then spread the
+  // connection points of every edge that meets the same face (e.g. several
+  // tables all pointing at one dimension) so they sit next to each other with a
+  // small gap instead of stacking on the same point.
+  interface EdgeInfo {
+    rel: ModelRelationshipInfo;
+    from: NodePos;
+    to: NodePos;
+    isSelf: boolean;
+    fromSide: EdgeSide | null;
+    toSide: EdgeSide | null;
+  }
+  const edgeInfos: EdgeInfo[] = [];
   for (const rel of relationships) {
-    const key = tablePairKey(rel.fromTable, rel.toTable);
-    const group = pairGroups.get(key) ?? [];
-    group.push(rel);
-    pairGroups.set(key, group);
+    const fromPos = positions[rel.fromTable];
+    const toPos = positions[rel.toTable];
+    const fromTable = tables.find((t) => t.name === rel.fromTable);
+    const toTable = tables.find((t) => t.name === rel.toTable);
+    if (!fromPos || !toPos || !fromTable || !toTable) continue;
+    const from = { ...fromPos, width: getNodeWidth(fromTable), height: getNodeHeight(fromTable) };
+    const to = { ...toPos, width: getNodeWidth(toTable), height: getNodeHeight(toTable) };
+    const isSelf = rel.fromTable === rel.toTable;
+    const sides = isSelf ? null : edgeSides(from, to);
+    edgeInfos.push({
+      rel,
+      from,
+      to,
+      isSelf,
+      fromSide: sides?.fromSide ?? null,
+      toSide: sides?.toSide ?? null,
+    });
   }
-  const renderList: { rel: ModelRelationshipInfo; offset: number }[] = [];
-  for (const group of pairGroups.values()) {
-    const sorted = [...group].sort((a, b) => (a.active === b.active ? 0 : a.active ? -1 : 1));
-    for (let i = 0; i < sorted.length; i++) {
-      const offset = sorted.length === 1 ? 0 : (i - (sorted.length - 1) / 2) * EDGE_OFFSET_STEP;
-      renderList.push({ rel: sorted[i], offset });
+
+  const fromOffsets = new Array<number>(edgeInfos.length).fill(0);
+  const toOffsets = new Array<number>(edgeInfos.length).fill(0);
+  interface Endpoint {
+    edge: number;
+    end: "from" | "to";
+    side: EdgeSide;
+  }
+  const faceGroups = new Map<string, Endpoint[]>();
+  edgeInfos.forEach((e, i) => {
+    if (e.fromSide) {
+      const key = `${e.rel.fromTable}|${e.fromSide}`;
+      const g = faceGroups.get(key) ?? [];
+      g.push({ edge: i, end: "from", side: e.fromSide });
+      faceGroups.set(key, g);
     }
+    if (e.toSide) {
+      const key = `${e.rel.toTable}|${e.toSide}`;
+      const g = faceGroups.get(key) ?? [];
+      g.push({ edge: i, end: "to", side: e.toSide });
+      faceGroups.set(key, g);
+    }
+  });
+  for (const eps of faceGroups.values()) {
+    if (eps.length <= 1) continue;
+    const vertical = eps[0].side === "left" || eps[0].side === "right";
+    const otherCenter = (ep: Endpoint): number => {
+      const e = edgeInfos[ep.edge];
+      const other = ep.end === "from" ? e.to : e.from;
+      return vertical ? other.y + other.height / 2 : other.x + other.width / 2;
+    };
+    // Order along the face by the opposite endpoint's position (fewer crossings).
+    const sorted = [...eps].sort((a, b) => otherCenter(a) - otherCenter(b));
+    const n = sorted.length;
+    const faceExtent = Math.min(
+      ...sorted.map((ep) => {
+        const node = ep.end === "from" ? edgeInfos[ep.edge].from : edgeInfos[ep.edge].to;
+        return vertical ? node.height : node.width;
+      }),
+    );
+    const step = Math.min(EDGE_GAP, Math.max(0, faceExtent - EDGE_FACE_MARGIN * 2) / (n - 1));
+    sorted.forEach((ep, idx) => {
+      const off = (idx - (n - 1) / 2) * step;
+      if (ep.end === "from") fromOffsets[ep.edge] = off;
+      else toOffsets[ep.edge] = off;
+    });
   }
-  renderList.sort((a, b) => (a.rel.active === b.rel.active ? 0 : a.rel.active ? 1 : -1));
+
+  // Draw inactive edges first so active ones sit on top.
+  const renderOrder = edgeInfos
+    .map((_, i) => i)
+    .sort((a, b) =>
+      edgeInfos[a].rel.active === edgeInfos[b].rel.active ? 0 : edgeInfos[a].rel.active ? 1 : -1,
+    );
 
   const clampScale = (s: number): number => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
   // Fit the whole diagram into the visible viewport (never zoom past 1:1).
@@ -355,23 +422,16 @@ export function RelationshipDiagram({
           <g ref={contentRef} transform={`scale(${scale})`}>
             <rect width={canvas.w} height={canvas.h} fill="url(#me-diagram-grid)" />
 
-            {renderList.map(({ rel, offset }) => {
-              const fromPos = positions[rel.fromTable];
-              const toPos = positions[rel.toTable];
-              const fromTable = tables.find((t) => t.name === rel.fromTable);
-              const toTable = tables.find((t) => t.name === rel.toTable);
-              if (!fromPos || !toPos || !fromTable || !toTable) return null;
+            {renderOrder.map((i) => {
+              const e = edgeInfos[i];
               return (
                 <RelationshipEdge
-                  key={rel.name}
-                  relationship={rel}
-                  fromPos={{
-                    ...fromPos,
-                    width: getNodeWidth(fromTable),
-                    height: getNodeHeight(fromTable),
-                  }}
-                  toPos={{ ...toPos, width: getNodeWidth(toTable), height: getNodeHeight(toTable) }}
-                  offset={offset}
+                  key={e.rel.name}
+                  relationship={e.rel}
+                  fromPos={e.from}
+                  toPos={e.to}
+                  fromOffset={fromOffsets[i]}
+                  toOffset={toOffsets[i]}
                   onDoubleClick={onEditRelationship}
                 />
               );

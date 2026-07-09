@@ -261,7 +261,9 @@ function BindTableCard({
   reportError: (err: unknown) => void;
 }): React.ReactElement {
   const [sourceId, setSourceId] = useState(sources[0]?.id ?? "");
-  const [schema, setSchema] = useState("public");
+  // Pre-filled from the chosen source's default schema (set on the connection),
+  // so it isn't re-typed; follows the source dropdown, still editable.
+  const [schema, setSchema] = useState(sources[0]?.defaultSchema ?? "public");
   const [sourceTable, setSourceTable] = useState(table.name);
   const [busy, setBusy] = useState(false);
 
@@ -305,7 +307,11 @@ function BindTableCard({
               style={{ ...styles.input, fontSize: 12 }}
               value={sourceId}
               disabled={readOnly || busy}
-              onChange={(e) => setSourceId(e.target.value)}
+              onChange={(e) => {
+                setSourceId(e.target.value);
+                const picked = sources.find((s) => s.id === e.target.value);
+                setSchema(picked?.defaultSchema ?? "public");
+              }}
             >
               {sources.map((s) => (
                 <option key={s.id} value={s.id}>

@@ -13,6 +13,39 @@ export const HEADER_HEIGHT = 28;
 export const ROW_HEIGHT = 20;
 const PADDING = 8;
 
+/** A positioned node rectangle in the diagram (layout coordinates). */
+export interface NodePos {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Which face of a node an edge connects to. */
+export type EdgeSide = "left" | "right" | "top" | "bottom";
+
+/** Which faces an edge leaves/enters, from the nodes' relative centers. The
+ *  single source of truth for both routing and per-face fan-out grouping. */
+export function edgeSides(
+  from: NodePos,
+  to: NodePos,
+): { isHorizontal: boolean; fromSide: EdgeSide; toSide: EdgeSide } {
+  const fromCx = from.x + from.width / 2;
+  const fromCy = from.y + from.height / 2;
+  const toCx = to.x + to.width / 2;
+  const toCy = to.y + to.height / 2;
+  if (Math.abs(fromCx - toCx) > Math.abs(fromCy - toCy)) {
+    const left = fromCx < toCx;
+    return {
+      isHorizontal: true,
+      fromSide: left ? "right" : "left",
+      toSide: left ? "left" : "right",
+    };
+  }
+  const up = fromCy < toCy;
+  return { isHorizontal: false, fromSide: up ? "bottom" : "top", toSide: up ? "top" : "bottom" };
+}
+
 export const MIN_NODE_WIDTH = 180;
 export const MAX_NODE_WIDTH = 460;
 /** Back-compat alias — the minimum node width. */
