@@ -4351,6 +4351,21 @@ pub async fn bi_model_test_query(
     engine.set_user_identity(clean(preview_user_identity));
     engine.set_custom_data(clean(preview_custom_data));
 
+    // "No registered source" means the model's sources are persisted but not
+    // wired in this session (credentials are never stored in the model) — tell
+    // the user where to fix it instead of leaving the raw engine error.
+    let friendly = |e: String| {
+        if e.contains("has no registered source") {
+            format!(
+                "{}. The model's data sources are not connected in this session \
+                 (credentials are never stored with the model) — open the \
+                 Connections tab, Connect the source, then run again.",
+                e
+            )
+        } else {
+            e
+        }
+    };
     let run: Result<(super::types::BiQueryResult, Vec<bi_engine::ResultColumn>, Option<bi_engine::ExecutionPlan>), String> =
         if include_plan {
             engine
@@ -4359,7 +4374,7 @@ pub async fn bi_model_test_query(
                 .map(|(batches, plan)| {
                     (super::commands::batches_to_result(&batches), Vec::new(), Some(plan))
                 })
-                .map_err(|e| format!("{}", e))
+                .map_err(|e| friendly(format!("{}", e)))
         } else {
             engine
                 .query_with_meta_and_cancellation(request, token)
@@ -4367,7 +4382,7 @@ pub async fn bi_model_test_query(
                 .map(|(batches, meta)| {
                     (super::commands::batches_to_result(&batches), meta, None)
                 })
-                .map_err(|e| format!("{}", e))
+                .map_err(|e| friendly(format!("{}", e)))
         };
 
     // Restore the engine's pre-preview RLS state unconditionally.

@@ -28,7 +28,7 @@ const STRATEGY_TYPES = [
   { value: "dailyAfter", label: "Daily after time" },
   { value: "sourceQuery", label: "Source query changed" },
 ];
-import { Badge, Field, SELECTION_BG, styles } from "../editorShared";
+import { Badge, Field, SELECTION_BG, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
 import { SqlEditorModal } from "../SqlEditorModal";
@@ -264,7 +264,12 @@ function BindTableCard({
   // Pre-filled from the chosen source's default schema (set on the connection),
   // so it isn't re-typed; follows the source dropdown, still editable.
   const [schema, setSchema] = useState(sources[0]?.defaultSchema ?? "public");
-  const [sourceTable, setSourceTable] = useState(table.name);
+  // The remote table guess is the model name MINUS its schema prefix — model
+  // tables imported from a schema are named "<schema>.<table>", but the binding
+  // wants the bare remote name (the query engine adds the schema itself).
+  const [sourceTable, setSourceTable] = useState(
+    stripSchemaPrefix(table.name, sources[0]?.defaultSchema ?? ""),
+  );
   const [busy, setBusy] = useState(false);
 
   const bind = async () => {

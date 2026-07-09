@@ -14,7 +14,7 @@ import {
   biModelUpsertSource,
 } from "@api";
 import type { ModelSourceInfo, ModelTableInfo } from "@api";
-import { Badge, Field, Modal, styles } from "../editorShared";
+import { Badge, Field, Modal, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 
 const KINDS = [
@@ -366,7 +366,10 @@ function BindRow({
         disabled={disabled}
         onChange={(e) => {
           setTable(e.target.value);
-          if (!sourceTable) setSourceTable(e.target.value);
+          // Guess the remote name from the model name, minus its schema prefix
+          // ("BI.fact_sales" bound into schema BI must be just "fact_sales" —
+          // the query engine adds the schema itself).
+          if (!sourceTable) setSourceTable(stripSchemaPrefix(e.target.value, schema));
         }}
       >
         <option value="">Bind unbound table…</option>
