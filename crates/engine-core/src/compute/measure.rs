@@ -236,6 +236,15 @@ impl Measure {
         self.expression = expression;
     }
 
+    /// Override the cached home table. Crate-internal: used only by
+    /// [`DataModel::resolve_measure_home_tables`](crate::model::DataModel::resolve_measure_home_tables)
+    /// to give a measure that references only OTHER measures (e.g.
+    /// `[Total Sales] + 1000`) the home table of the measures it builds on —
+    /// `infer_fact_table` cannot see through a `MeasureRef` without the model.
+    pub(crate) fn set_home_table(&mut self, table: String) {
+        self.cached_table = table;
+    }
+
     /// Returns the measure group name, if any.
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()

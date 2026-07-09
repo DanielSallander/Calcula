@@ -78,6 +78,22 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
             '[' => {
                 tokens.push((Token::LBracket, tok_start));
                 i += 1;
+                // The content of a `[...]` reference is a single column / measure
+                // NAME that may contain spaces or punctuation (e.g. `[Total Sales]`,
+                // `[Order Date]`). Capture it verbatim (trimmed) as ONE identifier
+                // so the parser — which reads exactly one Ident between the
+                // brackets — receives the whole name. Operators in filters live
+                // outside the brackets (`[col] = 1`), so this never over-captures.
+                let name_start = i;
+                while i < len && chars[i] != ']' {
+                    i += 1;
+                }
+                let name: String =
+                    chars[name_start..i].iter().collect::<String>().trim().to_string();
+                if !name.is_empty() {
+                    tokens.push((Token::Ident(name), byte_at(name_start)));
+                }
+                // The closing `]` is emitted by the `]` arm on the next iteration.
             }
             ']' => {
                 tokens.push((Token::RBracket, tok_start));
@@ -186,10 +202,23 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 tokens.push((Token::Number(val), tok_start));
             }
             _ if c.is_alphanumeric() || c == '_' => {
-                // Identifier.
+                // Identifier. A `.` is consumed ONLY as an internal separator
+                // (schema-qualified table names like `BI.fact_sales`) — never a
+                // leading or trailing dot — so decimal literals (`1.5`, `.5`)
+                // and stray dots keep their meaning.
                 let start = i;
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                    i += 1;
+                while i < len {
+                    let ch = chars[i];
+                    if ch.is_alphanumeric() || ch == '_' {
+                        i += 1;
+                    } else if ch == '.'
+                        && i + 1 < len
+                        && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_')
+                    {
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let ident: String = chars[start..i].iter().collect();
                 tokens.push((Token::Ident(ident), tok_start));
@@ -204,4 +233,56 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
     }
 
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idents(input: &str) -> Vec<String> {
+        tokenize(input)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(t, _)| match t {
+                Token::Ident(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn schema_qualified_table_name_is_one_identifier() {
+        // A model table named `BI.fact_sales` must tokenize as a single ident so
+        // measures like SUM(BI.fact_sales[linetotal]) parse.
+        assert_eq!(
+            idents("SUM(BI.fact_sales[linetotal])"),
+            vec!["SUM", "BI.fact_sales", "linetotal"]
+        );
+    }
+
+    #[test]
+    fn bracketed_name_with_spaces_is_one_identifier() {
+        // A measure named "Total Sales" must reference as [Total Sales]; the
+        // bracket content is one name even with spaces.
+        assert_eq!(idents("[Total Sales] + 1000"), vec!["Total Sales"]);
+        // Schema-qualified table + spaced column together.
+        assert_eq!(
+            idents("SUM(BI.fact_sales[Order Date])"),
+            vec!["SUM", "BI.fact_sales", "Order Date"]
+        );
+    }
+
+    #[test]
+    fn decimals_and_trailing_dots_are_unaffected() {
+        let toks = tokenize("1.5 + .25 + Sales[x]").unwrap();
+        let nums: Vec<f64> = toks
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Token::Number(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nums, vec![1.5, 0.25]);
+        assert!(idents("1.5 + .25 + Sales[x]").contains(&"Sales".to_string()));
+    }
 }

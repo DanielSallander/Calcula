@@ -1003,6 +1003,38 @@ impl DataModel {
                 measure.set_expression(expression);
             }
         }
+        // Reparsing recomputes each measure's cached home table from its own
+        // expression; give measure-only measures theirs from what they reference.
+        self.resolve_measure_home_tables();
+    }
+
+    /// Give measures that reference ONLY other measures (e.g. `[Total Sales] +
+    /// 1000`, `[Profit] / [Revenue]`) a home table, by expanding their measure
+    /// references against the model and re-inferring the fact table.
+    ///
+    /// [`infer_fact_table`](crate::compute::expression::infer_fact_table) alone
+    /// cannot see through a [`MeasureRef`](crate::compute::expression::Expression::MeasureRef)
+    /// — it has no model — so such a measure's cached home table would otherwise
+    /// be empty and fail model validation (`TableNotFound("")`). This associates
+    /// it with the home table of the measures it builds on. Idempotent; a measure
+    /// whose references are circular or themselves tableless is left unresolved.
+    pub fn resolve_measure_home_tables(&mut self) {
+        use crate::compute::expression::{expand_measure_refs, infer_fact_table};
+        let resolved: Vec<(usize, String)> = self
+            .measures
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.table().trim().is_empty())
+            .filter_map(|(i, m)| {
+                expand_measure_refs(m.expression(), self)
+                    .ok()
+                    .and_then(|e| infer_fact_table(&e))
+                    .map(|t| (i, t))
+            })
+            .collect();
+        for (i, table) in resolved {
+            self.measures[i].set_home_table(table);
+        }
     }
 
     /// Find the active relationship between two tables (searches both directions).

@@ -706,6 +706,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_measure_home_tables_gives_measure_only_measure_a_table() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap();
+        let total = Measure::new(
+            "TotalSales",
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        );
+        // References only another measure — no column of its own, so no home table.
+        let bonus = Measure::new("Bonus", Expression::MeasureRef("TotalSales".into()));
+        assert_eq!(bonus.table(), "");
+
+        let mut model = DataModel::builder()
+            .add_table(table)
+            .add_measure(total)
+            .add_measure(bonus)
+            .build()
+            .unwrap();
+        assert_eq!(model.measure("Bonus").unwrap().table(), "");
+        model.resolve_measure_home_tables();
+        // Resolved to the home table of the measure it references.
+        assert_eq!(model.measure("Bonus").unwrap().table(), "Sales");
+    }
+
+    #[test]
     fn expand_measure_ref_with_context() {
         use crate::compute::aggregate::AggregateOp;
         use crate::compute::measure::Measure;
