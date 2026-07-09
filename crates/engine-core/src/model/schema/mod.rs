@@ -1037,6 +1037,25 @@ impl DataModel {
         }
     }
 
+    /// Propagate a measure rename into its dependents: rewrite every measure's
+    /// `[old]` reference as `[new]`, leaving qualified column references
+    /// (`Table[old]`) untouched. Call this after renaming a measure so an
+    /// expression like `[Revenue] + 1000` follows `Revenue` -> `Total Sales`
+    /// instead of dangling. Home tables are preserved (a rename never moves a
+    /// measure). Returns the number of dependent measures that changed.
+    pub fn rewrite_measure_references(&mut self, old: &str, new: &str) -> usize {
+        if old == new {
+            return 0;
+        }
+        let mut changed = 0;
+        for m in &mut self.measures {
+            if m.rename_measure_reference(old, new) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Find the active relationship between two tables (searches both directions).
     ///
     /// Returns the first **active** relationship where one table is on the "from"

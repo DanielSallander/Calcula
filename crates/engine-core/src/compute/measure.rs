@@ -245,6 +245,45 @@ impl Measure {
         self.cached_table = table;
     }
 
+    /// Rewrite every **measure reference** to `old` in this measure as `new`,
+    /// leaving column references (`Table[old]`) untouched. Used by
+    /// [`DataModel::rewrite_measure_references`](crate::model::DataModel::rewrite_measure_references)
+    /// so that renaming a measure propagates into its dependents — renaming
+    /// `Revenue` rewrites `[Revenue] + 1000` to `[Total Sales] + 1000`.
+    ///
+    /// Works off the formula text (this measure's `source` when present, else
+    /// the rendered expression) so the rewrite is bracket-aware and the
+    /// source/expression pair stays in sync. The home table is preserved: a
+    /// rename never moves a measure to a different table. A no-op (returns
+    /// `false`) if this measure does not reference `old` or the rewritten text
+    /// fails to reparse.
+    pub(crate) fn rename_measure_reference(&mut self, old: &str, new: &str) -> bool {
+        if old == new || !self.referenced_measures().iter().any(|r| *r == old) {
+            return false;
+        }
+        let had_source = self.source.is_some();
+        let text = match &self.source {
+            Some(s) => s.clone(),
+            None => expr::measure_to_formula(self),
+        };
+        let rewritten = rewrite_measure_ref_in_source(&text, old, new);
+        if rewritten == text {
+            return false;
+        }
+        match crate::compute::parser::parse_measure_expression(&rewritten) {
+            Ok(expression) => {
+                // Keep cached_table as-is: the referenced columns are unchanged,
+                // so a rename never moves this measure to a different table.
+                self.expression = expression;
+                if had_source {
+                    self.source = Some(rewritten);
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Returns the measure group name, if any.
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()
@@ -359,6 +398,46 @@ pub fn distinct_count_measure(
 /// can be inferred.
 pub fn expression_measure(name: impl Into<String>, expression: Expression) -> Measure {
     Measure::new(name, expression)
+}
+
+/// Rewrite bare measure references `[old]` in a measure's formula text to
+/// `[new]`, leaving qualified column references (`Table[old]`) untouched.
+///
+/// A `[` opens a measure reference unless the last non-space character before
+/// it is an identifier character — in which case it is a column reference on
+/// that table (mirroring how the tokenizer binds `Ident [ ... ]`). Bracket
+/// content is compared trimmed, so `[ Revenue ]` matches `Revenue`.
+fn rewrite_measure_ref_in_source(src: &str, old: &str, new: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len() + new.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            let is_column_ref = out
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+            let start = i + 1;
+            let mut j = start;
+            while j < chars.len() && chars[j] != ']' {
+                j += 1;
+            }
+            if !is_column_ref && j < chars.len() {
+                let name: String = chars[start..j].iter().collect();
+                if name.trim() == old {
+                    out.push('[');
+                    out.push_str(new);
+                    out.push(']');
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -535,5 +614,37 @@ mod tests {
         assert_eq!(restored.description(), None);
         assert!(!restored.is_hidden());
         assert_eq!(restored.table(), "Sales");
+    }
+
+    #[test]
+    fn rewrite_measure_ref_renames_only_measure_brackets() {
+        // Bare `[Revenue]` is a measure ref; `Sales[Revenue]` is a column ref.
+        let src = "[Revenue] + Sales[Revenue] * [ Revenue ]";
+        let out = rewrite_measure_ref_in_source(src, "Revenue", "Total Sales");
+        assert_eq!(out, "[Total Sales] + Sales[Revenue] * [Total Sales]");
+    }
+
+    #[test]
+    fn rewrite_measure_ref_leaves_non_matching_names_alone() {
+        let src = "[Revenue Growth] + [Revenue]";
+        let out = rewrite_measure_ref_in_source(src, "Revenue", "Total Sales");
+        assert_eq!(out, "[Revenue Growth] + [Total Sales]");
+    }
+
+    #[test]
+    fn rename_measure_reference_updates_source_and_expression() {
+        let expr = crate::compute::parser::parse_measure_expression("[Revenue] + 1000").unwrap();
+        let mut m = Measure::new("Bonus", expr).with_source("[Revenue] + 1000");
+        assert!(m.rename_measure_reference("Revenue", "Total Sales"));
+        assert_eq!(m.source(), Some("[Total Sales] + 1000"));
+        assert_eq!(m.referenced_measures(), vec!["Total Sales"]);
+    }
+
+    #[test]
+    fn rename_measure_reference_is_noop_when_not_referenced() {
+        let expr = crate::compute::parser::parse_measure_expression("[Profit] + 1").unwrap();
+        let mut m = Measure::new("Bonus", expr).with_source("[Profit] + 1");
+        assert!(!m.rename_measure_reference("Revenue", "Total Sales"));
+        assert_eq!(m.source(), Some("[Profit] + 1"));
     }
 }
