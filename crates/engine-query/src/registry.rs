@@ -178,6 +178,55 @@ impl AnyConnector {
     }
 }
 
+/// Tuning for cross-source semi-join (reverse fact → dimension) pushdown.
+///
+/// In a cross-source [`QueryPlan::LocalAggregation`](crate::QueryPlan), a large
+/// dimension on one source is normally fetched **in full** and joined locally to
+/// a fact on another source. When the fact is restricted (a query filter, or an
+/// IN-filter propagated from another filtered dimension), its distinct join-key
+/// set can be pushed to the dimension's fetch so the dimension pulls only the
+/// rows that will survive the join.
+///
+/// This is a **pure performance** optimization only in the provably safe case
+/// this config enables: a **single-fact** query (one measure table) targeting an
+/// **unfiltered, connector-backed** dimension via a single-condition equi
+/// relationship. In that case the dimension is a pure dimension (no measure
+/// reads its rows, so no `DISTINCTCOUNT`-over-dimension changes), it is not a
+/// conformed dimension shared across facts (impossible with one fact), and every
+/// dimension row it drops is one an `INNER`/`LEFT` join would drop anyway — so
+/// the result is byte-identical to the full-fetch path. The stricter, explicit
+/// [`FilterPropagation::Both`](engine_core::model::FilterPropagation) reverse
+/// path (a *semantic* Power BI feature) is unaffected by this config and always
+/// active.
+///
+/// **Disabled by default** (like auto-tiering): it adds one narrow fact-key
+/// fetch per qualifying dimension, which only pays off when that dimension is
+/// large. Hosts whose composite models have large cross-source dimensions opt in
+/// via [`SourceRegistry::set_semi_join_config`] /
+/// [`Engine::set_semi_join_config`](../../bi_engine/struct.Engine.html).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemiJoinConfig {
+    /// Enable cost-based reverse (fact → dimension) key pushdown for the safe
+    /// single-fact case described above. Default `false`.
+    pub reverse_pushdown: bool,
+    /// Upper bound on the distinct fact-key set pushed to a dimension. Above it,
+    /// an opportunistic (cost-based) candidate is **skipped** — the dimension is
+    /// fetched in full rather than sending an oversized `IN` list — because a
+    /// key set that large is unlikely to restrict the dimension much. Explicit
+    /// `Both` relationships are never subject to this abort (their large key
+    /// sets use the connectors' temp-table strategy). Default `100_000`.
+    pub key_set_abort_max: usize,
+}
+
+impl Default for SemiJoinConfig {
+    fn default() -> Self {
+        Self {
+            reverse_pushdown: false,
+            key_set_abort_max: 100_000,
+        }
+    }
+}
+
 /// Registry that maps data model table names to their connectors and
 /// source locations.
 ///
@@ -194,6 +243,9 @@ pub struct SourceRegistry {
     /// persisted `source_binding.source_id` be resolved to a connector without
     /// the host tracking indices. Anonymous connectors (no id) are absent.
     source_ids: HashMap<String, usize>,
+    /// Cross-source semi-join pushdown tuning. Disabled by default; the executor
+    /// reads it during local (cross-source) aggregation. See [`SemiJoinConfig`].
+    semi_join: SemiJoinConfig,
 }
 
 impl SourceRegistry {
@@ -203,7 +255,18 @@ impl SourceRegistry {
             bindings: HashMap::new(),
             connectors: Vec::new(),
             source_ids: HashMap::new(),
+            semi_join: SemiJoinConfig::default(),
         }
+    }
+
+    /// Set the cross-source semi-join pushdown tuning. See [`SemiJoinConfig`].
+    pub fn set_semi_join_config(&mut self, config: SemiJoinConfig) {
+        self.semi_join = config;
+    }
+
+    /// Returns the cross-source semi-join pushdown tuning.
+    pub fn semi_join_config(&self) -> SemiJoinConfig {
+        self.semi_join
     }
 
     /// Register a connector and return its index.

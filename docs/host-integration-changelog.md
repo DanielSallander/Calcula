@@ -73,6 +73,17 @@ A model spanning multiple **live** sources answers cross-source joins by fetchin
 
 ---
 
+## Cross-source semi-join pushdown (opt-in) — no format change
+
+An **opt-in** performance control for cross-source Direct Query: when a query's fact is restricted, its join-key set is pushed to a large, unfiltered, connector-backed dimension so the dimension **pulls only the rows that will survive the join** — less data across the source boundary. This does not change the model format or any result.
+
+- **Public API (new).** `SemiJoinConfig { reverse_pushdown: bool, key_set_abort_max: usize }` (re-exported from `bi_engine`); `Engine::set_semi_join_config(SemiJoinConfig)` / `Engine::semi_join_config()`; and the underlying `SourceRegistry::set_semi_join_config` / `semi_join_config` (the setting lives on the registry, so it survives `set_model`). Nothing else on the query/result contract changes.
+- **Disabled by default.** With the default config nothing changes — existing hosts see identical behavior (and one narrow extra fetch is *not* issued). Enabling it (`reverse_pushdown: true`) trades one narrow fact-key fetch per qualifying dimension for a smaller dimension pull; worthwhile when cross-source dimensions are large.
+- **Result-preserving.** Applied only in the provably safe case — a **single-fact** query (one measure table) targeting a **pure, unfiltered, connector-backed** dimension via a single-condition equi relationship — where every dropped dimension row is one the `INNER`/`LEFT` join would drop anyway. No `DISTINCTCOUNT`-over-dimension or conformed-dimension semantics change (those are impossible in the single-fact case). `key_set_abort_max` (default `100_000`) bounds the pushed `IN`: an oversized opportunistic key set falls back to a full dimension fetch rather than sending a giant list.
+- **Unaffected.** The explicit `FilterPropagation::Both` reverse path (a *semantic* Power BI feature) is independent of this config and always active; it is never subject to the abort ceiling.
+
+---
+
 ## Query-scoped variables — `GVAR` (format version 13)
 
 **Measure authoring — new keyword.** A measure's `VAR … RETURN` block may now also declare `GVAR` (query-scoped) variables. A `GVAR` is evaluated **once per query** — against the query's outer filter/slicer context and active RLS role, but **without** the group-by/row axis — and substituted as a constant everywhere it is referenced. Contrast: a plain `VAR` is inlined and re-evaluated per group. Canonical use is "% of grand total" or "compare each row to a whole-context value":

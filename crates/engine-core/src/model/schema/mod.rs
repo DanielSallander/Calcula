@@ -596,6 +596,17 @@ impl DataModel {
         model
     }
 
+    /// Returns a copy of the model with its persisted data-source catalog
+    /// REPLACED (caller-validates contract, see [`DataModel::with_measures`]).
+    /// Used by the host to edit/remove a source; pair with [`Table::set_source_binding`]
+    /// on the affected tables (removing a source should clear the bindings that
+    /// name it).
+    pub fn with_sources(&self, sources: Vec<PersistedSource>) -> DataModel {
+        let mut model = self.clone();
+        model.sources = sources;
+        model
+    }
+
     /// Returns a copy of the model with its relationship list REPLACED
     /// (caller-validates contract, see [`DataModel::with_measures`]).
     pub fn with_relationships(&self, relationships: Vec<Relationship>) -> DataModel {

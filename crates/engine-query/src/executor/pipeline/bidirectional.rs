@@ -94,6 +94,12 @@ pub(super) async fn compute_bidirectional_filters(
 ) -> QueryResult<HashMap<String, Vec<BidirectionalFilter>>> {
     let mut result: HashMap<String, Vec<BidirectionalFilter>> = HashMap::new();
 
+    // Cost-based (opportunistic) reverse pushdown is enabled per config and is
+    // only ever attempted for a single-fact query — see the eligibility check
+    // in the dimension loop and [`SemiJoinConfig`] for the safety argument.
+    let semi_join = registry.semi_join_config();
+    let single_fact = measure_table_names.len() == 1;
+
     for &fact_name in measure_table_names {
         // The fact must itself be in the fetch set (measure tables always are).
         let Some((_, fact_request)) = fetches
@@ -118,19 +124,43 @@ pub(super) async fn compute_bidirectional_filters(
         // multiple dimensions may join on different fact columns).
         let mut keys_by_column: HashMap<String, (Vec<String>, InValueKind)> = HashMap::new();
 
-        for (dim_name, _) in fetches {
+        for (dim_name, dim_request) in fetches {
             if dim_name.eq_ignore_ascii_case(fact_name) {
                 continue;
             }
             let Ok(rel) = model.find_relationship(fact_name, dim_name) else {
                 continue;
             };
-            if rel.propagation() != FilterPropagation::Both {
-                continue;
-            }
             // Reverse propagation shares the forward path's restriction:
             // only single-condition equality joins map to an IN list.
             if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                continue;
+            }
+
+            // A relationship reverse-propagates either because the author marked
+            // it `Both` (an explicit, always-active semantic feature) OR because
+            // cost-based pushdown is enabled and this is the provably safe case:
+            // a single-fact query targeting a pure (non-measure), unfiltered,
+            // connector-backed dimension. Dropping that dimension's unreferenced
+            // rows is byte-identical to the full-fetch join result — see
+            // [`SemiJoinConfig`]. An unfiltered dimension is fetched in phase 2,
+            // where the reverse IN filter is pushed into its FetchRequest.
+            let is_both = rel.propagation() == FilterPropagation::Both;
+            let dim_is_measure_table = measure_table_names
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(dim_name));
+            let dim_unfiltered = dim_request.filters.is_empty()
+                && dim_request.in_filters.is_empty()
+                && dim_request.or_groups.is_empty();
+            let dim_connector_backed = !inmemory_results
+                .iter()
+                .any(|(n, _, _, _)| n.eq_ignore_ascii_case(dim_name));
+            let cost_based = semi_join.reverse_pushdown
+                && single_fact
+                && !dim_is_measure_table
+                && dim_unfiltered
+                && dim_connector_backed;
+            if !is_both && !cost_based {
                 continue;
             }
             let (fact_key_col, dim_key_col) = if rel.from_table() == fact_name {
@@ -162,6 +192,16 @@ pub(super) async fn compute_bidirectional_filters(
             // reverse filter (connectors skip empty IN lists in SQL, and a
             // silently divergent local-only empty filter would be worse).
             if values.is_empty() {
+                continue;
+            }
+
+            // Abort tier (opportunistic candidates only): a cost-based reverse
+            // filter whose key set exceeds the configured bound is skipped — the
+            // dimension is fetched in full rather than sending an oversized IN
+            // that is unlikely to restrict it much. An explicit `Both`
+            // relationship is an author opt-in with defined semantics and is
+            // never aborted (its large key sets use the temp-table strategy).
+            if !is_both && values.len() > semi_join.key_set_abort_max {
                 continue;
             }
 

@@ -191,7 +191,7 @@ pub use engine_query::csv_connector::CsvConnector;
 pub use engine_query::error::{QueryError, QueryResult};
 pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::parquet_connector::ParquetConnector;
-pub use engine_query::registry::{AnyConnector, SourceBinding, SourceRegistry};
+pub use engine_query::registry::{AnyConnector, SemiJoinConfig, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
     LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy, ResultColumn,
@@ -1140,6 +1140,25 @@ impl Engine {
     /// Returns the current maximum inline IN-filter values threshold.
     pub fn max_inline_in_values(&self) -> usize {
         self.max_inline_in_values
+    }
+
+    /// Configure cross-source semi-join (reverse fact → dimension) pushdown.
+    ///
+    /// **Disabled by default.** When enabled, a cross-source query whose fact is
+    /// restricted pushes the fact's join-key set to a large, unfiltered,
+    /// connector-backed dimension so it pulls only the rows that will survive the
+    /// join — pulling less data across the source boundary. Only applied in the
+    /// provably result-preserving single-fact case; see [`SemiJoinConfig`]. The
+    /// setting lives on the [`SourceRegistry`] (read by the executor during local
+    /// cross-source aggregation) and survives `set_model`, which keeps the
+    /// registry intact.
+    pub fn set_semi_join_config(&mut self, config: SemiJoinConfig) {
+        self.registry.set_semi_join_config(config);
+    }
+
+    /// Returns the current cross-source semi-join pushdown configuration.
+    pub fn semi_join_config(&self) -> SemiJoinConfig {
+        self.registry.semi_join_config()
     }
 
     /// Set the query-result cache configuration.
