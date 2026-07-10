@@ -1533,6 +1533,20 @@ impl DataModelBuilder {
                     // SELECTEDMEASURE() is allowed in a calc item; everything
                     // else is enforced as for a regular measure expression.
                     item.expression().validate_calc_item()?;
+                    // GVAR (query-scoped variables) is rejected outright:
+                    // applying a group always activates the calc-group path,
+                    // which fails closed on GVARs at query time — so an item
+                    // declaring one could never be evaluated. Rejecting at
+                    // build keeps unusable definitions out of the model (same
+                    // policy as calculated columns and global variables).
+                    if item.expression().has_query_scoped_bindings() {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "calculation item '{}' in group '{}' uses a query-scoped (GVAR) \
+                             variable, which is not supported in calculation items",
+                            item.name(),
+                            group.name()
+                        )));
+                    }
                     // Any MeasureRef inside the item must resolve.
                     for measure_name in
                         crate::model::calculation_group::measure_ref_names(item.expression())

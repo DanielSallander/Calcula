@@ -57,6 +57,7 @@ pub use text::TextFunction;
 pub use transform::resolve_is_in_scope;
 pub use validate::is_valid_call_name;
 pub(crate) use validate::validate_call_name;
+pub(crate) use walkers::child_expressions;
 
 /// Arithmetic operators for binary expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

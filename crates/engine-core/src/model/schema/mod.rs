@@ -376,6 +376,11 @@ impl DataModel {
     /// candidate may be new or replace an existing measure of the same name (so
     /// editing is supported). It catches:
     ///
+    /// - **expression validity** — the same per-expression checks `build()`
+    ///   runs ([`Expression::validate`]): SQL-safety allow-lists and the GVAR
+    ///   (query-scoped variable) rules, including top-level placement and the
+    ///   GVAR-name vs model global-variable collision
+    ///   ([`EngineError::InvalidExpression`]);
     /// - **circular / unknown measure references** (`[OtherMeasure]`), including
     ///   a self-reference and a reference that would close a cycle with existing
     ///   measures ([`EngineError::InvalidData`] / [`EngineError::MeasureNotFound`]);
@@ -388,9 +393,37 @@ impl DataModel {
     /// `validate_measure_text` adds the UDF check, which needs the registered
     /// set). `build` and query planning remain the full authority.
     ///
+    /// [`Expression::validate`]: crate::compute::expression::Expression::validate
+    ///
     /// [`DataModelBuilder::build`]: crate::model::DataModelBuilder::build
     pub fn validate_candidate_measure(&self, candidate: &Measure) -> EngineResult<()> {
         use crate::compute::expression::expand_measure_refs;
+
+        // Expression-level validation — the same checks `build()` runs per
+        // measure: SQL-safety allow-lists, and the GVAR (query-scoped variable)
+        // rules (scalar-only binding, no VAR/forward references, duplicate
+        // names, top-level placement). Without this, a host calling
+        // `validate_measure_text` would accept a measure that a subsequent
+        // model build rejects.
+        candidate.expression().validate()?;
+        candidate.expression().validate_query_scoped_top_level()?;
+
+        // A GVAR name must not collide with a model global variable (both are
+        // referenced as bare identifiers — the precedence would be ambiguous).
+        // Mirrors the same check in `DataModelBuilder::build`.
+        for gvar in candidate.expression().root_query_scoped_names() {
+            if self
+                .global_variables
+                .iter()
+                .any(|gv| gv.name().eq_ignore_ascii_case(gvar))
+            {
+                return Err(EngineError::InvalidExpression(format!(
+                    "query-scoped variable (GVAR) '{gvar}' in measure '{}' collides with a \
+                     model global variable of the same name; rename one of them",
+                    candidate.name()
+                )));
+            }
+        }
 
         // A temporary view in which the candidate's name resolves to its (new)
         // definition, so self/forward references and any newly-introduced cycle
@@ -587,6 +620,29 @@ impl DataModel {
         model
     }
 
+    /// Replace the measure whose name matches `measure` (case-insensitively)
+    /// **in place**, returning `true` when a measure was replaced and `false`
+    /// when no measure of that name exists (the model is then unchanged).
+    ///
+    /// The in-place sibling of [`DataModel::with_measures`] for callers that
+    /// own the model and update one measure at a time (e.g. the engine
+    /// facade's per-query `GVAR` resolution overlay) — avoiding a full model
+    /// clone per update. Same caller-validates contract as `with_measures`:
+    /// no validation is performed here.
+    pub fn replace_measure(&mut self, measure: Measure) -> bool {
+        match self
+            .measures
+            .iter_mut()
+            .find(|m| m.name().eq_ignore_ascii_case(measure.name()))
+        {
+            Some(slot) => {
+                *slot = measure;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Returns a copy of the model with its measure-group (display-folder) list
     /// REPLACED (caller-validates contract, see [`DataModel::with_measures`]).
     /// A measure's `group` must name one of these, so hosts assigning a measure
@@ -604,8 +660,11 @@ impl DataModel {
     /// and existing groups (and their descriptions) are preserved. Returns the
     /// number of groups added.
     pub fn ensure_measure_groups(&mut self) -> usize {
-        let declared: std::collections::HashSet<String> =
-            self.measure_groups.iter().map(|g| g.name().to_string()).collect();
+        let declared: std::collections::HashSet<String> = self
+            .measure_groups
+            .iter()
+            .map(|g| g.name().to_string())
+            .collect();
         let mut to_add: Vec<String> = Vec::new();
         for m in &self.measures {
             if let Some(name) = m.group() {
@@ -1358,7 +1417,10 @@ mod tests {
         let grouped = sum_measure("Revenue", "Sales", "amount")
             .with_source("SUM(Sales[amount])")
             .with_group("Sales");
-        let model = DataModel::builder().add_table(sales_table()).build().unwrap();
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
         let mut edited = model.with_measures(vec![grouped]);
         assert!(edited.validate().is_err());
 
@@ -1377,9 +1439,12 @@ mod tests {
         use crate::compute::parser::parse_measure_expression;
 
         // An empty formula is a BLANK() placeholder: no columns, no home table.
-        let blank = Measure::new("Placeholder", parse_measure_expression("").unwrap())
-            .with_source("");
-        let model = DataModel::builder().add_table(sales_table()).build().unwrap();
+        let blank =
+            Measure::new("Placeholder", parse_measure_expression("").unwrap()).with_source("");
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
         let edited = model.with_measures(vec![blank]);
         assert_eq!(edited.measures()[0].table(), "");
         edited.validate().unwrap();

@@ -227,9 +227,7 @@ impl Expression {
                     // recursively by has_window) and a QUERY node anywhere in the
                     // binding (contains_query — a top-level is_query() would miss
                     // `SUM(x) + QUERY(...)`).
-                    if crate::model::calculation_group::contains_query(gbinding)
-                        || gbinding.has_window()
-                    {
+                    if gbinding.contains_query() || gbinding.has_window() {
                         return Err(EngineError::InvalidExpression(format!(
                             "query-scoped variable (GVAR) '{gname}' must be a scalar; QUERY, \
                              window (WINDOW/OFFSET/INDEX/RANK) and time-intelligence \

@@ -133,7 +133,6 @@ pub use tokio_util::sync::CancellationToken;
 // --- Re-exports from engine-core ---
 
 pub use engine_core::catalog::{function_catalog, FunctionInfo};
-pub use function_docs::{function_docs, FunctionDoc};
 pub use engine_core::compute::aggregate::AggregateOp;
 pub use engine_core::compute::context::{
     ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,
@@ -173,6 +172,7 @@ pub use engine_core::model::{
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
+pub use function_docs::{function_docs, FunctionDoc};
 
 // --- Re-exports from engine-connectors ---
 
@@ -354,9 +354,10 @@ fn const_f64(e: &Expression) -> Option<f64> {
     }
 }
 
-/// Fold a **constant** scalar expression (built only from literals via
-/// arithmetic / `DIVIDE` / `COALESCE`) to a single literal, or `None` if it is
-/// not a compile-time constant.
+/// Fold a **constant** scalar expression (literals combined via arithmetic /
+/// `DIVIDE` / `COALESCE`, plus the constant date functions `TODAY` / `DATE` /
+/// `DATEADD` / `DATETRUNC`) to a single literal, or `None` if it is not a
+/// compile-time constant.
 ///
 /// Used to evaluate a query-scoped (`GVAR`) binding that, after substituting
 /// earlier `GVAR` literals, references no table (e.g. `GVAR b = a`, `GVAR c =
@@ -429,6 +430,15 @@ fn fold_const_scalar(expr: &Expression) -> Option<Expression> {
                 }
             }
             Some(Expression::Blank)
+        }
+        // Constant date functions — `TODAY()`, `DATE(y,m,d)`,
+        // `DATEADD(TODAY(), -30, "DAY")`, `DATETRUNC(...)` — fold through the
+        // same engine-core machinery (and local clock) as incremental refresh
+        // filters, so `GVAR asof = DATEADD(TODAY(), -30, "DAY")` yields a
+        // `LiteralDate` that compares correctly against date columns. `NOW()`
+        // has no literal expression form and stays unfoldable.
+        e @ Expression::DateTimeFunc { .. } => {
+            engine_core::compute::incremental::fold_constant_scalar_now(e)
         }
         _ => None,
     }
@@ -2365,6 +2375,18 @@ impl Engine {
         role_filters: &[FilterPredicate],
         token: &CancellationToken,
     ) -> QueryResult<Option<DataModel>> {
+        // Hot-path early-out: this runs on every cache-missed query, so skip
+        // the per-request closure walk (allocating measure_references vectors
+        // per measure) entirely when NO model measure declares a GVAR — the
+        // overwhelmingly common case. The scan is a short-circuiting,
+        // allocation-free tree walk.
+        if !model
+            .measures()
+            .iter()
+            .any(|m| m.expression().has_query_scoped_bindings())
+        {
+            return Ok(None);
+        }
         let gvar_measures = self.query_scoped_measures_in_closure(request, model);
         if gvar_measures.is_empty() {
             return Ok(None);
@@ -2393,23 +2415,19 @@ impl Engine {
             ));
         }
         // Resolve in dependency order (a GVAR measure may reference another via
-        // `[Measure]`), rewriting an incremental overlay so a later measure's
-        // inner query sees earlier measures already resolved.
+        // `[Measure]`), updating ONE owned overlay in place so a later
+        // measure's inner query sees earlier measures already resolved. A
+        // single model clone up front + `replace_measure` per resolution —
+        // not a full model clone per measure.
         let order = Self::query_scoped_topo_order(&gvar_measures, model);
-        let mut overlay_measures: Vec<Measure> = model.measures().to_vec();
+        let mut overlay = model.clone();
         for name in order {
-            let current = model.with_measures(overlay_measures.clone());
             let resolved = self
-                .resolve_one_query_scoped_measure(&name, &current, request, role_filters, token)
+                .resolve_one_query_scoped_measure(&name, &overlay, request, role_filters, token)
                 .await?;
-            if let Some(slot) = overlay_measures
-                .iter_mut()
-                .find(|m| m.name().eq_ignore_ascii_case(&name))
-            {
-                *slot = resolved;
-            }
+            overlay.replace_measure(resolved);
         }
-        Ok(Some(model.with_measures(overlay_measures)))
+        Ok(Some(overlay))
     }
 
     /// Names of measures in `request`'s transitive measure-reference closure
@@ -2579,25 +2597,34 @@ impl Engine {
         let binding_expr = expand_measure_refs(binding_expr, model).map_err(QueryError::Engine)?;
 
         // A binding that reduces to a constant (e.g. it references only earlier
-        // GVARs) has no fact table to query — fold it directly.
+        // GVARs, or literal/date-function arithmetic) has no fact table to
+        // query — fold it directly.
         if infer_fact_table(&binding_expr).is_none() {
             return match fold_const_scalar(&binding_expr) {
                 Some(lit) => Ok(lit),
                 None => Err(QueryError::InvalidQuery(
-                    "a query-scoped (GVAR) binding has no inferable fact table and is not a \
-                     constant; reference columns with qualified table[column] syntax"
+                    "a query-scoped (GVAR) binding must either aggregate over a table (e.g. \
+                     GVAR d = MAX(dim_date[date])) or be a constant expression of literals, \
+                     earlier GVARs, and the date functions TODAY/DATE/DATEADD/DATETRUNC; this \
+                     binding references no table and is not a foldable constant"
                         .to_string(),
                 )),
             };
         }
 
-        const EPHEMERAL: &str = "__gvar_scalar__";
-        let ephemeral = Measure::new(EPHEMERAL, binding_expr.clone());
+        // The ephemeral measure name is uniquified against the model so a user
+        // measure that happens to carry the default name never breaks GVAR
+        // evaluation (`with_overlay_measures` would reject the collision).
+        let mut ephemeral_name = "__gvar_scalar__".to_string();
+        while model.measure(&ephemeral_name).is_ok() {
+            ephemeral_name.push('_');
+        }
+        let ephemeral = Measure::new(ephemeral_name.as_str(), binding_expr.clone());
         let eval_model = model
             .with_overlay_measures(vec![ephemeral])
             .map_err(QueryError::Engine)?;
         let inner = QueryRequest {
-            measures: vec![EPHEMERAL.to_string()],
+            measures: vec![ephemeral_name],
             filters: request.filters.clone(),
             in_filters: request.in_filters.clone(),
             or_filters: request.or_filters.clone(),

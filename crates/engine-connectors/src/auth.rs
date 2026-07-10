@@ -148,7 +148,11 @@ impl ConnectionTarget {
     /// Set the explicit TLS/SSL mode (`"disable"` | `"prefer"` | `"require"`).
     pub fn with_ssl_mode(mut self, mode: impl Into<String>) -> Self {
         let mode = mode.into();
-        self.ssl_mode = if mode.trim().is_empty() { None } else { Some(mode) };
+        self.ssl_mode = if mode.trim().is_empty() {
+            None
+        } else {
+            Some(mode)
+        };
         self
     }
 

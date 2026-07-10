@@ -243,6 +243,49 @@ pub fn fold_refresh_filter_now(
     fold_refresh_filter_at(table, refresh_filter, now)
 }
 
+/// Fold a constant date/scalar expression to a literal [`Expression`] at
+/// `now`, or `None` when it is not a constant this folder understands.
+///
+/// Accepts the same constant subset as a refresh filter's right-hand side —
+/// literals and the date functions `TODAY()`, `NOW()`, `DATE(y,m,d)`,
+/// `DATEADD(...)`, `DATETRUNC(...)` — and produces:
+/// - a date → [`Expression::LiteralDate`] (a Date32 day count, which compares
+///   correctly against date columns without string coercion);
+/// - a number → `LiteralInt` / `LiteralFloat`;
+/// - a boolean / string → the corresponding literal.
+///
+/// A timestamp result (`NOW()`) has no literal expression form and returns
+/// `None`. The engine facade uses this to evaluate a table-less constant
+/// query-scoped (`GVAR`) binding — e.g. `GVAR asof = DATEADD(TODAY(), -30,
+/// "DAY")` — with the same local-time semantics as incremental refresh
+/// filters.
+pub fn fold_constant_scalar_at(expr: &Expression, now: NaiveDateTime) -> Option<Expression> {
+    match fold_scalar_at(expr, now).ok()? {
+        FoldedValue::Date(d) => {
+            // Days since the Unix epoch, the Date32 convention LiteralDate
+            // carries. Any date chrono can represent fits in i32 days.
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+            let days = i32::try_from((d - epoch).num_days()).ok()?;
+            Some(Expression::LiteralDate(days))
+        }
+        FoldedValue::Number(n) => n
+            .parse::<i64>()
+            .map(Expression::LiteralInt)
+            .ok()
+            .or_else(|| n.parse::<f64>().map(Expression::LiteralFloat).ok()),
+        FoldedValue::Bool(b) => Some(Expression::LiteralBool(b)),
+        FoldedValue::Text(s) => Some(Expression::LiteralString(s)),
+        FoldedValue::Timestamp(_) => None,
+    }
+}
+
+/// [`fold_constant_scalar_at`] evaluated at the current local time (the same
+/// clock as incremental refresh folding, so `TODAY()` means the same day in a
+/// refresh filter and in a `GVAR` binding).
+pub fn fold_constant_scalar_now(expr: &Expression) -> Option<Expression> {
+    fold_constant_scalar_at(expr, chrono::Local::now().naive_local())
+}
+
 /// A folded scalar value of a comparison right-hand side.
 enum FoldedValue {
     /// A date (rendered `YYYY-MM-DD`).
@@ -306,6 +349,16 @@ fn fold_scalar_at(expr: &Expression, now: NaiveDateTime) -> EngineResult<FoldedV
         Expression::LiteralInt(n) => Ok(FoldedValue::Number(n.to_string())),
         Expression::LiteralFloat(f) => Ok(FoldedValue::Number(f.to_string())),
         Expression::LiteralBool(b) => Ok(FoldedValue::Bool(*b)),
+        // A resolved date literal (Date32 day count) — produced when an earlier
+        // query-scoped (GVAR) date binding is substituted into a later one, so
+        // `GVAR asof = TODAY()  GVAR from = DATEADD(asof, -30, "DAY")` folds.
+        Expression::LiteralDate(days) => {
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                .ok_or_else(|| err("internal: epoch date construction failed".to_string()))?;
+            Ok(FoldedValue::Date(
+                epoch + chrono::Duration::days(i64::from(*days)),
+            ))
+        }
         Expression::LiteralString(s) => {
             // A string that looks like an ISO date folds to a Date so date
             // functions can operate on it; otherwise it stays text.
@@ -579,6 +632,54 @@ mod tests {
             .unwrap()
             .and_hms_opt(12, 30, 0)
             .unwrap()
+    }
+
+    // --- fold_constant_scalar_at (GVAR constant bindings) ---
+
+    #[test]
+    fn fold_constant_scalar_today_yields_literal_date() {
+        let today = Expression::DateTimeFunc {
+            function: DateTimeFunction::Today,
+            args: vec![],
+        };
+        // 2024-03-15 is 19_797 days after the Unix epoch.
+        let folded = fold_constant_scalar_at(&today, dt(2024, 3, 15)).unwrap();
+        assert!(
+            matches!(folded, Expression::LiteralDate(19_797)),
+            "{folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_constant_scalar_dateadd_over_literal_date_composes() {
+        // DATEADD(<resolved earlier GVAR = 2024-03-15>, -30, "DAY") folds.
+        let dateadd = Expression::DateTimeFunc {
+            function: DateTimeFunction::DateAdd,
+            args: vec![
+                Expression::LiteralDate(19_797),
+                Expression::LiteralInt(-30),
+                Expression::LiteralString("DAY".into()),
+            ],
+        };
+        let folded = fold_constant_scalar_at(&dateadd, dt(2024, 3, 15)).unwrap();
+        assert!(
+            matches!(folded, Expression::LiteralDate(19_767)),
+            "{folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_constant_scalar_rejects_non_constants() {
+        // NOW() has no literal expression form; a column reference is not
+        // constant.
+        let now_fn = Expression::DateTimeFunc {
+            function: DateTimeFunction::Now,
+            args: vec![],
+        };
+        assert!(fold_constant_scalar_at(&now_fn, dt(2024, 3, 15)).is_none());
+        assert!(
+            fold_constant_scalar_at(&Expression::ColumnRef("x".into()), dt(2024, 3, 15)).is_none()
+        );
     }
 
     // --- Constant folder ---

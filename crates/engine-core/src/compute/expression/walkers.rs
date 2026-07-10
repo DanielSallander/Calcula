@@ -1049,6 +1049,169 @@ impl Expression {
     }
 }
 
+/// Return the direct child sub-expressions of `expr`, for generic traversal.
+///
+/// This is a small, allocation-light enumeration of the immediate
+/// sub-expression slots of every node kind — the single point that must be
+/// updated when a new [`Expression`] variant is added. It powers the generic
+/// recursive inspectors ([`Expression::has_window`],
+/// [`Expression::has_query_scoped_bindings`], `contains_query`) and the
+/// calc-item validation walks, so those never drift out of sync with the enum.
+/// Leaf nodes return an empty list.
+///
+/// [`Expression::Query`] contributes its aggregate expressions (its `group_by`
+/// entries are plain `(table, column)` name pairs, not expressions).
+pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
+    let mut out: Vec<&Expression> = Vec::new();
+    match expr {
+        Expression::ColumnRef(_)
+        | Expression::QualifiedColumnRef { .. }
+        | Expression::TableRef(_)
+        | Expression::MeasureRef(_)
+        | Expression::SelectedMeasure
+        | Expression::LiteralFloat(_)
+        | Expression::LiteralInt(_)
+        | Expression::LiteralDate(_)
+        | Expression::LiteralString(_)
+        | Expression::LiteralBool(_)
+        | Expression::Blank
+        | Expression::IsInScope { .. }
+        | Expression::RankWindow { .. } => {}
+        Expression::Query { aggregates, .. } => {
+            out.extend(aggregates.iter().map(|(e, _)| e));
+        }
+        Expression::BinaryOp { left, right, .. }
+        | Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right)
+        | Expression::Xor(left, right)
+        | Expression::NullIf {
+            expr: left,
+            value: right,
+        }
+        | Expression::ListAgg {
+            column: left,
+            delimiter: right,
+        }
+        | Expression::MaxBy {
+            value: left,
+            sort_by: right,
+        }
+        | Expression::MinBy {
+            value: left,
+            sort_by: right,
+        }
+        | Expression::FirstValue {
+            column: left,
+            order_by: right,
+        }
+        | Expression::Percentile {
+            operand: left,
+            percentile: right,
+        }
+        | Expression::IfError {
+            expr: left,
+            alternate: right,
+        } => {
+            out.push(left);
+            out.push(right);
+        }
+        Expression::Not(inner)
+        | Expression::IsBlank(inner)
+        | Expression::CountIf { condition: inner }
+        | Expression::HasOneValue { column: inner }
+        | Expression::Aggregate { operand: inner, .. }
+        | Expression::Clear { expr: inner, .. }
+        | Expression::Reset { expr: inner }
+        | Expression::ClearInner { expr: inner, .. }
+        | Expression::ClearOuter { expr: inner, .. }
+        | Expression::ResetInner { expr: inner }
+        | Expression::ResetOuter { expr: inner }
+        | Expression::Traverse { expr: inner, .. }
+        | Expression::Using { expr: inner, .. }
+        | Expression::UseRelationship { expr: inner, .. }
+        | Expression::KeepIn { expr: inner, .. }
+        | Expression::ClearExcept { expr: inner, .. }
+        | Expression::Iterate {
+            expression: inner, ..
+        }
+        | Expression::Window { inner, .. }
+        | Expression::Offset { inner, .. }
+        | Expression::Index { inner, .. }
+        | Expression::ToDate { expr: inner, .. }
+        | Expression::PeriodShift { expr: inner, .. }
+        | Expression::DatesInPeriod { expr: inner, .. }
+        | Expression::SemiAdditiveBalance { expr: inner, .. } => out.push(inner),
+        Expression::Keep {
+            expr, conditions, ..
+        } => {
+            out.push(expr);
+            out.extend(conditions.iter());
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            out.push(condition);
+            out.push(then_expr);
+            out.push(else_expr);
+        }
+        Expression::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            out.push(expr);
+            for (v, r) in cases {
+                out.push(v);
+                out.push(r);
+            }
+            if let Some(d) = default {
+                out.push(d);
+            }
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            out.push(numerator);
+            out.push(denominator);
+            if let Some(a) = alternate {
+                out.push(a);
+            }
+        }
+        Expression::SelectedValue { column, alternate } => {
+            out.push(column);
+            if let Some(a) = alternate {
+                out.push(a);
+            }
+        }
+        Expression::Coalesce(exprs) | Expression::Greatest(exprs) | Expression::Least(exprs) => {
+            out.extend(exprs.iter())
+        }
+        Expression::ScalarFunc { args, .. }
+        | Expression::TextFunc { args, .. }
+        | Expression::DateTimeFunc { args, .. }
+        | Expression::Call { args, .. } => out.extend(args.iter()),
+        Expression::InList { expr, values } => {
+            out.push(expr);
+            out.extend(values.iter());
+        }
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => {
+            out.extend(bindings.iter().map(|(_, e)| e));
+            out.extend(query_scoped_bindings.iter().map(|(_, e)| e));
+            out.push(result);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

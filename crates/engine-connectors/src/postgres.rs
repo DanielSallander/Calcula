@@ -899,7 +899,23 @@ mod pg_dialect {
                     .collect::<ConnectorResult<Vec<_>>>()?;
                 Ok(format!("COALESCE({})", parts.join(", ")))
             }
-            Expression::Block { .. } => {
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => {
+                // Query-scoped (GVAR) bindings must be resolved to literals at
+                // the Engine facade before any source SQL is generated;
+                // inline_bindings would silently drop a survivor. Fail closed
+                // (mirrors the engine-core renderer guards). The pushdown
+                // planner marks GVAR blocks unpushable, so this is
+                // defense-in-depth against a future pushability change.
+                if !query_scoped_bindings.is_empty() {
+                    return Err(ConnectorError::QueryFailed(
+                        "internal: a query-scoped (GVAR) binding reached connector SQL \
+                         generation unresolved (it must be resolved at the Engine facade)"
+                            .to_string(),
+                    ));
+                }
                 let inlined = expr.inline_bindings();
                 expr_to_sql_with_clear(&inlined, table_map, group_by)
             }

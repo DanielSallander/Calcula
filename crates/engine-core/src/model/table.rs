@@ -328,6 +328,19 @@ impl Table {
         })
     }
 
+    /// Replace this table's model name (the name measures and queries use).
+    ///
+    /// For hosts that import a source table under a model-local name — e.g.
+    /// introspection names tables `"<schema>.<table>"`, but a host may prefer
+    /// the bare table name in the model (the source schema/table live in the
+    /// [`source_binding`](Self::source_binding), not the name). The caller owns
+    /// reference integrity: rename BEFORE the table joins a model, or fix up
+    /// measures/relationships that reference the old name.
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
     /// Set the human-friendly display name for this table.
     ///
     /// Purely presentational — hosts show it instead of the physical

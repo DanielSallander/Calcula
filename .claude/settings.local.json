@@ -10,7 +10,9 @@
       "Agent",
       "WebFetch",
       "WebSearch",
-      "NotebookEdit"
+      "NotebookEdit",
+      "Skill(code-review)",
+      "Skill(code-review:*)"
     ],
     "deny": [
       "Bash(git commit*)",

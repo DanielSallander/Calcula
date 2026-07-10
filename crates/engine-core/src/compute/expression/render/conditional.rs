@@ -128,7 +128,21 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                 let r = self.render_conditional(right, condition, fact_table)?;
                 format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))")
             }
-            Expression::Block { .. } => {
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => {
+                // Query-scoped (GVAR) bindings must be resolved to literals at
+                // the Engine facade before rendering; inline_bindings would
+                // silently drop a survivor, leaving a dangling column
+                // reference. Fail closed (mirrors the render_plain guard).
+                if !query_scoped_bindings.is_empty() {
+                    return Err(EngineError::InvalidExpression(
+                        "internal: a query-scoped (GVAR) binding reached SQL rendering \
+                         unresolved (it must be resolved at the Engine facade)"
+                            .to_string(),
+                    ));
+                }
                 self.render_conditional(&expr.inline_bindings(), condition, fact_table)?
             }
             Expression::HasOneValue { column } => {

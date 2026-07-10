@@ -112,6 +112,20 @@ impl Parser {
         matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "GVAR")
     }
 
+    /// Check if the input starts with a full `GVAR <name> =` declaration.
+    ///
+    /// Unlike `VAR`/`RETURN`, `GVAR` is only a keyword in declaration position,
+    /// so the top-level parser entry must not hijack an expression that merely
+    /// *begins* with an identifier named `gvar` (a column, measure, or model
+    /// global variable reference such as `gvar + 1`) — those keep parsing as
+    /// ordinary column references, preserving pre-GVAR behavior. The 3-token
+    /// lookahead (`GVAR`, name, `=`) distinguishes the two.
+    pub(super) fn peek_is_gvar_declaration(&self) -> bool {
+        self.peek_is_gvar()
+            && matches!(self.peek_at(1), Some(Token::Ident(_)))
+            && matches!(self.peek_at(2), Some(Token::Eq))
+    }
+
     /// Check if the current token is `RETURN` (case-insensitive).
     fn peek_is_return(&self) -> bool {
         matches!(self.peek(), Some(Token::Ident(s)) if s.to_uppercase() == "RETURN")
@@ -393,6 +407,29 @@ mod tests {
         // so it stays usable as a VAR/GVAR binding name (unlike VAR/RETURN).
         let expr = parse_measure_expression("VAR gvar = SUM(Sales[amount]) RETURN gvar").unwrap();
         assert!(matches!(expr, Expression::Block { .. }));
+    }
+
+    #[test]
+    fn leading_gvar_identifier_still_parses_as_column_reference() {
+        // Backward compatibility: an expression that merely BEGINS with an
+        // identifier named `gvar` (a column / measure / model global variable
+        // reference) is not hijacked by the GVAR keyword — only the full
+        // declaration form `GVAR <name> =` enters the block path.
+        let expr = parse_measure_expression("gvar + 1").unwrap();
+        assert!(matches!(expr, Expression::BinaryOp { .. }));
+
+        let bare = parse_measure_expression("gvar").unwrap();
+        assert!(matches!(bare, Expression::ColumnRef(name) if name == "gvar"));
+
+        // The declaration form still enters the block path.
+        let block = parse_measure_expression("GVAR x = 1 RETURN x").unwrap();
+        match &block {
+            Expression::Block {
+                query_scoped_bindings,
+                ..
+            } => assert_eq!(query_scoped_bindings.len(), 1),
+            other => panic!("expected Block, got {other:?}"),
+        }
     }
 
     #[test]

@@ -297,146 +297,26 @@ impl Expression {
     /// expression uses this to **fail closed** if one survived (a facade bypass
     /// or the lower-level `MeasureEngine` path, which cannot resolve them).
     pub fn has_query_scoped_bindings(&self) -> bool {
-        match self {
-            Expression::Block {
-                bindings,
-                query_scoped_bindings,
-                result,
-            } => {
-                !query_scoped_bindings.is_empty()
-                    || bindings.iter().any(|(_, e)| e.has_query_scoped_bindings())
-                    || query_scoped_bindings
-                        .iter()
-                        .any(|(_, e)| e.has_query_scoped_bindings())
-                    || result.has_query_scoped_bindings()
-            }
-            Expression::BinaryOp { left, right, .. }
-            | Expression::Comparison { left, right, .. }
-            | Expression::And(left, right)
-            | Expression::Or(left, right)
-            | Expression::Xor(left, right) => {
-                left.has_query_scoped_bindings() || right.has_query_scoped_bindings()
-            }
-            Expression::Not(inner) | Expression::IsBlank(inner) => {
-                inner.has_query_scoped_bindings()
-            }
-            Expression::Aggregate { operand, .. } => operand.has_query_scoped_bindings(),
-            Expression::Keep {
-                expr, conditions, ..
-            } => {
-                expr.has_query_scoped_bindings()
-                    || conditions.iter().any(|c| c.has_query_scoped_bindings())
-            }
-            Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
-            | Expression::ClearInner { expr, .. }
-            | Expression::ClearOuter { expr, .. }
-            | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
-            | Expression::Traverse { expr, .. }
-            | Expression::Using { expr, .. }
-            | Expression::UseRelationship { expr, .. }
-            | Expression::KeepIn { expr, .. }
-            | Expression::ClearExcept { expr, .. }
-            | Expression::Iterate {
-                expression: expr, ..
-            } => expr.has_query_scoped_bindings(),
-            Expression::If {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                condition.has_query_scoped_bindings()
-                    || then_expr.has_query_scoped_bindings()
-                    || else_expr.has_query_scoped_bindings()
-            }
-            Expression::SafeDivide {
-                numerator,
-                denominator,
-                alternate,
-            } => {
-                numerator.has_query_scoped_bindings()
-                    || denominator.has_query_scoped_bindings()
-                    || alternate
-                        .as_ref()
-                        .is_some_and(|a| a.has_query_scoped_bindings())
-            }
-            Expression::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                expr.has_query_scoped_bindings()
-                    || cases.iter().any(|(v, r)| {
-                        v.has_query_scoped_bindings() || r.has_query_scoped_bindings()
-                    })
-                    || default
-                        .as_ref()
-                        .is_some_and(|d| d.has_query_scoped_bindings())
-            }
-            Expression::Coalesce(exprs)
-            | Expression::Greatest(exprs)
-            | Expression::Least(exprs) => exprs.iter().any(|e| e.has_query_scoped_bindings()),
-            Expression::ScalarFunc { args, .. }
-            | Expression::TextFunc { args, .. }
-            | Expression::DateTimeFunc { args, .. }
-            | Expression::Call { args, .. } => args.iter().any(|a| a.has_query_scoped_bindings()),
-            Expression::IfError { expr, alternate } => {
-                expr.has_query_scoped_bindings() || alternate.has_query_scoped_bindings()
-            }
-            Expression::Percentile {
-                operand,
-                percentile,
-            } => operand.has_query_scoped_bindings() || percentile.has_query_scoped_bindings(),
-            Expression::HasOneValue { column } => column.has_query_scoped_bindings(),
-            Expression::SelectedValue { column, alternate } => {
-                column.has_query_scoped_bindings()
-                    || alternate
-                        .as_ref()
-                        .is_some_and(|a| a.has_query_scoped_bindings())
-            }
-            Expression::FirstValue { column, order_by } => {
-                column.has_query_scoped_bindings() || order_by.has_query_scoped_bindings()
-            }
-            Expression::Window { inner, .. }
-            | Expression::Offset { inner, .. }
-            | Expression::Index { inner, .. } => inner.has_query_scoped_bindings(),
-            Expression::ToDate { expr, .. }
-            | Expression::PeriodShift { expr, .. }
-            | Expression::DatesInPeriod { expr, .. }
-            | Expression::SemiAdditiveBalance { expr, .. } => expr.has_query_scoped_bindings(),
-            Expression::Query { aggregates, .. } => aggregates
+        matches!(
+            self,
+            Expression::Block { query_scoped_bindings, .. } if !query_scoped_bindings.is_empty()
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.has_query_scoped_bindings())
+    }
+
+    /// Returns `true` if this tree contains an [`Expression::Query`]
+    /// (table-producing two-stage aggregation) node anywhere.
+    ///
+    /// Used to enforce that a query-scoped (`GVAR`) binding is a genuine
+    /// scalar: a `QUERY` may be nested at any expression position, so the
+    /// top-level [`is_query`](Self::is_query) check alone would miss
+    /// `SUM(x) + QUERY(...)`.
+    pub(crate) fn contains_query(&self) -> bool {
+        self.is_query()
+            || super::child_expressions(self)
                 .iter()
-                .any(|(e, _)| e.has_query_scoped_bindings()),
-            Expression::InList { expr, values } => {
-                expr.has_query_scoped_bindings()
-                    || values.iter().any(|v| v.has_query_scoped_bindings())
-            }
-            Expression::NullIf { expr, value } => {
-                expr.has_query_scoped_bindings() || value.has_query_scoped_bindings()
-            }
-            Expression::CountIf { condition } => condition.has_query_scoped_bindings(),
-            Expression::ListAgg { column, delimiter } => {
-                column.has_query_scoped_bindings() || delimiter.has_query_scoped_bindings()
-            }
-            Expression::MaxBy { value, sort_by } | Expression::MinBy { value, sort_by } => {
-                value.has_query_scoped_bindings() || sort_by.has_query_scoped_bindings()
-            }
-            // Leaves and nodes that cannot contain a Block.
-            Expression::ColumnRef(_)
-            | Expression::LiteralFloat(_)
-            | Expression::LiteralInt(_)
-            | Expression::LiteralDate(_)
-            | Expression::LiteralString(_)
-            | Expression::LiteralBool(_)
-            | Expression::Blank
-            | Expression::TableRef(_)
-            | Expression::MeasureRef(_)
-            | Expression::SelectedMeasure
-            | Expression::QualifiedColumnRef { .. }
-            | Expression::IsInScope { .. }
-            | Expression::RankWindow { .. } => false,
-        }
+                .any(|c| c.contains_query())
     }
 
     /// Names of the query-scoped (`GVAR`) bindings declared at the **root** of
@@ -472,38 +352,21 @@ impl Expression {
     /// Returns [`EngineError::InvalidExpression`] on a nested occurrence.
     pub fn validate_query_scoped_top_level(&self) -> EngineResult<()> {
         // Only the root Block may carry query-scoped bindings; nothing beneath
-        // it (including a root GVAR binding's own subtree) may.
-        let reject = || {
+        // it (including a root GVAR binding's own subtree) may. Starting the
+        // check at the root's CHILDREN exempts exactly the root Block's own
+        // list.
+        if super::child_expressions(self)
+            .iter()
+            .any(|c| c.has_query_scoped_bindings())
+        {
             Err(EngineError::InvalidExpression(
                 "query-scoped (GVAR) variables are only allowed at the top level of a measure; \
                  they cannot be nested inside another VAR/RETURN block, a context operation, or \
                  any other expression"
                     .to_string(),
             ))
-        };
-        match self {
-            Expression::Block {
-                bindings,
-                query_scoped_bindings,
-                result,
-            } => {
-                for (_, e) in bindings.iter().chain(query_scoped_bindings.iter()) {
-                    if e.has_query_scoped_bindings() {
-                        return reject();
-                    }
-                }
-                if result.has_query_scoped_bindings() {
-                    return reject();
-                }
-                Ok(())
-            }
-            other => {
-                if other.has_query_scoped_bindings() {
-                    reject()
-                } else {
-                    Ok(())
-                }
-            }
+        } else {
+            Ok(())
         }
     }
 
@@ -529,79 +392,31 @@ impl Expression {
     /// node: it is lowered onto the Window/Offset machinery and must route
     /// through the same two-stage execution path.
     pub fn has_window(&self) -> bool {
-        match self {
-            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
-                true
-            }
-            // RankWindow (RANK/ROW_NUMBER/DENSE_RANK) also routes through the
-            // window two-stage path. Omitting it sent the node down the normal
-            // SQL path, which emitted a `/* RANK_WINDOW … */` placeholder and
-            // produced a broken statement; routing it here yields a clean typed
-            // error until execution lands.
-            Expression::RankWindow { .. } => true,
-            Expression::ToDate { .. }
-            | Expression::PeriodShift { .. }
-            | Expression::DatesInPeriod { .. }
-            | Expression::SemiAdditiveBalance { .. } => true,
-            Expression::BinaryOp { left, right, .. }
-            | Expression::Comparison { left, right, .. }
-            | Expression::And(left, right)
-            | Expression::Or(left, right)
-            | Expression::Xor(left, right) => left.has_window() || right.has_window(),
-            Expression::Not(inner) | Expression::IsBlank(inner) => inner.has_window(),
-            Expression::Aggregate { operand, .. } => operand.has_window(),
-            Expression::Keep { expr, .. }
-            | Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
-            | Expression::ClearInner { expr, .. }
-            | Expression::ClearOuter { expr, .. }
-            | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
-            | Expression::Traverse { expr, .. }
-            | Expression::Using { expr, .. }
-            | Expression::UseRelationship { expr, .. }
-            | Expression::KeepIn { expr, .. } => expr.has_window(),
-            Expression::Block {
-                bindings,
-                query_scoped_bindings,
-                result,
-            } => {
-                bindings
-                    .iter()
-                    .chain(query_scoped_bindings.iter())
-                    .any(|(_, e)| e.has_window())
-                    || result.has_window()
-            }
-            Expression::If {
-                condition,
-                then_expr,
-                else_expr,
-            } => condition.has_window() || then_expr.has_window() || else_expr.has_window(),
-            Expression::SafeDivide {
-                numerator,
-                denominator,
-                alternate,
-            } => {
-                numerator.has_window()
-                    || denominator.has_window()
-                    || alternate.as_ref().is_some_and(|a| a.has_window())
-            }
-            Expression::Coalesce(exprs) => exprs.iter().any(|e| e.has_window()),
-            Expression::ScalarFunc { args, .. }
-            | Expression::TextFunc { args, .. }
-            | Expression::DateTimeFunc { args, .. } => args.iter().any(|a| a.has_window()),
-            Expression::IfError { expr, alternate } => expr.has_window() || alternate.has_window(),
-            Expression::ClearExcept { expr, .. }
-            | Expression::Iterate {
-                expression: expr, ..
-            } => expr.has_window(),
-            Expression::Percentile {
-                operand,
-                percentile,
-            } => operand.has_window() || percentile.has_window(),
-            Expression::Call { args, .. } => args.iter().any(|a| a.has_window()),
-            _ => false,
-        }
+        // RankWindow (RANK/ROW_NUMBER/DENSE_RANK) also routes through the
+        // window two-stage path. Omitting it sent the node down the normal
+        // SQL path, which emitted a `/* RANK_WINDOW … */` placeholder and
+        // produced a broken statement; routing it here yields a clean typed
+        // error until execution lands.
+        //
+        // Recursion goes through the generic `child_expressions` enumerator so
+        // a window buried in ANY combinator (Switch, Greatest, MaxBy, InList,
+        // SelectedValue, …) is found — a previous hand-written match with a
+        // `_ => false` catch-all missed a dozen node kinds, which let e.g.
+        // `SWITCH(1, 1, WINDOW(...), 0)` slip past the GVAR scalar-only guard
+        // and the executor's window routing.
+        matches!(
+            self,
+            Expression::Window { .. }
+                | Expression::Offset { .. }
+                | Expression::Index { .. }
+                | Expression::RankWindow { .. }
+                | Expression::ToDate { .. }
+                | Expression::PeriodShift { .. }
+                | Expression::DatesInPeriod { .. }
+                | Expression::SemiAdditiveBalance { .. }
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.has_window())
     }
 
     /// Returns `true` if this expression contains a FILTER-CONTEXT
@@ -657,6 +472,113 @@ impl Expression {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_window() -> Expression {
+        window_expr(
+            agg(AggregateOp::Sum, qualified_col("sales", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        )
+    }
+
+    #[test]
+    fn has_window_finds_window_buried_in_any_combinator() {
+        // Regression: the old hand-written match had a `_ => false` catch-all
+        // that missed Switch/Greatest/Least/MaxBy/MinBy/InList/NullIf/CountIf/
+        // ListAgg/SelectedValue/FirstValue/HasOneValue — letting e.g.
+        // `SWITCH(1, 1, WINDOW(...), 0)` slip past the GVAR scalar-only guard.
+        let w = sample_window();
+        assert!(switch(lit_int(1), vec![(lit_int(1), w.clone())], Some(lit_int(0))).has_window());
+        assert!(Expression::Greatest(vec![w.clone(), lit_int(0)]).has_window());
+        assert!(Expression::Least(vec![w.clone(), lit_int(0)]).has_window());
+        assert!(Expression::MaxBy {
+            value: Box::new(w.clone()),
+            sort_by: Box::new(col("x")),
+        }
+        .has_window());
+        assert!(Expression::NullIf {
+            expr: Box::new(w.clone()),
+            value: Box::new(lit_int(0)),
+        }
+        .has_window());
+        assert!(Expression::InList {
+            expr: Box::new(w.clone()),
+            values: vec![lit_int(1)],
+        }
+        .has_window());
+        assert!(selected_value(w.clone(), None).has_window());
+        // And plain shapes still behave.
+        assert!(w.has_window());
+        assert!(!agg(AggregateOp::Sum, col("x")).has_window());
+        assert!(!switch(lit_int(1), vec![(lit_int(1), lit_int(2))], None).has_window());
+    }
+
+    #[test]
+    fn has_query_scoped_bindings_finds_nested_blocks() {
+        let gvar_block = block_with_globals(
+            vec![("g".into(), agg(AggregateOp::Sum, col("x")))],
+            vec![],
+            col("g"),
+        );
+        // Direct.
+        assert!(gvar_block.has_query_scoped_bindings());
+        // Nested inside arithmetic.
+        assert!(gvar_block
+            .clone()
+            .add(lit_int(1))
+            .has_query_scoped_bindings());
+        // Nested inside a Switch case result.
+        assert!(
+            switch(lit_int(1), vec![(lit_int(1), gvar_block)], None).has_query_scoped_bindings()
+        );
+        // Plain VAR block: no.
+        assert!(!block(
+            vec![("v".into(), agg(AggregateOp::Sum, col("x")))],
+            col("v")
+        )
+        .has_query_scoped_bindings());
+    }
+
+    #[test]
+    fn root_query_scoped_names_lists_only_root_gvars() {
+        let e = block_with_globals(
+            vec![
+                ("a".into(), agg(AggregateOp::Sum, col("x"))),
+                ("b".into(), lit_int(1)),
+            ],
+            vec![("v".into(), lit_int(2))],
+            col("a"),
+        );
+        assert_eq!(e.root_query_scoped_names(), vec!["a", "b"]);
+        assert!(col("x").root_query_scoped_names().is_empty());
+        assert!(block(vec![("v".into(), lit_int(1))], col("v"))
+            .root_query_scoped_names()
+            .is_empty());
+    }
+
+    #[test]
+    fn validate_query_scoped_top_level_rejects_nested_only() {
+        // Root-level GVARs are fine.
+        let root = block_with_globals(
+            vec![("g".into(), agg(AggregateOp::Sum, col("x")))],
+            vec![],
+            col("g"),
+        );
+        assert!(root.validate_query_scoped_top_level().is_ok());
+
+        // A GVAR block nested under arithmetic is rejected.
+        let nested = root.clone().add(lit_int(1));
+        assert!(nested.validate_query_scoped_top_level().is_err());
+
+        // A GVAR block nested inside a root Block's VAR binding is rejected.
+        let buried = block(vec![("v".into(), root)], col("v"));
+        assert!(buried.validate_query_scoped_top_level().is_err());
+
+        // Expressions without GVARs anywhere are fine.
+        assert!(col("x").validate_query_scoped_top_level().is_ok());
+    }
 
     #[test]
     fn has_aggregate_detection() {

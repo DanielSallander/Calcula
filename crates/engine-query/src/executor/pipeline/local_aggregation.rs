@@ -156,18 +156,42 @@ impl QueryExecutor {
         // wrong or an opaque SQL error). This top-of-function check covers every
         // local sub-path — window, QUERY, multi-group, pre-aggregate,
         // split-override, and the main SQL builder — since they all route
-        // through here. A measure that *references* a GVAR measure has an empty
-        // inferred table, forcing `needs_expansion`, so the post-expansion guard
-        // below catches that case.
-        if let Some(m) = measures
-            .iter()
-            .find(|m| m.expression().has_query_scoped_bindings())
+        // through here. The walk is TRANSITIVE over `[Measure]` references (a
+        // measure like `[GVarMeasure] + SUM(fact[x])` hides the GVAR behind a
+        // MeasureRef and can carry a non-empty inferred table, so neither a
+        // shallow check here nor the `needs_expansion`-gated post-expansion
+        // guard below is guaranteed to see it on every sub-path).
+        fn has_query_scoped_transitive<'m>(
+            measure: &'m engine_core::compute::measure::Measure,
+            model: &'m DataModel,
+            seen: &mut std::collections::HashSet<&'m str>,
+        ) -> bool {
+            if !seen.insert(measure.name()) {
+                return false;
+            }
+            measure.expression().has_query_scoped_bindings()
+                || measure
+                    .expression()
+                    .measure_references()
+                    .iter()
+                    .any(|name| {
+                        model.measure(name).is_ok_and(|referenced| {
+                            has_query_scoped_transitive(referenced, model, seen)
+                        })
+                    })
+        }
         {
-            return Err(crate::error::QueryError::InvalidQuery(format!(
-                "internal: measure '{}' reached the executor with an unresolved query-scoped \
-                 (GVAR) binding (it must be resolved at the Engine facade)",
-                m.name()
-            )));
+            let mut seen = std::collections::HashSet::new();
+            if let Some(m) = measures
+                .iter()
+                .find(|m| has_query_scoped_transitive(m, model, &mut seen))
+            {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "internal: measure '{}' reached the executor with an unresolved query-scoped \
+                     (GVAR) binding (it must be resolved at the Engine facade)",
+                    m.name()
+                )));
+            }
         }
 
         // Defense in depth: a DYNAMIC row-level-security predicate

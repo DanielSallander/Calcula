@@ -40,7 +40,9 @@ pub fn function_docs() -> Vec<FunctionDoc> {
             continue;
         }
         let (Some(name), Ok(markdown)) = (
-            path.file_stem().and_then(|s| s.to_str()).map(str::to_string),
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string),
             std::fs::read_to_string(&path),
         ) else {
             continue;
@@ -60,7 +62,10 @@ mod tests {
         let docs = function_docs();
         // The repo ships these docs; if the folder resolves they must be present.
         if !docs.is_empty() {
-            let abs = docs.iter().find(|d| d.name == "ABS").expect("ABS.md present");
+            let abs = docs
+                .iter()
+                .find(|d| d.name == "ABS")
+                .expect("ABS.md present");
             assert!(abs.markdown.contains("# ABS"));
             // Sorted by name.
             let mut sorted = docs.clone();

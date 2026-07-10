@@ -88,8 +88,11 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 while i < len && chars[i] != ']' {
                     i += 1;
                 }
-                let name: String =
-                    chars[name_start..i].iter().collect::<String>().trim().to_string();
+                let name: String = chars[name_start..i]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
                 if !name.is_empty() {
                     tokens.push((Token::Ident(name), byte_at(name_start)));
                 }

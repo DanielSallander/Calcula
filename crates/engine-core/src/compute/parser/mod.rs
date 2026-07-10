@@ -174,6 +174,12 @@ impl Parser {
         self.tokens.get(self.pos)
     }
 
+    /// Look ahead `offset` tokens past the current position without consuming
+    /// (`peek_at(0)` == `peek()`).
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset)
+    }
+
     fn advance(&mut self) -> EngineResult<&Token> {
         if self.pos >= self.tokens.len() {
             return Err(self.parse_err("unexpected end of expression"));
@@ -209,8 +215,11 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
     }
     let mut parser = Parser::new(tokens, input.len());
 
-    // Check for VAR/GVAR/RETURN block syntax.
-    if parser.peek_is_var() || parser.peek_is_gvar() {
+    // Check for VAR/GVAR/RETURN block syntax. GVAR enters the block path only
+    // in full declaration form (`GVAR <name> =`) so an expression that merely
+    // begins with an identifier named `gvar` still parses as a column
+    // reference (see `peek_is_gvar_declaration`).
+    if parser.peek_is_var() || parser.peek_is_gvar_declaration() {
         let expr = parser.parse_var_return_block()?;
         if !parser.at_end() {
             return Err(parser.parse_err(format!(
@@ -898,20 +907,36 @@ mod tests {
     #[test]
     fn empty_input_parses_to_blank() {
         // An empty measure expression is a valid BLANK() placeholder.
-        assert!(matches!(parse_measure_expression("").unwrap(), Expression::Blank));
-        assert!(matches!(parse_measure_expression("   ").unwrap(), Expression::Blank));
+        assert!(matches!(
+            parse_measure_expression("").unwrap(),
+            Expression::Blank
+        ));
+        assert!(matches!(
+            parse_measure_expression("   ").unwrap(),
+            Expression::Blank
+        ));
     }
 
     #[test]
     fn comment_only_input_parses_to_blank() {
-        assert!(matches!(parse_measure_expression("/* just a note */").unwrap(), Expression::Blank));
-        assert!(matches!(parse_measure_expression("// a note").unwrap(), Expression::Blank));
+        assert!(matches!(
+            parse_measure_expression("/* just a note */").unwrap(),
+            Expression::Blank
+        ));
+        assert!(matches!(
+            parse_measure_expression("// a note").unwrap(),
+            Expression::Blank
+        ));
     }
 
     #[test]
     fn block_and_line_comments_are_ignored() {
-        let render =
-            |s: &str| crate::compute::expression::expression_to_formula(&parse_measure_expression(s).unwrap(), "T");
+        let render = |s: &str| {
+            crate::compute::expression::expression_to_formula(
+                &parse_measure_expression(s).unwrap(),
+                "T",
+            )
+        };
         let base = render("SUM(Sales[amount]) + 1");
         assert_eq!(render("SUM(Sales[amount]) /* total */ + 1"), base);
         assert_eq!(render("SUM(Sales[amount]) // trailing\n + 1"), base);
