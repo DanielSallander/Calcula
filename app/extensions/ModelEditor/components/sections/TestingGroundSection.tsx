@@ -7,18 +7,17 @@
 //          plan. Read-only — it never mutates the model.
 
 import React, { useState } from "react";
-import { biModelCancelQuery, biModelTestQuery } from "@api";
+import { biModelCancelQuery, biModelTestQuery, saveTextToFile } from "@api";
 import type {
-  ExecutionPlanDto,
   MeasureFilterDto,
   PivotSortDto,
-  PlanNodeDto,
   RankByDto,
   TestQueryResult,
   TopNDto,
 } from "@api";
 import { Badge, Field, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { ExecutionPlanView } from "./ExecutionPlanView";
 
 const FILTER_OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
 
@@ -618,7 +617,55 @@ function DimensionList({
   );
 }
 
+/** CSV-escape one cell (quote when it contains a comma, quote, or newline). */
+function csvEscape(v: string): string {
+  return v.includes(",") || v.includes('"') || v.includes("\n") ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
 function ResultView({ result }: { result: TestQueryResult }): React.ReactElement {
+  const [copied, setCopied] = useState(false);
+
+  const cells = (): { headers: string[]; rows: string[][] } => ({
+    headers: result.columns,
+    rows: result.rows.map((r) => r.map((c) => c ?? "")),
+  });
+  const toCsv = (): string => {
+    const { headers, rows } = cells();
+    return [headers.map(csvEscape).join(","), ...rows.map((r) => r.map(csvEscape).join(","))].join(
+      "\n",
+    );
+  };
+  const toTsv = (): string => {
+    const { headers, rows } = cells();
+    return [headers.join("\t"), ...rows.map((r) => r.join("\t"))].join("\n");
+  };
+
+  const copyToClipboard = (): void => {
+    void navigator.clipboard.writeText(toTsv());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  // BOM so Excel opens Swedish/accented characters correctly.
+  const exportCsv = (): void => {
+    void saveTextToFile({
+      title: "Export Result as CSV",
+      defaultName: "result.csv",
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+      content: toCsv(),
+      encoding: "utf-8-bom",
+    });
+  };
+  // Tab-separated .xls — Excel opens it natively (same trick as Studio).
+  const exportExcel = (): void => {
+    void saveTextToFile({
+      title: "Export Result for Excel",
+      defaultName: "result.xls",
+      filters: [{ name: "Excel", extensions: ["xls"] }],
+      content: toTsv(),
+      encoding: "utf-8-bom",
+    });
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={styles.sectionHeader}>
@@ -626,15 +673,30 @@ function ResultView({ result }: { result: TestQueryResult }): React.ReactElement
           Result ({result.rowCount} row{result.rowCount === 1 ? "" : "s"})
         </span>
         {result.truncated && <Badge tone="warn">truncated — more rows exist</Badge>}
+        <span style={{ flex: 1 }} />
+        <button style={styles.smallBtn} onClick={copyToClipboard}>
+          {copied ? "Copied!" : "Copy"}
+        </button>
+        <button style={styles.smallBtn} onClick={exportCsv}>
+          CSV…
+        </button>
+        <button style={styles.smallBtn} onClick={exportExcel}>
+          Excel…
+        </button>
       </div>
-      <div style={{ ...styles.card, overflowX: "auto", padding: 0 }}>
+      {/* Fixed-height window over the rows (scrolls internally, sticky header)
+          so the execution plan below stays within reach. */}
+      <div style={{ ...styles.card, overflow: "auto", padding: 0, maxHeight: 320 }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
           <thead>
             <tr>
               {result.columns.map((c, i) => {
                 const meta = result.resultColumns[i];
                 return (
-                  <th key={i} style={styles.th}>
+                  <th
+                    key={i}
+                    style={{ ...styles.th, position: "sticky", top: 0, background: "#f7f8fa", zIndex: 1 }}
+                  >
                     {c}
                     {meta && (
                       <span style={{ ...styles.muted, fontWeight: 400, marginLeft: 4 }}>
@@ -666,47 +728,7 @@ function ResultView({ result }: { result: TestQueryResult }): React.ReactElement
           </tbody>
         </table>
       </div>
-      {result.plan && <PlanView plan={result.plan} />}
-    </div>
-  );
-}
-
-function PlanView({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
-  return (
-    <div style={styles.card}>
-      <div style={{ ...styles.label, marginBottom: 4 }}>
-        Execution plan{" "}
-        <span style={{ ...styles.muted, fontWeight: 400 }}>
-          — {plan.summary} ({plan.totalMs.toFixed(1)} ms)
-        </span>
-      </div>
-      <PlanNode node={plan.root} depth={0} />
-    </div>
-  );
-}
-
-function PlanNode({ node, depth }: { node: PlanNodeDto; depth: number }): React.ReactElement {
-  return (
-    <div style={{ marginLeft: depth === 0 ? 0 : 14 }}>
-      <div style={{ fontSize: 12, padding: "1px 0" }}>
-        <span style={{ fontWeight: 600 }}>{node.label}</span>
-        <span style={styles.muted}>
-          {" "}
-          [{node.operation}] · {node.durationMs.toFixed(1)} ms
-        </span>
-      </div>
-      {node.properties.length > 0 && (
-        <div style={{ marginLeft: 14, fontSize: 11, ...styles.muted }}>
-          {node.properties.map((p, i) => (
-            <div key={i}>
-              {p.key}: {p.value}
-            </div>
-          ))}
-        </div>
-      )}
-      {node.children.map((c, i) => (
-        <PlanNode key={i} node={c} depth={depth + 1} />
-      ))}
+      {result.plan && <ExecutionPlanView plan={result.plan} />}
     </div>
   );
 }

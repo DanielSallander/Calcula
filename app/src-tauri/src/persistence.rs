@@ -2680,10 +2680,11 @@ pub fn read_text_file(path: String, encoding: Option<String>, window: tauri::Win
     }
 }
 
-/// Write a text string to a file with the specified encoding.
+/// Write a text string to a file with the specified encoding. Also used by the
+/// Model Editor window (Testing Ground dataset/plan export).
 #[tauri::command]
 pub fn write_text_file(path: String, content: String, encoding: Option<String>, window: tauri::Window) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     let path_buf = PathBuf::from(&path);
 
     let enc = encoding.unwrap_or_default().to_lowercase();

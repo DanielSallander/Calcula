@@ -463,6 +463,7 @@ export {
   biModelTestConnection,
   biModelConnect,
   biModelExportToFile,
+  saveTextToFile,
   biModelImportFromFile,
 } from "./backend";
 export type {

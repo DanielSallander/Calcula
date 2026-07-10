@@ -4605,6 +4605,30 @@ export async function biModelConnect(connectionId: string): Promise<ConnectionIn
   return invoke<ConnectionInfo>("bi_model_connect", { connectionId });
 }
 
+/** Open a native save dialog and write `content` as a text file. Returns the
+ *  written path, or null if the user cancelled. `encoding` defaults to UTF-8;
+ *  pass "utf-8-bom" for files Excel should open with correct accents. */
+export async function saveTextToFile(params: {
+  title: string;
+  defaultName: string;
+  filters: { name: string; extensions: string[] }[];
+  content: string;
+  encoding?: string;
+}): Promise<string | null> {
+  const path = await saveFileDialog({
+    title: params.title,
+    defaultPath: params.defaultName,
+    filters: params.filters,
+  });
+  if (!path) return null;
+  await invoke<void>("write_text_file", {
+    path,
+    content: params.content,
+    encoding: params.encoding ?? null,
+  });
+  return path;
+}
+
 /** Export a connection's model to a user-chosen file as a ModelBundle
  *  (`{ formatVersion, model }`, Studio-compatible). Opens a native save dialog;
  *  returns the written path, or null if the user cancelled. The model still
