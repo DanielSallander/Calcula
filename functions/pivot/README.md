@@ -22,8 +22,10 @@ numbers.
 | CONCAT / LEFT / RIGHT / MID / LEN | Text | `CONCAT(a, b, …)` | Build / slice text |
 | UPPER / LOWER / TRIM / TEXT | Text | `TEXT(value, format)` | Transform text |
 
-Comparison (`>`, `<`, `>=`, `<=`, `=`, `<>`) and concatenation (`&`) operators are
-also available. See: [Transformation Functions](transform-functions.md).
+`CONCATENATE` is accepted as an alias of `CONCAT`. Comparison (`>`, `<`, `>=`,
+`<=`, `=`, `<>`), concatenation (`&`), and power (`^`) operators are also
+available. `^` is right-associative and unary minus binds tighter, so
+`-2^2 = 4`. See: [Transformation Functions](transform-functions.md).
 
 ## Visual Calculation Functions
 
@@ -39,17 +41,19 @@ Visual calculation functions operate on the pivot table's visual axis, enabling 
 | NEXT | Window | `NEXT(field, [steps], [reset])` | Value from subsequent row |
 | FIRST | Window | `FIRST(field, [reset])` | First value in partition |
 | LAST | Window | `LAST(field, [reset])` | Last value in partition |
-| PARENT | Hierarchy | `PARENT(field)` | Value at parent level |
+| PARENT | Hierarchy | `PARENT(field, [levels])` | Value at parent level |
 | GRANDTOTAL | Hierarchy | `GRANDTOTAL(field)` | Value at grand total level |
 | CHILDREN | Hierarchy | `CHILDREN(expr)` | Average of direct children |
 | LEAVES | Hierarchy | `LEAVES(expr)` | Average of leaf-level descendants |
 | RANGE | Utility | `RANGE(size)` or `RANGE(start, end)` | Row window slice |
 | ISATLEVEL | Utility | `ISATLEVEL(field)` | 1 if field is at current level |
+| LOOKUP | Lookup | `LOOKUP(expr, field, value, …)` | Value from first matching row (skips totals) |
+| LOOKUPWITHTOTALS | Lookup | `LOOKUPWITHTOTALS(expr, field, value, …)` | Same, including subtotal/grand total rows |
 
 ## Categories
 
 ### Window Functions
-Window functions traverse the flattened row axis in visual order (top to bottom). They can be partitioned using the **Reset** parameter so calculations restart at group boundaries.
+Window functions traverse the axis in visual order, visiting only rows at the **same hierarchy level** as the current row — a parent group row gets its own window over the rows at its level. Subtotal and grand total rows always return NaN. Windows can be partitioned using the **Reset** parameter so calculations restart at group boundaries.
 
 See: [Window Functions](window-functions.md)
 
@@ -63,6 +67,11 @@ Utility functions provide conditional logic and custom window capabilities.
 
 See: [Utility Functions](utility-functions.md)
 
+### Lookup Functions
+Lookup functions find a row on the visual matrix by matching row field values and evaluate an expression there.
+
+See: [LOOKUP](LOOKUP.md), [LOOKUPWITHTOTALS](LOOKUPWITHTOTALS.md)
+
 ## The Reset Parameter
 
 Many window functions accept an optional **reset** parameter that controls when the calculation restarts. See: [Reset Parameter](reset-parameter.md)
@@ -73,6 +82,7 @@ Window functions default to traversing the **ROWS** axis (top to bottom). When c
 
 ```
 CALC RunCols = RUNNINGSUM([Sales], COLUMNS)
+CALC RunColsByGroup = RUNNINGSUM([Sales], HIGHESTPARENT, COLUMNS)
 CALC PrevCol = PREVIOUS([Sales], 1, COLUMNS)
 ```
 
@@ -81,7 +91,26 @@ CALC PrevCol = PREVIOUS([Sales], 1, COLUMNS)
 | `ROWS` | Traverse rows top to bottom (default) |
 | `COLUMNS` | Traverse columns left to right |
 
-Note: The axis parameter is specified in the same position as the reset parameter. The engine distinguishes between them by name (`ROWS`/`COLUMNS` = axis, `HIGHESTPARENT`/`LOWESTPARENT`/`NONE` = reset).
+Rules:
+
+- The axis keyword must be the **last** argument. It can be combined with a
+  reset: `RUNNINGSUM([Sales], HIGHESTPARENT, COLUMNS)`.
+- The axis keyword never counts toward a function's required arguments —
+  `MOVINGAVERAGE([Sales], COLUMNS)` is an arity error (the window size is
+  missing), not a columns-axis moving average.
+- Resets (keywords, level numbers, and field names) work on the `COLUMNS` axis
+  too; field-name resets then resolve against the column fields.
+- On the `COLUMNS` axis the first argument must be a direct field reference
+  (arbitrary expressions are only supported on the `ROWS` axis).
+
+## Limits & Locale
+
+- A formula may be at most **4096 characters** long and **256 nesting levels**
+  deep; exceeding either limit is an error.
+- CALC formulas are **locale-invariant**: `,` always separates arguments and
+  `.` is always the decimal separator. Under a locale like sv-SE, a typed
+  decimal comma inside an argument list would be read as an argument
+  separator — write `ROUND([Sales], 1)` and `0.5`, never `0,5`.
 
 ## Usage in DSL
 
@@ -102,3 +131,17 @@ CALC Margin = ([Revenue] - [Cost]) / PARENT([Revenue])
 CALC VsPrev = [Sales] - PREVIOUS([Sales])
 CALC Growth = ([Sales] - PREVIOUS([Sales])) / PREVIOUS([Sales])
 ```
+
+Notes:
+
+- `[Bracketed]` and bare field names are interchangeable — `[Sales]` resolves a
+  plain `Sales` key and vice versa. Grid pivots register the source field name
+  (`Sales`) alongside the display name (`Sum of Sales`), so the examples above
+  work on both grid and BI pivots.
+- A CALC field may reference another CALC field defined **earlier** in the
+  column order (same row only). Cross-row references to other calc fields
+  (e.g. `PREVIOUS` of a calc field) are not supported.
+- With column fields present, each calculated field produces one column per
+  column item, labeled `CalcName (ColumnLabel)` and evaluated at that column
+  intersection; ROWS-axis window functions then read the current column's
+  values.

@@ -35,20 +35,18 @@ vi.mock("../filterPaneApi", () => ({
 }));
 
 // The store merges ribbon filters via filterPaneStore.getAllFilters and derives
-// each filter's control value via filterPaneStore.filterControlValue.
+// each filter's control value via filterPaneStore.filterControlValue. Partial
+// mock: only getAllFilters is stubbed — filterControlValue stays REAL so these
+// tests verify the actual (All)/text/textList mapping, not a copy of it.
 const mockGetAllFilters = vi.fn((): RibbonFilter[] => []);
 
-vi.mock("../filterPaneStore", () => ({
-  getAllFilters: (...args: unknown[]) => mockGetAllFilters(...args),
-  // Real mapping (mirrors the Rust snapshot builder) so buildNamedControlList
-  // produces the expected (All)/text/textList values.
-  filterControlValue: (selectedItems: string[] | null) =>
-    selectedItems === null
-      ? { kind: "text", value: "(All)" }
-      : selectedItems.length === 1
-        ? { kind: "text", value: selectedItems[0] }
-        : { kind: "textList", value: selectedItems },
-}));
+vi.mock("../filterPaneStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../filterPaneStore")>();
+  return {
+    ...actual,
+    getAllFilters: (...args: unknown[]) => mockGetAllFilters(...args),
+  };
+});
 
 vi.mock("../controlsPaneEvents", () => ({
   ControlsPaneEvents: {

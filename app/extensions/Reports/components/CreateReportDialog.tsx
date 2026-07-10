@@ -245,8 +245,11 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         />
         <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
           Materializes at <strong>{destination}</strong>. Bind a Controls-pane value or ribbon
-          filter in FILTERS with <code>@Name</code> (type <code>@</code> for suggestions; the report
-          re-runs when it changes). Ctrl+Space suggests fields.
+          filter in FILTERS with <code>@Name</code> — quote names with spaces or dots:{" "}
+          <code>@"Products.Category"</code> (type <code>@</code> for suggestions). The report
+          re-runs when the bound value changes; an unset control (or a filter at "(All)") removes
+          that FILTERS line, showing all rows. Renaming a control breaks its <code>@</code>{" "}
+          bindings. Ctrl+Space suggests fields.
         </div>
 
         {error && (

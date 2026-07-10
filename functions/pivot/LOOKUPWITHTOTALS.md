@@ -22,6 +22,9 @@ CALC TotalRow = LOOKUPWITHTOTALS([TotalSales], Year, "Grand Total")
 ## Behavior
 
 - Same as LOOKUP but includes subtotal and grand total rows in the search
+- Matching follows the same rules as LOOKUP: case-insensitive, numeric-aware
+  (`"2024"` matches 2024), values may be quoted strings, bare identifiers, or
+  numbers
 - Useful for referencing specific total values
 
 ## See Also

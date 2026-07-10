@@ -72,9 +72,11 @@ function refreshControls(): void {
 const controlValuesProvider: ControlValuesProvider = {
   list: () => buildNamedControlList(),
   get: (name: string): ControlValue | undefined => {
-    const upper = name.toUpperCase();
+    // Trim + uppercase both sides — the Rust GET.CONTROLVALUE key does the
+    // same, so @Name and the formula surface resolve identically.
+    const key = name.trim().toUpperCase();
     return buildNamedControlList().find(
-      (c) => c.name.toUpperCase() === upper,
+      (c) => c.name.trim().toUpperCase() === key,
     )?.value;
   },
 };

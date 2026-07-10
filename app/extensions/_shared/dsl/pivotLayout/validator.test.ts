@@ -181,6 +181,97 @@ describe('Validator', () => {
     expect(sortErrors).toHaveLength(0);
   });
 
+  it('reports not-supported error for sort by calculated field name', () => {
+    const ast = emptyAST();
+    ast.calculatedFields = [{ name: 'Margin', expression: '[Sales] - [Cost]', location: LOC }];
+    ast.sort = [{ fieldName: 'Margin', direction: 'desc', location: LOC }];
+    const errors = validate(ast, ctx());
+    expect(errors.some(e =>
+      e.severity === 'error' &&
+      e.message.includes('calculated field') &&
+      e.message.includes('not supported')
+    )).toBe(true);
+    // Should NOT report the generic unknown-sort-field message
+    expect(errors.some(e => e.message.includes('Unknown sort field'))).toBe(false);
+  });
+
+  // --- CALC formula validation ---
+
+  describe('CALC formula validation', () => {
+    function calcAst(name: string, expression: string) {
+      const ast = emptyAST();
+      ast.calculatedFields = [{ name, expression, location: LOC }];
+      return ast;
+    }
+
+    it('accepts a valid formula using engine functions', () => {
+      const ast = calcAst('X', 'IF([Sales] > 0, RUNNINGSUM([Sales]), 0)');
+      const errors = validate(ast, ctx());
+      expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    });
+
+    it('accepts CONCATENATE and engine alias functions', () => {
+      const ast = calcAst('X', "CONCATENATE('Total Sales', COLLAPSE([Sales]))");
+      const errors = validate(ast, ctx());
+      expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    });
+
+    it('reports error for empty formula', () => {
+      const ast = calcAst('Empty', '   ');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('empty formula'))).toBe(true);
+    });
+
+    it('reports error for unknown function name', () => {
+      const ast = calcAst('X', 'FOO([Sales]) + 1');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('Unknown function "FOO"'))).toBe(true);
+    });
+
+    it('does not flag field references that are not calls', () => {
+      const ast = calcAst('X', '[Sales] * (Tax + 1)');
+      const errors = validate(ast, ctx());
+      const fnErrors = errors.filter(e => e.message.includes('Unknown function'));
+      expect(fnErrors).toHaveLength(0);
+    });
+
+    it('reports error for unbalanced parentheses', () => {
+      const ast = calcAst('X', 'IF([Sales] > 0, 1, 0');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('Unbalanced parentheses'))).toBe(true);
+    });
+
+    it('reports error for unbalanced brackets', () => {
+      const ast = calcAst('X', '[Sales + 1');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('Unbalanced brackets'))).toBe(true);
+    });
+
+    it('reports error for unterminated string literal', () => {
+      const ast = calcAst('X', 'CONCAT([Region], " suffix)');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('Unterminated string'))).toBe(true);
+    });
+
+    it('reports error for unterminated quoted name', () => {
+      const ast = calcAst('X', "'Total Sales - Returns");
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('Unterminated quoted name'))).toBe(true);
+    });
+
+    it('reports error for formula exceeding max length', () => {
+      const ast = calcAst('X', '[A] + ' + '1 + '.repeat(1100) + '1');
+      const errors = validate(ast, ctx());
+      expect(errors.some(e => e.severity === 'error' && e.message.includes('too long'))).toBe(true);
+    });
+
+    it('ignores parens and function-like text inside strings and brackets', () => {
+      const ast = calcAst('X', 'CONCAT("NOTAFUNC(", [Weird (Name)])');
+      const errors = validate(ast, ctx());
+      expect(errors.filter(e => e.severity === 'error')).toHaveLength(0);
+    });
+  });
+
   // --- LOOKUP validation ---
 
   it('reports error for LOOKUP without BI model', () => {

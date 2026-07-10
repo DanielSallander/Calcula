@@ -78,6 +78,48 @@ describe('Lexer edge cases', () => {
     expect(strs.map(s => s.value)).toEqual(['one', 'two', 'three']);
   });
 
+  it('doubled quote inside a string is an escaped literal quote', () => {
+    const { tokens, errors } = lex('"5"" pipe"');
+    expect(errors).toHaveLength(0);
+    const strs = tokens.filter(t => t.type === TokenType.StringLiteral);
+    expect(strs).toHaveLength(1);
+    expect(strs[0].value).toBe('5" pipe');
+  });
+
+  it('escaped-quote-only string', () => {
+    const { tokens, errors } = lex('""""');
+    expect(errors).toHaveLength(0);
+    const strs = tokens.filter(t => t.type === TokenType.StringLiteral);
+    expect(strs).toHaveLength(1);
+    expect(strs[0].value).toBe('"');
+  });
+
+  // --- Single-quoted name edge cases (CALC expression references) ---
+
+  it('lexes a single-quoted name as one token', () => {
+    const { tokens, errors } = lex("'Total Sales'");
+    expect(errors).toHaveLength(0);
+    const quoted = tokens.filter(t => t.type === TokenType.SingleQuotedIdentifier);
+    expect(quoted).toHaveLength(1);
+    expect(quoted[0].value).toBe('Total Sales');
+  });
+
+  it('lexes a CALC expression containing a single-quoted name', () => {
+    const { tokens, errors } = lex("CALC: X = 'Total Sales' - Returns");
+    expect(errors).toHaveLength(0);
+    const quoted = tokens.find(t => t.type === TokenType.SingleQuotedIdentifier);
+    expect(quoted).toBeDefined();
+    expect(quoted!.value).toBe('Total Sales');
+  });
+
+  it('single-quoted name terminated by newline reports error', () => {
+    const { tokens, errors } = lex("'unterminated\nRegion");
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('Unterminated quoted name');
+    const quoted = tokens.find(t => t.type === TokenType.SingleQuotedIdentifier);
+    expect(quoted!.value).toBe('unterminated');
+  });
+
   // --- Bracket identifier edge cases ---
 
   it('handles empty bracket identifier', () => {

@@ -36,8 +36,8 @@ import {
   extractReferencedFields,
   validateLayoutCompatibility,
 } from "./namedConfigs";
-import { lex, parse, compile, processDsl } from "../dsl";
-import type { CompileContext } from "../dsl";
+import { lex, parse, compile, processDsl } from "../../_shared/dsl/pivotLayout";
+import type { CompileContext } from "../../_shared/dsl/pivotLayout";
 import type { PivotViewResponse } from "./pivot-api";
 
 // ============================================================================

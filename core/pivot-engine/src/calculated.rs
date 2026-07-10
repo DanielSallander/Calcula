@@ -72,6 +72,8 @@ pub enum CalcOp {
     Sub,
     Mul,
     Div,
+    /// Exponentiation (`^`), right-associative; unary minus binds tighter.
+    Pow,
     /// Text concatenation (`&`).
     Concat,
 }
@@ -124,7 +126,17 @@ impl CalcValue {
     /// Coerce to display text. Numbers trim trailing zeros; bools -> TRUE/FALSE.
     pub fn as_text(&self) -> String {
         match self {
-            CalcValue::Number(n) => format!("{}", n),
+            // Round to 10 decimals before display so float artifacts
+            // (0.1 + 0.2 -> 0.30000000000000004) don't leak into labels.
+            CalcValue::Number(n) => {
+                if n.fract() == 0.0 || !n.is_finite() {
+                    format!("{}", n)
+                } else {
+                    let s = format!("{:.10}", n);
+                    let s = s.trim_end_matches('0').trim_end_matches('.');
+                    s.to_string()
+                }
+            }
             CalcValue::Text(s) => s.clone(),
             CalcValue::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
             CalcValue::Blank => String::new(),
@@ -168,6 +180,10 @@ pub(crate) struct VisualCalcContext<'a> {
     /// Row field names by depth (for field-level reset resolution).
     pub(crate) field_names_by_depth: &'a [String],
 
+    /// Grand-total value map, computed even when the grand-total row is
+    /// hidden, so GRANDTOTAL/PARENT-at-top work regardless of layout.
+    pub(crate) grand_total_values: Option<&'a HashMap<String, f64>>,
+
     /// Column axis context (for COLUMNS axis mode).
     /// When present, enables window functions to traverse columns.
     pub(crate) col_ctx: Option<ColumnAxisContext<'a>>,
@@ -185,6 +201,8 @@ pub(crate) struct ColumnAxisContext<'a> {
     /// col_values[col_idx][field_name] = f64.
     pub(crate) col_values: &'a [HashMap<String, f64>],
 
+    /// Column field names by depth (for field-level reset on the COLUMNS axis).
+    pub(crate) field_names_by_depth: &'a [String],
 }
 
 /// Axis direction for window functions.
@@ -221,6 +239,8 @@ enum Token {
     Minus,
     Star,
     Slash,
+    /// Exponentiation operator (^).
+    Caret,
     /// Text concatenation operator (&).
     Amp,
     Gt,
@@ -285,6 +305,7 @@ impl Tokenizer {
                     '-' => { self.next_char(); tokens.push(Token::Minus); }
                     '*' => { self.next_char(); tokens.push(Token::Star); }
                     '/' => { self.next_char(); tokens.push(Token::Slash); }
+                    '^' => { self.next_char(); tokens.push(Token::Caret); }
                     '&' => { self.next_char(); tokens.push(Token::Amp); }
                     '(' => { self.next_char(); tokens.push(Token::LParen); }
                     ')' => { self.next_char(); tokens.push(Token::RParen); }
@@ -309,12 +330,20 @@ impl Tokenizer {
                     }
                     '"' => {
                         // Double-quoted string literal: "High". Distinct from the
-                        // single-quoted field-name form below.
+                        // single-quoted field-name form below. A doubled quote ("")
+                        // inside the literal is an escaped literal quote (Excel style).
                         self.next_char(); // skip opening quote
                         let mut s = String::new();
                         loop {
                             match self.next_char() {
-                                Some('"') => break,
+                                Some('"') => {
+                                    if self.peek_char() == Some('"') {
+                                        self.next_char();
+                                        s.push('"');
+                                    } else {
+                                        break;
+                                    }
+                                }
                                 Some(c) => s.push(c),
                                 None => return Err("Unterminated string literal".to_string()),
                             }
@@ -365,9 +394,11 @@ impl Tokenizer {
                     c if c.is_alphanumeric() || c == '_' => {
                         // Unquoted identifier — but DON'T greedily consume spaces
                         // if followed by '(' (function call) or ',' (argument separator).
+                        // '.' is an identifier character so BI "table.column" field
+                        // names tokenize as a single reference.
                         let mut name = String::new();
                         while let Some(c) = self.peek_char() {
-                            if c.is_alphanumeric() || c == '_' {
+                            if c.is_alphanumeric() || c == '_' || c == '.' {
                                 name.push(c);
                                 self.next_char();
                             } else if c == ' ' {
@@ -405,14 +436,25 @@ impl Tokenizer {
 // PARSER (Recursive Descent)
 // ============================================================================
 
+/// Maximum nesting depth for user formulas. The parser and evaluator are
+/// recursive; this bound turns hostile/pathological nesting into a clean
+/// error instead of a stack overflow (which would abort the process).
+const MAX_PARSE_DEPTH: usize = 256;
+
+/// Maximum formula length in characters. Besides sanity, this bounds the
+/// depth of left-leaning operator chains (a+a+a+...) which recurse in the
+/// evaluator even though the parser builds them iteratively.
+const MAX_FORMULA_LEN: usize = 4096;
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, depth: 0 }
     }
 
     fn peek(&self) -> &Token {
@@ -425,6 +467,15 @@ impl Parser {
         tok
     }
 
+    /// Guard for the recursive-descent entry points.
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(format!("Formula is nested too deeply (max {} levels)", MAX_PARSE_DEPTH));
+        }
+        Ok(())
+    }
+
     /// expr = comparison
     ///
     /// Precedence (loosest to tightest):
@@ -432,10 +483,14 @@ impl Parser {
     ///   concat      (&)
     ///   additive    (+, -)
     ///   term        (*, /)
+    ///   power       (^, right-associative)
     ///   unary       (-)
     ///   primary
     fn parse_expr(&mut self) -> Result<CalcExpr, String> {
-        self.parse_comparison()
+        self.enter()?;
+        let result = self.parse_comparison();
+        self.depth -= 1;
+        result
     }
 
     /// comparison = concat ((cmp_op) concat)?  — non-chaining.
@@ -487,19 +542,19 @@ impl Parser {
         Ok(left)
     }
 
-    /// term = unary (('*' | '/') unary)*
+    /// term = power (('*' | '/') power)*
     fn parse_term(&mut self) -> Result<CalcExpr, String> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_power()?;
         loop {
             match self.peek() {
                 Token::Star => {
                     self.advance();
-                    let right = self.parse_unary()?;
+                    let right = self.parse_power()?;
                     left = CalcExpr::BinOp { op: CalcOp::Mul, left: Box::new(left), right: Box::new(right) };
                 }
                 Token::Slash => {
                     self.advance();
-                    let right = self.parse_unary()?;
+                    let right = self.parse_power()?;
                     left = CalcExpr::BinOp { op: CalcOp::Div, left: Box::new(left), right: Box::new(right) };
                 }
                 _ => break,
@@ -508,14 +563,36 @@ impl Parser {
         Ok(left)
     }
 
+    /// power = unary ('^' power)?  — right-associative; unary minus binds
+    /// tighter than '^' (Excel semantics: -2^2 = 4).
+    fn parse_power(&mut self) -> Result<CalcExpr, String> {
+        self.enter()?;
+        let result = (|| {
+            let base = self.parse_unary()?;
+            if matches!(self.peek(), Token::Caret) {
+                self.advance();
+                let exp = self.parse_power()?;
+                return Ok(CalcExpr::BinOp { op: CalcOp::Pow, left: Box::new(base), right: Box::new(exp) });
+            }
+            Ok(base)
+        })();
+        self.depth -= 1;
+        result
+    }
+
     /// unary = '-' unary | primary
     fn parse_unary(&mut self) -> Result<CalcExpr, String> {
-        if matches!(self.peek(), Token::Minus) {
-            self.advance();
-            let inner = self.parse_unary()?;
-            return Ok(CalcExpr::Negate(Box::new(inner)));
-        }
-        self.parse_primary()
+        self.enter()?;
+        let result = (|| {
+            if matches!(self.peek(), Token::Minus) {
+                self.advance();
+                let inner = self.parse_unary()?;
+                return Ok(CalcExpr::Negate(Box::new(inner)));
+            }
+            self.parse_primary()
+        })();
+        self.depth -= 1;
+        result
     }
 
     /// primary = NUMBER | STRING | IDENT ['(' arg_list ')'] | '(' expr ')'
@@ -567,6 +644,9 @@ impl Parser {
 
 /// Parses a calculated field/item formula string into an expression tree.
 pub fn parse_calc_formula(formula: &str) -> Result<CalcExpr, String> {
+    if formula.chars().count() > MAX_FORMULA_LEN {
+        return Err(format!("Formula is too long (max {} characters)", MAX_FORMULA_LEN));
+    }
     let mut tokenizer = Tokenizer::new(formula);
     let tokens = tokenizer.tokenize()?;
     let mut parser = Parser::new(tokens);
@@ -592,13 +672,10 @@ pub(crate) fn evaluate_calc_expr(
             // Case-insensitive lookup. Field references always resolve to aggregated
             // numeric measures; an unknown reference is a hard error (loud failure),
             // distinct from a runtime CalcValue::Error.
-            let name_lower = name.to_lowercase();
-            for (key, val) in values {
-                if key.to_lowercase() == name_lower {
-                    return Ok(CalcValue::Number(*val));
-                }
+            match lookup_value_ci(values, name) {
+                Some(v) => Ok(CalcValue::Number(v)),
+                None => Err(format!("Unknown field or item: '{}'", name)),
             }
-            Err(format!("Unknown field or item: '{}'", name))
         }
         CalcExpr::BinOp { op, left, right } => {
             let l = evaluate_calc_expr(left, values, ctx)?;
@@ -616,6 +693,10 @@ pub(crate) fn evaluate_calc_expr(
                 CalcOp::Mul => CalcValue::Number(ln * rn),
                 CalcOp::Div => {
                     if rn == 0.0 { CalcValue::Error("DIV/0!".to_string()) } else { CalcValue::Number(ln / rn) }
+                }
+                CalcOp::Pow => {
+                    let p = ln.powf(rn);
+                    if p.is_nan() { CalcValue::Error("NUM!".to_string()) } else { CalcValue::Number(p) }
                 }
                 CalcOp::Concat => unreachable!("Concat handled above"),
             })
@@ -747,6 +828,12 @@ fn evaluate_function(
         _ => {}
     }
 
+    // Anything else must be a known visual-calc function; report typos as
+    // unknown functions instead of the misleading "requires a context" error.
+    if !is_visual_calc_function(&upper) {
+        return Err(format!("Unknown function: '{}'", name));
+    }
+
     // Visual-calc functions require a pivot context and are always numeric.
     let ctx = ctx.ok_or_else(|| {
         format!("Function '{}' requires a visual calculation context (only available in pivot calculated fields)", name)
@@ -841,6 +928,8 @@ fn eval_switch(
 }
 
 /// AND(a, b, ...) — true if every argument is truthy.
+/// All arguments are evaluated so errors propagate (documented rule);
+/// no short-circuit swallowing of a later argument's error.
 fn eval_and(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
@@ -849,15 +938,15 @@ fn eval_and(
     if args.is_empty() {
         return Err("AND requires at least 1 argument".to_string());
     }
-    for a in args {
-        let v = evaluate_calc_expr(a, values, ctx)?;
-        if v.is_error() { return Ok(v); }
-        if !v.truthy() { return Ok(CalcValue::Bool(false)); }
+    let vals = eval_args(args, values, ctx)?;
+    if let Some(err) = vals.iter().find(|v| v.is_error()) {
+        return Ok(err.clone());
     }
-    Ok(CalcValue::Bool(true))
+    Ok(CalcValue::Bool(vals.iter().all(|v| v.truthy())))
 }
 
 /// OR(a, b, ...) — true if any argument is truthy.
+/// All arguments are evaluated so errors propagate (documented rule).
 fn eval_or(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
@@ -866,12 +955,11 @@ fn eval_or(
     if args.is_empty() {
         return Err("OR requires at least 1 argument".to_string());
     }
-    for a in args {
-        let v = evaluate_calc_expr(a, values, ctx)?;
-        if v.is_error() { return Ok(v); }
-        if v.truthy() { return Ok(CalcValue::Bool(true)); }
+    let vals = eval_args(args, values, ctx)?;
+    if let Some(err) = vals.iter().find(|v| v.is_error()) {
+        return Ok(err.clone());
     }
-    Ok(CalcValue::Bool(false))
+    Ok(CalcValue::Bool(vals.iter().any(|v| v.truthy())))
 }
 
 /// NOT(x) — boolean negation.
@@ -1085,15 +1173,56 @@ fn group_thousands(s: &str) -> String {
 // HELPER: FIELD VALUE LOOKUP
 // ============================================================================
 
-/// Resolve the first argument (a field expression) to a field name string.
+/// Strip a surrounding `[...]` from a reference name so bracketed and bare
+/// spellings of the same field compare equal (`[Sales]` vs `Sales`).
+fn normalize_ref(name: &str) -> &str {
+    let t = name.trim();
+    if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    }
+}
+
+/// Case-insensitive name comparison with bracket normalization on both sides.
+fn ref_names_match(a: &str, b: &str) -> bool {
+    normalize_ref(a).eq_ignore_ascii_case(normalize_ref(b))
+        || a.to_lowercase() == b.to_lowercase()
+}
+
+/// Case-insensitive value lookup with a bracket-stripping fallback so that
+/// `[Sales]` resolves a plain `Sales` key (grid pivots) and a bare `Sales`
+/// resolves a `[Sales]` key (BI pivots).
+fn lookup_value_ci(values: &HashMap<String, f64>, name: &str) -> Option<f64> {
+    let target = name.to_lowercase();
+    for (key, val) in values {
+        if key.to_lowercase() == target {
+            return Some(*val);
+        }
+    }
+    let target = normalize_ref(name).to_lowercase();
+    for (key, val) in values {
+        if normalize_ref(key).to_lowercase() == target {
+            return Some(*val);
+        }
+    }
+    None
+}
+
+/// Resolve the first argument (a field expression) at a specific row.
 /// Supports both `Reference("[Sales]")` and evaluable expressions.
+/// Unknown field names and nested evaluation errors are hard errors —
+/// they must not silently poison a window as NaN.
 fn resolve_field_value(
     expr: &CalcExpr,
     row_idx: usize,
     ctx: &VisualCalcContext,
-) -> f64 {
+) -> Result<f64, String> {
     if let CalcExpr::Reference(name) = expr {
-        lookup_field_in_row(name, row_idx, ctx)
+        ctx.row_values
+            .get(row_idx)
+            .and_then(|rv| lookup_value_ci(rv, name))
+            .ok_or_else(|| format!("Unknown field or item: '{}'", name))
     } else {
         // Evaluate the expression in the context of the given row
         let row_values = ctx.row_values.get(row_idx).cloned().unwrap_or_default();
@@ -1102,39 +1231,11 @@ fn resolve_field_value(
             row_items: ctx.row_items,
             row_values: ctx.row_values,
             field_names_by_depth: ctx.field_names_by_depth,
+            grand_total_values: ctx.grand_total_values,
             col_ctx: None,
         };
-        evaluate_calc_expr(expr, &row_values, Some(&child_ctx))
-            .ok()
-            .and_then(|v| v.as_number().ok())
-            .unwrap_or(f64::NAN)
+        evaluate_calc_expr(expr, &row_values, Some(&child_ctx))?.as_number()
     }
-}
-
-/// Lookup a field value in a specific row (case-insensitive).
-fn lookup_field_in_row(name: &str, row_idx: usize, ctx: &VisualCalcContext) -> f64 {
-    if let Some(row_values) = ctx.row_values.get(row_idx) {
-        let name_lower = name.to_lowercase();
-        for (key, val) in row_values {
-            if key.to_lowercase() == name_lower {
-                return *val;
-            }
-        }
-    }
-    f64::NAN
-}
-
-/// Lookup a field value in a specific column (case-insensitive).
-fn lookup_field_in_col(name: &str, col_idx: usize, col_ctx: &ColumnAxisContext) -> f64 {
-    if let Some(col_values) = col_ctx.col_values.get(col_idx) {
-        let name_lower = name.to_lowercase();
-        for (key, val) in col_values {
-            if key.to_lowercase() == name_lower {
-                return *val;
-            }
-        }
-    }
-    f64::NAN
 }
 
 /// Resolve axis from the last argument. Returns the axis mode and how many
@@ -1150,30 +1251,55 @@ fn resolve_axis_from_args(args: &[CalcExpr]) -> (AxisMode, usize) {
     (AxisMode::Rows, 0)
 }
 
+/// Split window-function arguments: trims a trailing ROWS/COLUMNS axis keyword
+/// and validates the required argument count against what REMAINS, so an axis
+/// keyword can never silently consume a required positional argument.
+fn window_args<'a>(
+    name: &str,
+    args: &'a [CalcExpr],
+    min_args: usize,
+) -> Result<(&'a [CalcExpr], AxisMode), String> {
+    let (axis, trim) = resolve_axis_from_args(args);
+    let effective = &args[..args.len() - trim];
+    if effective.len() < min_args {
+        return Err(format!(
+            "{} requires at least {} argument{} (the trailing ROWS/COLUMNS axis keyword does not count)",
+            name,
+            min_args,
+            if min_args == 1 { "" } else { "s" },
+        ));
+    }
+    Ok((effective, axis))
+}
+
 /// Resolve a field value on the appropriate axis.
 fn resolve_field_on_axis(
     expr: &CalcExpr,
     idx: usize,
     axis: AxisMode,
     ctx: &VisualCalcContext,
-) -> f64 {
+) -> Result<f64, String> {
     match axis {
         AxisMode::Rows => resolve_field_value(expr, idx, ctx),
         AxisMode::Columns => {
-            if let Some(ref col_ctx) = ctx.col_ctx {
-                if let CalcExpr::Reference(name) = expr {
-                    lookup_field_in_col(name, idx, col_ctx)
-                } else {
-                    f64::NAN // Complex expressions on column axis not yet supported
-                }
+            let col_ctx = ctx
+                .col_ctx
+                .as_ref()
+                .ok_or_else(|| "The COLUMNS axis requires column fields in the pivot".to_string())?;
+            if let CalcExpr::Reference(name) = expr {
+                col_ctx
+                    .col_values
+                    .get(idx)
+                    .and_then(|cv| lookup_value_ci(cv, name))
+                    .ok_or_else(|| format!("Unknown field or item: '{}'", name))
             } else {
-                f64::NAN
+                Err("Only direct field references are supported with the COLUMNS axis".to_string())
             }
         }
     }
 }
 
-/// Get visible rows/columns for the appropriate axis partition.
+/// Get visible items and the current position for the requested axis partition.
 fn get_partition_items_for_axis(
     axis: AxisMode,
     ctx: &VisualCalcContext,
@@ -1182,21 +1308,18 @@ fn get_partition_items_for_axis(
     match axis {
         AxisMode::Rows => {
             let visible = get_partition_visible_rows(ctx.current_row_idx, ctx, reset);
-            let current = ctx.current_row_idx;
-            (visible, current)
+            (visible, ctx.current_row_idx)
         }
         AxisMode::Columns => {
-            if let Some(ref col_ctx) = ctx.col_ctx {
-                // For columns, collect non-subtotal/grand-total column items
-                let visible: Vec<usize> = col_ctx.col_items.iter().enumerate()
-                    .filter(|(_, item)| !item.is_subtotal && !item.is_grand_total)
-                    .map(|(i, _)| i)
-                    .collect();
-                let current = col_ctx.current_col_idx;
-                (visible, current)
-            } else {
-                (vec![0], 0)
-            }
+            let Some(col_ctx) = ctx.col_ctx.as_ref() else {
+                return (Vec::new(), 0);
+            };
+            let visible = partition_items(
+                col_ctx.col_items,
+                col_ctx.current_col_idx,
+                reset,
+            );
+            (visible, col_ctx.current_col_idx)
         }
     }
 }
@@ -1205,59 +1328,123 @@ fn get_partition_items_for_axis(
 // HELPER: RESET / PARTITION
 // ============================================================================
 
-/// Resolve a reset argument to a ResetMode.
-fn resolve_reset(arg: Option<&CalcExpr>, ctx: &VisualCalcContext) -> ResetMode {
+/// Resolve a reset argument to a ResetMode. Strict: a misspelled keyword or an
+/// unknown field name is an error, never a silent no-reset.
+fn resolve_reset(
+    arg: Option<&CalcExpr>,
+    ctx: &VisualCalcContext,
+    axis: AxisMode,
+) -> Result<ResetMode, String> {
     let arg = match arg {
         Some(a) => a,
-        None => return ResetMode::None,
+        None => return Ok(ResetMode::None),
     };
-    match arg {
-        CalcExpr::Number(n) => {
-            let n = *n as i32;
-            if n == 0 {
-                ResetMode::None
-            } else if n == 1 {
-                ResetMode::HighestParent
-            } else if n == -1 {
-                ResetMode::LowestParent
-            } else if n > 0 {
-                ResetMode::DepthLevel((n - 1).min(ctx.field_names_by_depth.len() as i32 - 1).max(0) as usize)
+
+    // Field names and current depth belong to the axis being traversed.
+    let empty: &[String] = &[];
+    let (field_names, current_depth): (&[String], usize) = match axis {
+        AxisMode::Rows => (
+            ctx.field_names_by_depth,
+            ctx.row_items.get(ctx.current_row_idx).map(|i| i.depth).unwrap_or(0),
+        ),
+        AxisMode::Columns => match ctx.col_ctx.as_ref() {
+            Some(cc) => (
+                cc.field_names_by_depth,
+                cc.col_items.get(cc.current_col_idx).map(|i| i.depth).unwrap_or(0),
+            ),
+            None => (empty, 0),
+        },
+    };
+
+    // A negative literal parses as Negate(Number); flatten before matching.
+    let numeric: Option<f64> = match arg {
+        CalcExpr::Number(n) => Some(*n),
+        CalcExpr::Negate(inner) => match &**inner {
+            CalcExpr::Number(n) => Some(-*n),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if let Some(n) = numeric {
+        let n = n as i32;
+        return if n == 0 {
+            Ok(ResetMode::None)
+        } else if n == 1 {
+            Ok(ResetMode::HighestParent)
+        } else if n == -1 {
+            Ok(ResetMode::LowestParent)
+        } else if n > 0 {
+            let level = (n - 1) as usize;
+            if !field_names.is_empty() && level >= field_names.len() {
+                Err(format!(
+                    "Reset level {} exceeds the {} field(s) on the axis",
+                    n,
+                    field_names.len()
+                ))
             } else {
-                // Negative: relative mode. -1 = immediate parent, -2 = grandparent, etc.
-                let current_depth = ctx.row_items[ctx.current_row_idx].depth;
-                let target = current_depth as i32 + n; // n is negative
-                ResetMode::DepthLevel(target.max(0) as usize)
+                Ok(ResetMode::DepthLevel(level))
             }
-        }
+        } else {
+            // Negative: relative mode. -2 = two levels above the current row, etc.
+            let target = current_depth as i32 + n; // n is negative
+            Ok(ResetMode::DepthLevel(target.max(0) as usize))
+        };
+    }
+
+    match arg {
         CalcExpr::Reference(name) => {
             match name.to_uppercase().as_str() {
-                "NONE" => ResetMode::None,
-                "HIGHESTPARENT" => ResetMode::HighestParent,
-                "LOWESTPARENT" => ResetMode::LowestParent,
+                "NONE" => Ok(ResetMode::None),
+                "HIGHESTPARENT" => Ok(ResetMode::HighestParent),
+                "LOWESTPARENT" => Ok(ResetMode::LowestParent),
+                "ROWS" | "COLUMNS" => Err(format!(
+                    "'{}' is an axis keyword and must be the last argument",
+                    name
+                )),
                 _ => {
-                    // Field name → find depth
-                    let name_lower = name.to_lowercase();
-                    for (depth, field_name) in ctx.field_names_by_depth.iter().enumerate() {
-                        if field_name.to_lowercase() == name_lower {
-                            return ResetMode::DepthLevel(depth);
+                    // Field name -> find its depth on the axis
+                    for (depth, field_name) in field_names.iter().enumerate() {
+                        if ref_names_match(field_name, name) {
+                            return Ok(ResetMode::DepthLevel(depth));
                         }
                     }
-                    ResetMode::None
+                    Err(format!(
+                        "Unknown reset '{}': expected NONE, HIGHESTPARENT, LOWESTPARENT, a level number, or a field on the axis",
+                        name
+                    ))
                 }
             }
         }
-        _ => ResetMode::None,
+        _ => Err("Invalid reset argument: expected NONE, HIGHESTPARENT, LOWESTPARENT, a level number, or a field name".to_string()),
     }
 }
 
 /// Get visible (non-subtotal, non-grand-total) data rows within a partition.
-/// Returns indices into row_items.
+/// Returns indices into row_items. The window is always restricted to rows at
+/// the SAME hierarchy depth as the current row — parent group rows carry their
+/// children's aggregate, so mixing depths would double-count.
 fn get_partition_visible_rows(
     current_row_idx: usize,
     ctx: &VisualCalcContext,
     reset: &ResetMode,
 ) -> Vec<usize> {
-    let current = &ctx.row_items[current_row_idx];
+    partition_items(ctx.row_items, current_row_idx, reset)
+}
+
+/// Shared partition logic for both axes: same-depth siblings of the current
+/// item, optionally restricted to the reset partition. Subtotal and grand
+/// total items are never part of a window; when the current item is itself a
+/// total (or out of range), the result will not contain it and window
+/// functions return NaN via the position lookup.
+fn partition_items(
+    items: &[FlatAxisItem],
+    current_idx: usize,
+    reset: &ResetMode,
+) -> Vec<usize> {
+    let Some(current) = items.get(current_idx) else {
+        return Vec::new();
+    };
     let current_depth = current.depth;
 
     // Determine the reset depth
@@ -1270,21 +1457,19 @@ fn get_partition_visible_rows(
         ResetMode::DepthLevel(d) => Some(*d),
     };
 
-    // Get the group key at the reset depth for the current row
+    // Get the group key at the reset depth for the current item
     let partition_key: Option<Vec<crate::cache::ValueId>> = reset_depth.map(|rd| {
-        let gv = &current.group_values;
-        gv.iter().take(rd + 1).copied().collect()
+        current.group_values.iter().take(rd + 1).copied().collect()
     });
 
-    // Collect visible rows that belong to the same partition
     let mut result = Vec::new();
-    for (i, item) in ctx.row_items.iter().enumerate() {
-        // Skip subtotals and grand totals
+    for (i, item) in items.iter().enumerate() {
         if item.is_subtotal || item.is_grand_total {
             continue;
         }
-
-        // Check partition membership
+        if item.depth != current_depth {
+            continue;
+        }
         if let Some(ref pk) = partition_key {
             let item_key: Vec<crate::cache::ValueId> = item.group_values.iter()
                 .take(pk.len())
@@ -1294,17 +1479,7 @@ fn get_partition_visible_rows(
                 continue;
             }
         }
-
-        // Only include rows at the same depth or deeper (leaf-level data rows)
-        // For window functions, we want rows at the same hierarchy level
-        if item.depth >= current_depth || reset_depth.is_none() || item.depth == current_depth {
-            result.push(i);
-        }
-    }
-
-    // If we got no results (edge case), at least include current row
-    if result.is_empty() {
-        result.push(current_row_idx);
+        result.push(i);
     }
 
     result
@@ -1319,51 +1494,79 @@ fn find_current_position(current_row_idx: usize, visible_rows: &[usize]) -> Opti
 // WINDOW FUNCTIONS
 // ============================================================================
 
-/// RUNNINGSUM(field, [reset])
+/// Resolve the optional steps/reset arguments of PREVIOUS/NEXT.
+/// `(field, [steps], [reset])` — but the docs also allow the reset directly
+/// in the steps slot (`PREVIOUS([Sales], HIGHESTPARENT)`): a bare identifier
+/// there is treated as the reset, a numeric expression as the step count.
+fn steps_and_reset<'a>(
+    name: &str,
+    effective_args: &'a [CalcExpr],
+    values: &HashMap<String, f64>,
+    ctx: &VisualCalcContext,
+) -> Result<(usize, Option<&'a CalcExpr>), String> {
+    match effective_args.get(1) {
+        None => Ok((1, None)),
+        Some(CalcExpr::Reference(_)) => {
+            if effective_args.len() > 2 {
+                return Err(format!(
+                    "{}: a reset in the 2nd position cannot be followed by more arguments — use {}(field, steps, reset)",
+                    name, name
+                ));
+            }
+            Ok((1, effective_args.get(1)))
+        }
+        Some(expr) => {
+            let n = evaluate_calc_expr(expr, values, Some(ctx))?.as_number()?;
+            if n < 0.0 {
+                return Err(format!("{} steps must be >= 0", name));
+            }
+            Ok((n.round() as usize, effective_args.get(2)))
+        }
+    }
+}
+
+/// RUNNINGSUM(field, [reset], [axis])
 fn eval_runningsum(
     args: &[CalcExpr],
     _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.is_empty() {
-        return Err("RUNNINGSUM requires at least 1 argument".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("RUNNINGSUM", args, 1)?;
     let field_expr = &effective_args[0];
-    let reset = resolve_reset(effective_args.get(1), ctx);
+    let reset = resolve_reset(effective_args.get(1), ctx, axis)?;
 
     let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
-    let pos = find_current_position(current, &visible);
-    let end = match pos {
+    let end = match find_current_position(current, &visible) {
         Some(p) => p + 1,
         None => return Ok(f64::NAN),
     };
 
     let mut sum = 0.0;
     for &idx in &visible[..end] {
-        sum += resolve_field_on_axis(field_expr, idx, axis, ctx);
+        sum += resolve_field_on_axis(field_expr, idx, axis, ctx)?;
     }
     Ok(sum)
 }
 
-/// MOVINGAVERAGE(field, window, [reset])
+/// MOVINGAVERAGE(field, window, [reset], [axis])
 fn eval_movingaverage(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.len() < 2 {
-        return Err("MOVINGAVERAGE requires at least 2 arguments: (field, window)".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("MOVINGAVERAGE", args, 2)?;
     let field_expr = &effective_args[0];
-    let window = evaluate_calc_expr(&effective_args[1], values, Some(ctx))?.as_number()?.round() as usize;
-    if window == 0 {
+    if let CalcExpr::Reference(r) = &effective_args[1] {
+        if matches!(r.to_uppercase().as_str(), "NONE" | "HIGHESTPARENT" | "LOWESTPARENT") {
+            return Err("MOVINGAVERAGE requires a window size as its 2nd argument: MOVINGAVERAGE(field, window, [reset])".to_string());
+        }
+    }
+    let window = evaluate_calc_expr(&effective_args[1], values, Some(ctx))?.as_number()?.round() as i64;
+    if window <= 0 {
         return Err("MOVINGAVERAGE window size must be > 0".to_string());
     }
-    let reset = resolve_reset(effective_args.get(2), ctx);
+    let window = window as usize;
+    let reset = resolve_reset(effective_args.get(2), ctx, axis)?;
     let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
 
     let pos = match find_current_position(current, &visible) {
@@ -1375,29 +1578,21 @@ fn eval_movingaverage(
     let count = pos + 1 - start;
     let mut sum = 0.0;
     for &idx in &visible[start..=pos] {
-        sum += resolve_field_on_axis(field_expr, idx, axis, ctx);
+        sum += resolve_field_on_axis(field_expr, idx, axis, ctx)?;
     }
     Ok(sum / count as f64)
 }
 
-/// PREVIOUS(field, [steps], [reset/axis])
+/// PREVIOUS(field, [steps], [reset], [axis])
 fn eval_previous(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.is_empty() {
-        return Err("PREVIOUS requires at least 1 argument".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("PREVIOUS", args, 1)?;
     let field_expr = &effective_args[0];
-    let steps = if effective_args.len() >= 2 {
-        evaluate_calc_expr(&effective_args[1], values, Some(ctx))?.as_number()?.round() as usize
-    } else {
-        1
-    };
-    let reset = resolve_reset(effective_args.get(2), ctx);
+    let (steps, reset_arg) = steps_and_reset("PREVIOUS", effective_args, values, ctx)?;
+    let reset = resolve_reset(reset_arg, ctx, axis)?;
     let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
 
     let pos = match find_current_position(current, &visible) {
@@ -1410,27 +1605,19 @@ fn eval_previous(
     }
 
     let target_idx = visible[pos - steps];
-    Ok(resolve_field_on_axis(field_expr, target_idx, axis, ctx))
+    resolve_field_on_axis(field_expr, target_idx, axis, ctx)
 }
 
-/// NEXT(field, [steps], [reset/axis])
+/// NEXT(field, [steps], [reset], [axis])
 fn eval_next(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.is_empty() {
-        return Err("NEXT requires at least 1 argument".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("NEXT", args, 1)?;
     let field_expr = &effective_args[0];
-    let steps = if effective_args.len() >= 2 {
-        evaluate_calc_expr(&effective_args[1], values, Some(ctx))?.as_number()?.round() as usize
-    } else {
-        1
-    };
-    let reset = resolve_reset(effective_args.get(2), ctx);
+    let (steps, reset_arg) = steps_and_reset("NEXT", effective_args, values, ctx)?;
+    let reset = resolve_reset(reset_arg, ctx, axis)?;
     let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
 
     let pos = match find_current_position(current, &visible) {
@@ -1444,56 +1631,69 @@ fn eval_next(
     }
 
     let target_idx = visible[target];
-    Ok(resolve_field_on_axis(field_expr, target_idx, axis, ctx))
+    resolve_field_on_axis(field_expr, target_idx, axis, ctx)
 }
 
-/// FIRST(field, [reset/axis])
+/// FIRST(field, [reset], [axis])
 fn eval_first(
     args: &[CalcExpr],
     _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.is_empty() {
-        return Err("FIRST requires at least 1 argument".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("FIRST", args, 1)?;
     let field_expr = &effective_args[0];
-    let reset = resolve_reset(effective_args.get(1), ctx);
-    let (visible, _current) = get_partition_items_for_axis(axis, ctx, &reset);
+    let reset = resolve_reset(effective_args.get(1), ctx, axis)?;
+    let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
 
-    if visible.is_empty() {
+    // NaN on subtotal/grand-total rows (current is never part of a window there).
+    if find_current_position(current, &visible).is_none() {
         return Ok(f64::NAN);
     }
-    Ok(resolve_field_on_axis(field_expr, visible[0], axis, ctx))
+    resolve_field_on_axis(field_expr, visible[0], axis, ctx)
 }
 
-/// LAST(field, [reset/axis])
+/// LAST(field, [reset], [axis])
 fn eval_last(
     args: &[CalcExpr],
     _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
-    if args.is_empty() {
-        return Err("LAST requires at least 1 argument".to_string());
-    }
-    let (axis, trim) = resolve_axis_from_args(args);
-    let effective_args = &args[..args.len() - trim];
+    let (effective_args, axis) = window_args("LAST", args, 1)?;
     let field_expr = &effective_args[0];
-    let reset = resolve_reset(effective_args.get(1), ctx);
-    let (visible, _current) = get_partition_items_for_axis(axis, ctx, &reset);
+    let reset = resolve_reset(effective_args.get(1), ctx, axis)?;
+    let (visible, current) = get_partition_items_for_axis(axis, ctx, &reset);
 
-    if visible.is_empty() {
+    // NaN on subtotal/grand-total rows (current is never part of a window there).
+    if find_current_position(current, &visible).is_none() {
         return Ok(f64::NAN);
     }
-    Ok(resolve_field_on_axis(field_expr, *visible.last().unwrap(), axis, ctx))
+    resolve_field_on_axis(field_expr, *visible.last().unwrap(), axis, ctx)
 }
 
 // ============================================================================
 // HIERARCHY FUNCTIONS
 // ============================================================================
 
-/// COLLAPSE(field) — value at parent level
+/// Resolve `expr` at the grand-total level. Prefers the visible grand-total
+/// row; falls back to the always-computed grand-total value map so hiding
+/// grand totals in the layout does not break percent-of-total calculations.
+fn resolve_at_grand_total(expr: &CalcExpr, ctx: &VisualCalcContext) -> Result<f64, String> {
+    if let Some(i) = ctx.row_items.iter().position(|it| it.is_grand_total) {
+        return resolve_field_value(expr, i, ctx);
+    }
+    if let Some(gt) = ctx.grand_total_values {
+        if let CalcExpr::Reference(name) = expr {
+            return lookup_value_ci(gt, name)
+                .ok_or_else(|| format!("Unknown field or item: '{}'", name));
+        }
+        // No grand-total row to anchor visual functions on; evaluate the
+        // expression context-free against the grand-total values.
+        return evaluate_calc_expr(expr, gt, None)?.as_number();
+    }
+    Ok(f64::NAN)
+}
+
+/// PARENT/COLLAPSE(field, [levels]) — value at a parent level
 fn eval_collapse(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
@@ -1504,9 +1704,21 @@ fn eval_collapse(
     }
     let field_expr = &args[0];
 
+    let Some(current) = ctx.row_items.get(ctx.current_row_idx) else {
+        return Ok(f64::NAN);
+    };
+    // The grand-total row has no parent.
+    if current.is_grand_total {
+        return Ok(f64::NAN);
+    }
+
     // Optional second argument: number of levels to go up (default 1)
     let levels = if args.len() >= 2 {
-        evaluate_calc_expr(&args[1], values, Some(ctx))?.as_number()?.round() as usize
+        let n = evaluate_calc_expr(&args[1], values, Some(ctx))?.as_number()?;
+        if n < 1.0 {
+            return Err("PARENT levels must be >= 1".to_string());
+        }
+        n.round() as usize
     } else {
         1
     };
@@ -1515,100 +1727,110 @@ fn eval_collapse(
     let mut idx = ctx.current_row_idx;
     for _ in 0..levels {
         let item = &ctx.row_items[idx];
-        if item.parent_index < 0 || item.is_grand_total {
-            // Reached root — return grand total
-            return eval_collapseall(args, values, ctx);
+        if item.parent_index < 0 {
+            // Above the top level — the parent is the grand total.
+            return resolve_at_grand_total(field_expr, ctx);
         }
-        idx = item.parent_index as usize;
+        let parent = item.parent_index as usize;
+        if parent >= ctx.row_items.len() {
+            return Ok(f64::NAN);
+        }
+        idx = parent;
     }
 
-    Ok(resolve_field_value(field_expr, idx, ctx))
+    resolve_field_value(field_expr, idx, ctx)
 }
 
-/// COLLAPSEALL(field) — value at grand total level
+/// GRANDTOTAL/COLLAPSEALL(field) — value at grand total level
 fn eval_collapseall(
     args: &[CalcExpr],
     _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
     if args.is_empty() {
-        return Err("COLLAPSEALL requires 1 argument".to_string());
+        return Err("GRANDTOTAL requires 1 argument".to_string());
     }
-    let field_expr = &args[0];
-
-    // Find the grand total row
-    for (i, item) in ctx.row_items.iter().enumerate() {
-        if item.is_grand_total {
-            return Ok(resolve_field_value(field_expr, i, ctx));
-        }
-    }
-
-    // No grand total row found — return NaN
-    Ok(f64::NAN)
+    resolve_at_grand_total(&args[0], ctx)
 }
 
-/// EXPAND(expr) — average of expression evaluated at each direct child
+/// CHILDREN/EXPAND(expr) — average of expression evaluated at each direct child
 fn eval_expand(
     args: &[CalcExpr],
-    values: &HashMap<String, f64>,
+    _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
     if args.is_empty() {
-        return Err("EXPAND requires 1 argument".to_string());
+        return Err("CHILDREN requires 1 argument".to_string());
     }
     let expr = &args[0];
 
-    // Find direct children
+    let Some(current) = ctx.row_items.get(ctx.current_row_idx) else {
+        return Ok(f64::NAN);
+    };
+
+    // Find direct children. The grand total's direct children are the
+    // top-level data rows (their parent_index is -1).
     let children: Vec<usize> = ctx.row_items.iter().enumerate()
         .filter(|(_, item)| {
-            item.parent_index == ctx.current_row_idx as i32
-            && !item.is_subtotal
+            !item.is_subtotal
+                && !item.is_grand_total
+                && if current.is_grand_total {
+                    item.depth == 0 && item.parent_index < 0
+                } else {
+                    item.parent_index == ctx.current_row_idx as i32
+                }
         })
         .map(|(i, _)| i)
         .collect();
 
     if children.is_empty() {
-        // Leaf node — evaluate with current values
-        return evaluate_calc_expr(expr, values, Some(ctx)).and_then(|v| v.as_number());
+        // Leaf node — evaluate at the current row
+        return resolve_field_value(expr, ctx.current_row_idx, ctx);
     }
 
     let mut sum = 0.0;
     for &child_idx in &children {
-        sum += resolve_field_value(expr, child_idx, ctx);
+        sum += resolve_field_value(expr, child_idx, ctx)?;
     }
     Ok(sum / children.len() as f64)
 }
 
-/// EXPANDALL(expr) — average of expression evaluated at leaf level
+/// LEAVES/EXPANDALL(expr) — average of expression evaluated at leaf level
 fn eval_expandall(
     args: &[CalcExpr],
-    values: &HashMap<String, f64>,
+    _values: &HashMap<String, f64>,
     ctx: &VisualCalcContext,
 ) -> Result<f64, String> {
     if args.is_empty() {
-        return Err("EXPANDALL requires 1 argument".to_string());
+        return Err("LEAVES requires 1 argument".to_string());
     }
     let expr = &args[0];
 
-    // Find all leaf descendants
+    let Some(current) = ctx.row_items.get(ctx.current_row_idx) else {
+        return Ok(f64::NAN);
+    };
+
+    // Find all leaf descendants. At the grand-total row every leaf data row
+    // is a descendant (documented: average across ALL leaf rows).
     let leaves: Vec<usize> = ctx.row_items.iter().enumerate()
         .filter(|(i, item)| {
             !item.has_children
-            && !item.is_subtotal
-            && !item.is_grand_total
-            && is_descendant_of(*i, ctx.current_row_idx, ctx.row_items)
+                && !item.is_subtotal
+                && !item.is_grand_total
+                && (current.is_grand_total
+                    || is_descendant_of(*i, ctx.current_row_idx, ctx.row_items))
         })
         .map(|(i, _)| i)
         .collect();
 
     if leaves.is_empty() {
-        // Already at leaf — evaluate with current values
-        return evaluate_calc_expr(expr, values, Some(ctx)).and_then(|v| v.as_number());
+        // Already at leaf — evaluate at the current row
+        return resolve_field_value(expr, ctx.current_row_idx, ctx);
     }
 
     let mut sum = 0.0;
     for &leaf_idx in &leaves {
-        sum += resolve_field_value(expr, leaf_idx, ctx);
+        sum += resolve_field_value(expr, leaf_idx, ctx)?;
     }
     Ok(sum / leaves.len() as f64)
 }
@@ -1639,11 +1861,10 @@ fn is_descendant_of(candidate: usize, ancestor: usize, row_items: &[FlatAxisItem
 // RANGE AND ISATLEVEL FUNCTIONS
 // ============================================================================
 
-/// RANGE(offset_or_size) — returns a slice of rows as an "axis reference".
-/// Typically used with AVERAGEX: AVERAGEX(RANGE(3), [Sales])
-/// For simplicity, RANGE(n) returns the average of the field's values over
-/// n rows centered on (or up to) the current row.
-/// RANGE(start, end) returns the average from relative offset start to end.
+/// RANGE(size) / RANGE(start, end) — returns the COUNT of rows that fall in
+/// the requested window slice after clamping to the axis bounds. A building
+/// block for custom window arithmetic; on subtotal/grand-total rows it
+/// returns NaN like the other window functions.
 fn eval_range(
     args: &[CalcExpr],
     values: &HashMap<String, f64>,
@@ -1653,36 +1874,40 @@ fn eval_range(
         return Err("RANGE requires at least 1 argument: RANGE(size) or RANGE(start, end)".to_string());
     }
 
-    // RANGE can be used in two ways:
-    // 1. RANGE(size) — last N rows up to current (like a window)
-    // 2. RANGE(start, end) — relative offsets from current position
     let visible = get_partition_visible_rows(ctx.current_row_idx, ctx, &ResetMode::None);
     let pos = match find_current_position(ctx.current_row_idx, &visible) {
-        Some(p) => p,
+        Some(p) => p as i64,
         None => return Ok(f64::NAN),
     };
+    let last = visible.len() as i64 - 1;
 
-    let (range_start, range_end) = if args.len() >= 2 {
-        // RANGE(start, end) — relative offsets
-        let start_offset = evaluate_calc_expr(&args[0], values, Some(ctx))?.as_number()?.round() as i32;
-        let end_offset = evaluate_calc_expr(&args[1], values, Some(ctx))?.as_number()?.round() as i32;
-        let s = (pos as i32 + start_offset).max(0) as usize;
-        let e = ((pos as i32 + end_offset).max(0) as usize).min(visible.len() - 1);
-        (s, e)
+    let (lo, hi) = if args.len() >= 2 {
+        // RANGE(start, end) — relative offsets from the current position
+        let start_offset = evaluate_calc_expr(&args[0], values, Some(ctx))?.as_number()?.round() as i64;
+        let end_offset = evaluate_calc_expr(&args[1], values, Some(ctx))?.as_number()?.round() as i64;
+        if start_offset > end_offset {
+            return Err("RANGE start offset must be <= end offset".to_string());
+        }
+        (pos + start_offset, pos + end_offset)
     } else {
-        // RANGE(size) — last N rows ending at current
-        let size = evaluate_calc_expr(&args[0], values, Some(ctx))?.as_number()?.round() as usize;
-        let s = if pos + 1 >= size { pos + 1 - size } else { 0 };
-        (s, pos)
+        // RANGE(size) — last N rows ending at the current row
+        let size = evaluate_calc_expr(&args[0], values, Some(ctx))?.as_number()?.round() as i64;
+        if size < 0 {
+            return Err("RANGE size must be >= 0".to_string());
+        }
+        if size == 0 {
+            return Ok(0.0);
+        }
+        (pos - (size - 1), pos)
     };
 
-    // Return the count of rows in the range (useful with division for averages)
-    // In practice, RANGE is most useful when combined with other expressions.
-    // For standalone use, return the count so RANGE(3) in arithmetic context = 3.
-    Ok((range_end - range_start + 1) as f64)
+    // Clamp to the axis and count what actually exists.
+    let lo = lo.max(0);
+    let hi = hi.min(last);
+    Ok(((hi - lo + 1).max(0)) as f64)
 }
 
-/// ISATLEVEL(field_name) — returns 1.0 if the specified field is present at the
+/// ISATLEVEL(field_name) — returns 1.0 if the specified row field is at the
 /// current hierarchy level, 0.0 otherwise. Useful for conditional calculations
 /// that should only apply at certain grouping levels.
 fn eval_isatlevel(
@@ -1696,27 +1921,27 @@ fn eval_isatlevel(
 
     let field_name = match &args[0] {
         CalcExpr::Reference(name) => name.clone(),
+        CalcExpr::Str(name) => name.clone(),
         _ => return Err("ISATLEVEL argument must be a field name reference".to_string()),
     };
 
-    let current = &ctx.row_items[ctx.current_row_idx];
+    let Some(current) = ctx.row_items.get(ctx.current_row_idx) else {
+        return Ok(0.0);
+    };
+    // The grand-total row is not "at" any field's level.
+    if current.is_grand_total {
+        return Ok(0.0);
+    }
 
     // Check if the named field corresponds to the current row's depth
-    let field_lower = field_name.to_lowercase();
     for (depth, name) in ctx.field_names_by_depth.iter().enumerate() {
-        if name.to_lowercase() == field_lower {
-            // The field is at this depth. Check if current row is at or below this depth.
-            // A row is "at" a field's level if its depth matches the field's depth.
-            if current.depth == depth {
-                return Ok(1.0);
-            } else {
-                return Ok(0.0);
-            }
+        if ref_names_match(name, &field_name) {
+            return Ok(if current.depth == depth { 1.0 } else { 0.0 });
         }
     }
 
-    // Field not found in row fields — return 0
-    Ok(0.0)
+    // A misspelled field must not silently disable the calculation.
+    Err(format!("ISATLEVEL: unknown row field '{}'", field_name))
 }
 
 // ============================================================================
@@ -1746,18 +1971,21 @@ fn eval_lookup(
     while i + 1 < args.len() {
         let field_name = match &args[i] {
             CalcExpr::Reference(name) => name.clone(),
+            CalcExpr::Str(name) => name.clone(),
             _ => return Err("LOOKUP field argument must be a field name".to_string()),
         };
 
-        // Value can be a string reference or a number
+        // Value can be a quoted string, a bare identifier, or a number
+        // (negative numbers parse as Negate(Number)).
         let match_value = match &args[i + 1] {
-            CalcExpr::Reference(name) => name.clone(),
-            CalcExpr::Number(n) => {
-                // Format number for matching (trim trailing zeros)
-                let s = format!("{}", n);
-                s
-            }
-            _ => return Err("LOOKUP value argument must be a value or field name".to_string()),
+            CalcExpr::Str(s) => s.clone(),
+            CalcExpr::Reference(name) => normalize_ref(name).to_string(),
+            CalcExpr::Number(n) => format!("{}", n),
+            CalcExpr::Negate(inner) => match &**inner {
+                CalcExpr::Number(n) => format!("{}", -n),
+                _ => return Err("LOOKUP value argument must be a value, text, or field name".to_string()),
+            },
+            _ => return Err("LOOKUP value argument must be a value, text, or field name".to_string()),
         };
 
         match_criteria.push((field_name, match_value));
@@ -1776,10 +2004,9 @@ fn eval_lookup(
         for (field_name, match_value) in &match_criteria {
             // The field_name should correspond to a row field at some depth.
             // Check the item's label at the appropriate depth.
-            let field_lower = field_name.to_lowercase();
             let mut field_depth: Option<usize> = None;
             for (d, name) in ctx.field_names_by_depth.iter().enumerate() {
-                if name.to_lowercase() == field_lower {
+                if ref_names_match(name, field_name) {
                     field_depth = Some(d);
                     break;
                 }
@@ -1789,17 +2016,16 @@ fn eval_lookup(
                 // Get the label for this item at the target depth.
                 // If the item is at or below the target depth, walk up to find the ancestor label.
                 let ancestor_label = get_label_at_depth(row_idx, depth, ctx);
-                let match_lower = match_value.to_lowercase();
-                if ancestor_label.to_lowercase() != match_lower {
+                if !text_values_match(&ancestor_label, match_value) {
                     all_match = false;
                     break;
                 }
             } else {
                 // Field not found in row fields — check value fields
                 if let Some(row_values) = ctx.row_values.get(row_idx) {
-                    let val_lower = field_lower.clone();
                     let found = row_values.iter().any(|(k, v)| {
-                        k.to_lowercase() == val_lower && format!("{}", v) == *match_value
+                        ref_names_match(k, field_name)
+                            && text_values_match(&format!("{}", v), match_value)
                     });
                     if !found {
                         all_match = false;
@@ -1814,12 +2040,21 @@ fn eval_lookup(
 
         if all_match {
             // Found matching row — evaluate expr in that row's context
-            return Ok(resolve_field_value(expr, row_idx, ctx));
+            return resolve_field_value(expr, row_idx, ctx);
         }
     }
 
     // No matching row found
     Ok(f64::NAN)
+}
+
+/// Compare a row label/value against a LOOKUP match value: numeric when both
+/// parse as numbers (so "2024.0" matches "2024"), else case-insensitive text.
+fn text_values_match(actual: &str, expected: &str) -> bool {
+    if let (Ok(a), Ok(b)) = (actual.trim().parse::<f64>(), expected.trim().parse::<f64>()) {
+        return a == b;
+    }
+    actual.trim().eq_ignore_ascii_case(expected.trim())
 }
 
 /// Get the label of a row item at a specific depth by walking up the parent chain.
@@ -1840,25 +2075,6 @@ fn get_label_at_depth(row_idx: usize, target_depth: usize, ctx: &VisualCalcConte
         }
         idx = parent;
     }
-}
-
-// ============================================================================
-// AXIS RESOLUTION
-// ============================================================================
-
-/// Resolve axis parameter from function arguments.
-/// Checks the last argument for ROWS/COLUMNS keyword.
-fn _resolve_axis(args: &[CalcExpr]) -> AxisMode {
-    if let Some(last) = args.last() {
-        if let CalcExpr::Reference(name) = last {
-            match name.to_uppercase().as_str() {
-                "ROWS" => return AxisMode::Rows,
-                "COLUMNS" => return AxisMode::Columns,
-                _ => {}
-            }
-        }
-    }
-    AxisMode::Rows // Default
 }
 
 // ============================================================================
@@ -2152,5 +2368,436 @@ mod tests {
         let m = sales(100.0);
         // Unknown field references remain a loud hard error (not a CalcValue::Error).
         assert!(eval_calc_formula("Nonexistent + 1", &m).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Parser robustness
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_dotted_bi_field_names_tokenize() {
+        let refs = extract_references("dim_date.year + 1").unwrap();
+        assert_eq!(refs, vec!["dim_date.year"]);
+        // Inside function arguments too.
+        assert!(parse_calc_formula("RUNNINGSUM([Sales], dim_date.year)").is_ok());
+    }
+
+    #[test]
+    fn test_string_escape_doubled_quote() {
+        let mut m = HashMap::new();
+        m.insert("X".to_string(), 0.0);
+        assert_eq!(
+            eval("\"He said \"\"hi\"\"\"", &m),
+            CalcValue::Text("He said \"hi\"".to_string())
+        );
+    }
+
+    #[test]
+    fn test_power_operator() {
+        let m = sales(0.0);
+        assert_eq!(eval_num("2^10", &m), 1024.0);
+        // Right-associative: 2^3^2 = 2^(3^2) = 512.
+        assert_eq!(eval_num("2^3^2", &m), 512.0);
+        // Unary minus binds tighter than '^' (Excel): -2^2 = 4.
+        assert_eq!(eval_num("-2^2", &m), 4.0);
+        // '^' binds tighter than '*': 2*3^2 = 18.
+        assert_eq!(eval_num("2*3^2", &m), 18.0);
+    }
+
+    #[test]
+    fn test_depth_and_length_caps() {
+        let m = sales(0.0);
+        // Deep nesting errors cleanly instead of overflowing the stack.
+        let deep = format!("{}1{}", "(".repeat(400), ")".repeat(400));
+        let err = eval_calc_formula(&deep, &m).unwrap_err();
+        assert!(err.contains("nested too deeply"), "got: {}", err);
+        // Oversized formulas are rejected up front.
+        let long = format!("1{}", "+1".repeat(4096));
+        let err = eval_calc_formula(&long, &m).unwrap_err();
+        assert!(err.contains("too long"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_unknown_function_message() {
+        let m = sales(0.0);
+        let err = eval_calc_formula("FOOBAR(1)", &m).unwrap_err();
+        assert!(err.contains("Unknown function"), "got: {}", err);
+        assert!(!err.contains("visual calculation context"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_and_or_propagate_errors() {
+        let mut m = HashMap::new();
+        m.insert("A".to_string(), 10.0);
+        m.insert("B".to_string(), 0.0);
+        // The error in a later argument surfaces even though the first
+        // argument already decides the boolean result.
+        assert_eq!(eval("AND(A > 100, A / B)", &m), CalcValue::Error("DIV/0!".to_string()));
+        assert_eq!(eval("OR(A > 5, A / B)", &m), CalcValue::Error("DIV/0!".to_string()));
+    }
+
+    #[test]
+    fn test_text_coercion_hides_float_artifacts() {
+        let m = sales(0.0);
+        assert_eq!(eval("\"\" & (0.1 + 0.2)", &m), CalcValue::Text("0.3".to_string()));
+    }
+
+    #[test]
+    fn test_bracket_reference_resolves_bare_key() {
+        // Grid pivots store plain source-field keys ("Sales"); the docs'
+        // bracket syntax must still resolve them.
+        let m = sales(100.0);
+        assert_eq!(eval_num("[Sales] * 2", &m), 200.0);
+        // And vice versa: a bare name resolves a bracketed key (BI pivots).
+        let mut bi = HashMap::new();
+        bi.insert("[TotalSales]".to_string(), 50.0);
+        assert_eq!(eval_num("TotalSales + 1", &bi), 51.0);
+    }
+
+    #[test]
+    fn test_transform_edge_cases() {
+        let m = sales(0.0);
+        assert_eq!(eval("MOD(7, 0)", &m), CalcValue::Error("DIV/0!".to_string()));
+        assert_eq!(eval_num("FLOOR(4.8)", &m), 4.0); // default significance 1
+        assert_eq!(eval_num("CEILING(4.2)", &m), 5.0);
+        assert_eq!(eval("LEFT(\"hello\")", &m), CalcValue::Text("h".to_string()));
+        assert_eq!(eval("RIGHT(\"hello\")", &m), CalcValue::Text("o".to_string()));
+        assert_eq!(eval_num("MOD(0 - 7, 3)", &m), 2.0); // divisor's sign (Excel)
+    }
+
+    // ------------------------------------------------------------------
+    // Visual calculation fixture (Year/Quarter hierarchy per the docs)
+    // ------------------------------------------------------------------
+
+    use crate::cache::{ValueId, VALUE_ID_EMPTY};
+
+    /// Fixture mirroring the documentation examples:
+    /// ROWS: Year, Quarter — 2024: Q1=100 Q2=150 Q3=200 Q4=180 (630),
+    /// 2025: Q1=120 Q2=160 (280), grand total 910. Parent (year) rows are
+    /// regular data rows carrying the year aggregate, exactly as the engine
+    /// flattens them.
+    struct VcFixture {
+        items: Vec<FlatAxisItem>,
+        values: Vec<HashMap<String, f64>>,
+        names: Vec<String>,
+        grand_total: HashMap<String, f64>,
+        include_grand_total_row: bool,
+    }
+
+    fn axis_item(
+        label: &str,
+        depth: usize,
+        parent: i32,
+        gv: Vec<ValueId>,
+        has_children: bool,
+        is_grand_total: bool,
+    ) -> FlatAxisItem {
+        FlatAxisItem {
+            group_values: gv,
+            label: label.to_string(),
+            depth,
+            is_subtotal: false,
+            is_grand_total,
+            has_children,
+            is_collapsed: false,
+            parent_index: parent,
+            field_indices: vec![0, 1],
+            attribute_labels: Vec::new(),
+        }
+    }
+
+    fn sales_map(v: f64) -> HashMap<String, f64> {
+        let mut m = HashMap::new();
+        m.insert("Sales".to_string(), v);
+        m
+    }
+
+    impl VcFixture {
+        fn new() -> Self {
+            // ValueIds: years 10/11, quarters 1..=4.
+            let e = VALUE_ID_EMPTY;
+            let items = vec![
+                axis_item("2024", 0, -1, vec![10, e], true, false), // 0: 630
+                axis_item("Q1", 1, 0, vec![10, 1], false, false),   // 1: 100
+                axis_item("Q2", 1, 0, vec![10, 2], false, false),   // 2: 150
+                axis_item("Q3", 1, 0, vec![10, 3], false, false),   // 3: 200
+                axis_item("Q4", 1, 0, vec![10, 4], false, false),   // 4: 180
+                axis_item("2025", 0, -1, vec![11, e], true, false), // 5: 280
+                axis_item("Q1", 1, 5, vec![11, 1], false, false),   // 6: 120
+                axis_item("Q2", 1, 5, vec![11, 2], false, false),   // 7: 160
+                axis_item("Grand Total", 0, -1, vec![e, e], false, true), // 8: 910
+            ];
+            let values = vec![630.0, 100.0, 150.0, 200.0, 180.0, 280.0, 120.0, 160.0, 910.0]
+                .into_iter()
+                .map(sales_map)
+                .collect();
+            VcFixture {
+                items,
+                values,
+                names: vec!["Year".to_string(), "Quarter".to_string()],
+                grand_total: sales_map(910.0),
+                include_grand_total_row: true,
+            }
+        }
+
+        /// Same fixture with the grand-total row hidden (layout option).
+        fn without_grand_total_row() -> Self {
+            let mut f = Self::new();
+            f.items.pop();
+            f.values.pop();
+            f.include_grand_total_row = false;
+            f
+        }
+
+        fn eval(&self, row: usize, formula: &str) -> Result<f64, String> {
+            let ctx = VisualCalcContext {
+                current_row_idx: row,
+                row_items: &self.items,
+                row_values: &self.values,
+                field_names_by_depth: &self.names,
+                grand_total_values: Some(&self.grand_total),
+                col_ctx: None,
+            };
+            eval_calc_formula_with_ctx(formula, &self.values[row], &ctx)
+                .and_then(|v| v.as_number())
+        }
+
+        fn eval_ok(&self, row: usize, formula: &str) -> f64 {
+            self.eval(row, formula).unwrap()
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {}, got {}",
+            expected,
+            actual
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Window functions (documented behavior)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_runningsum_stays_on_one_hierarchy_level() {
+        let f = VcFixture::new();
+        // Quarter-level running sum must NOT include the year parent rows.
+        assert_close(f.eval_ok(1, "RUNNINGSUM([Sales])"), 100.0);
+        assert_close(f.eval_ok(2, "RUNNINGSUM([Sales])"), 250.0);
+        assert_close(f.eval_ok(3, "RUNNINGSUM([Sales])"), 450.0);
+        assert_close(f.eval_ok(4, "RUNNINGSUM([Sales])"), 630.0);
+        // Continues across years with no reset (docs table).
+        assert_close(f.eval_ok(6, "RUNNINGSUM([Sales])"), 750.0);
+        assert_close(f.eval_ok(7, "RUNNINGSUM([Sales])"), 910.0);
+        // Year rows get their own year-level window.
+        assert_close(f.eval_ok(0, "RUNNINGSUM([Sales])"), 630.0);
+        assert_close(f.eval_ok(5, "RUNNINGSUM([Sales])"), 910.0);
+        // Grand total row: NaN (excluded from windows).
+        assert!(f.eval_ok(8, "RUNNINGSUM([Sales])").is_nan());
+    }
+
+    #[test]
+    fn test_runningsum_reset_variants() {
+        let f = VcFixture::new();
+        // HIGHESTPARENT restarts at each year (docs table).
+        assert_close(f.eval_ok(6, "RUNNINGSUM([Sales], HIGHESTPARENT)"), 120.0);
+        assert_close(f.eval_ok(7, "RUNNINGSUM([Sales], HIGHESTPARENT)"), 280.0);
+        // Numeric aliases: 1 = HIGHESTPARENT, -1 = LOWESTPARENT.
+        assert_close(f.eval_ok(7, "RUNNINGSUM([Sales], 1)"), 280.0);
+        assert_close(f.eval_ok(7, "RUNNINGSUM([Sales], -1)"), 280.0);
+        // Field-name reset (Year == level 1 here).
+        assert_close(f.eval_ok(7, "RUNNINGSUM([Sales], Year)"), 280.0);
+        // Level number beyond the axis errors.
+        assert!(f.eval(7, "RUNNINGSUM([Sales], 3)").is_err());
+    }
+
+    #[test]
+    fn test_misspelled_reset_is_an_error_not_silence() {
+        let f = VcFixture::new();
+        let err = f.eval(7, "RUNNINGSUM([Sales], HIGHESTPRAENT)").unwrap_err();
+        assert!(err.contains("Unknown reset"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_axis_keyword_cannot_consume_required_args() {
+        let f = VcFixture::new();
+        // These used to panic with index-out-of-bounds.
+        assert!(f.eval(1, "RUNNINGSUM(ROWS)").is_err());
+        assert!(f.eval(1, "MOVINGAVERAGE([Sales], COLUMNS)").is_err());
+        assert!(f.eval(1, "PREVIOUS(COLUMNS)").is_err());
+        assert!(f.eval(1, "FIRST(ROWS)").is_err());
+        assert!(f.eval(1, "LAST(COLUMNS)").is_err());
+        assert!(f.eval(1, "NEXT(ROWS)").is_err());
+    }
+
+    #[test]
+    fn test_movingaverage_documented_window() {
+        let f = VcFixture::new();
+        // Window covers the current row and up to (window-1) preceding rows.
+        assert_close(f.eval_ok(1, "MOVINGAVERAGE([Sales], 3)"), 100.0);
+        assert_close(f.eval_ok(2, "MOVINGAVERAGE([Sales], 3)"), 125.0);
+        assert_close(f.eval_ok(3, "MOVINGAVERAGE([Sales], 3)"), 150.0);
+        assert_close(f.eval_ok(4, "MOVINGAVERAGE([Sales], 3)"), (150.0 + 200.0 + 180.0) / 3.0);
+        // Reset restarts the window at the year boundary.
+        assert_close(f.eval_ok(6, "MOVINGAVERAGE([Sales], 3, HIGHESTPARENT)"), 120.0);
+        // A reset keyword in the window slot is a clear error.
+        assert!(f.eval(2, "MOVINGAVERAGE([Sales], HIGHESTPARENT)").is_err());
+        assert!(f.eval(2, "MOVINGAVERAGE([Sales], 0)").is_err());
+    }
+
+    #[test]
+    fn test_previous_next_steps_and_reset() {
+        let f = VcFixture::new();
+        assert!(f.eval_ok(1, "PREVIOUS([Sales])").is_nan()); // first row
+        assert_close(f.eval_ok(2, "PREVIOUS([Sales])"), 100.0);
+        // Continues across the year boundary with no reset.
+        assert_close(f.eval_ok(6, "PREVIOUS([Sales])"), 180.0);
+        // Documented shorthand: reset directly in the steps slot.
+        assert!(f.eval_ok(6, "PREVIOUS([Sales], HIGHESTPARENT)").is_nan());
+        assert_close(f.eval_ok(7, "PREVIOUS([Sales], HIGHESTPARENT)"), 120.0);
+        // Explicit steps.
+        assert_close(f.eval_ok(3, "PREVIOUS([Sales], 2)"), 100.0);
+        // Steps + reset together.
+        assert!(f.eval_ok(7, "PREVIOUS([Sales], 2, HIGHESTPARENT)").is_nan());
+        // NEXT mirrors PREVIOUS.
+        assert_close(f.eval_ok(1, "NEXT([Sales])"), 150.0);
+        assert!(f.eval_ok(7, "NEXT([Sales])").is_nan()); // last row
+        assert!(f.eval_ok(4, "NEXT([Sales], HIGHESTPARENT)").is_nan()); // last in year
+        // Year rows traverse the year-level window.
+        assert_close(f.eval_ok(0, "NEXT([Sales])"), 280.0);
+    }
+
+    #[test]
+    fn test_first_last() {
+        let f = VcFixture::new();
+        assert_close(f.eval_ok(4, "FIRST([Sales])"), 100.0);
+        assert_close(f.eval_ok(1, "LAST([Sales])"), 160.0);
+        assert_close(f.eval_ok(6, "FIRST([Sales], HIGHESTPARENT)"), 120.0);
+        assert_close(f.eval_ok(6, "LAST([Sales], HIGHESTPARENT)"), 160.0);
+        // Subtotal/grand-total rows are not part of any window: NaN.
+        assert!(f.eval_ok(8, "FIRST([Sales])").is_nan());
+        assert!(f.eval_ok(8, "LAST([Sales])").is_nan());
+    }
+
+    #[test]
+    fn test_unknown_measure_inside_window_errors() {
+        let f = VcFixture::new();
+        assert!(f.eval(1, "RUNNINGSUM([Salez])").is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Hierarchy functions (documented behavior)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_parent_documented_semantics() {
+        let f = VcFixture::new();
+        // Quarter -> year value.
+        assert_close(f.eval_ok(1, "PARENT([Sales])"), 630.0);
+        assert_close(f.eval_ok(7, "PARENT([Sales])"), 280.0);
+        // Top level -> grand total.
+        assert_close(f.eval_ok(0, "PARENT([Sales])"), 910.0);
+        // Grand-total row -> NaN.
+        assert!(f.eval_ok(8, "PARENT([Sales])").is_nan());
+        // Levels parameter: two levels up from a quarter is the grand total.
+        assert_close(f.eval_ok(1, "PARENT([Sales], 2)"), 910.0);
+        // Percent-of-parent composes.
+        assert_close(f.eval_ok(1, "[Sales] / PARENT([Sales])"), 100.0 / 630.0);
+    }
+
+    #[test]
+    fn test_grandtotal_works_without_visible_grand_total_row() {
+        let visible = VcFixture::new();
+        assert_close(visible.eval_ok(1, "GRANDTOTAL([Sales])"), 910.0);
+        // Hiding the grand-total row must not break percent-of-total.
+        let hidden = VcFixture::without_grand_total_row();
+        assert_close(hidden.eval_ok(1, "GRANDTOTAL([Sales])"), 910.0);
+        assert_close(hidden.eval_ok(0, "PARENT([Sales])"), 910.0);
+    }
+
+    #[test]
+    fn test_children_documented_semantics() {
+        let f = VcFixture::new();
+        // Year row: average of its quarters.
+        assert_close(f.eval_ok(0, "CHILDREN([Sales])"), 157.5);
+        assert_close(f.eval_ok(5, "CHILDREN([Sales])"), 140.0);
+        // Leaf: own value.
+        assert_close(f.eval_ok(3, "CHILDREN([Sales])"), 200.0);
+        // Grand total: average of the top-level rows.
+        assert_close(f.eval_ok(8, "CHILDREN([Sales])"), 455.0);
+    }
+
+    #[test]
+    fn test_leaves_documented_semantics() {
+        let f = VcFixture::new();
+        // Year row: average of its leaf quarters.
+        assert_close(f.eval_ok(0, "LEAVES([Sales])"), 157.5);
+        // Leaf: own value.
+        assert_close(f.eval_ok(6, "LEAVES([Sales])"), 120.0);
+        // Grand total: average across ALL leaf rows (docs table).
+        assert_close(
+            f.eval_ok(8, "LEAVES([Sales])"),
+            (100.0 + 150.0 + 200.0 + 180.0 + 120.0 + 160.0) / 6.0,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Utility + lookup functions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_isatlevel() {
+        let f = VcFixture::new();
+        assert_close(f.eval_ok(0, "ISATLEVEL(Year)"), 1.0);
+        assert_close(f.eval_ok(1, "ISATLEVEL(Year)"), 0.0);
+        assert_close(f.eval_ok(1, "ISATLEVEL(Quarter)"), 1.0);
+        // The grand-total row is not at any field's level.
+        assert_close(f.eval_ok(8, "ISATLEVEL(Year)"), 0.0);
+        // A misspelled field errors instead of silently returning 0.
+        assert!(f.eval(1, "ISATLEVEL(Quartr)").is_err());
+    }
+
+    #[test]
+    fn test_range_clamps_and_errors() {
+        let f = VcFixture::new();
+        // Quarter-level axis has 6 rows; idx 1 is position 0, idx 4 position 3.
+        assert_close(f.eval_ok(1, "RANGE(3)"), 1.0); // clamped at partition start
+        assert_close(f.eval_ok(4, "RANGE(3)"), 3.0);
+        assert_close(f.eval_ok(4, "RANGE(-2, 0)"), 3.0);
+        assert_close(f.eval_ok(4, "RANGE(0, 2)"), 3.0);
+        // Past the end of the axis: counts what exists.
+        assert_close(f.eval_ok(7, "RANGE(1, 2)"), 0.0);
+        assert_close(f.eval_ok(7, "RANGE(0, 2)"), 1.0);
+        // Degenerate inputs are explicit errors / zero, never a panic.
+        assert_close(f.eval_ok(4, "RANGE(0)"), 0.0);
+        assert!(f.eval(4, "RANGE(-1)").is_err());
+        assert!(f.eval(4, "RANGE(2, 0)").is_err());
+        // Totals rows: NaN like other window functions.
+        assert!(f.eval_ok(8, "RANGE(3)").is_nan());
+    }
+
+    #[test]
+    fn test_lookup_documented_semantics() {
+        let f = VcFixture::new();
+        // First matching row wins.
+        assert_close(f.eval_ok(1, "LOOKUP([Sales], Quarter, \"Q1\")"), 100.0);
+        // Case-insensitive text match.
+        assert_close(f.eval_ok(1, "LOOKUP([Sales], Quarter, \"q2\")"), 150.0);
+        // Bare identifiers still work as match values.
+        assert_close(f.eval_ok(1, "LOOKUP([Sales], Quarter, Q3)"), 200.0);
+        // Numbers match numeric labels.
+        assert_close(f.eval_ok(1, "LOOKUP([Sales], Year, 2025)"), 280.0);
+        // Multiple AND-combined criteria.
+        assert_close(f.eval_ok(1, "LOOKUP([Sales], Year, 2025, Quarter, \"Q2\")"), 160.0);
+        // No match -> NaN.
+        assert!(f.eval_ok(1, "LOOKUP([Sales], Quarter, \"Q9\")").is_nan());
+        // LOOKUP skips totals; LOOKUPWITHTOTALS can address them.
+        assert!(f.eval_ok(1, "LOOKUP([Sales], Year, \"Grand Total\")").is_nan());
+        assert_close(
+            f.eval_ok(1, "LOOKUPWITHTOTALS([Sales], Year, \"Grand Total\")"),
+            910.0,
+        );
     }
 }

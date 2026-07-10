@@ -1,6 +1,6 @@
 # RANGE
 
-Returns the number of rows in a window slice. Building block for custom window calculations.
+Returns the number of rows that fall in a window slice after clamping to the axis. Building block for custom window calculations.
 
 **Category:** Utility
 
@@ -21,6 +21,16 @@ CALC Window3 = RANGE(3)
 CALC Window = RANGE(-2, 0)
 CALC Forward = RANGE(0, 2)
 ```
+
+## Behavior
+
+- Returns the **count** of rows in the slice after clamping to the axis —
+  only rows at the current row's hierarchy level that actually exist are
+  counted. At the first row, `RANGE(3)` returns 1.
+- `RANGE(0)` returns 0.
+- A negative size is an error, as is `RANGE(start, end)` with start > end.
+- Returns NaN on subtotal and grand total rows, like the other window
+  functions.
 
 ## See Also
 

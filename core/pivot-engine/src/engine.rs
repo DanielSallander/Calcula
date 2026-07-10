@@ -125,6 +125,21 @@ pub(crate) struct FlatAxisItem {
     pub(crate) attribute_labels: Vec<String>,
 }
 
+/// Pre-computed row-axis data for visual calculations, built once per view
+/// and shared by every calculated cell.
+struct VisualRowData {
+    /// Row-total value maps, one per row item (used when no column fields exist).
+    row_values_totals: Vec<std::collections::HashMap<String, f64>>,
+    /// Per-column row value maps: [col_idx][row_idx] -> map. Populated when
+    /// column fields exist so ROWS-axis window functions read the CURRENT
+    /// column's values instead of row totals.
+    row_values_by_col: Vec<Vec<std::collections::HashMap<String, f64>>>,
+    /// Row field names by depth (reset/ISATLEVEL/LOOKUP resolution).
+    field_names_by_depth: Vec<String>,
+    /// Grand-total value map — computed even when the grand-total row is hidden.
+    grand_total_values: std::collections::HashMap<String, f64>,
+}
+
 // ============================================================================
 // PIVOT CALCULATOR
 // ============================================================================
@@ -1655,8 +1670,13 @@ impl<'a> PivotCalculator<'a> {
                     }
                 }
             } else {
-                // Rows, or columns without expanded children: original order
-                let my_index = items.len() as i32;
+                // Rows, or columns without expanded children: original order.
+                // With an AtTop subtotal the subtotal row is pushed BEFORE the
+                // main item, so the main item lands one slot later — compute
+                // its index up front so both the subtotal's parent_index and
+                // the children's parent_index point at the main item.
+                let at_top = wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop);
+                let my_index = items.len() as i32 + if at_top { 1 } else { 0 };
 
                 // Build the subtotal item lazily (used for both AtTop and AtBottom)
                 let build_subtotal = || {
@@ -1680,8 +1700,8 @@ impl<'a> PivotCalculator<'a> {
                     }
                 };
 
-                // SubtotalLocation::AtTop: insert subtotal BEFORE children
-                if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop) {
+                // SubtotalLocation::AtTop: insert subtotal BEFORE the main item
+                if at_top {
                     items.push(build_subtotal());
                 }
 
@@ -2066,20 +2086,23 @@ impl<'a> PivotCalculator<'a> {
                     group_values: item.group_values.clone(),
                 });
             }
-            // Calculated field columns (appended after col_item columns when column fields present)
+            // Calculated field columns: one per (column item × calc field),
+            // appended after the col_item columns to match the data cells.
             let calc_count = self.definition.calculated_fields.len();
             let calc_start = self.col_items.len();
-            for i in 0..calc_count {
-                let col_idx = row_label_cols + calc_start + i;
-                descriptors.push(PivotColumnDescriptor {
-                    view_col: col_idx,
-                    col_type: PivotColumnType::Data,
-                    depth: 0,
-                    width_hint: 100,
-                    parent_index: None,
-                    children_indices: Vec::new(),
-                    group_values: Vec::new(),
-                });
+            for (i, item) in self.col_items.iter().enumerate() {
+                for c in 0..calc_count {
+                    let col_idx = row_label_cols + calc_start + i * calc_count + c;
+                    descriptors.push(PivotColumnDescriptor {
+                        view_col: col_idx,
+                        col_type: PivotColumnType::Data,
+                        depth: item.depth as u8,
+                        width_hint: 100,
+                        parent_index: None,
+                        children_indices: Vec::new(),
+                        group_values: item.group_values.clone(),
+                    });
+                }
             }
         }
 
@@ -2294,12 +2317,21 @@ impl<'a> PivotCalculator<'a> {
                     };
                     cells.push(cell);
                 }
-                // Add calculated field headers after col_item columns
-                for cf in &self.definition.calculated_fields {
-                    if is_last_header {
-                        cells.push(PivotViewCell::column_header(cf.name.clone()));
-                    } else {
-                        cells.push(PivotViewCell::corner());
+                // Add calculated field headers after the col_item columns:
+                // one per (column item × calc field), matching the calculated
+                // data cells emitted per column intersection.
+                for item in &col_items_snap {
+                    for cf in &self.definition.calculated_fields {
+                        if is_last_header {
+                            let label = if item.is_grand_total {
+                                format!("{} (Total)", cf.name)
+                            } else {
+                                format!("{} ({})", cf.name, item.label)
+                            };
+                            cells.push(PivotViewCell::column_header(label));
+                        } else {
+                            cells.push(PivotViewCell::corner());
+                        }
                     }
                 }
             }
@@ -2345,26 +2377,11 @@ impl<'a> PivotCalculator<'a> {
                 .unwrap_or(false)
         });
 
-        let all_row_values: Vec<std::collections::HashMap<String, f64>> = if needs_visual_ctx {
-            row_items.iter().map(|item| {
-                self.prepare_row_key(&item.group_values);
-                let mut fv = std::collections::HashMap::new();
-                for (vf_idx, vf) in value_fields.iter().enumerate() {
-                    let aggregate = self.lookup_aggregate_col(&[], vf_idx, vf.aggregation);
-                    if let Some(fc) = self.cache.get_field(vf.source_index) {
-                        fv.insert(fc.name.clone(), aggregate);
-                    }
-                    fv.insert(vf.name.clone(), aggregate);
-                }
-                fv
-            }).collect()
+        let visual_data: Option<VisualRowData> = if needs_visual_ctx {
+            Some(self.build_visual_row_data(&row_items, &col_items, &value_fields))
         } else {
-            Vec::new()
+            None
         };
-
-        let field_names_by_depth: Vec<String> = self.effective_row_fields.iter()
-            .map(|f| f.name.clone())
-            .collect();
 
         for (row_idx, item) in row_items.iter().enumerate() {
             let view_row = view.row_count;
@@ -2489,11 +2506,7 @@ impl<'a> PivotCalculator<'a> {
             }
 
             // Generate data cells (using pre-cloned col_items/value_fields)
-            let vctx = if needs_visual_ctx {
-                Some((&row_items[..], &all_row_values[..], &field_names_by_depth[..]))
-            } else {
-                None
-            };
+            let vctx = visual_data.as_ref().map(|vd| (&row_items[..], vd));
             self.generate_data_cells_for_row(&mut cells, item, row_idx, &col_items, &value_fields, values_position, vctx);
 
             // Create row descriptor
@@ -2545,6 +2558,59 @@ impl<'a> PivotCalculator<'a> {
         String::new()
     }
     
+    /// Builds the shared per-view data that visual calculation functions need:
+    /// value maps for every row (as row totals AND per column intersection when
+    /// column fields exist), axis field names, and the grand-total value map
+    /// (computed even when the grand-total row is hidden).
+    fn build_visual_row_data(
+        &mut self,
+        row_items: &[FlatAxisItem],
+        col_items: &[FlatAxisItem],
+        value_fields: &[ValueField],
+    ) -> VisualRowData {
+        use std::collections::HashMap;
+
+        let build_map = |calc: &mut Self, col_values: &[ValueId]| -> HashMap<String, f64> {
+            let mut fv = HashMap::new();
+            for (vf_idx, vf) in value_fields.iter().enumerate() {
+                let aggregate = calc.lookup_aggregate_col(col_values, vf_idx, vf.aggregation);
+                if let Some(fc) = calc.cache.get_field(vf.source_index) {
+                    fv.insert(fc.name.clone(), aggregate);
+                }
+                fv.insert(vf.name.clone(), aggregate);
+            }
+            fv
+        };
+
+        let row_values_totals: Vec<HashMap<String, f64>> = row_items.iter().map(|item| {
+            self.prepare_row_key(&item.group_values);
+            build_map(self, &[])
+        }).collect();
+
+        // Per-column row maps so ROWS-axis window functions see the current
+        // column's values. Only needed when real column fields exist.
+        let row_values_by_col: Vec<Vec<HashMap<String, f64>>> = if self.effective_col_fields.is_empty() {
+            Vec::new()
+        } else {
+            col_items.iter().map(|ci| {
+                row_items.iter().map(|item| {
+                    self.prepare_row_key(&item.group_values);
+                    build_map(self, &ci.group_values)
+                }).collect()
+            }).collect()
+        };
+
+        self.prepare_row_key(&[]);
+        let grand_total_values = build_map(self, &[]);
+
+        VisualRowData {
+            row_values_totals,
+            row_values_by_col,
+            field_names_by_depth: self.effective_row_fields.iter().map(|f| f.name.clone()).collect(),
+            grand_total_values,
+        }
+    }
+
     /// Generates a single data row when there are no row fields.
     fn generate_single_data_row(&mut self, view: &mut PivotView, row_label_cols: usize) {
         let mut cells = Vec::new();
@@ -2573,9 +2639,24 @@ impl<'a> PivotCalculator<'a> {
         let col_items = std::mem::take(&mut self.col_items);
         let value_fields = self.definition.value_fields.clone();
         let values_position = self.definition.layout.values_position;
-        // Single-row view: no visual calc context (no row axis to traverse)
-        self.generate_data_cells_for_row(&mut cells, &grand_total_item, 0, &col_items, &value_fields, values_position, None);
-        
+
+        // Even with no row fields, visual-calc formulas need a valid (single
+        // grand-total row) context — an empty row_items slice would make the
+        // evaluators index out of bounds.
+        let needs_visual_ctx = self.definition.calculated_fields.iter().any(|cf| {
+            crate::calculated::parse_calc_formula(&cf.formula)
+                .map(|expr| crate::calculated::uses_visual_calc_functions(&expr))
+                .unwrap_or(false)
+        });
+        let single_items = vec![grand_total_item.clone()];
+        let visual_data: Option<VisualRowData> = if needs_visual_ctx {
+            Some(self.build_visual_row_data(&single_items, &col_items, &value_fields))
+        } else {
+            None
+        };
+        let vctx = visual_data.as_ref().map(|vd| (&single_items[..], vd));
+        self.generate_data_cells_for_row(&mut cells, &grand_total_item, 0, &col_items, &value_fields, values_position, vctx);
+
         let descriptor = PivotRowDescriptor {
             view_row: view.row_count,
             row_type: PivotRowType::GrandTotal,
@@ -2585,7 +2666,7 @@ impl<'a> PivotCalculator<'a> {
             children_indices: Vec::new(),
             group_values: grand_total_item.group_values,
         };
-        
+
         view.add_row(cells, descriptor);
 
         // Restore col_items
@@ -2602,7 +2683,7 @@ impl<'a> PivotCalculator<'a> {
         col_items: &[FlatAxisItem],
         value_fields: &[ValueField],
         values_position: ValuesPosition,
-        visual_ctx_data: Option<(&[FlatAxisItem], &[std::collections::HashMap<String, f64>], &[String])>,
+        visual_ctx_data: Option<(&[FlatAxisItem], &VisualRowData)>,
     ) {
         
         // Handle case with no value fields - generate blank cells
@@ -2687,13 +2768,14 @@ impl<'a> PivotCalculator<'a> {
                         if cf_idx >= self.definition.calculated_fields.len() { continue; }
                         let cf = &self.definition.calculated_fields[cf_idx];
 
-                        let result = if let Some((ri, rv, fnd)) = visual_ctx_data {
+                        let result = if let Some((ri, vd)) = visual_ctx_data {
                             let ctx = crate::calculated::VisualCalcContext {
                                 current_row_idx: row_idx,
                                 row_items: ri,
-                                row_values: rv,
-                                field_names_by_depth: fnd,
-                                col_ctx: None, // TODO: populate for COLUMNS axis support
+                                row_values: &vd.row_values_totals,
+                                field_names_by_depth: &vd.field_names_by_depth,
+                                grand_total_values: Some(&vd.grand_total_values),
+                                col_ctx: None,
                             };
                             crate::calculated::eval_calc_formula_with_ctx(&cf.formula, &field_values, &ctx)
                                 .unwrap_or_else(crate::calculated::CalcValue::Error)
@@ -2702,6 +2784,12 @@ impl<'a> PivotCalculator<'a> {
                                 .unwrap_or_else(crate::calculated::CalcValue::Error)
                         };
 
+                        // Make this calc field's value visible to calc fields
+                        // that come later in the column order (same-row refs).
+                        if let crate::calculated::CalcValue::Number(n) = &result {
+                            field_values.insert(cf.name.clone(), *n);
+                        }
+
                         // A number format only makes sense for numeric results; text /
                         // boolean / error results carry their own display.
                         let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
@@ -2709,6 +2797,9 @@ impl<'a> PivotCalculator<'a> {
                         if is_numeric {
                             cell.number_format = cf.number_format.clone();
                         }
+                        // Row context for drill-through (empty group_path would
+                        // drill the whole dataset).
+                        cell.group_path = Self::build_group_path(row_item);
 
                         if row_item.is_subtotal {
                             cell.cell_type = PivotCellType::RowSubtotal;
@@ -2723,6 +2814,13 @@ impl<'a> PivotCalculator<'a> {
                         cells.push(cell);
                     }
                 }
+            }
+        } else if value_fields.is_empty() {
+            // Column fields + calculated fields but no value fields: blank
+            // value cells (indexing value_fields[0] would panic); the
+            // calculated cells are appended below.
+            for _ in col_items {
+                cells.push(PivotViewCell::blank());
             }
         } else {
             // Generate cell for each column item
@@ -2830,6 +2928,11 @@ impl<'a> PivotCalculator<'a> {
 
     /// Generates cells for calculated fields by evaluating their formulas
     /// against the aggregated values of regular value fields.
+    ///
+    /// With column fields present this emits one cell per (column item ×
+    /// calculated field), evaluated at that column intersection; the column
+    /// descriptors and header rows emit matching columns so data rows and
+    /// headers stay aligned.
     fn generate_calculated_field_cells(
         &mut self,
         cells: &mut Vec<PivotViewCell>,
@@ -2838,7 +2941,7 @@ impl<'a> PivotCalculator<'a> {
         col_items: &[FlatAxisItem],
         value_fields: &[ValueField],
         _values_position: ValuesPosition,
-        row_visual_ctx: Option<(&[FlatAxisItem], &[std::collections::HashMap<String, f64>], &[String])>,
+        row_visual_ctx: Option<(&[FlatAxisItem], &VisualRowData)>,
     ) {
         use std::collections::HashMap;
 
@@ -2852,7 +2955,7 @@ impl<'a> PivotCalculator<'a> {
         });
 
         if col_items.is_empty() {
-            // No column fields - one cell per calculated field
+            // No column items - one cell per calculated field
             let mut field_values: HashMap<String, f64> = HashMap::new();
             for (vf_idx, vf) in value_fields.iter().enumerate() {
                 let aggregate = self.lookup_aggregate_col(&[], vf_idx, vf.aggregation);
@@ -2863,14 +2966,33 @@ impl<'a> PivotCalculator<'a> {
             }
 
             for cf in &calc_fields {
-                let result = crate::calculated::eval_calc_formula(&cf.formula, &field_values)
-                    .unwrap_or_else(crate::calculated::CalcValue::Error);
+                let result = if let Some((ri, vd)) = row_visual_ctx {
+                    let ctx = crate::calculated::VisualCalcContext {
+                        current_row_idx: row_idx,
+                        row_items: ri,
+                        row_values: &vd.row_values_totals,
+                        field_names_by_depth: &vd.field_names_by_depth,
+                        grand_total_values: Some(&vd.grand_total_values),
+                        col_ctx: None,
+                    };
+                    crate::calculated::eval_calc_formula_with_ctx(&cf.formula, &field_values, &ctx)
+                        .unwrap_or_else(crate::calculated::CalcValue::Error)
+                } else {
+                    crate::calculated::eval_calc_formula(&cf.formula, &field_values)
+                        .unwrap_or_else(crate::calculated::CalcValue::Error)
+                };
+
+                // Same-row visibility for calc fields defined later.
+                if let crate::calculated::CalcValue::Number(n) = &result {
+                    field_values.insert(cf.name.clone(), *n);
+                }
 
                 let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
                 let mut cell = PivotViewCell::data_value(result.into());
                 if is_numeric {
                     cell.number_format = cf.number_format.clone();
                 }
+                cell.group_path = Self::build_group_path(row_item);
 
                 if row_item.is_subtotal {
                     cell.cell_type = PivotCellType::RowSubtotal;
@@ -2902,6 +3024,9 @@ impl<'a> PivotCalculator<'a> {
             } else {
                 Vec::new()
             };
+            let col_field_names: Vec<String> = self.effective_col_fields.iter()
+                .map(|f| f.name.clone())
+                .collect();
 
             for (col_idx, col_item) in col_items.iter().enumerate() {
                 let col_group_values = &col_item.group_values;
@@ -2923,24 +3048,34 @@ impl<'a> PivotCalculator<'a> {
                                 current_col_idx: col_idx,
                                 col_items,
                                 col_values: &all_col_values,
+                                field_names_by_depth: &col_field_names,
                             })
                         } else {
                             None
                         };
-                        let (ri, rv, fnd) = match row_visual_ctx {
-                            Some((ri, rv, fnd)) => (ri, rv, fnd),
-                            None => {
-                                let empty_ri: &[FlatAxisItem] = &[];
-                                let empty_rv: &[std::collections::HashMap<String, f64>] = &[];
-                                let empty_fnd: &[String] = &[];
-                                (empty_ri, empty_rv, empty_fnd)
-                            }
+                        // ROWS-axis functions must see the CURRENT column's row
+                        // values, not row totals — per-column maps when available.
+                        let empty_ri: &[FlatAxisItem] = &[];
+                        let empty_rv: &[std::collections::HashMap<String, f64>] = &[];
+                        let empty_fnd: &[String] = &[];
+                        let (ri, rv, fnd, gt) = match row_visual_ctx {
+                            Some((ri, vd)) => (
+                                ri,
+                                vd.row_values_by_col
+                                    .get(col_idx)
+                                    .map(|v| &v[..])
+                                    .unwrap_or(&vd.row_values_totals[..]),
+                                &vd.field_names_by_depth[..],
+                                Some(&vd.grand_total_values),
+                            ),
+                            None => (empty_ri, empty_rv, empty_fnd, None),
                         };
                         let ctx = crate::calculated::VisualCalcContext {
                             current_row_idx: row_idx,
                             row_items: ri,
                             row_values: rv,
                             field_names_by_depth: fnd,
+                            grand_total_values: gt,
                             col_ctx,
                         };
                         crate::calculated::eval_calc_formula_with_ctx(&cf.formula, &field_values, &ctx)
@@ -2950,11 +3085,25 @@ impl<'a> PivotCalculator<'a> {
                             .unwrap_or_else(crate::calculated::CalcValue::Error)
                     };
 
+                    // Same-row visibility for calc fields defined later.
+                    if let crate::calculated::CalcValue::Number(n) = &result {
+                        field_values.insert(cf.name.clone(), *n);
+                    }
+
                     let is_numeric = matches!(result, crate::calculated::CalcValue::Number(_));
                     let mut cell = PivotViewCell::data_value(result.into());
                     if is_numeric {
                         cell.number_format = cf.number_format.clone();
                     }
+
+                    // Row + column context for drill-through.
+                    let mut group_path = Self::build_group_path(row_item);
+                    for (i, &val) in col_item.group_values.iter().enumerate() {
+                        if val != VALUE_ID_EMPTY && i < col_item.field_indices.len() {
+                            group_path.push((col_item.field_indices[i], val));
+                        }
+                    }
+                    cell.group_path = group_path;
 
                     let is_row_total = row_item.is_subtotal || row_item.is_grand_total;
                     let is_col_total = col_item.is_subtotal || col_item.is_grand_total;
@@ -3577,6 +3726,210 @@ mod tests {
         assert_eq!(view.filter_row_count, 2);
         assert_eq!(view.filter_rows.len(), 1);
         assert_eq!(view.filter_rows[0].field_name, "Region");
+    }
+
+    /// Every data/header row in a view must have exactly view.col_count cells —
+    /// misalignment paints cells outside the table frame.
+    fn assert_view_aligned(view: &PivotView) {
+        for (i, row_cells) in view.cells.iter().enumerate() {
+            assert_eq!(
+                row_cells.len(),
+                view.col_count,
+                "row {} has {} cells but view.col_count is {}",
+                i,
+                row_cells.len(),
+                view.col_count
+            );
+        }
+    }
+
+    #[test]
+    fn test_calc_columns_stay_aligned_with_column_fields() {
+        use crate::definition::CalculatedField;
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition(); // Region rows, Product cols
+        definition.calculated_fields.push(CalculatedField {
+            name: "Dbl".to_string(),
+            formula: "'Sum of Sales' * 2".to_string(),
+            number_format: None,
+        });
+
+        let view = calculate_pivot(&definition, &mut cache);
+        assert_view_aligned(&view);
+    }
+
+    #[test]
+    fn test_rows_axis_window_uses_current_column_not_row_totals() {
+        use crate::definition::CalculatedField;
+        use crate::view::PivotCellValue;
+
+        // ROWS: Region (North, South), COLUMNS: Product, values per intersection:
+        // North/Apples=100, North/Oranges=150, South/Apples=200, South/Oranges=250.
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.calculated_fields.push(CalculatedField {
+            name: "Prev".to_string(),
+            formula: "PREVIOUS('Sum of Sales')".to_string(),
+            number_format: None,
+        });
+
+        let view = calculate_pivot(&definition, &mut cache);
+        assert_view_aligned(&view);
+
+        // The South row's Prev cell for the Apples column must be North/Apples
+        // (100), not North's row total (250).
+        let mut south_prev_values: Vec<f64> = Vec::new();
+        for (row_cells, desc) in view.cells.iter().zip(view.rows.iter()) {
+            if desc.row_type != PivotRowType::Data { continue; }
+            let is_south = row_cells.iter().any(|c| {
+                matches!(&c.value, crate::view::PivotCellValue::Text(t) if t == "South")
+            });
+            if !is_south { continue; }
+            for cell in row_cells {
+                if let PivotCellValue::Number(n) = cell.value {
+                    south_prev_values.push(n);
+                }
+            }
+        }
+        assert!(
+            south_prev_values.contains(&100.0),
+            "South row should contain Prev(Apples)=100 (per-column context); cells: {:?}",
+            south_prev_values
+        );
+        assert!(
+            !south_prev_values.contains(&250.0) || south_prev_values.contains(&100.0),
+            "Prev must not be computed from row totals"
+        );
+    }
+
+    #[test]
+    fn test_attop_subtotals_keep_hierarchy_intact() {
+        use crate::definition::{SubtotalLocation, ReportLayout};
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.column_fields.clear();
+        definition.row_fields.push(PivotField::new(1, "Product".to_string()));
+        definition.layout.report_layout = ReportLayout::Outline;
+        definition.layout.subtotal_location = SubtotalLocation::AtTop;
+
+        let mut calc = PivotCalculator::new(&definition, &mut cache);
+        let _view = calc.calculate();
+
+        for (i, item) in calc.row_items.iter().enumerate() {
+            if item.parent_index < 0 { continue; }
+            let parent = &calc.row_items[item.parent_index as usize];
+            assert!(
+                !parent.is_subtotal,
+                "item {} ('{}') must not have a subtotal row as its parent",
+                i,
+                item.label
+            );
+            assert!(
+                item.is_subtotal || parent.has_children,
+                "item {} ('{}') should point at a real group row",
+                i,
+                item.label
+            );
+        }
+    }
+
+    #[test]
+    fn test_no_row_fields_with_visual_calc_does_not_panic() {
+        use crate::definition::CalculatedField;
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition(); // keeps Product columns
+        definition.row_fields.clear();
+        definition.calculated_fields.push(CalculatedField {
+            name: "Run".to_string(),
+            formula: "RUNNINGSUM('Sum of Sales') + PARENT('Sum of Sales') + ISATLEVEL(Product)".to_string(),
+            number_format: None,
+        });
+
+        // This used to index an empty row_items slice and panic.
+        let view = calculate_pivot(&definition, &mut cache);
+        assert!(view.row_count > 0);
+        assert_view_aligned(&view);
+    }
+
+    #[test]
+    fn test_calc_fields_with_columns_but_no_value_fields() {
+        use crate::definition::CalculatedField;
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition(); // Region rows, Product cols
+        definition.value_fields.clear();
+        definition.calculated_fields.push(CalculatedField {
+            name: "Const".to_string(),
+            formula: "1 + 1".to_string(),
+            number_format: None,
+        });
+
+        // Used to index value_fields[0] on an empty vec and panic.
+        let view = calculate_pivot(&definition, &mut cache);
+        assert!(view.row_count > 0);
+        assert_view_aligned(&view);
+    }
+
+    #[test]
+    fn test_calc_field_can_reference_earlier_calc_field() {
+        use crate::definition::CalculatedField;
+        use crate::view::PivotCellValue;
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.column_fields.clear();
+        definition.calculated_fields.push(CalculatedField {
+            name: "Dbl".to_string(),
+            formula: "'Sum of Sales' * 2".to_string(),
+            number_format: None,
+        });
+        definition.calculated_fields.push(CalculatedField {
+            name: "DblPlus".to_string(),
+            formula: "Dbl + 1".to_string(),
+            number_format: None,
+        });
+
+        let view = calculate_pivot(&definition, &mut cache);
+        // North aggregates to 250 -> Dbl 500 -> DblPlus 501.
+        let found = view.cells.iter().flatten().any(|c| {
+            matches!(c.value, PivotCellValue::Number(n) if n == 501.0)
+        });
+        assert!(found, "a calc field referencing an earlier calc field should evaluate");
+    }
+
+    #[test]
+    fn test_grandtotal_calc_survives_hidden_grand_total_row() {
+        use crate::definition::CalculatedField;
+        use crate::view::PivotCellValue;
+
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.column_fields.clear();
+        definition.layout.show_row_grand_totals = false;
+        definition.calculated_fields.push(CalculatedField {
+            name: "Pct".to_string(),
+            formula: "'Sum of Sales' / GRANDTOTAL('Sum of Sales')".to_string(),
+            number_format: None,
+        });
+
+        let view = calculate_pivot(&definition, &mut cache);
+        // North 250/700, South 450/700 — must be numbers, not NaN.
+        let mut pcts: Vec<f64> = view.cells.iter().flatten().filter_map(|c| {
+            if let PivotCellValue::Number(n) = c.value {
+                if n > 0.0 && n < 1.0 { Some(n) } else { None }
+            } else {
+                None
+            }
+        }).collect();
+        pcts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(
+            pcts.iter().any(|p| (p - 250.0 / 700.0).abs() < 1e-9),
+            "percent-of-total must work with grand totals hidden; got {:?}",
+            pcts
+        );
     }
 
     #[test]

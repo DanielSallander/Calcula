@@ -20,6 +20,7 @@ CALC AboveAvg = [TotalSales] - CHILDREN([TotalSales])
 ## Behavior
 
 - At a Year row with 3 Country children: returns average of the 3 countries' values.
+- At the grand total row: returns the average of the top-level rows.
 - At a leaf row (no children): returns the leaf's own value.
 - Subtotal rows are excluded from the average.
 

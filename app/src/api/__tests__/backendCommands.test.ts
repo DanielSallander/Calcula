@@ -78,6 +78,11 @@ const KNOWN_SAFE_HEURISTIC_MATCHES: Record<string, string> = {
     "over the active sheet (reads cell display values, matches criteria, sets the " +
     "hidden-row set / returns matched rows). Initiates no code execution — the " +
     "server-side twin of set_advanced_filter_hidden_rows.",
+  run_design_query:
+    "matches the 'run_' heuristic but is feature-open: headless BI design-query " +
+    "compute (the pivot compute pipeline, read-only against a workbook BI " +
+    "connection's model; no grid write, no code execution) — the data source " +
+    "behind design-query charts and grid reports.",
 };
 
 describe("backend command capability model (A3)", () => {

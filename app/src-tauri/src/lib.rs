@@ -3915,6 +3915,7 @@ pub fn run() {
             // Sheet commands
             sheets::get_sheets,
             sheets::get_active_sheet,
+            sheets::get_sheet_ids,
             sheets::get_show_gridlines,
             sheets::set_show_gridlines,
             sheets::set_active_sheet,

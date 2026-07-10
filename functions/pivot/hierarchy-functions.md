@@ -6,21 +6,25 @@ Hierarchy functions navigate the row axis tree structure. When a pivot table has
 
 Returns the value of a field at the parent hierarchy level. Useful for percentage-of-parent calculations.
 
-**Syntax:** `PARENT(field)`
+**Syntax:** `PARENT(field, [levels])`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | field | Field reference or expression | Yes | The value to look up at the parent level |
+| levels | Number | No | Number of levels to go up (default: 1, must be >= 1) |
 
 **Examples:**
 ```
 CALC PctOfParent = [TotalSales] / PARENT([TotalSales])
 CALC DiffFromParent = [TotalSales] - PARENT([TotalSales])
+CALC TwoLevelsUp = PARENT([TotalSales], 2)
 ```
 
 **Behavior:**
 - For a City row, returns the Country-level value
 - For a Country row, returns the Year-level value
+- `PARENT(field, 2)` goes up two levels, and so on; walking past the top
+  level returns the grand total value
 - For a top-level row (no parent), returns the grand total value
 - For the grand total row, returns NaN
 
@@ -54,7 +58,9 @@ CALC ShareOfAll = [Revenue] / GRANDTOTAL([Revenue])
 
 **Behavior:**
 - Always returns the same value regardless of the current row's depth
-- Returns NaN if no grand total row exists (grand totals disabled)
+- Works even when the grand total row is hidden in the layout — the value is
+  computed from the cache, so percent-of-total calculations keep working with
+  grand totals disabled
 
 ---
 
@@ -76,6 +82,7 @@ CALC AboveAvg = [TotalSales] - CHILDREN([TotalSales])
 
 **Behavior:**
 - At a Year row with 3 Country children: returns average of the 3 countries' values
+- At the grand total row: returns the average of the top-level rows
 - At a leaf row (no children): returns the leaf's own value
 - Subtotal rows are excluded from the average
 

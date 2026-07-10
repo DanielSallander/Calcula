@@ -29,8 +29,12 @@ CALC RunByParent = RUNNINGSUM([TotalSales], LOWESTPARENT)
 | 2025 Q1 | 120 | 570 | 120 (restarted) |
 | 2025 Q2 | 160 | 730 | 280 |
 
+- The window only contains rows at the **same hierarchy level** as the current
+  row; a parent group row accumulates over the other rows at its level.
 - Subtotal and grand total rows are excluded from the running sum and return NaN.
 - The sum includes the current row.
+- An optional trailing `ROWS`/`COLUMNS` axis keyword may follow the reset
+  (see [Reset Parameter](reset-parameter.md)).
 
 ## See Also
 

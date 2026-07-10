@@ -68,6 +68,50 @@ function triggerControlValueRecalc(names?: string[]): void {
 
 let cachedFilters: RibbonFilter[] = [];
 
+/** False until the first successful cache populate: the initial load (activate /
+ *  file open) must NOT diff-dispatch value events — reports would re-query on
+ *  every workbook open. */
+let cacheInitialized = false;
+
+/** Fire the app-wide facade event for one ribbon filter's value change.
+ *  `value` undefined = the name no longer resolves (filter deleted/renamed). */
+function dispatchFilterValueChanged(
+  id: string,
+  name: string,
+  value: ControlValue | undefined,
+): void {
+  const detail: ControlValueChangedDetail = { id, name, value, transient: false };
+  window.dispatchEvent(new CustomEvent(CONTROL_VALUE_CHANGED, { detail }));
+}
+
+/** Diff two filter snapshots and dispatch CONTROL_VALUE_CHANGED for every
+ *  observable value change: selection changes arriving OUTSIDE
+ *  updateFilterSelectionAsync (undo/redo, .calp pull), renames (old name stops
+ *  resolving, new name starts), deletions and creations. This is what keeps
+ *  @Name-bound consumers (grid reports) in sync with non-interactive changes. */
+function dispatchFilterValueDiffs(previous: RibbonFilter[], next: RibbonFilter[]): void {
+  const prevById = new Map(previous.map((f) => [f.id, f]));
+  for (const filter of next) {
+    const old = prevById.get(filter.id);
+    prevById.delete(filter.id);
+    if (!old) {
+      // Created (e.g. redo of a create): @Name references start resolving.
+      dispatchFilterValueChanged(filter.id, filter.name, filterControlValue(filter.selectedItems));
+      continue;
+    }
+    if (old.name !== filter.name) {
+      // Renamed: the old name stops resolving, the new one starts.
+      dispatchFilterValueChanged(filter.id, old.name, undefined);
+      dispatchFilterValueChanged(filter.id, filter.name, filterControlValue(filter.selectedItems));
+    } else if (JSON.stringify(old.selectedItems) !== JSON.stringify(filter.selectedItems)) {
+      dispatchFilterValueChanged(filter.id, filter.name, filterControlValue(filter.selectedItems));
+    }
+  }
+  for (const gone of prevById.values()) {
+    dispatchFilterValueChanged(gone.id, gone.name, undefined);
+  }
+}
+
 /** Cached items per filter (filter id -> items). Refreshed on demand. */
 const itemsCache = new Map<string, SlicerItem[]>();
 
@@ -121,6 +165,9 @@ export async function createFilterAsync(
     // GET.CONTROLVALUE: formulas already bound to the new filter's name pick
     // up its value ("(All)" while nothing is selected) instead of staying #N/A.
     triggerControlValueRecalc([filter.name]);
+    // The cache was set directly (no refreshCache diff): notify @Name-bound
+    // consumers that this name now resolves.
+    dispatchFilterValueChanged(filter.id, filter.name, filterControlValue(filter.selectedItems));
     window.dispatchEvent(
       new CustomEvent(FilterPaneEvents.FILTER_CREATED, { detail: filter }),
     );
@@ -185,9 +232,12 @@ export async function updateFilterSelectionAsync(
   filterId: string,
   selectedItems: string[] | null,
 ): Promise<void> {
+  // Optimistic local update — rolled back if the backend rejects, so the cache
+  // (which feeds getControlValue/@Name substitution) never holds a selection
+  // that was never persisted.
+  const filter = cachedFilters.find((f) => f.id === filterId);
+  const previousSelection = filter ? filter.selectedItems : null;
   try {
-    // Optimistic local update
-    const filter = cachedFilters.find((f) => f.id === filterId);
     if (filter) {
       filter.selectedItems = selectedItems;
     }
@@ -222,15 +272,17 @@ export async function updateFilterSelectionAsync(
     // pane control. Non-transient — a ribbon selection is a committed change,
     // never a mid-drag preview frame.
     if (updatedFilter) {
-      const detail: ControlValueChangedDetail = {
-        id: updatedFilter.id,
-        name: updatedFilter.name,
-        value: filterControlValue(selectedItems),
-        transient: false,
-      };
-      window.dispatchEvent(new CustomEvent(CONTROL_VALUE_CHANGED, { detail }));
+      dispatchFilterValueChanged(
+        updatedFilter.id,
+        updatedFilter.name,
+        filterControlValue(selectedItems),
+      );
     }
   } catch (err) {
+    // Roll back the optimistic update: the backend never saw this selection.
+    if (filter) {
+      filter.selectedItems = previousSelection;
+    }
     console.error("[FilterPane] Failed to update filter selection:", err);
   }
 }
@@ -356,8 +408,15 @@ export async function refreshConnectionInfo(): Promise<void> {
 
 export async function refreshCache(): Promise<void> {
   try {
+    const previous = cacheInitialized ? cachedFilters : null;
     cachedFilters = await api.getAllRibbonFilters();
+    cacheInitialized = true;
     await refreshConnectionInfo();
+    // Backend-side changes (undo/redo restores, .calp pulls) reach the cache
+    // only through here — diff so @Name-bound consumers hear about them.
+    if (previous) {
+      dispatchFilterValueDiffs(previous, cachedFilters);
+    }
     window.dispatchEvent(new CustomEvent(FilterPaneEvents.FILTERS_REFRESHED));
   } catch (err) {
     console.error("[FilterPane] Failed to refresh cache:", err);
@@ -372,6 +431,7 @@ export async function refreshAllItems(): Promise<void> {
 /** Clear all cached state (used on extension deactivation). */
 export function clearCache(): void {
   cachedFilters = [];
+  cacheInitialized = false;
   itemsCache.clear();
   connectionInfoCache = new Map();
 }

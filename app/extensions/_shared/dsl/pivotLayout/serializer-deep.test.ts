@@ -178,6 +178,75 @@ describe('serialize calculated fields', () => {
     expect(xIdx).toBeLessThan(bIdx);
     expect(bIdx).toBeLessThan(yIdx);
   });
+
+  it('quotes calc names that are not plain identifiers', () => {
+    const values = [
+      zf('Net Sales', {
+        isCalculated: true,
+        calculatedFormula: '[Sales] - [Returns]',
+        customName: 'Net Sales',
+      }),
+    ];
+
+    const { text, ast, errors } = roundTrip([], [], values, [], emptyLayout);
+    expect(text).toContain('CALC "Net Sales" = [Sales] - [Returns]');
+    expect(errors).toHaveLength(0);
+    expect(ast.calculatedFields).toHaveLength(1);
+    expect(ast.calculatedFields[0].name).toBe('Net Sales');
+  });
+
+  it('quotes calc names that collide with DSL keywords', () => {
+    const values = [
+      zf('Top', {
+        isCalculated: true,
+        calculatedFormula: '[Sales] * 2',
+        customName: 'Top',
+      }),
+    ];
+
+    const { text, ast, errors } = roundTrip([], [], values, [], emptyLayout);
+    expect(text).toContain('CALC "Top" = [Sales] * 2');
+    expect(errors).toHaveLength(0);
+    expect(ast.calculatedFields[0].name).toBe('Top');
+  });
+
+  it('emits standalone CALC clauses for options.calculatedFields not in values', () => {
+    const values = [valueField('Sales')];
+    const options: SerializeOptions = {
+      calculatedFields: [
+        { name: 'Margin', formula: '[Sales] * 0.2' },
+        { name: 'Net Margin', formula: '[Sales] - [Cost]' },
+      ],
+    };
+
+    const { text, ast, errors } = roundTrip([], [], values, [], emptyLayout, options);
+    expect(text).toContain('CALC: Margin = [Sales] * 0.2');
+    expect(text).toContain('CALC: "Net Margin" = [Sales] - [Cost]');
+    expect(errors).toHaveLength(0);
+    expect(ast.calculatedFields).toHaveLength(2);
+    expect(ast.calculatedFields.map(c => c.name)).toEqual(['Margin', 'Net Margin']);
+  });
+
+  it('does not duplicate calcs already emitted inline in VALUES', () => {
+    const values = [
+      valueField('Sales'),
+      zf('Margin', {
+        isCalculated: true,
+        calculatedFormula: '[Sales] * 0.2',
+        customName: 'Margin',
+      }),
+    ];
+    const options: SerializeOptions = {
+      calculatedFields: [{ name: 'Margin', formula: '[Sales] * 0.2' }],
+    };
+
+    const { text, ast, errors } = roundTrip([], [], values, [], emptyLayout, options);
+    expect(errors).toHaveLength(0);
+    // Exactly one CALC — the inline one; no standalone duplicate
+    const calcCount = (text.match(/CALC/g) ?? []).length;
+    expect(calcCount).toBe(1);
+    expect(ast.calculatedFields).toHaveLength(1);
+  });
 });
 
 // ============================================================================

@@ -384,6 +384,123 @@ describe("updateFilterSelectionAsync", () => {
     });
     dispatchSpy.mockRestore();
   });
+
+  it("on backend failure: no CONTROL_VALUE_CHANGED, optimistic update rolled back", async () => {
+    mockUpdateRibbonFilterSelection.mockRejectedValue(new Error("backend down"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    await updateFilterSelectionAsync("f-1", ["X"]);
+
+    expect(controlValueDetail(dispatchSpy)).toBeUndefined();
+    // The cache must not keep a selection the backend never persisted —
+    // getControlValue/@Name substitution reads it.
+    expect(getFilterById("f-1")?.selectedItems).toBeNull();
+    expect(mockApplyRibbonFilter).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+    err.mockRestore();
+  });
+});
+
+// ============================================================================
+// refreshCache value-diff dispatch (undo/redo, rename, delete, external change)
+// ============================================================================
+
+describe("refreshCache CONTROL_VALUE_CHANGED diff", () => {
+  /** All CONTROL_VALUE_CHANGED details captured by a dispatchEvent spy. */
+  function controlValueDetails(
+    spy: ReturnType<typeof vi.spyOn>,
+  ): ControlValueChangedDetail[] {
+    const out: ControlValueChangedDetail[] = [];
+    for (const call of spy.mock.calls) {
+      const ev = call[0] as CustomEvent<ControlValueChangedDetail>;
+      if (ev?.type === CONTROL_VALUE_CHANGED) out.push(ev.detail);
+    }
+    return out;
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    clearCache();
+    // Seed: one filter, selection ["A"] — this initial populate must NOT dispatch.
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", name: "Region", selectedItems: ["A"] }),
+    ]);
+    await refreshCache();
+  });
+
+  it("does not dispatch on the first populate after clearCache (file open)", async () => {
+    clearCache();
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([]);
+    dispatchSpy.mockRestore();
+  });
+
+  it("dispatches when a selection changed backend-side (undo/redo path)", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", name: "Region", selectedItems: ["B", "C"] }),
+    ]);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([
+      {
+        id: "f-1",
+        name: "Region",
+        value: { kind: "textList", value: ["B", "C"] },
+        transient: false,
+      },
+    ]);
+    dispatchSpy.mockRestore();
+  });
+
+  it("dispatches old-name-undefined + new-name-value on rename", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", name: "Area", selectedItems: ["A"] }),
+    ]);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([
+      { id: "f-1", name: "Region", value: undefined, transient: false },
+      { id: "f-1", name: "Area", value: { kind: "text", value: "A" }, transient: false },
+    ]);
+    dispatchSpy.mockRestore();
+  });
+
+  it("dispatches name-undefined when a filter is deleted", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([]);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([
+      { id: "f-1", name: "Region", value: undefined, transient: false },
+    ]);
+    dispatchSpy.mockRestore();
+  });
+
+  it("dispatches for a filter appearing in the cache (redo of create)", async () => {
+    mockGetAllRibbonFilters.mockResolvedValue([
+      makeFilter({ id: "f-1", name: "Region", selectedItems: ["A"] }),
+      makeFilter({ id: "f-2", name: "Category", selectedItems: null }),
+    ]);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([
+      {
+        id: "f-2",
+        name: "Category",
+        value: { kind: "text", value: "(All)" },
+        transient: false,
+      },
+    ]);
+    dispatchSpy.mockRestore();
+  });
+
+  it("does not dispatch when nothing changed", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    await refreshCache();
+    expect(controlValueDetails(dispatchSpy)).toEqual([]);
+    dispatchSpy.mockRestore();
+  });
 });
 
 // ============================================================================

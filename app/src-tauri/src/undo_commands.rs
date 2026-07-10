@@ -824,13 +824,25 @@ fn apply_report_restore(
         }
     }
 
-    // Drop any merged regions inside the restored box (report merges become stale
-    // on undo; pre-op the box was typically empty of merges).
+    // --- Restore merged regions inside the box (capture current for redo) ---
+    // The snapshot carries the box's merges as they were (report header merges
+    // + any pre-existing user merges); swap them in on the REPORT'S sheet (the
+    // per-sheet store when it isn't the active one).
+    let mut inverse_merges: Vec<crate::MergedRegion> = Vec::new();
     if let (Some(first), Some(last)) = (snapshot.cells.first(), snapshot.cells.last()) {
         let (sr, sc, er, ec) = (first.0, first.1, last.0, last.1);
-        let mut merged = state.merged_regions.lock().unwrap();
-        merged.retain(|m| {
-            !(m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+        crate::report::with_sheet_merges(state, snapshot.sheet_index, |merged| {
+            inverse_merges = merged
+                .iter()
+                .filter(|m| m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+                .cloned()
+                .collect();
+            merged.retain(|m| {
+                !(m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+            });
+            for m in &snapshot.merges {
+                merged.insert(m.clone());
+            }
         });
     }
 
@@ -852,6 +864,7 @@ fn apply_report_restore(
             sheet_index: snapshot.sheet_index,
             cells: inverse_cells,
             definitions: current_defs,
+            merges: inverse_merges,
         })
         .unwrap_or_default(),
     });

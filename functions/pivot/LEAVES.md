@@ -28,6 +28,7 @@ Given **ROWS: Year, Country, City**:
 | - Sweden | 6000 | 750 (avg of 8 Swedish cities) |
 | -- Stockholm | 2000 | 2000 (leaf, returns own value) |
 
+- At the grand total row: returns the average across ALL leaf rows.
 - At a parent row: returns the average of only its leaf descendants.
 - At a leaf row: returns its own value.
 

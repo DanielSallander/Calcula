@@ -62,6 +62,42 @@ function triggerControlValueRecalc(names?: string[]): void {
 
 let cachedControls: PaneControl[] = [];
 
+/** False until the first successful cache populate: the initial load must not
+ *  diff-dispatch value events (reports would re-query on every workbook open). */
+let cacheInitialized = false;
+
+/** Diff two control snapshots and dispatch CONTROL_VALUE_CHANGED for every
+ *  observable value change arriving OUTSIDE commitValue (undo/redo restores,
+ *  renames, deletions) — keeps @Name-bound consumers (grid reports) in sync.
+ *  App-wide event only: the pane-local counterpart is for live card updates,
+ *  which CONTROLS_REFRESHED already covers on this path. */
+function dispatchControlValueDiffs(previous: PaneControl[], next: PaneControl[]): void {
+  const fire = (id: string, name: string, value: ControlValue | undefined) => {
+    const detail: ControlValueChangedDetail = { id, name, value, transient: false };
+    window.dispatchEvent(new CustomEvent(CONTROL_VALUE_CHANGED, { detail }));
+  };
+  const prevById = new Map(previous.map((c) => [c.id, c]));
+  for (const control of next) {
+    const old = prevById.get(control.id);
+    prevById.delete(control.id);
+    if (!old) {
+      if (control.value !== undefined && control.value !== null) {
+        fire(control.id, control.name, control.value);
+      }
+      continue;
+    }
+    if (old.name !== control.name) {
+      fire(control.id, old.name, undefined);
+      fire(control.id, control.name, control.value ?? undefined);
+    } else if (JSON.stringify(old.value ?? null) !== JSON.stringify(control.value ?? null)) {
+      fire(control.id, control.name, control.value ?? undefined);
+    }
+  }
+  for (const gone of prevById.values()) {
+    fire(gone.id, gone.name, undefined);
+  }
+}
+
 // ============================================================================
 // Accessors
 // ============================================================================
@@ -94,6 +130,11 @@ export async function createControlAsync(
     // GET.CONTROLVALUE: formulas already bound to the new control's name pick
     // up its initial value (value-less controls stay #N/A — recalc is a no-op).
     triggerControlValueRecalc([control.name]);
+    // The cache was set directly (no refreshControlsCache diff): notify
+    // @Name-bound consumers that this name now resolves.
+    if (control.value !== undefined && control.value !== null) {
+      dispatchValueChanged(control, control.value, false);
+    }
     window.dispatchEvent(
       new CustomEvent(ControlsPaneEvents.CONTROL_CREATED, { detail: control }),
     );
@@ -271,7 +312,14 @@ export function buildNamedControlList(): NamedControl[] {
 
 export async function refreshControlsCache(): Promise<void> {
   try {
+    const previous = cacheInitialized ? cachedControls : null;
     cachedControls = await api.getAllPaneControls();
+    cacheInitialized = true;
+    // Backend-side changes (undo/redo restores, renames, deletes) reach the
+    // cache only through here — diff so @Name-bound consumers hear about them.
+    if (previous) {
+      dispatchControlValueDiffs(previous, cachedControls);
+    }
     window.dispatchEvent(
       new CustomEvent(ControlsPaneEvents.CONTROLS_REFRESHED),
     );
@@ -283,4 +331,5 @@ export async function refreshControlsCache(): Promise<void> {
 /** Clear all cached state (used on extension deactivation). */
 export function clearControlsCache(): void {
   cachedControls = [];
+  cacheInitialized = false;
 }

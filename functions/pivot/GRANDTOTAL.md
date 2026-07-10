@@ -20,7 +20,9 @@ CALC ShareOfAll = [Revenue] / GRANDTOTAL([Revenue])
 ## Behavior
 
 - Always returns the same value regardless of the current row's depth.
-- Returns NaN if no grand total row exists (grand totals disabled in layout).
+- Works even when the grand total row is hidden in the layout — the value is
+  computed from the cache, so percent-of-total calculations keep working with
+  grand totals disabled.
 
 **Alias:** `COLLAPSEALL` (PowerBI-compatible)
 

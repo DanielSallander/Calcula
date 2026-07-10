@@ -60,13 +60,26 @@ pub(crate) fn has_fields_configured(definition: &PivotDefinition) -> bool {
         || !definition.value_fields.is_empty()
 }
 
-/// Safely calculate pivot - returns empty view if no fields configured
+/// Safely calculate pivot - returns empty view if no fields configured.
+/// Also catches panics from the calculation: callers hold PivotState mutexes,
+/// and an unwinding panic would poison them and break every later pivot call.
 pub(crate) fn safe_calculate_pivot(definition: &PivotDefinition, cache: &mut PivotCache) -> PivotView {
     if !has_fields_configured(definition) {
         log_debug!("PIVOT", "No fields configured, returning empty view");
         return create_empty_view(definition.id, definition.version);
     }
-    calculate_pivot(definition, cache)
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| calculate_pivot(definition, cache))) {
+        Ok(view) => view,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            log_debug!("PIVOT", "calculate_pivot panicked: {}", msg);
+            create_empty_view(definition.id, definition.version)
+        }
+    }
 }
 
 /// Builds a PivotCache from grid data.

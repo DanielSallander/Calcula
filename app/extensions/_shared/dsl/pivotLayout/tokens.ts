@@ -33,6 +33,7 @@ export enum TokenType {
   Identifier = 'IDENTIFIER',         // Region, Sales, tabular
   DottedIdentifier = 'DOTTED_IDENT', // Customers.Region
   BracketIdentifier = 'BRACKET_ID',  // [Total Revenue]
+  SingleQuotedIdentifier = 'SQUOTE_ID', // 'Total Sales' (CALC expression references)
   StringLiteral = 'STRING',          // "Sweden"
   NumberLiteral = 'NUMBER',          // 10, 3.14
 
@@ -125,6 +126,19 @@ export const VISUAL_CALC_FUNCTIONS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * Engine-supported aliases for visual-calc functions (kept separate from
+ * VISUAL_CALC_FUNCTIONS so the canonical list stays stable). The engine
+ * treats COLLAPSE=PARENT, COLLAPSEALL=GRANDTOTAL, EXPAND=CHILDREN,
+ * EXPANDALL=LEAVES (core/pivot-engine/src/calculated.rs).
+ */
+export const CALC_FUNCTION_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['collapse', 'Alias of PARENT — value at parent level'],
+  ['collapseall', 'Alias of GRANDTOTAL — value at grand total level'],
+  ['expand', 'Alias of CHILDREN — average of direct child values'],
+  ['expandall', 'Alias of LEAVES — average of leaf-level values'],
+]);
+
+/**
  * Transformation function names for CALC expressions. Unlike visual-calc
  * functions, these are pure/post-aggregation (no reset/axis parameter) and can
  * return text or booleans as well as numbers. Evaluated in the Rust engine
@@ -152,6 +166,7 @@ export const TRANSFORM_FUNCTIONS: ReadonlyMap<string, string> = new Map([
   ['power', 'POWER(base, exponent)'],
   // Text
   ['concat', 'CONCAT(a, b, …) — join values as text'],
+  ['concatenate', 'CONCATENATE(a, b, …) — join values as text'],
   ['left', 'LEFT(text, [count]) — leading characters'],
   ['right', 'RIGHT(text, [count]) — trailing characters'],
   ['mid', 'MID(text, start, count) — substring (1-based)'],

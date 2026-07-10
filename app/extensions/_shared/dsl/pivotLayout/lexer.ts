@@ -74,11 +74,21 @@ export function lex(input: string): LexResult {
       continue;
     }
 
-    // String literal: "..."
+    // String literal: "..." — a doubled quote ("") inside is an escaped literal
+    // quote, so values containing " are expressible (e.g. from @param substitution).
     if (ch === '"') {
       advance(); // skip opening quote
       let str = '';
-      while (pos < input.length && peek() !== '"' && peek() !== '\n') {
+      while (pos < input.length && peek() !== '\n') {
+        if (peek() === '"') {
+          if (input[pos + 1] === '"') {
+            advance();
+            advance();
+            str += '"';
+            continue;
+          }
+          break;
+        }
         str += advance();
       }
       if (peek() === '"') {
@@ -89,6 +99,26 @@ export function lex(input: string): LexResult {
         }));
       }
       tokens.push(makeToken(TokenType.StringLiteral, str, startCol, startLine));
+      continue;
+    }
+
+    // Single-quoted name: '...' — an engine-supported reference form used
+    // inside CALC expressions for field/measure names with spaces or special
+    // characters (e.g. CALC X = 'Total Sales' - Returns).
+    if (ch === "'") {
+      advance(); // skip opening quote
+      let name = '';
+      while (pos < input.length && peek() !== "'" && peek() !== '\n') {
+        name += advance();
+      }
+      if (peek() === "'") {
+        advance(); // skip closing quote
+      } else {
+        errors.push(dslError("Unterminated quoted name (missing closing ')", {
+          line: startLine, column: startCol, endColumn: col,
+        }));
+      }
+      tokens.push(makeToken(TokenType.SingleQuotedIdentifier, name, startCol, startLine));
       continue;
     }
 

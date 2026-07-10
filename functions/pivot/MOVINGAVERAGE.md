@@ -30,8 +30,12 @@ With window=3:
 | Q3 | 300 | 200 (average of Q1, Q2, Q3) |
 | Q4 | 400 | 300 (average of Q2, Q3, Q4) |
 
-- The window includes the current row and up to (window-1) preceding rows.
+- The window includes the current row and up to (window-1) preceding rows at
+  the same hierarchy level; subtotal and grand total rows return NaN.
 - If fewer rows are available (start of partition), averages whatever is available.
+- The window size is required and must be > 0 — a reset keyword in the window
+  slot (`MOVINGAVERAGE([Sales], HIGHESTPARENT)`) is an error, as is a trailing
+  axis keyword standing in for it (`MOVINGAVERAGE([Sales], COLUMNS)`).
 
 ## See Also
 

@@ -24,6 +24,12 @@ CALC YearOnly = [Sales] * ISATLEVEL(Year)
 | - Q1 | 2500 | 0 | 0 |
 | -- Jan | 800 | 0 | 0 |
 
+## Behavior
+
+- Returns 0 on the grand total row (it is not "at" any field's level).
+- An unknown or misspelled field name is an **error**, not 0 — a typo cannot
+  silently disable the calculation.
+
 ## Use Cases
 
 - Show a value only at a specific hierarchy level

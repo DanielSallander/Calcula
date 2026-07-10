@@ -606,14 +606,22 @@ pub async fn update_pivot_fields(
             apply_layout_config(&mut definition.layout, layout_config);
         }
 
-        // Update calculated fields
+        // Update calculated fields. The Design-view DSL has no number-format
+        // syntax, so an incoming def without one keeps the existing format
+        // for the same-named field instead of silently wiping it.
         if let Some(ref calc_fields) = request.calculated_fields {
+            let existing = std::mem::take(&mut definition.calculated_fields);
             definition.calculated_fields = calc_fields
                 .iter()
                 .map(|cf| pivot_engine::CalculatedField {
                     name: cf.name.clone(),
                     formula: cf.formula.clone(),
-                    number_format: cf.number_format.clone(),
+                    number_format: cf.number_format.clone().or_else(|| {
+                        existing
+                            .iter()
+                            .find(|e| e.name == cf.name)
+                            .and_then(|e| e.number_format.clone())
+                    }),
                 })
                 .collect();
         }
@@ -5774,14 +5782,22 @@ pub async fn update_bi_pivot_fields(
         }
     }
 
-    // Update calculated fields
+    // Update calculated fields. The Design-view DSL has no number-format
+    // syntax, so an incoming def without one keeps the existing format
+    // for the same-named field instead of silently wiping it.
     if let Some(ref calc_fields) = request.calculated_fields {
+        let existing = std::mem::take(&mut definition.calculated_fields);
         definition.calculated_fields = calc_fields
             .iter()
             .map(|cf| pivot_engine::CalculatedField {
                 name: cf.name.clone(),
                 formula: cf.formula.clone(),
-                number_format: cf.number_format.clone(),
+                number_format: cf.number_format.clone().or_else(|| {
+                    existing
+                        .iter()
+                        .find(|e| e.name == cf.name)
+                        .and_then(|e| e.number_format.clone())
+                }),
             })
             .collect();
     }

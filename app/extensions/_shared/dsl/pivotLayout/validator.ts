@@ -3,9 +3,9 @@
 // CONTEXT: Runs after parsing, before compilation. Reports warnings
 //          and errors for field existence, type mismatches, and duplicates.
 
-import type { PivotLayoutAST, FieldNode, ValueFieldNode, FilterFieldNode } from './ast';
+import type { PivotLayoutAST, FieldNode, ValueFieldNode, FilterFieldNode, CalcFieldNode } from './ast';
 import { type DslError, dslError, dslWarning, dslInfo } from './errors';
-import { LAYOUT_DIRECTIVES } from './tokens';
+import { LAYOUT_DIRECTIVES, TRANSFORM_FUNCTIONS, VISUAL_CALC_FUNCTIONS, CALC_FUNCTION_ALIASES } from './tokens';
 import type { SourceField } from '../../components/types';
 import type { BiPivotModelInfo } from '../../components/types';
 
@@ -79,7 +79,9 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
 
   // --- Validate VALUES fields ---
   for (const node of ast.values) {
-    // Skip inline CALC placeholders — they are validated as calculated fields
+    // Skip inline CALC placeholders — their formulas are checked in the
+    // calculated-field validation below (the parser stores inline CALCs in
+    // ast.calculatedFields alongside standalone CALC clauses)
     if (node.inlineCalcIndex !== undefined) continue;
 
     if (node.isMeasure) {
@@ -116,8 +118,18 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
   }
 
   // --- Validate SORT ---
+  // Sorting by a calculated field is not supported: the backend sort
+  // (sort_pivot_field) only reorders row/column fields by their labels via
+  // source_index — calculated columns have no source field to sort by.
+  const calcFieldNames = new Set(ast.calculatedFields.map(c => c.name.toLowerCase()));
   for (const node of ast.sort) {
-    if (!fieldNames.has(node.fieldName.toLowerCase()) && !biFieldNames.has(node.fieldName.toLowerCase())) {
+    const lower = node.fieldName.toLowerCase();
+    if (calcFieldNames.has(lower)) {
+      errors.push(dslError(
+        `Sorting by calculated field "${node.fieldName}" is not supported yet`,
+        node.location,
+      ));
+    } else if (!fieldNames.has(lower) && !biFieldNames.has(lower)) {
       errors.push(dslError(`Unknown sort field: "${node.fieldName}"`, node.location));
     }
   }
@@ -155,6 +167,12 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
     }
   }
 
+  // --- Validate CALC formulas (standalone CALC clauses AND inline CALCs in
+  //     VALUES — the parser stores both in ast.calculatedFields) ---
+  for (const cf of ast.calculatedFields) {
+    validateCalcFormula(cf, errors);
+  }
+
   // --- Informational hints ---
   if (ast.rows.length === 0 && ast.columns.length === 0 && ast.values.length === 0) {
     // No fields at all — not an error, but hint
@@ -166,6 +184,128 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
   }
 
   return errors;
+}
+
+// --- CALC formula validation ---
+
+/** Engine limit for CALC formula length (core/pivot-engine/src/calculated.rs MAX_FORMULA_LEN). */
+const MAX_CALC_FORMULA_LENGTH = 4096;
+
+/** All function names the engine's CALC evaluator accepts (lowercase). */
+const KNOWN_CALC_FUNCTIONS: ReadonlySet<string> = new Set([
+  ...TRANSFORM_FUNCTIONS.keys(),
+  ...VISUAL_CALC_FUNCTIONS.keys(),
+  ...CALC_FUNCTION_ALIASES.keys(),
+]);
+
+/**
+ * Lightweight structural validation of a CALC formula. Deliberately NOT a full
+ * expression parse (the Rust engine owns the grammar): checks non-empty text,
+ * length limit, balanced parentheses/brackets/quotes, and that every
+ * identifier used as a function call is an engine-known function name.
+ */
+function validateCalcFormula(cf: CalcFieldNode, errors: DslError[]): void {
+  const formula = cf.expression;
+
+  if (formula.trim() === '') {
+    errors.push(dslError(`Calculated field "${cf.name}" has an empty formula`, cf.location));
+    return;
+  }
+
+  if (formula.length > MAX_CALC_FORMULA_LENGTH) {
+    errors.push(dslError(
+      `Formula for "${cf.name}" is too long (${formula.length} characters, max ${MAX_CALC_FORMULA_LENGTH})`,
+      cf.location,
+    ));
+    return;
+  }
+
+  let parenDepth = 0;
+  let i = 0;
+  while (i < formula.length) {
+    const ch = formula[i];
+
+    // Double-quoted string literal ("" is an escaped quote)
+    if (ch === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < formula.length) {
+        if (formula[j] === '"') {
+          if (formula[j + 1] === '"') { j += 2; continue; }
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (!closed) {
+        errors.push(dslError(`Unterminated string literal in formula for "${cf.name}"`, cf.location));
+        return;
+      }
+      i = j + 1;
+      continue;
+    }
+
+    // Single-quoted name reference
+    if (ch === "'") {
+      const close = formula.indexOf("'", i + 1);
+      if (close === -1) {
+        errors.push(dslError(`Unterminated quoted name in formula for "${cf.name}"`, cf.location));
+        return;
+      }
+      i = close + 1;
+      continue;
+    }
+
+    // Bracketed name reference (no nesting)
+    if (ch === '[') {
+      const close = formula.indexOf(']', i + 1);
+      if (close === -1) {
+        errors.push(dslError(`Unbalanced brackets in formula for "${cf.name}"`, cf.location));
+        return;
+      }
+      i = close + 1;
+      continue;
+    }
+    if (ch === ']') {
+      errors.push(dslError(`Unbalanced brackets in formula for "${cf.name}"`, cf.location));
+      return;
+    }
+
+    if (ch === '(') { parenDepth++; i++; continue; }
+    if (ch === ')') {
+      parenDepth--;
+      if (parenDepth < 0) {
+        errors.push(dslError(`Unbalanced parentheses in formula for "${cf.name}"`, cf.location));
+        return;
+      }
+      i++;
+      continue;
+    }
+
+    // Identifier — if directly followed by "(", it must be a known function.
+    // The engine now hard-errors on unknown function names.
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i + 1;
+      while (j < formula.length && /[A-Za-z0-9_.]/.test(formula[j])) j++;
+      const ident = formula.slice(i, j);
+      let k = j;
+      while (k < formula.length && (formula[k] === ' ' || formula[k] === '\t')) k++;
+      if (formula[k] === '(' && !KNOWN_CALC_FUNCTIONS.has(ident.toLowerCase())) {
+        errors.push(dslError(
+          `Unknown function "${ident}" in formula for "${cf.name}"`,
+          cf.location,
+        ));
+      }
+      i = j;
+      continue;
+    }
+
+    i++;
+  }
+
+  if (parenDepth > 0) {
+    errors.push(dslError(`Unbalanced parentheses in formula for "${cf.name}"`, cf.location));
+  }
 }
 
 // --- Helper functions ---

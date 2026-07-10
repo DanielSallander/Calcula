@@ -52,6 +52,39 @@ fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
 // PROTECTED REGION SHIFT HELPERS
 // ============================================================================
 
+/// Realign report definitions with their (already coordinate-shifted) protected
+/// regions and drop definitions whose region was removed, then persist. A report
+/// definition mirrors its region exactly (anchor = region start, bounds = region
+/// end), so after a generic region shift this brings the definition store — the
+/// source of truth for the NEXT refresh's destination — back in sync. Without it
+/// a refresh would re-materialize the report at its pre-shift coordinates.
+fn sync_report_definitions_to_regions(state: &AppState) {
+    let report_regions: Vec<_> = {
+        let regions = state.protected_regions.lock().unwrap();
+        regions
+            .iter()
+            .filter(|r| r.region_type == "report")
+            .map(|r| (r.owner_id, r.sheet_index, r.start_row, r.start_col, r.end_row, r.end_col))
+            .collect()
+    };
+    {
+        let mut defs = state.report_definitions.lock().unwrap();
+        defs.retain(|d| report_regions.iter().any(|(id, ..)| *id == d.id));
+        for d in defs.iter_mut() {
+            if let Some((_, sheet, sr, sc, er, ec)) =
+                report_regions.iter().find(|(id, ..)| *id == d.id)
+            {
+                d.sheet_index = *sheet;
+                d.anchor_row = *sr;
+                d.anchor_col = *sc;
+                d.end_row = *er;
+                d.end_col = *ec;
+            }
+        }
+    }
+    crate::report::sync_reports_to_extension_data(state);
+}
+
 /// Shift protected regions when rows are inserted.
 /// Coordinate shifts apply to ALL regions; pivot definition updates apply only to pivot regions.
 fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
@@ -95,6 +128,11 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState
             }
         }
     }
+
+    // Report-specific: realign report definitions with their shifted regions.
+    drop(pivot_tables);
+    drop(regions);
+    sync_report_definitions_to_regions(state);
 }
 
 /// Shift protected regions when columns are inserted.
@@ -138,6 +176,11 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, pivot_state: &PivotState
             }
         }
     }
+
+    // Report-specific: realign report definitions with their shifted regions.
+    drop(pivot_tables);
+    drop(regions);
+    sync_report_definitions_to_regions(state);
 }
 
 /// Shift protected regions when rows are deleted.
@@ -220,6 +263,12 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
         }
     }
     regions.retain(|r| !regions_to_remove.contains(&r.id));
+
+    // Report-specific: realign report definitions with their shifted regions
+    // (definitions whose region was fully deleted are dropped).
+    drop(pivot_tables);
+    drop(regions);
+    sync_report_definitions_to_regions(state);
 }
 
 /// ============================================================================
@@ -458,6 +507,12 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState
         }
     }
     regions.retain(|r| !regions_to_remove.contains(&r.id));
+
+    // Report-specific: realign report definitions with their shifted regions
+    // (definitions whose region was fully deleted are dropped).
+    drop(pivot_tables);
+    drop(regions);
+    sync_report_definitions_to_regions(state);
 }
 
 // ============================================================================

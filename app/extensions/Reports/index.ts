@@ -17,7 +17,7 @@ import { onControlValueChange } from "@api/controlValues";
 import { CreateReportDialog } from "./components/CreateReportDialog";
 import { ManageReportsDialog } from "./components/ManageReportsDialog";
 import { reportsBackend } from "./lib/reportsBackend";
-import { refreshControlBoundReports } from "./lib/reportRefresh";
+import { clearReportModelCache, refreshControlBoundReports } from "./lib/reportRefresh";
 import { registerReportDistribution } from "./lib/reportDistribution";
 
 const CREATE_DIALOG_ID = "create-report-dialog";
@@ -75,19 +75,39 @@ function activate(context: ExtensionContext): void {
     action: () => showDialog(MANAGE_DIALOG_ID, {}),
   });
 
-  // Auto-refresh reports bound to Controls-pane values when a control changes.
-  // Skip transient (mid-drag) previews; debounce bursts of changes.
+  // Auto-refresh reports bound (via @Name) to the controls / ribbon filters that
+  // actually changed. Skip transient (mid-drag) previews; debounce bursts and
+  // accumulate the changed names across the debounce window.
   let refreshTimer: number | undefined;
+  let changedNames = new Set<string>();
   const unsubControls = onControlValueChange((detail) => {
     if (detail.transient) return;
+    changedNames.add(detail.name);
     if (refreshTimer) window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      void refreshControlBoundReports();
+      const names = changedNames;
+      changedNames = new Set();
+      void refreshControlBoundReports(names);
     }, 150);
   });
   cleanupFns.push(() => {
     if (refreshTimer) window.clearTimeout(refreshTimer);
     unsubControls();
+  });
+
+  // The per-connection BI model cache must not outlive the model: drop it when a
+  // connection or its data changes. Window-event names from the BI extension —
+  // listened to by string (same cross-extension pattern as Charts' "pivot:refresh").
+  const onBiChanged = () => clearReportModelCache();
+  const BI_EVENTS = [
+    "app:bi-refreshed",
+    "app:bi-connection-created",
+    "app:bi-connection-updated",
+    "app:bi-connection-deleted",
+  ];
+  for (const ev of BI_EVENTS) window.addEventListener(ev, onBiChanged);
+  cleanupFns.push(() => {
+    for (const ev of BI_EVENTS) window.removeEventListener(ev, onBiChanged);
   });
 
   // Publish/subscribe reports in .calp packages via the distributable-object channel.

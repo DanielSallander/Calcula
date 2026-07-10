@@ -121,6 +121,21 @@ pub fn get_active_sheet(state: State<AppState>) -> usize {
     *state.active_sheet.lock().unwrap()
 }
 
+/// The workbook's stable sheet uuids in index order. Lets per-sheet
+/// distributable-object providers fill `DistributableObjectPayload.sheetId`
+/// (the publish flow maps it to the package sheet id; the pull flow hands the
+/// provider a REMAPPED local sheet index).
+#[tauri::command]
+pub fn get_sheet_ids(state: State<AppState>) -> Vec<String> {
+    state
+        .sheet_ids
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|id| id.to_string())
+        .collect()
+}
+
 /// Get the gridlines visibility setting for the active sheet.
 #[tauri::command]
 pub fn get_show_gridlines(state: State<AppState>) -> bool {
@@ -431,6 +446,21 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
             }
         }
     }
+
+    // Reports: drop definitions on the deleted sheet and shift the indices of
+    // those above it (their regions were handled by the generic cleanup above).
+    // Without this, the next refresh would materialize a deleted-sheet report
+    // onto whichever sheet inherited its index.
+    {
+        let mut defs = state.report_definitions.lock().unwrap();
+        defs.retain(|d| d.sheet_index != index);
+        for d in defs.iter_mut() {
+            if d.sheet_index > index {
+                d.sheet_index -= 1;
+            }
+        }
+    }
+    crate::report::sync_reports_to_extension_data(&state);
 
     // Re-key tables for sheets above the deleted index (shift down by 1)
     let keys_to_shift: Vec<usize> = tables.keys().filter(|&&k| k > index).cloned().collect();
@@ -830,6 +860,40 @@ pub fn move_sheet(
         }
     }
 
+    // Reports follow their sheet through the move: remap the sheet_index of
+    // report definitions and their protected regions to the rotated order —
+    // otherwise the next refresh materializes onto whatever sheet now holds the
+    // old index. (Pivot regions keep their historical no-remap behavior so they
+    // stay consistent with pivot definitions.)
+    {
+        let remap = |i: usize| -> usize {
+            if i == from_index {
+                to_index
+            } else if from_index < to_index && i > from_index && i <= to_index {
+                i - 1
+            } else if to_index < from_index && i >= to_index && i < from_index {
+                i + 1
+            } else {
+                i
+            }
+        };
+        {
+            let mut regions = state.protected_regions.lock().unwrap();
+            for r in regions.iter_mut() {
+                if r.region_type == "report" {
+                    r.sheet_index = remap(r.sheet_index);
+                }
+            }
+        }
+        {
+            let mut defs = state.report_definitions.lock().unwrap();
+            for d in defs.iter_mut() {
+                d.sheet_index = remap(d.sheet_index);
+            }
+        }
+        crate::report::sync_reports_to_extension_data(&state);
+    }
+
     Ok(SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: new_active,
@@ -962,6 +1026,30 @@ pub fn copy_sheet(
         if new_index < all_merged.len() {
             *current_merged = std::mem::take(&mut all_merged[new_index]);
         }
+    }
+
+    // The insert shifted every sheet at/above insert_at up by one: follow with
+    // the report definitions and their protected regions. The COPY itself gets
+    // no report definition — its report cells become plain grid content.
+    // (Pivot regions keep their historical no-remap behavior.)
+    {
+        {
+            let mut regions = state.protected_regions.lock().unwrap();
+            for r in regions.iter_mut() {
+                if r.region_type == "report" && r.sheet_index >= insert_at {
+                    r.sheet_index += 1;
+                }
+            }
+        }
+        {
+            let mut defs = state.report_definitions.lock().unwrap();
+            for d in defs.iter_mut() {
+                if d.sheet_index >= insert_at {
+                    d.sheet_index += 1;
+                }
+            }
+        }
+        crate::report::sync_reports_to_extension_data(&state);
     }
 
     Ok(SheetsResult {

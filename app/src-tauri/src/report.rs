@@ -1,14 +1,18 @@
 //! FILENAME: app/src-tauri/src/report.rs
-//! Paginated grid reports — Slice 1: materialize a design query straight into a
-//! range of grid cells (committed / pivot-like model). A report holds pivot-layout
-//! DSL + a model binding; its result is written into the grid like a pivot's
-//! output, refreshable and delete-able. Reuses the generic grid-write primitive
+//! Grid reports: materialize a design query straight into a range of grid cells
+//! (committed / pivot-like model). A report holds pivot-layout DSL + a model
+//! binding; its result is written into the grid like a pivot's output,
+//! refreshable and delete-able. Reuses the generic grid-write primitive
 //! `write_pivot_to_grid` and the headless `compute_design_query_view` compute core.
 //!
-//! Slice-1 scope: create / refresh / delete / list, fixed inline FILTERS, single
-//! row-capped block, overwrite-guarded, region-tracked (region_type "report").
-//! Deferred to follow-up slices: .cala persistence, undo, .calp distribution,
-//! interactive filters, true pagination.
+//! Implemented here: create / refresh / delete / list / restore, row-capped
+//! block, overlap- and overwrite-guarded, region-tracked (region_type "report"),
+//! persistence via extension_data (`sync_reports_to_extension_data`), symmetric
+//! cell-based undo (`ReportUndoSnapshot` / undo_commands::apply_report_restore),
+//! and `.calp` distribution (`restore_report`). Interactive @param filters live
+//! frontend-side (Reports extension). Still open: true pagination.
+
+use std::collections::HashSet;
 
 use tauri::State;
 
@@ -20,7 +24,7 @@ use crate::pivot::operations::{
     clear_pivot_region_from_grid, recalculate_sheet_formulas, write_pivot_to_grid,
 };
 use crate::pivot::types::PivotState;
-use crate::{AppState, ProtectedRegion};
+use crate::{AppState, MergedRegion, ProtectedRegion};
 
 pub type ReportId = identity::EntityId;
 
@@ -93,6 +97,49 @@ pub struct ReportUndoSnapshot {
     /// (row, col, cell-to-restore-to). `None` means the cell was empty.
     pub cells: Vec<(u32, u32, Option<Cell>)>,
     pub definitions: Vec<SavedReport>,
+    /// Merged regions fully inside the snapshot box as they were (report header
+    /// merges and any pre-existing user merges) — restored together with the
+    /// cells, since the report write removes/replaces merges in its box.
+    #[serde(default)]
+    pub merges: Vec<MergedRegion>,
+}
+
+/// Run `f` on the merge set for `sheet_idx`: the live active-sheet set when that
+/// sheet is active, else its slot in the per-sheet store. Report writes must go
+/// through this — mutating `merged_regions` for a background sheet would corrupt
+/// the VISIBLE sheet's merges (and lose the background sheet's own).
+pub fn with_sheet_merges<R>(
+    state: &AppState,
+    sheet_idx: usize,
+    f: impl FnOnce(&mut HashSet<MergedRegion>) -> R,
+) -> R {
+    let active = *state.active_sheet.lock().unwrap();
+    if sheet_idx == active {
+        let mut merged = state.merged_regions.lock().unwrap();
+        f(&mut merged)
+    } else {
+        let mut all = state.all_merged_regions.lock().unwrap();
+        while all.len() <= sheet_idx {
+            all.push(HashSet::new());
+        }
+        f(&mut all[sheet_idx])
+    }
+}
+
+/// The merged regions fully inside `bounds` on a sheet (for undo capture).
+pub fn merges_in_box(
+    state: &AppState,
+    sheet_idx: usize,
+    bounds: (u32, u32, u32, u32),
+) -> Vec<MergedRegion> {
+    let (sr, sc, er, ec) = bounds;
+    with_sheet_merges(state, sheet_idx, |merged| {
+        merged
+            .iter()
+            .filter(|m| m.start_row >= sr && m.end_row <= er && m.start_col >= sc && m.end_col <= ec)
+            .cloned()
+            .collect()
+    })
 }
 
 /// Snapshot the current cells within a bounding box (inclusive) on a sheet.
@@ -126,7 +173,8 @@ fn record_report_undo(
 ) {
     let cells = snapshot_box_cells(state, sheet_idx, bounds);
     let definitions = state.report_definitions.lock().unwrap().clone();
-    let snapshot = ReportUndoSnapshot { sheet_index: sheet_idx, cells, definitions };
+    let merges = merges_in_box(state, sheet_idx, bounds);
+    let snapshot = ReportUndoSnapshot { sheet_index: sheet_idx, cells, definitions, merges };
     let data = serde_json::to_vec(&snapshot).unwrap_or_default();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     undo_stack.begin_transaction(description);
@@ -179,6 +227,13 @@ pub struct RefreshReportRequest {
     pub report_id: ReportId,
     /// The (re-compiled) design query, so a refresh picks up model changes.
     pub query: DesignQueryRequest,
+    /// True for control-driven auto-refreshes (a bound control / ribbon filter
+    /// changed). These skip the undo entry unless the write reaches user cells
+    /// outside the report's previous region: recording one per filter click
+    /// floods the undo stack and makes Ctrl+Z desync the report's cells from
+    /// the visible filter state (the transient-write discipline).
+    #[serde(default)]
+    pub auto: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -201,6 +256,42 @@ fn get_report_region(state: &AppState, report_id: ReportId) -> Option<ProtectedR
         .iter()
         .find(|r| r.region_type == "report" && r.owner_id == report_id)
         .cloned()
+}
+
+/// Reject a write whose target box intersects a protected region NOT owned by
+/// this report (another report, a pivot, ...): silently growing over a sibling
+/// object would leave both regions corrupt.
+fn check_report_overlap(
+    state: &AppState,
+    report_id: ReportId,
+    sheet_idx: usize,
+    bounds: (u32, u32, u32, u32),
+) -> Result<(), String> {
+    let (sr, sc, er, ec) = bounds;
+    let regions = state.protected_regions.lock().unwrap();
+    if let Some(other) = regions.iter().find(|r| {
+        r.sheet_index == sheet_idx
+            && !(r.region_type == "report" && r.owner_id == report_id)
+            && r.start_row <= er
+            && r.end_row >= sr
+            && r.start_col <= ec
+            && r.end_col >= sc
+    }) {
+        let what = match other.region_type.as_str() {
+            "pivot" => "a pivot table".to_string(),
+            "report" => "another report".to_string(),
+            t => format!("a {} region", t),
+        };
+        return Err(format!(
+            "The report result (rows {}-{}, columns {}-{}) would overlap {}. Move the report or narrow the query.",
+            sr + 1,
+            er + 1,
+            sc + 1,
+            ec + 1,
+            what
+        ));
+    }
+    Ok(())
 }
 
 /// Count non-empty cells the write would clobber outside the report's old region.
@@ -285,20 +376,25 @@ fn write_report_to_grid(
             let new_end_row = dest_row + visible_rows.max(1) - 1;
             let new_end_col = dest_col + view.col_count.max(1) as u32 - 1;
 
-            let mut merged = state.merged_regions.lock().unwrap();
-            if let Some(ref r) = old {
+            // Merge bookkeeping targets THIS report's sheet (per-sheet store when
+            // it isn't the active one — never the visible sheet's set).
+            with_sheet_merges(state, sheet_idx, |merged| {
+                if let Some(ref r) = old {
+                    if r.sheet_index == sheet_idx {
+                        merged.retain(|m| {
+                            !(m.start_row >= r.start_row && m.end_row <= r.end_row
+                                && m.start_col >= r.start_col && m.end_col <= r.end_col)
+                        });
+                    }
+                }
                 merged.retain(|m| {
-                    !(m.start_row >= r.start_row && m.end_row <= r.end_row
-                        && m.start_col >= r.start_col && m.end_col <= r.end_col)
+                    !(m.start_row >= dest_row && m.end_row <= new_end_row
+                        && m.start_col >= dest_col && m.end_col <= new_end_col)
                 });
-            }
-            merged.retain(|m| {
-                !(m.start_row >= dest_row && m.end_row <= new_end_row
-                    && m.start_col >= dest_col && m.end_col <= new_end_col)
+                for mr in merges {
+                    merged.insert(mr);
+                }
             });
-            for mr in merges {
-                merged.insert(mr);
-            }
         }
     }
 
@@ -324,9 +420,11 @@ fn write_report_to_grid(
 fn clear_report_region(state: &AppState, report_id: ReportId) {
     let old = get_report_region(state, report_id);
     if let Some(r) = old {
-        let mut grids = state.grids.lock().unwrap();
-        if let Some(dest_grid) = grids.get_mut(r.sheet_index) {
-            clear_pivot_region_from_grid(dest_grid, r.start_row, r.start_col, r.end_row, r.end_col);
+        {
+            let mut grids = state.grids.lock().unwrap();
+            if let Some(dest_grid) = grids.get_mut(r.sheet_index) {
+                clear_pivot_region_from_grid(dest_grid, r.start_row, r.start_col, r.end_row, r.end_col);
+            }
         }
         let active_sheet = *state.active_sheet.lock().unwrap();
         if r.sheet_index == active_sheet {
@@ -334,18 +432,21 @@ fn clear_report_region(state: &AppState, report_id: ReportId) {
             active_grid.clear_region(r.start_row, r.start_col, r.end_row, r.end_col);
             active_grid.recalculate_bounds();
         }
-        let mut merged = state.merged_regions.lock().unwrap();
-        merged.retain(|m| {
-            !(m.start_row >= r.start_row && m.end_row <= r.end_row
-                && m.start_col >= r.start_col && m.end_col <= r.end_col)
+        // Merge bookkeeping on the report's own sheet (not the visible one).
+        with_sheet_merges(state, r.sheet_index, |merged| {
+            merged.retain(|m| {
+                !(m.start_row >= r.start_row && m.end_row <= r.end_row
+                    && m.start_col >= r.start_col && m.end_col <= r.end_col)
+            });
         });
     }
     let mut regions = state.protected_regions.lock().unwrap();
     regions.retain(|reg| !(reg.region_type == "report" && reg.owner_id == report_id));
 }
 
-/// Materialize a computed view for a report at (sheet, dest): count overwrites,
-/// write cells, register the region, recalc dependent formulas. Returns the count.
+/// Materialize a computed view for a report at (sheet, dest): write cells,
+/// register the region, recalc dependent formulas. Overwrite counting happens
+/// in the callers BEFORE this runs (it feeds the undo-policy decision).
 #[allow(clippy::too_many_arguments)]
 fn materialize(
     state: &AppState,
@@ -356,11 +457,9 @@ fn materialize(
     sheet_idx: usize,
     dest: (u32, u32),
     view: &pivot_engine::PivotView,
-) -> u32 {
-    let overwritten = count_report_overwrites(state, report_id, sheet_idx, dest, view);
+) {
     write_report_to_grid(state, report_id, sheet_idx, dest, view);
     recalculate_sheet_formulas(state, pivot_state, Some((pane_control_state, ribbon_filter_state)));
-    overwritten
 }
 
 // ============================================================================
@@ -390,16 +489,21 @@ pub async fn create_report(
     let dest = (request.anchor_row, request.anchor_col);
     let end_row = request.anchor_row + (visible_rows.max(1) as u32) - 1;
     let end_col = request.anchor_col + (view.col_count.max(1) as u32) - 1;
+    let bounds = (request.anchor_row, request.anchor_col, end_row, end_col);
+
+    {
+        let grids = state.grids.lock().unwrap();
+        if request.sheet_index >= grids.len() {
+            return Err(format!("Sheet {} does not exist.", request.sheet_index + 1));
+        }
+    }
+    check_report_overlap(&state, report_id, request.sheet_index, bounds)?;
+    let overwritten = count_report_overwrites(&state, report_id, request.sheet_index, dest, &view);
 
     // Undo snapshot: the target cells as they are now + the current report list.
-    record_report_undo(
-        &state,
-        request.sheet_index,
-        (request.anchor_row, request.anchor_col, end_row, end_col),
-        "Create report",
-    );
+    record_report_undo(&state, request.sheet_index, bounds, "Create report");
 
-    let overwritten = materialize(
+    materialize(
         &state,
         &pivot_state,
         &pane_control_state,
@@ -465,13 +569,33 @@ pub async fn refresh_report(
         ));
     }
 
+    {
+        let grids = state.grids.lock().unwrap();
+        if sheet_idx >= grids.len() {
+            return Err(format!(
+                "This report's sheet (sheet {}) no longer exists.",
+                sheet_idx + 1
+            ));
+        }
+    }
+
     let end_row = dest.0 + (visible_rows.max(1) as u32) - 1;
     let end_col = dest.1 + (view.col_count.max(1) as u32) - 1;
-    // Undo snapshot covering both the old and new report extents.
-    let box_bounds = union_bounds(old_bounds, (dest.0, dest.1, end_row, end_col));
-    record_report_undo(&state, sheet_idx, box_bounds, "Refresh report");
+    check_report_overlap(&state, request.report_id, sheet_idx, (dest.0, dest.1, end_row, end_col))?;
+    let overwritten = count_report_overwrites(&state, request.report_id, sheet_idx, dest, &view);
 
-    let overwritten = materialize(
+    // Undo policy: manual refreshes always record (covering both the old and new
+    // extents). Control-driven auto-refreshes only rewrite the report's own
+    // output — recording one entry per filter click floods the undo stack and
+    // makes Ctrl+Z desync the report from the visible filter state — so they
+    // skip the entry UNLESS the write reaches user cells outside the previous
+    // region (then it must stay undoable: that data would otherwise be lost).
+    if !request.auto || overwritten > 0 {
+        let box_bounds = union_bounds(old_bounds, (dest.0, dest.1, end_row, end_col));
+        record_report_undo(&state, sheet_idx, box_bounds, "Refresh report");
+    }
+
+    materialize(
         &state,
         &pivot_state,
         &pane_control_state,
@@ -536,16 +660,33 @@ pub fn list_reports(state: State<'_, AppState>) -> Result<Vec<SavedReport>, Stri
 /// the definition + protected region. The report's CELLS travel with the
 /// package's sheet content, so no query runs here — the subscriber sees the data
 /// immediately, and a Refresh re-runs against the rebound connection.
+///
+/// Returns `Ok(Some(warning))` when the report was registered but its connection
+/// could not be rebound (a later Refresh will fail until a matching connection
+/// exists); the pull flow surfaces the warning instead of losing it.
 #[tauri::command]
 pub fn restore_report(
     state: State<'_, AppState>,
     bi_state: State<'_, BiState>,
     report: SavedReport,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let mut report = report;
+
+    {
+        let grids = state.grids.lock().unwrap();
+        if report.sheet_index >= grids.len() {
+            return Err(format!(
+                "Report '{}' targets sheet {} but this workbook has {} sheet(s).",
+                report.name,
+                report.sheet_index + 1,
+                grids.len()
+            ));
+        }
+    }
 
     // Rebind the connection: find the local connection whose stable data-source
     // id matches the report's (the publisher's connection id is stale here).
+    let mut rebind_warning: Option<String> = None;
     let ds_opt = report.data_source_id.clone();
     if let Some(ds) = ds_opt.as_deref() {
         if let Ok(connections) = bi_state.connections.lock() {
@@ -556,8 +697,16 @@ pub fn restore_report(
                     None
                 }
             });
-            if let Some(cid) = rebound {
-                report.connection_id = cid;
+            match rebound {
+                Some(cid) => report.connection_id = cid,
+                None => {
+                    rebind_warning = Some(format!(
+                        "Report '{}': no local BI connection matches its data source ({}). \
+                         The report's cells are intact, but Refresh will fail until the \
+                         connection's model is set up.",
+                        report.name, ds
+                    ));
+                }
             }
         }
     }
@@ -569,5 +718,5 @@ pub fn restore_report(
     }
     reregister_report_region(&state, &report);
     sync_reports_to_extension_data(&state);
-    Ok(())
+    Ok(rebind_warning)
 }

@@ -6,6 +6,7 @@
 import type { ZoneField, AggregationType } from '../../components/types';
 import { AGGREGATION_OPTIONS, getValueFieldDisplayName } from '../../components/types';
 import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef } from '../../components/types';
+import { KEYWORDS } from './tokens';
 
 /** Options controlling serialization output. */
 export interface SerializeOptions {
@@ -57,7 +58,7 @@ export function serialize(
       if (v.isCalculated) {
         const name = v.customName || v.name;
         const formula = v.calculatedFormula || '';
-        parts.push(`CALC ${name} = ${formula}`);
+        parts.push(`CALC ${quoteCalcName(name)} = ${formula}`);
       } else {
         parts.push(serializeValueField(v, options));
       }
@@ -66,6 +67,20 @@ export function serialize(
       lines.push(`VALUES:  ${parts.join(',\n         ')}`);
     } else if (parts.length === 1) {
       lines.push(`VALUES:  ${parts[0]}`);
+    }
+  }
+
+  // Standalone CALC clauses: calculated fields supplied via options that are
+  // not already emitted inline as VALUES entries. This is the path used when
+  // serializing from a backend field configuration (e.g. getPivotDsl), where
+  // value fields and calculated fields are stored separately.
+  if (options.calculatedFields && options.calculatedFields.length > 0) {
+    const inlineCalcNames = new Set(
+      values.filter(v => v.isCalculated).map(v => (v.customName || v.name).toLowerCase()),
+    );
+    for (const cf of options.calculatedFields) {
+      if (inlineCalcNames.has(cf.name.toLowerCase())) continue;
+      lines.push(`CALC: ${quoteCalcName(cf.name)} = ${cf.formula}`);
     }
   }
 
@@ -266,6 +281,20 @@ function quoteIfNeeded(name: string): string {
 /** Escape double quotes within a string. */
 function escapeString(s: string): string {
   return s.replace(/"/g, '\\"');
+}
+
+/** A plain identifier needs no quoting as a CALC field name. */
+const PLAIN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Quote a CALC field name unless it is a plain identifier (and not a DSL
+ * keyword, which would lex as a keyword token instead of a name). The parser
+ * accepts a double-quoted string as the CALC name; embedded quotes use the
+ * lexer's doubled-quote ("") escape.
+ */
+function quoteCalcName(name: string): string {
+  if (PLAIN_IDENT.test(name) && KEYWORDS[name.toUpperCase()] === undefined) return name;
+  return `"${name.replace(/"/g, '""')}"`;
 }
 
 /** Get the display label for an aggregation type (capitalized for DSL). */

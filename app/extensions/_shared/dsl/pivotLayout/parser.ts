@@ -470,7 +470,8 @@ class Parser {
   private parseCalcField(inline: boolean = false): CalcFieldNode {
     const nameTok = this.peek();
     let name = '';
-    if (nameTok.type === TokenType.Identifier || nameTok.type === TokenType.StringLiteral) {
+    if (nameTok.type === TokenType.Identifier || nameTok.type === TokenType.StringLiteral ||
+        nameTok.type === TokenType.SingleQuotedIdentifier) {
       this.advance();
       name = nameTok.value;
     } else {
@@ -497,6 +498,8 @@ class Parser {
       if (tok.type === TokenType.RightParen) parenDepth = Math.max(0, parenDepth - 1);
       if (tok.type === TokenType.BracketIdentifier) {
         expression += `[${tok.value}]`;
+      } else if (tok.type === TokenType.SingleQuotedIdentifier) {
+        expression += `'${tok.value}'`;
       } else if (tok.type === TokenType.StringLiteral) {
         expression += `"${tok.value}"`;
       } else {

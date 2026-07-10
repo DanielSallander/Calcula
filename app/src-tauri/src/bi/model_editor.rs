@@ -3198,11 +3198,11 @@ pub async fn bi_model_list_source_tables(
     window: tauri::Window,
 ) -> Result<Vec<SourceTableInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
-    let (engine_arc, connector_index, model_tables, schema_filter) = {
+    let (engine_arc, connector_index, model_tables, schema_filter, model_sources) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         let idx = conn.connector_index.ok_or(
-            "Not connected to the database — open Data > Connections and click Connect first.",
+            "Not connected to the database — Connect a source in the Connections tab (or Data > Connections) first.",
         )?;
         let tables: HashSet<String> = conn
             .base_model
@@ -3220,9 +3220,23 @@ pub async fn bi_model_list_source_tables(
             idx,
             tables,
             schema_filter,
+            conn.base_model
+                .as_ref()
+                .map(|m| m.sources().to_vec())
+                .unwrap_or_default(),
         )
     };
     let guard = engine_arc.lock().await;
+    // Connections-tab-only workflow: the legacy connection string may carry no
+    // schema — fall back to the WIRED source's default schema so the listing
+    // stays scoped the way the source was configured.
+    let schema_filter = schema_filter.or_else(|| {
+        model_sources
+            .iter()
+            .find(|s| guard.registry().connector_index_by_source_id(&s.id) == Some(connector_index))
+            .and_then(|s| s.connection.default_schema.clone())
+            .filter(|s| !s.trim().is_empty())
+    });
     let connector = guard
         .registry()
         .connector_by_index(connector_index)
@@ -3239,7 +3253,10 @@ pub async fn bi_model_list_source_tables(
                 .map_or(true, |s| t.schema.eq_ignore_ascii_case(s))
         })
         .map(|t| SourceTableInfo {
-            imported: model_tables.contains(&t.name),
+            // A source table may live in the model under its bare name (new
+            // imports) or the qualified "<schema>.<table>" (older imports).
+            imported: model_tables.contains(&t.name)
+                || model_tables.contains(&format!("{}.{}", t.schema, t.name)),
             schema: t.schema,
             name: t.name,
         })
@@ -3266,7 +3283,7 @@ pub async fn bi_model_import_tables(
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         let idx = conn.connector_index.ok_or(
-            "Not connected to the database — open Data > Connections and click Connect first.",
+            "Not connected to the database — Connect a source in the Connections tab (or Data > Connections) first.",
         )?;
         (
             conn.engine
@@ -3311,17 +3328,64 @@ pub async fn bi_model_import_tables(
         )
     };
 
+    // Prefer the CATALOG source actually wired to this connector (the
+    // Connections-tab flow) over one derived from the legacy connection
+    // string — the stamped id must be the one wire_sources resolves on reopen.
+    let (persisted_source, source_id) = match base
+        .sources()
+        .iter()
+        .find(|s| guard.registry().connector_index_by_source_id(&s.id) == Some(connector_index))
+    {
+        Some(wired) => (wired.clone(), wired.id.clone()),
+        None => (persisted_source, source_id),
+    };
+
+    // Model tables are named with the BARE source-table name — the source
+    // schema lives in the binding, not the name (a "<schema>." prefix reads
+    // poorly in measures: SUM(BI.fact_sales[x]) vs SUM(fact_sales[x])). The
+    // introspector's "<schema>.<table>" name is kept only when the bare name
+    // collides with an existing table or another table in this batch.
+    let mut model_tables = base.tables().to_vec();
+    let introspected: Vec<bi_engine::Table> = {
+        let mut named: Vec<bi_engine::Table> = Vec::with_capacity(introspected.len());
+        for (src, table) in tables.iter().zip(introspected.into_iter()) {
+            // A source table can be imported ONCE: a second import would add a
+            // duplicate model table under the fallback qualified name.
+            if let Some(existing) = model_tables.iter().find(|t| {
+                t.source_binding().is_some_and(|b| {
+                    b.schema.eq_ignore_ascii_case(&src.schema)
+                        && b.table.eq_ignore_ascii_case(&src.name)
+                })
+            }) {
+                return Err(format!(
+                    "'{}.{}' is already imported as model table '{}'.",
+                    src.schema,
+                    src.name,
+                    existing.name()
+                ));
+            }
+            let taken = |n: &str| {
+                model_tables.iter().any(|t| t.name() == n)
+                    || named.iter().any(|t| t.name() == n)
+            };
+            let table = if !taken(&src.name) {
+                table.with_model_name(&src.name)
+            } else if !taken(table.name()) {
+                table
+            } else {
+                return Err(format!(
+                    "The model already has a table named '{}'",
+                    table.name()
+                ));
+            };
+            named.push(table);
+        }
+        named
+    };
     // Append the introspected tables, stamping each with its persisted source
     // binding (source id + physical schema/table) so the model self-describes
     // where its data comes from and survives save/export/publish.
-    let mut model_tables = base.tables().to_vec();
     for (src, table) in tables.iter().zip(introspected.iter()) {
-        if model_tables.iter().any(|t| t.name() == table.name()) {
-            return Err(format!(
-                "The model already has a table named '{}'",
-                table.name()
-            ));
-        }
         model_tables.push(table.clone().with_source_binding(
             bi_engine::TableSourceBinding::new(&source_id, &src.schema, &src.name),
         ));
@@ -3442,7 +3506,7 @@ pub async fn bi_model_import_sql_source(
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
         let idx = conn.connector_index.ok_or(
-            "Not connected to the database — open Data > Connections and click Connect first.",
+            "Not connected to the database — Connect a source in the Connections tab (or Data > Connections) first.",
         )?;
         (
             conn.engine
@@ -3649,6 +3713,84 @@ pub async fn bi_model_delete_source(
     Ok(overview)
 }
 
+/// Strip a doubled "<schema>." prefix from a remote table name: the binding's
+/// `table` must be the BARE remote name (the SQL builder qualifies it with the
+/// schema itself — a doubled prefix renders as `"BI"."BI.fact_sales"` and the
+/// database rejects it). Returns the bare name; a clean name passes through.
+///
+/// Deliberate tradeoff: a remote table whose PHYSICAL name genuinely starts
+/// with `"<schema>."` (possible only via quoted DDL like
+/// `CREATE TABLE "BI.x"`) would be mis-stripped. Introspection never produces
+/// such names and the doubled form is always the host-bug pattern, so the
+/// heuristic is safe in practice.
+fn strip_doubled_schema<'a>(schema: &str, table: &'a str) -> &'a str {
+    if !schema.is_empty() {
+        if let Some((head, rest)) = table.split_once('.') {
+            if head.eq_ignore_ascii_case(schema) && !rest.is_empty() {
+                return rest;
+            }
+        }
+    }
+    table
+}
+
+/// Heal persisted table-source bindings that carry a doubled schema prefix
+/// (stored by the pre-fix bind dialog). Runs before wiring so the corrected
+/// remote names reach the engine; a clean or non-editable model is a no-op.
+async fn heal_doubled_schema_bindings(
+    bi_state: &BiState,
+    file_state: &FileState,
+    connection_id: ConnectionId,
+) -> Result<(), String> {
+    let needs_heal = {
+        let conns = bi_state.connections.lock().unwrap();
+        let Some(conn) = conns.get(&connection_id) else {
+            return Ok(());
+        };
+        conn.base_model.as_ref().is_some_and(|m| {
+            m.tables().iter().any(|t| {
+                t.source_binding()
+                    .is_some_and(|b| strip_doubled_schema(&b.schema, &b.table) != b.table)
+            })
+        })
+    };
+    // A read-only (package-subscribed) model can't be edited — its bindings
+    // came from the publisher and are clean; skip rather than fail the connect.
+    if !needs_heal || editable_base(bi_state, connection_id).is_err() {
+        return Ok(());
+    }
+    mutate_and_overview(bi_state, file_state, connection_id, |base, _| {
+        let tables: Vec<bi_engine::Table> = base
+            .tables()
+            .iter()
+            .map(|t| {
+                let mut t = t.clone();
+                if let Some(b) = t.source_binding() {
+                    let bare = strip_doubled_schema(&b.schema, &b.table);
+                    if bare != b.table {
+                        let fixed =
+                            bi_engine::TableSourceBinding::new(b.source_id.clone(), &b.schema, bare);
+                        crate::log_info!(
+                            "BI",
+                            "model editor: healed doubled-schema binding on '{}' ({} -> {})",
+                            t.name(),
+                            b.table,
+                            bare
+                        );
+                        t.set_source_binding(Some(fixed));
+                    }
+                }
+                t
+            })
+            .collect();
+        let edited = base.with_tables(tables);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+    .map(|_| ())
+}
+
 /// Bind a model table to a location within a catalog source (or clear its
 /// binding when `source_id` is null). Records the persisted binding on the
 /// model; the runtime binding is (re)established when the source is connected.
@@ -3678,19 +3820,9 @@ pub async fn bi_model_set_table_source_binding(
                 }
                 // Model tables imported from a schema are NAMED "<schema>.<table>"
                 // and that name is the natural thing to paste here — but the
-                // binding's `table` must be the bare remote name (the SQL builder
-                // qualifies it with `schema` itself; a doubled prefix renders as
-                // "BI"."BI.fact_sales" and the database rejects it). Strip a
-                // leading "<schema>." that matches the chosen schema.
+                // binding's `table` must be the bare remote name.
                 let schema = schema.trim();
-                let mut remote = source_table.trim();
-                if !schema.is_empty() {
-                    if let Some((head, rest)) = remote.split_once('.') {
-                        if head.eq_ignore_ascii_case(schema) && !rest.is_empty() {
-                            remote = rest;
-                        }
-                    }
-                }
+                let remote = strip_doubled_schema(schema, source_table.trim());
                 Some(bi_engine::TableSourceBinding::new(sid, schema, remote))
             }
             None => None,
@@ -3722,6 +3854,7 @@ pub async fn bi_model_set_table_source_binding(
 #[tauri::command]
 pub async fn bi_model_connect_source(
     bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
     connection_id: ConnectionId,
     source_id: String,
     connection_string: String,
@@ -3731,6 +3864,14 @@ pub async fn bi_model_connect_source(
         &window,
         crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
     )?;
+    // Older bind dialogs stored the remote table with a doubled schema prefix
+    // (schema "BI" + table "BI.fact_sales"); heal before wiring so the engine
+    // registers the correct remote names. Best-effort: a model with UNRELATED
+    // validation errors (e.g. a dangling measure reference) must not lose the
+    // ability to connect — the heal simply doesn't apply then.
+    if let Err(e) = heal_doubled_schema_bindings(&bi_state, &file_state, connection_id).await {
+        crate::log_warn!("BI", "model editor: binding heal skipped: {}", e);
+    }
     let (engine_arc, base) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
@@ -3768,6 +3909,22 @@ pub async fn bi_model_connect_source(
                 .to_string(),
         );
     }
+    // The wired source's connector doubles as the connection's IMPORT
+    // connector, so Import (list/import tables) works when connected from the
+    // Connections tab — not only via the legacy main-window connect flow.
+    let import_connector = {
+        let engine = engine_arc.lock().await;
+        engine.registry().connector_index_by_source_id(&source_id)
+    };
+    if import_connector.is_none() {
+        // Should not happen after a successful wire; without it Import keeps
+        // requiring the legacy connect flow — surface why in the log.
+        crate::log_warn!(
+            "BI",
+            "model editor: wired source '{}' resolved no registry connector; Import stays on the previous connector",
+            source_id
+        );
+    }
     // Mark connected on every connection sharing this model.
     {
         let mut conns = bi_state.connections.lock().unwrap();
@@ -3775,6 +3932,9 @@ pub async fn bi_model_connect_source(
             for c in conns.values_mut() {
                 if c.model_key.as_ref() == Some(&mk) {
                     c.is_connected = true;
+                    if let Some(idx) = import_connector {
+                        c.connector_index = Some(idx);
+                    }
                 }
             }
         }

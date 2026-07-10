@@ -483,7 +483,10 @@ pub(crate) fn view_to_response(
                     | pivot_engine::PivotCellType::ColumnSubtotal
                     | pivot_engine::PivotCellType::GrandTotalRow
                     | pivot_engine::PivotCellType::GrandTotalColumn
-                    | pivot_engine::PivotCellType::GrandTotal => cell
+                    | pivot_engine::PivotCellType::GrandTotal
+                    // Data cells need their path too: double-click drill-through
+                    // filters by it, and an omitted path drills the whole table.
+                    | pivot_engine::PivotCellType::Data => cell
                         .group_path
                         .iter()
                         .map(|(fi, vid)| (*fi, *vid))
@@ -751,7 +754,10 @@ pub(crate) fn extract_cell_window(
                         | pivot_engine::PivotCellType::ColumnSubtotal
                         | pivot_engine::PivotCellType::GrandTotalRow
                         | pivot_engine::PivotCellType::GrandTotalColumn
-                        | pivot_engine::PivotCellType::GrandTotal => cell
+                        | pivot_engine::PivotCellType::GrandTotal
+                        // Data cells need their path too: double-click drill-through
+                        // filters by it, and an omitted path drills the whole table.
+                        | pivot_engine::PivotCellType::Data => cell
                             .group_path
                             .iter()
                             .map(|(fi, vid)| (*fi, *vid))

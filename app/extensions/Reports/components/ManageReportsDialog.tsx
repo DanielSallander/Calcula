@@ -50,7 +50,14 @@ export function ManageReportsDialog(props: DialogProps): React.ReactElement | nu
     setBusy(r.id);
     setError(null);
     try {
-      await refreshOneReport(r);
+      const result = await refreshOneReport(r);
+      if (!result.ok) {
+        setError(`"${r.name}" was not refreshed:\n${result.message ?? "unknown error"}`);
+      } else if ((result.overwrittenCellCount ?? 0) > 0) {
+        setError(
+          `"${r.name}" refreshed. Note: ${result.overwrittenCellCount} existing cell(s) outside the previous report area were overwritten (Ctrl+Z to undo).`,
+        );
+      }
     } catch (e) {
       setError(String(e));
     } finally {

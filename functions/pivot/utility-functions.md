@@ -16,12 +16,21 @@ Returns the number of rows in a slice of the row axis. Useful for building custo
 
 **Examples:**
 ```
-CALC Window3 = RANGE(3)           # Returns 3 (count of rows in window)
-CALC Window = RANGE(-2, 0)        # 3 rows: 2 before + current
-CALC Forward = RANGE(0, 2)        # 3 rows: current + 2 after
+CALC Window3 = RANGE(3)           # Up to 3 (count of rows in window)
+CALC Window = RANGE(-2, 0)        # Up to 3 rows: 2 before + current
+CALC Forward = RANGE(0, 2)        # Up to 3 rows: current + 2 after
 ```
 
-**Note:** RANGE currently returns the count of rows in the specified window. It's most useful in combination with other arithmetic to build custom window calculations.
+**Behavior:**
+- Returns the **count** of rows that fall in the requested slice after
+  clamping to the axis — only rows at the current row's hierarchy level that
+  actually exist are counted. At the first row, `RANGE(3)` returns 1.
+- `RANGE(0)` returns 0.
+- A negative size is an error, as is `RANGE(start, end)` with start > end.
+- Returns NaN on subtotal and grand total rows, like the other window
+  functions.
+
+It's most useful in combination with other arithmetic to build custom window calculations.
 
 ---
 
@@ -51,6 +60,11 @@ CALC YearOnly = [Sales] * ISATLEVEL(Year)
 | -- Feb | 850 | 0 | 0 |
 | -- Mar | 850 | 0 | 0 |
 | - Q2 | 2600 | 0 | 0 |
+
+**Behavior:**
+- Returns 0 on the grand total row (it is not "at" any field's level).
+- An unknown or misspelled field name is an **error**, not 0 — a typo cannot
+  silently disable the calculation.
 
 **Use cases:**
 - Show a value only at a specific hierarchy level

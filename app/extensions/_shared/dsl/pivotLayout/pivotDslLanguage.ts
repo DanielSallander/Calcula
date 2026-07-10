@@ -7,7 +7,8 @@ import { loader } from '@monaco-editor/react';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import type { SourceField } from '../../components/types';
 import type { BiPivotModelInfo } from '../../components/types';
-import { AGGREGATION_NAMES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, TRANSFORM_FUNCTIONS, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from './tokens';
+import { AGGREGATION_NAMES, CALC_FUNCTION_ALIASES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, TRANSFORM_FUNCTIONS, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from './tokens';
+import { BARE_PARAM_NAME_RE, paramReference } from './paramNames';
 
 // Monaco worker setup (local, no CDN)
 self.MonacoEnvironment = {
@@ -51,6 +52,48 @@ export function setDslEditorContext(
   currentSourceFields = sourceFields;
   currentBiModel = biModel;
   currentControlHints = controlHints ?? [];
+}
+
+/** Update only the control hints (used by the Reports editor's unmount cleanup,
+ *  so stale hints never leak into a pivot/chart editor sharing this module). */
+export function setDslControlHints(controlHints: DslControlHint[]): void {
+  currentControlHints = controlHints;
+}
+
+/**
+ * 0-based index of the `@` starting an in-progress param token at the END of
+ * `lineText` (the text up to the cursor), or null when the cursor is not inside
+ * one. Skips `@` inside quoted string values (with `""` escapes) and after an
+ * unquoted `#` (trailing comment) — the same rules the Reports substitution uses.
+ */
+function findOpenParamToken(lineText: string): number | null {
+  let inString = false;
+  for (let i = 0; i < lineText.length; i++) {
+    const ch = lineText[i];
+    if (ch === '"') {
+      if (inString && lineText[i + 1] === '"') {
+        i++;
+        continue;
+      }
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '#') return null;
+    if (ch !== '@') continue;
+
+    if (lineText[i + 1] === '"') {
+      const close = lineText.indexOf('"', i + 2);
+      if (close === -1) return i; // open quoted param reaching the cursor
+      i = close; // completed quoted param — keep scanning
+    } else {
+      const m = BARE_PARAM_NAME_RE.exec(lineText.slice(i + 1));
+      const len = m ? m[0].length : 0;
+      if (i + 1 + len === lineText.length) return i; // token reaches the cursor
+      i += len; // completed bare token — keep scanning
+    }
+  }
+  return null;
 }
 
 /**
@@ -135,8 +178,8 @@ function addClauseKeywords(
 /** Known aggregation function names (lowercase). */
 const AGGREGATION_FUNC_NAMES = new Set([...AGGREGATION_NAMES]);
 
-/** Known visual calc function names (lowercase). */
-const VISUAL_CALC_FUNC_NAMES = new Set([...VISUAL_CALC_FUNCTIONS.keys()]);
+/** Known visual calc function names incl. engine aliases (lowercase). */
+const VISUAL_CALC_FUNC_NAMES = new Set([...VISUAL_CALC_FUNCTIONS.keys(), ...CALC_FUNCTION_ALIASES.keys()]);
 
 /**
  * Detect if the cursor is inside a function's parentheses.
@@ -200,7 +243,7 @@ export function registerPivotDslLanguage(): void {
           [/\b(Sum|Count|Average|Min|Max|CountNumbers|StdDev|StdDevP|Var|VarP|Product)\s*(?=\()/i, 'type.identifier'],
           [/\b(RunningSum|MovingAverage|Previous|Next|First|Last|Parent|GrandTotal|Children|Leaves|Range|IsAtLevel|Lookup|LookupWithTotals|Collapse|CollapseAll|Expand|ExpandAll)\s*(?=\()/i, 'type.identifier'],
           [/\b(IF|SWITCH|AND|OR|NOT|ABS|ROUND|MIN|MAX|CEILING|FLOOR|SQRT|MOD|INT|SIGN|POWER|CONCAT|CONCATENATE|LEFT|RIGHT|MID|LEN|UPPER|LOWER|TRIM|TEXT)\s*(?=\()/i, 'type.identifier'],
-          [/\b(HIGHESTPARENT|LOWESTPARENT)\b/i, 'keyword.modifier'],
+          [/\b(HIGHESTPARENT|LOWESTPARENT|NONE)\b/i, 'keyword.modifier'],
           [/\b[a-zA-Z][\w]*(-[a-zA-Z][\w]*)+\b/, 'variable.predefined'],
           [/[A-Za-z_]\w*\.[A-Za-z_]\w*/, 'variable.name'],
           [/[A-Za-z_]\w*/, 'identifier'],
@@ -240,21 +283,40 @@ export function registerPivotDslLanguage(): void {
       const lineTrimmed = lineText.trim().toUpperCase();
 
       // @Control param completion: a report's FILTERS line can bind a value to a
-      // Controls-pane control or ribbon filter by name (e.g. `Category = @Region`).
-      // Fires when the cursor follows an `@`. Only the Reports editor supplies
-      // control hints, so this is naturally inert in pivot/chart editors.
-      if (currentControlHints.length > 0 && /@\w*$/.test(lineText)) {
-        for (const hint of currentControlHints) {
-          suggestions.push({
-            label: { label: `@${hint.name}`, description: hint.kind ?? 'control' },
-            kind: monaco.languages.CompletionItemKind.Variable,
-            insertText: hint.name,
-            detail: hint.detail,
-            sortText: `00_${hint.name}`,
-            range,
-          });
+      // Controls-pane control or ribbon filter by name (e.g. `Category = @Region`
+      // or `Products.Category = @"Products.Category"`). Fires when the cursor is
+      // inside an in-progress `@` token — but not inside string values or
+      // comments. Only the Reports editor supplies control hints, so this is
+      // naturally inert in pivot/chart editors.
+      if (currentControlHints.length > 0) {
+        const atIdx = findOpenParamToken(lineText);
+        if (atIdx !== null) {
+          // Replace the WHOLE token including the '@' — the default word range
+          // excludes '@' and breaks on '.', which would corrupt dotted names.
+          const paramRange: monaco.IRange = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: atIdx + 1, // columns are 1-based; atIdx is 0-based
+            endColumn: position.column,
+          };
+          for (const hint of currentControlHints) {
+            const insert = paramReference(hint.name);
+            if (!insert) continue; // names containing '"' are not expressible
+            suggestions.push({
+              label: { label: `@${hint.name}`, description: hint.kind ?? 'control' },
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: insert,
+              // The typed prefix ('@Reg' / '@Prod') must strong-match; without
+              // filterText Monaco matches against the label from its first char
+              // and drops these once the user types past the '@'.
+              filterText: `@${hint.name}`,
+              detail: hint.detail,
+              sortText: `00_${hint.name}`,
+              range: paramRange,
+            });
+          }
+          return { suggestions };
         }
-        return { suggestions };
       }
 
       // Determine which clause the cursor is in.
@@ -393,6 +455,19 @@ export function registerPivotDslLanguage(): void {
             const upperName = fn.toUpperCase();
             suggestions.push({
               label: { label: `${upperName}()`, description: 'Visual Calc' },
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: `${upperName}($0)`,
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              detail: desc,
+              sortText: `01_${fn}`,
+              range,
+            });
+          }
+          // Engine-supported aliases (COLLAPSE/COLLAPSEALL/EXPAND/EXPANDALL)
+          for (const [fn, desc] of CALC_FUNCTION_ALIASES) {
+            const upperName = fn.toUpperCase();
+            suggestions.push({
+              label: { label: `${upperName}()`, description: 'Visual Calc (alias)' },
               kind: monaco.languages.CompletionItemKind.Function,
               insertText: `${upperName}($0)`,
               insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,

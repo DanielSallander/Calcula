@@ -12,6 +12,7 @@ import {
   LANGUAGE_ID,
   registerPivotDslLanguage,
   setDslEditorContext,
+  setDslControlHints,
   type DslControlHint,
 } from "./pivotDslLanguage";
 import type { BiPivotModelInfo } from "../../components/types";
@@ -40,10 +41,13 @@ export function DesignQueryEditor({
   }, []);
 
   // The DSL editor context is module-global (shared with the pivot Design view);
-  // re-set it whenever the supplied model or control hints change.
+  // re-set it whenever the supplied model or control hints change, and clear the
+  // hints on unmount so they never leak into a pivot/chart editor that reuses
+  // the shared language module.
   useEffect(() => {
     setDslEditorContext([], biModel ?? undefined, controlHints);
   }, [biModel, controlHints]);
+  useEffect(() => () => setDslControlHints([]), []);
 
   const handleChange: OnChange = useCallback((v) => onChange(v ?? ""), [onChange]);
 

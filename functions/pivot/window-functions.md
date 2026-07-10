@@ -1,6 +1,8 @@
 # Window Functions
 
-Window functions traverse the flattened row axis in visual order. They see the same rows that the user sees in the pivot table, excluding subtotals and grand totals.
+Window functions traverse the axis in visual order. The window only contains rows at the **same hierarchy level** as the current row — a quarter row traverses the other quarter rows, and a parent (year) row gets its own window over the rows at its level. Subtotal and grand total rows are never part of a window; on those rows every window function (including FIRST and LAST) returns NaN.
+
+All window functions also accept an optional trailing axis keyword (`ROWS`, the default, or `COLUMNS`) after the arguments shown below. The axis keyword must be the last argument and can be combined with a reset; it never substitutes for a required argument. See [the Axis Parameter](README.md#the-axis-parameter).
 
 ## RUNNINGSUM
 
@@ -24,6 +26,8 @@ CALC RunByParent = RUNNINGSUM([TotalSales], LOWESTPARENT)
 - Row 1: value[1]
 - Row 2: value[1] + value[2]
 - Row 3: value[1] + value[2] + value[3]
+- Only rows at the current row's hierarchy level are accumulated; a parent
+  group row accumulates over the other rows at its level
 - Subtotal/grand total rows: NaN (excluded from window)
 
 ---
@@ -47,9 +51,13 @@ CALC MA5ByYear = MOVINGAVERAGE([TotalSales], 5, HIGHESTPARENT)
 ```
 
 **Behavior:**
-- Window includes the current row and up to (window-1) preceding rows
+- Window includes the current row and up to (window-1) preceding rows at the
+  same hierarchy level
 - If fewer rows are available (e.g., first row), averages whatever is available
 - For window=3 at row 5: average of rows 3, 4, 5
+- The window size must be > 0, and it is required — a reset keyword in the
+  window slot (`MOVINGAVERAGE([Sales], HIGHESTPARENT)`) is an error
+- Subtotal/grand total rows: NaN
 
 ---
 
@@ -75,7 +83,14 @@ CALC Growth = ([TotalSales] - PREVIOUS([TotalSales])) / PREVIOUS([TotalSales])
 
 **Behavior:**
 - Returns NaN if there is no previous row (first row in partition)
-- Steps defaults to 1 if not specified
+- Steps defaults to 1 if not specified; steps must be >= 0 (0 = the current row)
+- **Steps vs. reset:** a bare keyword or field name in the steps slot is read
+  as the reset — `PREVIOUS([Sales], HIGHESTPARENT)` is shorthand for
+  `PREVIOUS([Sales], 1, HIGHESTPARENT)`. A number there is the step count. To
+  combine both, write `PREVIOUS(field, steps, reset)`; a reset in the 2nd
+  position cannot be followed by further arguments
+- Only rows at the current row's hierarchy level are traversed; subtotal and
+  grand total rows return NaN
 
 ---
 
@@ -99,6 +114,12 @@ CALC VsNext = [TotalSales] - NEXT([TotalSales])
 
 **Behavior:**
 - Returns NaN if there is no next row (last row in partition)
+- Steps defaults to 1 if not specified; steps must be >= 0 (0 = the current row)
+- **Steps vs. reset:** as with PREVIOUS, a bare keyword or field name in the
+  steps slot is read as the reset (`NEXT([Sales], HIGHESTPARENT)`); a number
+  there is the step count. To combine both, write `NEXT(field, steps, reset)`
+- Only rows at the current row's hierarchy level are traversed; subtotal and
+  grand total rows return NaN
 
 ---
 
@@ -120,6 +141,11 @@ CALC PctOfFirst = [TotalSales] / FIRST([TotalSales])
 CALC FirstInYear = FIRST([TotalSales], HIGHESTPARENT)
 ```
 
+**Behavior:**
+- Returns the first value among rows at the current row's hierarchy level
+  (within the reset partition, if one is given)
+- Subtotal and grand total rows return NaN
+
 ---
 
 ## LAST
@@ -138,3 +164,8 @@ Returns the value from the last row in the partition.
 CALC VsLast = [TotalSales] - LAST([TotalSales])
 CALC LastInYear = LAST([TotalSales], HIGHESTPARENT)
 ```
+
+**Behavior:**
+- Returns the last value among rows at the current row's hierarchy level
+  (within the reset partition, if one is given)
+- Subtotal and grand total rows return NaN

@@ -287,6 +287,26 @@ describe('Parser coverage', () => {
       const r = p('CALC: "My Calc" = [A] + [B]');
       expect(r.ast.calculatedFields[0].name).toBe('My Calc');
     });
+
+    it('preserves single-quoted names in calc expressions', () => {
+      const r = p("CALC: X = 'Total Sales' - Returns");
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.calculatedFields).toHaveLength(1);
+      expect(r.ast.calculatedFields[0].expression).toBe("'Total Sales' - Returns");
+    });
+
+    it('parses calc with single-quoted name as the field name', () => {
+      const r = p("CALC: 'Net Margin' = [Sales] - [Cost]");
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.calculatedFields[0].name).toBe('Net Margin');
+    });
+
+    it('preserves single-quoted names in inline CALC within VALUES', () => {
+      const r = p("VALUES: Sum(Sales), CALC X = 'Total Sales' * 2");
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.calculatedFields).toHaveLength(1);
+      expect(r.ast.calculatedFields[0].expression).toBe("'Total Sales' * 2");
+    });
   });
 
   // ---------------------------------------------------------------

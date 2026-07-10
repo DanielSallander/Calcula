@@ -207,7 +207,10 @@ pub(crate) fn persisted_source_for(conn: &Connection) -> bi_engine::PersistedSou
         trust_server_certificate: target.trust_server_certificate,
         ssl_mode: target.ssl_mode.clone(),
     };
-    let id = source_id_for(&conn.connection_type, &conn.server, &conn.database);
+    // The id must derive from the SAME target as the connection descriptor —
+    // a connection_string pointing elsewhere than conn.server/database would
+    // otherwise stamp tables with an id that matches no wired source.
+    let id = source_id_for(&conn.connection_type, &target.host, &target.database);
     let mut src = bi_engine::PersistedSource::new(
         id,
         kind,
