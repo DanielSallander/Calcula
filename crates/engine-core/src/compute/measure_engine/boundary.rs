@@ -10,7 +10,7 @@ use crate::compute::context::{
     format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter,
 };
 use crate::compute::expression::Expression;
-use crate::compute::sql_util::quote_ident_double;
+use crate::compute::sql_util::{df_table_name, quote_ident_double};
 use crate::error::EngineResult;
 use crate::types::TableColumn;
 
@@ -62,7 +62,7 @@ impl<'a> MeasureEngine<'a> {
         // Register all needed tables.
         for table_name in &all_tables {
             let batch = self.get_table_batch(table_name).await?;
-            let df_name = table_name.to_lowercase();
+            let df_name = df_table_name(&table_name);
             // Avoid re-registering.
             if ctx.table(&df_name).await.is_err() {
                 ctx.register_batch(&df_name, batch)?;
@@ -384,7 +384,7 @@ impl<'a> MeasureEngine<'a> {
         ctx: &SessionContext,
         idx: usize,
     ) -> EngineResult<RecordBatch> {
-        let fact_lower = fact_table.to_lowercase();
+        let fact_lower = df_table_name(&fact_table);
 
         // Find the unsafe dim in GROUP BY.
         let mut unsafe_dim: Option<(&str, &crate::model::relationship::Relationship)> = None;
@@ -417,7 +417,7 @@ impl<'a> MeasureEngine<'a> {
             }
         };
 
-        let dim_lower = unsafe_dim_name.to_lowercase();
+        let dim_lower = df_table_name(&unsafe_dim_name);
         let fact_is_from = rel.from_table() == fact_table;
 
         // Step 1: Compute boundary values per group from the unsafe dim.
@@ -493,7 +493,7 @@ impl<'a> MeasureEngine<'a> {
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
             } else {
-                let tbl = tc.table.to_lowercase();
+                let tbl = df_table_name(&tc.table);
                 let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
                 main_select.push(qualified.clone());
                 main_group.push(qualified);
@@ -529,7 +529,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         for table_name in &tables_to_join {
-            let tbl = table_name.to_lowercase();
+            let tbl = df_table_name(&table_name);
             if main_joined.contains(&tbl) {
                 continue;
             }
@@ -549,7 +549,7 @@ impl<'a> MeasureEngine<'a> {
                 let tbl = if f.table == fact_table {
                     fact_lower.clone()
                 } else {
-                    f.table.to_lowercase()
+                    df_table_name(&f.table)
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
@@ -594,13 +594,13 @@ impl<'a> MeasureEngine<'a> {
         eval_ctx: &EvaluationContext,
         ctx: &SessionContext,
     ) -> EngineResult<RecordBatch> {
-        let fact_lower = fact_table.to_lowercase();
+        let fact_lower = df_table_name(&fact_table);
 
         let mut select_parts: Vec<String> = Vec::new();
         let mut group_parts: Vec<String> = Vec::new();
 
         for tc in group_by {
-            let tbl = tc.table.to_lowercase();
+            let tbl = df_table_name(&tc.table);
             let qualified = format!("{tbl}.{}", quote_ident_double(&tc.column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
@@ -628,7 +628,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         for table_name in &tables_to_join {
-            let tbl = table_name.to_lowercase();
+            let tbl = df_table_name(&table_name);
             if joined.contains(&tbl) {
                 continue;
             }
@@ -647,7 +647,7 @@ impl<'a> MeasureEngine<'a> {
                 let tbl = if f.table == fact_table {
                     fact_lower.clone()
                 } else {
-                    f.table.to_lowercase()
+                    df_table_name(&f.table)
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);

@@ -96,6 +96,8 @@ mod context_column_tests;
 #[cfg(test)]
 mod detail_tests;
 #[cfg(test)]
+mod dotted_name_tests;
+#[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
 mod gvar_tests;

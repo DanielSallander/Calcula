@@ -41,6 +41,40 @@ pub fn quote_ident_bracket(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
 }
 
+/// Quote a (possibly dotted) model table name as a DataFusion table REFERENCE.
+///
+/// The local pipeline registers a single-dotted model name (`BI.fact_sales`,
+/// from imports that named tables `"<schema>.<table>"`) as a schema-qualified
+/// DataFusion table, so a quoted reference must quote each part separately:
+/// `bi.fact_sales` → `"bi"."fact_sales"` (a single quoted ident
+/// `"bi.fact_sales"` would name a table that no longer exists). A dot-free
+/// name quotes whole, exactly like [`quote_ident_double`].
+pub fn quote_table_ref_double(name: &str) -> String {
+    let mut parts = name.split('.');
+    if let (Some(schema), Some(table), None) = (parts.next(), parts.next(), parts.next()) {
+        if !schema.is_empty() && !table.is_empty() {
+            return format!("{}.{}", quote_ident_double(schema), quote_ident_double(table));
+        }
+    }
+    quote_ident_double(name)
+}
+
+/// The DataFusion registration/reference name for a model table.
+///
+/// The local compute path registers in-memory batches under this name and
+/// interpolates it (unquoted) into DataFusion SQL, so it must be a plain
+/// identifier. Model table names may be DOTTED — imports historically named
+/// tables `"<schema>.<table>"` (e.g. `BI.fact_sales`), and DataFusion would
+/// parse the unquoted dot as a `schema.table` qualification and fail with
+/// "table 'datafusion.bi.fact_sales' not found". Lowercase + dots mapped to
+/// underscores keeps registration and every SQL reference in agreement.
+/// (Theoretical collision: distinct model tables `bi.fact` and `bi_fact`
+/// would map to the same name — model names come from imports where that
+/// pair cannot arise.)
+pub fn df_table_name(name: &str) -> String {
+    name.to_lowercase().replace('.', "_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,6 +87,12 @@ mod tests {
     #[test]
     fn sql_quote_literal_doubles_embedded_quote() {
         assert_eq!(sql_quote_literal("O'Brien"), "'O''Brien'");
+    }
+
+    #[test]
+    fn df_table_name_maps_dotted_names_to_plain_identifiers() {
+        assert_eq!(df_table_name("BI.fact_sales"), "bi_fact_sales");
+        assert_eq!(df_table_name("dim_product"), "dim_product");
     }
 
     #[test]

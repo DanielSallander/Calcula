@@ -3,7 +3,7 @@
 use crate::compute::aggregate::AggregateResult;
 use crate::compute::context::{ContextResolver, ResolvedFilter};
 use crate::compute::expression::{expand_global_variables, expand_measure_refs};
-use crate::compute::sql_util::quote_ident_double;
+use crate::compute::sql_util::{df_table_name, quote_ident_double};
 use crate::error::EngineResult;
 
 use super::sql::extract_scalar;
@@ -101,7 +101,7 @@ impl<'a> MeasureEngine<'a> {
         // handled by EXISTS (those filters are already embedded in the EXISTS clause).
         let safe_filters: Vec<ResolvedFilter> = effective
             .iter()
-            .filter(|f| !exists_tables.contains(&f.table.to_lowercase()))
+            .filter(|f| !exists_tables.contains(&df_table_name(&f.table)))
             .cloned()
             .collect();
         let where_clause = self.build_where_clause(&safe_filters, table_name);

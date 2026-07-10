@@ -9,7 +9,7 @@ use crate::compute::context::{
     format_filter_value, EvaluationContext, ResolvedFilter, ResolvedInFilter,
 };
 use crate::compute::evaluate::materialize_calculated_columns_with_udfs;
-use crate::compute::sql_util::quote_ident_double;
+use crate::compute::sql_util::{df_table_name, quote_ident_double};
 use crate::error::EngineResult;
 
 use super::MeasureEngine;
@@ -27,7 +27,7 @@ impl<'a> MeasureEngine<'a> {
                 let tbl = if f.table == fact_table {
                     "t".to_string()
                 } else {
-                    f.table.to_lowercase()
+                    df_table_name(&f.table)
                 };
                 let op = f.operator.as_sql();
                 let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
@@ -65,7 +65,7 @@ impl<'a> MeasureEngine<'a> {
             // Find relationship between fact table and filter's table,
             // respecting USERELATIONSHIP overrides.
             let rel = eval_ctx.resolve_relationship(self.model, fact_table, &filter.table)?;
-            let dim_lower = filter.table.to_lowercase();
+            let dim_lower = df_table_name(&filter.table);
             let fact_is_from = rel.from_table() == fact_table;
 
             if rel.is_safe_for_direct_join() {
@@ -120,7 +120,7 @@ impl<'a> MeasureEngine<'a> {
         let mut conditions = Vec::new();
 
         for inf in in_filters {
-            let var_lower = format!("var_{}", inf.var_base_table.to_lowercase());
+            let var_lower = format!("var_{}", df_table_name(&inf.var_base_table));
 
             // Register the variable's base table if not already registered.
             if !registered.contains(&var_lower) {
@@ -153,7 +153,7 @@ impl<'a> MeasureEngine<'a> {
             let fact_prefix = if fact_table == inf.table {
                 "t".to_string()
             } else {
-                inf.table.to_lowercase()
+                df_table_name(&inf.table)
             };
             conditions.push(format!(
                 "{fact_prefix}.{} IN ({subquery})",

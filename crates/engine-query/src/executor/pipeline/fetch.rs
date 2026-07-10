@@ -233,12 +233,20 @@ fn partition_batches(batches: Vec<RecordBatch>, max_partitions: usize) -> Vec<Ve
 /// Register `batches` as an in-memory table, preserving them as multiple
 /// `MemTable` partitions instead of concatenating into one giant batch.
 ///
-/// Functionally equivalent to [`SessionContext::register_batch`] (same bare
+/// Functionally equivalent to [`SessionContext::register_batch`] (same
 /// table-name semantics — callers pass lowercase names), but avoids the full
 /// extra copy made by `concat_batches` and lets DataFusion parallelize across
 /// `target_partitions` cores. An empty batch list registers nothing (matching
 /// the previous skip-on-empty behavior); zero-row batches register an empty
 /// table with the correct schema.
+///
+/// **Dotted model table names** (imports historically named tables
+/// `"<schema>.<table>"`, e.g. `BI.fact_sales`) are registered as a
+/// schema-qualified reference — the in-memory schema is created on demand —
+/// because the generated SQL interpolates the name UNQUOTED, which DataFusion
+/// parses as `schema.table`. A bare registration of the dotted string would
+/// therefore never resolve ("table 'datafusion.bi.fact_sales' not found").
+/// Names with no dot (or several) register bare, exactly as before.
 pub(super) fn register_partitioned_table(
     ctx: &SessionContext,
     name: &str,
@@ -251,8 +259,40 @@ pub(super) fn register_partitioned_table(
     let target_partitions = ctx.copied_config().target_partitions();
     let partitions = partition_batches(batches, target_partitions);
     let table = MemTable::try_new(schema, partitions)?;
-    ctx.register_table(TableReference::bare(name), Arc::new(table))?;
+    ctx.register_table(model_table_reference(ctx, name)?, Arc::new(table))?;
     Ok(())
+}
+
+/// The [`TableReference`] under which a model table is registered — see
+/// [`register_partitioned_table`]. For a single-dotted name this creates the
+/// in-memory schema on demand and returns a schema-qualified reference so the
+/// unquoted SQL form (`bi.fact_sales`) resolves; anything else stays bare.
+fn model_table_reference(ctx: &SessionContext, name: &str) -> QueryResult<TableReference> {
+    let mut parts = name.split('.');
+    if let (Some(schema_part), Some(table_part), None) = (parts.next(), parts.next(), parts.next())
+    {
+        if !schema_part.is_empty() && !table_part.is_empty() {
+            let default_catalog = ctx
+                .copied_config()
+                .options()
+                .catalog
+                .default_catalog
+                .clone();
+            if let Some(catalog) = ctx.catalog(&default_catalog) {
+                if catalog.schema(schema_part).is_none() {
+                    catalog.register_schema(
+                        schema_part,
+                        Arc::new(datafusion::catalog_common::memory::MemorySchemaProvider::new()),
+                    )?;
+                }
+                return Ok(TableReference::partial(
+                    schema_part.to_string(),
+                    table_part.to_string(),
+                ));
+            }
+        }
+    }
+    Ok(TableReference::bare(name))
 }
 
 /// Whether an Arrow type is an integer family type (including

@@ -7,7 +7,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::compute::aggregate::AggregateResult;
 use crate::compute::context::{ContextResolver, EvaluationContext, ResolvedFilter};
-use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
+use crate::compute::sql_util::{df_table_name, quote_ident_double, sql_quote_literal};
 use crate::error::EngineResult;
 use crate::types::TableColumn;
 
@@ -48,16 +48,16 @@ impl<'a> MeasureEngine<'a> {
         let binding_name_set: std::collections::HashSet<String> = bindings
             .iter()
             .filter(|(_, e)| e.is_query())
-            .map(|(name, _)| name.to_lowercase())
+            .map(|(name, _)| df_table_name(&name))
             .collect();
         let source_filters: Vec<ResolvedFilter> = outer_filters
             .iter()
-            .filter(|f| !binding_name_set.contains(&f.table.to_lowercase()))
+            .filter(|f| !binding_name_set.contains(&df_table_name(&f.table)))
             .cloned()
             .collect();
         let intermediate_filters: Vec<&ResolvedFilter> = outer_filters
             .iter()
-            .filter(|f| binding_name_set.contains(&f.table.to_lowercase()))
+            .filter(|f| binding_name_set.contains(&df_table_name(&f.table)))
             .collect();
 
         // Step 1: Materialize each Query binding (using only source filters).
@@ -71,8 +71,8 @@ impl<'a> MeasureEngine<'a> {
                     .materialize_query(aggregates, group_by, fact_table, &source_filters, &[])
                     .await?;
                 let schema = batch.schema();
-                ctx.register_batch(&name.to_lowercase(), batch)?;
-                binding_schemas.insert(name.to_lowercase(), schema);
+                ctx.register_batch(&df_table_name(&name), batch)?;
+                binding_schemas.insert(df_table_name(&name), schema);
                 query_binding_names.push(name.clone());
             }
         }
@@ -86,7 +86,7 @@ impl<'a> MeasureEngine<'a> {
         // Step 2: Inline scalar bindings and evaluate the RETURN expression.
         let inlined = expr.inline_bindings();
         let result_sql = inlined.to_sql_string()?;
-        let from_table = query_binding_names[0].to_lowercase();
+        let from_table = df_table_name(&query_binding_names[0]);
 
         let mut sql = format!(
             "SELECT {result_sql} AS {} FROM {from_table}",
@@ -141,16 +141,16 @@ impl<'a> MeasureEngine<'a> {
         let binding_name_set: std::collections::HashSet<String> = bindings
             .iter()
             .filter(|(_, e)| e.is_query())
-            .map(|(name, _)| name.to_lowercase())
+            .map(|(name, _)| df_table_name(&name))
             .collect();
         let source_filters: Vec<ResolvedFilter> = outer_filters
             .iter()
-            .filter(|f| !binding_name_set.contains(&f.table.to_lowercase()))
+            .filter(|f| !binding_name_set.contains(&df_table_name(&f.table)))
             .cloned()
             .collect();
         let intermediate_filters: Vec<&ResolvedFilter> = outer_filters
             .iter()
-            .filter(|f| binding_name_set.contains(&f.table.to_lowercase()))
+            .filter(|f| binding_name_set.contains(&df_table_name(&f.table)))
             .collect();
 
         // Step 1: Materialize each Query binding (using only source filters).
@@ -177,8 +177,8 @@ impl<'a> MeasureEngine<'a> {
                     .materialize_query(aggregates, &augmented_gb, fact_table, &source_filters, &[])
                     .await?;
                 let schema = batch.schema();
-                ctx.register_batch(&name.to_lowercase(), batch)?;
-                binding_schemas.insert(name.to_lowercase(), schema);
+                ctx.register_batch(&df_table_name(&name), batch)?;
+                binding_schemas.insert(df_table_name(&name), schema);
                 query_binding_names.push(name.clone());
             }
         }
@@ -192,7 +192,7 @@ impl<'a> MeasureEngine<'a> {
         // Step 2: Build SQL over the intermediate table(s).
         let inlined = expr.inline_bindings();
         let result_sql = inlined.to_sql_string()?;
-        let from_table = query_binding_names[0].to_lowercase();
+        let from_table = df_table_name(&query_binding_names[0]);
 
         let mut select_parts: Vec<String> = Vec::new();
         let mut group_parts: Vec<String> = Vec::new();
@@ -251,7 +251,7 @@ impl<'a> MeasureEngine<'a> {
         relationship_overrides: &[String],
     ) -> EngineResult<RecordBatch> {
         let ctx = self.session_context();
-        let fact_lower = fact_table.to_lowercase();
+        let fact_lower = df_table_name(&fact_table);
 
         // Register fact table.
         let fact_batch = self.get_table_batch(fact_table).await?;
@@ -268,7 +268,7 @@ impl<'a> MeasureEngine<'a> {
         // Register dimension tables.
         for dim in &dim_tables {
             let dim_batch = self.get_table_batch(dim).await?;
-            ctx.register_batch(&dim.to_lowercase(), dim_batch)?;
+            ctx.register_batch(&df_table_name(&dim), dim_batch)?;
         }
 
         // Build SELECT: group-by columns + aggregate expressions.
@@ -276,7 +276,7 @@ impl<'a> MeasureEngine<'a> {
         let mut group_parts: Vec<String> = Vec::new();
 
         for (table, column) in group_by {
-            let tbl = table.to_lowercase();
+            let tbl = df_table_name(&table);
             let qualified = format!("{tbl}.{}", quote_ident_double(column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
@@ -315,7 +315,7 @@ impl<'a> MeasureEngine<'a> {
         // Register any extra dimension tables from context filters.
         for dim in &extra_dim_tables {
             let dim_batch = self.get_table_batch(dim).await?;
-            ctx.register_batch(&dim.to_lowercase(), dim_batch)?;
+            ctx.register_batch(&df_table_name(&dim), dim_batch)?;
         }
 
         let select_clause = select_parts.join(", ");
@@ -327,7 +327,7 @@ impl<'a> MeasureEngine<'a> {
         joined.insert(fact_lower.clone());
 
         for dim in all_dims {
-            let dim_lower = dim.to_lowercase();
+            let dim_lower = df_table_name(&dim);
             if joined.contains(&dim_lower) {
                 continue;
             }
@@ -376,7 +376,7 @@ fn build_intermediate_where(
     let parts: Vec<String> = filters
         .iter()
         .map(|f| {
-            let tbl = f.table.to_lowercase();
+            let tbl = df_table_name(&f.table);
             let op = f.operator.as_sql();
             let val = format_intermediate_value(&tbl, &f.column, &f.value, schemas);
             format!("{tbl}.{} {op} {val}", quote_ident_double(&f.column))

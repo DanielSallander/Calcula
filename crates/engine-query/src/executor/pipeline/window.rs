@@ -13,7 +13,7 @@ use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{DateGranularity, Expression};
 use engine_core::compute::measure::{expression_measure, Measure};
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
-use engine_core::compute::sql_util::quote_ident_double;
+use engine_core::compute::sql_util::{quote_ident_double, quote_table_ref_double};
 use engine_core::compute::time_intelligence::{
     lower_time_intelligence, lower_time_intelligence_filtered, lower_to_date_explicit_range,
     time_intelligence_route, FilterContextPlan, TimeIntelligenceRoute,
@@ -881,7 +881,7 @@ impl QueryExecutor {
             return Ok(true);
         }
 
-        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
         let sql = format!(
             "SELECT COUNT(*) FROM {table} WHERE {}",
             divergence.join(" OR ")
@@ -954,7 +954,7 @@ impl QueryExecutor {
         })?;
 
         let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
-        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
         let ctx_where = if where_sql.is_empty() {
             String::new()
         } else {
@@ -1014,7 +1014,7 @@ impl QueryExecutor {
         function_label: &str,
     ) -> QueryResult<()> {
         let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
-        let table = quote_ident_double(&plan_info.date_table.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
         let ctx_where = if where_sql.is_empty() {
             String::new()
         } else {
@@ -1140,7 +1140,7 @@ impl QueryExecutor {
         } else {
             format!("MAX({key_col}) AS __max")
         };
-        let mut sql = format!("SELECT {select} FROM {}", quote_ident_double(&table));
+        let mut sql = format!("SELECT {select} FROM {}", quote_table_ref_double(&table));
         if !where_sql.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(where_sql);
