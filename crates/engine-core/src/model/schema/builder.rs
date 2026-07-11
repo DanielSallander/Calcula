@@ -282,7 +282,16 @@ impl DataModelBuilder {
     /// - Relationship names are unique
     /// - All referenced tables and columns exist
     /// - Join column types are compatible
-    pub fn build(self) -> EngineResult<DataModel> {
+    pub fn build(mut self) -> EngineResult<DataModel> {
+        // 0-ct. Synthesize the derived tables of materialized calculated
+        // tables (idempotent reconcile: previously synthesized tables are
+        // dropped and re-inferred, so build/validate replays converge). Runs
+        // FIRST so the derived tables participate in every check below —
+        // identifier validation, duplicate detection, relationships,
+        // hierarchies, RLS — exactly like hand-authored tables.
+        self.tables =
+            super::reconcile_calculated_tables(std::mem::take(&mut self.tables), &self.global_variables)?;
+
         // 0. Identifier validation. Table, column, calculated-column, and
         // measure names are later interpolated into quoted SQL identifiers
         // (and table names into cache file names), so characters that can
@@ -710,6 +719,26 @@ impl DataModelBuilder {
             // `42`) — a valid placeholder with no home table, so skip the
             // table/column checks (validate its group and move on).
             if measure.column_references().is_empty() {
+                if let Some(group_name) = measure.group() {
+                    if !seen_groups.contains(group_name) {
+                        return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
+                    }
+                }
+                continue;
+            }
+
+            // A measure may aggregate over a DYNAMIC calculated table
+            // (e.g. `SUM(ct[alias])`): the reference expands into a VAR
+            // binding at evaluation, so the inferred "table" is not a model
+            // table. Like MeasureRef-bearing measures above, deep validation
+            // happens after expansion at query time — only the group is
+            // checked here. (A MATERIALIZED calculated table needs no skip:
+            // its derived table is a real model table.)
+            if self
+                .global_variables
+                .iter()
+                .any(|gv| gv.name() == measure.table() && gv.is_query() && gv.is_dynamic())
+            {
                 if let Some(group_name) = measure.group() {
                     if !seen_groups.contains(group_name) {
                         return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
@@ -1156,8 +1185,14 @@ impl DataModelBuilder {
                 )));
             }
 
-            // No collision with table names.
-            if seen_tables.contains(gv.name()) {
+            // No collision with table names — except a materialized calculated
+            // table's OWN derived table, which is synthesized under the same
+            // name by design (see `reconcile_calculated_tables`).
+            let collides_with_real_table = self
+                .tables
+                .iter()
+                .any(|t| t.name() == gv.name() && !t.is_calculated());
+            if collides_with_real_table {
                 return Err(EngineError::InvalidGlobalVariable {
                     name: gv.name().to_string(),
                     reason: format!("name conflicts with table '{}'", gv.name()),

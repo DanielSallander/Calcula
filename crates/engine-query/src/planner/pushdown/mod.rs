@@ -274,6 +274,35 @@ fn context_pushdown_fact_filters(
     Some(fact_filters)
 }
 
+/// The `(schema, table)` a `FetchRequest` should target for a model table.
+///
+/// Normally the registered source binding. Derived tables of materialized
+/// calculated tables have no source binding by design — the in-memory cache
+/// serves them, filled by materialization at refresh — so they get a
+/// placeholder (no schema, model table name); the executor's cached-table
+/// path never sends it to a connector, and a cache miss fails closed at
+/// fetch time.
+fn fetch_target_for(
+    registry: &SourceRegistry,
+    model: &DataModel,
+    table_name: &str,
+) -> QueryResult<(Option<String>, String)> {
+    match registry.binding_for(table_name) {
+        Ok(binding) => Ok((Some(binding.schema.clone()), binding.table.clone())),
+        Err(err) => {
+            let is_calculated = model
+                .tables()
+                .iter()
+                .any(|t| t.name() == table_name && t.is_calculated());
+            if is_calculated {
+                Ok((None, table_name.to_string()))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 fn lc_set_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
     set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
 }
@@ -823,12 +852,19 @@ impl PushdownPlanner {
             .chain(scalar_filter_only_tables.iter().copied())
             .collect();
 
-        // Verify all tables have registered sources (skip QUERY binding names).
+        // Verify all tables have registered sources (skip QUERY binding names,
+        // and derived tables of materialized calculated tables — those have no
+        // source connector by design: the in-memory cache serves them, filled
+        // by materialization at refresh).
         for table in &all_tables {
             if query_binding_names.contains(&table.to_lowercase()) {
                 continue;
             }
-            if !registry.has_table(table) {
+            let is_calculated = model
+                .tables()
+                .iter()
+                .any(|t| t.name() == *table && t.is_calculated());
+            if !registry.has_table(table) && !is_calculated {
                 return Err(QueryError::SourceNotRegistered(table.to_string()));
             }
         }
@@ -1304,7 +1340,8 @@ impl PushdownPlanner {
                 continue;
             }
             if seen_tables.insert(*table_name) {
-                let binding = registry.binding_for(table_name)?;
+                let (fetch_schema, fetch_table) =
+                    fetch_target_for(registry, model, table_name)?;
 
                 // Push filters that apply to this table.
                 let mut table_filters: Vec<FilterCondition> = request
@@ -1361,8 +1398,8 @@ impl PushdownPlanner {
                     };
 
                 let fetch = FetchRequest {
-                    schema: Some(binding.schema.clone()),
-                    table: binding.table.clone(),
+                    schema: fetch_schema,
+                    table: fetch_table,
                     columns: projections.columns_for(table_name),
                     filters: table_filters,
                     in_filters: table_in_filters,
@@ -1383,10 +1420,10 @@ impl PushdownPlanner {
         // dimension appears in neither group_by nor query filters.
         for extra_table in &rls_extra_tables {
             if seen_tables.insert(extra_table.as_str()) {
-                let binding = registry.binding_for(extra_table)?;
+                let (fetch_schema, fetch_table) = fetch_target_for(registry, model, extra_table)?;
                 let fetch = FetchRequest {
-                    schema: Some(binding.schema.clone()),
-                    table: binding.table.clone(),
+                    schema: fetch_schema,
+                    table: fetch_table,
                     filters: role_conditions_for_table(role_filters, extra_table),
                     ..Default::default()
                 };
@@ -1397,10 +1434,10 @@ impl PushdownPlanner {
         // Ensure lookup tables are included in fetches.
         for spec in &lookup_specs {
             if seen_tables.insert(spec.table.as_str()) {
-                let binding = registry.binding_for(&spec.table)?;
+                let (fetch_schema, fetch_table) = fetch_target_for(registry, model, &spec.table)?;
                 let fetch = FetchRequest {
-                    schema: Some(binding.schema.clone()),
-                    table: binding.table.clone(),
+                    schema: fetch_schema,
+                    table: fetch_table,
                     columns: projections.columns_for(&spec.table),
                     ..Default::default()
                 };

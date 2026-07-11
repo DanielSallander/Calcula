@@ -118,6 +118,13 @@ impl Engine {
             return Err(EngineError::TableNotInMemory(table_name.to_string()));
         }
 
+        // A derived table of a materialized calculated table has no source
+        // connector — "refreshing" it means evaluating its QUERY over the
+        // model and storing the result.
+        if table.is_calculated() {
+            return self.materialize_calculated_table_inner(table_name).await;
+        }
+
         // Incremental path: only when the table has an `incremental_refresh`
         // policy AND a cached batch already exists. The first load (empty
         // cache) has no stable rows to retain, so it takes the full path.
@@ -227,7 +234,7 @@ impl Engine {
 
     /// Optimize, sort, and store fetched batches in the in-memory cache,
     /// invalidating the query-result cache.
-    fn store_refreshed_table(
+    pub(crate) fn store_refreshed_table(
         &mut self,
         table_name: &str,
         batches: Vec<RecordBatch>,
@@ -315,12 +322,15 @@ impl Engine {
     /// statement only) and is skipped entirely — recorded as a poll failure —
     /// when the policy is [`SourceQueryPolicy::Disabled`].
     pub async fn refresh_stale(&mut self) -> EngineResult<RefreshReport> {
-        // Collect in-memory tables with their staleness info.
+        // Collect in-memory tables with their staleness info. Derived tables
+        // of materialized calculated tables are handled separately below —
+        // they materialize AFTER the physical tables they read from, and only
+        // when a source refreshed or their cache is missing.
         let candidates: Vec<(String, bool, Vec<RefreshStrategy>)> = self
             .model
             .tables()
             .iter()
-            .filter(|t| t.is_in_memory())
+            .filter(|t| t.is_in_memory() && !t.is_calculated())
             .map(|t| {
                 let strategies = t.refresh_strategies();
                 let locally_stale = if strategies.is_empty() {
@@ -404,6 +414,44 @@ impl Engine {
                         }
                     }
                     report.refreshed.push(name.clone());
+                }
+                Err(e) => report.failures.push(RefreshFailure {
+                    table: name.clone(),
+                    detail: e.to_string(),
+                }),
+            }
+        }
+
+        // Materialize calculated tables. Model table order already encodes
+        // dependency order (the builder's reconcile appends each derived
+        // table after the tables it reads from), so a single ordered pass is
+        // correct even for calculated-table-on-calculated-table chains. A
+        // table re-materializes when its cache is missing or any table it
+        // reads from was refreshed in this run (including another calculated
+        // table, via the growing `refreshed` set).
+        let calculated: Vec<String> = self
+            .model
+            .tables()
+            .iter()
+            .filter(|t| t.is_calculated())
+            .map(|t| t.name().to_string())
+            .collect();
+        let mut refreshed_set: std::collections::HashSet<String> =
+            report.refreshed.iter().cloned().collect();
+        for name in calculated {
+            let deps = self
+                .model
+                .global_variable(&name)
+                .map(engine_core::model::global_variable::calculated_table_dependencies)
+                .unwrap_or_default();
+            let needs = !self.cache.contains(&name) || deps.iter().any(|d| refreshed_set.contains(d));
+            if !needs {
+                continue;
+            }
+            match self.materialize_calculated_table(&name).await {
+                Ok(()) => {
+                    report.refreshed.push(name.clone());
+                    refreshed_set.insert(name);
                 }
                 Err(e) => report.failures.push(RefreshFailure {
                     table: name.clone(),

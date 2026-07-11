@@ -3,8 +3,11 @@
 //! Model-level calculated tables (engine struct: `GlobalVariable`) are
 //! QUERY-only: a measure referencing `name[column]` gets the calculated
 //! table's QUERY expression injected as a VAR binding in an implicit `Block`.
-//! (Scalar globals were removed 2026-07-11 — a reusable scalar is a hidden
-//! measure; see Calcula's docs/design/calculated-tables.md.)
+//! Only DYNAMIC calculated tables expand here — a materialized one is a real
+//! model table (synthesized at build, data produced at refresh), so its
+//! references resolve through the normal table machinery untouched. (Scalar
+//! globals were removed 2026-07-11 — a reusable scalar is a hidden measure;
+//! see Calcula's docs/design/calculated-tables.md.)
 
 use super::*;
 
@@ -73,7 +76,9 @@ fn collect_query_global_refs(
     match expr {
         Expression::QualifiedColumnRef { table_or_var, .. } => {
             if let Ok(gv) = model.global_variable(table_or_var) {
-                if gv.is_query() {
+                // Materialized calculated tables are real model tables — the
+                // reference resolves through the table machinery, not here.
+                if gv.is_query() && gv.is_dynamic() {
                     found.insert(table_or_var.clone());
                 }
             }

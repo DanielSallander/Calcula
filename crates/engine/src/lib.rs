@@ -82,6 +82,7 @@
 mod auto_tier;
 mod disk_cache;
 pub mod function_docs;
+mod materialize;
 mod model_io;
 mod query_cache;
 mod refresh;
@@ -101,6 +102,8 @@ mod dotted_name_tests;
 mod disk_cache_tests;
 #[cfg(test)]
 mod gvar_tests;
+#[cfg(test)]
+mod materialize_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]

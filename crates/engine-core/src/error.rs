@@ -156,6 +156,15 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// Evaluating a materialized calculated table's QUERY failed at refresh.
+    #[error("Materialization of calculated table '{name}' failed: {reason}")]
+    MaterializationFailed {
+        /// The calculated table name.
+        name: String,
+        /// What failed (query planning/execution, schema conformance, storage).
+        reason: String,
+    },
+
     /// A referenced hierarchy was not found.
     #[error("Hierarchy '{0}' not found")]
     HierarchyNotFound(String),

@@ -5,6 +5,82 @@ mod validation;
 
 pub use builder::DataModelBuilder;
 pub use validation::{apply_lookup_placeholder, LOOKUP_COLUMN_PLACEHOLDER};
+
+/// Reconcile the DERIVED tables of materialized calculated tables against a
+/// calculated-table (global-variable) list: drop every previously synthesized
+/// table (marked [`Table::is_calculated`]), then synthesize one fresh derived
+/// table per materialized (`dynamic == false`) QUERY calculated table, with
+/// columns inferred from its QUERY output schema
+/// ([`infer_calculated_table_columns`](crate::model::global_variable::infer_calculated_table_columns)),
+/// `InMemory` storage, and the calculated marker.
+///
+/// Synthesis is dependency-ordered (fixed point) so a materialized calculated
+/// table may build on another one's derived table. When no progress can be
+/// made — a missing source table, or materialized calculated tables forming a
+/// cycle — the blocking inference error is returned with a hint.
+///
+/// Idempotent: both [`DataModelBuilder::build`] and
+/// [`DataModel::with_global_variables`] run it, so [`DataModel::validate`]
+/// (which replays through the builder) reproduces exactly the tables a
+/// mutated or deserialized model carries.
+pub(crate) fn reconcile_calculated_tables(
+    tables: Vec<Table>,
+    global_variables: &[GlobalVariable],
+) -> EngineResult<Vec<Table>> {
+    use crate::model::global_variable::infer_calculated_table_columns;
+    use crate::model::table::StorageMode;
+
+    let mut tables: Vec<Table> = tables.into_iter().filter(|t| !t.is_calculated()).collect();
+
+    let mut pending: Vec<&GlobalVariable> = global_variables
+        .iter()
+        .filter(|gv| gv.is_query() && !gv.is_dynamic())
+        .collect();
+
+    while !pending.is_empty() {
+        let mut progressed = false;
+        let mut still_pending: Vec<&GlobalVariable> = Vec::new();
+        let mut first_error: Option<EngineError> = None;
+
+        for gv in pending {
+            match infer_calculated_table_columns(gv, &tables) {
+                Ok(columns) => {
+                    tables.push(
+                        Table::new(gv.name(), columns)?
+                            .with_storage_mode(StorageMode::InMemory)
+                            .calculated(),
+                    );
+                    progressed = true;
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    still_pending.push(gv);
+                }
+            }
+        }
+
+        if !progressed {
+            let base = first_error.expect("no progress implies at least one inference error");
+            let first = still_pending
+                .first()
+                .expect("no progress implies pending calculated tables remain");
+            return Err(EngineError::InvalidGlobalVariable {
+                name: first.name().to_string(),
+                reason: format!(
+                    "cannot synthesize the derived table: {base}. If the missing table is \
+                     another materialized calculated table, the definitions form a cycle; if \
+                     it is a dynamic calculated table, only materialized (Dynamic = no) \
+                     calculated tables can be used as a source table"
+                ),
+            });
+        }
+        pending = still_pending;
+    }
+
+    Ok(tables)
+}
 pub(crate) use validation::{
     validate_identifier, validate_metadata_text, MAX_METADATA_DESCRIPTION_CHARS,
     MAX_METADATA_NAME_CHARS,
@@ -153,8 +229,18 @@ use crate::model::table_variable::TableVariable;
 ///   metadata fields (`model_name`/`model_version`/`model_author`/
 ///   `model_description`) added earlier in anticipation of v14.
 ///
+/// - `15` — materialized calculated tables: a model
+///   [`GlobalVariable`](crate::model::GlobalVariable) gained a `dynamic` flag
+///   (default `true`), and [`Table`](crate::model::Table) gained an
+///   `is_calculated` marker for the derived table synthesized from a
+///   materialized (`dynamic == false`) calculated table's QUERY output schema.
+///   A pre-v15 engine would ignore the `dynamic` field and treat a
+///   materialized calculated table as dynamic — silently dropping the derived
+///   table, its data, and any relationships bound to it — so the
+///   [`ModelFormatTooNew`] gate refuses v15 files on a pre-v15 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 14;
+pub const MODEL_FORMAT_VERSION: u32 = 15;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -772,12 +858,21 @@ impl DataModel {
         model
     }
 
-    /// Returns a copy of the model with its global-variable list REPLACED
-    /// (caller-validates contract, see [`DataModel::with_measures`]).
-    pub fn with_global_variables(&self, global_variables: Vec<GlobalVariable>) -> DataModel {
+    /// Returns a copy of the model with its calculated-table (global-variable)
+    /// list REPLACED, and the derived tables of materialized calculated tables
+    /// reconciled to match (synthesized/refreshed/removed). Otherwise
+    /// caller-validates contract, see [`DataModel::with_measures`]; note that
+    /// removing or dynamic-flipping a materialized calculated table drops its
+    /// derived table here, so a subsequent [`DataModel::validate`] fails
+    /// closed if relationships (or other entities) still reference it.
+    pub fn with_global_variables(
+        &self,
+        global_variables: Vec<GlobalVariable>,
+    ) -> EngineResult<DataModel> {
         let mut model = self.clone();
+        model.tables = reconcile_calculated_tables(model.tables, &global_variables)?;
         model.global_variables = global_variables;
-        model
+        Ok(model)
     }
 
     /// Returns a copy of the model with its script-function list REPLACED

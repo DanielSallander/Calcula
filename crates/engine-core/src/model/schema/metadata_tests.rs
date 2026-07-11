@@ -43,10 +43,12 @@ fn model_format_version_is_current() {
     // dynamic-RLS predicate field; v12 added context-driven calculated columns;
     // v13 added query-scoped (GVAR) variables (Block query_scoped_bindings);
     // v14 added persisted multi-source bindings (model sources catalog + table
-    // source_binding) and finalized the model metadata fields.
+    // source_binding) and finalized the model metadata fields; v15 added
+    // materialized calculated tables (GlobalVariable dynamic flag + derived
+    // Table is_calculated marker).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 14);
+    assert_eq!(MODEL_FORMAT_VERSION, 15);
 }
 
 #[test]

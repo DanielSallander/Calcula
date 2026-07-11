@@ -296,6 +296,14 @@ pub struct Table {
     /// model files simply have no binding here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_binding: Option<TableSourceBinding>,
+    /// `true` when this table is DERIVED from a materialized calculated table
+    /// (a model `GlobalVariable` with `dynamic == false` and the same name):
+    /// its schema is synthesized from the QUERY's inferred output columns at
+    /// model build/mutation time, and its data is produced at refresh by
+    /// evaluating the QUERY over the model (`Engine::materialize_calculated_table`)
+    /// instead of fetching from a connector. Never hand-authored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_calculated: bool,
 }
 
 impl Table {
@@ -325,7 +333,23 @@ impl Table {
             is_hidden: false,
             incremental_refresh: None,
             source_binding: None,
+            is_calculated: false,
         })
+    }
+
+    /// Mark this table as derived from a materialized calculated table
+    /// (consumed by the model builder's synthesis — see
+    /// [`Table::is_calculated`](Self::is_calculated)).
+    pub fn calculated(mut self) -> Self {
+        self.is_calculated = true;
+        self
+    }
+
+    /// Returns `true` when this table is derived from a materialized
+    /// calculated table (its data is produced by evaluating the calculated
+    /// table's QUERY at refresh, not fetched from a connector).
+    pub fn is_calculated(&self) -> bool {
+        self.is_calculated
     }
 
     /// Replace this table's model name (the name measures and queries use).
