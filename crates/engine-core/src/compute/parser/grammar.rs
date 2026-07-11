@@ -172,6 +172,7 @@ impl Parser {
             "CLEAR_OUTER" | "CLEAROUTER" => self.parse_clear_outer_call(),
             "RESET_INNER" | "RESETINNER" => self.parse_reset_inner_call(),
             "RESET_OUTER" | "RESETOUTER" => self.parse_reset_outer_call(),
+            "ALLSELECTED" => self.parse_allselected_call(),
             "USING" => self.parse_using_call(),
             "USERELATIONSHIP" => self.parse_use_relationship_call(),
             // Logical functions (function-call syntax)
@@ -280,6 +281,7 @@ impl Parser {
             "IFERROR" => self.parse_iferror_call(),
             // Scope check
             "ISINSCOPE" => self.parse_isinscope_call(),
+            "ISFILTERED" => self.parse_isfiltered_call(),
             // Context operations
             "CLEAREXCEPT" | "CLEAR_EXCEPT" => self.parse_clearexcept_call(),
             // Iterator

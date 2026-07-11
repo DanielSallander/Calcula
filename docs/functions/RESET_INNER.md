@@ -41,6 +41,7 @@ If a year slicer is active (e.g., 2014), `Total (Slicers Only)` shows the total 
 
 ## See also
 
+- [ALLSELECTED](ALLSELECTED.md) — the DAX-compatible alias of this function
 - [RESET](RESET.md) — remove all filters from both sources
 - [RESET_OUTER](RESET_OUTER.md) — remove only query-level filters
 - [CLEAR_INNER](CLEAR_INNER.md) — remove specific group-by filters

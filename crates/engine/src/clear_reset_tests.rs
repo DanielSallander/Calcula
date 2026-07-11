@@ -78,6 +78,18 @@ fn clear_model() -> DataModel {
             "AvgClear",
             parse_measure("AVG(Sales[amount], CLEAR(Product))").unwrap(),
         ))
+        // DAX-compatible alias: parses to RESET_INNER (drop the group axis,
+        // keep query-level slicers).
+        .add_measure(expression_measure(
+            "TotalAllSelected",
+            parse_measure("SUM(Sales[amount], ALLSELECTED())").unwrap(),
+        ))
+        // ISFILTERED marker: folded to a literal per request at the facade.
+        .add_measure(expression_measure(
+            "NameFilteredFlag",
+            parse_measure("IF(ISFILTERED(Product[name]), SUM(Sales[amount]), 0.0 - 1.0)")
+                .unwrap(),
+        ))
         .build()
         .unwrap()
 }
@@ -235,6 +247,67 @@ async fn reset_with_slicer_on_cleared_table_fails_closed() {
         msg.contains("slicer"),
         "error should mention the slicer restriction, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn isfiltered_resolves_from_axis_and_slicers() {
+    let engine = clear_engine();
+
+    // Grouped by Product[name]: the column is on the axis -> TRUE branch
+    // (the per-group revenue).
+    let batches = engine
+        .query(request(&["Revenue", "NameFilteredFlag"]))
+        .await
+        .unwrap();
+    let flag = grouped(&batches, "NameFilteredFlag");
+    assert_eq!(flag.get("Bikes"), Some(&130.0));
+    assert_eq!(flag.get("Helmets"), Some(&60.0));
+
+    // Ungrouped, no filter: FALSE branch (-1).
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["NameFilteredFlag".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), -1.0);
+
+    // Ungrouped but with a query filter on the column: TRUE branch (the
+    // filtered total).
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["NameFilteredFlag".into()],
+            filters: vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 130.0);
+}
+
+#[tokio::test]
+async fn allselected_drops_axis_and_keeps_slicers() {
+    let engine = clear_engine();
+
+    // No slicer: ALLSELECTED() broadcasts the grand total (the group axis is
+    // dropped) — identical to RESET_INNER, which it aliases.
+    let batches = engine
+        .query(request(&["Revenue", "TotalAllSelected"]))
+        .await
+        .unwrap();
+    let tot = grouped(&batches, "TotalAllSelected");
+    assert_eq!(tot.get("Bikes"), Some(&190.0));
+    assert_eq!(tot.get("Helmets"), Some(&190.0));
+
+    // With a slicer: the slicer is PRESERVED — the "total" is the visible
+    // (Bikes) total, not the grand total. (Contrast RESET over a sliced
+    // table, which fails closed — see reset_with_slicer_on_cleared_table.)
+    let mut req = request(&["Revenue", "TotalAllSelected"]);
+    req.filters = vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")];
+    let batches = engine.query(req).await.unwrap();
+    let tot = grouped(&batches, "TotalAllSelected");
+    assert_eq!(tot.get("Bikes"), Some(&130.0));
 }
 
 #[tokio::test]

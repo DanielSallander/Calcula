@@ -304,6 +304,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "RESETINNER",
         "RESET_OUTER",
         "RESETOUTER",
+        "ALLSELECTED",
         "USING",
         "USERELATIONSHIP",
         "CLEAREXCEPT",
@@ -355,6 +356,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "SELECTEDMEASURE",
         "FIRST",
         "ISINSCOPE",
+        "ISFILTERED",
         "PERCENTILE",
         // Scalar math
         "ABS",
@@ -812,6 +814,50 @@ mod tests {
     fn parse_table_variable_rejects_trailing_tokens() {
         let err = parse_table_variable(r#"KEEP(dim_product, dim_product[cat] = "X") + 1"#);
         assert!(err.is_err());
+    }
+
+    // --- ISFILTERED tests ---
+
+    #[test]
+    fn parse_isfiltered_and_format_round_trip() {
+        let e = parse_measure_expression("IF(ISFILTERED(Product[name]), 1.0, 0.0)").unwrap();
+        match &e {
+            Expression::If { condition, .. } => {
+                assert!(matches!(
+                    condition.as_ref(),
+                    Expression::IsFiltered { table, column } if table == "Product" && column == "name"
+                ));
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+        // Formula rendering round-trips the spelling.
+        let text = crate::compute::expression::expression_to_formula(&e, "Sales");
+        assert!(text.contains("ISFILTERED(Product[name])"), "got: {text}");
+    }
+
+    // --- ALLSELECTED alias tests ---
+
+    #[test]
+    fn parse_allselected_bare_aliases_reset_inner() {
+        let e = parse_measure_expression("SUM(Sales[amount], ALLSELECTED())").unwrap();
+        match e {
+            Expression::ResetInner { expr } => {
+                assert!(matches!(*expr, Expression::Aggregate { .. }))
+            }
+            other => panic!("expected ResetInner, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_allselected_targeted_aliases_clear_inner() {
+        let e = parse_measure_expression("SUM(Sales[amount], ALLSELECTED(Product))").unwrap();
+        match e {
+            Expression::ClearInner { targets, .. } => assert_eq!(targets.len(), 1),
+            other => panic!("expected ClearInner, got {other:?}"),
+        }
+        let e =
+            parse_measure_expression("SUM(Sales[amount], ALLSELECTED(Product[name]))").unwrap();
+        assert!(matches!(e, Expression::ClearInner { .. }));
     }
 
     // --- parse_global tests ---

@@ -211,6 +211,9 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             }
             // Should be resolved before SQL generation. Default to TRUE.
             Expression::IsInScope { .. } => "TRUE".to_string(),
+            // Defensive fallback: the facade folds ISFILTERED to a literal
+            // before planning; an unresolved marker means "no direct filter".
+            Expression::IsFiltered { .. } => "FALSE".to_string(),
             Expression::Percentile {
                 operand,
                 percentile,

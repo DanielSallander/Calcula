@@ -111,7 +111,8 @@ impl Expression {
             | Expression::LiteralBool(_)
             | Expression::Blank
             | Expression::MeasureRef(_)
-            | Expression::IsInScope { .. } => Ok(()),
+            | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. } => Ok(()),
             // SELECTEDMEASURE() is only legal inside a calculation item. For
             // ordinary measures / calculated columns it must never appear: it
             // would reach the renderer unsubstituted (an internal error).

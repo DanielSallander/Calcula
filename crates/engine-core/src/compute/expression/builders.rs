@@ -507,6 +507,14 @@ pub fn is_in_scope(table: impl Into<String>, column: impl Into<String>) -> Expre
     }
 }
 
+/// Create an ISFILTERED expression: `ISFILTERED(table[column])`.
+pub fn is_filtered(table: impl Into<String>, column: impl Into<String>) -> Expression {
+    Expression::IsFiltered {
+        table: table.into(),
+        column: column.into(),
+    }
+}
+
 /// Create a CLEAREXCEPT expression — clear all filters on table except specified columns.
 pub fn clear_except(
     expr: Expression,

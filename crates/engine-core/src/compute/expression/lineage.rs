@@ -344,6 +344,7 @@ fn walk(
         }
         // Leaves with no sub-expressions.
         Expression::IsInScope { .. }
+        | Expression::IsFiltered { .. }
         | Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
         | Expression::LiteralString(_)

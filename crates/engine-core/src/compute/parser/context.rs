@@ -25,6 +25,7 @@ impl Parser {
                         | "RESET"
                         | "RESET_INNER"
                         | "RESET_OUTER"
+                        | "ALLSELECTED"
                         | "USING"
                         | "USERELATIONSHIP"
                 );
@@ -140,6 +141,28 @@ impl Parser {
         self.expect(&Token::RParen)?;
         Ok(Expression::ResetOuter {
             expr: Box::new(expr::lit_int(0)),
+        })
+    }
+
+    /// Parse `ALLSELECTED()` / `ALLSELECTED(table)` / `ALLSELECTED(table[column])`
+    /// — the DAX-compatible spelling of the inner-clear family. The bare form
+    /// removes every group-axis (visual) filter while keeping query-level
+    /// slicers — exactly `RESET_INNER()`; the targeted forms do the same for
+    /// specific tables/columns — exactly `CLEAR_INNER(...)`. Parsed straight
+    /// to those variants, so evaluation, rendering, and persistence are
+    /// shared (a round-tripped formula renders as RESET_INNER/CLEAR_INNER).
+    pub(super) fn parse_allselected_call(&mut self) -> EngineResult<Expression> {
+        if self.peek() == Some(&Token::RParen) {
+            self.advance()?; // consume ')'
+            return Ok(Expression::ResetInner {
+                expr: Box::new(expr::lit_int(0)),
+            });
+        }
+        let targets = self.parse_clear_targets()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expression::ClearInner {
+            expr: Box::new(expr::lit_int(0)),
+            targets,
         })
     }
 

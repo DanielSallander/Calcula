@@ -152,7 +152,7 @@ impl Expression {
                 expr.collect_column_refs(refs);
                 alternate.collect_column_refs(refs);
             }
-            Expression::IsInScope { .. } => {}
+            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
             Expression::ClearExcept { expr, .. }
             | Expression::Iterate {
                 expression: expr, ..
@@ -374,7 +374,7 @@ impl Expression {
                 expr.collect_context_filter_tables(tables);
                 alternate.collect_context_filter_tables(tables);
             }
-            Expression::IsInScope { .. } => {}
+            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
             Expression::ClearExcept { expr, .. } => {
                 expr.collect_context_filter_tables(tables);
             }
@@ -524,6 +524,7 @@ impl Expression {
             | Expression::LiteralBool(_)
             | Expression::Blank
             | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => {}
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
@@ -713,6 +714,7 @@ impl Expression {
             | Expression::LiteralBool(_)
             | Expression::Blank
             | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => {}
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
@@ -899,6 +901,7 @@ impl Expression {
             | Expression::LiteralBool(_)
             | Expression::Blank
             | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => {}
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
@@ -1076,6 +1079,7 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::LiteralBool(_)
         | Expression::Blank
         | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
         | Expression::RankWindow { .. } => {}
         Expression::Query { aggregates, .. } => {
             out.extend(aggregates.iter().map(|(e, _)| e));

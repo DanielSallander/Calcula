@@ -34,7 +34,8 @@ pub use builders::{
     agg, and, blank, block, block_with_globals, call, clear, clear_except, clear_inner,
     clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_in_period, datetime_fn,
     expr_literal_from_arrow, expr_literal_from_scalar, first_value, has_one_value, if_error,
-    if_expr, index_expr, is_blank, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars,
+    if_expr, index_expr, is_blank, is_filtered, is_in_scope, iterate, keep, keep_conditions,
+    keep_in, keep_vars,
     lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
     period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
     scalar_fn, selected_value, switch, table_ref, text_fn, to_date, traverse, use_relationship,
@@ -54,7 +55,7 @@ pub use render::{
     MultiTableQualifier, PostgresDialect, SqlRenderer, TableAliasQualifier,
 };
 pub use text::TextFunction;
-pub use transform::resolve_is_in_scope;
+pub use transform::{resolve_is_filtered, resolve_is_in_scope};
 pub use validate::is_valid_call_name;
 pub(crate) use validate::validate_call_name;
 pub(crate) use walkers::child_expressions;
@@ -751,6 +752,21 @@ pub enum Expression {
     /// Returns TRUE if the specified column is in the current GROUP BY context.
     /// Must be resolved before SQL generation by replacing with `LiteralBool`.
     IsInScope {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
+
+    /// Direct-filter check: `ISFILTERED(table[column])` (DAX-compatible).
+    ///
+    /// Returns TRUE if the column carries a DIRECT filter in the query's
+    /// filter context — it is on the group-by axis, or targeted by a query
+    /// filter / IN slicer / OR slicer. Resolved to a `LiteralBool` at the
+    /// query facade (before planning) via `resolve_is_filtered`; like
+    /// `IsInScope` it never reaches SQL generation unresolved (the plain
+    /// renderer falls back to FALSE defensively).
+    IsFiltered {
         /// Table name.
         table: String,
         /// Column name.

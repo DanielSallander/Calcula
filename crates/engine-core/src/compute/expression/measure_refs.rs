@@ -630,7 +630,7 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
             infer_fact_table(expr).or_else(|| infer_fact_table(alternate))
         }
         Expression::DateTimeFunc { args, .. } => args.iter().find_map(infer_fact_table),
-        Expression::IsInScope { .. } => None,
+        Expression::IsInScope { .. } | Expression::IsFiltered { .. } => None,
         Expression::Greatest(args) | Expression::Least(args) => {
             args.iter().find_map(infer_fact_table)
         }

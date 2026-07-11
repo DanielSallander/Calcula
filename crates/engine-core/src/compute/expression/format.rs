@@ -630,6 +630,11 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("ISINSCOPE({tbl}[{column}])")
         }
 
+        // --- Direct-filter check ---
+        Expression::IsFiltered { table: tbl, column } => {
+            format!("ISFILTERED({tbl}[{column}])")
+        }
+
         // --- ClearExcept ---
         Expression::ClearExcept {
             expr: inner,

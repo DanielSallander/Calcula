@@ -56,6 +56,10 @@ impl Expression {
                 table: table.clone(),
                 column: column.clone(),
             },
+            Expression::IsFiltered { table, column } => Expression::IsFiltered {
+                table: table.clone(),
+                column: column.clone(),
+            },
             Expression::ClearExcept {
                 expr,
                 table,
@@ -947,6 +951,7 @@ impl Expression {
             | Expression::LiteralBool(_)
             | Expression::Blank
             | Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => self.clone(),
         }
     }
@@ -1004,6 +1009,141 @@ impl Expression {
 
 /// Resolve `IsInScope` nodes by replacing them with `LiteralBool` based on
 /// whether the referenced column is in the provided group-by list.
+/// Replace every `ISFILTERED(table[column])` marker with the literal answer
+/// for one query: TRUE when the column is DIRECTLY filtered — on the
+/// group-by axis, or named by a query filter / IN slicer / OR slicer
+/// (`filtered_columns` carries those column names; query filters are not
+/// table-qualified, so the match is by column name). Applied at the query
+/// facade before planning, GVAR-style, so every execution path (pushed and
+/// local) sees only the resolved literal.
+///
+/// Recurses through conditional wrappers AND the common measure shapes
+/// (blocks/VAR bindings, aggregates and their context-op wrappers, DIVIDE,
+/// IFERROR, COALESCE, comparisons) — an `ISFILTERED` in a spot this walk
+/// does not reach renders as FALSE (the renderer's defensive fallback).
+pub fn resolve_is_filtered(
+    expr: &Expression,
+    group_by: &[(String, String)],
+    filtered_columns: &[String],
+) -> Expression {
+    let recurse = |e: &Expression| resolve_is_filtered(e, group_by, filtered_columns);
+    match expr {
+        Expression::IsFiltered { table, column } => {
+            let filtered = group_by.iter().any(|(t, c)| t == table && c == column)
+                || filtered_columns.iter().any(|c| c == column);
+            Expression::LiteralBool(filtered)
+        }
+        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+            left: Box::new(recurse(left)),
+            op: *op,
+            right: Box::new(recurse(right)),
+        },
+        Expression::Comparison { left, op, right } => Expression::Comparison {
+            left: Box::new(recurse(left)),
+            op: *op,
+            right: Box::new(recurse(right)),
+        },
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expression::If {
+            condition: Box::new(recurse(condition)),
+            then_expr: Box::new(recurse(then_expr)),
+            else_expr: Box::new(recurse(else_expr)),
+        },
+        Expression::Switch {
+            expr: e,
+            cases,
+            default,
+        } => Expression::Switch {
+            expr: Box::new(recurse(e)),
+            cases: cases.iter().map(|(v, r)| (recurse(v), recurse(r))).collect(),
+            default: default.as_ref().map(|d| Box::new(recurse(d))),
+        },
+        Expression::And(l, r) => Expression::And(Box::new(recurse(l)), Box::new(recurse(r))),
+        Expression::Or(l, r) => Expression::Or(Box::new(recurse(l)), Box::new(recurse(r))),
+        Expression::Xor(l, r) => Expression::Xor(Box::new(recurse(l)), Box::new(recurse(r))),
+        Expression::Not(inner) => Expression::Not(Box::new(recurse(inner))),
+        Expression::IsBlank(inner) => Expression::IsBlank(Box::new(recurse(inner))),
+        Expression::Call { name, args } => Expression::Call {
+            name: name.clone(),
+            args: args.iter().map(recurse).collect(),
+        },
+        Expression::Aggregate { operation, operand } => Expression::Aggregate {
+            operation: *operation,
+            operand: Box::new(recurse(operand)),
+        },
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Expression::SafeDivide {
+            numerator: Box::new(recurse(numerator)),
+            denominator: Box::new(recurse(denominator)),
+            alternate: alternate.as_ref().map(|a| Box::new(recurse(a))),
+        },
+        Expression::IfError { expr: e, alternate } => Expression::IfError {
+            expr: Box::new(recurse(e)),
+            alternate: Box::new(recurse(alternate)),
+        },
+        Expression::Coalesce(args) => Expression::Coalesce(args.iter().map(recurse).collect()),
+        Expression::Block {
+            bindings,
+            query_scoped_bindings,
+            result,
+        } => Expression::Block {
+            bindings: bindings
+                .iter()
+                .map(|(n, e)| (n.clone(), recurse(e)))
+                .collect(),
+            query_scoped_bindings: query_scoped_bindings
+                .iter()
+                .map(|(n, e)| (n.clone(), recurse(e)))
+                .collect(),
+            result: Box::new(recurse(result)),
+        },
+        Expression::Keep {
+            expr: e,
+            filters,
+            variables,
+            conditions,
+        in_predicates,
+        } => Expression::Keep {
+            expr: Box::new(recurse(e)),
+            filters: filters.clone(),
+            variables: variables.clone(),
+            conditions: conditions.iter().map(recurse).collect(),
+            in_predicates: in_predicates.clone(),
+        },
+        Expression::Clear { expr: e, targets } => Expression::Clear {
+            expr: Box::new(recurse(e)),
+            targets: targets.clone(),
+        },
+        Expression::ClearInner { expr: e, targets } => Expression::ClearInner {
+            expr: Box::new(recurse(e)),
+            targets: targets.clone(),
+        },
+        Expression::ClearOuter { expr: e, targets } => Expression::ClearOuter {
+            expr: Box::new(recurse(e)),
+            targets: targets.clone(),
+        },
+        Expression::Reset { expr: e } => Expression::Reset {
+            expr: Box::new(recurse(e)),
+        },
+        Expression::ResetInner { expr: e } => Expression::ResetInner {
+            expr: Box::new(recurse(e)),
+        },
+        Expression::ResetOuter { expr: e } => Expression::ResetOuter {
+            expr: Box::new(recurse(e)),
+        },
+        // Everything else (literals, column/measure refs, windows, time
+        // intelligence, ...) — returned as-is; ISFILTERED inside those is out
+        // of the v1 contract.
+        _ => expr.clone(),
+    }
+}
+
 pub fn resolve_is_in_scope(expr: &Expression, group_by: &[(String, String)]) -> Expression {
     match expr {
         Expression::IsInScope { table, column } => {

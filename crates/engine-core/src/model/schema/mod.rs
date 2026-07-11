@@ -242,8 +242,15 @@ use crate::model::table_variable::TableVariable;
 ///   relationships bound to it — so the [`ModelFormatTooNew`] gate refuses
 ///   v15 files on a pre-v15 engine.
 ///
+/// - `16` — the expression tree gained the
+///   [`IsFiltered`](crate::compute::expression::Expression::IsFiltered)
+///   variant (the DAX-compatible `ISFILTERED(table[column])` direct-filter
+///   check, resolved to a literal at the query facade). A pre-v16 engine
+///   fails to deserialize measures containing it, so the
+///   [`ModelFormatTooNew`] gate refuses v16 files on a pre-v16 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 15;
+pub const MODEL_FORMAT_VERSION: u32 = 16;
 
 /// A data model consisting of tables and relationships between them.
 ///

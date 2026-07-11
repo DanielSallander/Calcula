@@ -2273,6 +2273,15 @@ impl Engine {
             return Ok(cached);
         }
 
+        // ISFILTERED literal fold. Any model measure carrying an
+        // `ISFILTERED(table[column])` marker is overlaid with the marker
+        // replaced by its literal answer for THIS request (on the group-by
+        // axis, or named by a query filter / IN slicer / OR slicer) — before
+        // planning, so every downstream path (pushed and local) plans on a
+        // plain boolean. `None` when no measure carries a marker.
+        let isfiltered_model = Self::resolve_is_filtered_markers(effective_request, model);
+        let model: &DataModel = isfiltered_model.as_ref().unwrap_or(model);
+
         let role_filters = self.active_role_filters()?;
 
         // Query-scoped (GVAR) resolution. For each requested — or transitively
@@ -2433,6 +2442,63 @@ impl Engine {
             overlay.replace_measure(resolved);
         }
         Ok(Some(overlay))
+    }
+
+    /// Fold `ISFILTERED(...)` markers to literals for one request (see
+    /// [`engine_core::compute::expression::resolve_is_filtered`]): a column
+    /// is "directly filtered" when it is on the request's group-by axis or
+    /// named by a query filter / IN slicer / OR slicer. Returns `None` when
+    /// no model measure carries a marker (the common case — no clone).
+    fn resolve_is_filtered_markers(request: &QueryRequest, model: &DataModel) -> Option<DataModel> {
+        use engine_core::compute::expression::resolve_is_filtered;
+
+        if !model
+            .measures()
+            .iter()
+            .any(|m| m.expression().contains_is_filtered())
+        {
+            return None;
+        }
+
+        let group_by: Vec<(String, String)> = request
+            .group_by
+            .iter()
+            .map(|c| (c.table.clone(), c.column.clone()))
+            .collect();
+        let filtered_columns: Vec<String> = request
+            .filters
+            .iter()
+            .map(|f| f.column.clone())
+            .chain(request.in_filters.iter().map(|f| f.column.clone()))
+            .chain(request.or_filters.iter().map(|f| f.column.clone()))
+            .collect();
+
+        let mut overlay = model.clone();
+        for measure in model.measures() {
+            if !measure.expression().contains_is_filtered() {
+                continue;
+            }
+            let new_expr = resolve_is_filtered(measure.expression(), &group_by, &filtered_columns);
+            // Rebuild preserving metadata (same shape as the GVAR overlay).
+            let mut resolved = Measure::new(measure.name(), new_expr);
+            if let Some(g) = measure.group() {
+                resolved = resolved.with_group(g);
+            }
+            if let Some(f) = measure.format_string() {
+                resolved = resolved.with_format_string(f);
+            }
+            if let Some(d) = measure.description() {
+                resolved = resolved.with_description(d);
+            }
+            if let Some(s) = measure.source() {
+                resolved = resolved.with_source(s);
+            }
+            if measure.is_hidden() {
+                resolved = resolved.hidden();
+            }
+            overlay.replace_measure(resolved);
+        }
+        Some(overlay)
     }
 
     /// Names of measures in `request`'s transitive measure-reference closure

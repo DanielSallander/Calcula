@@ -681,6 +681,9 @@ impl<'a> ProjectionCollector<'a> {
                 self.walk(alternate);
             }
             Expression::IsInScope { table, column } => self.add(table, column),
+            // ISFILTERED is folded to a literal at the facade before planning;
+            // a survivor renders as FALSE and needs no columns fetched.
+            Expression::IsFiltered { .. } => {}
             Expression::Iterate { expression, .. } => self.walk(expression),
             Expression::Percentile {
                 operand,

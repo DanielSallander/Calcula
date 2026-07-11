@@ -100,6 +100,30 @@ impl Parser {
         Ok(expr::is_in_scope(table, column))
     }
 
+    /// Parse `ISFILTERED(table[column])`.
+    pub(super) fn parse_isfiltered_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISFILTERED: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISFILTERED: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::is_filtered(table, column))
+    }
+
     /// Parse `CLEAREXCEPT(table, col1, col2, ...)` as a context argument.
     ///
     /// Returns a placeholder ClearExcept wrapping Blank — the actual inner

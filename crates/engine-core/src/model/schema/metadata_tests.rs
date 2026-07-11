@@ -45,10 +45,11 @@ fn model_format_version_is_current() {
     // v14 added persisted multi-source bindings (model sources catalog + table
     // source_binding) and finalized the model metadata fields; v15 added
     // materialized calculated tables (GlobalVariable dynamic flag + derived
-    // Table is_calculated marker).
+    // Table is_calculated marker, calendar spec, DISTINCT queries); v16 added
+    // the IsFiltered expression variant (ISFILTERED direct-filter check).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 15);
+    assert_eq!(MODEL_FORMAT_VERSION, 16);
 }
 
 #[test]

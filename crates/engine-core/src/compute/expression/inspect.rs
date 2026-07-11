@@ -80,7 +80,7 @@ impl Expression {
             Expression::IfError { expr, alternate } => {
                 expr.has_aggregate() || alternate.has_aggregate()
             }
-            Expression::IsInScope { .. } => false,
+            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => false,
             Expression::ClearExcept { expr, .. } => expr.has_aggregate(),
             Expression::Iterate { expression, .. } => expression.has_aggregate(),
             Expression::Percentile { .. } => true,
@@ -197,7 +197,7 @@ impl Expression {
             Expression::IfError { expr, alternate } => {
                 expr.has_context_ops() || alternate.has_context_ops()
             }
-            Expression::IsInScope { .. } => false,
+            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => false,
             Expression::ClearExcept { .. } => true,
             Expression::Iterate { expression, .. } => expression.has_context_ops(),
             Expression::Percentile {
@@ -303,6 +303,16 @@ impl Expression {
         ) || super::child_expressions(self)
             .iter()
             .any(|c| c.has_query_scoped_bindings())
+    }
+
+    /// Returns `true` if this tree contains an `ISFILTERED(...)` marker
+    /// ([`Expression::IsFiltered`]) anywhere. Drives the facade's pre-plan
+    /// literal fold and the host's format-version stamping (v16).
+    pub fn contains_is_filtered(&self) -> bool {
+        matches!(self, Expression::IsFiltered { .. })
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.contains_is_filtered())
     }
 
     /// Returns `true` if this tree contains an [`Expression::Query`]

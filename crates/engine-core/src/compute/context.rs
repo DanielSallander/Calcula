@@ -841,7 +841,7 @@ impl<'a> ContextResolver<'a> {
             }
 
             // ISINSCOPE: leaf node, no context modification.
-            Expression::IsInScope { .. } => Ok(expr.clone()),
+            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => Ok(expr.clone()),
 
             // CLEAREXCEPT: context operation — clears table but preserves specified columns.
             Expression::ClearExcept {
