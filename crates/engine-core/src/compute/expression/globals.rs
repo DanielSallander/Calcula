@@ -1,4 +1,10 @@
-//! Global variable expansion (scalar inlining and QUERY block merging).
+//! Calculated-table expansion (QUERY block merging).
+//!
+//! Model-level calculated tables (engine struct: `GlobalVariable`) are
+//! QUERY-only: a measure referencing `name[column]` gets the calculated
+//! table's QUERY expression injected as a VAR binding in an implicit `Block`.
+//! (Scalar globals were removed 2026-07-11 — a reusable scalar is a hidden
+//! measure; see Calcula's docs/design/calculated-tables.md.)
 
 use super::*;
 
@@ -6,19 +12,16 @@ pub fn expand_global_variables(
     expr: &Expression,
     model: &crate::model::schema::DataModel,
 ) -> Expression {
-    // First pass: collect all QUERY global names referenced via QualifiedColumnRef.
+    // Collect all calculated-table names referenced via QualifiedColumnRef.
     let mut query_globals = std::collections::HashSet::new();
     collect_query_global_refs(expr, model, &mut query_globals);
 
-    // Expand scalar globals recursively.
-    let expanded = expand_scalar_globals(expr, model);
-
-    // If any QUERY globals were referenced, wrap in a Block with those bindings.
+    // If any were referenced, wrap in a Block with those bindings.
     if query_globals.is_empty() {
-        expanded
+        expr.clone()
     } else {
         // If the expression is already a Block, merge QUERY bindings into it.
-        match expanded {
+        match expr.clone() {
             Expression::Block {
                 bindings,
                 query_scoped_bindings,
@@ -249,379 +252,12 @@ fn collect_query_global_refs(
     }
 }
 
-/// Recursively replace scalar global ColumnRef(name) with the global's expression.
-fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataModel) -> Expression {
-    match expr {
-        Expression::ColumnRef(name) => {
-            if let Ok(gv) = model.global_variable(name) {
-                if !gv.is_query() {
-                    return gv.expression().clone();
-                }
-            }
-            expr.clone()
-        }
-        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
-            left: Box::new(expand_scalar_globals(left, model)),
-            op: *op,
-            right: Box::new(expand_scalar_globals(right, model)),
-        },
-        Expression::Aggregate { operation, operand } => Expression::Aggregate {
-            operation: *operation,
-            operand: Box::new(expand_scalar_globals(operand, model)),
-        },
-        Expression::Keep {
-            expr: inner,
-            filters,
-            variables,
-            conditions,
-            in_predicates,
-        } => Expression::Keep {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            filters: filters.clone(),
-            variables: variables.clone(),
-            conditions: conditions
-                .iter()
-                .map(|c| expand_scalar_globals(c, model))
-                .collect(),
-            in_predicates: in_predicates.clone(),
-        },
-        Expression::Clear {
-            expr: inner,
-            targets,
-        } => Expression::Clear {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            targets: targets.clone(),
-        },
-        Expression::Reset { expr: inner } => Expression::Reset {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-        },
-        Expression::Traverse { expr: inner, path } => Expression::Traverse {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            path: path.clone(),
-        },
-        Expression::Using {
-            expr: inner,
-            context_name,
-        } => Expression::Using {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            context_name: context_name.clone(),
-        },
-        Expression::UseRelationship {
-            expr: inner,
-            relationship_name,
-        } => Expression::UseRelationship {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            relationship_name: relationship_name.clone(),
-        },
-        Expression::ClearInner {
-            expr: inner,
-            targets,
-        } => Expression::ClearInner {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            targets: targets.clone(),
-        },
-        Expression::ClearOuter {
-            expr: inner,
-            targets,
-        } => Expression::ClearOuter {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            targets: targets.clone(),
-        },
-        Expression::ResetInner { expr: inner } => Expression::ResetInner {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-        },
-        Expression::ResetOuter { expr: inner } => Expression::ResetOuter {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-        },
-        Expression::KeepIn {
-            expr: inner,
-            predicates,
-        } => Expression::KeepIn {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            predicates: predicates.clone(),
-        },
-        Expression::Block {
-            bindings,
-            query_scoped_bindings,
-            result,
-        } => {
-            let expanded_bindings = bindings
-                .iter()
-                .map(|(name, binding_expr)| {
-                    (name.clone(), expand_scalar_globals(binding_expr, model))
-                })
-                .collect();
-            let expanded_query_scoped = query_scoped_bindings
-                .iter()
-                .map(|(name, binding_expr)| {
-                    (name.clone(), expand_scalar_globals(binding_expr, model))
-                })
-                .collect();
-            Expression::Block {
-                bindings: expanded_bindings,
-                query_scoped_bindings: expanded_query_scoped,
-                result: Box::new(expand_scalar_globals(result, model)),
-            }
-        }
-        Expression::If {
-            condition,
-            then_expr,
-            else_expr,
-        } => Expression::If {
-            condition: Box::new(expand_scalar_globals(condition, model)),
-            then_expr: Box::new(expand_scalar_globals(then_expr, model)),
-            else_expr: Box::new(expand_scalar_globals(else_expr, model)),
-        },
-        Expression::SafeDivide {
-            numerator,
-            denominator,
-            alternate,
-        } => Expression::SafeDivide {
-            numerator: Box::new(expand_scalar_globals(numerator, model)),
-            denominator: Box::new(expand_scalar_globals(denominator, model)),
-            alternate: alternate
-                .as_ref()
-                .map(|a| Box::new(expand_scalar_globals(a, model))),
-        },
-        Expression::Comparison { left, op, right } => Expression::Comparison {
-            left: Box::new(expand_scalar_globals(left, model)),
-            op: *op,
-            right: Box::new(expand_scalar_globals(right, model)),
-        },
-        Expression::And(left, right) => Expression::And(
-            Box::new(expand_scalar_globals(left, model)),
-            Box::new(expand_scalar_globals(right, model)),
-        ),
-        Expression::Or(left, right) => Expression::Or(
-            Box::new(expand_scalar_globals(left, model)),
-            Box::new(expand_scalar_globals(right, model)),
-        ),
-        Expression::Not(inner) => Expression::Not(Box::new(expand_scalar_globals(inner, model))),
-        Expression::Xor(left, right) => Expression::Xor(
-            Box::new(expand_scalar_globals(left, model)),
-            Box::new(expand_scalar_globals(right, model)),
-        ),
-        Expression::IsBlank(inner) => {
-            Expression::IsBlank(Box::new(expand_scalar_globals(inner, model)))
-        }
-        Expression::Switch {
-            expr: inner,
-            cases,
-            default,
-        } => Expression::Switch {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            cases: cases
-                .iter()
-                .map(|(v, r)| {
-                    (
-                        expand_scalar_globals(v, model),
-                        expand_scalar_globals(r, model),
-                    )
-                })
-                .collect(),
-            default: default
-                .as_ref()
-                .map(|d| Box::new(expand_scalar_globals(d, model))),
-        },
-        Expression::Coalesce(exprs) => Expression::Coalesce(
-            exprs
-                .iter()
-                .map(|e| expand_scalar_globals(e, model))
-                .collect(),
-        ),
-        Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
-            function: *function,
-            args: args
-                .iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        },
-        Expression::TextFunc { function, args } => Expression::TextFunc {
-            function: *function,
-            args: args
-                .iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        },
-        Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
-            function: *function,
-            args: args
-                .iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        },
-        Expression::IfError { expr, alternate } => Expression::IfError {
-            expr: Box::new(expand_scalar_globals(expr, model)),
-            alternate: Box::new(expand_scalar_globals(alternate, model)),
-        },
-        Expression::IsInScope { table, column } => Expression::IsInScope {
-            table: table.clone(),
-            column: column.clone(),
-        },
-        Expression::ClearExcept {
-            expr,
-            table,
-            except_columns,
-        } => Expression::ClearExcept {
-            expr: Box::new(expand_scalar_globals(expr, model)),
-            table: table.clone(),
-            except_columns: except_columns.clone(),
-        },
-        Expression::Iterate { table, expression } => Expression::Iterate {
-            table: table.clone(),
-            expression: Box::new(expand_scalar_globals(expression, model)),
-        },
-        Expression::Percentile {
-            operand,
-            percentile,
-        } => Expression::Percentile {
-            operand: Box::new(expand_scalar_globals(operand, model)),
-            percentile: Box::new(expand_scalar_globals(percentile, model)),
-        },
-        Expression::HasOneValue { column } => Expression::HasOneValue {
-            column: Box::new(expand_scalar_globals(column, model)),
-        },
-        Expression::SelectedValue { column, alternate } => Expression::SelectedValue {
-            column: Box::new(expand_scalar_globals(column, model)),
-            alternate: alternate
-                .as_ref()
-                .map(|a| Box::new(expand_scalar_globals(a, model))),
-        },
-        Expression::FirstValue { column, order_by } => Expression::FirstValue {
-            column: Box::new(expand_scalar_globals(column, model)),
-            order_by: Box::new(expand_scalar_globals(order_by, model)),
-        },
-        Expression::Window {
-            inner,
-            function,
-            order_by,
-            partition_by,
-            frame,
-        } => Expression::Window {
-            inner: Box::new(expand_scalar_globals(inner, model)),
-            function: *function,
-            order_by: order_by.clone(),
-            partition_by: partition_by.clone(),
-            frame: frame.clone(),
-        },
-        Expression::Offset {
-            inner,
-            delta,
-            order_by,
-            partition_by,
-        } => Expression::Offset {
-            inner: Box::new(expand_scalar_globals(inner, model)),
-            delta: *delta,
-            order_by: order_by.clone(),
-            partition_by: partition_by.clone(),
-        },
-        Expression::Index {
-            inner,
-            position,
-            order_by,
-            partition_by,
-        } => Expression::Index {
-            inner: Box::new(expand_scalar_globals(inner, model)),
-            position: *position,
-            order_by: order_by.clone(),
-            partition_by: partition_by.clone(),
-        },
-        Expression::ToDate {
-            expr: inner,
-            granularity,
-        } => Expression::ToDate {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            granularity: *granularity,
-        },
-        Expression::PeriodShift {
-            expr: inner,
-            offset,
-            granularity,
-        } => Expression::PeriodShift {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            offset: *offset,
-            granularity: *granularity,
-        },
-        Expression::DatesInPeriod {
-            expr: inner,
-            intervals,
-            granularity,
-        } => Expression::DatesInPeriod {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            intervals: *intervals,
-            granularity: *granularity,
-        },
-        Expression::SemiAdditiveBalance {
-            expr: inner,
-            opening,
-        } => Expression::SemiAdditiveBalance {
-            expr: Box::new(expand_scalar_globals(inner, model)),
-            opening: *opening,
-        },
-        Expression::InList { expr, values } => Expression::InList {
-            expr: Box::new(expand_scalar_globals(expr, model)),
-            values: values
-                .iter()
-                .map(|v| expand_scalar_globals(v, model))
-                .collect(),
-        },
-        Expression::Greatest(args) => Expression::Greatest(
-            args.iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        ),
-        Expression::Least(args) => Expression::Least(
-            args.iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        ),
-        Expression::NullIf { expr, value } => Expression::NullIf {
-            expr: Box::new(expand_scalar_globals(expr, model)),
-            value: Box::new(expand_scalar_globals(value, model)),
-        },
-        Expression::CountIf { condition } => Expression::CountIf {
-            condition: Box::new(expand_scalar_globals(condition, model)),
-        },
-        Expression::ListAgg { column, delimiter } => Expression::ListAgg {
-            column: Box::new(expand_scalar_globals(column, model)),
-            delimiter: Box::new(expand_scalar_globals(delimiter, model)),
-        },
-        Expression::MaxBy { value, sort_by } => Expression::MaxBy {
-            value: Box::new(expand_scalar_globals(value, model)),
-            sort_by: Box::new(expand_scalar_globals(sort_by, model)),
-        },
-        Expression::MinBy { value, sort_by } => Expression::MinBy {
-            value: Box::new(expand_scalar_globals(value, model)),
-            sort_by: Box::new(expand_scalar_globals(sort_by, model)),
-        },
-        Expression::RankWindow { .. } => expr.clone(),
-        Expression::Call { name, args } => Expression::Call {
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|a| expand_scalar_globals(a, model))
-                .collect(),
-        },
-        // Leaves that don't contain sub-expressions or ColumnRef.
-        Expression::LiteralFloat(_)
-        | Expression::LiteralInt(_)
-        | Expression::LiteralDate(_)
-        | Expression::LiteralString(_)
-        | Expression::LiteralBool(_)
-        | Expression::Blank
-        | Expression::TableRef(_)
-        | Expression::MeasureRef(_)
-        | Expression::SelectedMeasure
-        | Expression::QualifiedColumnRef { .. }
-        | Expression::Query { .. } => expr.clone(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // --- Global variable expansion tests ---
+    // --- Calculated-table expansion tests ---
 
     fn make_model_with_globals() -> crate::model::schema::DataModel {
         use crate::compute::aggregate::AggregateOp;
@@ -649,17 +285,7 @@ mod tests {
         )
         .unwrap();
 
-        // Scalar global: SUM(fact_sales[linetotal])
-        let scalar_gv = GlobalVariable::new(
-            "total_revenue",
-            "fact_sales",
-            Expression::Aggregate {
-                operation: AggregateOp::Sum,
-                operand: Box::new(col("linetotal")),
-            },
-        );
-
-        // Table global: QUERY(SUM(fact_sales[linetotal]) AS Amount BY dim_customer[city])
+        // Calculated table: QUERY(SUM(fact_sales[linetotal]) AS Amount BY dim_customer[city])
         let query_gv = GlobalVariable::new(
             "city_sales",
             "fact_sales",
@@ -678,34 +304,9 @@ mod tests {
         crate::model::schema::DataModel::builder()
             .add_table(fact)
             .add_table(dim)
-            .add_global_variable(scalar_gv)
             .add_global_variable(query_gv)
             .build()
             .unwrap()
-    }
-
-    #[test]
-    fn expand_scalar_global_substitutes_inline() {
-        let model = make_model_with_globals();
-        // total_revenue should be replaced with SUM(linetotal)
-        let expr = col("total_revenue");
-        let expanded = expand_global_variables(&expr, &model);
-
-        assert!(matches!(expanded, Expression::Aggregate { .. }));
-        assert_eq!(expanded.to_sql_string().unwrap(), "SUM(\"linetotal\")");
-    }
-
-    #[test]
-    fn expand_scalar_global_in_arithmetic() {
-        let model = make_model_with_globals();
-        // total_revenue / 100
-        let expr = col("total_revenue").divide(lit(100.0));
-        let expanded = expand_global_variables(&expr, &model);
-
-        assert_eq!(
-            expanded.to_sql_string().unwrap(),
-            "(SUM(\"linetotal\") / 100)"
-        );
     }
 
     #[test]

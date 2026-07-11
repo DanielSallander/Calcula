@@ -122,12 +122,13 @@ fn gvar_model() -> DataModel {
             "GVAR from_date = DATEADD(DATE(2000, 1, 1), 31, \"DAY\") \
              RETURN IF(ISBLANK(from_date), SUM(Sales[cost]), SUM(Sales[amount]))",
         ))
-        // A model-level global variable, to prove GVAR names must not collide
+        // A model-level calculated table, to prove GVAR names must not collide
         // with it (checked in validate_measure_text / build).
         .add_global_variable(GlobalVariable::new(
             "gv_total",
             "Sales",
-            parse_measure_expression("SUM(Sales[amount])").unwrap(),
+            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])")
+                .unwrap(),
         ))
         .add_calculation_group(CalculationGroup::new(
             "Time",
@@ -436,11 +437,21 @@ fn reject_duplicate_gvar_var_name() {
 fn reject_gvar_colliding_with_model_global_variable() {
     use crate::GlobalVariable;
     let err = DataModel::builder()
-        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap(),
+        )
         .add_global_variable(GlobalVariable::new(
             "grand",
             "Sales",
-            parse_measure_expression("SUM(Sales[amount])").unwrap(),
+            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])")
+                .unwrap(),
         ))
         .add_measure(measure_from(
             "M",
@@ -450,7 +461,7 @@ fn reject_gvar_colliding_with_model_global_variable() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("collides with a shared expression"),
+        err.contains("collides with a calculated table"),
         "got: {err}"
     );
 }
@@ -613,12 +624,12 @@ async fn validate_measure_text_rejects_gvar_violations() {
         .unwrap_err();
     assert!(err.to_string().contains("must be a scalar"), "got: {err}");
 
-    // GVAR name colliding with a model global variable.
+    // GVAR name colliding with a model-level calculated table.
     let err = engine
         .validate_measure_text("Bad3", "GVAR gv_total = SUM(Sales[amount]) RETURN gv_total")
         .unwrap_err();
     assert!(
-        err.to_string().contains("shared expression"),
+        err.to_string().contains("calculated table"),
         "got: {err}"
     );
 

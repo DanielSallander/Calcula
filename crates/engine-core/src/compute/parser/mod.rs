@@ -598,29 +598,37 @@ pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition>
     Ok(ContextDefinition::new(name, ops))
 }
 
-/// Parse a global variable definition from a text expression.
+/// Parse a calculated-table definition from a text expression.
 ///
-/// The `name` and `table` are provided by the caller (typically from a UI form).
-/// The `input` is the expression text, parsed using the same grammar as
-/// `parse_measure_expression`.
+/// The `name` and `table` are provided by the caller (typically from a UI
+/// form). The `input` is the expression text, parsed using the same grammar
+/// as `parse_measure_expression` — but only a table-producing `QUERY(...)`
+/// expression is accepted; anything else is rejected (a reusable scalar is a
+/// hidden measure, not a calculated table).
 ///
 /// # Examples
 ///
 /// ```rust
 /// use engine_core::compute::parser::parse_global;
 ///
-/// // Scalar global:
-/// let gv = parse_global("total_revenue", "fact_sales",
-///     "SUM(fact_sales[linetotal])").unwrap();
-/// assert!(!gv.is_query());
-///
-/// // Table (QUERY) global:
 /// let gv = parse_global("city_sales", "fact_sales",
 ///     "QUERY(SUM(fact_sales[linetotal]) AS Amount BY dim_customer[city])").unwrap();
 /// assert!(gv.is_query());
+///
+/// // Scalar expressions are rejected:
+/// assert!(parse_global("total_revenue", "fact_sales",
+///     "SUM(fact_sales[linetotal])").is_err());
 /// ```
 pub fn parse_global(name: &str, table: &str, input: &str) -> EngineResult<GlobalVariable> {
     let expression = parse_measure_expression(input)?;
+    if !matches!(expression, Expression::Query { .. }) {
+        return Err(EngineError::InvalidGlobalVariable {
+            name: name.to_string(),
+            reason: "a calculated table must be a table-producing QUERY(...) expression; \
+                     for a reusable scalar, define a (hidden) measure instead"
+                .to_string(),
+        });
+    }
     Ok(GlobalVariable::new(name, table, expression))
 }
 
@@ -756,11 +764,16 @@ mod tests {
     // --- parse_global tests ---
 
     #[test]
-    fn parse_global_scalar() {
-        let gv = parse_global("rev", "fact_sales", "SUM(fact_sales[linetotal])").unwrap();
-        assert_eq!(gv.name(), "rev");
-        assert_eq!(gv.table(), "fact_sales");
-        assert!(!gv.is_query());
+    fn parse_global_rejects_scalar() {
+        let err = parse_global("rev", "fact_sales", "SUM(fact_sales[linetotal])").unwrap_err();
+        assert!(
+            err.to_string().contains("QUERY"),
+            "should point at QUERY requirement, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("measure"),
+            "should suggest a measure instead, got: {err}"
+        );
     }
 
     #[test]
@@ -776,15 +789,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_global_var_return() {
-        let gv = parse_global(
+    fn parse_global_rejects_var_return() {
+        let result = parse_global(
             "pct",
             "fact_sales",
             "VAR total = SUM(fact_sales[linetotal]) RETURN total / COUNTROWS(fact_sales)",
-        )
-        .unwrap();
-        assert_eq!(gv.name(), "pct");
-        assert!(!gv.is_query());
+        );
+        assert!(result.is_err());
     }
 
     #[test]

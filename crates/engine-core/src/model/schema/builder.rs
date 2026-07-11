@@ -423,8 +423,7 @@ impl DataModelBuilder {
                 if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
                     return Err(EngineError::InvalidExpression(format!(
                         "query-scoped variable (GVAR) '{gvar}' in measure '{}' collides with a \
-                         shared expression (model global variable) of the same name; rename one \
-                         of them",
+                         calculated table of the same name; rename one of them",
                         measure.name()
                     )));
                 }
@@ -447,7 +446,7 @@ impl DataModelBuilder {
             gv.expression().validate()?;
             if gv.expression().has_query_scoped_bindings() {
                 return Err(EngineError::InvalidExpression(format!(
-                    "shared expression '{}' uses a query-scoped (GVAR) variable, which is only \
+                    "calculated table '{}' uses a query-scoped (GVAR) variable, which is only \
                      supported in measures",
                     gv.name()
                 )));
@@ -1133,13 +1132,26 @@ impl DataModelBuilder {
             }
         }
 
-        // 9. Validate global variables.
+        // 9. Validate calculated tables (model global variables).
         let mut seen_globals = std::collections::HashSet::new();
         for gv in &self.global_variables {
+            // Must be a table-producing QUERY expression. (Scalar globals
+            // were removed 2026-07-11 — a reusable scalar is a hidden
+            // measure; see Calcula's docs/design/calculated-tables.md.)
+            if !gv.is_query() {
+                return Err(EngineError::InvalidGlobalVariable {
+                    name: gv.name().to_string(),
+                    reason: "a calculated table must be a table-producing QUERY(...) \
+                             expression; for a reusable scalar, define a (hidden) measure \
+                             instead"
+                        .to_string(),
+                });
+            }
+
             // Unique names.
             if !seen_globals.insert(gv.name()) {
                 return Err(EngineError::DuplicateName(format!(
-                    "Duplicate shared expression '{}'",
+                    "Duplicate calculated table '{}'",
                     gv.name()
                 )));
             }
@@ -1217,7 +1229,7 @@ impl DataModelBuilder {
                 return Err(EngineError::InvalidHierarchy {
                     name: hierarchy.name().to_string(),
                     reason: format!(
-                        "name conflicts with shared expression '{}'",
+                        "name conflicts with calculated table '{}'",
                         hierarchy.name()
                     ),
                 });

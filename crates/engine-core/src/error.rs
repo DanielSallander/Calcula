@@ -143,12 +143,12 @@ pub enum EngineError {
         reason: String,
     },
 
-    /// A referenced global variable (UI term: shared expression) was not found.
-    #[error("Shared expression '{0}' not found")]
+    /// A referenced calculated table (engine struct: `GlobalVariable`) was not found.
+    #[error("Calculated table '{0}' not found")]
     GlobalVariableNotFound(String),
 
-    /// A global variable (UI term: shared expression) definition is invalid.
-    #[error("Invalid shared expression '{name}': {reason}")]
+    /// A calculated table (engine struct: `GlobalVariable`) definition is invalid.
+    #[error("Invalid calculated table '{name}': {reason}")]
     InvalidGlobalVariable {
         /// The global variable name.
         name: String,

@@ -2,19 +2,15 @@
 
 use super::*;
 
-/// Expand global variable references in an expression.
+/// Expand calculated-table references in an expression.
 ///
-/// This function performs two kinds of substitution:
+/// A `QualifiedColumnRef { table_or_var, .. }` matching a calculated table
+/// (QUERY global variable) causes the entire expression to be wrapped in a
+/// `Block` with the QUERY expression as a binding. Multiple distinct
+/// calculated tables each get their own binding.
 ///
-/// - **Scalar globals**: A `ColumnRef(name)` matching a scalar global variable
-///   is replaced with the global's expression inline.
-/// - **Table (QUERY) globals**: A `QualifiedColumnRef { table_or_var, .. }` matching
-///   a QUERY global variable causes the entire expression to be wrapped in a
-///   `Block` with the QUERY expression as a binding. Multiple distinct QUERY globals
-///   each get their own binding.
-///
-/// The function is idempotent: if no global references are found, the expression
-/// is returned unchanged (cloned).
+/// The function is idempotent: if no calculated-table references are found,
+/// the expression is returned unchanged (cloned).
 /// Returns `true` if the expression tree contains any `MeasureRef` nodes.
 pub fn has_measure_ref(expr: &Expression) -> bool {
     match expr {

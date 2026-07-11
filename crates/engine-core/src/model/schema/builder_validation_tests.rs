@@ -258,43 +258,72 @@ fn build_rejects_unparseable_column_lookup_resolution() {
     );
 }
 
-// --- Global variable tests ---
+// --- Calculated table (model global variable) tests ---
+
+/// A valid calculated table: QUERY(SUM(Sales[amount]) AS Amt BY Sales[id]).
+fn query_gv(name: &str, table: &str) -> crate::model::global_variable::GlobalVariable {
+    use crate::compute::aggregate::AggregateOp;
+    use crate::compute::expression::Expression;
+    crate::model::global_variable::GlobalVariable::new(
+        name,
+        table,
+        Expression::Query {
+            aggregates: vec![(
+                Expression::Aggregate {
+                    operation: AggregateOp::Sum,
+                    operand: Box::new(Expression::ColumnRef("amount".into())),
+                },
+                "Amt".into(),
+            )],
+            group_by: vec![("Sales".into(), "id".into())],
+        },
+    )
+}
 
 #[test]
 fn global_variable_added_to_model() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("total_by_id", "Sales"))
+        .build()
+        .unwrap();
+
+    assert_eq!(model.global_variables().len(), 1);
+    assert!(model.global_variable("total_by_id").is_ok());
+    assert!(model.global_variable("missing").is_err());
+}
+
+#[test]
+fn rejects_scalar_global_variable() {
     use crate::compute::aggregate::AggregateOp;
     use crate::compute::expression as expr;
     use crate::model::global_variable::GlobalVariable;
 
+    // A scalar expression is no longer a valid calculated table — the
+    // guidance points at (hidden) measures instead.
     let gv = GlobalVariable::new(
         "total_revenue",
         "Sales",
         expr::agg(AggregateOp::Sum, expr::col("amount")),
     );
 
-    let model = DataModel::builder()
+    let result = DataModel::builder()
         .add_table(sales_table())
         .add_global_variable(gv)
-        .build()
-        .unwrap();
+        .build();
 
-    assert_eq!(model.global_variables().len(), 1);
-    assert!(model.global_variable("total_revenue").is_ok());
-    assert!(model.global_variable("missing").is_err());
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("QUERY"), "got: {err}");
+    assert!(err.contains("measure"), "got: {err}");
 }
 
 #[test]
 fn rejects_duplicate_global_variable_names() {
-    use crate::compute::expression as expr;
-    use crate::model::global_variable::GlobalVariable;
-
-    let g1 = GlobalVariable::new("gv", "Sales", expr::col("amount"));
-    let g2 = GlobalVariable::new("gv", "Sales", expr::col("id"));
-
     let result = DataModel::builder()
         .add_table(sales_table())
-        .add_global_variable(g1)
-        .add_global_variable(g2)
+        .add_global_variable(query_gv("gv", "Sales"))
+        .add_global_variable(query_gv("gv", "Sales"))
         .build();
 
     assert!(result.is_err());
@@ -305,14 +334,9 @@ fn rejects_duplicate_global_variable_names() {
 
 #[test]
 fn rejects_global_variable_name_collision_with_table() {
-    use crate::compute::expression as expr;
-    use crate::model::global_variable::GlobalVariable;
-
-    let gv = GlobalVariable::new("Sales", "Sales", expr::col("amount"));
-
     let result = DataModel::builder()
         .add_table(sales_table())
-        .add_global_variable(gv)
+        .add_global_variable(query_gv("Sales", "Sales"))
         .build();
 
     assert!(result.is_err());
@@ -322,17 +346,14 @@ fn rejects_global_variable_name_collision_with_table() {
 
 #[test]
 fn rejects_global_variable_name_collision_with_context() {
-    use crate::compute::expression as expr;
     use crate::model::context::{ContextDefinition, ContextOp};
-    use crate::model::global_variable::GlobalVariable;
 
     let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
-    let gv = GlobalVariable::new("my_ctx", "Sales", expr::col("amount"));
 
     let result = DataModel::builder()
         .add_table(sales_table())
         .add_context(ctx)
-        .add_global_variable(gv)
+        .add_global_variable(query_gv("my_ctx", "Sales"))
         .build();
 
     assert!(result.is_err());
@@ -342,14 +363,9 @@ fn rejects_global_variable_name_collision_with_context() {
 
 #[test]
 fn rejects_global_variable_with_missing_table() {
-    use crate::compute::expression as expr;
-    use crate::model::global_variable::GlobalVariable;
-
-    let gv = GlobalVariable::new("gv", "NonExistent", expr::col("x"));
-
     let result = DataModel::builder()
         .add_table(sales_table())
-        .add_global_variable(gv)
+        .add_global_variable(query_gv("gv", "NonExistent"))
         .build();
 
     assert!(result.is_err());
@@ -373,26 +389,16 @@ fn serde_backward_compat_no_global_variables() {
 
 #[test]
 fn global_variable_json_roundtrip() {
-    use crate::compute::aggregate::AggregateOp;
-    use crate::compute::expression as expr;
-    use crate::model::global_variable::GlobalVariable;
-
-    let gv = GlobalVariable::new(
-        "total_revenue",
-        "Sales",
-        expr::agg(AggregateOp::Sum, expr::col("amount")),
-    );
-
     let model = DataModel::builder()
         .add_table(sales_table())
-        .add_global_variable(gv)
+        .add_global_variable(query_gv("total_by_id", "Sales"))
         .build()
         .unwrap();
 
     let json = serde_json::to_string_pretty(&model).unwrap();
     let restored: DataModel = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.global_variables().len(), 1);
-    assert_eq!(restored.global_variables()[0].name(), "total_revenue");
+    assert_eq!(restored.global_variables()[0].name(), "total_by_id");
     assert!(restored.validate().is_ok());
 }
 

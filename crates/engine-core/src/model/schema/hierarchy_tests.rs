@@ -151,11 +151,25 @@ fn rejects_hierarchy_name_collision_with_table_variable() {
 
 #[test]
 fn rejects_hierarchy_name_collision_with_global_variable() {
-    use crate::compute::expression as expr;
+    use crate::compute::aggregate::AggregateOp;
+    use crate::compute::expression::Expression;
     use crate::model::global_variable::GlobalVariable;
     use crate::model::hierarchy::HierarchyLevel;
 
-    let gv = GlobalVariable::new("my_gv", "dim_geography", expr::col("country"));
+    let gv = GlobalVariable::new(
+        "my_gv",
+        "dim_geography",
+        Expression::Query {
+            aggregates: vec![(
+                Expression::Aggregate {
+                    operation: AggregateOp::Count,
+                    operand: Box::new(Expression::ColumnRef("country".into())),
+                },
+                "Cnt".into(),
+            )],
+            group_by: vec![("dim_geography".into(), "state".into())],
+        },
+    );
     let h = Hierarchy::new(
         "my_gv",
         "dim_geography",
@@ -170,7 +184,7 @@ fn rejects_hierarchy_name_collision_with_global_variable() {
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("conflicts with shared expression"));
+    assert!(err.contains("conflicts with calculated table"));
 }
 
 #[test]
