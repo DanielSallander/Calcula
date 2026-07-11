@@ -1167,6 +1167,12 @@ const GVAR_MIN_FORMAT_VERSION: u64 = 13;
 /// relationships bound to it — so such a model must be stamped >= 15.
 const MATERIALIZED_CT_MIN_FORMAT_VERSION: u64 = 15;
 
+/// Minimum schema `format_version` required by an `ISFILTERED(...)` measure.
+/// A pre-v16 engine fails to deserialize the `IsFiltered` expression variant,
+/// so such a model must be stamped >= 16 to fail closed with the clean
+/// "update Calcula" gate instead of a serde error.
+const ISFILTERED_MIN_FORMAT_VERSION: u64 = 16;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1185,8 +1191,14 @@ pub fn stamp_feature_format_version(
         .iter()
         .any(|m| m.expression().has_query_scoped_bindings());
     let uses_materialized_ct = model.global_variables().iter().any(|gv| !gv.is_dynamic());
+    let uses_isfiltered = model
+        .measures()
+        .iter()
+        .any(|m| m.expression().contains_is_filtered());
 
-    let required = if uses_materialized_ct {
+    let required = if uses_isfiltered {
+        ISFILTERED_MIN_FORMAT_VERSION
+    } else if uses_materialized_ct {
         MATERIALIZED_CT_MIN_FORMAT_VERSION
     } else if uses_gvar {
         GVAR_MIN_FORMAT_VERSION
