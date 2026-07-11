@@ -26,7 +26,7 @@ export function OverviewSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
     { label: "Contexts", count: overview.contexts.length },
     { label: "Context Columns", count: overview.contextColumns.length },
     { label: "Table Variables", count: overview.tableVariables.length },
-    { label: "Global Variables", count: overview.globalVariables.length },
+    { label: "Shared Expressions", count: overview.globalVariables.length },
     { label: "Script Functions", count: overview.scriptFunctions.length },
   ];
 

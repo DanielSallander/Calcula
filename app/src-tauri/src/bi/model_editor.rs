@@ -2475,10 +2475,10 @@ pub async fn bi_model_delete_calc_group(
 }
 
 // ---------------------------------------------------------------------------
-// ME-6: global variables
+// ME-6: shared expressions (engine term: global variables)
 // ---------------------------------------------------------------------------
 
-/// Add or update a global variable (a model-level reusable expression; scalar
+/// Add or update a shared expression (a model-level reusable expression; scalar
 /// or table-producing QUERY(...)). Parsed by the engine `parse_global`.
 #[tauri::command]
 pub async fn bi_model_upsert_global_variable(
@@ -2495,22 +2495,22 @@ pub async fn bi_model_upsert_global_variable(
     mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            return Err("Global variable name cannot be empty".to_string());
+            return Err("Shared expression name cannot be empty".to_string());
         }
         if table.trim().is_empty() {
-            return Err("Global variable must specify a table".to_string());
+            return Err("Shared expression must specify a table".to_string());
         }
         if expression.trim().is_empty() {
-            return Err(format!("Global variable '{}' has an empty expression", trimmed));
+            return Err(format!("Shared expression '{}' has an empty expression", trimmed));
         }
         let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
-            .map_err(|e| format!("Global variable '{}': {}", trimmed, e))?;
+            .map_err(|e| format!("Shared expression '{}': {}", trimmed, e))?;
 
         let mut globals = base.global_variables().to_vec();
         match original_name.as_deref() {
             Some(orig) => {
                 let Some(idx) = globals.iter().position(|g| g.name() == orig) else {
-                    return Err(format!("Global variable '{}' not found", orig));
+                    return Err(format!("Shared expression '{}' not found", orig));
                 };
                 globals[idx] = gv;
             }
@@ -2537,7 +2537,7 @@ pub async fn bi_model_delete_global_variable(
         let before = globals.len();
         globals.retain(|g| g.name() != name);
         if globals.len() == before {
-            return Err(format!("Global variable '{}' not found", name));
+            return Err(format!("Shared expression '{}' not found", name));
         }
         let edited = base.with_global_variables(globals);
         edited.validate().map_err(|e| format!("{}", e))?;

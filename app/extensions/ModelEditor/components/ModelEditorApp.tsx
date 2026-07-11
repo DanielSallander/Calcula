@@ -82,7 +82,7 @@ const NAV: Array<{ id: SectionId; label: string }> = [
   { id: "contexts", label: "Contexts" },
   { id: "kpis", label: "KPIs" },
   { id: "calcGroups", label: "Calculation Groups" },
-  { id: "globals", label: "Global Variables" },
+  { id: "globals", label: "Shared Expressions" },
   { id: "tableVariables", label: "Table Variables" },
   { id: "scriptFunctions", label: "Script Functions" },
   { id: "roles", label: "Security Roles" },

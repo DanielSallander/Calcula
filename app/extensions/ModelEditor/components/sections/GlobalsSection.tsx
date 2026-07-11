@@ -1,7 +1,8 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/GlobalsSection.tsx
-// PURPOSE: Global Variables section of the Model Editor window: list model
-//          global variables (reusable named scalar/QUERY expressions bound to a
-//          table) and add/edit/delete them (name, host table, expression).
+// PURPOSE: Shared Expressions section of the Model Editor window: list the
+//          model's shared expressions (reusable named scalar/QUERY expressions
+//          bound to a table; "global variables" in engine terms — distinct from
+//          the query-scoped GVAR inside a measure) and add/edit/delete them.
 
 import React, { useState } from "react";
 import { biModelDeleteGlobalVariable, biModelUpsertGlobalVariable } from "@api";
@@ -16,7 +17,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
   );
 
   const handleDelete = async (g: ModelGlobalVariableInfo) => {
-    if (!window.confirm(`Delete global variable '${g.name}'?`)) return;
+    if (!window.confirm(`Delete shared expression '${g.name}'?`)) return;
     try {
       applyOverview(await biModelDeleteGlobalVariable(connectionId, g.name));
     } catch (err: unknown) {
@@ -28,7 +29,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
     <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0 }}>
       <div style={styles.sectionHeader}>
         <span style={styles.sectionTitle}>
-          Global Variables ({overview.globalVariables.length})
+          Shared Expressions ({overview.globalVariables.length})
         </span>
         <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
           New
@@ -37,7 +38,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
       <div style={{ ...styles.card, flex: 1, overflowY: "auto", padding: 4 }}>
         {overview.globalVariables.length === 0 && (
           <div style={{ ...styles.muted, padding: 8 }}>
-            No global variables defined — create one with New.
+            No shared expressions defined — create one with New.
           </div>
         )}
         {overview.globalVariables.map((g) => (
@@ -136,7 +137,7 @@ function GlobalVariableModal({
 
   return (
     <Modal
-      title={original ? `Edit Global Variable: ${original.name}` : "New Global Variable"}
+      title={original ? `Edit Shared Expression: ${original.name}` : "New Shared Expression"}
       width={560}
       onClose={onClose}
       footer={
@@ -172,7 +173,7 @@ function GlobalVariableModal({
 
       <Field
         label="Expression"
-        hint="DAX-like scalar, e.g. SUM(fact[amount]); or a table global QUERY(SUM(fact[amount]) AS Amt BY dim[city])"
+        hint="DAX-like scalar, e.g. SUM(fact[amount]); or a table-producing QUERY(SUM(fact[amount]) AS Amt BY dim[city])"
       >
         <textarea
           style={styles.textarea}
