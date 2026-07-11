@@ -446,6 +446,7 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
             model_table: table_name.clone(),
             schema: "BI".to_string(),
             source_table: table_name.clone(),
+            source_query: None,
         }
     }).collect();
 
@@ -459,6 +460,7 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
         database: String::new(),
         model_json: bundle, // embed full ModelBundle (includes connectionSpecs)
         bindings,
+        calculated_table_snapshots: Vec::new(),
     })
 }
 

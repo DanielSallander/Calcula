@@ -175,7 +175,8 @@ function GlobalVariableModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSave = name.trim() !== "" && table !== "" && expression.trim() !== "";
+  const isCalendar = /^\s*calendar\s*\(/i.test(expression);
+  const canSave = name.trim() !== "" && (table !== "" || isCalendar) && expression.trim() !== "";
 
   const save = async () => {
     setBusy(true);
@@ -184,9 +185,13 @@ function GlobalVariableModal({
       // A materialized calculated table flipped to dynamic (or renamed) loses
       // its model table — confirm the destructive cascade first, listing
       // everything bound to the table that will be removed with it.
+      // A CALENDAR is always materialized — the checkbox is ignored for it.
       let cascade = false;
+      const staysMaterialized = !dynamic || isCalendar;
       const unmaterializes =
-        original != null && !original.dynamic && (dynamic || name.trim() !== original.name);
+        original != null &&
+        !original.dynamic &&
+        (!staysMaterialized || name.trim() !== original.name);
       if (unmaterializes) {
         const summary = dependentsSummary(
           await biModelCalculatedTableDependents(connectionId, original.name),
@@ -217,7 +222,7 @@ function GlobalVariableModal({
       // Populate the materialized table's data right away (refresh paths
       // also re-materialize automatically). A failure here does not undo the
       // model edit — surface it, then close normally.
-      if (!dynamic) {
+      if (staysMaterialized) {
         try {
           await biModelMaterializeCalculatedTable(connectionId, name.trim());
         } catch (err: unknown) {
@@ -269,7 +274,7 @@ function GlobalVariableModal({
 
       <Field
         label="Expression"
-        hint="A table-producing QUERY(...), e.g. QUERY(SUM(fact[amount]) AS Amt BY dim[city]); referenced in measures as name[column], evaluated in the query's filter context"
+        hint="QUERY(SUM(fact[amount]) AS Amt BY dim[city]) — aggregate grouping; QUERY(DISTINCT dim[city]) — unique rows (materialized only); CALENDAR(2024-01-01, 2026-12-31) — generated date table (materialized only). Referenced in measures as name[column]."
       >
         <textarea
           style={styles.textarea}

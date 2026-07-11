@@ -6654,9 +6654,54 @@ fn load_embedded_data_sources(
             ttl_secs: 300,
         });
 
+        // Restore materialized calculated-table snapshots carried in the
+        // package: the subscriber may have no source access, so this is the
+        // only data those derived tables get until a refresh succeeds.
+        for (table, path) in &ds.calculated_table_snapshots {
+            match read_ipc_batch(path) {
+                Ok(batch) => {
+                    if let Err(e) = engine.store_calculated_table_snapshot(table, batch) {
+                        crate::log_warn!(
+                            "CALP",
+                            "calculated-table snapshot '{}' not restored: {}",
+                            table,
+                            e
+                        );
+                    }
+                }
+                Err(e) => crate::log_warn!(
+                    "CALP",
+                    "calculated-table snapshot '{}' unreadable: {}",
+                    table,
+                    e
+                ),
+            }
+        }
+
         let model_key = ModelKey::from_model_path(&model_path);
-        let (engine_arc, _was_existing, _cache_dir) =
+        let (engine_arc, was_existing, _cache_dir) =
             bi_state.engine_registry.get_or_create(&model_key, engine);
+
+        // A model-sharing engine already existed: our freshly built engine
+        // (with the restored snapshots) was discarded — replay the snapshots
+        // onto the shared instance. try_lock: this sync path must not block
+        // an async runtime; a busy engine keeps its (equivalent) cached data.
+        if was_existing && !ds.calculated_table_snapshots.is_empty() {
+            if let Ok(mut shared) = engine_arc.try_lock() {
+                for (table, path) in &ds.calculated_table_snapshots {
+                    if let Ok(batch) = read_ipc_batch(path) {
+                        if let Err(e) = shared.store_calculated_table_snapshot(table, batch) {
+                            crate::log_warn!(
+                                "CALP",
+                                "calculated-table snapshot '{}' not restored on shared engine: {}",
+                                table,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Allocate a connection ID and register the connection
         let conn_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
@@ -6985,17 +7030,51 @@ fn capture_bi_data_sources(
 
     for conn in connections.values() {
         // Get the engine and serialize the model. Connections without a
-        // loaded engine have nothing to embed.
-        let model_json = match &conn.engine {
+        // loaded engine have nothing to embed. Materialized calculated
+        // tables also snapshot their cached data (Arrow IPC) so subscribers
+        // without source access still see the derived tables.
+        let (model_json, calculated_table_snapshots) = match &conn.engine {
             Some(engine_arc) => {
                 match engine_arc.try_lock() {
                     Ok(engine) => {
                         let mut v = serde_json::to_value(engine.model())
                             .map_err(|e| format!("Failed to serialize model: {}", e))?;
-                        // Ensure a GVAR model publishes stamped >= v13 so a
-                        // subscriber on an older engine fails closed cleanly.
+                        // Ensure a feature-bearing model publishes stamped high
+                        // enough (GVAR >= 13, materialized calculated tables
+                        // >= 15) so a subscriber on an older engine fails
+                        // closed cleanly.
                         crate::bi::commands::stamp_feature_format_version(engine.model(), &mut v);
-                        v
+
+                        let mut snapshots = Vec::new();
+                        for gv in engine.model().global_variables() {
+                            if gv.is_dynamic() {
+                                continue;
+                            }
+                            let Some(batch) = engine.cache().get(gv.name()) else {
+                                crate::log_warn!(
+                                    "CALP",
+                                    "calculated table '{}' has no materialized data to snapshot \
+                                     (materialize or refresh before publishing to carry it)",
+                                    gv.name()
+                                );
+                                continue;
+                            };
+                            match record_batch_to_ipc(batch) {
+                                Ok(ipc_bytes) => snapshots.push(
+                                    calp::publish::CalculatedTableSnapshot {
+                                        table: gv.name().to_string(),
+                                        ipc_bytes,
+                                    },
+                                ),
+                                Err(e) => crate::log_warn!(
+                                    "CALP",
+                                    "calculated table '{}' snapshot failed: {}",
+                                    gv.name(),
+                                    e
+                                ),
+                            }
+                        }
+                        (v, snapshots)
                     }
                     Err(_) => {
                         crate::log_warn!("CALP", "Engine busy for connection {}, skipping", conn.id);
@@ -7038,10 +7117,40 @@ fn capture_bi_data_sources(
             database,
             model_json,
             bindings,
+            calculated_table_snapshots,
         });
     }
 
     Ok(data_sources)
+}
+
+/// Serialize a RecordBatch as Arrow IPC stream bytes (the calculated-table
+/// snapshot artifact format).
+fn record_batch_to_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let mut writer =
+        arrow::ipc::writer::StreamWriter::try_new(&mut buf, batch.schema().as_ref())
+            .map_err(|e| e.to_string())?;
+    writer.write(batch).map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())?;
+    drop(writer);
+    Ok(buf)
+}
+
+/// Read an Arrow IPC stream file back into a single RecordBatch
+/// (multiple batches are concatenated).
+fn read_ipc_batch(path: &std::path::Path) -> Result<arrow::record_batch::RecordBatch, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
+        .map_err(|e| e.to_string())?;
+    let schema = reader.schema();
+    let batches: Vec<arrow::record_batch::RecordBatch> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if batches.is_empty() {
+        return Ok(arrow::record_batch::RecordBatch::new_empty(schema));
+    }
+    arrow::compute::concat_batches(&schema, &batches).map_err(|e| e.to_string())
 }
 
 /// Parse server (host) and database (dbname) from a PostgreSQL connection string.

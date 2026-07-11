@@ -1768,7 +1768,12 @@ fn build_overview(
         .map(|gv| ModelGlobalVariableInfo {
             name: gv.name().to_string(),
             table: gv.table().to_string(),
-            expression: bi_engine::expression_to_formula(gv.expression(), gv.table()),
+            // Generated calendars have a placeholder AST — render the
+            // canonical CALENDAR(...) text so editing round-trips.
+            expression: match gv.calendar() {
+                Some(spec) => format!("CALENDAR({}, {})", spec.start, spec.end),
+                None => bi_engine::expression_to_formula(gv.expression(), gv.table()),
+            },
             is_query: gv.is_query(),
             dynamic: gv.is_dynamic(),
         })
@@ -2504,16 +2509,22 @@ pub async fn bi_model_upsert_global_variable(
         if trimmed.is_empty() {
             return Err("Calculated table name cannot be empty".to_string());
         }
-        if table.trim().is_empty() {
-            return Err("Calculated table must specify a table".to_string());
-        }
         if expression.trim().is_empty() {
             return Err(format!("Calculated table '{}' has an empty expression", trimmed));
         }
         let dynamic = dynamic.unwrap_or(true);
         let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
-            .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?
-            .with_dynamic(dynamic);
+            .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
+        // A generated CALENDAR reads from no table (and forces materialized
+        // mode itself); QUERY forms need the host table.
+        let gv = if gv.calendar().is_some() {
+            gv
+        } else {
+            if table.trim().is_empty() {
+                return Err("Calculated table must specify a table".to_string());
+            }
+            gv.with_dynamic(dynamic)
+        };
 
         let mut globals = base.global_variables().to_vec();
         // When the edit makes the OLD derived table disappear — a
@@ -2527,8 +2538,10 @@ pub async fn bi_model_upsert_global_variable(
                 let Some(idx) = globals.iter().position(|g| g.name() == orig) else {
                     return Err(format!("Calculated table '{}' not found", orig));
                 };
+                // Keyed off the FINAL state (a CALENDAR stays materialized
+                // regardless of the checkbox), so a no-op edit never cascades.
                 let was_materialized = !globals[idx].is_dynamic();
-                if was_materialized && (dynamic || orig != trimmed) {
+                if was_materialized && (gv.is_dynamic() || orig != trimmed) {
                     cascade_target = Some(orig.to_string());
                 }
                 globals[idx] = gv;

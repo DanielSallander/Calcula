@@ -24,6 +24,18 @@ pub struct PublishDataSource {
     /// The BI DataModel as JSON (will be written to models/{id}/model.json).
     pub model_json: serde_json::Value,
     pub bindings: Vec<PackageBinding>,
+    /// Materialized calculated-table snapshots (Arrow IPC stream bytes),
+    /// written to models/{id}/calculated_tables/{index}.arrow so subscribers
+    /// without source access still see the derived tables' data.
+    pub calculated_table_snapshots: Vec<CalculatedTableSnapshot>,
+}
+
+/// One materialized calculated table's data snapshot to embed.
+pub struct CalculatedTableSnapshot {
+    /// The derived model table's name.
+    pub table: String,
+    /// The table's data as Arrow IPC stream bytes.
+    pub ipc_bytes: Vec<u8>,
 }
 
 /// A rectangular region of cells to exclude from published sheet data.
@@ -377,6 +389,15 @@ pub fn publish(
             database: ds.database.clone(),
             model_path: format!("models/{}/model.json", ds.id),
             bindings: ds.bindings.clone(),
+            calculated_table_snapshots: ds
+                .calculated_table_snapshots
+                .iter()
+                .enumerate()
+                .map(|(i, snap)| crate::manifest::CalculatedTableSnapshotRef {
+                    table: snap.table.clone(),
+                    path: format!("models/{}/calculated_tables/{}.arrow", ds.id, i),
+                })
+                .collect(),
             extra: std::collections::HashMap::new(),
         }).collect(),
         custom_objects: published_custom_objects,
@@ -704,13 +725,21 @@ pub fn publish(
         )?;
     }
 
-    // Write embedded data source models
+    // Write embedded data source models + materialized calculated-table
+    // snapshots (Arrow IPC bytes; checksummed like every other artifact).
     for ds in &request.data_sources {
         registry.write_artifact(
             pkg, ver,
             &format!("models/{}/model.json", ds.id),
             serde_json::to_string_pretty(&ds.model_json)?.as_bytes(),
         )?;
+        for (i, snap) in ds.calculated_table_snapshots.iter().enumerate() {
+            registry.write_artifact(
+                pkg, ver,
+                &format!("models/{}/calculated_tables/{}.arrow", ds.id, i),
+                &snap.ipc_bytes,
+            )?;
+        }
     }
 
     // All artifacts are on disk in final form: compute SHA-256 checksums over

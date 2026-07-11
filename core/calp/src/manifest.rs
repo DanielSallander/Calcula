@@ -393,8 +393,25 @@ pub struct PackageDataSource {
     pub model_path: String,
     /// Table bindings: logical model tables -> physical database tables.
     pub bindings: Vec<PackageBinding>,
+    /// Materialized calculated-table snapshots carried in the package (Arrow
+    /// IPC stream artifacts under "models/{id}/calculated_tables/"), so a
+    /// subscriber without source access still sees the derived tables' data.
+    /// Empty for models without materialized calculated tables (and for
+    /// packages published before the feature existed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_table_snapshots: Vec<CalculatedTableSnapshotRef>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// One materialized calculated table's snapshot artifact in a package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedTableSnapshotRef {
+    /// The derived model table's name.
+    pub table: String,
+    /// Relative artifact path (Arrow IPC stream bytes).
+    pub path: String,
 }
 
 /// Maps a logical model table to a physical database table.

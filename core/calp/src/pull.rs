@@ -107,6 +107,10 @@ pub struct PulledDataSource {
     pub definition: PackageDataSource,
     /// Absolute path to the embedded model.json in the registry.
     pub model_path: PathBuf,
+    /// Materialized calculated-table snapshots: (table name, absolute path
+    /// to the Arrow IPC stream artifact). Empty when the package carries
+    /// none. Integrity-verified with the rest of the artifacts.
+    pub calculated_table_snapshots: Vec<(String, PathBuf)>,
 }
 
 /// A sheet pulled from a package, ready to be inserted into a workbook.
@@ -499,9 +503,22 @@ pub fn pull(
             let model_path = registry
                 .local_artifact_path(pkg, ver, &ds.model_path)?
                 .unwrap_or_default();
+            let calculated_table_snapshots = ds
+                .calculated_table_snapshots
+                .iter()
+                .map(|snap| {
+                    Ok((
+                        snap.table.clone(),
+                        registry
+                            .local_artifact_path(pkg, ver, &snap.path)?
+                            .unwrap_or_default(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, CalpError>>()?;
             Ok(PulledDataSource {
                 definition: ds.clone(),
                 model_path,
+                calculated_table_snapshots,
             })
         })
         .collect::<Result<Vec<_>, CalpError>>()?;
@@ -1009,6 +1026,7 @@ mod tests {
                     "model": { "tables": [] }
                 }),
                 bindings: Vec::new(),
+                calculated_table_snapshots: Vec::new(),
             }],
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
