@@ -19,7 +19,7 @@ const PAD = 20;
 
 const TYPE_COLORS: Record<string, { bg: string; border: string; label: string }> = {
   measure: { bg: "#e8f0fd", border: "#2f6fce", label: "Measure" },
-  globalVariable: { bg: "#f0e8fd", border: "#7a3fce", label: "Shared expr" },
+  globalVariable: { bg: "#f0e8fd", border: "#7a3fce", label: "Calc table" },
   calculatedColumn: { bg: "#e6f6ea", border: "#2c9a4a", label: "Calc column" },
   contextColumn: { bg: "#fdf0e1", border: "#c9781f", label: "Context column" },
 };
@@ -173,8 +173,8 @@ export function LineageSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
           )}
           {!loading && graph && graph.nodes.length === 0 && (
             <div style={{ ...styles.muted, padding: 10 }}>
-              No expression-bearing entities yet — add measures, calculated columns, shared
-              expressions or context columns.
+              No expression-bearing entities yet — add measures, calculated columns,
+              calculated tables or context columns.
             </div>
           )}
           {!loading && graph && graph.nodes.length > 0 && (

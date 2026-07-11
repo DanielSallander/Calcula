@@ -1,8 +1,10 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/GlobalsSection.tsx
-// PURPOSE: Shared Expressions section of the Model Editor window: list the
-//          model's shared expressions (reusable named scalar/QUERY expressions
-//          bound to a table; "global variables" in engine terms — distinct from
-//          the query-scoped GVAR inside a measure) and add/edit/delete them.
+// PURPOSE: Calculated Tables section of the Model Editor window: list the
+//          model's calculated tables (named QUERY(...) expressions evaluated
+//          dynamically in the referencing query's filter context; "global
+//          variables" in engine terms) and add/edit/delete them. Reusable
+//          scalars are hidden measures, not calculated tables — see
+//          docs/design/calculated-tables.md.
 
 import React, { useState } from "react";
 import { biModelDeleteGlobalVariable, biModelUpsertGlobalVariable } from "@api";
@@ -17,7 +19,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
   );
 
   const handleDelete = async (g: ModelGlobalVariableInfo) => {
-    if (!window.confirm(`Delete shared expression '${g.name}'?`)) return;
+    if (!window.confirm(`Delete calculated table '${g.name}'?`)) return;
     try {
       applyOverview(await biModelDeleteGlobalVariable(connectionId, g.name));
     } catch (err: unknown) {
@@ -29,7 +31,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
     <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minHeight: 0 }}>
       <div style={styles.sectionHeader}>
         <span style={styles.sectionTitle}>
-          Shared Expressions ({overview.globalVariables.length})
+          Calculated Tables ({overview.globalVariables.length})
         </span>
         <button style={styles.btn} disabled={readOnly} onClick={() => setEditing({ original: null })}>
           New
@@ -38,7 +40,8 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
       <div style={{ ...styles.card, flex: 1, overflowY: "auto", padding: 4 }}>
         {overview.globalVariables.length === 0 && (
           <div style={{ ...styles.muted, padding: 8 }}>
-            No shared expressions defined — create one with New.
+            No calculated tables defined — create one with New. (For a reusable
+            scalar, define a hidden measure instead.)
           </div>
         )}
         {overview.globalVariables.map((g) => (
@@ -49,7 +52,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <strong>{g.name}</strong>
-                <Badge tone="neutral">{g.isQuery ? "QUERY" : "scalar"}</Badge>
+                <Badge tone="neutral">dynamic</Badge>
                 <span style={styles.muted}>{" "}— {g.table}</span>
               </div>
               <div
@@ -137,7 +140,7 @@ function GlobalVariableModal({
 
   return (
     <Modal
-      title={original ? `Edit Shared Expression: ${original.name}` : "New Shared Expression"}
+      title={original ? `Edit Calculated Table: ${original.name}` : "New Calculated Table"}
       width={560}
       onClose={onClose}
       footer={
@@ -173,7 +176,7 @@ function GlobalVariableModal({
 
       <Field
         label="Expression"
-        hint="DAX-like scalar, e.g. SUM(fact[amount]); or a table-producing QUERY(SUM(fact[amount]) AS Amt BY dim[city])"
+        hint="A table-producing QUERY(...), e.g. QUERY(SUM(fact[amount]) AS Amt BY dim[city]); referenced in measures as name[column], evaluated in the query's filter context"
       >
         <textarea
           style={styles.textarea}
