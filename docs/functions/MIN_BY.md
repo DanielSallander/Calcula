@@ -6,6 +6,7 @@ Returns the value from the row where the sort column has its minimum value.
 
 ```
 MIN_BY(table[value_column], table[sort_column])
+MIN_BY(table[value_column], table[sort_column], context_op1, context_op2, ...)
 ```
 
 ### Parameters
@@ -14,6 +15,7 @@ MIN_BY(table[value_column], table[sort_column])
 |-----------|------------|
 | `table[value_column]` | The column whose value to return. Can be any data type. |
 | `table[sort_column]` | The column used to determine which row to pick. The row with the minimum value in this column is selected. |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

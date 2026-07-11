@@ -6,6 +6,7 @@ Returns the arithmetic mean (average) of all values in a column.
 
 ```
 AVG(table[column])
+AVG(table[column], context_op1, context_op2, ...)
 ```
 
 or
@@ -19,6 +20,7 @@ AVERAGE(table[column])
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to be averaged. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

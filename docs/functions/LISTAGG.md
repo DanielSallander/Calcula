@@ -6,6 +6,7 @@ Concatenates values from a column into a single string, separated by a delimiter
 
 ```
 LISTAGG(table[column], delimiter)
+LISTAGG(table[column], delimiter, context_op1, context_op2, ...)
 ```
 
 The alias `STRING_AGG` can also be used:
@@ -20,6 +21,7 @@ STRING_AGG(table[column], delimiter)
 |-----------|------------|
 | `table[column]` | The column whose values to concatenate. Values are cast to text before concatenation. |
 | `delimiter` | A string literal used to separate the concatenated values (e.g., `", "`). |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

@@ -6,6 +6,7 @@ Returns the smallest value in a column.
 
 ```
 MIN(table[column])
+MIN(table[column], context_op1, context_op2, ...)
 ```
 
 ### Parameters
@@ -13,6 +14,7 @@ MIN(table[column])
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to evaluate. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

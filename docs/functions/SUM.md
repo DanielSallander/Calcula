@@ -6,6 +6,7 @@ Adds all the values in a column.
 
 ```
 SUM(table[column])
+SUM(table[column], context_op1, context_op2, ...)
 ```
 
 ### Parameters
@@ -13,6 +14,7 @@ SUM(table[column])
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to be summed. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

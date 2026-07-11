@@ -143,12 +143,12 @@ pub enum EngineError {
         reason: String,
     },
 
-    /// A referenced global variable was not found.
-    #[error("Global variable '{0}' not found")]
+    /// A referenced global variable (UI term: shared expression) was not found.
+    #[error("Shared expression '{0}' not found")]
     GlobalVariableNotFound(String),
 
-    /// A global variable definition is invalid.
-    #[error("Invalid global variable '{name}': {reason}")]
+    /// A global variable (UI term: shared expression) definition is invalid.
+    #[error("Invalid shared expression '{name}': {reason}")]
     InvalidGlobalVariable {
         /// The global variable name.
         name: String,

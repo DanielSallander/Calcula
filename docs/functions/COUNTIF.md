@@ -6,6 +6,7 @@ Counts the number of rows where a condition is true.
 
 ```
 COUNTIF(condition)
+COUNTIF(condition, context_op1, context_op2, ...)
 ```
 
 The alias `COUNT_IF` can also be used:
@@ -19,6 +20,7 @@ COUNT_IF(condition)
 | Parameter | Definition |
 |-----------|------------|
 | `condition` | A Boolean expression evaluated for each row. Rows where the condition is true are counted. |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

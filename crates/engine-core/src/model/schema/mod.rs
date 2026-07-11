@@ -419,7 +419,8 @@ impl DataModel {
             {
                 return Err(EngineError::InvalidExpression(format!(
                     "query-scoped variable (GVAR) '{gvar}' in measure '{}' collides with a \
-                     model global variable of the same name; rename one of them",
+                     shared expression (model global variable) of the same name; rename one \
+                     of them",
                     candidate.name()
                 )));
             }

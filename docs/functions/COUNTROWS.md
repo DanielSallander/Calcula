@@ -6,6 +6,7 @@ Counts the number of rows in a table. Unlike [COUNT](COUNT.md), COUNTROWS counts
 
 ```
 COUNTROWS(table)
+COUNTROWS(table, context_op)
 ```
 
 ### Parameters
@@ -13,6 +14,7 @@ COUNTROWS(table)
 | Parameter | Definition |
 |-----------|------------|
 | `table` | The name of the table whose rows are to be counted. |
+| `context_op` | Optional. A context operation ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modifies the evaluation context. |
 
 ## Return value
 

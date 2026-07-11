@@ -423,7 +423,8 @@ impl DataModelBuilder {
                 if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
                     return Err(EngineError::InvalidExpression(format!(
                         "query-scoped variable (GVAR) '{gvar}' in measure '{}' collides with a \
-                         model global variable of the same name; rename one of them",
+                         shared expression (model global variable) of the same name; rename one \
+                         of them",
                         measure.name()
                     )));
                 }
@@ -446,7 +447,7 @@ impl DataModelBuilder {
             gv.expression().validate()?;
             if gv.expression().has_query_scoped_bindings() {
                 return Err(EngineError::InvalidExpression(format!(
-                    "global variable '{}' uses a query-scoped (GVAR) variable, which is only \
+                    "shared expression '{}' uses a query-scoped (GVAR) variable, which is only \
                      supported in measures",
                     gv.name()
                 )));
@@ -1138,7 +1139,7 @@ impl DataModelBuilder {
             // Unique names.
             if !seen_globals.insert(gv.name()) {
                 return Err(EngineError::DuplicateName(format!(
-                    "Duplicate global variable '{}'",
+                    "Duplicate shared expression '{}'",
                     gv.name()
                 )));
             }
@@ -1215,7 +1216,10 @@ impl DataModelBuilder {
             if seen_globals.contains(hierarchy.name()) {
                 return Err(EngineError::InvalidHierarchy {
                     name: hierarchy.name().to_string(),
-                    reason: format!("name conflicts with global variable '{}'", hierarchy.name()),
+                    reason: format!(
+                        "name conflicts with shared expression '{}'",
+                        hierarchy.name()
+                    ),
                 });
             }
 

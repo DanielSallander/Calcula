@@ -450,7 +450,7 @@ fn reject_gvar_colliding_with_model_global_variable() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("collides with a model global variable"),
+        err.contains("collides with a shared expression"),
         "got: {err}"
     );
 }
@@ -618,7 +618,7 @@ async fn validate_measure_text_rejects_gvar_violations() {
         .validate_measure_text("Bad3", "GVAR gv_total = SUM(Sales[amount]) RETURN gv_total")
         .unwrap_err();
     assert!(
-        err.to_string().contains("model global variable"),
+        err.to_string().contains("shared expression"),
         "got: {err}"
     );
 

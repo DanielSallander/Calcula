@@ -170,7 +170,7 @@ fn rejects_hierarchy_name_collision_with_global_variable() {
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("conflicts with global variable"));
+    assert!(err.contains("conflicts with shared expression"));
 }
 
 #[test]

@@ -15,9 +15,10 @@
 //! ```
 //!
 //! The build script extracts the function name, description (first non-empty
-//! line after the title), and syntax (first code block after `## Syntax`).
-//! It writes a generated Rust file that is `include!`-ed by the `catalog`
-//! module.
+//! line after the title), and syntax (the longest call variant among the code
+//! lines in the `## Syntax` section — docs list the bare form first and the
+//! fullest form, e.g. with optional context operations, after it). It writes
+//! a generated Rust file that is `include!`-ed by the `catalog` module.
 
 use std::env;
 use std::fs;
@@ -116,11 +117,16 @@ fn parse_function_doc(path: &Path) -> Option<(String, String, String)> {
         break;
     }
 
-    // Extract syntax: first code block after "## Syntax"
+    // Extract syntax: docs may list several call variants inside the Syntax
+    // section — as multiple lines in one code block (e.g. `SUM(table[column])`
+    // then `SUM(table[column], context_op1, ...)`) and/or as several code
+    // blocks (alias forms). Each non-empty code line is one variant; the
+    // longest variant is the fullest signature, which is what intellisense
+    // should advertise.
     let mut signature = String::new();
     let mut in_syntax_section = false;
     let mut in_code_block = false;
-    let mut code_lines: Vec<String> = Vec::new();
+    let mut variants: Vec<String> = Vec::new();
 
     for line in &lines {
         let trimmed = line.trim();
@@ -137,28 +143,19 @@ fn parse_function_doc(path: &Path) -> Option<(String, String, String)> {
             }
 
             if trimmed.starts_with("```") {
-                if in_code_block {
-                    // End of code block — we have our syntax
-                    break;
-                } else {
-                    in_code_block = true;
-                    continue;
-                }
+                in_code_block = !in_code_block;
+                continue;
             }
 
-            if in_code_block {
-                code_lines.push(trimmed.to_string());
+            if in_code_block && !trimmed.is_empty() {
+                // Collapse internal whitespace
+                variants.push(trimmed.split_whitespace().collect::<Vec<&str>>().join(" "));
             }
         }
     }
 
-    if !code_lines.is_empty() {
-        // Join multi-line syntax into a single line, collapsing whitespace
-        signature = code_lines
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<&str>>()
-            .join(" ");
+    if let Some(fullest) = variants.iter().max_by_key(|v| v.len()) {
+        signature = fullest.clone();
     }
 
     // Fallback: if no syntax found, use "NAME()"

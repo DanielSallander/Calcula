@@ -6,6 +6,7 @@ Returns the most frequently occurring value in a group.
 
 ```
 MODE(table[column])
+MODE(table[column], context_op1, context_op2, ...)
 ```
 
 ### Parameters
@@ -13,6 +14,7 @@ MODE(table[column])
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column from which to find the most frequent value. Can be any data type. |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

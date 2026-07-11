@@ -6,6 +6,7 @@ Counts the number of distinct (unique) values in a column.
 
 ```
 DISTINCTCOUNT(table[column])
+DISTINCTCOUNT(table[column], context_op1, context_op2, ...)
 ```
 
 ### Parameters
@@ -13,6 +14,7 @@ DISTINCTCOUNT(table[column])
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to count. Can be any data type. |
+| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
