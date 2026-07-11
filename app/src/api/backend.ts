@@ -3753,6 +3753,11 @@ export interface ModelGlobalVariableInfo {
   expression: string;
   /** True when the expression is a table-producing QUERY(...) global. */
   isQuery: boolean;
+  /**
+   * True (default) = evaluated per query in the live filter context;
+   * false = materialized at refresh into a real model table.
+   */
+  dynamic: boolean;
 }
 
 export interface ModelTableVariableInfo {
@@ -4075,7 +4080,7 @@ export async function biModelDeleteCalcGroup(
   return invoke<ModelOverview>("bi_model_delete_calc_group", { connectionId, name });
 }
 
-// --- Global variables ---
+// --- Calculated tables (engine term: global variables) ---
 
 export async function biModelUpsertGlobalVariable(params: {
   connectionId: string;
@@ -4083,6 +4088,8 @@ export async function biModelUpsertGlobalVariable(params: {
   name: string;
   table: string;
   expression: string;
+  /** Default true (dynamic). False = materialized at refresh. */
+  dynamic?: boolean;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_global_variable", {
     connectionId: params.connectionId,
@@ -4090,6 +4097,7 @@ export async function biModelUpsertGlobalVariable(params: {
     name: params.name,
     table: params.table,
     expression: params.expression,
+    dynamic: params.dynamic ?? true,
   });
 }
 

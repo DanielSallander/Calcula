@@ -1161,6 +1161,12 @@ pub fn check_model_format_version(model_json: &serde_json::Value) -> Result<(), 
 /// miscomputes, so a model that uses `GVAR` must be stamped >= 13.
 const GVAR_MIN_FORMAT_VERSION: u64 = 13;
 
+/// Minimum schema `format_version` required by a MATERIALIZED calculated
+/// table. A pre-v15 engine ignores the `dynamic` flag and treats the
+/// calculated table as dynamic — silently dropping the derived table and any
+/// relationships bound to it — so such a model must be stamped >= 15.
+const MATERIALIZED_CT_MIN_FORMAT_VERSION: u64 = 15;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1178,18 +1184,25 @@ pub fn stamp_feature_format_version(
         .measures()
         .iter()
         .any(|m| m.expression().has_query_scoped_bindings());
-    if !uses_gvar {
+    let uses_materialized_ct = model.global_variables().iter().any(|gv| !gv.is_dynamic());
+
+    let required = if uses_materialized_ct {
+        MATERIALIZED_CT_MIN_FORMAT_VERSION
+    } else if uses_gvar {
+        GVAR_MIN_FORMAT_VERSION
+    } else {
         return;
-    }
+    };
+
     if let Some(obj) = model_json.as_object_mut() {
         let current = obj
             .get("format_version")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        if current < GVAR_MIN_FORMAT_VERSION {
+        if current < required {
             obj.insert(
                 "format_version".to_string(),
-                serde_json::Value::from(GVAR_MIN_FORMAT_VERSION),
+                serde_json::Value::from(required),
             );
         }
     }
@@ -1263,6 +1276,37 @@ mod format_gate_tests {
         stamp_feature_format_version(&model, &mut json);
         // No GVAR → the stamp is left exactly as-is (never lowered or raised).
         assert_eq!(json.get("format_version").and_then(|v| v.as_u64()), Some(5));
+    }
+
+    #[test]
+    fn stamps_materialized_calculated_table_model_to_v15() {
+        let gv = bi_engine::parse_global(
+            "sales_by_amount",
+            "Sales",
+            "QUERY(SUM(Sales[amount]) AS Amt BY Sales[amount])",
+        )
+        .unwrap()
+        .with_dynamic(false);
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![bi_engine::Column::new("amount", bi_engine::DataType::Int64)],
+                )
+                .unwrap(),
+            )
+            .add_global_variable(gv)
+            .build()
+            .unwrap();
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(13u64));
+        stamp_feature_format_version(&model, &mut json);
+        assert_eq!(
+            json.get("format_version").and_then(|v| v.as_u64()),
+            Some(MATERIALIZED_CT_MIN_FORMAT_VERSION)
+        );
     }
 }
 

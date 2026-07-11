@@ -52,7 +52,7 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <strong>{g.name}</strong>
-                <Badge tone="neutral">dynamic</Badge>
+                <Badge tone="neutral">{g.dynamic ? "dynamic" : "materialized"}</Badge>
                 <span style={styles.muted}>{" "}— {g.table}</span>
               </div>
               <div
@@ -114,6 +114,7 @@ function GlobalVariableModal({
   const [name, setName] = useState(original?.name ?? "");
   const [table, setTable] = useState(original?.table ?? "");
   const [expression, setExpression] = useState(original?.expression ?? "");
+  const [dynamic, setDynamic] = useState(original?.dynamic ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -130,6 +131,7 @@ function GlobalVariableModal({
           name: name.trim(),
           table,
           expression: expression.trim(),
+          dynamic,
         }),
       );
     } catch (err: unknown) {
@@ -184,6 +186,24 @@ function GlobalVariableModal({
           value={expression}
           onChange={(e) => setExpression(e.target.value)}
         />
+      </Field>
+
+      <Field
+        label="Dynamic"
+        hint={
+          dynamic
+            ? "Evaluated per query in the live filter context (slicers apply). Usable inside measures only."
+            : "Materialized at model refresh into a real table: appears under Tables, can have relationships and be a pivot source. Switching back to dynamic removes any relationships bound to it."
+        }
+      >
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={dynamic}
+            onChange={(e) => setDynamic(e.target.checked)}
+          />
+          Evaluate dynamically per query (uncheck to materialize at refresh)
+        </label>
       </Field>
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>

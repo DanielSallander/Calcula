@@ -1025,6 +1025,9 @@ pub struct ModelGlobalVariableInfo {
     pub expression: String,
     /// True when the expression is a table-producing QUERY(...) global.
     pub is_query: bool,
+    /// True (default) = evaluated per query in the live filter context;
+    /// false = materialized at refresh into a real model table.
+    pub dynamic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1767,6 +1770,7 @@ fn build_overview(
             table: gv.table().to_string(),
             expression: bi_engine::expression_to_formula(gv.expression(), gv.table()),
             is_query: gv.is_query(),
+            dynamic: gv.is_dynamic(),
         })
         .collect();
 
@@ -2490,6 +2494,7 @@ pub async fn bi_model_upsert_global_variable(
     name: String,
     table: String,
     expression: String,
+    dynamic: Option<bool>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -2505,7 +2510,8 @@ pub async fn bi_model_upsert_global_variable(
             return Err(format!("Calculated table '{}' has an empty expression", trimmed));
         }
         let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
-            .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
+            .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?
+            .with_dynamic(dynamic.unwrap_or(true));
 
         let mut globals = base.global_variables().to_vec();
         match original_name.as_deref() {
@@ -2517,7 +2523,11 @@ pub async fn bi_model_upsert_global_variable(
             }
             None => globals.push(gv),
         }
-        let edited = base.with_global_variables(globals);
+        // Reconciles the derived table of a materialized calculated table
+        // (synthesize/refresh/remove) alongside the list replacement.
+        let edited = base
+            .with_global_variables(globals)
+            .map_err(|e| format!("{}", e))?;
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
     })
@@ -2540,7 +2550,11 @@ pub async fn bi_model_delete_global_variable(
         if globals.len() == before {
             return Err(format!("Calculated table '{}' not found", name));
         }
-        let edited = base.with_global_variables(globals);
+        // Drops a materialized calculated table's derived table too; validate
+        // then fails closed if relationships still reference it.
+        let edited = base
+            .with_global_variables(globals)
+            .map_err(|e| format!("{}", e))?;
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
     })
