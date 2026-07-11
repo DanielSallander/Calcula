@@ -249,8 +249,17 @@ use crate::model::table_variable::TableVariable;
 ///   fails to deserialize measures containing it, so the
 ///   [`ModelFormatTooNew`] gate refuses v16 files on a pre-v16 engine.
 ///
+/// - `17` — the expression tree gained the
+///   [`LookupValue`](crate::compute::expression::Expression::LookupValue)
+///   variant (DAX-compatible `LOOKUPVALUE(...)`, valid in plain calculated
+///   columns and resolved as a deduplicated LEFT JOIN at materialization),
+///   and plain calculated columns may carry cross-table (RELATED-style)
+///   qualified references. A pre-v17 engine fails to deserialize
+///   `LookupValue`, so the [`ModelFormatTooNew`] gate refuses v17 files on a
+///   pre-v17 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 16;
+pub const MODEL_FORMAT_VERSION: u32 = 17;
 
 /// A data model consisting of tables and relationships between them.
 ///

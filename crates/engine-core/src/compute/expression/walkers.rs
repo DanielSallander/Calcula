@@ -16,6 +16,11 @@ impl Expression {
         match self {
             Expression::ColumnRef(name) => refs.push(name),
             Expression::QualifiedColumnRef { column, .. } => refs.push(column),
+            Expression::LookupValue { search, .. } => {
+                for (_, e) in search {
+                    e.collect_column_refs(refs);
+                }
+            }
             Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
@@ -249,6 +254,11 @@ impl Expression {
 
     fn collect_context_filter_tables<'a>(&'a self, tables: &mut Vec<&'a str>) {
         match self {
+            Expression::LookupValue { search, .. } => {
+                for (_, e) in search {
+                    e.collect_context_filter_tables(tables);
+                }
+            }
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
@@ -513,6 +523,11 @@ impl Expression {
     fn collect_measure_refs<'a>(&'a self, names: &mut Vec<&'a str>) {
         match self {
             Expression::MeasureRef(name) => names.push(name),
+            Expression::LookupValue { search, .. } => {
+                for (_, e) in search {
+                    e.collect_measure_refs(names);
+                }
+            }
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
@@ -685,6 +700,34 @@ impl Expression {
     /// the qualifier as written: usually a model table name, but it may be a
     /// `VAR`/`QUERY` binding name in a table-variable expression — resolve it
     /// against the model's tables to keep only physical columns.
+    /// Every `LOOKUPVALUE` node in this tree, as `(target table, result
+    /// column, search columns)`. Search EXPRESSIONS are not included — walk
+    /// them via the other walkers (they are ordinary row-level
+    /// sub-expressions and are reported by `column_references` etc.).
+    pub fn lookup_values(&self) -> Vec<(&str, &str, Vec<&str>)> {
+        let mut out = Vec::new();
+        self.collect_lookup_values(&mut out);
+        out
+    }
+
+    fn collect_lookup_values<'a>(&'a self, out: &mut Vec<(&'a str, &'a str, Vec<&'a str>)>) {
+        if let Expression::LookupValue {
+            table,
+            result_column,
+            search,
+        } = self
+        {
+            out.push((
+                table.as_str(),
+                result_column.as_str(),
+                search.iter().map(|(c, _)| c.as_str()).collect(),
+            ));
+        }
+        for child in child_expressions(self) {
+            child.collect_lookup_values(out);
+        }
+    }
+
     pub fn qualified_column_references(&self) -> Vec<(&str, &str)> {
         let mut refs = Vec::new();
         self.collect_qualified_column_refs(&mut refs);
@@ -703,6 +746,15 @@ impl Expression {
                 table_or_var,
                 column,
             } => refs.push((table_or_var, column)),
+            // LookupValue's own (table, result/search columns) are NOT
+            // reported as qualified refs — their cross-table rules differ
+            // (no relationship required) and are validated explicitly at
+            // model build. Only the search expressions are walked.
+            Expression::LookupValue { search, .. } => {
+                for (_, e) in search {
+                    e.collect_qualified_column_refs(refs);
+                }
+            }
             Expression::ColumnRef(_)
             | Expression::MeasureRef(_)
             | Expression::TableRef(_)
@@ -889,6 +941,11 @@ impl Expression {
                     arg.collect_call_names(names);
                 }
             }
+            Expression::LookupValue { search, .. } => {
+                for (_, e) in search {
+                    e.collect_call_names(names);
+                }
+            }
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
@@ -1067,6 +1124,11 @@ impl Expression {
 pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
     let mut out: Vec<&Expression> = Vec::new();
     match expr {
+        Expression::LookupValue { search, .. } => {
+            for (_, e) in search {
+                out.push(e);
+            }
+        }
         Expression::ColumnRef(_)
         | Expression::QualifiedColumnRef { .. }
         | Expression::TableRef(_)

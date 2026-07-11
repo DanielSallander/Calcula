@@ -63,4 +63,18 @@ impl CalculatedColumn {
     pub fn data_type(&self) -> &DataType {
         &self.data_type
     }
+
+    /// Returns `true` when the row expression reads OTHER tables —
+    /// RELATED-style qualified references to a related table or
+    /// `LOOKUPVALUE` targets. Such columns need JOINs to materialize and are
+    /// handled by the query pipeline's joined second pass; the single-batch
+    /// materializer skips them.
+    pub fn is_cross_table(&self) -> bool {
+        !self.expression.lookup_values().is_empty()
+            || self
+                .expression
+                .qualified_column_references()
+                .iter()
+                .any(|(t, _)| !t.eq_ignore_ascii_case(&self.table))
+    }
 }

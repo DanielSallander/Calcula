@@ -127,6 +127,22 @@ impl Expression {
                     ))
                 }
             }
+            // LOOKUPVALUE's table is rendered as a raw join qualifier during
+            // calculated-column materialization; search expressions are
+            // ordinary row-level expressions and must not nest lookups.
+            Expression::LookupValue { table, search, .. } => {
+                validate_identifier(table, "table reference")?;
+                for (_, e) in search {
+                    if e.has_lookup_value() {
+                        return Err(EngineError::InvalidExpression(
+                            "LOOKUPVALUE search values cannot contain another LOOKUPVALUE"
+                                .to_string(),
+                        ));
+                    }
+                    e.validate_inner(allow_selected_measure)?;
+                }
+                Ok(())
+            }
             // Table references are rendered as raw (unquoted) qualifiers.
             Expression::TableRef(name) => validate_identifier(name, "table reference"),
             Expression::QualifiedColumnRef { table_or_var, .. } => {

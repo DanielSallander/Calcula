@@ -214,6 +214,15 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             // Defensive fallback: the facade folds ISFILTERED to a literal
             // before planning; an unresolved marker means "no direct filter".
             Expression::IsFiltered { .. } => "FALSE".to_string(),
+            // LOOKUPVALUE is rewritten to a join during calculated-column
+            // materialization; one reaching a renderer is a misuse.
+            Expression::LookupValue { .. } => {
+                return Err(EngineError::InvalidExpression(
+                    "LOOKUPVALUE is only supported in calculated columns; it is resolved \
+                     during calculated-column materialization and cannot be rendered here"
+                        .to_string(),
+                ));
+            }
             Expression::Percentile {
                 operand,
                 percentile,

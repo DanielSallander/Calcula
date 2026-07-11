@@ -428,6 +428,15 @@ impl DataModelBuilder {
         for measure in &self.measures {
             measure.expression().validate()?;
             measure.expression().validate_query_scoped_top_level()?;
+            // LOOKUPVALUE is a row-context tool resolved during
+            // calculated-column materialization; a measure has no host row.
+            if measure.expression().has_lookup_value() {
+                return Err(EngineError::InvalidExpression(format!(
+                    "measure '{}' uses LOOKUPVALUE, which is only supported in calculated \
+                     columns (v1)",
+                    measure.name()
+                )));
+            }
             for gvar in measure.expression().root_query_scoped_names() {
                 if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
                     return Err(EngineError::InvalidExpression(format!(
@@ -854,8 +863,84 @@ impl DataModelBuilder {
                 });
             }
 
-            // All referenced columns must exist in the table.
+            // Cross-table row references (RELATED-style): the referenced
+            // table/column must exist, and the host must be the many (or
+            // one-to-one) side of an active, equality-only relationship so
+            // the LEFT JOIN at materialization cannot multiply host rows.
+            // Mirrors the context-column contract (step 6a). Referenced
+            // columns must be PHYSICAL (not calculated) — cross-table
+            // calc-on-calc ordering is out of the v1 contract.
+            let mut cross_table_cols: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for (ref_table, col) in cc.expression().qualified_column_references() {
+                if ref_table.eq_ignore_ascii_case(cc.table()) {
+                    continue; // host-table reference, checked below
+                }
+                let other = self
+                    .tables
+                    .iter()
+                    .find(|t| t.name().eq_ignore_ascii_case(ref_table))
+                    .ok_or_else(|| EngineError::InvalidCalculatedColumn {
+                        name: cc.name().to_string(),
+                        reason: format!("references unknown table '{ref_table}'"),
+                    })?;
+                if other.column(col).is_err() {
+                    return Err(EngineError::ExpressionColumnNotFound {
+                        table: ref_table.to_string(),
+                        column: col.to_string(),
+                    });
+                }
+                let safe = self.relationships.iter().any(|r| {
+                    let pair = (r.from_table().eq_ignore_ascii_case(cc.table())
+                        && r.to_table().eq_ignore_ascii_case(ref_table))
+                        || (r.from_table().eq_ignore_ascii_case(ref_table)
+                            && r.to_table().eq_ignore_ascii_case(cc.table()));
+                    pair && r.lookup_safe_from(cc.table())
+                });
+                if !safe {
+                    return Err(EngineError::InvalidCalculatedColumn {
+                        name: cc.name().to_string(),
+                        reason: format!(
+                            "references column '{ref_table}[{col}]' across a relationship that \
+                             is not a fan-out-safe single hop from its host table '{}'. A \
+                             calculated column may reference a related table only over an \
+                             active, equality-only relationship on which the host is the many \
+                             (or one-to-one) side (e.g. RELATED(dim[column]) from the fact)",
+                            cc.table()
+                        ),
+                    });
+                }
+                cross_table_cols.insert(col);
+            }
+
+            // LOOKUPVALUE targets: table and columns must exist physically.
+            for (lv_table, lv_result, lv_search) in cc.expression().lookup_values() {
+                let other = self
+                    .tables
+                    .iter()
+                    .find(|t| t.name().eq_ignore_ascii_case(lv_table))
+                    .ok_or_else(|| EngineError::InvalidCalculatedColumn {
+                        name: cc.name().to_string(),
+                        reason: format!("LOOKUPVALUE references unknown table '{lv_table}'"),
+                    })?;
+                for col in std::iter::once(lv_result).chain(lv_search.iter().copied()) {
+                    if other.column(col).is_err() {
+                        return Err(EngineError::ExpressionColumnNotFound {
+                            table: lv_table.to_string(),
+                            column: col.to_string(),
+                        });
+                    }
+                    cross_table_cols.insert(col);
+                }
+            }
+
+            // All bare referenced columns must exist in the host table.
+            // `column_references()` also yields the column part of qualified
+            // and LOOKUPVALUE references — tolerated via `cross_table_cols`.
             for col_ref in cc.expression().column_references() {
+                if cross_table_cols.contains(col_ref) {
+                    continue;
+                }
                 if table.column(col_ref).is_err() {
                     return Err(EngineError::ExpressionColumnNotFound {
                         table: cc.table().to_string(),

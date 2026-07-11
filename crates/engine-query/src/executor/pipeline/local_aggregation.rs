@@ -801,9 +801,12 @@ impl QueryExecutor {
             // Register with lowercase name (DataFusion normalizes to lowercase).
             let df_name = table_name.to_lowercase();
 
+            // Cross-table (RELATED / LOOKUPVALUE) columns need every table
+            // registered first — the joined second pass below handles them.
             let calc_cols: Vec<engine_core::model::CalculatedColumn> = model
                 .calculated_columns_for_table(table_name)
                 .into_iter()
+                .filter(|cc| !cc.is_cross_table())
                 .cloned()
                 .collect();
 
@@ -846,6 +849,113 @@ impl QueryExecutor {
             }
 
             register_partitioned_table(&ctx, &df_name, vec![optimized])?;
+        }
+
+        // Second pass: materialize CROSS-TABLE calculated columns (RELATED
+        // qualified refs / LOOKUPVALUE) now that every table is registered.
+        // Each host table with such columns is re-computed as
+        //   SELECT host.*, <expr> AS "name", ... FROM host
+        //   LEFT JOIN dim ON <relationship keys>            -- RELATED
+        //   LEFT JOIN (SELECT key, MIN(result) ... GROUP BY key) __lkN
+        //        ON __lkN."key" = <search expr>             -- LOOKUPVALUE
+        // and re-registered under its name. LEFT JOINs keep every host row
+        // (no match -> NULL); the lookup subquery deduplicates per key so a
+        // multi-match can never multiply host rows (ties resolve to MIN).
+        for (table_name, batches, _, _) in &all_fetch_results {
+            if batches.is_empty() {
+                continue;
+            }
+            let cross_cols: Vec<engine_core::model::CalculatedColumn> = model
+                .calculated_columns_for_table(table_name)
+                .into_iter()
+                .filter(|cc| cc.is_cross_table())
+                .cloned()
+                .collect();
+            if cross_cols.is_empty() {
+                continue;
+            }
+            let host_lower = table_name.to_lowercase();
+            let mut select_parts: Vec<String> = vec![format!("{host_lower}.*")];
+            let mut join_sql = String::new();
+            let mut joined: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut lookup_specs: Vec<engine_core::compute::expression::LookupJoinSpec> =
+                Vec::new();
+
+            for cc in &cross_cols {
+                // Relationship-derived LEFT JOINs for RELATED-style refs.
+                for (ref_table, _) in cc.expression().qualified_column_references() {
+                    if ref_table.eq_ignore_ascii_case(table_name) {
+                        continue;
+                    }
+                    let ref_lower = ref_table.to_lowercase();
+                    if !joined.insert(ref_lower.clone()) {
+                        continue;
+                    }
+                    let rel = model
+                        .find_relationship(table_name, ref_table)
+                        .map_err(crate::error::QueryError::Engine)?;
+                    let host_is_from = rel.from_table().eq_ignore_ascii_case(table_name);
+                    let on_clause = rel.build_on_clause(&host_lower, &ref_lower, host_is_from);
+                    join_sql.push_str(&format!(" LEFT JOIN {ref_lower} ON {on_clause}"));
+                }
+                // Extract LOOKUPVALUE nodes into alias refs + join specs, then
+                // render the rewritten row expression host-qualified.
+                let rewritten = engine_core::compute::expression::extract_lookup_joins(
+                    cc.expression(),
+                    &mut lookup_specs,
+                );
+                let expr_sql = rewritten
+                    .to_qualified_sql(&host_lower)
+                    .map_err(crate::error::QueryError::Engine)?;
+                select_parts.push(format!(
+                    "{expr_sql} AS {}",
+                    quote_ident_double(cc.name())
+                ));
+            }
+
+            for spec in &lookup_specs {
+                let target_lower = spec.table.to_lowercase();
+                let key_cols: Vec<String> = spec
+                    .search
+                    .iter()
+                    .map(|(c, _)| {
+                        quote_ident_double(c)
+                    })
+                    .collect();
+                let subquery = format!(
+                    "SELECT {keys}, MIN({result}) AS {result} FROM {target_lower} GROUP BY {keys}",
+                    keys = key_cols.join(", "),
+                    result = quote_ident_double(&spec.result_column),
+                );
+                let on_parts: Vec<String> = spec
+                    .search
+                    .iter()
+                    .map(|(col, e)| {
+                        let value_sql = e
+                            .to_qualified_sql(&host_lower)
+                            .map_err(crate::error::QueryError::Engine)?;
+                        Ok(format!(
+                            "{alias}.{col} = {value_sql}",
+                            alias = spec.alias,
+                            col = quote_ident_double(col),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, crate::error::QueryError>>()?;
+                join_sql.push_str(&format!(
+                    " LEFT JOIN ({subquery}) AS {alias} ON {on}",
+                    alias = spec.alias,
+                    on = on_parts.join(" AND "),
+                ));
+            }
+
+            let sql = format!(
+                "SELECT {} FROM {host_lower}{join_sql}",
+                select_parts.join(", ")
+            );
+            let df = ctx.sql(&sql).await?;
+            let joined_batches = df.collect().await?;
+            ctx.deregister_table(host_lower.as_str())?;
+            register_partitioned_table(&ctx, &host_lower, joined_batches)?;
         }
 
         // Build fetch plan nodes if collecting plan data.

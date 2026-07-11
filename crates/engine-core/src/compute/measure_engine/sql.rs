@@ -169,11 +169,16 @@ impl<'a> MeasureEngine<'a> {
         let table_data = self.store.table_data(table_name)?;
         let batch = table_data.to_record_batch()?;
 
-        // Materialize any calculated columns for this table.
+        // Materialize any calculated columns for this table. Cross-table
+        // (RELATED / LOOKUPVALUE) columns need JOINs and are materialized by
+        // the query pipeline's joined pass — the single-batch path skips
+        // them (a measure reaching one through THIS path fails closed with
+        // column-not-found rather than a wrong number).
         let calc_cols: Vec<_> = self
             .model
             .calculated_columns_for_table(table_name)
             .into_iter()
+            .filter(|cc| !cc.is_cross_table())
             .cloned()
             .collect();
 

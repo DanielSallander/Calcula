@@ -283,6 +283,7 @@ impl Parser {
             "ISINSCOPE" => self.parse_isinscope_call(),
             "ISFILTERED" => self.parse_isfiltered_call(),
             "RELATED" => self.parse_related_call(),
+            "LOOKUPVALUE" => self.parse_lookupvalue_call(),
             // Context operations
             "CLEAREXCEPT" | "CLEAR_EXCEPT" => self.parse_clearexcept_call(),
             // Iterator

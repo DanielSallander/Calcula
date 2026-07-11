@@ -173,6 +173,11 @@ fn collect_query_global_refs(
             collect_query_global_refs(alternate, model, found);
         }
         Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
+        Expression::LookupValue { search, .. } => {
+            for (_, e) in search {
+                collect_query_global_refs(e, model, found);
+            }
+        }
         Expression::ClearExcept { expr, .. }
         | Expression::Iterate {
             expression: expr, ..

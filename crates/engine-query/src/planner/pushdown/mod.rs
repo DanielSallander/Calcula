@@ -1312,6 +1312,42 @@ impl PushdownPlanner {
             }
         }
 
+        // Tables read by CROSS-TABLE calculated columns (RELATED-style
+        // qualified refs / LOOKUPVALUE targets) of the fetched tables: the
+        // registration second pass LEFT JOINs them to materialize those
+        // columns, so they must be fetched even when the request itself
+        // never names them.
+        let mut calc_col_extra_tables: Vec<String> = Vec::new();
+        {
+            let mut seen: std::collections::HashSet<String> = all_tables
+                .iter()
+                .map(|t| t.to_lowercase())
+                .collect();
+            for table_name in &all_tables {
+                let Some(model_table) = model
+                    .tables()
+                    .iter()
+                    .find(|t| t.name().eq_ignore_ascii_case(table_name))
+                else {
+                    continue;
+                };
+                for cc in model.calculated_columns_for_table(model_table.name()) {
+                    for (ref_table, _) in cc.expression().qualified_column_references() {
+                        if !ref_table.eq_ignore_ascii_case(model_table.name())
+                            && seen.insert(ref_table.to_lowercase())
+                        {
+                            calc_col_extra_tables.push(ref_table.to_string());
+                        }
+                    }
+                    for (lv_table, _, _) in cc.expression().lookup_values() {
+                        if seen.insert(lv_table.to_lowercase()) {
+                            calc_col_extra_tables.push(lv_table.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         // Compute the exact source columns each fetch needs. Tables whose
         // requirements cannot be statically determined fall back to a full
         // fetch (empty column list = SELECT *). The context-column scalar
@@ -1442,6 +1478,21 @@ impl PushdownPlanner {
                     ..Default::default()
                 };
                 fetches.push((spec.table.clone(), fetch));
+            }
+        }
+
+        // Ensure cross-table calculated-column source tables are fetched
+        // (their projections were collected by `add_calculated_inputs`).
+        for extra_table in &calc_col_extra_tables {
+            if seen_tables.insert(extra_table.as_str()) {
+                let (fetch_schema, fetch_table) = fetch_target_for(registry, model, extra_table)?;
+                let fetch = FetchRequest {
+                    schema: fetch_schema,
+                    table: fetch_table,
+                    columns: projections.columns_for(extra_table),
+                    ..Default::default()
+                };
+                fetches.push((extra_table.clone(), fetch));
             }
         }
 

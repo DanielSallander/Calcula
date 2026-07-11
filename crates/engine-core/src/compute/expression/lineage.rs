@@ -113,6 +113,17 @@ fn walk(
                 deps.columns.push((table_or_var.clone(), column.clone()));
             }
         }
+        Expression::LookupValue {
+            table,
+            result_column,
+            search,
+        } => {
+            deps.columns.push((table.clone(), result_column.clone()));
+            for (col, e) in search {
+                deps.columns.push((table.clone(), col.clone()));
+                walk(e, measure_names, global_names, block_vars, deps);
+            }
+        }
         Expression::Using {
             expr: inner,
             context_name,

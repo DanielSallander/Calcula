@@ -841,7 +841,11 @@ impl<'a> ContextResolver<'a> {
             }
 
             // ISINSCOPE: leaf node, no context modification.
-            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => Ok(expr.clone()),
+            Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
+            // Row-level by validation (no context ops inside): nothing to
+            // resolve here; materialization handles the lookup join.
+            | Expression::LookupValue { .. } => Ok(expr.clone()),
 
             // CLEAREXCEPT: context operation — clears table but preserves specified columns.
             Expression::ClearExcept {

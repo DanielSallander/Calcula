@@ -6,6 +6,9 @@ impl Expression {
     /// Returns `true` if this expression contains any `Aggregate` nodes.
     pub fn has_aggregate(&self) -> bool {
         match self {
+            Expression::LookupValue { search, .. } => {
+                search.iter().any(|(_, e)| e.has_aggregate())
+            }
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
@@ -121,6 +124,9 @@ impl Expression {
     /// (`Keep`, `Clear`, `Reset`, `Traverse`, `Using`, or `Block`).
     pub fn has_context_ops(&self) -> bool {
         match self {
+            Expression::LookupValue { search, .. } => {
+                search.iter().any(|(_, e)| e.has_context_ops())
+            }
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
@@ -313,6 +319,17 @@ impl Expression {
             || super::child_expressions(self)
                 .iter()
                 .any(|c| c.contains_is_filtered())
+    }
+
+    /// Returns `true` if this tree contains a `LOOKUPVALUE(...)` node
+    /// ([`Expression::LookupValue`]). Drives validation (only plain
+    /// calculated columns may carry lookups, and they must not nest) and the
+    /// host's format-version stamping (v17).
+    pub fn has_lookup_value(&self) -> bool {
+        matches!(self, Expression::LookupValue { .. })
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.has_lookup_value())
     }
 
     /// Returns `true` if this tree contains an [`Expression::Query`]

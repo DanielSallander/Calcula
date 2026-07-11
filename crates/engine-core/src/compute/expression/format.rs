@@ -635,6 +635,21 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("ISFILTERED({tbl}[{column}])")
         }
 
+        // --- Row lookup ---
+        Expression::LookupValue {
+            table: tbl,
+            result_column,
+            search,
+        } => {
+            let pairs: Vec<String> = search
+                .iter()
+                .map(|(col, e)| {
+                    format!("{tbl}[{col}], {}", format_expr(e, table, Precedence::Lowest))
+                })
+                .collect();
+            format!("LOOKUPVALUE({tbl}[{result_column}], {})", pairs.join(", "))
+        }
+
         // --- ClearExcept ---
         Expression::ClearExcept {
             expr: inner,

@@ -358,6 +358,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "ISINSCOPE",
         "ISFILTERED",
         "RELATED",
+        "LOOKUPVALUE",
         "PERCENTILE",
         // Scalar math
         "ABS",

@@ -60,6 +60,18 @@ impl Expression {
                 table: table.clone(),
                 column: column.clone(),
             },
+            Expression::LookupValue {
+                table,
+                result_column,
+                search,
+            } => Expression::LookupValue {
+                table: table.clone(),
+                result_column: result_column.clone(),
+                search: search
+                    .iter()
+                    .map(|(c, e)| (c.clone(), e.substitute_vars(env)))
+                    .collect(),
+            },
             Expression::ClearExcept {
                 expr,
                 table,
@@ -953,6 +965,18 @@ impl Expression {
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => self.clone(),
+            Expression::LookupValue {
+                table,
+                result_column,
+                search,
+            } => Expression::LookupValue {
+                table: table.clone(),
+                result_column: result_column.clone(),
+                search: search
+                    .iter()
+                    .map(|(c, e)| (c.clone(), e.substitute_selected_measure(replacement)))
+                    .collect(),
+            },
         }
     }
 
@@ -1009,6 +1033,155 @@ impl Expression {
 
 /// Resolve `IsInScope` nodes by replacing them with `LiteralBool` based on
 /// whether the referenced column is in the provided group-by list.
+/// One `LOOKUPVALUE` extracted from a calculated-column expression: the join
+/// the materializer must emit, with the node itself replaced by a qualified
+/// reference to `alias[result_column]`.
+#[derive(Debug, Clone)]
+pub struct LookupJoinSpec {
+    /// The synthetic join alias (`__lk0`, `__lk1`, ...).
+    pub alias: String,
+    /// The lookup target table (model name, original casing).
+    pub table: String,
+    /// The column returned from the matched row.
+    pub result_column: String,
+    /// `(search column on the target, match expression over the host row)`.
+    pub search: Vec<(String, Expression)>,
+}
+
+/// Replace every `LOOKUPVALUE` node with a `QualifiedColumnRef` to a
+/// synthetic join alias, returning the rewritten expression plus one
+/// [`LookupJoinSpec`] per extracted node. The calculated-column materializer
+/// LEFT JOINs each spec (against a per-key-deduplicated subquery) and renders
+/// the rewritten expression, so the lookup value arrives as an ordinary
+/// column. Calculated-column expressions are row-level (validation bans
+/// aggregates/blocks/context ops), so only the row-level node set recurses;
+/// a `LOOKUPVALUE` in an unreachable position is impossible post-validation.
+pub fn extract_lookup_joins(expr: &Expression, specs: &mut Vec<LookupJoinSpec>) -> Expression {
+    match expr {
+        Expression::LookupValue {
+            table,
+            result_column,
+            search,
+        } => {
+            let alias = format!("__lk{}", specs.len());
+            let spec = LookupJoinSpec {
+                alias: alias.clone(),
+                table: table.clone(),
+                result_column: result_column.clone(),
+                // Search expressions cannot nest LOOKUPVALUE (validation).
+                search: search.clone(),
+            };
+            specs.push(spec);
+            Expression::QualifiedColumnRef {
+                table_or_var: alias,
+                column: result_column.clone(),
+            }
+        }
+        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+            left: Box::new(extract_lookup_joins(left, specs)),
+            op: *op,
+            right: Box::new(extract_lookup_joins(right, specs)),
+        },
+        Expression::Comparison { left, op, right } => Expression::Comparison {
+            left: Box::new(extract_lookup_joins(left, specs)),
+            op: *op,
+            right: Box::new(extract_lookup_joins(right, specs)),
+        },
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expression::If {
+            condition: Box::new(extract_lookup_joins(condition, specs)),
+            then_expr: Box::new(extract_lookup_joins(then_expr, specs)),
+            else_expr: Box::new(extract_lookup_joins(else_expr, specs)),
+        },
+        Expression::Switch {
+            expr: e,
+            cases,
+            default,
+        } => Expression::Switch {
+            expr: Box::new(extract_lookup_joins(e, specs)),
+            cases: cases
+                .iter()
+                .map(|(v, r)| {
+                    (
+                        extract_lookup_joins(v, specs),
+                        extract_lookup_joins(r, specs),
+                    )
+                })
+                .collect(),
+            default: default
+                .as_ref()
+                .map(|d| Box::new(extract_lookup_joins(d, specs))),
+        },
+        Expression::And(l, r) => Expression::And(
+            Box::new(extract_lookup_joins(l, specs)),
+            Box::new(extract_lookup_joins(r, specs)),
+        ),
+        Expression::Or(l, r) => Expression::Or(
+            Box::new(extract_lookup_joins(l, specs)),
+            Box::new(extract_lookup_joins(r, specs)),
+        ),
+        Expression::Xor(l, r) => Expression::Xor(
+            Box::new(extract_lookup_joins(l, specs)),
+            Box::new(extract_lookup_joins(r, specs)),
+        ),
+        Expression::Not(inner) => Expression::Not(Box::new(extract_lookup_joins(inner, specs))),
+        Expression::IsBlank(inner) => {
+            Expression::IsBlank(Box::new(extract_lookup_joins(inner, specs)))
+        }
+        Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
+            function: *function,
+            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+        },
+        Expression::TextFunc { function, args } => Expression::TextFunc {
+            function: *function,
+            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+        },
+        Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+            function: *function,
+            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+        },
+        Expression::Call { name, args } => Expression::Call {
+            name: name.clone(),
+            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+        },
+        Expression::Coalesce(args) => {
+            Expression::Coalesce(args.iter().map(|a| extract_lookup_joins(a, specs)).collect())
+        }
+        Expression::IfError { expr: e, alternate } => Expression::IfError {
+            expr: Box::new(extract_lookup_joins(e, specs)),
+            alternate: Box::new(extract_lookup_joins(alternate, specs)),
+        },
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Expression::SafeDivide {
+            numerator: Box::new(extract_lookup_joins(numerator, specs)),
+            denominator: Box::new(extract_lookup_joins(denominator, specs)),
+            alternate: alternate
+                .as_ref()
+                .map(|a| Box::new(extract_lookup_joins(a, specs))),
+        },
+        Expression::InList { expr: e, values } => Expression::InList {
+            expr: Box::new(extract_lookup_joins(e, specs)),
+            values: values.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+        },
+        Expression::Greatest(args) => {
+            Expression::Greatest(args.iter().map(|a| extract_lookup_joins(a, specs)).collect())
+        }
+        Expression::Least(args) => Expression::Least(args.iter().map(|a| extract_lookup_joins(a, specs)).collect()),
+        Expression::NullIf { expr: e, value } => Expression::NullIf {
+            expr: Box::new(extract_lookup_joins(e, specs)),
+            value: Box::new(extract_lookup_joins(value, specs)),
+        },
+        // Leaves and anything non-row-level (impossible post-validation).
+        _ => expr.clone(),
+    }
+}
+
 /// Replace every `ISFILTERED(table[column])` marker with the literal answer
 /// for one query: TRUE when the column is DIRECTLY filtered — on the
 /// group-by axis, or named by a query filter / IN slicer / OR slicer

@@ -55,7 +55,9 @@ pub use render::{
     MultiTableQualifier, PostgresDialect, SqlRenderer, TableAliasQualifier,
 };
 pub use text::TextFunction;
-pub use transform::{resolve_is_filtered, resolve_is_in_scope};
+pub use transform::{
+    extract_lookup_joins, resolve_is_filtered, resolve_is_in_scope, LookupJoinSpec,
+};
 pub use validate::is_valid_call_name;
 pub(crate) use validate::validate_call_name;
 pub(crate) use walkers::child_expressions;
@@ -771,6 +773,24 @@ pub enum Expression {
         table: String,
         /// Column name.
         column: String,
+    },
+
+    /// Relationship-less single-row lookup (DAX-compatible `LOOKUPVALUE`):
+    /// `LOOKUPVALUE(table[result_column], table[search_column], expr [, ...])`
+    /// — the value of `table[result_column]` from the row where every
+    /// `(search_column, expr)` pair matches, the expressions evaluated over
+    /// the HOST row. Row-level: valid only in plain calculated columns (v1),
+    /// resolved during calculated-column materialization as a LEFT JOIN
+    /// against a per-key-deduplicated subquery (ties resolve to MIN; no
+    /// match yields NULL). Never reaches SQL generation unresolved.
+    LookupValue {
+        /// The table holding both the result and search columns.
+        table: String,
+        /// Column whose value is returned from the matched row.
+        result_column: String,
+        /// `(search column on table, match expression over the host row)`
+        /// pairs, ANDed together. Non-empty.
+        search: Vec<(String, Expression)>,
     },
 
     /// Clear all filters on a table EXCEPT specified columns.

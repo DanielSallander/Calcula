@@ -354,7 +354,40 @@ impl<'a> ProjectionCollector<'a> {
         };
         let canonical = model_table.name().to_string();
         for cc in model.calculated_columns_for_table(&canonical) {
+            // Cross-table row references (RELATED-style): fetch the referenced
+            // table's column plus both relationship join keys so the
+            // materialization LEFT JOIN can execute. Safety (fan-out-safe
+            // single hop) was enforced at model build. Their column names are
+            // remembered so the bare-input loop below tolerates them
+            // (`column_references` includes qualified refs' column part).
+            let mut cross_table_cols: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for (ref_table, col) in cc.expression().qualified_column_references() {
+                if ref_table.eq_ignore_ascii_case(&canonical) {
+                    continue;
+                }
+                self.add(ref_table, col);
+                cross_table_cols.insert(col.to_string());
+                if let Ok(rel) = model.find_relationship(&canonical, ref_table) {
+                    self.add(rel.from_table(), rel.from_column());
+                    self.add(rel.to_table(), rel.to_column());
+                }
+            }
+            // LOOKUPVALUE targets: the result and search columns on the
+            // target table (search EXPRESSIONS reference host columns, which
+            // `column_references` below already covers).
+            for (lv_table, lv_result, lv_search) in cc.expression().lookup_values() {
+                self.add(lv_table, lv_result);
+                cross_table_cols.insert(lv_result.to_string());
+                for col in lv_search {
+                    self.add(lv_table, col);
+                    cross_table_cols.insert(col.to_string());
+                }
+            }
             for input in cc.expression().column_references() {
+                if cross_table_cols.contains(input) {
+                    continue;
+                }
                 if resolve_physical_column(model_table, input).is_some() {
                     let input = input.to_string();
                     self.add(&canonical, &input);
@@ -684,6 +717,18 @@ impl<'a> ProjectionCollector<'a> {
             // ISFILTERED is folded to a literal at the facade before planning;
             // a survivor renders as FALSE and needs no columns fetched.
             Expression::IsFiltered { .. } => {}
+            // LOOKUPVALUE lives only in calculated columns (measure
+            // validation rejects it); its fetch requirements — the target
+            // table's result/search columns — are added by
+            // `add_calculated_inputs`. Walk the search expressions for host
+            // columns as defense in depth.
+            Expression::LookupValue { table, result_column, search } => {
+                self.add(table, result_column);
+                for (col, e) in search {
+                    self.add(table, col);
+                    self.walk(e);
+                }
+            }
             Expression::Iterate { expression, .. } => self.walk(expression),
             Expression::Percentile {
                 operand,

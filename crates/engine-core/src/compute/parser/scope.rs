@@ -130,6 +130,65 @@ impl Parser {
         Ok(expr::qualified_col(table, column))
     }
 
+    /// Parse `LOOKUPVALUE(table[result_col], table[search_col], expr [, table[search_col2], expr2 ...])`.
+    ///
+    /// All named columns must live on the SAME table (DAX-compatible shape);
+    /// the match expressions are ordinary row-level expressions over the
+    /// host row.
+    pub(super) fn parse_lookupvalue_call(&mut self) -> EngineResult<Expression> {
+        let (table, result_column) = self.parse_bracketed_column("LOOKUPVALUE")?;
+        let mut search = Vec::new();
+        loop {
+            self.expect(&Token::Comma)?;
+            let (search_table, search_column) = self.parse_bracketed_column("LOOKUPVALUE")?;
+            if !search_table.eq_ignore_ascii_case(&table) {
+                return Err(self.parse_err_prev(format!(
+                    "LOOKUPVALUE: search column '{search_table}[{search_column}]' must be on \
+                     the result column's table '{table}'"
+                )));
+            }
+            self.expect(&Token::Comma)?;
+            let value = self.parse_expression()?;
+            search.push((search_column, value));
+            if self.peek() == Some(&Token::RParen) {
+                self.advance()?; // consume ')'
+                break;
+            }
+        }
+        if search.is_empty() {
+            return Err(self.parse_err(
+                "LOOKUPVALUE requires at least one search column / value pair",
+            ));
+        }
+        Ok(Expression::LookupValue {
+            table,
+            result_column,
+            search,
+        })
+    }
+
+    /// Parse a `table[column]` pair (shared by RELATED / ISFILTERED /
+    /// LOOKUPVALUE style arguments).
+    fn parse_bracketed_column(&mut self, func: &str) -> EngineResult<(String, String)> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(self.parse_err_prev(format!("{func}: expected table name, got {tok:?}")));
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("{func}: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        Ok((table, column))
+    }
+
     /// Parse `ISFILTERED(table[column])`.
     pub(super) fn parse_isfiltered_call(&mut self) -> EngineResult<Expression> {
         let table = match self.advance()?.clone() {
