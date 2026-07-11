@@ -90,8 +90,67 @@ fn clear_model() -> DataModel {
             parse_measure("IF(ISFILTERED(Product[name]), SUM(Sales[amount]), 0.0 - 1.0)")
                 .unwrap(),
         ))
+        // DYNAMIC format string: evaluated once per query under the outer
+        // filter context; overrides the static format in result metadata.
+        .add_measure(
+            expression_measure("FmtRevenue", parse_measure("SUM(Sales[amount])").unwrap())
+                .with_format_string("static-fmt")
+                .with_format_string_expression(
+                    "IF(SUM(Sales[amount]) > 150, \"big-fmt\", \"small-fmt\")",
+                ),
+        )
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn dynamic_format_string_follows_outer_context() {
+    let engine = clear_engine();
+
+    // Unfiltered: outer total 190 > 150 -> "big-fmt" (overrides the static).
+    let (_batches, meta) = engine
+        .query_with_meta(QueryRequest {
+            measures: vec!["FmtRevenue".into()],
+            group_by: vec![ColumnRef::new("Product", "name")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let col = meta
+        .iter()
+        .find(|c| c.measure.as_deref() == Some("FmtRevenue"))
+        .unwrap();
+    assert_eq!(col.format_string.as_deref(), Some("big-fmt"));
+
+    // Sliced to Bikes: outer total 130 <= 150 -> "small-fmt".
+    let (_batches, meta) = engine
+        .query_with_meta(QueryRequest {
+            measures: vec!["FmtRevenue".into()],
+            group_by: vec![ColumnRef::new("Product", "name")],
+            filters: vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let col = meta
+        .iter()
+        .find(|c| c.measure.as_deref() == Some("FmtRevenue"))
+        .unwrap();
+    assert_eq!(col.format_string.as_deref(), Some("small-fmt"));
+
+    // A measure WITHOUT a dynamic format keeps its static metadata path.
+    let (_batches, meta) = engine
+        .query_with_meta(QueryRequest {
+            measures: vec!["Revenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let col = meta
+        .iter()
+        .find(|c| c.measure.as_deref() == Some("Revenue"))
+        .unwrap();
+    assert_eq!(col.format_string, None);
 }
 
 fn clear_engine() -> Engine {

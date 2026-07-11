@@ -48,10 +48,11 @@ fn model_format_version_is_current() {
     // Table is_calculated marker, calendar spec, DISTINCT queries); v16 added
     // the IsFiltered expression variant (ISFILTERED direct-filter check);
     // v17 added the LookupValue variant (LOOKUPVALUE in calculated columns)
-    // and cross-table calculated-column references.
+    // and cross-table calculated-column references; v18 added the measure
+    // format_string_expression (dynamic format strings).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 17);
+    assert_eq!(MODEL_FORMAT_VERSION, 18);
 }
 
 #[test]

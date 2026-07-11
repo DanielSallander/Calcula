@@ -2127,11 +2127,13 @@ impl Engine {
         request: QueryRequest,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<ResultColumn>)> {
         let batches = self.query(request.clone()).await?;
-        let meta = match batches.first() {
+        let mut meta = match batches.first() {
             Some(batch) => build_result_metadata(&self.model, &request, batch.schema().as_ref()),
             // No batch at all (not even an empty one) → no schema to describe.
             None => Vec::new(),
         };
+        self.apply_dynamic_format_strings(&request, &mut meta)
+            .await?;
         Ok((batches, meta))
     }
 
@@ -2148,11 +2150,97 @@ impl Engine {
         token: CancellationToken,
     ) -> QueryResult<(Vec<RecordBatch>, Vec<ResultColumn>)> {
         let batches = self.query_with_cancellation(request.clone(), token).await?;
-        let meta = match batches.first() {
+        let mut meta = match batches.first() {
             Some(batch) => build_result_metadata(&self.model, &request, batch.schema().as_ref()),
             None => Vec::new(),
         };
+        self.apply_dynamic_format_strings(&request, &mut meta)
+            .await?;
         Ok((batches, meta))
+    }
+
+    /// Evaluate each metadata measure's DYNAMIC format string (when the
+    /// model defines one) ONCE for this request — under the outer
+    /// filter/slicer context and active role, with no group axis — and
+    /// overwrite the column's static `format_string` with the result. A
+    /// non-string or NULL result leaves the static format in place.
+    async fn apply_dynamic_format_strings(
+        &self,
+        request: &QueryRequest,
+        meta: &mut [ResultColumn],
+    ) -> QueryResult<()> {
+        // Distinct measures that carry a dynamic format.
+        let mut dynamic: Vec<String> = Vec::new();
+        for col in meta.iter() {
+            let Some(name) = &col.measure else { continue };
+            if dynamic.iter().any(|n| n == name) {
+                continue;
+            }
+            if self
+                .model
+                .measure(name)
+                .ok()
+                .and_then(|m| m.format_string_expression())
+                .is_some()
+            {
+                dynamic.push(name.clone());
+            }
+        }
+        if dynamic.is_empty() {
+            return Ok(());
+        }
+
+        let role_filters = self.active_role_filters()?;
+        let mut resolved: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for name in dynamic {
+            let measure = self.model.measure(&name).map_err(QueryError::Engine)?;
+            let fmt_src = measure
+                .format_string_expression()
+                .expect("filtered to measures with a dynamic format")
+                .to_string();
+            let fmt_expr =
+                parse_measure_expression(&fmt_src).map_err(QueryError::Engine)?;
+            // One scalar evaluation under the OUTER context only (mirrors
+            // GVAR): the request's filters/slicers, no group-by axis.
+            let synth_name = format!("__dynfmt__{name}");
+            let overlay = self
+                .model
+                .with_overlay_measures(vec![Measure::new(&synth_name, fmt_expr)])
+                .map_err(QueryError::Engine)?;
+            let inner = QueryRequest {
+                measures: vec![synth_name],
+                filters: request.filters.clone(),
+                in_filters: request.in_filters.clone(),
+                or_filters: request.or_filters.clone(),
+                ..Default::default()
+            };
+            let batches = self
+                .plan_and_execute(&inner, &inner, &overlay, &role_filters, &CancellationToken::new())
+                .await?;
+            if let Some(batch) = batches.first() {
+                if batch.num_rows() > 0 {
+                    if let Some(a) = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<arrow::array::StringArray>()
+                    {
+                        if !arrow::array::Array::is_null(a, 0) {
+                            resolved.insert(name, a.value(0).to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        for col in meta.iter_mut() {
+            if let Some(name) = &col.measure {
+                if let Some(fmt) = resolved.get(name) {
+                    col.format_string = Some(fmt.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Execute a query that can be cancelled from another task.
@@ -2489,6 +2577,9 @@ impl Engine {
             if let Some(f) = measure.format_string() {
                 resolved = resolved.with_format_string(f);
             }
+            if let Some(f) = measure.format_string_expression() {
+                resolved = resolved.with_format_string_expression(f);
+            }
             if let Some(d) = measure.description() {
                 resolved = resolved.with_description(d);
             }
@@ -2633,6 +2724,9 @@ impl Engine {
         }
         if let Some(f) = measure.format_string() {
             resolved = resolved.with_format_string(f);
+        }
+        if let Some(f) = measure.format_string_expression() {
+            resolved = resolved.with_format_string_expression(f);
         }
         if let Some(d) = measure.description() {
             resolved = resolved.with_description(d);

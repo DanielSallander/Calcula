@@ -36,6 +36,14 @@ pub struct Measure {
     /// `"0.0%"`). Opaque to the engine — see [`Measure::format_string`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format_string: Option<String>,
+    /// DYNAMIC format string: an expression (source text) that evaluates to
+    /// the format string ONCE PER QUERY under the outer filter/slicer context
+    /// (no group axis) — e.g. switch between currency formats by slicer.
+    /// Overrides [`format_string`](Self::format_string) in
+    /// `Engine::query_with_meta` result metadata when it evaluates to a
+    /// string; validated (parse + scalar-only) at model build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string_expression: Option<String>,
     /// Human-readable description shown by host applications.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -65,6 +73,8 @@ impl<'de> Deserialize<'de> for Measure {
             #[serde(default)]
             format_string: Option<String>,
             #[serde(default)]
+            format_string_expression: Option<String>,
+            #[serde(default)]
             description: Option<String>,
             #[serde(default)]
             is_hidden: bool,
@@ -77,6 +87,7 @@ impl<'de> Deserialize<'de> for Measure {
             group: f.group,
             source: f.source,
             format_string: f.format_string,
+            format_string_expression: f.format_string_expression,
             description: f.description,
             is_hidden: f.is_hidden,
             cached_table,
@@ -98,6 +109,7 @@ impl Measure {
             group: None,
             source: None,
             format_string: None,
+            format_string_expression: None,
             description: None,
             is_hidden: false,
             cached_table,
@@ -151,6 +163,18 @@ impl Measure {
     pub fn with_format_string(mut self, format: impl Into<String>) -> Self {
         self.format_string = Some(format.into());
         self
+    }
+
+    /// Set the DYNAMIC format string expression (source text) — evaluated
+    /// once per query under the outer filter context; see the field docs.
+    pub fn with_format_string_expression(mut self, expression: impl Into<String>) -> Self {
+        self.format_string_expression = Some(expression.into());
+        self
+    }
+
+    /// Returns the dynamic format string expression, if any.
+    pub fn format_string_expression(&self) -> Option<&str> {
+        self.format_string_expression.as_deref()
     }
 
     /// Set the human-readable description of this measure.

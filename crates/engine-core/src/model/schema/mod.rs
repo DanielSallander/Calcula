@@ -258,8 +258,16 @@ use crate::model::table_variable::TableVariable;
 ///   `LookupValue`, so the [`ModelFormatTooNew`] gate refuses v17 files on a
 ///   pre-v17 engine.
 ///
+/// - `18` — [`Measure`](crate::compute::measure::Measure) gained
+///   `format_string_expression`, a DYNAMIC format string (an expression
+///   evaluated once per query under the outer filter context, surfaced via
+///   `Engine::query_with_meta` result metadata). Authored presentation
+///   content a pre-v18 engine would silently drop on a load→save round-trip
+///   (like the v10 KPI bump), so the [`ModelFormatTooNew`] gate refuses v18
+///   files on a pre-v18 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 17;
+pub const MODEL_FORMAT_VERSION: u32 = 18;
 
 /// A data model consisting of tables and relationships between them.
 ///

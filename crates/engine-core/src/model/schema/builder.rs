@@ -437,6 +437,29 @@ impl DataModelBuilder {
                     measure.name()
                 )));
             }
+            // A dynamic format string must parse to a plain scalar expression
+            // (evaluated once per query under the outer filter context) —
+            // fail at build, not at first render.
+            if let Some(fmt_src) = measure.format_string_expression() {
+                let fmt_expr = crate::compute::parser::parse_measure_expression(fmt_src)
+                    .map_err(|e| {
+                        EngineError::InvalidExpression(format!(
+                            "measure '{}': dynamic format string does not parse: {e}",
+                            measure.name()
+                        ))
+                    })?;
+                if fmt_expr.has_query_scoped_bindings()
+                    || fmt_expr.has_lookup_value()
+                    || matches!(fmt_expr, Expression::Query { .. })
+                {
+                    return Err(EngineError::InvalidExpression(format!(
+                        "measure '{}': dynamic format string must be a plain scalar \
+                         expression (no GVAR, QUERY, or LOOKUPVALUE)",
+                        measure.name()
+                    )));
+                }
+                fmt_expr.validate()?;
+            }
             for gvar in measure.expression().root_query_scoped_names() {
                 if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
                     return Err(EngineError::InvalidExpression(format!(
