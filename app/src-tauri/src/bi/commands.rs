@@ -1173,6 +1173,11 @@ const MATERIALIZED_CT_MIN_FORMAT_VERSION: u64 = 15;
 /// "update Calcula" gate instead of a serde error.
 const ISFILTERED_MIN_FORMAT_VERSION: u64 = 16;
 
+/// Minimum schema `format_version` required by a `LOOKUPVALUE(...)`
+/// calculated column. A pre-v17 engine fails to deserialize the
+/// `LookupValue` expression variant.
+const LOOKUPVALUE_MIN_FORMAT_VERSION: u64 = 17;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1195,8 +1200,14 @@ pub fn stamp_feature_format_version(
         .measures()
         .iter()
         .any(|m| m.expression().contains_is_filtered());
+    let uses_lookupvalue = model
+        .calculated_columns()
+        .iter()
+        .any(|cc| cc.expression().has_lookup_value());
 
-    let required = if uses_isfiltered {
+    let required = if uses_lookupvalue {
+        LOOKUPVALUE_MIN_FORMAT_VERSION
+    } else if uses_isfiltered {
         ISFILTERED_MIN_FORMAT_VERSION
     } else if uses_materialized_ct {
         MATERIALIZED_CT_MIN_FORMAT_VERSION
