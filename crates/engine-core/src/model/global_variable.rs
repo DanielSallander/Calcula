@@ -50,6 +50,112 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+/// A generated date-table definition (`CALENDAR(start, end)`): one row per
+/// day in the inclusive range. Only valid MATERIALIZED — a dynamic calendar
+/// has no filter-context meaning. Dates are ISO `YYYY-MM-DD` strings
+/// (validated by [`CalendarSpec::validate`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarSpec {
+    /// Inclusive start date, ISO `YYYY-MM-DD`.
+    pub start: String,
+    /// Inclusive end date, ISO `YYYY-MM-DD`.
+    pub end: String,
+}
+
+/// Longest allowed calendar span in days (~200 years) — a typo like a year
+/// `20260` must not materialize millions of rows.
+const MAX_CALENDAR_DAYS: i64 = 200 * 366;
+
+impl CalendarSpec {
+    /// Check both dates parse and the range is sane (start <= end, span
+    /// capped). Returns a human-readable reason on failure.
+    pub fn validate(&self) -> Result<(), String> {
+        let start = parse_iso_date_to_days(&self.start)
+            .ok_or_else(|| format!("invalid start date '{}' (expected YYYY-MM-DD)", self.start))?;
+        let end = parse_iso_date_to_days(&self.end)
+            .ok_or_else(|| format!("invalid end date '{}' (expected YYYY-MM-DD)", self.end))?;
+        if start > end {
+            return Err(format!(
+                "start date '{}' is after end date '{}'",
+                self.start, self.end
+            ));
+        }
+        if end - start + 1 > MAX_CALENDAR_DAYS {
+            return Err(format!(
+                "calendar span exceeds {MAX_CALENDAR_DAYS} days (~200 years); check the dates"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Inclusive (start, end) as days since the Unix epoch. `None` if the
+    /// spec does not validate (deserialized data bypasses construction).
+    pub fn day_range(&self) -> Option<(i64, i64)> {
+        Some((
+            parse_iso_date_to_days(&self.start)?,
+            parse_iso_date_to_days(&self.end)?,
+        ))
+    }
+}
+
+/// Parse an ISO `YYYY-MM-DD` date into days since the Unix epoch. Rejects
+/// out-of-range components (including invalid day-of-month, via round-trip).
+pub fn parse_iso_date_to_days(s: &str) -> Option<i64> {
+    let mut parts = s.trim().split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    // Round-trip to reject e.g. Feb 30 (days_from_civil is total, not checked).
+    if civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    Some(days)
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+pub fn days_from_civil(mut year: i64, month: u32, day: u32) -> i64 {
+    if month <= 2 {
+        year -= 1;
+    }
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = (year - era * 400) as i64; // [0, 399]
+    let mp = ((month + 9) % 12) as i64;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Civil (year, month, day) for days since 1970-01-01 (Hinnant's algorithm).
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// The fixed output schema of a `CALENDAR(start, end)` calculated table.
+pub fn calendar_table_columns() -> Vec<Column> {
+    vec![
+        Column::new("date", DataType::Date),
+        Column::new("year", DataType::Int64),
+        Column::new("quarter", DataType::Int64),
+        Column::new("month", DataType::Int64),
+        Column::new("month_name", DataType::String),
+        Column::new("day", DataType::Int64),
+        Column::new("day_of_week", DataType::Int64),
+    ]
+}
+
 /// A model-level named `QUERY(...)` expression reusable across measures
 /// (a "calculated table").
 ///
@@ -70,6 +176,12 @@ pub struct GlobalVariable {
     /// `false` = materialized at refresh into a real model table.
     #[serde(default = "default_dynamic", skip_serializing_if = "is_true")]
     dynamic: bool,
+    /// When set, this calculated table is a GENERATED date table
+    /// (`CALENDAR(start, end)`) instead of a QUERY over the model. The
+    /// `expression` then holds an empty placeholder `Query` and `table` is
+    /// empty. Calendar tables must be materialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    calendar: Option<CalendarSpec>,
 }
 
 impl GlobalVariable {
@@ -80,7 +192,30 @@ impl GlobalVariable {
             table: table.into(),
             expression,
             dynamic: true,
+            calendar: None,
         }
+    }
+
+    /// Create a generated date-table calculated table (`CALENDAR(start,
+    /// end)`). Materialized by default — a dynamic calendar is invalid and
+    /// rejected at model build.
+    pub fn new_calendar(name: impl Into<String>, spec: CalendarSpec) -> Self {
+        Self {
+            name: name.into(),
+            table: String::new(),
+            expression: Expression::Query {
+                aggregates: Vec::new(),
+                group_by: Vec::new(),
+            },
+            dynamic: false,
+            calendar: Some(spec),
+        }
+    }
+
+    /// The generated-calendar spec, when this calculated table is a
+    /// `CALENDAR(start, end)` date table.
+    pub fn calendar(&self) -> Option<&CalendarSpec> {
+        self.calendar.as_ref()
     }
 
     /// Set the mode: `true` (default) = dynamic (per-query, filter-context
@@ -131,6 +266,16 @@ pub fn infer_calculated_table_columns(
     gv: &GlobalVariable,
     tables: &[Table],
 ) -> EngineResult<Vec<Column>> {
+    // Generated calendars have a fixed schema (validated at parse/build).
+    if let Some(spec) = gv.calendar() {
+        spec.validate()
+            .map_err(|reason| EngineError::InvalidGlobalVariable {
+                name: gv.name().to_string(),
+                reason,
+            })?;
+        return Ok(calendar_table_columns());
+    }
+
     let Expression::Query {
         aggregates,
         group_by,

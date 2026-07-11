@@ -231,13 +231,16 @@ use crate::model::table_variable::TableVariable;
 ///
 /// - `15` — materialized calculated tables: a model
 ///   [`GlobalVariable`](crate::model::GlobalVariable) gained a `dynamic` flag
-///   (default `true`), and [`Table`](crate::model::Table) gained an
-///   `is_calculated` marker for the derived table synthesized from a
-///   materialized (`dynamic == false`) calculated table's QUERY output schema.
-///   A pre-v15 engine would ignore the `dynamic` field and treat a
-///   materialized calculated table as dynamic — silently dropping the derived
-///   table, its data, and any relationships bound to it — so the
-///   [`ModelFormatTooNew`] gate refuses v15 files on a pre-v15 engine.
+///   (default `true`) and an optional `calendar` spec (a generated
+///   `CALENDAR(start, end)` date table), [`Table`](crate::model::Table)
+///   gained an `is_calculated` marker for the derived table synthesized from
+///   a materialized (`dynamic == false`) calculated table's output schema,
+///   and the `Query` expression may carry an empty aggregate list (the
+///   `QUERY(DISTINCT ...)` form, materialized-only). A pre-v15 engine would
+///   ignore the new fields and treat a materialized calculated table as
+///   dynamic — silently dropping the derived table, its data, and any
+///   relationships bound to it — so the [`ModelFormatTooNew`] gate refuses
+///   v15 files on a pre-v15 engine.
 ///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
 pub const MODEL_FORMAT_VERSION: u32 = 15;

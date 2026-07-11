@@ -601,10 +601,16 @@ pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition>
 /// Parse a calculated-table definition from a text expression.
 ///
 /// The `name` and `table` are provided by the caller (typically from a UI
-/// form). The `input` is the expression text, parsed using the same grammar
-/// as `parse_measure_expression` — but only a table-producing `QUERY(...)`
-/// expression is accepted; anything else is rejected (a reusable scalar is a
-/// hidden measure, not a calculated table).
+/// form). Three forms are accepted:
+///
+/// - `QUERY(agg AS alias [, ...] BY t[col] [, ...])` — aggregate grouping;
+/// - `QUERY(DISTINCT t[col] [, ...])` — one row per unique combination
+///   (materialized-only; measure validation rejects the aggregate-less form);
+/// - `CALENDAR(YYYY-MM-DD, YYYY-MM-DD)` — a generated date table, one row
+///   per day in the inclusive range (materialized-only; `table` is ignored).
+///
+/// Anything else is rejected (a reusable scalar is a hidden measure, not a
+/// calculated table).
 ///
 /// # Examples
 ///
@@ -615,21 +621,68 @@ pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition>
 ///     "QUERY(SUM(fact_sales[linetotal]) AS Amount BY dim_customer[city])").unwrap();
 /// assert!(gv.is_query());
 ///
+/// let cal = parse_global("dates", "", "CALENDAR(2024-01-01, 2026-12-31)").unwrap();
+/// assert!(cal.calendar().is_some());
+/// assert!(!cal.is_dynamic());
+///
 /// // Scalar expressions are rejected:
 /// assert!(parse_global("total_revenue", "fact_sales",
 ///     "SUM(fact_sales[linetotal])").is_err());
 /// ```
 pub fn parse_global(name: &str, table: &str, input: &str) -> EngineResult<GlobalVariable> {
+    // CALENDAR form — parsed from the text directly (date literals like
+    // 2024-01-01 would lex as arithmetic in the measure grammar).
+    if let Some(result) = try_parse_calendar(input) {
+        let spec = result.map_err(|reason| EngineError::InvalidGlobalVariable {
+            name: name.to_string(),
+            reason,
+        })?;
+        return Ok(crate::model::global_variable::GlobalVariable::new_calendar(name, spec));
+    }
+
     let expression = parse_measure_expression(input)?;
     if !matches!(expression, Expression::Query { .. }) {
         return Err(EngineError::InvalidGlobalVariable {
             name: name.to_string(),
-            reason: "a calculated table must be a table-producing QUERY(...) expression; \
-                     for a reusable scalar, define a (hidden) measure instead"
+            reason: "a calculated table must be a table-producing QUERY(...) or \
+                     CALENDAR(start, end) expression; for a reusable scalar, define a \
+                     (hidden) measure instead"
                 .to_string(),
         });
     }
     Ok(GlobalVariable::new(name, table, expression))
+}
+
+/// Recognize `CALENDAR(YYYY-MM-DD, YYYY-MM-DD)`. `None` = not a CALENDAR
+/// call at all (fall through to the measure grammar); `Some(Err)` = it is
+/// one, but malformed.
+fn try_parse_calendar(
+    input: &str,
+) -> Option<Result<crate::model::global_variable::CalendarSpec, String>> {
+    let trimmed = input.trim();
+    if trimmed.len() < 8 || !trimmed[..8].eq_ignore_ascii_case("CALENDAR") {
+        return None;
+    }
+    let rest = trimmed[8..].trim_start();
+    let Some(inner) = rest.strip_prefix('(') else {
+        return None;
+    };
+    let Some(inner) = inner.trim_end().strip_suffix(')') else {
+        return Some(Err(
+            "CALENDAR expects the form CALENDAR(YYYY-MM-DD, YYYY-MM-DD)".to_string()
+        ));
+    };
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.len() != 2 {
+        return Some(Err(
+            "CALENDAR expects exactly two dates: CALENDAR(YYYY-MM-DD, YYYY-MM-DD)".to_string(),
+        ));
+    }
+    let spec = crate::model::global_variable::CalendarSpec {
+        start: parts[0].to_string(),
+        end: parts[1].to_string(),
+    };
+    Some(spec.validate().map(|()| spec))
 }
 
 /// Parse an incremental-refresh filter condition into a boolean

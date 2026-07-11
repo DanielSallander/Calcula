@@ -373,6 +373,20 @@ impl Expression {
                 aggregates,
                 group_by,
             } => {
+                // An aggregate-less QUERY (the `QUERY(DISTINCT ...)` form) is
+                // only executable as a MATERIALIZED calculated table — inside
+                // a measure/VAR binding the two-stage pipeline needs at least
+                // one aggregate to materialize. The materialized path never
+                // routes through measure validation, so rejecting here is
+                // safe and precise.
+                if aggregates.is_empty() {
+                    return Err(EngineError::InvalidExpression(
+                        "QUERY(DISTINCT ...) is only supported as a materialized calculated \
+                         table (Dynamic = no); inside a measure, use an aggregate QUERY \
+                         (e.g. COUNTROWS(t) AS n BY ...) instead"
+                            .to_string(),
+                    ));
+                }
                 // Aggregate output aliases are quoted at render time;
                 // group-by tables are rendered as raw qualifiers and JOIN
                 // targets.

@@ -9,8 +9,22 @@ impl Parser {
     /// Grammar:
     /// ```text
     /// QUERY( agg_expr AS alias [, agg_expr AS alias]* BY table[col] [, table[col]]* )
+    /// QUERY( DISTINCT table[col] [, table[col]]* )
     /// ```
+    ///
+    /// The `DISTINCT` form produces an aggregate-less `Query` (one row per
+    /// unique column combination). It is only executable as a MATERIALIZED
+    /// calculated table — measure validation rejects it (see
+    /// `validate_inner`'s `Query` arm).
     pub(super) fn parse_query_call(&mut self) -> EngineResult<Expression> {
+        // DISTINCT form: no aggregates, just the column list.
+        if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("DISTINCT")) {
+            self.advance()?; // consume DISTINCT
+            let group_by = self.parse_query_by_columns()?;
+            self.expect(&Token::RParen)?;
+            return Ok(expr::query_expr(Vec::new(), group_by));
+        }
+
         let mut aggregates = Vec::new();
 
         // Parse aggregate expressions until we hit the BY keyword.
@@ -59,6 +73,23 @@ impl Parser {
         }
 
         // Parse group-by columns: table[column] pairs.
+        let group_by = self.parse_query_by_columns()?;
+
+        self.expect(&Token::RParen)?;
+
+        if aggregates.is_empty() {
+            return Err(self.parse_err("QUERY requires at least one aggregate expression"));
+        }
+        if group_by.is_empty() {
+            return Err(self.parse_err("QUERY requires at least one BY column"));
+        }
+
+        Ok(expr::query_expr(aggregates, group_by))
+    }
+
+    /// Parse a comma-separated `table[column]` list (the QUERY BY clause and
+    /// the QUERY DISTINCT column list).
+    fn parse_query_by_columns(&mut self) -> EngineResult<Vec<(String, String)>> {
         let mut group_by = Vec::new();
         loop {
             let table = match self.advance()?.clone() {
@@ -81,24 +112,14 @@ impl Parser {
             self.expect(&Token::RBracket)?;
             group_by.push((table, column));
 
-            // Check for comma (more columns) or closing paren.
+            // Check for comma (more columns) or end of list.
             if self.peek() == Some(&Token::Comma) {
                 self.advance()?;
             } else {
                 break;
             }
         }
-
-        self.expect(&Token::RParen)?;
-
-        if aggregates.is_empty() {
-            return Err(self.parse_err("QUERY requires at least one aggregate expression"));
-        }
-        if group_by.is_empty() {
-            return Err(self.parse_err("QUERY requires at least one BY column"));
-        }
-
-        Ok(expr::query_expr(aggregates, group_by))
+        Ok(group_by)
     }
 
     /// Check if the current token is `VAR` (case-insensitive).

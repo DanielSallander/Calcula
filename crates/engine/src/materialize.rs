@@ -61,6 +61,27 @@ impl Engine {
         Ok(names)
     }
 
+    /// Restore a materialized calculated table's data from a SNAPSHOT batch —
+    /// e.g. one carried inside a `.calp` package — instead of evaluating its
+    /// QUERY (which may be impossible on a subscriber without source access).
+    /// The batch is stored through the same optimize/sort/cache path as a
+    /// refresh; a later `refresh_stale`/materialization simply replaces it.
+    pub fn store_calculated_table_snapshot(
+        &mut self,
+        name: &str,
+        batch: RecordBatch,
+    ) -> EngineResult<()> {
+        let table = self.model.table(name)?;
+        if !table.is_calculated() {
+            return Err(EngineError::MaterializationFailed {
+                name: name.to_string(),
+                reason: "not a calculated table — snapshots can only restore derived tables"
+                    .to_string(),
+            });
+        }
+        self.store_refreshed_table(name, vec![batch]).map(|_| ())
+    }
+
     pub(crate) async fn materialize_calculated_table_inner(
         &mut self,
         name: &str,
@@ -74,6 +95,20 @@ impl Engine {
                     .to_string(),
             });
         }
+
+        // Generated calendar: build the rows directly — no query needed. The
+        // derived table (synthesized at build) declares the fixed schema.
+        if let Some(spec) = gv.calendar() {
+            let schema = Arc::new(self.model.table(name)?.to_arrow_schema());
+            let batch = build_calendar_batch(spec, schema).map_err(|reason| {
+                EngineError::MaterializationFailed {
+                    name: name.to_string(),
+                    reason,
+                }
+            })?;
+            return self.store_refreshed_table(name, vec![batch]);
+        }
+
         let Expression::Query {
             aggregates,
             group_by,
@@ -98,6 +133,24 @@ impl Engine {
             let measure_name = format!("__materialize__{name}__{i}");
             synthetic.push(Measure::new(&measure_name, expr.clone()));
             column_sources.push((alias.clone(), measure_name.clone()));
+        }
+        // The DISTINCT form has no aggregates: inject a hidden COUNTROWS so
+        // the grouped query executes; the conform step below drops it
+        // (column_sources lists only the BY columns).
+        if aggregates.is_empty() {
+            let Some((first_table, _)) = group_by.first() else {
+                return Err(EngineError::MaterializationFailed {
+                    name: name.to_string(),
+                    reason: "QUERY(DISTINCT ...) has no columns".to_string(),
+                });
+            };
+            synthetic.push(Measure::new(
+                format!("__materialize__{name}__distinct"),
+                Expression::Aggregate {
+                    operation: crate::AggregateOp::CountRows,
+                    operand: Box::new(Expression::TableRef(first_table.clone())),
+                },
+            ));
         }
         let measure_names: Vec<String> = synthetic.iter().map(|m| m.name().to_string()).collect();
         let overlay = self
@@ -173,4 +226,69 @@ impl Engine {
 
         self.store_refreshed_table(name, conformed)
     }
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Generate a `CALENDAR(start, end)` batch: one row per day, with the fixed
+/// calendar schema (declared by the derived table synthesized at build) —
+/// date, year, quarter, month, month_name, day, day_of_week (ISO, 1 = Monday).
+fn build_calendar_batch(
+    spec: &engine_core::model::global_variable::CalendarSpec,
+    schema: Arc<arrow::datatypes::Schema>,
+) -> Result<RecordBatch, String> {
+    use arrow::array::{Date32Array, Int64Array, StringArray};
+    use engine_core::model::global_variable::civil_from_days;
+
+    spec.validate()?;
+    let (start, end) = spec
+        .day_range()
+        .ok_or_else(|| "calendar dates failed to parse".to_string())?;
+
+    let len = (end - start + 1) as usize;
+    let mut dates = Vec::with_capacity(len);
+    let mut years = Vec::with_capacity(len);
+    let mut quarters = Vec::with_capacity(len);
+    let mut months = Vec::with_capacity(len);
+    let mut month_names = Vec::with_capacity(len);
+    let mut days = Vec::with_capacity(len);
+    let mut weekdays = Vec::with_capacity(len);
+    for d in start..=end {
+        let (year, month, day) = civil_from_days(d);
+        dates.push(d as i32);
+        years.push(year);
+        quarters.push(i64::from((month - 1) / 3 + 1));
+        months.push(i64::from(month));
+        month_names.push(MONTH_NAMES[(month - 1) as usize]);
+        days.push(i64::from(day));
+        // 1970-01-01 (day 0) was a Thursday; ISO weekday Monday = 1.
+        weekdays.push((d + 3).rem_euclid(7) + 1);
+    }
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Date32Array::from(dates)),
+            Arc::new(Int64Array::from(years)),
+            Arc::new(Int64Array::from(quarters)),
+            Arc::new(Int64Array::from(months)),
+            Arc::new(StringArray::from(month_names)),
+            Arc::new(Int64Array::from(days)),
+            Arc::new(Int64Array::from(weekdays)),
+        ],
+    )
+    .map_err(|e| e.to_string())
 }

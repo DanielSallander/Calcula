@@ -328,6 +328,241 @@ async fn refresh_stale_materializes_missing_calculated_table() {
     assert!(report.refreshed.is_empty(), "got: {:?}", report.refreshed);
 }
 
+// --- QUERY(DISTINCT ...) ---
+
+fn distinct_gv(dynamic: bool) -> GlobalVariable {
+    GlobalVariable::new(
+        "product_names",
+        "Product",
+        parse_measure_expression("QUERY(DISTINCT Product[name])").unwrap(),
+    )
+    .with_dynamic(dynamic)
+}
+
+#[test]
+fn distinct_synthesizes_by_columns_only() {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
+        )
+        .add_global_variable(distinct_gv(false))
+        .build()
+        .unwrap();
+    let derived = model.table("product_names").unwrap();
+    let cols: Vec<&str> = derived.columns().iter().map(|c| c.name()).collect();
+    assert_eq!(cols, vec!["name"]);
+}
+
+#[test]
+fn dynamic_distinct_rejected_at_build() {
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
+        )
+        .add_global_variable(
+            GlobalVariable::new(
+                "product_names",
+                "Product",
+                parse_measure_expression("QUERY(DISTINCT Product[name])").unwrap(),
+            ), // dynamic by default
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("materialized"), "got: {err}");
+}
+
+#[test]
+fn distinct_query_rejected_inside_measures() {
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
+        )
+        .add_measure(measure_from(
+            "Bad",
+            "VAR names = QUERY(DISTINCT Product[name]) RETURN COUNTROWS(names)",
+        ))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("materialized calculated table"), "got: {err}");
+}
+
+#[tokio::test]
+async fn distinct_materializes_unique_rows() {
+    // Note star_model adds a measure over prod_sales — swap the calculated
+    // table only, keep the fixture shape by building a dedicated model.
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Product",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Product",
+            "Sales",
+            "prod_id",
+            "Product",
+            "id",
+        ))
+        .add_global_variable(distinct_gv(false))
+        .add_measure(measure_from("NameCount", "COUNTROWS(product_names)"))
+        .build()
+        .unwrap();
+    let mut engine = star_engine(model);
+    engine.materialize_calculated_table("product_names").await.unwrap();
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["NameCount".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Two distinct product names (Bikes, Helmets).
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 2.0);
+}
+
+// --- CALENDAR(start, end) ---
+
+#[test]
+fn calendar_parses_and_synthesizes_fixed_schema() {
+    let gv = crate::parse_global("dates", "", "CALENDAR(2024-01-01, 2024-12-31)").unwrap();
+    assert!(gv.calendar().is_some());
+    assert!(!gv.is_dynamic());
+
+    let model = DataModel::builder()
+        .add_table(Table::new("T", vec![Column::new("x", DataType::Int64)]).unwrap())
+        .add_global_variable(gv)
+        .build()
+        .unwrap();
+    let derived = model.table("dates").unwrap();
+    assert!(derived.is_calculated());
+    let cols: Vec<&str> = derived.columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        cols,
+        vec!["date", "year", "quarter", "month", "month_name", "day", "day_of_week"]
+    );
+}
+
+#[test]
+fn calendar_rejects_bad_dates_and_dynamic_mode() {
+    assert!(crate::parse_global("d", "", "CALENDAR(2024-02-30, 2024-12-31)").is_err());
+    assert!(crate::parse_global("d", "", "CALENDAR(2024-12-31, 2024-01-01)").is_err());
+    assert!(crate::parse_global("d", "", "CALENDAR(2024-01-01)").is_err());
+
+    // Dynamic calendar rejected at build.
+    let gv = crate::parse_global("dates", "", "CALENDAR(2024-01-01, 2024-12-31)")
+        .unwrap()
+        .with_dynamic(true);
+    let err = DataModel::builder()
+        .add_table(Table::new("T", vec![Column::new("x", DataType::Int64)]).unwrap())
+        .add_global_variable(gv)
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("materialized"), "got: {err}");
+}
+
+#[tokio::test]
+async fn calendar_materializes_generated_rows() {
+    let gv = crate::parse_global("dates", "", "CALENDAR(2024-01-01, 2024-03-31)").unwrap();
+    let model = DataModel::builder()
+        .add_table(
+            Table::new("T", vec![Column::new("x", DataType::Int64)])
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_global_variable(gv)
+        .add_measure(measure_from("DayCount", "COUNTROWS(dates)"))
+        .add_measure(measure_from("MaxDay", "MAX(dates[day])"))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine
+        .cache
+        .store(
+            "T",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("x", ArrowType::Int64, true)])),
+                vec![Arc::new(Int64Array::from(vec![1]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine.materialize_calculated_table("dates").await.unwrap();
+
+    // Jan (31) + Feb (29, leap year) + Mar (31) = 91 rows.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["DayCount".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 91.0);
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["MaxDay".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 31.0);
+}
+
+#[tokio::test]
+async fn snapshot_restore_populates_calculated_table() {
+    // Simulate a .calp subscriber: same model, but instead of materializing
+    // (no source access), restore a snapshot batch directly.
+    let mut engine = star_engine(star_model(prod_sales_gv(false)));
+    let snapshot = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("name", ArrowType::Utf8, true),
+            Field::new("Amt", ArrowType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["Bikes", "Helmets"])),
+            Arc::new(Float64Array::from(vec![130.0, 60.0])),
+        ],
+    )
+    .unwrap();
+    engine
+        .store_calculated_table_snapshot("prod_sales", snapshot)
+        .unwrap();
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["ProdSalesTotal".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 190.0);
+
+    // Snapshots only restore calculated tables.
+    let bad = RecordBatch::new_empty(Arc::new(Schema::empty()));
+    assert!(engine.store_calculated_table_snapshot("Sales", bad).is_err());
+}
+
 #[tokio::test]
 async fn refresh_table_routes_calculated_table_to_materialization() {
     let mut engine = star_engine(star_model(prod_sales_gv(false)));

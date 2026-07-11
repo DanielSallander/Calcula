@@ -452,13 +452,51 @@ impl DataModelBuilder {
             }
         }
         for gv in &self.global_variables {
-            gv.expression().validate()?;
-            if gv.expression().has_query_scoped_bindings() {
-                return Err(EngineError::InvalidExpression(format!(
-                    "calculated table '{}' uses a query-scoped (GVAR) variable, which is only \
-                     supported in measures",
-                    gv.name()
-                )));
+            // Generated calendars carry an empty placeholder expression; the
+            // spec itself is validated by schema inference during table
+            // reconcile. Only the mode needs a gate here.
+            if gv.calendar().is_some() {
+                if gv.is_dynamic() {
+                    return Err(EngineError::InvalidGlobalVariable {
+                        name: gv.name().to_string(),
+                        reason: "a CALENDAR calculated table must be materialized \
+                                 (Dynamic = no); a generated date table has no per-query \
+                                 filter-context meaning"
+                            .to_string(),
+                    });
+                }
+                continue;
+            }
+            match gv.expression() {
+                // Aggregate-less QUERY (the DISTINCT form): executable only
+                // as a materialized table — measure validation rejects it, so
+                // it must not pass through `validate()` here.
+                Expression::Query {
+                    aggregates,
+                    group_by,
+                } if aggregates.is_empty() => {
+                    if gv.is_dynamic() {
+                        return Err(EngineError::InvalidGlobalVariable {
+                            name: gv.name().to_string(),
+                            reason: "QUERY(DISTINCT ...) requires a materialized calculated \
+                                     table (Dynamic = no)"
+                                .to_string(),
+                        });
+                    }
+                    for (table, _column) in group_by {
+                        validate_identifier(table, "group-by table")?;
+                    }
+                }
+                _ => {
+                    gv.expression().validate()?;
+                    if gv.expression().has_query_scoped_bindings() {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "calculated table '{}' uses a query-scoped (GVAR) variable, which \
+                             is only supported in measures",
+                            gv.name()
+                        )));
+                    }
+                }
             }
         }
         for ctx in &self.contexts {
@@ -1215,8 +1253,9 @@ impl DataModelBuilder {
                 });
             }
 
-            // Referenced table must exist.
-            if !seen_tables.contains(gv.table()) {
+            // Referenced table must exist. (A generated calendar reads from
+            // no table — its `table` field is empty by construction.)
+            if gv.calendar().is_none() && !seen_tables.contains(gv.table()) {
                 return Err(EngineError::InvalidGlobalVariable {
                     name: gv.name().to_string(),
                     reason: format!("table '{}' not found", gv.table()),
