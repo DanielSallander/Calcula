@@ -688,14 +688,25 @@ fn by_paid_tier(batches: &[RecordBatch]) -> HashMap<String, f64> {
 
 fn cross_table_model() -> DataModel {
     let in_mem = |t: Table| t.with_storage_mode(StorageMode::InMemory);
-    let paid_tier = expr::if_expr(
-        expr::compare(
-            expr::qualified_col("Invoice", "paid_date"),
-            ComparisonOp::LessThanOrEqual,
-            Expression::MeasureRef("AsOfDate".into()),
-        ),
-        expr::qualified_col("Customer", "tier"),
-        expr::lit_str("Unpaid"),
+    // Written with the DAX-compatible RELATED(...) spelling — pure parser
+    // sugar for the qualified cross-table reference, so every cross-table
+    // test in this module also covers RELATED end to end.
+    let paid_tier = crate::parse_measure_expression(
+        "IF(Invoice[paid_date] <= [AsOfDate], RELATED(Customer[tier]), \"Unpaid\")",
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_string(&paid_tier).unwrap(),
+        serde_json::to_string(&expr::if_expr(
+            expr::compare(
+                expr::qualified_col("Invoice", "paid_date"),
+                ComparisonOp::LessThanOrEqual,
+                Expression::MeasureRef("AsOfDate".into()),
+            ),
+            expr::qualified_col("Customer", "tier"),
+            expr::lit_str("Unpaid"),
+        ))
+        .unwrap()
     );
     DataModel::builder()
         .add_table(in_mem(

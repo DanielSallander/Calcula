@@ -100,6 +100,36 @@ impl Parser {
         Ok(expr::is_in_scope(table, column))
     }
 
+    /// Parse `RELATED(table[column])` — DAX-compatible sugar for a
+    /// cross-table qualified column reference. The dereference itself is the
+    /// engine's existing row-context navigation: legal where cross-table row
+    /// references are legal (context columns reading a ONE-side table across
+    /// an active many-to-one equi relationship), enforced by those surfaces'
+    /// own validation. Parses straight to `QualifiedColumnRef`, so rendering
+    /// and persistence show the plain `Table[column]` spelling.
+    pub(super) fn parse_related_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("RELATED: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("RELATED: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::qualified_col(table, column))
+    }
+
     /// Parse `ISFILTERED(table[column])`.
     pub(super) fn parse_isfiltered_call(&mut self) -> EngineResult<Expression> {
         let table = match self.advance()?.clone() {

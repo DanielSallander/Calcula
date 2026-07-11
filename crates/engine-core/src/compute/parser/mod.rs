@@ -357,6 +357,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "FIRST",
         "ISINSCOPE",
         "ISFILTERED",
+        "RELATED",
         "PERCENTILE",
         // Scalar math
         "ABS",
@@ -814,6 +815,24 @@ mod tests {
     fn parse_table_variable_rejects_trailing_tokens() {
         let err = parse_table_variable(r#"KEEP(dim_product, dim_product[cat] = "X") + 1"#);
         assert!(err.is_err());
+    }
+
+    // --- RELATED sugar tests ---
+
+    #[test]
+    fn parse_related_desugars_to_qualified_column_ref() {
+        let e = parse_measure_expression("RELATED(Customer[tier])").unwrap();
+        assert!(matches!(
+            &e,
+            Expression::QualifiedColumnRef { table_or_var, column }
+                if table_or_var == "Customer" && column == "tier"
+        ));
+        // Identical to writing the qualified reference directly.
+        let direct = parse_measure_expression("Customer[tier]").unwrap();
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            serde_json::to_string(&direct).unwrap()
+        );
     }
 
     // --- ISFILTERED tests ---
