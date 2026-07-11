@@ -103,6 +103,8 @@ mod disk_cache_tests;
 #[cfg(test)]
 mod gvar_tests;
 #[cfg(test)]
+mod calculated_column_tests;
+#[cfg(test)]
 mod materialize_tests;
 #[cfg(test)]
 mod having_tests;

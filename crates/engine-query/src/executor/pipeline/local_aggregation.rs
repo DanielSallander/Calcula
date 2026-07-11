@@ -785,6 +785,14 @@ impl QueryExecutor {
         let opt_config = engine_core::optimize::OptimizerConfig::default();
         let mut opt_stats_by_table: Vec<(String, engine_core::optimize::OptimizationStats)> =
             Vec::new();
+        // Plain (static, row-level) calculated columns are materialized onto
+        // each table's batch HERE, at registration time — the fetched/cached
+        // batches carry only physical columns (the planner projects the calc
+        // columns' INPUT columns), while the local SQL references calculated
+        // columns by name like any physical column.
+        let empty_udfs = engine_core::compute::udf::UdfRegistry::new();
+        let materialize_udfs = udfs.unwrap_or(&empty_udfs);
+
         for (table_name, batches, _, _) in &all_fetch_results {
             if batches.is_empty() {
                 continue;
@@ -793,7 +801,13 @@ impl QueryExecutor {
             // Register with lowercase name (DataFusion normalizes to lowercase).
             let df_name = table_name.to_lowercase();
 
-            if cache_served_tables.contains(table_name) {
+            let calc_cols: Vec<engine_core::model::CalculatedColumn> = model
+                .calculated_columns_for_table(table_name)
+                .into_iter()
+                .cloned()
+                .collect();
+
+            if cache_served_tables.contains(table_name) && calc_cols.is_empty() {
                 // Cache-served batches were already optimized and sorted at
                 // refresh time (`Engine::refresh_table_inner`); skip the
                 // redundant per-query re-optimization and register directly.
@@ -809,6 +823,22 @@ impl QueryExecutor {
             // result zero-copy so DataFusion can parallelize across partitions.
             let schema = batches[0].schema();
             let combined = concat_batches(&schema, batches)?;
+            let combined = if calc_cols.is_empty() {
+                combined
+            } else {
+                engine_core::compute::materialize_calculated_columns_with_udfs(
+                    &combined,
+                    &calc_cols,
+                    materialize_udfs,
+                )
+                .await?
+            };
+            if cache_served_tables.contains(table_name) {
+                // Cache-served (pre-optimized) — only the calc columns were
+                // appended; register without re-optimizing.
+                register_partitioned_table(&ctx, &df_name, vec![combined])?;
+                continue;
+            }
             let (optimized, stats) = engine_core::optimize::optimize_batch(&combined, &opt_config)?;
 
             if stats.any_applied() {
