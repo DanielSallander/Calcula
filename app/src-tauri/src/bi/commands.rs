@@ -1178,6 +1178,10 @@ const ISFILTERED_MIN_FORMAT_VERSION: u64 = 16;
 /// `LookupValue` expression variant.
 const LOOKUPVALUE_MIN_FORMAT_VERSION: u64 = 17;
 
+/// Minimum schema `format_version` required by a DYNAMIC measure format
+/// string — a pre-v18 engine silently drops the field on round-trip.
+const DYNAMIC_FORMAT_MIN_FORMAT_VERSION: u64 = 18;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1204,8 +1208,14 @@ pub fn stamp_feature_format_version(
         .calculated_columns()
         .iter()
         .any(|cc| cc.expression().has_lookup_value());
+    let uses_dynamic_format = model
+        .measures()
+        .iter()
+        .any(|m| m.format_string_expression().is_some());
 
-    let required = if uses_lookupvalue {
+    let required = if uses_dynamic_format {
+        DYNAMIC_FORMAT_MIN_FORMAT_VERSION
+    } else if uses_lookupvalue {
         LOOKUPVALUE_MIN_FORMAT_VERSION
     } else if uses_isfiltered {
         ISFILTERED_MIN_FORMAT_VERSION

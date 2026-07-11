@@ -3526,6 +3526,11 @@ export interface ModelMeasureInfo {
   hasSource: boolean;
   description: string | null;
   formatString: string | null;
+  /**
+   * Dynamic format string: an expression evaluated once per query under the
+   * outer filter context; overrides formatString in result metadata.
+   */
+  formatStringExpression: string | null;
   isHidden: boolean;
   /** Display folder (Studio-style measure group), or null when ungrouped. */
   group: string | null;
@@ -3586,6 +3591,8 @@ export async function biModelUpsertMeasure(params: {
   formula: string;
   description?: string | null;
   formatString?: string | null;
+  /** Dynamic format string expression (evaluated per query); optional. */
+  formatStringExpression?: string | null;
   /** Display folder (Studio-style measure group); null/empty = ungrouped. */
   group?: string | null;
 }): Promise<ModelMeasureInfo[]> {
@@ -3596,6 +3603,7 @@ export async function biModelUpsertMeasure(params: {
     formula: params.formula,
     description: params.description ?? null,
     formatString: params.formatString ?? null,
+    formatStringExpression: params.formatStringExpression ?? null,
     group: params.group ?? null,
   });
 }

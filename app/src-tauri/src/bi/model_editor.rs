@@ -40,6 +40,8 @@ pub struct ModelMeasureInfo {
     pub has_source: bool,
     pub description: Option<String>,
     pub format_string: Option<String>,
+    /// Dynamic format string expression (evaluated per query), when set.
+    pub format_string_expression: Option<String>,
     pub is_hidden: bool,
     /// Display folder this measure belongs to (Studio-style measure groups),
     /// or `None` for an ungrouped measure.
@@ -90,6 +92,7 @@ fn measure_info(m: &bi_engine::Measure) -> ModelMeasureInfo {
         has_source: m.source().is_some(),
         description: m.description().map(|s| s.to_string()),
         format_string: m.format_string().map(|s| s.to_string()),
+        format_string_expression: m.format_string_expression().map(|s| s.to_string()),
         is_hidden: m.is_hidden(),
         group: m.group().map(|s| s.to_string()),
     }
@@ -104,6 +107,7 @@ fn build_measure(
     formula: &str,
     description: Option<&str>,
     format_string: Option<&str>,
+    format_string_expression: Option<&str>,
 ) -> Result<bi_engine::Measure, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -119,6 +123,9 @@ fn build_measure(
     }
     if let Some(f) = format_string.map(str::trim).filter(|f| !f.is_empty()) {
         measure = measure.with_format_string(f);
+    }
+    if let Some(f) = format_string_expression.map(str::trim).filter(|f| !f.is_empty()) {
+        measure = measure.with_format_string_expression(f);
     }
     // The home-table check is deferred to upsert_measure_model, which has the
     // model needed to resolve a measure that references only OTHER measures
@@ -488,7 +495,7 @@ pub fn bi_model_validate_measure(
             },
         });
     }
-    let dry_run = build_measure(&name, &formula, None, None)
+    let dry_run = build_measure(&name, &formula, None, None, None)
         .and_then(|m| upsert_measure_model(&base, original_name.as_deref(), m))
         .and_then(|edited| build_combined_model(&edited, &calculated));
     Ok(match dry_run {
@@ -509,6 +516,7 @@ pub async fn bi_model_upsert_measure(
     formula: String,
     description: Option<String>,
     format_string: Option<String>,
+    format_string_expression: Option<String>,
     group: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<ModelMeasureInfo>, String> {
@@ -548,6 +556,7 @@ pub async fn bi_model_upsert_measure(
                 &formula,
                 description.as_deref(),
                 format_string.as_deref(),
+                format_string_expression.as_deref(),
             )?,
         };
         // Assign the display folder (Studio-style measure groups). A blank or
@@ -4821,7 +4830,7 @@ mod tests {
 
     #[test]
     fn add_measure_preserves_source_text() {
-        let m = build_measure("Orders", "COUNT(Sales[country])", Some("How many"), None).unwrap();
+        let m = build_measure("Orders", "COUNT(Sales[country])", Some("How many"), None, None).unwrap();
         let edited = upsert_measure_model(&base_model(), None, m).unwrap();
         let added = edited.measures().iter().find(|m| m.name() == "Orders").unwrap();
         assert_eq!(added.source(), Some("COUNT(Sales[country])"));
@@ -4831,7 +4840,7 @@ mod tests {
 
     #[test]
     fn add_rejects_name_collision() {
-        let m = build_measure("Revenue", "SUM(Sales[amount])", None, None).unwrap();
+        let m = build_measure("Revenue", "SUM(Sales[amount])", None, None, None).unwrap();
         let err = upsert_measure_model(&base_model(), None, m).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
@@ -4839,11 +4848,11 @@ mod tests {
     #[test]
     fn update_replaces_in_place_and_rename_collision_is_rejected() {
         let base = base_model();
-        let m = build_measure("Orders", "COUNT(Sales[country])", None, None).unwrap();
+        let m = build_measure("Orders", "COUNT(Sales[country])", None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, m).unwrap();
 
         // Update the formula in place.
-        let m2 = build_measure("Orders", "COUNT(Sales[amount])", None, None).unwrap();
+        let m2 = build_measure("Orders", "COUNT(Sales[amount])", None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Orders"), m2).unwrap();
         assert_eq!(
             edited.measures().iter().find(|m| m.name() == "Orders").unwrap().source(),
@@ -4851,7 +4860,7 @@ mod tests {
         );
 
         // Renaming onto an existing name is rejected.
-        let m3 = build_measure("Revenue", "COUNT(Sales[amount])", None, None).unwrap();
+        let m3 = build_measure("Revenue", "COUNT(Sales[amount])", None, None, None).unwrap();
         let err = upsert_measure_model(&base, Some("Orders"), m3).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
@@ -4859,12 +4868,12 @@ mod tests {
     #[test]
     fn rename_rewrites_dependent_references() {
         let base = base_model();
-        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None).unwrap();
+        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, dep).unwrap();
 
         // Rename Revenue -> Income: Boosted's [Revenue] follows the rename
         // (upsert rewrites dependent references before validating).
-        let renamed = build_measure("Income", "SUM(Sales[amount])", None, None).unwrap();
+        let renamed = build_measure("Income", "SUM(Sales[amount])", None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Revenue"), renamed).unwrap();
         assert!(edited.measures().iter().all(|m| m.name() != "Revenue"));
         let boosted = edited
@@ -4883,7 +4892,7 @@ mod tests {
     #[test]
     fn delete_refuses_when_referenced_and_lists_referrers() {
         let base = base_model();
-        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None).unwrap();
+        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, dep).unwrap();
 
         let err = delete_measure_model(&base, &[], "Revenue").unwrap_err();
@@ -4911,7 +4920,7 @@ mod tests {
             bi_engine::sum_measure("Revenue", "Sales", "amount").hidden(),
         ]);
         let edited_measure =
-            build_measure("Revenue", "SUM(Sales[amount]) * 2", None, None).unwrap();
+            build_measure("Revenue", "SUM(Sales[amount]) * 2", None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Revenue"), edited_measure).unwrap();
         assert!(edited.measures()[0].is_hidden(), "edit must not unhide");
     }
@@ -4921,7 +4930,7 @@ mod tests {
         // `[Revenue] * 2` has no column of its own; upsert resolves its home
         // table from the measure it builds on.
         let base = base_model();
-        let m = build_measure("Doubled", "[Revenue] * 2", None, None).unwrap();
+        let m = build_measure("Doubled", "[Revenue] * 2", None, None, None).unwrap();
         let edited = upsert_measure_model(&base, None, m).unwrap();
         let doubled = edited
             .measures()
@@ -4935,10 +4944,10 @@ mod tests {
     fn measure_reference_resolving_to_no_table_is_rejected_with_column_guidance() {
         let base = base_model();
         // A constant measure legitimately has no home table...
-        let konst = build_measure("Konst", "42", None, None).unwrap();
+        let konst = build_measure("Konst", "42", None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, konst).unwrap();
         // ...but a measure referencing ONLY it cannot resolve a table.
-        let bad = build_measure("Bad", "[Konst] * 2", None, None).unwrap();
+        let bad = build_measure("Bad", "[Konst] * 2", None, None, None).unwrap();
         let err = upsert_measure_model(&base, None, bad).unwrap_err();
         assert!(err.contains("column form"), "got: {}", err);
     }

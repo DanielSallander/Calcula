@@ -200,6 +200,9 @@ export function MeasureEditorModal({
   const [name, setName] = useState(existing?.name ?? "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [formatString, setFormatString] = useState(existing?.formatString ?? "");
+  const [formatStringExpression, setFormatStringExpression] = useState(
+    existing?.formatStringExpression ?? "",
+  );
   const [group, setGroup] = useState(normalizeFolderPath(existing?.group ?? ""));
   const [formula, setFormula] = useState(existing?.formula ?? "");
 
@@ -363,6 +366,7 @@ export function MeasureEditorModal({
         formula,
         description: description.trim() || null,
         formatString: formatString.trim() || null,
+        formatStringExpression: formatStringExpression.trim() || null,
         group: group.trim() || null,
       });
       // The parent applies the fresh measure list and notifies the main
@@ -373,7 +377,17 @@ export function MeasureEditorModal({
     } finally {
       setBusy(false);
     }
-  }, [connectionId, existing, name, formula, description, formatString, group, onSaved]);
+  }, [
+    connectionId,
+    existing,
+    name,
+    formula,
+    description,
+    formatString,
+    formatStringExpression,
+    group,
+    onSaved,
+  ]);
 
   return (
     <Modal
@@ -436,6 +450,18 @@ export function MeasureEditorModal({
       </Field>
       <FolderField value={group} onChange={setGroup} groups={existingGroups} />
       <FormatField value={formatString} onChange={setFormatString} />
+
+      <Field
+        label="Dynamic format (optional)"
+        hint='An expression evaluated once per query under the active filters, returning the format string — e.g. IF([SelectedCurrency] = "EUR", "#,##0.00 €", "$#,##0.00"). Overrides the static format when it yields a value.'
+      >
+        <input
+          style={styles.input}
+          value={formatStringExpression}
+          onChange={(e) => setFormatStringExpression(e.target.value)}
+          placeholder='IF(SUM(fact[amount]) > 1000000, "#,##0,,\"M\"", "#,##0")'
+        />
+      </Field>
 
       <Field
         label="Formula"
