@@ -2131,6 +2131,7 @@ mod restore_registry_tests {
             ("obj_extension_data", true, CustomRestoreKind::Objects),
             ("obj_cell_types", true, CustomRestoreKind::Objects),
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
+            ("report_restore", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -2144,8 +2145,9 @@ mod restore_registry_tests {
     /// The deadlock-critical `defer` flag must agree with the legacy
     /// `kind.starts_with("pivot_"/"slicer"/"ribbon_filter"/"obj_")` deferral for
     /// EVERY registered kind — this is what guarantees lock-ordering is preserved.
-    /// `script_grid_cells` is newer than the legacy prefixes but is likewise
-    /// deferred (it re-acquires the grid/grids/active-sheet locks), so it joins the
+    /// `script_grid_cells` and `report_restore` are newer than the legacy
+    /// prefixes but are likewise deferred (both re-acquire the
+    /// grid/grids/active-sheet locks for cell-based restores), so they join the
     /// deferred set explicitly; `pane_control*` kinds acquire the PaneControlState
     /// lock and are deferred exactly like their ribbon_filter siblings.
     #[test]
@@ -2156,7 +2158,8 @@ mod restore_registry_tests {
                 || kind.starts_with("ribbon_filter")
                 || kind.starts_with("pane_control")
                 || kind.starts_with("obj_")
-                || *kind == "script_grid_cells";
+                || *kind == "script_grid_cells"
+                || *kind == "report_restore";
             assert_eq!(
                 spec.defer, legacy_deferred,
                 "defer for '{kind}' disagrees with the legacy prefix deferral"

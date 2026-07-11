@@ -7,10 +7,26 @@
 //          docs/design/calculated-tables.md.
 
 import React, { useState } from "react";
-import { biModelDeleteGlobalVariable, biModelUpsertGlobalVariable } from "@api";
-import type { ModelGlobalVariableInfo, ModelOverview } from "@api";
+import {
+  biModelCalculatedTableDependents,
+  biModelDeleteGlobalVariable,
+  biModelMaterializeCalculatedTable,
+  biModelUpsertGlobalVariable,
+} from "@api";
+import type { CalculatedTableDependents, ModelGlobalVariableInfo, ModelOverview } from "@api";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+
+/** Human-readable list of what is bound to a materialized calculated table
+ *  (null when nothing is). Shown in the cascade-confirm dialogs. */
+function dependentsSummary(d: CalculatedTableDependents): string | null {
+  const lines: string[] = [];
+  if (d.relationships.length > 0) lines.push(`Relationships: ${d.relationships.join(", ")}`);
+  if (d.hierarchies.length > 0) lines.push(`Hierarchies: ${d.hierarchies.join(", ")}`);
+  if (d.securityRoles.length > 0) lines.push(`Security-role filters in: ${d.securityRoles.join(", ")}`);
+  if (d.tableVariables.length > 0) lines.push(`Table variables: ${d.tableVariables.join(", ")}`);
+  return lines.length > 0 ? lines.join("\n") : null;
+}
 
 export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -18,12 +34,43 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
     null,
   );
 
+  const [materializing, setMaterializing] = useState<string | null>(null);
+
   const handleDelete = async (g: ModelGlobalVariableInfo) => {
-    if (!window.confirm(`Delete calculated table '${g.name}'?`)) return;
+    let cascade = false;
+    if (!g.dynamic) {
+      // Deleting a materialized calculated table removes its table from the
+      // model — confirm with the list of everything bound to it.
+      let summary: string | null = null;
+      try {
+        summary = dependentsSummary(await biModelCalculatedTableDependents(connectionId, g.name));
+      } catch (err: unknown) {
+        reportError(err);
+        return;
+      }
+      const message = summary
+        ? `Delete calculated table '${g.name}'?\n\nIts materialized table is removed from the model together with everything bound to it:\n\n${summary}`
+        : `Delete calculated table '${g.name}'? (Its materialized table is removed from the model.)`;
+      if (!window.confirm(message)) return;
+      cascade = summary !== null;
+    } else if (!window.confirm(`Delete calculated table '${g.name}'?`)) {
+      return;
+    }
     try {
-      applyOverview(await biModelDeleteGlobalVariable(connectionId, g.name));
+      applyOverview(await biModelDeleteGlobalVariable(connectionId, g.name, cascade));
     } catch (err: unknown) {
       reportError(err);
+    }
+  };
+
+  const handleMaterialize = async (g: ModelGlobalVariableInfo) => {
+    setMaterializing(g.name);
+    try {
+      await biModelMaterializeCalculatedTable(connectionId, g.name);
+    } catch (err: unknown) {
+      reportError(err);
+    } finally {
+      setMaterializing(null);
     }
   };
 
@@ -68,6 +115,16 @@ export function GlobalsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
                 {g.expression}
               </div>
             </div>
+            {!g.dynamic && (
+              <button
+                style={styles.smallBtn}
+                disabled={readOnly || materializing === g.name}
+                title="Evaluate the QUERY now and refresh the materialized table's data"
+                onClick={() => void handleMaterialize(g)}
+              >
+                {materializing === g.name ? "Materializing…" : "Materialize"}
+              </button>
+            )}
             <button style={styles.smallBtn} disabled={readOnly} onClick={() => setEditing({ original: g })}>
               Edit
             </button>
@@ -124,16 +181,50 @@ function GlobalVariableModal({
     setBusy(true);
     setError(null);
     try {
-      onSaved(
-        await biModelUpsertGlobalVariable({
-          connectionId,
-          originalName: original?.name ?? null,
-          name: name.trim(),
-          table,
-          expression: expression.trim(),
-          dynamic,
-        }),
-      );
+      // A materialized calculated table flipped to dynamic (or renamed) loses
+      // its model table — confirm the destructive cascade first, listing
+      // everything bound to the table that will be removed with it.
+      let cascade = false;
+      const unmaterializes =
+        original != null && !original.dynamic && (dynamic || name.trim() !== original.name);
+      if (unmaterializes) {
+        const summary = dependentsSummary(
+          await biModelCalculatedTableDependents(connectionId, original.name),
+        );
+        if (summary) {
+          const action = dynamic
+            ? "Making it dynamic removes its table from the model"
+            : "Renaming it replaces its table in the model";
+          const ok = window.confirm(
+            `'${original.name}' is materialized. ${action}, together with everything bound to the table:\n\n${summary}\n\nContinue?`,
+          );
+          if (!ok) {
+            setBusy(false);
+            return;
+          }
+          cascade = true;
+        }
+      }
+      const overview = await biModelUpsertGlobalVariable({
+        connectionId,
+        originalName: original?.name ?? null,
+        name: name.trim(),
+        table,
+        expression: expression.trim(),
+        dynamic,
+        cascade,
+      });
+      // Populate the materialized table's data right away (refresh paths
+      // also re-materialize automatically). A failure here does not undo the
+      // model edit — surface it, then close normally.
+      if (!dynamic) {
+        try {
+          await biModelMaterializeCalculatedTable(connectionId, name.trim());
+        } catch (err: unknown) {
+          window.alert(`Calculated table saved, but materializing its data failed:\n${String(err)}`);
+        }
+      }
+      onSaved(overview);
     } catch (err: unknown) {
       setError(String(err));
       setBusy(false);

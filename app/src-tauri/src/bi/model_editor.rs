@@ -2495,6 +2495,7 @@ pub async fn bi_model_upsert_global_variable(
     table: String,
     expression: String,
     dynamic: Option<bool>,
+    cascade: Option<bool>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -2509,20 +2510,37 @@ pub async fn bi_model_upsert_global_variable(
         if expression.trim().is_empty() {
             return Err(format!("Calculated table '{}' has an empty expression", trimmed));
         }
+        let dynamic = dynamic.unwrap_or(true);
         let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
             .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?
-            .with_dynamic(dynamic.unwrap_or(true));
+            .with_dynamic(dynamic);
 
         let mut globals = base.global_variables().to_vec();
+        // When the edit makes the OLD derived table disappear — a
+        // materialized calculated table flipped to dynamic or renamed — a
+        // requested cascade removes everything bound to it (relationships,
+        // hierarchies, role filters, table variables). The UI confirms the
+        // dependents list first; without cascade, validate fails closed.
+        let mut cascade_target: Option<String> = None;
         match original_name.as_deref() {
             Some(orig) => {
                 let Some(idx) = globals.iter().position(|g| g.name() == orig) else {
                     return Err(format!("Calculated table '{}' not found", orig));
                 };
+                let was_materialized = !globals[idx].is_dynamic();
+                if was_materialized && (dynamic || orig != trimmed) {
+                    cascade_target = Some(orig.to_string());
+                }
                 globals[idx] = gv;
             }
             None => globals.push(gv),
         }
+        let base = match cascade_target {
+            Some(old_name) if cascade.unwrap_or(false) => {
+                strip_calculated_table_dependents(base, &old_name)
+            }
+            _ => base.clone(),
+        };
         // Reconciles the derived table of a materialized calculated table
         // (synthesize/refresh/remove) alongside the list replacement.
         let edited = base
@@ -2540,18 +2558,30 @@ pub async fn bi_model_delete_global_variable(
     file_state: State<'_, FileState>,
     connection_id: ConnectionId,
     name: String,
+    cascade: Option<bool>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
         let mut globals = base.global_variables().to_vec();
         let before = globals.len();
+        let was_materialized = globals
+            .iter()
+            .any(|g| g.name() == name && !g.is_dynamic());
         globals.retain(|g| g.name() != name);
         if globals.len() == before {
             return Err(format!("Calculated table '{}' not found", name));
         }
+        // A cascade delete of a materialized calculated table also removes
+        // everything bound to its derived table (relationships, hierarchies,
+        // role filters, table variables) — the UI confirms the list first.
+        let base = if was_materialized && cascade.unwrap_or(false) {
+            strip_calculated_table_dependents(base, &name)
+        } else {
+            base.clone()
+        };
         // Drops a materialized calculated table's derived table too; validate
-        // then fails closed if relationships still reference it.
+        // then fails closed if anything still references it.
         let edited = base
             .with_global_variables(globals)
             .map_err(|e| format!("{}", e))?;
@@ -2559,6 +2589,142 @@ pub async fn bi_model_delete_global_variable(
         Ok(edited)
     })
     .await
+}
+
+/// What is bound to a materialized calculated table's DERIVED table — the
+/// entities a materialized -> dynamic flip (or delete/rename) would leave
+/// dangling. The UI lists these in the cascade-confirm dialog.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedTableDependentsDto {
+    pub relationships: Vec<String>,
+    pub hierarchies: Vec<String>,
+    /// Roles with at least one row filter targeting the derived table.
+    pub security_roles: Vec<String>,
+    pub table_variables: Vec<String>,
+}
+
+fn calculated_table_dependents(
+    base: &bi_engine::DataModel,
+    name: &str,
+) -> CalculatedTableDependentsDto {
+    CalculatedTableDependentsDto {
+        relationships: base
+            .relationships()
+            .iter()
+            .filter(|r| r.from_table() == name || r.to_table() == name)
+            .map(|r| r.name().to_string())
+            .collect(),
+        hierarchies: base
+            .hierarchies()
+            .iter()
+            .filter(|h| h.table() == name)
+            .map(|h| h.name().to_string())
+            .collect(),
+        security_roles: base
+            .security_roles()
+            .iter()
+            .filter(|role| role.table_filters().iter().any(|f| f.table == name))
+            .map(|role| role.name().to_string())
+            .collect(),
+        table_variables: base
+            .table_variables()
+            .iter()
+            .filter(|tv| tv.source() == name)
+            .map(|tv| tv.name().to_string())
+            .collect(),
+    }
+}
+
+/// Remove everything bound to a (former) materialized calculated table's
+/// derived table: relationships touching it, hierarchies on it, role filters
+/// targeting it (the role itself stays, minus those filters), and table
+/// variables sourced from it. The inverse of [`calculated_table_dependents`].
+fn strip_calculated_table_dependents(
+    base: &bi_engine::DataModel,
+    name: &str,
+) -> bi_engine::DataModel {
+    let relationships = base
+        .relationships()
+        .iter()
+        .filter(|r| r.from_table() != name && r.to_table() != name)
+        .cloned()
+        .collect();
+    let hierarchies = base
+        .hierarchies()
+        .iter()
+        .filter(|h| h.table() != name)
+        .cloned()
+        .collect();
+    let security_roles = base
+        .security_roles()
+        .iter()
+        .map(|role| {
+            let kept: Vec<bi_engine::FilterPredicate> = role
+                .table_filters()
+                .iter()
+                .filter(|f| f.table != name)
+                .cloned()
+                .collect();
+            bi_engine::SecurityRole::new(role.name()).with_filters(kept)
+        })
+        .collect();
+    let table_variables = base
+        .table_variables()
+        .iter()
+        .filter(|tv| tv.source() != name)
+        .cloned()
+        .collect();
+    base.with_relationships(relationships)
+        .with_hierarchies(hierarchies)
+        .with_security_roles(security_roles)
+        .with_table_variables(table_variables)
+}
+
+/// List what is bound to a materialized calculated table's derived table, so
+/// the UI can confirm the destructive cascade before a materialized -> dynamic
+/// flip, rename, or delete.
+#[tauri::command]
+pub fn bi_model_calculated_table_dependents(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<CalculatedTableDependentsDto, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let conns = bi_state.connections.lock().unwrap();
+    let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+    let base = conn
+        .base_model
+        .as_ref()
+        .ok_or("This connection has no editable base model")?;
+    Ok(calculated_table_dependents(base, &name))
+}
+
+/// Evaluate a materialized calculated table's QUERY over the model NOW and
+/// store the result as the derived table's in-memory data. Called by the UI
+/// after saving a materialized calculated table (and from its row button);
+/// refresh paths (`refresh_stale`) also materialize automatically.
+#[tauri::command]
+pub async fn bi_model_materialize_calculated_table(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let engine_arc = {
+        let conns = bi_state.connections.lock().map_err(|e| e.to_string())?;
+        conns
+            .get(&connection_id)
+            .and_then(|c| c.engine.clone())
+            .ok_or("Connection has no engine")?
+    };
+    let mut guard = engine_arc.lock().await;
+    guard
+        .materialize_calculated_table(&name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -4678,14 +4844,27 @@ mod tests {
     }
 
     #[test]
-    fn rename_leaving_dangling_reference_is_rejected_by_validate() {
+    fn rename_rewrites_dependent_references() {
         let base = base_model();
         let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None).unwrap();
         let base = upsert_measure_model(&base, None, dep).unwrap();
 
-        // Rename Revenue -> Income: Boosted's [Revenue] now dangles.
+        // Rename Revenue -> Income: Boosted's [Revenue] follows the rename
+        // (upsert rewrites dependent references before validating).
         let renamed = build_measure("Income", "SUM(Sales[amount])", None, None).unwrap();
-        assert!(upsert_measure_model(&base, Some("Revenue"), renamed).is_err());
+        let edited = upsert_measure_model(&base, Some("Revenue"), renamed).unwrap();
+        assert!(edited.measures().iter().all(|m| m.name() != "Revenue"));
+        let boosted = edited
+            .measures()
+            .iter()
+            .find(|m| m.name() == "Boosted")
+            .unwrap();
+        let refs: Vec<String> = boosted
+            .referenced_measures()
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
+        assert_eq!(refs, vec!["Income".to_string()], "got: {refs:?}");
     }
 
     #[test]
@@ -4725,8 +4904,29 @@ mod tests {
     }
 
     #[test]
-    fn pure_measure_reference_is_rejected_with_column_guidance() {
-        let err = build_measure("Bad", "[Revenue] * 2", None, None).unwrap_err();
+    fn pure_measure_reference_resolves_to_referenced_measures_home_table() {
+        // `[Revenue] * 2` has no column of its own; upsert resolves its home
+        // table from the measure it builds on.
+        let base = base_model();
+        let m = build_measure("Doubled", "[Revenue] * 2", None, None).unwrap();
+        let edited = upsert_measure_model(&base, None, m).unwrap();
+        let doubled = edited
+            .measures()
+            .iter()
+            .find(|m| m.name() == "Doubled")
+            .unwrap();
+        assert_eq!(doubled.table(), "Sales");
+    }
+
+    #[test]
+    fn measure_reference_resolving_to_no_table_is_rejected_with_column_guidance() {
+        let base = base_model();
+        // A constant measure legitimately has no home table...
+        let konst = build_measure("Konst", "42", None, None).unwrap();
+        let base = upsert_measure_model(&base, None, konst).unwrap();
+        // ...but a measure referencing ONLY it cannot resolve a table.
+        let bad = build_measure("Bad", "[Konst] * 2", None, None).unwrap();
+        let err = upsert_measure_model(&base, None, bad).unwrap_err();
         assert!(err.contains("column form"), "got: {}", err);
     }
 

@@ -250,10 +250,28 @@ mod tests {
     }
 
     #[test]
-    fn combined_model_rejects_pure_measure_reference() {
-        // No direct column -> empty fact table -> rejected with guidance.
-        let err = build_combined_model(&base_model(), &[cm("DoubleRev", "[Revenue] * 2")])
-            .unwrap_err();
+    fn combined_model_resolves_pure_measure_reference() {
+        // No direct column: the home table resolves from the referenced
+        // measure ([Revenue] -> Sales).
+        let combined = build_combined_model(&base_model(), &[cm("DoubleRev", "[Revenue] * 2")])
+            .unwrap();
+        let m = combined
+            .measures()
+            .iter()
+            .find(|m| m.name() == "DoubleRev")
+            .unwrap();
+        assert_eq!(m.table(), "Sales");
+    }
+
+    #[test]
+    fn combined_model_rejects_reference_resolving_to_no_table() {
+        // A reference chain that bottoms out in a table-less constant cannot
+        // resolve a home table -> rejected with the column-form guidance.
+        let err = build_combined_model(
+            &base_model(),
+            &[cm("Konst", "42"), cm("Bad", "[Konst] * 2")],
+        )
+        .unwrap_err();
         assert!(err.contains("column form"), "got: {}", err);
     }
 

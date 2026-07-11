@@ -4073,6 +4073,8 @@ pub fn run() {
             bi::model_editor::bi_model_delete_calc_group,
             bi::model_editor::bi_model_upsert_global_variable,
             bi::model_editor::bi_model_delete_global_variable,
+            bi::model_editor::bi_model_calculated_table_dependents,
+            bi::model_editor::bi_model_materialize_calculated_table,
             bi::model_editor::bi_model_upsert_table_variable,
             bi::model_editor::bi_model_delete_table_variable,
             bi::model_editor::bi_model_upsert_script_function,

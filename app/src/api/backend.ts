@@ -4090,6 +4090,13 @@ export async function biModelUpsertGlobalVariable(params: {
   expression: string;
   /** Default true (dynamic). False = materialized at refresh. */
   dynamic?: boolean;
+  /**
+   * When the edit un-materializes or renames a materialized calculated
+   * table, also remove everything bound to its derived table (relationships,
+   * hierarchies, role filters, table variables). Confirm with the user via
+   * biModelCalculatedTableDependents first; without it the edit fails closed.
+   */
+  cascade?: boolean;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_global_variable", {
     connectionId: params.connectionId,
@@ -4098,14 +4105,56 @@ export async function biModelUpsertGlobalVariable(params: {
     table: params.table,
     expression: params.expression,
     dynamic: params.dynamic ?? true,
+    cascade: params.cascade ?? false,
   });
 }
 
 export async function biModelDeleteGlobalVariable(
   connectionId: string,
   name: string,
+  cascade?: boolean,
 ): Promise<ModelOverview> {
-  return invoke<ModelOverview>("bi_model_delete_global_variable", { connectionId, name });
+  return invoke<ModelOverview>("bi_model_delete_global_variable", {
+    connectionId,
+    name,
+    cascade: cascade ?? false,
+  });
+}
+
+/** What is bound to a materialized calculated table's derived table. */
+export interface CalculatedTableDependents {
+  relationships: string[];
+  hierarchies: string[];
+  /** Roles with at least one row filter targeting the derived table. */
+  securityRoles: string[];
+  tableVariables: string[];
+}
+
+/**
+ * List what a materialized -> dynamic flip, rename, or delete of a
+ * materialized calculated table would leave dangling — shown in the
+ * cascade-confirm dialog before passing `cascade: true`.
+ */
+export async function biModelCalculatedTableDependents(
+  connectionId: string,
+  name: string,
+): Promise<CalculatedTableDependents> {
+  return invoke<CalculatedTableDependents>("bi_model_calculated_table_dependents", {
+    connectionId,
+    name,
+  });
+}
+
+/**
+ * Evaluate a materialized calculated table's QUERY now and store the result
+ * as the derived table's in-memory data (refresh paths also do this
+ * automatically).
+ */
+export async function biModelMaterializeCalculatedTable(
+  connectionId: string,
+  name: string,
+): Promise<void> {
+  return invoke<void>("bi_model_materialize_calculated_table", { connectionId, name });
 }
 
 // --- Table variables ---
