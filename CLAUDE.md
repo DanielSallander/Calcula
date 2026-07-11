@@ -1,6 +1,6 @@
 # Calcula Engine Lib
 
-A columnar analytical engine library (Rust crate) that provides in-memory data modeling, query planning with pushdown, and measure computation. Embedded by both **Calcula** (spreadsheet) and **Calcula Studio** (data model designer).
+A columnar analytical engine library (Rust crate) that provides in-memory data modeling, query planning with pushdown, and measure computation. Embedded by **Calcula** (spreadsheet), whose in-app **Model Editor** is the data-model designer. (Stand-alone Calcula Studio is RETIRED and FROZEN as of 2026-07-11 — engine changes must NOT consider it, and its build is expected to break against newer engine versions.)
 
 **Design philosophy:** This is a **library**, not a server. Like SQLite, it is embedded into host applications. It enables local-first analytical computation.
 
@@ -117,7 +117,7 @@ engine-connectors → engine-core (types only)
    - e. Handle **all** `AuthMethod` variants in `from_target` — return `ConnectorError::AuthMethodNotSupported` for methods you don't support.
    See `engine-connectors/src/auth.rs` for the full type definitions and checklist.
 
-9. **Document every host-facing change.** `docs/host-integration-changelog.md` is the committed log that the **Calcula Studio** and **Calcula** teams rely on to track changes to the library boundary. Whenever you make a change that those host applications need to know about, you MUST add an entry to that changelog in the same change. A change is host-facing — and therefore requires a changelog entry — if it touches any of:
+9. **Document every host-facing change.** `docs/host-integration-changelog.md` is the committed log that the **Calcula** team relies on to track changes to the library boundary. Whenever you make a change that those host applications need to know about, you MUST add an entry to that changelog in the same change. A change is host-facing — and therefore requires a changelog entry — if it touches any of:
    - The public API surface (new/changed/removed public types, functions, methods, or trait signatures host apps call).
    - The model JSON format (any serialized field, including a `MODEL_FORMAT_VERSION` bump).
    - A request contract (`QueryRequest`, `DetailRequest`, or any other host-supplied request type — new/changed/removed fields).
@@ -125,7 +125,7 @@ engine-connectors → engine-core (types only)
    - Error variants the host can observe.
    - Behavioral changes in existing surface that alter what a host sees (semantics, defaults, fail-closed conditions).
 
-   Purely internal changes (refactors, private helpers, test-only code, performance work with no observable difference) do NOT need an entry. When in doubt, ask: *"Would the Calcula Studio or Calcula team have to change their code, model files, or expectations because of this?"* If yes, log it. Follow the existing per-feature format and keep the version-history table in sync.
+   Purely internal changes (refactors, private helpers, test-only code, performance work with no observable difference) do NOT need an entry. When in doubt, ask: *"Would the Calcula team have to change their code, model files, or expectations because of this?"* If yes, log it. Follow the existing per-feature format and keep the version-history table in sync.
 
 ## Coding Conventions
 
