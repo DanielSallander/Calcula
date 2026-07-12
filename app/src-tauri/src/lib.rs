@@ -3991,6 +3991,7 @@ pub fn run() {
             pivot::ungroup_pivot_field,
             pivot::drill_through_to_sheet,
             pivot::set_pivot_drill_behavior,
+            pivot::set_pivot_perspective,
             pivot::get_pivot_drill_behavior,
             pivot::create_pivot_from_bi_model,
             pivot::update_bi_pivot_fields,

@@ -931,6 +931,32 @@ export async function getPivotBiMetadata(
   return pivotBackend.invoke<BiPivotModelInfo | null>("get_pivot_bi_metadata", { pivotId });
 }
 
+/**
+ * Fresh connection-level model metadata (same `BiPivotModelInfo` shape a
+ * pivot exposes, no pivot required). Used by the perspective picker to show
+ * the model's CURRENT perspectives — the copy stored in pivot metadata is a
+ * snapshot from pivot creation. Returns null when the connection has no
+ * loaded model (e.g. offline before reconnect).
+ */
+export async function getConnectionBiModel(
+  connectionId: string,
+): Promise<BiPivotModelInfo | null> {
+  return pivotBackend.invoke<BiPivotModelInfo | null>("get_connection_bi_model", {
+    connectionId,
+  });
+}
+
+/**
+ * Select the perspective filtering a BI pivot's field-list DISPLAY
+ * (null = show all fields). Display-only; persists with the workbook.
+ */
+export async function setPivotPerspective(
+  pivotId: PivotId,
+  perspective: string | null,
+): Promise<void> {
+  return pivotBackend.invoke<void>("set_pivot_perspective", { pivotId, perspective });
+}
+
 // ============================================================================
 // BI Pivot API Functions
 // ============================================================================

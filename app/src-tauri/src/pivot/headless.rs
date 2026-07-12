@@ -55,7 +55,8 @@ pub async fn get_connection_bi_model(
         None => return Ok(None),
     };
     let engine = engine_arc.lock().await;
-    let (tables, measures, hierarchies, calculation_groups) = extract_bi_model_metadata(&engine);
+    let (tables, measures, hierarchies, calculation_groups, perspectives) =
+        extract_bi_model_metadata(&engine);
     Ok(Some(BiPivotModelInfo {
         connection_id,
         tables,
@@ -65,6 +66,9 @@ pub async fn get_connection_bi_model(
         calculation_groups,
         applied_calculation_group: None,
         data_as_of: None,
+        perspectives,
+        // Connection-level metadata has no pivot, hence no selection.
+        selected_perspective: None,
     }))
 }
 
@@ -162,7 +166,8 @@ pub(crate) async fn compute_design_query_view(
     // Add each measure's home table (usually the fact table) so it is warmed too.
     {
         let engine = engine_arc.lock().await;
-        let (_tables, measures, _hier, _calc_groups) = extract_bi_model_metadata(&engine);
+        let (_tables, measures, _hier, _calc_groups, _perspectives) =
+            extract_bi_model_metadata(&engine);
         for vf in &request.value_fields {
             if let Some(m) = measures.iter().find(|m| m.name == vf.measure_name) {
                 if !m.table.is_empty() && !referenced_tables.contains(&m.table) {

@@ -446,6 +446,24 @@ export interface BiPivotModelInfo {
   appliedCalculationGroup?: AppliedCalcGroup;
   /** ISO-8601 time this pivot's data was last fetched ("Data as of …"). */
   dataAsOf?: string;
+  /** Perspectives defined in the BI model (field-list display subsets). */
+  perspectives?: BiPerspectiveInfo[];
+  /** The perspective selected for this pivot's field list (null = all). */
+  selectedPerspective?: string | null;
+}
+
+/** A perspective: a named presentation subset of the model (display-only —
+ *  not a security boundary; selecting one filters the field LIST, never the
+ *  query). Mirrors Rust `BiPerspectiveMeta`. */
+export interface BiPerspectiveInfo {
+  name: string;
+  /** Tables shown in full (all their columns). */
+  tables: string[];
+  /** Individually shown qualified `Table[column]` refs. */
+  columns: string[];
+  /** Measures shown. */
+  measures: string[];
+  description?: string | null;
 }
 
 export interface BiModelTable {

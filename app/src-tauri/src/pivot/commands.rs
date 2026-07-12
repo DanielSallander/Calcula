@@ -1837,6 +1837,8 @@ pub fn get_pivot_at_cell(
                 calculation_groups: meta.calculation_groups.clone(),
                 applied_calculation_group: meta.applied_calc_group.clone(),
                 data_as_of: meta.data_as_of.clone(),
+                perspectives: meta.perspectives.clone(),
+                selected_perspective: meta.selected_perspective.clone(),
             }
         })
     };
@@ -2483,6 +2485,8 @@ pub fn get_pivot_hierarchies(
                 calculation_groups: meta.calculation_groups.clone(),
                 applied_calculation_group: meta.applied_calc_group.clone(),
                 data_as_of: meta.data_as_of.clone(),
+                perspectives: meta.perspectives.clone(),
+                selected_perspective: meta.selected_perspective.clone(),
             }
         })
     };
@@ -3367,6 +3371,8 @@ pub fn get_pivot_bi_metadata(
             // behavior dialog) can offer a column/attribute picker.
             "tables": meta.model_tables,
             "measures": meta.measures,
+            "perspectives": meta.perspectives,
+            "selectedPerspective": meta.selected_perspective,
         }))
     } else {
         None
@@ -4367,6 +4373,30 @@ pub fn set_pivot_drill_behavior(
     Ok(())
 }
 
+/// Select the perspective filtering a BI pivot's FIELD LIST display
+/// (`None` / empty = show all fields). Display-only metadata -- queries and
+/// existing zone assignments are unaffected; persists with the workbook and
+/// travels in .calp. An unknown name is accepted and simply filters nothing
+/// (the model's perspectives may change under the pivot).
+#[tauri::command]
+pub fn set_pivot_perspective(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    perspective: Option<String>,
+) -> Result<(), String> {
+    let mut bi_meta = pivot_state
+        .bi_metadata
+        .lock()
+        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+    let meta = bi_meta
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot {} is not a BI-backed pivot", pivot_id))?;
+    meta.selected_perspective = perspective
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    Ok(())
+}
+
 /// Get a BI pivot's current drill-through behavior (`None` = default builtin).
 #[tauri::command]
 pub fn get_pivot_drill_behavior(
@@ -4566,6 +4596,7 @@ pub(crate) fn extract_bi_model_metadata(
     Vec<MeasureFieldInfo>,
     Vec<BiHierarchyMeta>,
     Vec<BiCalcGroupMeta>,
+    Vec<super::types::BiPerspectiveMeta>,
 ) {
     let model = engine.model();
 
@@ -4726,7 +4757,21 @@ pub(crate) fn extract_bi_model_metadata(
         })
         .collect();
 
-    (tables, measures, hierarchies, calculation_groups)
+    // Perspectives: named presentation subsets for the field list. Display
+    // metadata only -- selecting one filters what the field list SHOWS.
+    let perspectives: Vec<super::types::BiPerspectiveMeta> = model
+        .perspectives()
+        .iter()
+        .map(|p| super::types::BiPerspectiveMeta {
+            name: p.name().to_string(),
+            tables: p.tables().to_vec(),
+            columns: p.columns().to_vec(),
+            measures: p.measures().to_vec(),
+            description: p.description().map(|s| s.to_string()),
+        })
+        .collect();
+
+    (tables, measures, hierarchies, calculation_groups, perspectives)
 }
 
 /// Creates an empty BI pivot from the full model (all tables + measures).
@@ -4749,7 +4794,7 @@ pub async fn create_pivot_from_bi_model(
 
     // Extract model metadata from the connection's engine (reads the in-memory
     // model; no DB connection required, so this works offline).
-    let (model_tables, measures, hierarchies, calc_groups) = {
+    let (model_tables, measures, hierarchies, calc_groups, perspectives) = {
         let engine_arc = {
             let connections = bi_state.connections.lock().unwrap();
             let conn = connections.get(&connection_id)
@@ -4886,6 +4931,8 @@ pub async fn create_pivot_from_bi_model(
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
         drill_through: None,
+        perspectives,
+        selected_perspective: None,
     };
     pivot_state
         .bi_metadata

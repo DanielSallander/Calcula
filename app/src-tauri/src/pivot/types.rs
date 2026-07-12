@@ -1624,6 +1624,12 @@ pub struct SavedBiPivotMetadata {
     /// Drill-through behavior config (None = default builtin). Travels in .calp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drill_through: Option<DrillThroughBehavior>,
+    /// Perspectives defined in the BI model (field-list display subsets).
+    #[serde(default)]
+    pub perspectives: Vec<BiPerspectiveMeta>,
+    /// The perspective selected for this pivot's field list (None = all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_perspective: Option<String>,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
@@ -1657,6 +1663,11 @@ pub struct BiPivotMetadata {
     pub lookup_columns: std::collections::HashSet<String>,
     /// Drill-through behavior config (None = default builtin).
     pub drill_through: Option<DrillThroughBehavior>,
+    /// Perspectives defined in the BI model (field-list display subsets).
+    pub perspectives: Vec<BiPerspectiveMeta>,
+    /// The perspective currently selected for this pivot's field list
+    /// (None = show all fields). Display-only; persists with the workbook.
+    pub selected_perspective: Option<String>,
 }
 
 /// Table metadata from a BI model.
@@ -1701,6 +1712,24 @@ pub struct MeasureFieldInfo {
     pub table: String,
     pub source_column: String,
     pub aggregation: String,
+}
+
+/// A perspective surfaced to the field list (mirrors engine `Perspective`):
+/// a named presentation subset — tables shown in full, individually shown
+/// `Table[column]` refs, and shown measures. Selecting one filters the field
+/// list DISPLAY only (not a security boundary; queries are unaffected).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiPerspectiveMeta {
+    pub name: String,
+    #[serde(default)]
+    pub tables: Vec<String>,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A calculation group surfaced to the field list (mirrors engine
@@ -1770,6 +1799,13 @@ pub struct BiPivotModelInfo {
     /// the editor control reflects the active selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_calculation_group: Option<AppliedCalcGroup>,
+    /// Perspectives defined in the BI model (field-list display subsets).
+    #[serde(default)]
+    pub perspectives: Vec<BiPerspectiveMeta>,
+    /// The perspective selected for THIS pivot's field list (None = all;
+    /// always None for connection-level metadata with no pivot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_perspective: Option<String>,
     /// ISO-8601 timestamp of when this pivot's data was last fetched ("Data as
     /// of …"). Lets a reader gauge offline-snapshot freshness.
     #[serde(default, skip_serializing_if = "Option::is_none")]

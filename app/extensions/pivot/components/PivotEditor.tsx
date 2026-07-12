@@ -14,6 +14,7 @@ import { pivot, savePivotLayout } from '@api/pivot';
 import { openTaskPane, getBiConnectionService } from '@api';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
+import { getConnectionBiModel, setPivotPerspective } from '../lib/pivot-api';
 import type {
   SourceField,
   ZoneField,
@@ -24,6 +25,7 @@ import type {
   BiFieldRef,
   BiValueFieldRef,
   BiHierarchyFieldRef,
+  BiPerspectiveInfo,
   MeasureField,
   PivotId,
   CalculatedFieldDef,
@@ -223,6 +225,55 @@ export function PivotEditor({
   // on the Values axis. v1 applies all items of the selected group (null = none).
   const [appliedCalcGroup, setAppliedCalcGroup] = useState<AppliedCalcGroup | null>(
     () => biModel?.appliedCalculationGroup ?? null,
+  );
+
+  // Perspective picker: which model perspective filters the field-list
+  // DISPLAY (null = all fields). Persisted per pivot via set_pivot_perspective.
+  const [selectedPerspective, setSelectedPerspective] = useState<string | null>(
+    () => biModel?.selectedPerspective ?? null,
+  );
+  // The editor component may be REUSED across pivots (no key on the host) --
+  // re-seed the selection from the new pivot's metadata when pivotId changes,
+  // without clobbering in-session changes to the SAME pivot (the biModel prop
+  // stays stale after setPivotPerspective until the next metadata fetch).
+  const perspectivePivotRef = useRef(pivotId);
+  useEffect(() => {
+    if (perspectivePivotRef.current !== pivotId) {
+      perspectivePivotRef.current = pivotId;
+      setSelectedPerspective(biModel?.selectedPerspective ?? null);
+    }
+  }, [pivotId, biModel?.selectedPerspective]);
+  // The perspectives stored in pivot metadata are a snapshot from pivot
+  // creation; overlay the model's CURRENT list when the connection is live
+  // (offline falls back to the snapshot, so the picker still works).
+  const [livePerspectives, setLivePerspectives] = useState<BiPerspectiveInfo[] | null>(null);
+  useEffect(() => {
+    // Drop any previous connection's overlay so a failed fetch can never show
+    // another connection's perspectives.
+    setLivePerspectives(null);
+    if (!biModel) return;
+    let cancelled = false;
+    getConnectionBiModel(biModel.connectionId)
+      .then((m) => {
+        if (!cancelled && m?.perspectives) setLivePerspectives(m.perspectives);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [biModel?.connectionId]);
+  const fieldListModel = useMemo(() => {
+    if (!biModel || !livePerspectives) return biModel;
+    return { ...biModel, perspectives: livePerspectives };
+  }, [biModel, livePerspectives]);
+  const handlePerspectiveChange = useCallback(
+    (name: string | null) => {
+      setSelectedPerspective(name);
+      // Persist per pivot; a failure (e.g. stale pivot id) only loses the
+      // saved selection, never the display change.
+      void setPivotPerspective(pivotId, name).catch(() => {});
+    },
+    [pivotId],
   );
 
   // Ref to resetZones (set after usePivotEditorState, used in handleUpdate catch)
@@ -743,9 +794,9 @@ export function PivotEditor({
 
       {/* Fields tab content */}
       <div className={styles.content} style={{ display: activeTab === 'fields' ? 'flex' : 'none' }}>
-        {isBiPivot && biModel ? (
+        {isBiPivot && fieldListModel ? (
           <TableFieldList
-            biModel={biModel}
+            biModel={fieldListModel}
             usedColumns={usedColumnsSet}
             usedMeasures={usedMeasuresSet}
             usedHierarchies={usedHierarchiesSet}
@@ -754,6 +805,8 @@ export function PivotEditor({
             onMeasureToggle={handleBiMeasureToggle}
             onHierarchyToggle={handleBiHierarchyToggle}
             onLookupToggle={handleLookupToggle}
+            selectedPerspective={selectedPerspective}
+            onPerspectiveChange={handlePerspectiveChange}
           />
         ) : (
           <FieldList

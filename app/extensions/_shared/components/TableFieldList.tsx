@@ -8,6 +8,7 @@ import { css } from '@emotion/css';
 import { styles } from './EditorStyles';
 import { useDraggable } from './useDragDrop';
 import type { DragField, MeasureField } from './types';
+import { applyPerspective, type BiPerspectiveInfo } from './perspectiveFilter';
 
 // --- Types ---
 
@@ -62,6 +63,8 @@ export interface BiPivotModelInfo {
   /** Calculation groups defined in the BI model. Items are measure templates
    *  applied on the Values axis, not groupable dimensions. Read-only in v1. */
   calculationGroups?: BiCalcGroup[];
+  /** Perspectives defined in the BI model (display subsets for this list). */
+  perspectives?: BiPerspectiveInfo[];
 }
 
 interface TableFieldListProps {
@@ -80,6 +83,10 @@ interface TableFieldListProps {
   onLookupToggle?: (table: string, column: string) => void;
   onDragStart?: (field: DragField) => void;
   onDragEnd?: () => void;
+  /** The perspective currently filtering the list (null = all fields). */
+  selectedPerspective?: string | null;
+  /** Called when the user picks a perspective (null = "(All fields)"). */
+  onPerspectiveChange?: (name: string | null) => void;
 }
 
 // --- Styles ---
@@ -89,6 +96,23 @@ const treeStyles = {
     padding: 6px 8px;
     border-bottom: 1px solid #eaeef2;
     background: #f6f8fa;
+  `,
+  perspectiveSelect: css`
+    width: 100%;
+    padding: 4px 6px;
+    margin-bottom: 6px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    background: #fff;
+    color: #24292f;
+    cursor: pointer;
+    &:focus {
+      border-color: #0969da;
+      box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+    }
   `,
   searchInput: css`
     width: 100%;
@@ -589,8 +613,17 @@ export function TableFieldList({
   onMeasureToggle,
   onHierarchyToggle,
   onLookupToggle,
+  selectedPerspective,
+  onPerspectiveChange,
 }: TableFieldListProps): React.ReactElement {
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Perspective display filter: a selected perspective narrows the tables /
+  // columns / measures / hierarchies this list SHOWS (never the query).
+  const perspectiveModel = useMemo(
+    () => applyPerspective(biModel, biModel.perspectives, selectedPerspective),
+    [biModel, selectedPerspective],
+  );
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
     // Start with all folders expanded
     const set = new Set<string>();
@@ -636,14 +669,14 @@ export function TableFieldList({
 
   // Filter measures by search
   const filteredMeasures = useMemo(() => {
-    if (!query) return biModel.measures;
-    return biModel.measures.filter((m) => m.name.toLowerCase().includes(query));
-  }, [biModel.measures, query]);
+    if (!query) return perspectiveModel.measures;
+    return perspectiveModel.measures.filter((m) => m.name.toLowerCase().includes(query));
+  }, [perspectiveModel.measures, query]);
 
   // Filter tables/columns by search — auto-expand matching tables
   const filteredTables = useMemo(() => {
-    if (!query) return biModel.tables;
-    return biModel.tables
+    if (!query) return perspectiveModel.tables;
+    return perspectiveModel.tables
       .map((t) => ({
         ...t,
         columns: t.columns.filter(
@@ -653,13 +686,13 @@ export function TableFieldList({
         ),
       }))
       .filter((t) => t.columns.length > 0);
-  }, [biModel.tables, query]);
+  }, [perspectiveModel.tables, query]);
 
   // Filter hierarchies by search and group by table
   const hierarchiesByTable = useMemo(() => {
     const map = new Map<string, BiHierarchyMeta[]>();
-    if (!biModel.hierarchies) return map;
-    for (const h of biModel.hierarchies) {
+    if (!perspectiveModel.hierarchies) return map;
+    for (const h of perspectiveModel.hierarchies) {
       if (query && !h.name.toLowerCase().includes(query) && !h.table.toLowerCase().includes(query)) {
         continue;
       }
@@ -668,7 +701,7 @@ export function TableFieldList({
       map.set(h.table, existing);
     }
     return map;
-  }, [biModel.hierarchies, query]);
+  }, [perspectiveModel.hierarchies, query]);
 
   // Filter calculation groups + items by search
   const filteredCalcGroups = useMemo(() => {
@@ -692,8 +725,32 @@ export function TableFieldList({
     <div className={styles.section} style={{ flex: 1, overflow: 'hidden' }}>
       <div className={styles.sectionTitle}>Choose fields to add to report</div>
       <div className={styles.fieldList}>
-        {/* Search input */}
+        {/* Perspective picker + search input */}
         <div className={treeStyles.searchContainer}>
+          {(biModel.perspectives?.length ?? 0) > 0 && onPerspectiveChange && (
+            <select
+              className={treeStyles.perspectiveSelect}
+              value={selectedPerspective ?? ''}
+              onChange={(e) => onPerspectiveChange(e.target.value || null)}
+              title={
+                'Perspective: show only a named subset of the model in this list. ' +
+                'Display-only — fields already in the pivot are unaffected.'
+              }
+            >
+              <option value="">(All fields)</option>
+              {selectedPerspective &&
+                !biModel.perspectives!.some((p) => p.name === selectedPerspective) && (
+                  <option value={selectedPerspective} disabled>
+                    {selectedPerspective} (no longer in the model)
+                  </option>
+                )}
+              {biModel.perspectives!.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             type="text"
             className={treeStyles.searchInput}

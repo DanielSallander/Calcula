@@ -45,6 +45,7 @@ export type {
   CalculatedFieldDef,
   ValueColumnRefDef,
   BiPivotModelInfo,
+  BiPerspectiveInfo,
   BiModelTable,
   BiModelColumn,
   BiCalcGroup,
