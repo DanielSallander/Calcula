@@ -4071,6 +4071,8 @@ pub fn run() {
             bi::model_editor::bi_model_upsert_role,
             bi::model_editor::bi_model_upsert_perspective,
             bi::model_editor::bi_model_delete_perspective,
+            bi::model_editor::bi_model_upsert_culture,
+            bi::model_editor::bi_model_delete_culture,
             bi::model_editor::bi_model_delete_role,
             bi::model_editor::bi_model_upsert_calc_group,
             bi::model_editor::bi_model_delete_calc_group,

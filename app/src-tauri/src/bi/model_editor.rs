@@ -594,7 +594,70 @@ pub async fn bi_model_upsert_measure(
         if let Some(g) = group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
             measure = measure.with_group(g);
         }
-        upsert_measure_model(base, orig.as_deref(), measure)
+        let renamed_from = orig
+            .as_deref()
+            .filter(|o| !o.eq_ignore_ascii_case(new_name.trim()))
+            .map(|o| o.to_string());
+        let edited = upsert_measure_model(base, orig.as_deref(), measure)?;
+        // A rename must carry presentation references along (perspectives and
+        // culture translations point at the measure BY NAME; leaving the old
+        // name would fail validation and brick the rename).
+        let edited = match renamed_from {
+            Some(old_name) => {
+                let new_trimmed = new_name.trim().to_string();
+                let perspectives = edited
+                    .perspectives()
+                    .iter()
+                    .map(|p| {
+                        let measures: Vec<String> = p
+                            .measures()
+                            .iter()
+                            .map(|m| {
+                                if m.eq_ignore_ascii_case(&old_name) {
+                                    new_trimmed.clone()
+                                } else {
+                                    m.clone()
+                                }
+                            })
+                            .collect();
+                        let mut np = bi_engine::Perspective::new(p.name())
+                            .with_tables(p.tables().to_vec())
+                            .with_columns(p.columns().to_vec())
+                            .with_measures(measures);
+                        if let Some(d) = p.description() {
+                            np = np.with_description(d);
+                        }
+                        np
+                    })
+                    .collect();
+                let cultures = edited
+                    .cultures()
+                    .iter()
+                    .map(|c| {
+                        let measures: Vec<bi_engine::NameTranslation> = c
+                            .measures()
+                            .iter()
+                            .map(|tr| {
+                                let mut tr = tr.clone();
+                                if tr.object.eq_ignore_ascii_case(&old_name) {
+                                    tr.object = new_trimmed.clone();
+                                }
+                                tr
+                            })
+                            .collect();
+                        bi_engine::Culture::new(c.locale())
+                            .with_table_translations(c.tables().to_vec())
+                            .with_column_translations(c.columns().to_vec())
+                            .with_measure_translations(measures)
+                    })
+                    .collect();
+                let e = edited.with_perspectives(perspectives).with_cultures(cultures);
+                e.validate().map_err(|err| format!("{}", err))?;
+                e
+            }
+            None => edited,
+        };
+        Ok(edited)
     })
     .await?;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
@@ -1072,6 +1135,35 @@ pub struct ModelPerspectiveInfo {
     pub description: Option<String>,
 }
 
+/// One object's translated metadata within a culture. `object` names the
+/// target: a table name, a qualified `Table[column]` ref, or a measure name
+/// depending on the owning list (mirrors engine `NameTranslation`).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameTranslationDto {
+    pub object: String,
+    /// Translated display name (`None` = keep the untranslated display).
+    pub display_name: Option<String>,
+    /// Translated description (`None` = keep the untranslated description).
+    pub description: Option<String>,
+}
+
+/// A culture: per-locale display-name/description translations for the
+/// model's tables, columns, and measures. DISPLAY-ONLY — field lists and
+/// editors swap labels; keys, queries, and expressions keep the raw names.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCultureInfo {
+    /// BCP-47 locale id (e.g. "sv-SE").
+    pub locale: String,
+    /// Table translations (`object` = table name).
+    pub tables: Vec<NameTranslationDto>,
+    /// Column translations (`object` = qualified `Table[column]`).
+    pub columns: Vec<NameTranslationDto>,
+    /// Measure translations (`object` = measure name).
+    pub measures: Vec<NameTranslationDto>,
+}
+
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalcGroupItemDto {
@@ -1202,6 +1294,8 @@ pub struct ModelOverview {
     pub security_roles: Vec<ModelRoleInfo>,
     /// Named presentation subsets of the model (perspectives).
     pub perspectives: Vec<ModelPerspectiveInfo>,
+    /// Per-locale metadata translations (cultures). Display-only.
+    pub cultures: Vec<ModelCultureInfo>,
     pub calculation_groups: Vec<ModelCalcGroupInfo>,
     pub measures: Vec<ModelMeasureInfo>,
     pub contexts: Vec<ModelContextInfo>,
@@ -1796,6 +1890,24 @@ fn build_overview(
         })
         .collect();
 
+    let cultures = base
+        .cultures()
+        .iter()
+        .map(|c| {
+            let dto = |t: &bi_engine::NameTranslation| NameTranslationDto {
+                object: t.object.clone(),
+                display_name: t.display_name.clone(),
+                description: t.description.clone(),
+            };
+            ModelCultureInfo {
+                locale: c.locale().to_string(),
+                tables: c.tables().iter().map(dto).collect(),
+                columns: c.columns().iter().map(dto).collect(),
+                measures: c.measures().iter().map(dto).collect(),
+            }
+        })
+        .collect();
+
     let calculation_groups = base
         .calculation_groups()
         .iter()
@@ -1890,6 +2002,7 @@ fn build_overview(
         kpis,
         security_roles,
         perspectives,
+        cultures,
         calculation_groups,
         measures: base.measures().iter().map(measure_info).collect(),
         contexts,
@@ -2600,6 +2713,98 @@ pub async fn bi_model_delete_perspective(
             return Err(format!("Perspective '{}' not found", name));
         }
         let edited = base.with_perspectives(perspectives);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Add or update a culture (per-locale metadata translations, display-only).
+#[tauri::command]
+pub async fn bi_model_upsert_culture(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_locale: Option<String>,
+    locale: String,
+    tables: Vec<NameTranslationDto>,
+    columns: Vec<NameTranslationDto>,
+    measures: Vec<NameTranslationDto>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = locale.trim();
+        if trimmed.is_empty() {
+            return Err("Culture locale cannot be empty".to_string());
+        }
+        // Author cleanup: drop rows that name no object, or that translate
+        // nothing (both display name and description empty).
+        let clean = |v: &[NameTranslationDto]| -> Vec<bi_engine::NameTranslation> {
+            v.iter()
+                .filter_map(|t| {
+                    let object = t.object.trim().to_string();
+                    let non_empty = |s: &Option<String>| {
+                        s.as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    };
+                    let display_name = non_empty(&t.display_name);
+                    let description = non_empty(&t.description);
+                    if object.is_empty() || (display_name.is_none() && description.is_none()) {
+                        return None;
+                    }
+                    Some(bi_engine::NameTranslation {
+                        object,
+                        display_name,
+                        description,
+                    })
+                })
+                .collect()
+        };
+        let culture = bi_engine::Culture::new(trimmed)
+            .with_table_translations(clean(&tables))
+            .with_column_translations(clean(&columns))
+            .with_measure_translations(clean(&measures));
+
+        let mut cultures = base.cultures().to_vec();
+        match original_locale.as_deref() {
+            Some(orig) => {
+                let Some(idx) = cultures
+                    .iter()
+                    .position(|c| c.locale().eq_ignore_ascii_case(orig))
+                else {
+                    return Err(format!("Culture '{}' not found", orig));
+                };
+                cultures[idx] = culture;
+            }
+            None => cultures.push(culture),
+        }
+        let edited = base.with_cultures(cultures);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_culture(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    locale: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut cultures = base.cultures().to_vec();
+        let before = cultures.len();
+        cultures.retain(|c| !c.locale().eq_ignore_ascii_case(&locale));
+        if cultures.len() == before {
+            return Err(format!("Culture '{}' not found", locale));
+        }
+        let edited = base.with_cultures(cultures);
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
     })

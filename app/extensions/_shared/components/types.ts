@@ -2,6 +2,13 @@
 // PURPOSE: Shared types for the field editor UI (used by Pivot and Tablix).
 // CONTEXT: Drag-and-drop types, field representations, and aggregation helpers.
 
+// The perspective / culture display-metadata types live beside their pure
+// filter/lookup helpers; re-exported here so BiPivotModelInfo is complete.
+import type { BiPerspectiveInfo } from './perspectiveFilter';
+import type { BiCultureInfo } from './cultureLookup';
+export type { BiPerspectiveInfo } from './perspectiveFilter';
+export type { BiCultureInfo, BiNameTranslationInfo } from './cultureLookup';
+
 export type FieldIndex = number;
 
 // Aggregation types matching AggregationType enum in definition.rs
@@ -195,6 +202,13 @@ export interface BiPivotModelInfo {
   appliedCalculationGroup?: AppliedCalcGroup;
   /** ISO-8601 time this pivot's data was last fetched ("Data as of …"). */
   dataAsOf?: string;
+  /** Perspectives defined in the BI model (field-list display subsets). */
+  perspectives?: BiPerspectiveInfo[];
+  /** The perspective selected for this pivot's field list (null = all). */
+  selectedPerspective?: string | null;
+  /** Cultures defined in the BI model (per-locale metadata translations,
+   *  display-only — keys and queries always use raw names). */
+  cultures?: BiCultureInfo[];
 }
 
 /** A calculation group + its items (read-only metadata). */

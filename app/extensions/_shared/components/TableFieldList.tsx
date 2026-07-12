@@ -9,6 +9,7 @@ import { styles } from './EditorStyles';
 import { useDraggable } from './useDragDrop';
 import type { DragField, MeasureField } from './types';
 import { applyPerspective, type BiPerspectiveInfo } from './perspectiveFilter';
+import { resolveCulture, buildCultureLookup, type BiCultureInfo } from './cultureLookup';
 
 // --- Types ---
 
@@ -87,6 +88,11 @@ interface TableFieldListProps {
   selectedPerspective?: string | null;
   /** Called when the user picks a perspective (null = "(All fields)"). */
   onPerspectiveChange?: (name: string | null) => void;
+  /** Cultures defined in the BI model (per-locale metadata translations).
+   *  Display-only: labels/tooltips swap; every key stays the raw name. */
+  cultures?: BiCultureInfo[];
+  /** The active UI locale the culture is resolved against (null = raw names). */
+  locale?: string | null;
 }
 
 // --- Styles ---
@@ -615,6 +621,8 @@ export function TableFieldList({
   onLookupToggle,
   selectedPerspective,
   onPerspectiveChange,
+  cultures,
+  locale,
 }: TableFieldListProps): React.ReactElement {
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -623,6 +631,14 @@ export function TableFieldList({
   const perspectiveModel = useMemo(
     () => applyPerspective(biModel, biModel.perspectives, selectedPerspective),
     [biModel, selectedPerspective],
+  );
+
+  // Culture display translation: swap table/column/measure LABELS (and column
+  // description tooltips) for the active locale. Display-only — expand keys,
+  // colKeys, fieldKeys, drag names, and toggle callbacks all stay RAW.
+  const cultureLookup = useMemo(
+    () => buildCultureLookup(resolveCulture(cultures, locale)),
+    [cultures, locale],
   );
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
     // Start with all folders expanded
@@ -667,11 +683,22 @@ export function TableFieldList({
 
   const query = searchQuery.toLowerCase().trim();
 
+  // Search matches the RAW name and, when a culture is active, the translated
+  // display name (users see the translation, so it must be searchable too).
+  const matchesQuery = useCallback(
+    (raw: string, translated: string | null) =>
+      raw.toLowerCase().includes(query) ||
+      (translated !== null && translated.toLowerCase().includes(query)),
+    [query],
+  );
+
   // Filter measures by search
   const filteredMeasures = useMemo(() => {
     if (!query) return perspectiveModel.measures;
-    return perspectiveModel.measures.filter((m) => m.name.toLowerCase().includes(query));
-  }, [perspectiveModel.measures, query]);
+    return perspectiveModel.measures.filter((m) =>
+      matchesQuery(m.name, cultureLookup.measure(m.name)),
+    );
+  }, [perspectiveModel.measures, query, matchesQuery, cultureLookup]);
 
   // Filter tables/columns by search — auto-expand matching tables
   const filteredTables = useMemo(() => {
@@ -681,19 +708,23 @@ export function TableFieldList({
         ...t,
         columns: t.columns.filter(
           (c) =>
-            c.name.toLowerCase().includes(query) ||
-            t.name.toLowerCase().includes(query)
+            matchesQuery(c.name, cultureLookup.column(t.name, c.name)) ||
+            matchesQuery(t.name, cultureLookup.table(t.name))
         ),
       }))
       .filter((t) => t.columns.length > 0);
-  }, [perspectiveModel.tables, query]);
+  }, [perspectiveModel.tables, query, matchesQuery, cultureLookup]);
 
   // Filter hierarchies by search and group by table
   const hierarchiesByTable = useMemo(() => {
     const map = new Map<string, BiHierarchyMeta[]>();
     if (!perspectiveModel.hierarchies) return map;
     for (const h of perspectiveModel.hierarchies) {
-      if (query && !h.name.toLowerCase().includes(query) && !h.table.toLowerCase().includes(query)) {
+      if (
+        query &&
+        !h.name.toLowerCase().includes(query) &&
+        !matchesQuery(h.table, cultureLookup.table(h.table))
+      ) {
         continue;
       }
       const existing = map.get(h.table) || [];
@@ -701,7 +732,7 @@ export function TableFieldList({
       map.set(h.table, existing);
     }
     return map;
-  }, [perspectiveModel.hierarchies, query]);
+  }, [perspectiveModel.hierarchies, query, matchesQuery, cultureLookup]);
 
   // Filter calculation groups + items by search
   const filteredCalcGroups = useMemo(() => {
@@ -781,7 +812,7 @@ export function TableFieldList({
                   <TreeFieldItem
                     key={`measure:${m.name}`}
                     fieldKey={`[${m.name}]`}
-                    name={m.name}
+                    name={cultureLookup.measure(m.name) ?? m.name}
                     isNumeric={true}
                     isChecked={usedMeasures.has(m.name)}
                     isMeasure={true}
@@ -826,7 +857,7 @@ export function TableFieldList({
               return (
                 <FolderNode
                   key={`table:${table.name}`}
-                  name={table.name}
+                  name={cultureLookup.table(table.name) ?? table.name}
                   icon={'\uD83D\uDCC1'}
                   childCount={table.columns.length + tableHierarchies.length}
                   isExpanded={!!query || expandedFolders.has(table.name)}
@@ -855,14 +886,16 @@ export function TableFieldList({
                       <TreeFieldItem
                         key={colKey}
                         fieldKey={colKey}
-                        name={col.name}
+                        name={cultureLookup.column(table.name, col.name) ?? col.name}
                         isNumeric={col.isNumeric}
                         isChecked={usedColumns.has(colKey)}
                         isMeasure={false}
                         isLookup={lookupColumns?.has(colKey)}
                         lookupResolution={col.lookupResolution}
                         isContextColumn={col.isContextColumn}
-                        description={col.description}
+                        description={
+                          cultureLookup.columnDescription(table.name, col.name) ?? col.description
+                        }
                         onToggle={(checked) =>
                           onColumnToggle(table.name, col.name, col.isNumeric, checked)
                         }

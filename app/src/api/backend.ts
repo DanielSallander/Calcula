@@ -3769,6 +3769,31 @@ export interface ModelPerspectiveInfo {
   description: string | null;
 }
 
+/** One object's translated metadata within a culture. `object` names the
+ *  target: a table name, a qualified `Table[column]` ref, or a measure name
+ *  depending on the owning list. */
+export interface NameTranslationInfo {
+  object: string;
+  /** Translated display name (null = keep the untranslated display). */
+  displayName: string | null;
+  /** Translated description (null = keep the untranslated description). */
+  description: string | null;
+}
+
+/** A culture: per-locale display-name/description translations for the
+ *  model's tables, columns, and measures. Display-only — field lists swap
+ *  labels; keys, queries, and expressions keep the raw names. */
+export interface ModelCultureInfo {
+  /** BCP-47 locale id (e.g. "sv-SE"). */
+  locale: string;
+  /** Table translations (`object` = table name). */
+  tables: NameTranslationInfo[];
+  /** Column translations (`object` = qualified `Table[column]`). */
+  columns: NameTranslationInfo[];
+  /** Measure translations (`object` = measure name). */
+  measures: NameTranslationInfo[];
+}
+
 export interface CalcGroupItemDto {
   name: string;
   formula: string;
@@ -3874,6 +3899,8 @@ export interface ModelOverview {
   securityRoles: ModelRoleInfo[];
   /** Named presentation subsets of the model. */
   perspectives: ModelPerspectiveInfo[];
+  /** Per-locale metadata translations (cultures). Display-only. */
+  cultures: ModelCultureInfo[];
   calculationGroups: ModelCalcGroupInfo[];
   measures: ModelMeasureInfo[];
   contexts: ModelContextInfo[];
@@ -4126,6 +4153,33 @@ export async function biModelDeletePerspective(
   name: string,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_delete_perspective", { connectionId, name });
+}
+
+/** Add (originalLocale omitted) or update/re-key a model culture (per-locale
+ *  metadata translations, display-only). */
+export async function biModelUpsertCulture(params: {
+  connectionId: string;
+  originalLocale?: string | null;
+  locale: string;
+  tables: NameTranslationInfo[];
+  columns: NameTranslationInfo[];
+  measures: NameTranslationInfo[];
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_culture", {
+    connectionId: params.connectionId,
+    originalLocale: params.originalLocale ?? null,
+    locale: params.locale,
+    tables: params.tables,
+    columns: params.columns,
+    measures: params.measures,
+  });
+}
+
+export async function biModelDeleteCulture(
+  connectionId: string,
+  locale: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_culture", { connectionId, locale });
 }
 
 export async function biModelUpsertCalcGroup(params: {

@@ -1103,6 +1103,7 @@ pub(crate) fn collect_pivot_definitions(
             drill_through: meta.drill_through.clone(),
             perspectives: meta.perspectives.clone(),
             selected_perspective: meta.selected_perspective.clone(),
+            cultures: meta.cultures.clone(),
             // Prefer the carried package data source id; fall back to the
             // live connection UUID (which IS the package ds id at publish
             // time on the authoring machine). Never write the ZERO placeholder.
@@ -1236,6 +1237,7 @@ fn restore_pivot_definitions(
             drill_through: saved.drill_through,
             perspectives: saved.perspectives,
             selected_perspective: saved.selected_perspective,
+            cultures: saved.cultures,
         });
     }
 }

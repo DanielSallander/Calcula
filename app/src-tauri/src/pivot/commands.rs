@@ -1839,6 +1839,7 @@ pub fn get_pivot_at_cell(
                 data_as_of: meta.data_as_of.clone(),
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
+                cultures: meta.cultures.clone(),
             }
         })
     };
@@ -2487,6 +2488,7 @@ pub fn get_pivot_hierarchies(
                 data_as_of: meta.data_as_of.clone(),
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
+                cultures: meta.cultures.clone(),
             }
         })
     };
@@ -4597,6 +4599,7 @@ pub(crate) fn extract_bi_model_metadata(
     Vec<BiHierarchyMeta>,
     Vec<BiCalcGroupMeta>,
     Vec<super::types::BiPerspectiveMeta>,
+    Vec<super::types::BiCultureMeta>,
 ) {
     let model = engine.model();
 
@@ -4771,7 +4774,27 @@ pub(crate) fn extract_bi_model_metadata(
         })
         .collect();
 
-    (tables, measures, hierarchies, calculation_groups, perspectives)
+    // Cultures: per-locale metadata translations. Display metadata only --
+    // the frontend swaps field-list labels; keys and queries stay raw.
+    let cultures: Vec<super::types::BiCultureMeta> = model
+        .cultures()
+        .iter()
+        .map(|c| {
+            let tr = |t: &bi_engine::NameTranslation| super::types::BiNameTranslationMeta {
+                object: t.object.clone(),
+                display_name: t.display_name.clone(),
+                description: t.description.clone(),
+            };
+            super::types::BiCultureMeta {
+                locale: c.locale().to_string(),
+                tables: c.tables().iter().map(tr).collect(),
+                columns: c.columns().iter().map(tr).collect(),
+                measures: c.measures().iter().map(tr).collect(),
+            }
+        })
+        .collect();
+
+    (tables, measures, hierarchies, calculation_groups, perspectives, cultures)
 }
 
 /// Creates an empty BI pivot from the full model (all tables + measures).
@@ -4794,7 +4817,7 @@ pub async fn create_pivot_from_bi_model(
 
     // Extract model metadata from the connection's engine (reads the in-memory
     // model; no DB connection required, so this works offline).
-    let (model_tables, measures, hierarchies, calc_groups, perspectives) = {
+    let (model_tables, measures, hierarchies, calc_groups, perspectives, cultures) = {
         let engine_arc = {
             let connections = bi_state.connections.lock().unwrap();
             let conn = connections.get(&connection_id)
@@ -4933,6 +4956,7 @@ pub async fn create_pivot_from_bi_model(
         drill_through: None,
         perspectives,
         selected_perspective: None,
+        cultures,
     };
     pivot_state
         .bi_metadata

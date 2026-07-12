@@ -1630,6 +1630,9 @@ pub struct SavedBiPivotMetadata {
     /// The perspective selected for this pivot's field list (None = all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_perspective: Option<String>,
+    /// Cultures defined in the BI model (per-locale metadata translations).
+    #[serde(default)]
+    pub cultures: Vec<BiCultureMeta>,
 }
 
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
@@ -1668,6 +1671,9 @@ pub struct BiPivotMetadata {
     /// The perspective currently selected for this pivot's field list
     /// (None = show all fields). Display-only; persists with the workbook.
     pub selected_perspective: Option<String>,
+    /// Cultures defined in the BI model (per-locale metadata translations).
+    /// Display-only; the frontend swaps field-list labels for a locale.
+    pub cultures: Vec<BiCultureMeta>,
 }
 
 /// Table metadata from a BI model.
@@ -1730,6 +1736,36 @@ pub struct BiPerspectiveMeta {
     pub measures: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// One object's translated metadata within a culture (mirrors engine
+/// `NameTranslation`): `object` is a table name, a qualified `Table[column]`
+/// ref, or a measure name depending on the owning list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiNameTranslationMeta {
+    pub object: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A culture surfaced to the field list (mirrors engine `Culture`): per-locale
+/// display-name/description translations for tables, columns, and measures.
+/// DISPLAY-ONLY — the field list swaps labels for the active locale; keys and
+/// queries always use the raw names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiCultureMeta {
+    /// BCP-47 locale id (e.g. "sv-SE").
+    pub locale: String,
+    #[serde(default)]
+    pub tables: Vec<BiNameTranslationMeta>,
+    #[serde(default)]
+    pub columns: Vec<BiNameTranslationMeta>,
+    #[serde(default)]
+    pub measures: Vec<BiNameTranslationMeta>,
 }
 
 /// A calculation group surfaced to the field list (mirrors engine
@@ -1806,6 +1842,10 @@ pub struct BiPivotModelInfo {
     /// always None for connection-level metadata with no pivot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_perspective: Option<String>,
+    /// Cultures defined in the BI model (per-locale metadata translations).
+    /// Display-only — the frontend swaps labels; keys/queries stay raw.
+    #[serde(default)]
+    pub cultures: Vec<BiCultureMeta>,
     /// ISO-8601 timestamp of when this pivot's data was last fetched ("Data as
     /// of …"). Lets a reader gauge offline-snapshot freshness.
     #[serde(default, skip_serializing_if = "Option::is_none")]

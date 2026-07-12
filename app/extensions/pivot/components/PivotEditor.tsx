@@ -26,6 +26,7 @@ import type {
   BiValueFieldRef,
   BiHierarchyFieldRef,
   BiPerspectiveInfo,
+  BiCultureInfo,
   MeasureField,
   PivotId,
   CalculatedFieldDef,
@@ -243,19 +244,24 @@ export function PivotEditor({
       setSelectedPerspective(biModel?.selectedPerspective ?? null);
     }
   }, [pivotId, biModel?.selectedPerspective]);
-  // The perspectives stored in pivot metadata are a snapshot from pivot
-  // creation; overlay the model's CURRENT list when the connection is live
-  // (offline falls back to the snapshot, so the picker still works).
-  const [livePerspectives, setLivePerspectives] = useState<BiPerspectiveInfo[] | null>(null);
+  // The perspectives/cultures stored in pivot metadata are a snapshot from
+  // pivot creation; overlay the model's CURRENT lists when the connection is
+  // live (offline falls back to the snapshot, so the picker still works).
+  const [liveModelMeta, setLiveModelMeta] = useState<{
+    perspectives?: BiPerspectiveInfo[];
+    cultures?: BiCultureInfo[];
+  } | null>(null);
   useEffect(() => {
     // Drop any previous connection's overlay so a failed fetch can never show
-    // another connection's perspectives.
-    setLivePerspectives(null);
-    if (!biModel) return;
+    // another connection's perspectives/cultures.
+    setLiveModelMeta(null);
+    if (!biModel?.connectionId) return;
     let cancelled = false;
     getConnectionBiModel(biModel.connectionId)
       .then((m) => {
-        if (!cancelled && m?.perspectives) setLivePerspectives(m.perspectives);
+        if (!cancelled && m) {
+          setLiveModelMeta({ perspectives: m.perspectives, cultures: m.cultures });
+        }
       })
       .catch(() => {});
     return () => {
@@ -263,9 +269,22 @@ export function PivotEditor({
     };
   }, [biModel?.connectionId]);
   const fieldListModel = useMemo(() => {
-    if (!biModel || !livePerspectives) return biModel;
-    return { ...biModel, perspectives: livePerspectives };
-  }, [biModel, livePerspectives]);
+    if (!biModel || !liveModelMeta) return biModel;
+    return {
+      ...biModel,
+      perspectives: liveModelMeta.perspectives ?? biModel.perspectives,
+      cultures: liveModelMeta.cultures ?? biModel.cultures,
+    };
+  }, [biModel, liveModelMeta]);
+  // The active UI locale for culture (translation) resolution. Read once —
+  // there is no app-wide locale service yet; null shows raw names.
+  const uiLocale = useMemo<string | null>(() => {
+    try {
+      return window.localStorage.getItem('calcula.locale');
+    } catch {
+      return null;
+    }
+  }, []);
   const handlePerspectiveChange = useCallback(
     (name: string | null) => {
       setSelectedPerspective(name);
@@ -807,6 +826,8 @@ export function PivotEditor({
             onLookupToggle={handleLookupToggle}
             selectedPerspective={selectedPerspective}
             onPerspectiveChange={handlePerspectiveChange}
+            cultures={fieldListModel?.cultures}
+            locale={uiLocale}
           />
         ) : (
           <FieldList

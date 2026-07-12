@@ -450,6 +450,9 @@ export interface BiPivotModelInfo {
   perspectives?: BiPerspectiveInfo[];
   /** The perspective selected for this pivot's field list (null = all). */
   selectedPerspective?: string | null;
+  /** Cultures defined in the BI model (per-locale metadata translations,
+   *  display-only — keys and queries always use raw names). */
+  cultures?: BiCultureInfo[];
 }
 
 /** A perspective: a named presentation subset of the model (display-only —
@@ -464,6 +467,29 @@ export interface BiPerspectiveInfo {
   /** Measures shown. */
   measures: string[];
   description?: string | null;
+}
+
+/** One object's translated metadata within a culture: `object` is a table
+ *  name, a qualified `Table[column]` ref, or a measure name depending on the
+ *  owning list. Mirrors Rust `BiNameTranslationMeta`. */
+export interface BiNameTranslationInfo {
+  object: string;
+  /** Translated display name (null/absent = keep the raw display). */
+  displayName?: string | null;
+  /** Translated description (null/absent = keep the raw description). */
+  description?: string | null;
+}
+
+/** A culture: per-locale display-name/description translations for tables,
+ *  columns, and measures (display-only — the field list swaps labels for the
+ *  active locale; keys and queries always use the raw names). Mirrors Rust
+ *  `BiCultureMeta`. */
+export interface BiCultureInfo {
+  /** BCP-47 locale id (e.g. "sv-SE"). */
+  locale: string;
+  tables: BiNameTranslationInfo[];
+  columns: BiNameTranslationInfo[];
+  measures: BiNameTranslationInfo[];
 }
 
 export interface BiModelTable {

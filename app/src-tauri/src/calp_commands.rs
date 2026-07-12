@@ -7007,6 +7007,7 @@ fn restore_pulled_pivots(
                         drill_through: saved.drill_through,
                         perspectives: saved.perspectives,
                         selected_perspective: saved.selected_perspective,
+                        cultures: saved.cultures,
                     });
                 }
             }

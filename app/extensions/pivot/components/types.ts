@@ -46,6 +46,8 @@ export type {
   ValueColumnRefDef,
   BiPivotModelInfo,
   BiPerspectiveInfo,
+  BiCultureInfo,
+  BiNameTranslationInfo,
   BiModelTable,
   BiModelColumn,
   BiCalcGroup,

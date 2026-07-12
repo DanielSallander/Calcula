@@ -1189,6 +1189,13 @@ const DYNAMIC_FORMAT_MIN_FORMAT_VERSION: u64 = 18;
 /// perspectives.
 const DAX_GAP_V19_MIN_FORMAT_VERSION: u64 = 19;
 
+/// Minimum schema `format_version` required by any v20 DAX-gap feature:
+/// THISROW calculated columns and DATESBETWEEN / Week-granularity time
+/// intelligence (expression variants / enum values a pre-v20 engine fails to
+/// deserialize), the fiscal-year-end setting, and cultures (metadata
+/// translations).
+const DAX_GAP_V20_MIN_FORMAT_VERSION: u64 = 20;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1236,7 +1243,30 @@ pub fn stamp_feature_format_version(
             .iter()
             .any(|m| m.expression().contains_path_functions());
 
-    let required = if uses_v19 {
+    // v20 expression constructs can ride measures, context columns, and
+    // calculation-group items (calc columns reject time intelligence but
+    // carry THISROW).
+    let has_v20_expr = |e: &bi_engine::Expression| {
+        e.has_this_row() || e.contains_dates_between() || e.contains_week_granularity()
+    };
+    let uses_v20 = model
+        .calculated_columns()
+        .iter()
+        .any(|cc| has_v20_expr(cc.expression()))
+        || model.measures().iter().any(|m| has_v20_expr(m.expression()))
+        || model
+            .context_columns()
+            .iter()
+            .any(|cc| has_v20_expr(cc.expression()))
+        || model.calculation_groups().iter().any(|g| {
+            g.items().iter().any(|i| has_v20_expr(i.expression()))
+        })
+        || model.fiscal_year_end_month().is_some()
+        || !model.cultures().is_empty();
+
+    let required = if uses_v20 {
+        DAX_GAP_V20_MIN_FORMAT_VERSION
+    } else if uses_v19 {
         DAX_GAP_V19_MIN_FORMAT_VERSION
     } else if uses_dynamic_format {
         DYNAMIC_FORMAT_MIN_FORMAT_VERSION
