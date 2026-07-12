@@ -37,6 +37,7 @@ import { ConnectionsSection } from "./sections/ConnectionsSection";
 import { HierarchiesSection } from "./sections/HierarchiesSection";
 import { KpisSection } from "./sections/KpisSection";
 import { RolesSection } from "./sections/RolesSection";
+import { PerspectivesSection } from "./sections/PerspectivesSection";
 import { CalcGroupsSection } from "./sections/CalcGroupsSection";
 import { ImportSection } from "./sections/ImportSection";
 import { OverviewSection } from "./sections/OverviewSection";
@@ -67,6 +68,7 @@ type SectionId =
   | "tableVariables"
   | "scriptFunctions"
   | "roles"
+  | "perspectives"
   | "lineage"
   | "testing"
   | "settings"
@@ -86,6 +88,7 @@ const NAV: Array<{ id: SectionId; label: string }> = [
   { id: "tableVariables", label: "Table Variables" },
   { id: "scriptFunctions", label: "Script Functions" },
   { id: "roles", label: "Security Roles" },
+  { id: "perspectives", label: "Perspectives" },
   { id: "lineage", label: "Lineage" },
   { id: "testing", label: "Testing Ground" },
   { id: "settings", label: "Settings" },
@@ -442,6 +445,8 @@ export function ModelEditorApp(): React.ReactElement {
         return <ScriptFunctionsSection ctx={ctx} />;
       case "roles":
         return <RolesSection ctx={ctx} />;
+      case "perspectives":
+        return <PerspectivesSection ctx={ctx} />;
       case "lineage":
         return <LineageSection ctx={ctx} />;
       case "testing":

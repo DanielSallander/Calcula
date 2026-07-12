@@ -48,6 +48,13 @@ export interface CompileContext {
    * compile inclusion filters (= syntax) into hiddenItems (exclusion list).
    */
   filterUniqueValues?: Map<string, string[]>;
+  /**
+   * Field parameters: resolves an `@CONTROL(name)` reference to the named
+   * control's current text value (Controls pane). When set, `processDsl`
+   * substitutes references before lexing; when omitted, `@CONTROL(...)`
+   * text reaches the lexer and errors there.
+   */
+  resolveControl?: (name: string) => string | undefined;
 }
 
 /**

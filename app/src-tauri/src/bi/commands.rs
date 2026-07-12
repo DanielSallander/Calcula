@@ -1182,6 +1182,13 @@ const LOOKUPVALUE_MIN_FORMAT_VERSION: u64 = 17;
 /// string — a pre-v18 engine silently drops the field on round-trip.
 const DYNAMIC_FORMAT_MIN_FORMAT_VERSION: u64 = 18;
 
+/// Minimum schema `format_version` required by any v19 DAX-gap feature:
+/// PATH calculated columns (a pre-v19 engine drops the `path` spec and the
+/// PATHLENGTH/PATHITEM variants fail to deserialize), measure `detail_rows`,
+/// security-role OLS denials (dropping those would UNDER-RESTRICT), and
+/// perspectives.
+const DAX_GAP_V19_MIN_FORMAT_VERSION: u64 = 19;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1212,8 +1219,26 @@ pub fn stamp_feature_format_version(
         .measures()
         .iter()
         .any(|m| m.format_string_expression().is_some());
+    let uses_v19 = model.calculated_columns().iter().any(|cc| cc.path().is_some())
+        || model.measures().iter().any(|m| m.detail_rows().is_some())
+        || model.security_roles().iter().any(|r| {
+            !r.denied_tables().is_empty() || !r.denied_columns().is_empty()
+        })
+        || !model.perspectives().is_empty()
+        // PATHLENGTH/PATHITEM expression variants (usable in any calculated
+        // column or measure, not just alongside a PATH spec).
+        || model
+            .calculated_columns()
+            .iter()
+            .any(|cc| cc.expression().contains_path_functions())
+        || model
+            .measures()
+            .iter()
+            .any(|m| m.expression().contains_path_functions());
 
-    let required = if uses_dynamic_format {
+    let required = if uses_v19 {
+        DAX_GAP_V19_MIN_FORMAT_VERSION
+    } else if uses_dynamic_format {
         DYNAMIC_FORMAT_MIN_FORMAT_VERSION
     } else if uses_lookupvalue {
         LOOKUPVALUE_MIN_FORMAT_VERSION

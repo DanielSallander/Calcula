@@ -203,6 +203,9 @@ export function MeasureEditorModal({
   const [formatStringExpression, setFormatStringExpression] = useState(
     existing?.formatStringExpression ?? "",
   );
+  const [detailRows, setDetailRows] = useState(
+    (existing?.detailRows ?? []).join(", "),
+  );
   const [group, setGroup] = useState(normalizeFolderPath(existing?.group ?? ""));
   const [formula, setFormula] = useState(existing?.formula ?? "");
 
@@ -367,6 +370,10 @@ export function MeasureEditorModal({
         description: description.trim() || null,
         formatString: formatString.trim() || null,
         formatStringExpression: formatStringExpression.trim() || null,
+        detailRows: detailRows
+          .split(",")
+          .map((r) => r.trim())
+          .filter((r) => r.length > 0),
         group: group.trim() || null,
       });
       // The parent applies the fresh measure list and notifies the main
@@ -385,6 +392,7 @@ export function MeasureEditorModal({
     description,
     formatString,
     formatStringExpression,
+    detailRows,
     group,
     onSaved,
   ]);
@@ -460,6 +468,18 @@ export function MeasureEditorModal({
           value={formatStringExpression}
           onChange={(e) => setFormatStringExpression(e.target.value)}
           placeholder='IF(SUM(fact[amount]) > 1000000, "#,##0,,\"M\"", "#,##0")'
+        />
+      </Field>
+
+      <Field
+        label="Detail rows (optional)"
+        hint="Drill-through projection: comma-separated Table[column] references returned when a user drills a cell of this measure. Fact-table columns become the detail columns; other tables' columns are looked up beside each row. Leave empty for the default projection."
+      >
+        <input
+          style={styles.input}
+          value={detailRows}
+          onChange={(e) => setDetailRows(e.target.value)}
+          placeholder="Sales[order_id], Sales[amount], Customer[name]"
         />
       </Field>
 

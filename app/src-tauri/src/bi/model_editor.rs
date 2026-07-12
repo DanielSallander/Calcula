@@ -42,6 +42,10 @@ pub struct ModelMeasureInfo {
     pub format_string: Option<String>,
     /// Dynamic format string expression (evaluated per query), when set.
     pub format_string_expression: Option<String>,
+    /// DETAILROWS drill-through projection: qualified `Table[column]` refs
+    /// applied when a user drills a cell of this measure, or `None` for the
+    /// builtin auto-derived projection.
+    pub detail_rows: Option<Vec<String>>,
     pub is_hidden: bool,
     /// Display folder this measure belongs to (Studio-style measure groups),
     /// or `None` for an ungrouped measure.
@@ -93,6 +97,7 @@ fn measure_info(m: &bi_engine::Measure) -> ModelMeasureInfo {
         description: m.description().map(|s| s.to_string()),
         format_string: m.format_string().map(|s| s.to_string()),
         format_string_expression: m.format_string_expression().map(|s| s.to_string()),
+        detail_rows: m.detail_rows().map(|r| r.to_vec()),
         is_hidden: m.is_hidden(),
         group: m.group().map(|s| s.to_string()),
     }
@@ -108,6 +113,7 @@ fn build_measure(
     description: Option<&str>,
     format_string: Option<&str>,
     format_string_expression: Option<&str>,
+    detail_rows: Option<&[String]>,
 ) -> Result<bi_engine::Measure, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -126,6 +132,18 @@ fn build_measure(
     }
     if let Some(f) = format_string_expression.map(str::trim).filter(|f| !f.is_empty()) {
         measure = measure.with_format_string_expression(f);
+    }
+    // DETAILROWS refs: keep only non-blank entries; an all-blank list means
+    // "clear the projection". Existence is validated by the model builder.
+    if let Some(refs) = detail_rows {
+        let cleaned: Vec<String> = refs
+            .iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            measure = measure.with_detail_rows(cleaned);
+        }
     }
     // The home-table check is deferred to upsert_measure_model, which has the
     // model needed to resolve a measure that references only OTHER measures
@@ -495,7 +513,7 @@ pub fn bi_model_validate_measure(
             },
         });
     }
-    let dry_run = build_measure(&name, &formula, None, None, None)
+    let dry_run = build_measure(&name, &formula, None, None, None, None)
         .and_then(|m| upsert_measure_model(&base, original_name.as_deref(), m))
         .and_then(|edited| build_combined_model(&edited, &calculated));
     Ok(match dry_run {
@@ -517,6 +535,7 @@ pub async fn bi_model_upsert_measure(
     description: Option<String>,
     format_string: Option<String>,
     format_string_expression: Option<String>,
+    detail_rows: Option<Vec<String>>,
     group: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<ModelMeasureInfo>, String> {
@@ -549,6 +568,16 @@ pub async fn bi_model_upsert_measure(
                 if let Some(f) = format_string.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
                     m = m.with_format_string(f);
                 }
+                if let Some(refs) = detail_rows.as_deref() {
+                    let cleaned: Vec<String> = refs
+                        .iter()
+                        .map(|r| r.trim().to_string())
+                        .filter(|r| !r.is_empty())
+                        .collect();
+                    if !cleaned.is_empty() {
+                        m = m.with_detail_rows(cleaned);
+                    }
+                }
                 m
             }
             _ => build_measure(
@@ -557,6 +586,7 @@ pub async fn bi_model_upsert_measure(
                 description.as_deref(),
                 format_string.as_deref(),
                 format_string_expression.as_deref(),
+                detail_rows.as_deref(),
             )?,
         };
         // Assign the display folder (Studio-style measure groups). A blank or
@@ -762,7 +792,7 @@ pub fn bi_model_dependency_graph(
             node_type: "calculatedColumn".to_string(),
             name: cc.name().to_string(),
             table: Some(cc.table().to_string()),
-            expression: Some(bi_engine::expression_to_formula(cc.expression(), cc.table())),
+            expression: Some(calc_column_formula(cc)),
         });
     }
 
@@ -795,6 +825,21 @@ pub fn bi_model_dependency_graph(
 // KPIs, security roles, calculation groups, schema import, blank models.
 // Every mutation goes through apply_model_edit (engine-lock-serialized).
 // ===========================================================================
+
+/// Formula rendering for a calculated column: generated PATH columns render
+/// their `PATH(t[id], t[parent])` source form (the stored expression is a
+/// placeholder), everything else renders the expression AST.
+fn calc_column_formula(cc: &bi_engine::CalculatedColumn) -> String {
+    match cc.path() {
+        Some(spec) => format!(
+            "PATH({t}[{id}], {t}[{parent}])",
+            t = cc.table(),
+            id = spec.id_column,
+            parent = spec.parent_column
+        ),
+        None => bi_engine::expression_to_formula(cc.expression(), cc.table()),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1008,6 +1053,23 @@ pub struct RoleFilterDto {
 pub struct ModelRoleInfo {
     pub name: String,
     pub filters: Vec<RoleFilterDto>,
+    /// Object-level security: tables this role may not access at all.
+    pub denied_tables: Vec<String>,
+    /// Object-level security: denied qualified `Table[column]` refs.
+    pub denied_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPerspectiveInfo {
+    pub name: String,
+    /// Tables shown in full by this perspective.
+    pub tables: Vec<String>,
+    /// Individually shown qualified `Table[column]` refs.
+    pub columns: Vec<String>,
+    /// Measures shown by this perspective.
+    pub measures: Vec<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -1138,6 +1200,8 @@ pub struct ModelOverview {
     pub hierarchies: Vec<ModelHierarchyInfo>,
     pub kpis: Vec<ModelKpiInfo>,
     pub security_roles: Vec<ModelRoleInfo>,
+    /// Named presentation subsets of the model (perspectives).
+    pub perspectives: Vec<ModelPerspectiveInfo>,
     pub calculation_groups: Vec<ModelCalcGroupInfo>,
     pub measures: Vec<ModelMeasureInfo>,
     pub contexts: Vec<ModelContextInfo>,
@@ -1612,10 +1676,7 @@ fn build_overview(
                         description: None,
                         is_hidden: false,
                         is_calculated: true,
-                        formula: Some(bi_engine::expression_to_formula(
-                            cc.expression(),
-                            cc.table(),
-                        )),
+                        formula: Some(calc_column_formula(cc)),
                         lookup_resolution: None,
                         sort_by_column: None,
                         format_string: None,
@@ -1718,6 +1779,20 @@ fn build_overview(
         .map(|r| ModelRoleInfo {
             name: r.name().to_string(),
             filters: r.table_filters().iter().map(predicate_to_dto).collect(),
+            denied_tables: r.denied_tables().to_vec(),
+            denied_columns: r.denied_columns().to_vec(),
+        })
+        .collect();
+
+    let perspectives = base
+        .perspectives()
+        .iter()
+        .map(|p| ModelPerspectiveInfo {
+            name: p.name().to_string(),
+            tables: p.tables().to_vec(),
+            columns: p.columns().to_vec(),
+            measures: p.measures().to_vec(),
+            description: p.description().map(|s| s.to_string()),
         })
         .collect();
 
@@ -1814,6 +1889,7 @@ fn build_overview(
         hierarchies,
         kpis,
         security_roles,
+        perspectives,
         calculation_groups,
         measures: base.measures().iter().map(measure_info).collect(),
         contexts,
@@ -1978,21 +2054,40 @@ pub async fn bi_model_upsert_calc_column(
         if trimmed.is_empty() {
             return Err("Column name cannot be empty".to_string());
         }
-        let expr = bi_engine::parse_measure_expression(&formula)
-            .map_err(|e| format!("Calculated column '{}': {}", trimmed, e))?;
-        // When editing and the submitted type string round-trips the ORIGINAL
-        // column's Debug form (e.g. "Decimal(18, 2)" — not offered by the
-        // editable dropdown), keep the original type instead of failing or
-        // silently coercing.
-        let dt = match original_name
-            .as_deref()
-            .and_then(|o| base.calculated_columns().iter().find(|c| c.name() == o))
-            .filter(|c| format!("{:?}", c.data_type()) == data_type)
-        {
-            Some(orig) => orig.data_type().clone(),
-            None => data_type_from_str(&data_type)?,
+        // `PATH(t[id], t[parent])` as the whole formula = a generated
+        // parent-child path column, computed in Rust at materialization.
+        let new_col = match bi_engine::try_parse_path(&formula) {
+            Some(Ok((path_table, id_col, parent_col))) => {
+                if !path_table.eq_ignore_ascii_case(&table) {
+                    return Err(format!(
+                        "Calculated column '{}': PATH columns must reference the host table \
+                         '{}', got '{}'",
+                        trimmed, table, path_table
+                    ));
+                }
+                bi_engine::CalculatedColumn::new_path(trimmed, table.clone(), id_col, parent_col)
+            }
+            Some(Err(reason)) => {
+                return Err(format!("Calculated column '{}': {}", trimmed, reason));
+            }
+            None => {
+                let expr = bi_engine::parse_measure_expression(&formula)
+                    .map_err(|e| format!("Calculated column '{}': {}", trimmed, e))?;
+                // When editing and the submitted type string round-trips the ORIGINAL
+                // column's Debug form (e.g. "Decimal(18, 2)" — not offered by the
+                // editable dropdown), keep the original type instead of failing or
+                // silently coercing.
+                let dt = match original_name
+                    .as_deref()
+                    .and_then(|o| base.calculated_columns().iter().find(|c| c.name() == o))
+                    .filter(|c| format!("{:?}", c.data_type()) == data_type)
+                {
+                    Some(orig) => orig.data_type().clone(),
+                    None => data_type_from_str(&data_type)?,
+                };
+                bi_engine::CalculatedColumn::new(trimmed, table.clone(), expr, dt)
+            }
         };
-        let new_col = bi_engine::CalculatedColumn::new(trimmed, table.clone(), expr, dt);
 
         let mut columns = base.calculated_columns().to_vec();
         match original_name.as_deref() {
@@ -2370,6 +2465,8 @@ pub async fn bi_model_upsert_role(
     original_name: Option<String>,
     name: String,
     filters: Vec<RoleFilterDto>,
+    denied_tables: Option<Vec<String>>,
+    denied_columns: Option<Vec<String>>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -2382,7 +2479,18 @@ pub async fn bi_model_upsert_role(
             .iter()
             .map(predicate_from_dto)
             .collect::<Result<Vec<_>, String>>()?;
-        let role = bi_engine::SecurityRole::new(trimmed).with_filters(predicates);
+        let clean = |v: &Option<Vec<String>>| -> Vec<String> {
+            v.as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let role = bi_engine::SecurityRole::new(trimmed)
+            .with_filters(predicates)
+            .with_denied_tables(clean(&denied_tables))
+            .with_denied_columns(clean(&denied_columns));
 
         let mut roles = base.security_roles().to_vec();
         match original_name.as_deref() {
@@ -2418,6 +2526,80 @@ pub async fn bi_model_delete_role(
             return Err(format!("Role '{}' not found", name));
         }
         let edited = base.with_security_roles(roles);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Add or update a perspective (a named presentation subset of the model).
+#[tauri::command]
+pub async fn bi_model_upsert_perspective(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    tables: Vec<String>,
+    columns: Vec<String>,
+    measures: Vec<String>,
+    description: Option<String>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Perspective name cannot be empty".to_string());
+        }
+        let clean = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let mut perspective = bi_engine::Perspective::new(trimmed)
+            .with_tables(clean(&tables))
+            .with_columns(clean(&columns))
+            .with_measures(clean(&measures));
+        if let Some(d) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            perspective = perspective.with_description(d);
+        }
+
+        let mut perspectives = base.perspectives().to_vec();
+        match original_name.as_deref() {
+            Some(orig) => {
+                let Some(idx) = perspectives.iter().position(|p| p.name() == orig) else {
+                    return Err(format!("Perspective '{}' not found", orig));
+                };
+                perspectives[idx] = perspective;
+            }
+            None => perspectives.push(perspective),
+        }
+        let edited = base.with_perspectives(perspectives);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn bi_model_delete_perspective(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    name: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut perspectives = base.perspectives().to_vec();
+        let before = perspectives.len();
+        perspectives.retain(|p| p.name() != name);
+        if perspectives.len() == before {
+            return Err(format!("Perspective '{}' not found", name));
+        }
+        let edited = base.with_perspectives(perspectives);
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
     })
@@ -2688,7 +2870,29 @@ fn strip_calculated_table_dependents(
                 .filter(|f| f.table != name)
                 .cloned()
                 .collect();
-            bi_engine::SecurityRole::new(role.name()).with_filters(kept)
+            // OLS denials targeting the removed table go with it; the rest
+            // (including denied columns on other tables) are preserved.
+            let denied_tables: Vec<String> = role
+                .denied_tables()
+                .iter()
+                .filter(|t| t.as_str() != name)
+                .cloned()
+                .collect();
+            let denied_columns: Vec<String> = role
+                .denied_columns()
+                .iter()
+                .filter(|r| {
+                    r.trim()
+                        .find('[')
+                        .map(|open| !r.trim()[..open].trim().eq_ignore_ascii_case(name))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+            bi_engine::SecurityRole::new(role.name())
+                .with_filters(kept)
+                .with_denied_tables(denied_tables)
+                .with_denied_columns(denied_columns)
         })
         .collect();
     let table_variables = base
@@ -4830,7 +5034,7 @@ mod tests {
 
     #[test]
     fn add_measure_preserves_source_text() {
-        let m = build_measure("Orders", "COUNT(Sales[country])", Some("How many"), None, None).unwrap();
+        let m = build_measure("Orders", "COUNT(Sales[country])", Some("How many"), None, None, None).unwrap();
         let edited = upsert_measure_model(&base_model(), None, m).unwrap();
         let added = edited.measures().iter().find(|m| m.name() == "Orders").unwrap();
         assert_eq!(added.source(), Some("COUNT(Sales[country])"));
@@ -4840,7 +5044,7 @@ mod tests {
 
     #[test]
     fn add_rejects_name_collision() {
-        let m = build_measure("Revenue", "SUM(Sales[amount])", None, None, None).unwrap();
+        let m = build_measure("Revenue", "SUM(Sales[amount])", None, None, None, None).unwrap();
         let err = upsert_measure_model(&base_model(), None, m).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
@@ -4848,11 +5052,11 @@ mod tests {
     #[test]
     fn update_replaces_in_place_and_rename_collision_is_rejected() {
         let base = base_model();
-        let m = build_measure("Orders", "COUNT(Sales[country])", None, None, None).unwrap();
+        let m = build_measure("Orders", "COUNT(Sales[country])", None, None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, m).unwrap();
 
         // Update the formula in place.
-        let m2 = build_measure("Orders", "COUNT(Sales[amount])", None, None, None).unwrap();
+        let m2 = build_measure("Orders", "COUNT(Sales[amount])", None, None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Orders"), m2).unwrap();
         assert_eq!(
             edited.measures().iter().find(|m| m.name() == "Orders").unwrap().source(),
@@ -4860,7 +5064,7 @@ mod tests {
         );
 
         // Renaming onto an existing name is rejected.
-        let m3 = build_measure("Revenue", "COUNT(Sales[amount])", None, None, None).unwrap();
+        let m3 = build_measure("Revenue", "COUNT(Sales[amount])", None, None, None, None).unwrap();
         let err = upsert_measure_model(&base, Some("Orders"), m3).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
@@ -4868,12 +5072,12 @@ mod tests {
     #[test]
     fn rename_rewrites_dependent_references() {
         let base = base_model();
-        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None).unwrap();
+        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, dep).unwrap();
 
         // Rename Revenue -> Income: Boosted's [Revenue] follows the rename
         // (upsert rewrites dependent references before validating).
-        let renamed = build_measure("Income", "SUM(Sales[amount])", None, None, None).unwrap();
+        let renamed = build_measure("Income", "SUM(Sales[amount])", None, None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Revenue"), renamed).unwrap();
         assert!(edited.measures().iter().all(|m| m.name() != "Revenue"));
         let boosted = edited
@@ -4892,7 +5096,7 @@ mod tests {
     #[test]
     fn delete_refuses_when_referenced_and_lists_referrers() {
         let base = base_model();
-        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None).unwrap();
+        let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, dep).unwrap();
 
         let err = delete_measure_model(&base, &[], "Revenue").unwrap_err();
@@ -4920,7 +5124,7 @@ mod tests {
             bi_engine::sum_measure("Revenue", "Sales", "amount").hidden(),
         ]);
         let edited_measure =
-            build_measure("Revenue", "SUM(Sales[amount]) * 2", None, None, None).unwrap();
+            build_measure("Revenue", "SUM(Sales[amount]) * 2", None, None, None, None).unwrap();
         let edited = upsert_measure_model(&base, Some("Revenue"), edited_measure).unwrap();
         assert!(edited.measures()[0].is_hidden(), "edit must not unhide");
     }
@@ -4930,7 +5134,7 @@ mod tests {
         // `[Revenue] * 2` has no column of its own; upsert resolves its home
         // table from the measure it builds on.
         let base = base_model();
-        let m = build_measure("Doubled", "[Revenue] * 2", None, None, None).unwrap();
+        let m = build_measure("Doubled", "[Revenue] * 2", None, None, None, None).unwrap();
         let edited = upsert_measure_model(&base, None, m).unwrap();
         let doubled = edited
             .measures()
@@ -4944,10 +5148,10 @@ mod tests {
     fn measure_reference_resolving_to_no_table_is_rejected_with_column_guidance() {
         let base = base_model();
         // A constant measure legitimately has no home table...
-        let konst = build_measure("Konst", "42", None, None, None).unwrap();
+        let konst = build_measure("Konst", "42", None, None, None, None).unwrap();
         let base = upsert_measure_model(&base, None, konst).unwrap();
         // ...but a measure referencing ONLY it cannot resolve a table.
-        let bad = build_measure("Bad", "[Konst] * 2", None, None, None).unwrap();
+        let bad = build_measure("Bad", "[Konst] * 2", None, None, None, None).unwrap();
         let err = upsert_measure_model(&base, None, bad).unwrap_err();
         assert!(err.contains("column form"), "got: {}", err);
     }

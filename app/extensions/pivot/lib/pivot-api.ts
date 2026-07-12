@@ -1107,6 +1107,7 @@ export async function showReportFilterPages(
 // ============================================================================
 
 import { processDsl, serialize, type CompileContext, type CompileResult } from '../../_shared/dsl/pivotLayout';
+import { getControlValue, type ControlValue } from '@api/controlValues';
 import type { DslError } from '../../_shared/dsl/pivotLayout/errors';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 
@@ -1180,7 +1181,30 @@ async function buildCompileContext(
     await Promise.all(promises);
   }
 
-  return { sourceFields, biModel, filterUniqueValues };
+  return { sourceFields, biModel, filterUniqueValues, resolveControl };
+}
+
+/**
+ * Field parameters: resolve an `@CONTROL(name)` DSL reference to the named
+ * pane control's / ribbon filter's current value as text. A dropdown control
+ * listing field names lets the user re-point a pivot zone from the Controls
+ * pane (Power BI "field parameter").
+ */
+function resolveControl(name: string): string | undefined {
+  const v: ControlValue | undefined = getControlValue(name);
+  if (!v) return undefined;
+  switch (v.kind) {
+    case 'text':
+      return v.value;
+    case 'number':
+      return String(v.value);
+    case 'boolean':
+      return v.value ? 'TRUE' : 'FALSE';
+    case 'textList':
+      return v.value.join(', ');
+    default:
+      return undefined;
+  }
 }
 
 /**

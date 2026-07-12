@@ -54,6 +54,10 @@ export function RolesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
               <span style={styles.muted}>
                 {" "}
                 — {r.filters.length} filter{r.filters.length === 1 ? "" : "s"}
+                {r.deniedTables.length + r.deniedColumns.length > 0 &&
+                  `, ${r.deniedTables.length + r.deniedColumns.length} denied object${
+                    r.deniedTables.length + r.deniedColumns.length === 1 ? "" : "s"
+                  }`}
               </span>
             </div>
             <button style={styles.smallBtn} disabled={readOnly} onClick={() => setEditing({ original: r })}>
@@ -120,6 +124,12 @@ function RoleModal({
         }))
       : [{ table: "", column: "", operator: "=", value: "", dynamic: "" }],
   );
+  const [deniedTables, setDeniedTables] = useState(
+    (original?.deniedTables ?? []).join(", "),
+  );
+  const [deniedColumns, setDeniedColumns] = useState(
+    (original?.deniedColumns ?? []).join(", "),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -155,6 +165,14 @@ function RoleModal({
             value: f.dynamic !== "" ? "" : f.value,
             dynamic: f.dynamic === "" ? null : f.dynamic,
           })),
+          deniedTables: deniedTables
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
+          deniedColumns: deniedColumns
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
         }),
       );
     } catch (err: unknown) {
@@ -273,6 +291,27 @@ function RoleModal({
           Dynamic filters compare the column against the connecting user
           (USERNAME()) or their custom data (CUSTOMDATA()) instead of a fixed value.
         </div>
+      </div>
+      <Field label="Denied tables (optional)">
+        <input
+          style={styles.input}
+          value={deniedTables}
+          onChange={(e) => setDeniedTables(e.target.value)}
+          placeholder="Salaries, AuditLog"
+        />
+      </Field>
+      <Field label="Denied columns (optional)">
+        <input
+          style={styles.input}
+          value={deniedColumns}
+          onChange={(e) => setDeniedColumns(e.target.value)}
+          placeholder="Employee[ssn], Customer[email]"
+        />
+      </Field>
+      <div style={styles.hint}>
+        Object-level security: while this role is active, denied tables and columns disappear
+        from field lists and any query touching them is refused. Comma-separated; columns as
+        Table[column].
       </div>
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>

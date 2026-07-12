@@ -3531,6 +3531,12 @@ export interface ModelMeasureInfo {
    * outer filter context; overrides formatString in result metadata.
    */
   formatStringExpression: string | null;
+  /**
+   * DETAILROWS drill-through projection: qualified `Table[column]` refs
+   * applied when a user drills a cell of this measure, or null for the
+   * builtin auto-derived projection.
+   */
+  detailRows: string[] | null;
   isHidden: boolean;
   /** Display folder (Studio-style measure group), or null when ungrouped. */
   group: string | null;
@@ -3593,6 +3599,8 @@ export async function biModelUpsertMeasure(params: {
   formatString?: string | null;
   /** Dynamic format string expression (evaluated per query); optional. */
   formatStringExpression?: string | null;
+  /** DETAILROWS drill-through projection (`Table[column]` refs); optional. */
+  detailRows?: string[] | null;
   /** Display folder (Studio-style measure group); null/empty = ungrouped. */
   group?: string | null;
 }): Promise<ModelMeasureInfo[]> {
@@ -3604,6 +3612,7 @@ export async function biModelUpsertMeasure(params: {
     description: params.description ?? null,
     formatString: params.formatString ?? null,
     formatStringExpression: params.formatStringExpression ?? null,
+    detailRows: params.detailRows ?? null,
     group: params.group ?? null,
   });
 }
@@ -3742,6 +3751,22 @@ export interface RoleFilterDto {
 export interface ModelRoleInfo {
   name: string;
   filters: RoleFilterDto[];
+  /** Object-level security: tables this role may not access at all. */
+  deniedTables: string[];
+  /** Object-level security: denied qualified `Table[column]` refs. */
+  deniedColumns: string[];
+}
+
+/** A named presentation subset of the model (perspective). */
+export interface ModelPerspectiveInfo {
+  name: string;
+  /** Tables shown in full by this perspective. */
+  tables: string[];
+  /** Individually shown qualified `Table[column]` refs. */
+  columns: string[];
+  /** Measures shown by this perspective. */
+  measures: string[];
+  description: string | null;
 }
 
 export interface CalcGroupItemDto {
@@ -3847,6 +3872,8 @@ export interface ModelOverview {
   hierarchies: ModelHierarchyInfo[];
   kpis: ModelKpiInfo[];
   securityRoles: ModelRoleInfo[];
+  /** Named presentation subsets of the model. */
+  perspectives: ModelPerspectiveInfo[];
   calculationGroups: ModelCalcGroupInfo[];
   measures: ModelMeasureInfo[];
   contexts: ModelContextInfo[];
@@ -4051,12 +4078,18 @@ export async function biModelUpsertRole(params: {
   originalName?: string | null;
   name: string;
   filters: RoleFilterDto[];
+  /** Object-level security: denied tables (queries fail closed). */
+  deniedTables?: string[];
+  /** Object-level security: denied `Table[column]` refs. */
+  deniedColumns?: string[];
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_role", {
     connectionId: params.connectionId,
     originalName: params.originalName ?? null,
     name: params.name,
     filters: params.filters,
+    deniedTables: params.deniedTables ?? null,
+    deniedColumns: params.deniedColumns ?? null,
   });
 }
 
@@ -4065,6 +4098,34 @@ export async function biModelDeleteRole(
   name: string,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_delete_role", { connectionId, name });
+}
+
+/** Add (originalName omitted) or update/rename a model perspective. */
+export async function biModelUpsertPerspective(params: {
+  connectionId: string;
+  originalName?: string | null;
+  name: string;
+  tables: string[];
+  columns: string[];
+  measures: string[];
+  description?: string | null;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_perspective", {
+    connectionId: params.connectionId,
+    originalName: params.originalName ?? null,
+    name: params.name,
+    tables: params.tables,
+    columns: params.columns,
+    measures: params.measures,
+    description: params.description ?? null,
+  });
+}
+
+export async function biModelDeletePerspective(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_perspective", { connectionId, name });
 }
 
 export async function biModelUpsertCalcGroup(params: {

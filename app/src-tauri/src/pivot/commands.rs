@@ -4097,6 +4097,9 @@ pub async fn drill_through_to_sheet(
         crate::bi::types::ConnectionId,
         bi_engine::DetailRequest,
         Option<bi_engine::DetailRequest>,
+        // (has_query_override, first measure name) — drives DETAILROWS below.
+        bool,
+        String,
     )> = {
         let bi_meta = pivot_state
             .bi_metadata
@@ -4145,7 +4148,13 @@ pub async fn drill_through_to_sheet(
             } else {
                 None
             };
-            Some((meta.connection_id, detail, fallback))
+            Some((
+                meta.connection_id,
+                detail,
+                fallback,
+                override_ref.is_some(),
+                meta.measures.first().map(|m| m.name.clone()).unwrap_or_default(),
+            ))
         } else {
             // Grid-backed pivot — read the matching source rows from the grid.
             let result = drill_down(definition, cache, &request.group_path, max);
@@ -4185,7 +4194,9 @@ pub async fn drill_through_to_sheet(
     };
 
     // BI-backed pivot: run the secured drillthrough now the pivot locks are free.
-    if let Some((connection_id, detail, fallback)) = bi_drill {
+    if let Some((connection_id, mut detail, mut fallback, has_query_override, first_measure)) =
+        bi_drill
+    {
         let engine_arc = {
             let connections = bi_state
                 .connections
@@ -4198,6 +4209,49 @@ pub async fn drill_through_to_sheet(
         };
         let batches = {
             let mut engine = engine_arc.lock().await;
+            // DETAILROWS: when the drilled measure defines its own drill
+            // projection in the model, it replaces the auto-derived builtin
+            // one (fact refs → detail columns, other-table refs → dimension
+            // attributes). An explicit Query-mode override still wins.
+            if !has_query_override {
+                let detail_refs = engine
+                    .model()
+                    .measure(&first_measure)
+                    .ok()
+                    .and_then(|m| m.detail_rows().map(|r| r.to_vec()));
+                if let Some(refs) = detail_refs {
+                    let mut columns: Vec<String> = Vec::new();
+                    let mut dims: Vec<bi_engine::ColumnRef> = Vec::new();
+                    for r in &refs {
+                        // Builder-validated shape: `Table[column]`.
+                        let r = r.trim();
+                        let Some(open) = r.find('[') else { continue };
+                        let Some(body) = r.strip_suffix(']') else { continue };
+                        let t = body[..open].trim();
+                        let c = body[open + 1..].trim();
+                        if t.eq_ignore_ascii_case(&detail.table) {
+                            columns.push(c.to_string());
+                        } else {
+                            dims.push(bi_engine::ColumnRef::new(t, c));
+                        }
+                    }
+                    let has_dims = !dims.is_empty();
+                    detail.columns = columns.clone();
+                    detail.dimension_columns = dims;
+                    match fallback.as_mut() {
+                        Some(bare) => bare.columns = columns,
+                        // The builtin path had no dimension attributes, but the
+                        // measure's projection adds some — give it the same
+                        // bare fallback the auto-derived path gets.
+                        None if has_dims => {
+                            let mut bare = detail.clone();
+                            bare.dimension_columns = Vec::new();
+                            fallback = Some(bare);
+                        }
+                        None => {}
+                    }
+                }
+            }
             // Apply this connection's RLS role (or clear a sibling's) so drilled
             // detail rows are restricted to what the active role permits.
             crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
@@ -4515,9 +4569,40 @@ pub(crate) fn extract_bi_model_metadata(
 ) {
     let model = engine.model();
 
+    // Object-level security: when the engine's ACTIVE role denies tables or
+    // columns, hide them from the field list. Presentation-side only — the
+    // engine's own OLS query gate is the authoritative (fail-closed) control.
+    let mut ols_denied_tables: Vec<String> = Vec::new();
+    let mut ols_denied_cols: Vec<(String, String)> = Vec::new();
+    for role_name in engine.active_roles() {
+        let Ok(role) = model.security_role(role_name) else {
+            continue;
+        };
+        ols_denied_tables.extend(role.denied_tables().iter().cloned());
+        for r in role.denied_columns() {
+            let r = r.trim();
+            let Some(open) = r.find('[') else { continue };
+            let Some(body) = r.strip_suffix(']') else { continue };
+            ols_denied_cols.push((
+                body[..open].trim().to_string(),
+                body[open + 1..].trim().to_string(),
+            ));
+        }
+    }
+    let table_denied = |t: &str| {
+        ols_denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t))
+    };
+    let col_denied = |t: &str, c: &str| {
+        table_denied(t)
+            || ols_denied_cols
+                .iter()
+                .any(|(dt, dc)| dt.eq_ignore_ascii_case(t) && dc.eq_ignore_ascii_case(c))
+    };
+
     let tables: Vec<BiModelTableMeta> = model
         .tables()
         .iter()
+        .filter(|t| !table_denied(t.name()))
         .map(|t| {
             let is_numeric_dt = |dt: &bi_engine::DataType| {
                 matches!(
@@ -4531,6 +4616,7 @@ pub(crate) fn extract_bi_model_metadata(
             let mut columns: Vec<BiModelColumnMeta> = t
                 .columns()
                 .iter()
+                .filter(|c| !col_denied(t.name(), c.name()))
                 .map(|c| {
                     let dt = c.data_type();
                     BiModelColumnMeta {
@@ -4549,6 +4635,9 @@ pub(crate) fn extract_bi_model_metadata(
             // (the engine computes them when they appear in group_by), so surface
             // them in the field list alongside the table's columns.
             for cc in model.context_columns_for_table(t.name()) {
+                if col_denied(t.name(), cc.name()) {
+                    continue;
+                }
                 let dt = cc.data_type();
                 columns.push(BiModelColumnMeta {
                     name: cc.name().to_string(),
@@ -4570,6 +4659,7 @@ pub(crate) fn extract_bi_model_metadata(
     let measures: Vec<MeasureFieldInfo> = model
         .measures()
         .iter()
+        .filter(|m| !table_denied(m.table()))
         .map(|m| {
             let source_column = m.simple_column().unwrap_or("").to_string();
             let aggregation = m
@@ -4588,6 +4678,10 @@ pub(crate) fn extract_bi_model_metadata(
     let hierarchies: Vec<BiHierarchyMeta> = model
         .hierarchies()
         .iter()
+        .filter(|h| {
+            !table_denied(h.table())
+                && !h.levels().iter().any(|l| col_denied(h.table(), l.column()))
+        })
         .map(|h| {
             let levels = h
                 .levels()
@@ -4662,7 +4756,10 @@ pub async fn create_pivot_from_bi_model(
                 .ok_or_else(|| format!("Connection {} not found", connection_id))?;
             conn.engine.clone().ok_or("No BI model loaded.")?
         };
-        let engine = engine_arc.lock().await;
+        let mut engine = engine_arc.lock().await;
+        // Sync the connection's active RLS role onto the engine so the OLS
+        // field-list filtering inside extract_bi_model_metadata sees it.
+        crate::bi::commands::apply_connection_role(&mut engine, &bi_state, connection_id);
         let result = extract_bi_model_metadata(&engine);
         log_info!(
             "PIVOT",
