@@ -325,6 +325,21 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("cell_behaviors.json", options.clone())?;
         zip.write_all(cell_behaviors_json.as_bytes())?;
     }
+    if !workbook.comments.is_empty() {
+        let comments_json = serde_json::to_string_pretty(&workbook.comments)?;
+        zip.start_file("comments.json", options.clone())?;
+        zip.write_all(comments_json.as_bytes())?;
+    }
+    if !workbook.scenarios.is_empty() {
+        let scenarios_json = serde_json::to_string_pretty(&workbook.scenarios)?;
+        zip.start_file("scenarios.json", options.clone())?;
+        zip.write_all(scenarios_json.as_bytes())?;
+    }
+    if !workbook.outlines.is_empty() {
+        let outlines_json = serde_json::to_string_pretty(&workbook.outlines)?;
+        zip.start_file("outlines.json", options.clone())?;
+        zip.write_all(outlines_json.as_bytes())?;
+    }
 
     // Write generic per-extension state as a single extension-data.json object
     if !workbook.extension_data.is_empty() {
@@ -775,6 +790,15 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let cell_behaviors: Vec<persistence::SavedCellBehavior> =
         read_optional_json::<Vec<persistence::SavedCellBehavior>>(&mut archive, "cell_behaviors.json")?
             .unwrap_or_default();
+    let comments: Vec<persistence::SavedSheetComments> =
+        read_optional_json::<Vec<persistence::SavedSheetComments>>(&mut archive, "comments.json")?
+            .unwrap_or_default();
+    let scenarios: Vec<persistence::SavedSheetScenarios> =
+        read_optional_json::<Vec<persistence::SavedSheetScenarios>>(&mut archive, "scenarios.json")?
+            .unwrap_or_default();
+    let outlines: Vec<persistence::SavedSheetOutline> =
+        read_optional_json::<Vec<persistence::SavedSheetOutline>>(&mut archive, "outlines.json")?
+            .unwrap_or_default();
 
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
@@ -843,6 +867,9 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         controls,
         cell_types,
         cell_behaviors,
+        comments,
+        scenarios,
+        outlines,
     })
 }
 
@@ -996,6 +1023,9 @@ mod tests {
             controls: Vec::new(),
             cell_types: Vec::new(),
             cell_behaviors: Vec::new(),
+            comments: Vec::new(),
+            scenarios: Vec::new(),
+            outlines: Vec::new(),
         }
     }
 
@@ -1286,6 +1316,77 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_comments_scenarios_outlines() {
+        // Regression (.calp fidelity Wave B): threaded comments, what-if
+        // scenarios, and outline groups lived only in AppState and vanished on
+        // every save/reload. All three persist as opaque per-sheet payloads
+        // keyed by SheetId, exactly like conditional formats.
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.comments = vec![persistence::SavedSheetComments {
+            sheet_id,
+            comments: serde_json::json!([
+                { "id": "c-1", "row": 0, "col": 0, "sheetIndex": 0,
+                  "authorEmail": "a@example.com", "authorName": "A",
+                  "content": "Check this figure", "resolved": false,
+                  "replies": [ { "id": "r-1", "authorEmail": "b@example.com",
+                                 "authorName": "B", "content": "Looks right",
+                                 "mentions": [], "createdAt": "2026-07-01T00:00:00Z",
+                                 "modifiedAt": null } ],
+                  "mentions": [], "createdAt": "2026-07-01T00:00:00Z" }
+            ]),
+        }];
+        workbook.scenarios = vec![persistence::SavedSheetScenarios {
+            sheet_id,
+            scenarios: serde_json::json!([
+                { "name": "Best case", "comment": "", "createdBy": "A",
+                  "sheetIndex": 0,
+                  "changingCells": [ { "row": 1, "col": 1, "value": "42" } ] }
+            ]),
+        }];
+        workbook.outlines = vec![persistence::SavedSheetOutline {
+            sheet_id,
+            outline: serde_json::json!({
+                "rowGroups": [ { "startRow": 2, "endRow": 5, "level": 1, "collapsed": true } ],
+                "columnGroups": [],
+                "settings": { "summaryRowPosition": "belowRight",
+                              "summaryColPosition": "belowRight",
+                              "showOutlineSymbols": true, "autoStyles": false },
+                "maxRowLevel": 1, "maxColLevel": 0
+            }),
+        }];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comments_scenarios_outlines.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.comments.len(), 1, "comments must survive the .cala round-trip");
+        assert_eq!(loaded.comments[0].sheet_id, sheet_id);
+        assert_eq!(loaded.comments[0].comments, workbook.comments[0].comments);
+        assert_eq!(loaded.scenarios.len(), 1, "scenarios must survive the .cala round-trip");
+        assert_eq!(loaded.scenarios[0].sheet_id, sheet_id);
+        assert_eq!(loaded.scenarios[0].scenarios, workbook.scenarios[0].scenarios);
+        assert_eq!(loaded.outlines.len(), 1, "outlines must survive the .cala round-trip");
+        assert_eq!(loaded.outlines[0].sheet_id, sheet_id);
+        assert_eq!(loaded.outlines[0].outline, workbook.outlines[0].outline);
+    }
+
+    #[test]
+    fn test_comments_scenarios_outlines_absent_default_to_empty() {
+        // Files written before Wave B have none of the three artifacts —
+        // they must load as empty stores, not error.
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_wave_b.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.comments.is_empty());
+        assert!(loaded.scenarios.is_empty());
+        assert!(loaded.outlines.is_empty());
+    }
+
+    #[test]
     fn test_roundtrip_controls() {
         // Regression: control metadata (buttons/checkboxes — onSelect scripts,
         // formula-driven properties) lived only in AppState and vanished on every
@@ -1541,6 +1642,7 @@ mod tests {
                 model_table: "Sales".to_string(),
                 schema: "public".to_string(),
                 source_table: "sales".to_string(),
+                source_query: None,
             }],
             calculated_measures: Vec::new(),
         });

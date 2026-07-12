@@ -99,6 +99,89 @@ fn ensure_vec_len_with<T, F: Fn() -> T>(v: &mut Vec<T>, min_len: usize, make: F)
 }
 
 // ============================================================================
+// Per-sheet HashMap store remapping (sheet move / delete / copy)
+// ============================================================================
+//
+// Most per-sheet state lives in index-aligned Vecs that the structural sheet
+// commands rotate/remove/insert in place above. A second family of stores is
+// keyed by sheet INDEX in HashMaps — comments, scenarios, outlines,
+// conditional formats, data validations, cell-type assignments, on-grid
+// controls, advanced-filter hidden rows, and the spill-tracking pair — and
+// was historically NOT remapped, so after a move/delete/copy those entries
+// silently pointed at whatever sheet inherited the old index.
+// `remap_sheet_keyed_stores` applies the same index mapping the Vec stores
+// received; `None` drops the entry (deleted sheet).
+
+/// Re-key a `sheet_index -> V` store through `remap` (None = drop the entry).
+fn remap_indexed_map<V>(
+    map: &mut HashMap<usize, V>,
+    remap: impl Fn(usize) -> Option<usize>,
+) {
+    let old = std::mem::take(map);
+    for (index, value) in old {
+        if let Some(new_index) = remap(index) {
+            map.insert(new_index, value);
+        }
+    }
+}
+
+/// Re-key a `(sheet_index, row, col) -> V` store through `remap` (None =
+/// drop the entry).
+fn remap_cell_keyed_map<V>(
+    map: &mut HashMap<(usize, u32, u32), V>,
+    remap: impl Fn(usize) -> Option<usize>,
+) {
+    let old = std::mem::take(map);
+    for ((index, row, col), value) in old {
+        if let Some(new_index) = remap(index) {
+            map.insert((new_index, row, col), value);
+        }
+    }
+}
+
+/// Apply `remap` to every sheet-index-keyed HashMap store, re-stamping the
+/// `sheet_index` field carried INSIDE Comment and Scenario payloads (the same
+/// re-stamp load_file performs when it materializes them). Takes each store's
+/// lock briefly, one at a time; callers must not hold any of these locks.
+fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<usize>) {
+    {
+        let mut comments = state.comments.lock().unwrap();
+        remap_indexed_map(&mut comments, &remap);
+        for (index, sheet_comments) in comments.iter_mut() {
+            for comment in sheet_comments.values_mut() {
+                comment.sheet_index = *index;
+            }
+        }
+    }
+    {
+        let mut scenarios = state.scenarios.lock().unwrap();
+        remap_indexed_map(&mut scenarios, &remap);
+        for (index, sheet_scenarios) in scenarios.iter_mut() {
+            for scenario in sheet_scenarios.iter_mut() {
+                scenario.sheet_index = *index;
+            }
+        }
+    }
+    remap_indexed_map(&mut state.outlines.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.conditional_formats.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.data_validations.lock().unwrap(), &remap);
+    remap_cell_keyed_map(&mut state.cell_types.lock().unwrap(), &remap);
+    // On-grid controls (buttons/checkboxes) share the cell-type key shape.
+    remap_cell_keyed_map(&mut state.controls.lock().unwrap(), &remap);
+    // Advanced-filter hidden rows: per-sheet session state that is never
+    // recomputed on sheet ops (and shows up in the state digest).
+    remap_indexed_map(&mut state.advanced_filter_hidden_rows.lock().unwrap(), &remap);
+    // Spill tracking is a TWIN pair maintained in lockstep in commands/data.rs
+    // (spill_hosts: spill cell -> origin; spill_ranges: origin -> its spill
+    // cells; both origins and spill cells are in-sheet coords). It is updated
+    // incrementally per ACTIVE sheet — never rebuilt on sheet ops — so both
+    // sides remap together (remapping one alone would desync the pair and
+    // mis-target spill protection).
+    remap_cell_keyed_map(&mut state.spill_hosts.lock().unwrap(), &remap);
+    remap_cell_keyed_map(&mut state.spill_ranges.lock().unwrap(), &remap);
+}
+
+// ============================================================================
 // Existing Commands (updated for tab_color / hidden)
 // ============================================================================
 
@@ -461,6 +544,22 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
         }
     }
     crate::report::sync_reports_to_extension_data(&state);
+
+    // The sheet-index-keyed HashMap stores (comments, scenarios, outlines,
+    // conditional formats, data validations, cell types, on-grid controls,
+    // advanced-filter hidden rows, spill tracking) are not index-aligned
+    // Vecs: drop the deleted sheet's entries and shift the indices above it
+    // down by one, exactly like the report/table remaps around this. Comment
+    // and Scenario payloads carry a sheet_index field too — re-stamped inside.
+    remap_sheet_keyed_stores(&state, |i| {
+        if i == index {
+            None
+        } else if i > index {
+            Some(i - 1)
+        } else {
+            Some(i)
+        }
+    });
 
     // Re-key tables for sheets above the deleted index (shift down by 1)
     let keys_to_shift: Vec<usize> = tables.keys().filter(|&&k| k > index).cloned().collect();
@@ -892,6 +991,13 @@ pub fn move_sheet(
             }
         }
         crate::report::sync_reports_to_extension_data(&state);
+
+        // Same remap for the sheet-index-keyed HashMap stores (comments,
+        // scenarios, outlines, conditional formats, data validations, cell
+        // types, on-grid controls, advanced-filter hidden rows, spill
+        // tracking) — historically missed here, which left their entries
+        // pointing at whatever sheet inherited the old index after a move.
+        remap_sheet_keyed_stores(&state, |i| Some(remap(i)));
     }
 
     Ok(SheetsResult {
@@ -1050,6 +1156,15 @@ pub fn copy_sheet(
             }
         }
         crate::report::sync_reports_to_extension_data(&state);
+
+        // Same shift for the sheet-index-keyed HashMap stores (comments,
+        // scenarios, outlines, conditional formats, data validations, cell
+        // types, on-grid controls, advanced-filter hidden rows, spill
+        // tracking): indices at/above the insertion point move up by one. The
+        // copy itself starts with none of this state (mirroring reports).
+        remap_sheet_keyed_stores(&state, |i| {
+            Some(if i >= insert_at { i + 1 } else { i })
+        });
     }
 
     Ok(SheetsResult {
@@ -1251,5 +1366,167 @@ pub fn previous_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
             set_active_sheet(state, idx)
         }
         None => Err("No other visible sheet to navigate to".to_string()),
+    }
+}
+
+// ============================================================================
+// Tests: per-sheet HashMap store remapping
+// ============================================================================
+
+#[cfg(test)]
+mod remap_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_map_delete_drops_and_shifts_down() {
+        // Deleting sheet 1 of [0, 1, 2, 3]: entry 1 drops, 2 -> 1, 3 -> 2.
+        let mut map: HashMap<usize, &str> =
+            [(0, "a"), (1, "b"), (2, "c"), (3, "d")].into_iter().collect();
+        let deleted = 1usize;
+        remap_indexed_map(&mut map, |i| {
+            if i == deleted {
+                None
+            } else if i > deleted {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        });
+        let expected: HashMap<usize, &str> =
+            [(0, "a"), (1, "c"), (2, "d")].into_iter().collect();
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn indexed_map_move_follows_rotation() {
+        // move_sheet(0 -> 2) over [0, 1, 2]: 0 -> 2, 1 -> 0, 2 -> 1 (the same
+        // mapping the rotated Vec stores and report definitions receive).
+        let (from_index, to_index) = (0usize, 2usize);
+        let remap = |i: usize| -> usize {
+            if i == from_index {
+                to_index
+            } else if from_index < to_index && i > from_index && i <= to_index {
+                i - 1
+            } else if to_index < from_index && i >= to_index && i < from_index {
+                i + 1
+            } else {
+                i
+            }
+        };
+        let mut map: HashMap<usize, &str> =
+            [(0, "a"), (1, "b"), (2, "c")].into_iter().collect();
+        remap_indexed_map(&mut map, |i| Some(remap(i)));
+        let expected: HashMap<usize, &str> =
+            [(2, "a"), (0, "b"), (1, "c")].into_iter().collect();
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn indexed_map_insert_shifts_up_at_and_above() {
+        // copy_sheet inserting at index 1: 0 stays, 1 -> 2, 2 -> 3; the new
+        // sheet (index 1) starts with no entry.
+        let insert_at = 1usize;
+        let mut map: HashMap<usize, &str> =
+            [(0, "a"), (1, "b"), (2, "c")].into_iter().collect();
+        remap_indexed_map(&mut map, |i| Some(if i >= insert_at { i + 1 } else { i }));
+        let expected: HashMap<usize, &str> =
+            [(0, "a"), (2, "b"), (3, "c")].into_iter().collect();
+        assert_eq!(map, expected);
+        assert!(!map.contains_key(&insert_at));
+    }
+
+    #[test]
+    fn cell_keyed_map_remaps_sheet_component_only() {
+        // Shared shape of cell_types, on-grid controls, and spill_hosts:
+        // (sheet_index, row, col) keys where only the sheet component remaps.
+        let mut map: HashMap<(usize, u32, u32), &str> = [
+            ((0, 5, 5), "keep"),
+            ((1, 2, 3), "dropped"),
+            ((2, 9, 9), "shifted"),
+        ]
+        .into_iter()
+        .collect();
+        let deleted = 1usize;
+        remap_cell_keyed_map(&mut map, |i| {
+            if i == deleted {
+                None
+            } else if i > deleted {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        });
+        let expected: HashMap<(usize, u32, u32), &str> =
+            [((0, 5, 5), "keep"), ((1, 9, 9), "shifted")].into_iter().collect();
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn advanced_filter_shaped_map_survives_delete_shift() {
+        // HashMap<usize, Vec<u32>> — the advanced_filter_hidden_rows shape;
+        // hidden-row lists follow their sheet, the deleted sheet's list drops.
+        let mut map: HashMap<usize, Vec<u32>> =
+            [(0, vec![1, 2]), (1, vec![7]), (2, vec![9])].into_iter().collect();
+        let deleted = 1usize;
+        remap_indexed_map(&mut map, |i| {
+            if i == deleted {
+                None
+            } else if i > deleted {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        });
+        let expected: HashMap<usize, Vec<u32>> =
+            [(0, vec![1, 2]), (1, vec![9])].into_iter().collect();
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn spill_twin_pair_remaps_consistently_under_the_same_mapping() {
+        // spill_hosts (spill cell -> origin) and spill_ranges (origin -> its
+        // spill cells) are maintained in lockstep; both sides must remap with
+        // the SAME mapping or spill protection mis-targets. Simulate
+        // move_sheet(2 -> 0) over three sheets.
+        let (from_index, to_index) = (2usize, 0usize);
+        let remap = |i: usize| -> usize {
+            if i == from_index {
+                to_index
+            } else if from_index < to_index && i > from_index && i <= to_index {
+                i - 1
+            } else if to_index < from_index && i >= to_index && i < from_index {
+                i + 1
+            } else {
+                i
+            }
+        };
+        // Origin (2, 0, 0) spills into (2, 1, 0) and (2, 2, 0); an unrelated
+        // spill lives on sheet 0 (shifts to 1 when sheet 2 moves in front).
+        let mut hosts: HashMap<(usize, u32, u32), (u32, u32)> = [
+            ((2, 1, 0), (0, 0)),
+            ((2, 2, 0), (0, 0)),
+            ((0, 4, 4), (3, 4)),
+        ]
+        .into_iter()
+        .collect();
+        let mut ranges: HashMap<(usize, u32, u32), Vec<(u32, u32)>> = [
+            ((2, 0, 0), vec![(1, 0), (2, 0)]),
+            ((0, 3, 4), vec![(4, 4)]),
+        ]
+        .into_iter()
+        .collect();
+        remap_cell_keyed_map(&mut hosts, |i| Some(remap(i)));
+        remap_cell_keyed_map(&mut ranges, |i| Some(remap(i)));
+
+        // The moved sheet's spill state follows it to index 0; the twin pair
+        // stays consistent: every spill cell's origin range still lists it.
+        assert!(ranges.contains_key(&(0, 0, 0)));
+        assert!(ranges.contains_key(&(1, 3, 4)));
+        for (&(sheet, row, col), &(origin_r, origin_c)) in &hosts {
+            let cells = ranges
+                .get(&(sheet, origin_r, origin_c))
+                .expect("every spill cell's origin range survives on the same sheet");
+            assert!(cells.contains(&(row, col)));
+        }
     }
 }

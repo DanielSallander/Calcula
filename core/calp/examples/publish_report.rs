@@ -589,6 +589,8 @@ fn main() {
         data_sources,
         excluded_regions,
         custom_objects: Vec::new(),
+        include_comments: false,
+        min_app_version: String::new(),
     };
 
     // Profile dir holds the publisher's Ed25519 keypair (created on first

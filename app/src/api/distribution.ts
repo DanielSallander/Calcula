@@ -24,6 +24,10 @@ export interface PublishParams {
   /** Custom objects contributed by distributable-object providers (brick 4).
    *  publishPackage fills this automatically from registered providers. */
   customObjects?: DistributableObjectPayload[];
+  /** Opt-in for carrying threaded comments (Wave B). Comments are internal
+   * discussion, so they stay private unless this is explicitly true
+   * (default false). Scenarios and outlines always publish. */
+  includeComments?: boolean;
 }
 
 export interface PublishResponse {
@@ -113,6 +117,23 @@ export interface PackageInspection {
   paneControlCount: number;
   /** Names of the pane controls the package carries. */
   paneControlNames: string[];
+  /** Slicers on the published sheets (Wave A). */
+  slicerCount: number;
+  /** Ribbon filters the package carries (workbook-scoped, BI-only; Wave A). */
+  ribbonFilterCount: number;
+  /** Saved pivot layouts the package carries (Wave A). */
+  pivotLayoutCount: number;
+  /** Whether the package carries a document theme (applied only if the
+   * subscriber's theme is still the default). */
+  hasDocumentTheme: boolean;
+  /** Extension-data keys the package carries (merged additively; keys the
+   * subscriber already has are never overwritten). */
+  extensionDataCount: number;
+  /** Their key names (per-object transparency, like namedRangeNames). */
+  extensionDataKeys: string[];
+  /** Sheets carrying threaded comments (Wave B). Non-zero only when the
+   * publisher explicitly opted in via "Include comments" at publish. */
+  commentSheetCount: number;
   /** Verified publisher display name (S5 phase 2). */
   publisherName: string;
   /** "firstUse" or "verified"; failed verification returns an error instead. */
@@ -175,7 +196,8 @@ export interface Subscription {
 /** One object a subscription materialized into the local workbook. */
 export interface SubscribedObject {
   /** "table" | "chart" | "pivot" | "namedRange" | "objectScript" |
-   * "moduleScript" | "notebook" | "dataSource" | "controlSheet" */
+   * "moduleScript" | "notebook" | "dataSource" | "controlSheet" |
+   * "paneControl" | "slicer" | "ribbonFilter" | "pivotLayout" */
   kind: string;
   id: string;
   /** Display name at materialization time; ABSENT when unknown (charts,
@@ -281,10 +303,18 @@ export async function publishPackage(params: PublishParams): Promise<PublishResp
  * Dry-run of publishPackage: assemble the exact carrier a publish would use
  * and report what would ship vs stay behind — without writing anything.
  * Omit sheetIndices (or pass []) to preview publishing every sheet.
+ * Pass includeComments to mirror the real publish's comment opt-in, so the
+ * preview report shows comments exactly where the publish would put them.
  */
-export function publishPreview(sheetIndices?: number[]): Promise<PublishPreviewResponse> {
+export function publishPreview(
+  sheetIndices?: number[],
+  includeComments?: boolean,
+): Promise<PublishPreviewResponse> {
   return invokeBackend("calp_publish_preview", {
-    params: { sheetIndices: sheetIndices ?? null },
+    params: {
+      sheetIndices: sheetIndices ?? null,
+      includeComments: includeComments ?? false,
+    },
   });
 }
 

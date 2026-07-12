@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
 use identity::SheetId;
-use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls, SavedPaneControl};
+use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls, SavedSheetComments, SavedSheetScenarios, SavedSheetOutline, SavedPaneControl, SavedSlicer, SavedRibbonFilter, SavedPivotLayout};
 
 use crate::error::CalpError;
 use crate::integrity::TrustStatus;
@@ -67,6 +67,19 @@ pub struct PullResult {
     /// the PACKAGE sheet id (un-remapped); `controls` is the opaque app payload.
     /// Empty for packages published before controls were carried.
     pub controls: Vec<SavedSheetControls>,
+    /// Threaded comments carried by the package, per sheet (Wave B). `sheet_id`
+    /// is the PACKAGE sheet id (un-remapped); `comments` is the opaque app
+    /// payload. Empty unless the publisher opted in via `include_comments`
+    /// (and for packages published before comments were carried).
+    pub comments: Vec<SavedSheetComments>,
+    /// What-if scenarios carried by the package, per sheet (Wave B). `sheet_id`
+    /// is the PACKAGE sheet id (un-remapped); `scenarios` is the opaque app
+    /// payload. Empty for older packages.
+    pub scenarios: Vec<SavedSheetScenarios>,
+    /// Row/column outline groups carried by the package, per sheet (Wave B).
+    /// `sheet_id` is the PACKAGE sheet id (un-remapped); `outline` is the
+    /// opaque app payload. Empty for older packages.
+    pub outlines: Vec<SavedSheetOutline>,
     /// Pane controls (Controls pane) carried by the package. WORKBOOK-scoped
     /// (no sheet remap needed) and complete: the package list is the
     /// publisher's whole pane-control set, in the deterministic (order, id)
@@ -81,6 +94,28 @@ pub struct PullResult {
     /// Built-in kinds (cellType) are materialized Rust-side on pull; unknown
     /// kinds are surfaced to frontend distributable-object providers.
     pub custom_objects: Vec<PulledCustomObject>,
+    /// Slicers carried by the package (Wave A). `sheet_id` is the PACKAGE
+    /// sheet id (un-remapped, like CF/DV); the Tauri layer maps it to the
+    /// local sheet and drops slicers whose sheet wasn't pulled. Empty for
+    /// packages published before slicers were carried.
+    pub slicers: Vec<SavedSlicer>,
+    /// Ribbon filters carried by the package (Wave A). WORKBOOK-scoped; each
+    /// carries the publisher's connection uuid plus its stable package
+    /// data-source id — the Tauri layer re-binds connection ids onto the
+    /// freshly materialized package connections and skips filters whose data
+    /// source is not embedded in the package. Empty for older packages.
+    pub ribbon_filters: Vec<SavedRibbonFilter>,
+    /// Saved pivot layouts carried by the package (Wave A). Workbook-scoped.
+    /// Empty for older packages.
+    pub pivot_layouts: Vec<SavedPivotLayout>,
+    /// The publisher's document theme (Wave A). None for packages published
+    /// before themes were carried. A workbook SINGLETON: the Tauri layer
+    /// applies it only while the subscriber's theme is still the default.
+    pub theme: Option<engine::theme::ThemeDefinition>,
+    /// Per-extension persisted state carried by the package (Wave A). The
+    /// Tauri layer merges ADDITIVELY (subscriber keys are never overwritten).
+    /// Empty for older packages.
+    pub extension_data: HashMap<String, serde_json::Value>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
@@ -335,6 +370,26 @@ pub fn pull(
             None => Vec::new(),
         };
 
+    // Read Wave B artifacts (comments, scenarios, outlines) — per-sheet opaque
+    // payloads with PACKAGE sheet ids, exactly like CF/DV. All optional:
+    // comments.json exists only when the publisher opted in, and older
+    // packages lack all three.
+    let pulled_comments: Vec<SavedSheetComments> =
+        match registry.read_artifact(pkg, ver, "comments.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_scenarios: Vec<SavedSheetScenarios> =
+        match registry.read_artifact(pkg, ver, "scenarios.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_outlines: Vec<SavedSheetOutline> =
+        match registry.read_artifact(pkg, ver, "outlines.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+
     // Read pane controls (workbook-scoped, like pivot definitions — no
     // per-sheet filtering or sheet-id remap). The artifact carries the
     // publisher's COMPLETE pane-control set; the caller materializes it as a
@@ -344,6 +399,36 @@ pub fn pull(
         match registry.read_artifact(pkg, ver, "pane_controls.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
+        };
+
+    // Read Wave A artifacts (slicers, ribbon filters, pivot layouts, theme,
+    // extension data). All optional — packages published before Wave A simply
+    // lack the artifacts, mirroring how conditional_formats.json absence is
+    // handled. Sheet ids on slicers stay PACKAGE ids (the Tauri layer remaps).
+    let pulled_slicers: Vec<SavedSlicer> =
+        match registry.read_artifact(pkg, ver, "slicers.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_ribbon_filters: Vec<SavedRibbonFilter> =
+        match registry.read_artifact(pkg, ver, "ribbon_filters.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_pivot_layouts: Vec<SavedPivotLayout> =
+        match registry.read_artifact(pkg, ver, "pivot_layouts.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
+    let pulled_theme: Option<engine::theme::ThemeDefinition> =
+        match registry.read_artifact(pkg, ver, "theme.json")? {
+            Some(bytes) => Some(serde_json::from_slice(&bytes)?),
+            None => None,
+        };
+    let pulled_extension_data: HashMap<String, serde_json::Value> =
+        match registry.read_artifact(pkg, ver, "extension_data.json")? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => HashMap::new(),
         };
 
     // Read tables
@@ -560,8 +645,16 @@ pub fn pull(
         conditional_formats: pulled_conditional_formats,
         data_validations: pulled_data_validations,
         controls: pulled_controls,
+        comments: pulled_comments,
+        scenarios: pulled_scenarios,
+        outlines: pulled_outlines,
         pane_controls: pulled_pane_controls,
         custom_objects: pulled_custom_objects,
+        slicers: pulled_slicers,
+        ribbon_filters: pulled_ribbon_filters,
+        pivot_layouts: pulled_pivot_layouts,
+        theme: pulled_theme,
+        extension_data: pulled_extension_data,
         trust_status,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
@@ -610,6 +703,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(reg, &request, prof).unwrap();
         wb
@@ -678,6 +773,8 @@ mod tests {
                     { "row": 1, "col": 0, "typeId": "calcula.checkbox", "params": {} }
                 ]),
             }],
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 
@@ -735,6 +832,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -795,6 +894,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.control_sheets_published, 1);
@@ -874,6 +975,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.pane_controls_published, 2);
@@ -952,6 +1055,8 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
             };
             publish::publish(&reg, &publish_req, prof.path()).unwrap();
         }
@@ -973,6 +1078,444 @@ mod tests {
             v1.artifact_checksums.get("pane_controls.json"),
             v2.artifact_checksums.get("pane_controls.json"),
         );
+    }
+
+    // --- Wave A: slicers / ribbon filters / pivot layouts / theme / extension data ---
+
+    /// A fully-populated SavedSlicer anchored to `sheet_id`.
+    fn make_test_slicer(name: &str, sheet_id: identity::SheetId) -> persistence::SavedSlicer {
+        persistence::SavedSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            header_text: Some("Region".to_string()),
+            sheet_id,
+            x: 100.0,
+            y: 50.0,
+            width: 180.0,
+            height: 220.0,
+            source_type: persistence::SavedSlicerSourceType::Pivot,
+            cache_source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            field_name: "Region".to_string(),
+            selected_items: Some(vec!["North".to_string(), "South".to_string()]),
+            show_header: true,
+            columns: 2,
+            style_preset: "SlicerStyleLight2".to_string(),
+            selection_mode: persistence::SavedSlicerSelectionMode::Multi,
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: true,
+            arrangement: persistence::SavedSlicerArrangement::Grid,
+            rows: 3,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 2.0,
+            button_radius: 2.0,
+            computed_properties: Vec::new(),
+            connected_sources: vec![persistence::SavedSlicerConnection {
+                source_type: persistence::SavedSlicerSourceType::Pivot,
+                source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            }],
+        }
+    }
+
+    #[test]
+    fn pull_carries_slicers_filtered_to_published_sheets() {
+        // Wave A: slicers are sheet-anchored — only slicers on published
+        // sheets travel, keyed by the un-remapped PACKAGE sheet id (CF/DV
+        // semantics; the Tauri layer remaps to the local sheet).
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let published_sheet_id = wb.sheets[0].id;
+        let unpublished_sheet_id = wb.sheets[1].id;
+        let published_slicer = make_test_slicer("ByRegion", published_sheet_id);
+        let published_slicer_id = published_slicer.id;
+        let connected_pivot_id = published_slicer.connected_sources[0].source_id;
+        wb.slicers = vec![
+            published_slicer,
+            make_test_slicer("Hidden", unpublished_sheet_id),
+        ];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "slicer-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0], // only the first sheet ships
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.slicers_published, 1);
+
+        // The artifact is covered by the signed manifest's checksums.
+        let ver = reg.get_version_manifest("slicer-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("slicers.json"));
+
+        let pull_req = PullRequest {
+            package_name: "slicer-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.slicers.len(), 1, "only the published sheet's slicer travels");
+        let s = &result.slicers[0];
+        assert_eq!(s.id, published_slicer_id);
+        assert_eq!(s.name, "ByRegion");
+        assert_eq!(
+            s.sheet_id, published_sheet_id,
+            "slicers carry the un-remapped PACKAGE sheet id, like CF/DV"
+        );
+        assert_eq!(
+            s.selected_items,
+            Some(vec!["North".to_string(), "South".to_string()])
+        );
+        assert_eq!(s.style_preset, "SlicerStyleLight2");
+        assert!(matches!(s.selection_mode, persistence::SavedSlicerSelectionMode::Multi));
+        assert_eq!(s.connected_sources.len(), 1);
+        assert_eq!(s.connected_sources[0].source_id, connected_pivot_id);
+    }
+
+    #[test]
+    fn min_app_version_stamped_for_wave_content_and_empty_otherwise() {
+        // Compatibility contract: a package carrying Wave A/B artifacts must
+        // declare the publisher app's version (publish writes the request's
+        // min_app_version VERBATIM into the signed manifest) so pre-Wave apps
+        // refuse it honestly instead of silently dropping the new artifacts.
+        // A cell-only package carries no minimum and stays pullable anywhere.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // Cell-only workbook: no Wave A/B content -> hosts stamp nothing.
+        let plain_wb = make_test_workbook();
+        let mut plain_req = PublishRequest {
+            workbook: &plain_wb,
+            package_name: "min-app-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        assert!(
+            !publish::carries_wave_content(&plain_req),
+            "a cell-only package must not trigger the version stamp"
+        );
+        publish::publish(&reg, &plain_req, prof.path()).unwrap();
+        let v1 = reg.get_version_manifest("min-app-pkg", "1.0.0").unwrap();
+        assert_eq!(v1.min_app_version, "", "cell-only package declares no minimum");
+
+        // Same package, next version, now with a slicer (Wave A): the host
+        // detects wave content and the stamp lands verbatim in the manifest.
+        let mut wave_wb = make_test_workbook();
+        wave_wb.slicers = vec![make_test_slicer("ByRegion", wave_wb.sheets[0].id)];
+        plain_req.workbook = &wave_wb;
+        plain_req.version = SemVer::new(1, 0, 1);
+        assert!(
+            publish::carries_wave_content(&plain_req),
+            "a slicer on a published sheet is Wave A content"
+        );
+        plain_req.min_app_version = "2.5.0".to_string();
+        publish::publish(&reg, &plain_req, prof.path()).unwrap();
+        let v2 = reg.get_version_manifest("min-app-pkg", "1.0.1").unwrap();
+        assert_eq!(v2.min_app_version, "2.5.0", "publish writes the stamp verbatim");
+    }
+
+    #[test]
+    fn pull_carries_ribbon_filters_with_data_source_id() {
+        // Wave A: ribbon filters are workbook-scoped and BI-only; the stable
+        // package data-source id must survive so the subscriber's pull can
+        // re-bind connection_id onto the freshly materialized connection.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let filter_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        let connection_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.ribbon_filters = vec![persistence::SavedRibbonFilter {
+            id: filter_id,
+            name: "Year".to_string(),
+            connection_id,
+            data_source_id: Some(connection_id.to_string()),
+            field_name: "dim_date.year".to_string(),
+            field_data_type: "number".to_string(),
+            connection_mode: persistence::SavedConnectionMode::Workbook,
+            connected_pivots: Vec::new(),
+            connected_sheets: Vec::new(),
+            display_mode: persistence::SavedRibbonFilterDisplayMode::Dropdown,
+            selected_items: Some(vec!["2026".to_string()]),
+            cross_filter_targets: Vec::new(),
+            cross_filter_slicer_targets: Vec::new(),
+            advanced_filter: None,
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            show_select_all: false,
+            single_select: true,
+            order: 2,
+            button_columns: 2,
+            button_rows: 0,
+        }];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "filter-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0], // partial selection — filters still all travel
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.ribbon_filters_published, 1);
+        let ver = reg.get_version_manifest("filter-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("ribbon_filters.json"));
+
+        let pull_req = PullRequest {
+            package_name: "filter-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.ribbon_filters.len(), 1);
+        let f = &result.ribbon_filters[0];
+        assert_eq!(f.id, filter_id);
+        assert_eq!(f.name, "Year");
+        assert_eq!(
+            f.data_source_id.as_deref(),
+            Some(connection_id.to_string().as_str()),
+            "the stable data_source_id must survive for the pull-side re-bind"
+        );
+        assert_eq!(f.field_name, "dim_date.year");
+        assert_eq!(f.selected_items, Some(vec!["2026".to_string()]));
+        assert!(f.single_select);
+        assert_eq!(f.order, 2);
+    }
+
+    #[test]
+    fn pull_carries_pivot_layouts() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        let layout_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+        wb.pivot_layouts = vec![persistence::SavedPivotLayout {
+            id: layout_id,
+            name: "Sales by Region".to_string(),
+            dsl_text: "ROWS: Region\nVALUES: SUM(Amount)".to_string(),
+            description: Some("quarterly view".to_string()),
+            source_type: "bi".to_string(),
+            source_table_name: None,
+            source_bi_tables: vec!["fact_sales".to_string()],
+            source_bi_measures: vec!["Total Amount".to_string()],
+            created_at: 1.0,
+            updated_at: 2.0,
+        }];
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "layout-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.pivot_layouts_published, 1);
+        let ver = reg.get_version_manifest("layout-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("pivot_layouts.json"));
+
+        let pull_req = PullRequest {
+            package_name: "layout-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.pivot_layouts.len(), 1);
+        let l = &result.pivot_layouts[0];
+        assert_eq!(l.id, layout_id);
+        assert_eq!(l.name, "Sales by Region");
+        assert_eq!(l.dsl_text, "ROWS: Region\nVALUES: SUM(Amount)");
+        assert_eq!(l.source_type, "bi");
+        assert_eq!(l.source_bi_tables, vec!["fact_sales".to_string()]);
+        assert_eq!(l.source_bi_measures, vec!["Total Amount".to_string()]);
+    }
+
+    #[test]
+    fn pull_carries_document_theme() {
+        // Wave A: theme.json is a singleton — ALWAYS written, and the
+        // publisher's (customized) theme reads back exactly.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        wb.theme = engine::theme::ThemeDefinition::facet();
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "theme-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        let ver = reg.get_version_manifest("theme-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("theme.json"));
+
+        let pull_req = PullRequest {
+            package_name: "theme-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        let theme = result.theme.expect("theme.json is always carried");
+        assert_eq!(theme, engine::theme::ThemeDefinition::facet());
+        assert_eq!(theme.name, "Facet");
+    }
+
+    #[test]
+    fn pull_carries_extension_data() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        wb.extension_data.insert(
+            "calcula.bookmarks".to_string(),
+            serde_json::json!({ "items": [{ "name": "Q1", "ref": "A1" }] }),
+        );
+        wb.extension_data.insert(
+            "thirdparty.notes".to_string(),
+            serde_json::json!("plain string state"),
+        );
+
+        let publish_req = PublishRequest {
+            workbook: &wb,
+            package_name: "ext-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
+        assert_eq!(pub_result.extension_data_published, 2);
+        let ver = reg.get_version_manifest("ext-pkg", "1.0.0").unwrap();
+        assert!(ver.artifact_checksums.contains_key("extension_data.json"));
+
+        let pull_req = PullRequest {
+            package_name: "ext-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        assert_eq!(result.extension_data.len(), 2);
+        assert_eq!(
+            result.extension_data.get("calcula.bookmarks"),
+            Some(&serde_json::json!({ "items": [{ "name": "Q1", "ref": "A1" }] }))
+        );
+        assert_eq!(
+            result.extension_data.get("thirdparty.notes"),
+            Some(&serde_json::json!("plain string state"))
+        );
+    }
+
+    #[test]
+    fn pull_without_wave_a_artifacts_returns_empty_defaults() {
+        // A package whose workbook carries none of the optional Wave A kinds:
+        // the vec artifacts are absent (reader tolerates), extension data is
+        // empty, and only the always-written theme singleton is present.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "slicers.json").unwrap().is_none());
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "ribbon_filters.json").unwrap().is_none());
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "pivot_layouts.json").unwrap().is_none());
+        assert!(reg.read_artifact("test-pkg", "1.0.0", "extension_data.json").unwrap().is_none());
+
+        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        assert!(result.slicers.is_empty());
+        assert!(result.ribbon_filters.is_empty());
+        assert!(result.pivot_layouts.is_empty());
+        assert!(result.extension_data.is_empty());
+        assert_eq!(result.theme, Some(engine::theme::ThemeDefinition::default()));
     }
 
     #[test]
@@ -1030,6 +1573,8 @@ mod tests {
             }],
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &publish_req, prof.path()).unwrap();
         assert_eq!(pub_result.sheets_published, 0);
@@ -1099,6 +1644,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1118,6 +1665,156 @@ mod tests {
         assert_eq!(result.conditional_formats[0].sheet_id, pkg_sheet_id);
         assert_eq!(result.data_validations.len(), 1, "DV must be carried by .calp");
         assert_eq!(result.data_validations[0].sheet_id, pkg_sheet_id);
+    }
+
+    /// Workbook with one published + one unpublished sheet, carrying Wave B
+    /// state (comments/scenarios/outlines) on BOTH — so the tests can assert
+    /// both the carry and the published-sheet filter.
+    fn make_wave_b_workbook() -> (persistence::Workbook, SheetId) {
+        let mut sheet = Sheet::new("Report".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(1.0)));
+        let pkg_sheet_id = sheet.id;
+        let other_sheet = Sheet::new("Private".to_string());
+        let other_id = other_sheet.id;
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![sheet, other_sheet];
+        for sid in [pkg_sheet_id, other_id] {
+            wb.comments.push(SavedSheetComments {
+                sheet_id: sid,
+                comments: serde_json::json!([
+                    { "id": "c-1", "row": 0, "col": 0, "content": "internal note",
+                      "resolved": false, "replies": [] }
+                ]),
+            });
+            wb.scenarios.push(SavedSheetScenarios {
+                sheet_id: sid,
+                scenarios: serde_json::json!([
+                    { "name": "Best case", "sheetIndex": 0,
+                      "changingCells": [ { "row": 1, "col": 1, "value": "42" } ] }
+                ]),
+            });
+            wb.outlines.push(SavedSheetOutline {
+                sheet_id: sid,
+                outline: serde_json::json!({
+                    "rowGroups": [ { "startRow": 2, "endRow": 5, "level": 1, "collapsed": true } ],
+                    "columnGroups": []
+                }),
+            });
+        }
+        (wb, pkg_sheet_id)
+    }
+
+    fn wave_b_publish_req<'a>(
+        wb: &'a persistence::Workbook,
+        include_comments: bool,
+    ) -> PublishRequest<'a> {
+        PublishRequest {
+            workbook: wb,
+            package_name: "wave-b-pkg".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0], // only "Report" — "Private" stays behind
+            now: "2026-07-12T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments,
+            min_app_version: String::new(),
+        }
+    }
+
+    #[test]
+    fn pull_carries_scenarios_and_outlines_filtered_to_published_sheets() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let (wb, pkg_sheet_id) = make_wave_b_workbook();
+
+        let pub_result =
+            publish::publish(&reg, &wave_b_publish_req(&wb, false), prof.path()).unwrap();
+        assert_eq!(pub_result.scenario_sheets_published, 1);
+        assert_eq!(pub_result.outline_sheets_published, 1);
+
+        let pull_req = PullRequest {
+            package_name: "wave-b-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // Scenarios + outlines travel per published sheet, PACKAGE sheet ids
+        // un-remapped (CF/DV semantics); the unpublished sheet's entries do not.
+        assert_eq!(result.scenarios.len(), 1, "scenarios must be carried by .calp");
+        assert_eq!(result.scenarios[0].sheet_id, pkg_sheet_id);
+        assert_eq!(result.scenarios[0].scenarios, wb.scenarios[0].scenarios);
+        assert_eq!(result.outlines.len(), 1, "outlines must be carried by .calp");
+        assert_eq!(result.outlines[0].sheet_id, pkg_sheet_id);
+        assert_eq!(result.outlines[0].outline, wb.outlines[0].outline);
+    }
+
+    #[test]
+    fn publish_omits_comments_unless_opted_in() {
+        // PRIVACY POLICY: include_comments=false (the default everywhere) must
+        // never write comments.json — even when the carrier holds comments on
+        // the published sheets.
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let (wb, _) = make_wave_b_workbook();
+
+        let pub_result =
+            publish::publish(&reg, &wave_b_publish_req(&wb, false), prof.path()).unwrap();
+        assert_eq!(pub_result.comment_sheets_published, 0);
+
+        let pkg = "wave-b-pkg";
+        let ver = "1.0.0";
+        assert!(
+            reg.read_artifact(pkg, ver, "comments.json").unwrap().is_none(),
+            "comments.json must not exist without the opt-in"
+        );
+
+        let pull_req = PullRequest {
+            package_name: pkg.to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        assert!(result.comments.is_empty(), "no comments may arrive without the opt-in");
+    }
+
+    #[test]
+    fn pull_carries_comments_when_opted_in() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let (wb, pkg_sheet_id) = make_wave_b_workbook();
+
+        let pub_result =
+            publish::publish(&reg, &wave_b_publish_req(&wb, true), prof.path()).unwrap();
+        assert_eq!(pub_result.comment_sheets_published, 1);
+
+        let pull_req = PullRequest {
+            package_name: "wave-b-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-07-12T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+
+        // Only the PUBLISHED sheet's comments travel, package sheet id
+        // un-remapped, payload byte-identical (opaque to the calp layer).
+        assert_eq!(result.comments.len(), 1, "opted-in comments must be carried by .calp");
+        assert_eq!(result.comments[0].sheet_id, pkg_sheet_id);
+        assert_eq!(result.comments[0].comments, wb.comments[0].comments);
     }
 
     #[test]
@@ -1156,6 +1853,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1214,6 +1913,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &publish_req, prof.path()).unwrap();
 
@@ -1283,6 +1984,8 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
             };
             publish::publish(&reg, &request, prof.path()).unwrap();
         }
@@ -1561,6 +2264,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 
@@ -1648,6 +2353,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let pub_result = publish::publish(&reg, &request, prof.path()).unwrap();
         assert_eq!(pub_result.modules_published, 1);
@@ -1765,6 +2472,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 

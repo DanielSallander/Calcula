@@ -120,6 +120,18 @@ pub struct Workbook {
     /// Cell-behavior bindings (granular bricks phase 2: per-range script
     /// behaviors). One entry per binding, keyed by SheetId.
     pub cell_behaviors: Vec<SavedCellBehavior>,
+    /// Threaded comments per sheet (opaque app-owned JSON payload — a
+    /// serialized list of comment threads with replies/mentions/resolved
+    /// state — keyed by SheetId, like conditional_formats).
+    pub comments: Vec<SavedSheetComments>,
+    /// What-if scenarios per sheet (opaque app-owned JSON payload keyed by
+    /// SheetId, like conditional_formats).
+    pub scenarios: Vec<SavedSheetScenarios>,
+    /// Row/column outline groups per sheet (opaque app-owned JSON payload
+    /// keyed by SheetId, like conditional_formats). Collapsed groups also
+    /// write their hidden rows/cols into the sheet's hidden sets, but the
+    /// group STRUCTURE lives only here.
+    pub outlines: Vec<SavedSheetOutline>,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -169,6 +181,34 @@ pub struct SavedSheetCellTypes {
 pub struct SavedCellBehavior {
     pub sheet_id: SheetId,
     pub binding: serde_json::Value,
+}
+
+/// Threaded comments for one sheet. `comments` is the opaque app-owned
+/// payload (a serialized list of comment threads — replies, mentions,
+/// resolved flags, timestamps); the persistence layer never inspects it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetComments {
+    pub sheet_id: SheetId,
+    pub comments: serde_json::Value,
+}
+
+/// What-if scenarios for one sheet. `scenarios` is the opaque app-owned
+/// payload (a serialized list of named scenarios with changing cells).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetScenarios {
+    pub sheet_id: SheetId,
+    pub scenarios: serde_json::Value,
+}
+
+/// Row/column outline groups for one sheet. `outline` is the opaque app-owned
+/// payload (a serialized sheet outline: row groups, column groups, settings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetOutline {
+    pub sheet_id: SheetId,
+    pub outline: serde_json::Value,
 }
 
 /// A locally-authored BI connection persisted in the workbook. Carries the
@@ -424,6 +464,9 @@ impl Workbook {
             controls: Vec::new(),
             cell_types: Vec::new(),
             cell_behaviors: Vec::new(),
+            comments: Vec::new(),
+            scenarios: Vec::new(),
+            outlines: Vec::new(),
         }
     }
 
@@ -458,6 +501,9 @@ impl Workbook {
             controls: Vec::new(),
             cell_types: Vec::new(),
             cell_behaviors: Vec::new(),
+            comments: Vec::new(),
+            scenarios: Vec::new(),
+            outlines: Vec::new(),
         }
     }
 }

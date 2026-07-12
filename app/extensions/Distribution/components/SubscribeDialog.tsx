@@ -300,6 +300,31 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                 : ""}
             </div>
           )}
+          {inspection.slicerCount > 0 && <div>{inspection.slicerCount} slicer(s)</div>}
+          {inspection.ribbonFilterCount > 0 && (
+            <div>{inspection.ribbonFilterCount} ribbon filter(s)</div>
+          )}
+          {inspection.pivotLayoutCount > 0 && (
+            <div>{inspection.pivotLayoutCount} saved pivot layout(s)</div>
+          )}
+          {inspection.hasDocumentTheme && (
+            <div>document theme — applied unless you customized yours</div>
+          )}
+          {inspection.commentSheetCount > 0 && (
+            <div>
+              includes comments on {inspection.commentSheetCount} sheet(s) —
+              discussion threads the publisher chose to share
+            </div>
+          )}
+          {inspection.extensionDataCount > 0 && (
+            <div>
+              {inspection.extensionDataCount} extension state key(s)
+              {inspection.extensionDataKeys.length > 0
+                ? `: ${inspection.extensionDataKeys.join(", ")}`
+                : ""}{" "}
+              — only keys you don't already have will apply
+            </div>
+          )}
         </div>
 
         {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}

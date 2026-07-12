@@ -83,6 +83,19 @@ pub struct PublishRequest<'a> {
     /// and listed in the manifest. Built-in producers (cell types) and
     /// third-party providers both feed this.
     pub custom_objects: Vec<PublishCustomObject>,
+    /// Whether to carry threaded comments (Wave B). PRIVACY POLICY: comments
+    /// are internal discussion, so they ship ONLY when the author explicitly
+    /// opts in — false means comments.json is never written, even when the
+    /// workbook carrier holds comments on published sheets. Scenarios and
+    /// outlines have no such gate (they are workbook content, not discussion).
+    pub include_comments: bool,
+    /// Minimum app version written into the version manifest VERBATIM (empty =
+    /// no gate). The pull-time compatibility gate
+    /// (`compat::check_min_app_version`) refuses the package on older apps
+    /// with an honest "update the app" error. Hosts stamp their own version
+    /// here when the package carries artifacts an older app would silently
+    /// drop — see [`carries_wave_content`].
+    pub min_app_version: String,
 }
 
 /// A custom object to publish (distribution brick 4). `payload` is opaque
@@ -122,8 +135,23 @@ pub struct PublishResult {
     pub data_validation_sheets: usize,
     /// Sheets that carried cell-anchored controls (buttons/checkboxes).
     pub control_sheets_published: usize,
+    /// Sheets that carried threaded comments (Wave B). Always 0 unless the
+    /// publish request opted in via `include_comments`.
+    pub comment_sheets_published: usize,
+    /// Sheets that carried what-if scenarios (Wave B).
+    pub scenario_sheets_published: usize,
+    /// Sheets that carried row/column outline groups (Wave B).
+    pub outline_sheets_published: usize,
     /// Pane controls (Controls pane) carried by the package (workbook-scoped).
     pub pane_controls_published: usize,
+    /// Slicers on the published sheets (Wave A).
+    pub slicers_published: usize,
+    /// Ribbon filters carried by the package (workbook-scoped, Wave A).
+    pub ribbon_filters_published: usize,
+    /// Saved pivot layouts carried by the package (workbook-scoped, Wave A).
+    pub pivot_layouts_published: usize,
+    /// Extension-data keys carried by the package (workbook-scoped, Wave A).
+    pub extension_data_published: usize,
     /// Embedded BI data-source models.
     pub data_sources_published: usize,
     /// Writeback region declarations in the manifest.
@@ -219,6 +247,44 @@ pub fn dropdown_reference_warnings(workbook: &Workbook, sheet_indices: &[usize])
         }
     }
     warnings
+}
+
+/// Whether the request carries any Wave A/B artifact the publish would
+/// actually write: slicers / opted-in comments / scenarios / outlines on the
+/// published sheets, ribbon filters / saved pivot layouts / extension data
+/// (workbook-scoped), or a non-default document theme. Apps that predate
+/// these artifacts pull such a package "successfully" while silently dropping
+/// them — so the publishing host stamps `PublishRequest::min_app_version`
+/// with its OWN version exactly when this returns true, letting the pull-time
+/// compatibility gate refuse honestly instead. Cell-only packages return
+/// false and stay pullable by older apps.
+pub fn carries_wave_content(request: &PublishRequest) -> bool {
+    let wb = request.workbook;
+    let published_sheet_ids: Vec<SheetId> = request
+        .sheet_indices
+        .iter()
+        .filter_map(|&idx| wb.sheets.get(idx).map(|s| s.id))
+        .collect();
+    wb.slicers
+        .iter()
+        .any(|s| published_sheet_ids.contains(&s.sheet_id))
+        || !wb.ribbon_filters.is_empty()
+        || !wb.pivot_layouts.is_empty()
+        || !wb.extension_data.is_empty()
+        || (request.include_comments
+            && wb
+                .comments
+                .iter()
+                .any(|c| published_sheet_ids.contains(&c.sheet_id)))
+        || wb
+            .scenarios
+            .iter()
+            .any(|s| published_sheet_ids.contains(&s.sheet_id))
+        || wb
+            .outlines
+            .iter()
+            .any(|o| published_sheet_ids.contains(&o.sheet_id))
+        || wb.theme != engine::theme::ThemeDefinition::default()
 }
 
 /// Publish selected sheets from a workbook to a local registry.
@@ -369,9 +435,11 @@ pub fn publish(
         // subscriber verifies against; publisher_name is display-only.
         publisher_key: keypair.public_key_hex(),
         publisher_name: keypair.display_name(),
-        // Opt-in publisher minimum-app-version (publisher UX to set it is a
-        // later slice); empty = no minimum.
-        min_app_version: String::new(),
+        // The host-supplied minimum, verbatim (empty = no minimum). The app
+        // stamps its own version when the package carries Wave A/B artifacts
+        // an older app would silently drop (carries_wave_content); cell-only
+        // packages stay pullable by older apps.
+        min_app_version: request.min_app_version.clone(),
         sheets,
         named_ranges: named_ranges.clone(),
         tables: table_ids,
@@ -610,6 +678,65 @@ pub fn publish(
         )?;
     }
 
+    // Write threaded comments on the published sheets (Wave B) — same
+    // per-sheet opaque-payload shape as CF/DV — but ONLY when the publish
+    // request opted in. Comments are internal discussion, not report content:
+    // shipping them by default would be a privacy hazard, so absent the
+    // explicit opt-in the artifact is never written (and the publish report
+    // discloses that they stayed private).
+    let published_comments: Vec<_> = if request.include_comments {
+        request
+            .workbook
+            .comments
+            .iter()
+            .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !published_comments.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "comments.json",
+            serde_json::to_string_pretty(&published_comments)?.as_bytes(),
+        )?;
+    }
+
+    // Write what-if scenarios on the published sheets (Wave B) — per-sheet
+    // opaque payloads, CF/DV shape. Always published: scenarios are workbook
+    // content the subscriber needs for the report's what-if analysis.
+    let published_scenarios: Vec<_> = request
+        .workbook
+        .scenarios
+        .iter()
+        .filter(|s| published_sheet_ids.contains(&s.sheet_id))
+        .collect();
+    if !published_scenarios.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "scenarios.json",
+            serde_json::to_string_pretty(&published_scenarios)?.as_bytes(),
+        )?;
+    }
+
+    // Write row/column outline groups on the published sheets (Wave B) —
+    // per-sheet opaque payloads, CF/DV shape. Collapsed groups' hidden
+    // rows/cols already ride in the sheet data; this carries the STRUCTURE
+    // so subscribers can expand/collapse.
+    let published_outlines: Vec<_> = request
+        .workbook
+        .outlines
+        .iter()
+        .filter(|o| published_sheet_ids.contains(&o.sheet_id))
+        .collect();
+    if !published_outlines.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "outlines.json",
+            serde_json::to_string_pretty(&published_outlines)?.as_bytes(),
+        )?;
+    }
+
     // Write pane controls (Controls pane) — WORKBOOK-scoped like pivot
     // definitions, not filtered per sheet: the pane strip belongs to the
     // workbook, so a report package carries all of it. Sorted by (order, id)
@@ -633,6 +760,82 @@ pub fn publish(
             pkg, ver,
             "pane_controls.json",
             serde_json::to_string_pretty(&published_pane_controls)?.as_bytes(),
+        )?;
+    }
+
+    // Write slicers on the published sheets (Wave A) — sheet-anchored like
+    // charts: filtered to the published selection and keyed by the PACKAGE
+    // sheet id (the pull side remaps to the local sheet and drops slicers
+    // whose sheet wasn't pulled). Sorted by id for deterministic artifact
+    // bytes across publishes (the live store is a HashMap).
+    let published_slicers = {
+        let mut slicers: Vec<persistence::SavedSlicer> = request
+            .workbook
+            .slicers
+            .iter()
+            .filter(|s| published_sheet_ids.contains(&s.sheet_id))
+            .cloned()
+            .collect();
+        slicers.sort_by(|a, b| a.id.cmp(&b.id));
+        slicers
+    };
+    if !published_slicers.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "slicers.json",
+            serde_json::to_string_pretty(&published_slicers)?.as_bytes(),
+        )?;
+    }
+
+    // Write ribbon filters (Wave A) — WORKBOOK-scoped like pane controls, so
+    // all of them travel. They are BI-only by design: each carries its stable
+    // package data-source id, and pull re-binds connection ids to the freshly
+    // materialized package connections (filters whose data source is not
+    // embedded in the package are skipped at pull, never clobbered). Sorted by
+    // (order, id) for deterministic bytes, matching pane_controls.
+    let published_ribbon_filters = {
+        let mut filters = request.workbook.ribbon_filters.clone();
+        filters.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+        filters
+    };
+    if !published_ribbon_filters.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "ribbon_filters.json",
+            serde_json::to_string_pretty(&published_ribbon_filters)?.as_bytes(),
+        )?;
+    }
+
+    // Write saved pivot layouts (Wave A) — workbook-scoped; the carrier Vec's
+    // stable order is preserved (already deterministic).
+    if !request.workbook.pivot_layouts.is_empty() {
+        registry.write_artifact(
+            pkg, ver,
+            "pivot_layouts.json",
+            serde_json::to_string_pretty(&request.workbook.pivot_layouts)?.as_bytes(),
+        )?;
+    }
+
+    // Write the document theme (Wave A) — a workbook SINGLETON, always
+    // written. The pull side applies it only while the subscriber's theme is
+    // still the default (subscriber customization always wins).
+    registry.write_artifact(
+        pkg, ver,
+        "theme.json",
+        serde_json::to_string_pretty(&request.workbook.theme)?.as_bytes(),
+    )?;
+
+    // Write extension data (Wave A) — the whole per-extension state map,
+    // serialized through a BTreeMap so artifact bytes are key-order
+    // deterministic. Pull merges ADDITIVELY: only keys the subscriber does
+    // not already have are inserted (never overwritten).
+    if !request.workbook.extension_data.is_empty() {
+        let ordered: std::collections::BTreeMap<&String, &serde_json::Value> =
+            request.workbook.extension_data.iter().collect();
+        registry.write_artifact(
+            pkg, ver,
+            "extension_data.json",
+            serde_json::to_string_pretty(&ordered)?.as_bytes(),
         )?;
     }
 
@@ -807,7 +1010,14 @@ pub fn publish(
         conditional_format_sheets: published_conditional_formats.len(),
         data_validation_sheets: published_data_validations.len(),
         control_sheets_published: published_controls.len(),
+        comment_sheets_published: published_comments.len(),
+        scenario_sheets_published: published_scenarios.len(),
+        outline_sheets_published: published_outlines.len(),
         pane_controls_published: published_pane_controls.len(),
+        slicers_published: published_slicers.len(),
+        ribbon_filters_published: published_ribbon_filters.len(),
+        pivot_layouts_published: request.workbook.pivot_layouts.len(),
+        extension_data_published: request.workbook.extension_data.len(),
         data_sources_published: request.data_sources.len(),
         writeback_regions_published: request
             .writeback_regions
@@ -921,6 +1131,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
 
@@ -974,6 +1186,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         let result = publish(&reg, &request, prof.path()).unwrap();
         assert!(result.warnings.is_empty(), "warnings: {:?}", result.warnings);
@@ -1038,6 +1252,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
 
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -1106,6 +1322,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
 
         let result = publish(&reg, &request, prof.path()).unwrap();
@@ -1138,13 +1356,17 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
         publish(&reg, &request, prof.path()).unwrap();
 
         let ver = reg.get_version_manifest("checked", "1.0.0").unwrap();
 
         // 2 sheets x (data.json + styles.json + layout.json + metadata.json)
-        assert_eq!(ver.artifact_checksums.len(), 8);
+        // + the always-written theme.json singleton (Wave A).
+        assert_eq!(ver.artifact_checksums.len(), 9);
+        assert!(ver.artifact_checksums.contains_key("theme.json"));
         // The manifest is the integrity root: never lists itself.
         assert!(!ver.artifact_checksums.contains_key("version-manifest.json"));
         // The detached signature is likewise not a listed artifact.
@@ -1207,6 +1429,8 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
         }
@@ -1266,6 +1490,8 @@ mod tests {
             data_sources: Vec::new(),
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
         };
 
         publish(&reg, &request, prof.path()).unwrap();
@@ -1296,6 +1522,8 @@ mod tests {
                 data_sources: Vec::new(),
                 excluded_regions: Vec::new(),
                 custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
         }

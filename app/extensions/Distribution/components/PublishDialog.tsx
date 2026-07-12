@@ -17,6 +17,7 @@ export function PublishDialog({ onClose }: DialogProps) {
   const [kind, setKind] = useState("report");
   const [publishedBy, setPublishedBy] = useState("");
   const [sheetIndices, setSheetIndices] = useState("0");
+  const [includeComments, setIncludeComments] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<PublishReport | null>(null);
@@ -33,7 +34,7 @@ export function PublishDialog({ onClose }: DialogProps) {
     setError(null);
     setStatus("Analyzing…");
     try {
-      const result = await publishPreview(parseIndices());
+      const result = await publishPreview(parseIndices(), includeComments);
       setReport(result.report);
       setReportLabel(`Preview — would publish ${result.sheetNames.join(", ")}`);
       setWarnings(result.warnings);
@@ -56,6 +57,7 @@ export function PublishDialog({ onClose }: DialogProps) {
         kind,
         sheetIndices: parseIndices(),
         publishedBy,
+        includeComments,
       });
       setStatus(
         `Published ${result.packageName} v${result.version}: ${result.sheetsPublished} sheet(s)`
@@ -113,6 +115,17 @@ export function PublishDialog({ onClose }: DialogProps) {
         <label>Published By</label>
         <input style={inputStyle} value={publishedBy} onChange={(e) => setPublishedBy(e.target.value)}
           placeholder="your-name@company.com" />
+      </div>
+      <div style={{ ...fieldStyle, flexDirection: "row", alignItems: "center", gap: "6px" }}>
+        <input
+          id="publish-include-comments"
+          type="checkbox"
+          checked={includeComments}
+          onChange={(e) => setIncludeComments(e.target.checked)}
+        />
+        <label htmlFor="publish-include-comments" style={{ cursor: "pointer" }}>
+          Include comments (threaded discussions stay private unless checked)
+        </label>
       </div>
 
       {error && <div style={{ color: "red", marginBottom: "8px", fontSize: "12px" }}>{error}</div>}

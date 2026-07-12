@@ -25,6 +25,7 @@ const KIND_LABELS: Record<string, string> = {
   table: "Tables",
   pivot: "Pivots",
   chart: "Charts",
+  slicer: "Slicers",
   namedRange: "Named ranges",
   objectScript: "Object scripts",
   moduleScript: "Module scripts",
@@ -32,12 +33,16 @@ const KIND_LABELS: Record<string, string> = {
   dataSource: "Data sources",
   controlSheet: "Controls (per sheet)",
   paneControl: "Pane controls",
+  ribbonFilter: "Ribbon filters",
+  pivotLayout: "Pivot layouts",
+  extensionData: "Extension data",
 };
 
 const KIND_ORDER = [
   "table",
   "pivot",
   "chart",
+  "slicer",
   "namedRange",
   "objectScript",
   "moduleScript",
@@ -45,6 +50,9 @@ const KIND_ORDER = [
   "dataSource",
   "controlSheet",
   "paneControl",
+  "ribbonFilter",
+  "pivotLayout",
+  "extensionData",
 ];
 
 const sectionStyle: React.CSSProperties = {

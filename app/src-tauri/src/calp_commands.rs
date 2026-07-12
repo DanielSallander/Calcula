@@ -29,6 +29,11 @@ pub struct PublishParams {
     /// objects (cell types). Absent when no provider contributed.
     #[serde(default)]
     pub custom_objects: Option<Vec<FrontendCustomObject>>,
+    /// Opt-in for carrying threaded comments (Wave B). Comments are internal
+    /// discussion — a privacy hazard to ship silently — so they publish ONLY
+    /// when the author checks "Include comments" (default false).
+    #[serde(default)]
+    pub include_comments: bool,
 }
 
 /// A custom object contributed by a FRONTEND provider for publishing
@@ -372,6 +377,7 @@ fn compute_publish_report(
     assembly: &PublishAssembly,
     state: &AppState,
     sheet_indices: &[usize],
+    include_comments: bool,
 ) -> PublishReport {
     let wb = &assembly.workbook;
     let published_sheet_ids: std::collections::HashSet<SheetId> = sheet_indices
@@ -417,6 +423,34 @@ fn compute_publish_report(
     item(&mut included, "controls",
         wb.controls.iter().filter(|c| published_sheet_ids.contains(&c.sheet_id)).count(),
         "sheets with buttons/checkboxes (incl. onSelect wiring)");
+    // Comment/scenario/outline counts come from the SAME carrier the publish
+    // writes (Wave B), counted per object (threads/scenarios/groups) so the
+    // report reads naturally.
+    let comment_threads: usize = wb.comments.iter()
+        .filter(|c| published_sheet_ids.contains(&c.sheet_id))
+        .map(|c| c.comments.as_array().map_or(0, |a| a.len()))
+        .sum();
+    if include_comments {
+        item(&mut included, "comments", comment_threads,
+            "threaded comment threads on published sheets (opted in via 'Include comments')");
+    }
+    item(&mut included, "scenarios",
+        wb.scenarios.iter()
+            .filter(|s| published_sheet_ids.contains(&s.sheet_id))
+            .map(|s| s.scenarios.as_array().map_or(0, |a| a.len()))
+            .sum(),
+        "saved what-if scenarios on published sheets");
+    item(&mut included, "outlineGroups",
+        wb.outlines.iter()
+            .filter(|o| published_sheet_ids.contains(&o.sheet_id))
+            .map(|o| {
+                let groups = |key: &str| o.outline.get(key)
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
+                groups("rowGroups") + groups("columnGroups")
+            })
+            .sum(),
+        "row/column outline groups (structure + collapsed state)");
     item(&mut included, "paneControls", wb.pane_controls.len(),
         "pane controls (config + current values); custom-control scripts ship as object scripts (consent-gated)");
     item(&mut included, "objectScripts",
@@ -426,6 +460,17 @@ fn compute_publish_report(
         "inert until explicitly run by the subscriber");
     item(&mut included, "notebooks", wb.notebooks.len(),
         "execution output stripped; inert until run");
+    item(&mut included, "slicers",
+        wb.slicers.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
+        "slicers on published sheets (position, style, selections, report connections)");
+    item(&mut included, "ribbonFilters", wb.ribbon_filters.len(),
+        "ribbon filters (BI-only; re-bound to the package's embedded data sources on pull)");
+    item(&mut included, "pivotLayouts", wb.pivot_layouts.len(),
+        "saved pivot layouts (DSL + source references)");
+    item(&mut included, "documentTheme", 1,
+        "applied on pull unless the subscriber customized their theme");
+    item(&mut included, "extensionData", wb.extension_data.len(),
+        "extension state (only keys you don't already have apply on pull)");
     item(&mut included, "dataSources", assembly.data_sources.len(),
         "BI model schema only — no data, no credentials");
     item(&mut included, "writebackRegions",
@@ -433,43 +478,15 @@ fn compute_publish_report(
         "declared data-collection regions");
 
     let mut excluded: Vec<PublishReportItem> = Vec::new();
-    item(&mut excluded, "slicers",
-        wb.slicers.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
-        "slicers are not yet carried by packages");
-    item(&mut excluded, "ribbonFilters", wb.ribbon_filters.len(),
-        "filter-pane state is not yet carried by packages");
-    item(&mut excluded, "pivotLayouts", wb.pivot_layouts.len(),
-        "saved pivot layouts are not yet carried by packages");
-    let theme_custom = serde_json::to_value(&wb.theme).ok()
-        != serde_json::to_value(engine::ThemeDefinition::default()).ok();
-    item(&mut excluded, "documentTheme", usize::from(theme_custom),
-        "the document theme is not yet carried; concrete cell styles ship");
-    if !wb.extension_data.is_empty() {
-        let keys: Vec<&str> = wb.extension_data.keys().map(|k| k.as_str()).collect();
-        excluded.push(PublishReportItem {
-            category: "extensionData".to_string(),
-            count: wb.extension_data.len(),
-            detail: format!("extension state is not yet carried: {}", keys.join(", ")),
-        });
-    }
     item(&mut excluded, "workbookFiles", wb.user_files.len(),
-        "workbook files (bookmarks, stored documents, filter state) stay local");
-    let comments: usize = state.comments.lock()
-        .map(|c| c.values().map(|m| m.len()).sum()).unwrap_or(0);
-    item(&mut excluded, "comments", comments,
-        "threaded comments are not yet persisted or published");
-    let scenarios: usize = state.scenarios.lock()
-        .map(|s| s.values().map(|v| v.len()).sum()).unwrap_or(0);
-    item(&mut excluded, "scenarios", scenarios,
-        "saved scenarios are not yet persisted or published");
+        "workbook files (bookmarks, stored documents, filter state) are subscriber-local by policy");
+    if !include_comments {
+        item(&mut excluded, "comments", comment_threads,
+            "comments stay private unless 'Include comments' is checked");
+    }
     let protected = state.sheet_protection.lock().map(|p| p.len()).unwrap_or(0);
     item(&mut excluded, "protection", protected,
-        "sheet/cell protection is not yet carried by packages");
-    let outline_groups: usize = state.outlines.lock()
-        .map(|o| o.values().map(|g| g.row_groups.len() + g.column_groups.len()).sum())
-        .unwrap_or(0);
-    item(&mut excluded, "outlineGroups", outline_groups,
-        "outline structure is not carried (collapsed groups ship as hidden rows)");
+        "sheet/cell protection is not carried (protection policy is a governance feature, not yet distributed)");
     let doc_props = [
         &wb.properties.title,
         &wb.properties.author,
@@ -482,7 +499,7 @@ fn compute_publish_report(
     .filter(|s| !s.is_empty())
     .count();
     item(&mut excluded, "documentProperties", doc_props,
-        "document properties (title, author, description, ...) are not yet carried by packages");
+        "document properties describe YOUR workbook; the package manifest carries the package's own identity");
 
     PublishReport { included, excluded }
 }
@@ -527,7 +544,8 @@ pub fn calp_publish(
         &user_files_state,
         &sheet_indices,
     )?;
-    let report = compute_publish_report(&assembly, &state, &sheet_indices);
+    let report =
+        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments);
 
     let PublishAssembly {
         workbook,
@@ -546,7 +564,7 @@ pub fn calp_publish(
     let mut custom_objects = collect_cell_type_custom_objects(&state, &sheet_indices)?;
     custom_objects.extend(frontend_custom_objects.into_iter().map(Into::into));
 
-    let request = calp::publish::PublishRequest {
+    let mut request = calp::publish::PublishRequest {
         workbook: &workbook,
         package_name: params.package_name,
         version,
@@ -563,7 +581,19 @@ pub fn calp_publish(
         data_sources,
         excluded_regions,
         custom_objects,
+        include_comments: params.include_comments,
+        min_app_version: String::new(),
     };
+    // Compatibility stamp: a package carrying Wave A/B artifacts (slicers,
+    // ribbon filters, pivot layouts, extension data, comments/scenarios/
+    // outlines, non-default theme) declares THIS app's version as its minimum
+    // — an older app's pull fails honestly at the compat gate instead of
+    // silently dropping those artifacts. Same version source the gate
+    // compares against (set_host_app_version(env!("CARGO_PKG_VERSION")) at
+    // startup). Cell-only packages stay pullable by older apps.
+    if calp::publish::carries_wave_content(&request) {
+        request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
+    }
 
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
@@ -675,6 +705,10 @@ pub fn calp_publish_model(
         data_sources,
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
+        include_comments: false, // dataset package: no sheets, no comments
+        // Model-only package: no Wave A/B artifacts, so no minimum — it stays
+        // pullable by older apps.
+        min_app_version: String::new(),
     };
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
@@ -727,6 +761,10 @@ pub struct PublishPreviewParams {
     /// Sheets to include (workbook indices). None or empty => all sheets.
     #[serde(default)]
     pub sheet_indices: Option<Vec<usize>>,
+    /// Mirror of PublishParams.include_comments, so the dry-run report shows
+    /// comments exactly where the real publish would put them (default false).
+    #[serde(default)]
+    pub include_comments: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -774,7 +812,8 @@ pub fn calp_publish_preview(
         &user_files_state,
         &sheet_indices,
     )?;
-    let report = compute_publish_report(&assembly, &state, &sheet_indices);
+    let report =
+        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments);
     // Same check core publish runs, over the same carrier — so the author
     // sees dangling dropdown references at PREVIEW time, not only after the
     // artifact is already written.
@@ -1302,6 +1341,251 @@ fn orphaned_pane_script_instance_ids(
         .collect())
 }
 
+/// Strip computed properties from DISTRIBUTED slicer payloads before
+/// materialization (the on-grid controls' `sanitize_distributed_controls`
+/// precedent). A slicer's computed properties are user-authored FORMULAS
+/// evaluated with full grid context — carrying them live from a package would
+/// let publisher-authored expressions evaluate in the subscriber's workbook
+/// without the subscriber ever authoring them, outside the per-package,
+/// consent-gated model that governs every other piece of distributed
+/// executable logic. Packaged slicers therefore arrive with their visual and
+/// selection state intact but NO computed properties; the subscriber can
+/// author their own, and publisher-shipped interactivity flows through
+/// consent-gated object scripts instead. (.cala load of the user's own
+/// workbook is NOT sanitized — local formulas are the user's own code.)
+fn sanitize_distributed_slicers(
+    pulled: &[persistence::SavedSlicer],
+) -> Vec<persistence::SavedSlicer> {
+    pulled
+        .iter()
+        .map(|saved| {
+            let mut cloned = saved.clone();
+            cloned.computed_properties = Vec::new();
+            cloned
+        })
+        .collect()
+}
+
+/// Materialize pulled slicers into SlicerState — shared by calp_pull and
+/// calp_refresh_apply (Wave A). ADDITIVE with don't-clobber: a slicer whose
+/// id already exists locally is skipped (the refresh path removes the
+/// package's ledger-owned ids first, so v2 replaces v1 while subscriber-
+/// authored slicers are never touched). `resolve` maps the PACKAGE sheet id
+/// to the local sheet index; a slicer whose sheet wasn't pulled is dropped
+/// (chart semantics). Conversion + computed-property restore go through the
+/// same pub(crate) converters the .cala load path uses — but callers pass
+/// DISTRIBUTED payloads through `sanitize_distributed_slicers` first, so
+/// packaged computed properties (formulas) never restore.
+///
+/// Returns (id, name) for each slicer ACTUALLY inserted, so callers record
+/// provenance-ledger entries only for what landed.
+fn materialize_pulled_slicers(
+    slicer_state: &crate::slicer::SlicerState,
+    pulled: &[persistence::SavedSlicer],
+    resolve: impl Fn(SheetId) -> Option<usize>,
+) -> Result<Vec<(String, String)>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut slicers = slicer_state.slicers.lock().map_err(|e| e.to_string())?;
+    let mut computed_props = slicer_state
+        .computed_properties
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut applied: Vec<(String, String)> = Vec::new();
+    for saved in pulled {
+        let Some(sheet_index) = resolve(saved.sheet_id) else {
+            continue; // sheet not pulled — drop, like charts
+        };
+        if slicers.contains_key(&saved.id) {
+            continue; // subscriber already has this slicer (id collision)
+        }
+        let slicer = crate::persistence::saved_slicer_to_slicer_at(saved, sheet_index);
+        applied.push((slicer.id.to_string(), slicer.name.clone()));
+        if !saved.computed_properties.is_empty() {
+            computed_props.insert(
+                slicer.id,
+                crate::persistence::slicer_computed_props_from_saved(saved),
+            );
+        }
+        slicers.insert(slicer.id, slicer);
+    }
+    Ok(applied)
+}
+
+/// Materialize pulled ribbon filters into RibbonFilterState — shared by
+/// calp_pull and calp_refresh_apply (Wave A). Ribbon filters are BI-only:
+/// a filter whose stable `data_source_id` matches no data source embedded in
+/// the package would dangle (its connection can never materialize on the
+/// subscriber), so it is SKIPPED with a warning. ADDITIVE with don't-clobber
+/// (pane-control precedent): id collisions and case-insensitive name
+/// collisions against pane controls / filters / NAMED on-grid controls (the
+/// GET.CONTROLVALUE namespace) are skipped. Applied filters re-base to the
+/// end of the subscriber's strip, preserving package-relative order. The
+/// carried connection_id still points at the PUBLISHER's connection — the
+/// data-source re-bind (remap_ribbon_filter_connections) runs after the
+/// package connections materialize.
+///
+/// `on_grid_controls` is a snapshot (its lock already released). LOCK ORDER
+/// (pane_control/types.rs): PaneControlState.controls BEFORE
+/// RibbonFilterState.filters.
+///
+/// Returns (id, name) for each filter ACTUALLY inserted.
+fn materialize_pulled_ribbon_filters(
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    on_grid_controls: &crate::controls::ControlStorage,
+    pulled: &[persistence::SavedRibbonFilter],
+    pulled_data_source_ids: &std::collections::HashSet<String>,
+) -> Result<Vec<(String, String)>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let controls = pane_control_state.controls.lock().map_err(|e| e.to_string())?;
+    let mut filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+    let mut taken_names =
+        pane_control_taken_names(controls.values(), filters.values(), on_grid_controls);
+    let base_order = controls
+        .values()
+        .map(|c| c.order)
+        .chain(filters.values().map(|f| f.order))
+        .max()
+        .map_or(0, |m| m.saturating_add(1));
+    drop(controls);
+
+    // Package order is already (order, id)-sorted at publish; re-sort
+    // defensively so re-based positions are deterministic regardless.
+    let mut incoming = pulled.to_vec();
+    incoming.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+
+    let mut applied: Vec<(String, String)> = Vec::new();
+    let mut next_order = base_order;
+    for saved in &incoming {
+        // Effective package data-source id: the carried stable id, falling
+        // back to the publisher's connection uuid — which IS the package
+        // data-source id when the publisher authored on a local connection
+        // (the bi_pivot_metadata precedent in collect_pivot_definitions).
+        let effective_ds_id = saved
+            .data_source_id
+            .clone()
+            .unwrap_or_else(|| saved.connection_id.to_string());
+        if !pulled_data_source_ids.contains(&effective_ds_id) {
+            crate::log_warn!(
+                "CALP",
+                "Skipping pulled ribbon filter \"{}\": its data source is not embedded in the package",
+                saved.name
+            );
+            continue;
+        }
+        if filters.contains_key(&saved.id) {
+            continue; // subscriber already has this filter (id collision)
+        }
+        if taken_names.contains(&saved.name.to_uppercase()) {
+            crate::log_warn!(
+                "CALP",
+                "Skipping pulled ribbon filter \"{}\": name already in use",
+                saved.name
+            );
+            continue;
+        }
+        let mut filter = crate::persistence::saved_to_ribbon_filter(saved);
+        // Stamp the effective ds id so remap_ribbon_filter_connections (which
+        // keys off data_source_id) re-binds this filter to the freshly
+        // materialized package connection, and future saves keep the stable id.
+        filter.data_source_id = Some(effective_ds_id);
+        filter.order = next_order;
+        next_order = next_order.saturating_add(1);
+        taken_names.insert(filter.name.to_uppercase());
+        applied.push((filter.id.to_string(), filter.name.clone()));
+        filters.insert(filter.id, filter);
+    }
+    Ok(applied)
+}
+
+/// Re-bind slicers sourced from a package BI connection to the freshly
+/// materialized connections (Wave A; mirrors remap_ribbon_filter_connections).
+/// A package connection mints a NEW uuid on every pull, and a BI-sourced
+/// slicer's `cache_source_id` / biConnection report connections carry the
+/// PUBLISHER's connection uuid — which at publish time IS the stable package
+/// data-source id, so a string match against the ds map re-binds it.
+fn remap_slicer_bi_connections(
+    slicer_state: &crate::slicer::SlicerState,
+    ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+) {
+    if ds_to_conn.is_empty() {
+        return;
+    }
+    let Ok(mut slicers) = slicer_state.slicers.lock() else {
+        return;
+    };
+    for slicer in slicers.values_mut() {
+        if matches!(slicer.source_type, crate::slicer::SlicerSourceType::BiConnection) {
+            if let Some(conn_id) = ds_to_conn.get(&slicer.cache_source_id.to_string()) {
+                slicer.cache_source_id = *conn_id;
+            }
+        }
+        for source in slicer.connected_sources.iter_mut() {
+            if matches!(source.source_type, crate::slicer::SlicerSourceType::BiConnection) {
+                if let Some(conn_id) = ds_to_conn.get(&source.source_id.to_string()) {
+                    source.source_id = *conn_id;
+                }
+            }
+        }
+    }
+}
+
+/// Apply a pulled document theme (Wave A). The theme is a workbook SINGLETON,
+/// so pull follows a guarded rule instead of a provenance ledger: the
+/// publisher's theme applies ONLY while the subscriber's theme is still the
+/// default — a subscriber who customized their theme keeps it (logged, never
+/// clobbered). Shared by calp_pull and calp_refresh_apply.
+fn apply_pulled_theme(
+    state: &AppState,
+    pulled: Option<&engine::ThemeDefinition>,
+) -> Result<(), String> {
+    let Some(theme) = pulled else {
+        return Ok(()); // pre-Wave-A package: no theme carried
+    };
+    let mut current = state.theme.lock().map_err(|e| e.to_string())?;
+    if *current == engine::ThemeDefinition::default() {
+        *current = theme.clone();
+    } else if *current != *theme {
+        crate::log_warn!(
+            "CALP",
+            "Package theme not applied: workbook has a custom theme"
+        );
+    }
+    Ok(())
+}
+
+/// Merge pulled extension data (Wave A) ADDITIVELY: only keys the subscriber
+/// does not already have are inserted (named-range precedent) — the publisher
+/// can seed extension state but NEVER overwrite the subscriber's. Same rule on
+/// pull and refresh. Shared by calp_pull and calp_refresh_apply.
+///
+/// Returns the keys ACTUALLY inserted (sorted for deterministic ledger
+/// order), so callers record "extensionData" provenance-ledger entries for
+/// exactly the state that came from the package — skipped subscriber-owned
+/// keys are never attributed to it.
+fn merge_pulled_extension_data(
+    state: &AppState,
+    pulled: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<Vec<String>, String> {
+    if pulled.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut data = state.extension_data.lock().map_err(|e| e.to_string())?;
+    let mut inserted: Vec<String> = Vec::new();
+    for (key, value) in pulled {
+        if !data.contains_key(key) {
+            data.insert(key.clone(), value.clone());
+            inserted.push(key.clone());
+        }
+    }
+    inserted.sort();
+    Ok(inserted)
+}
+
 /// Pull (subscribe to) a package.
 #[tauri::command]
 pub fn calp_pull(
@@ -1311,6 +1595,7 @@ pub fn calp_pull(
     script_state: State<'_, crate::scripting::types::ScriptState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
     params: PullParams,
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
@@ -1547,6 +1832,60 @@ pub fn calp_pull(
         }
     }
 
+    // Materialize pulled threaded comments (Wave B; present only when the
+    // publisher opted in) onto the (remapped) local sheet index. Pulled sheets
+    // are freshly appended, so each lands on an empty per-sheet map — plain
+    // insert, CF/DV semantics. No ledger entries (sheet-scoped payloads, like
+    // CF/DV). Re-stamp each thread's sheet_index with the LOCAL index.
+    if !result.comments.is_empty() {
+        let mut store = state.comments.lock().map_err(|e| e.to_string())?;
+        for entry in &result.comments {
+            if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
+                if let Ok(threads) = serde_json::from_value::<Vec<crate::comments::Comment>>(
+                    entry.comments.clone(),
+                ) {
+                    let sheet_map = store.entry(idx).or_default();
+                    for mut c in threads {
+                        c.sheet_index = idx;
+                        sheet_map.insert((c.row, c.col), c);
+                    }
+                }
+            }
+        }
+    }
+
+    // Materialize pulled what-if scenarios (Wave B) — same shape as comments.
+    if !result.scenarios.is_empty() {
+        let mut store = state.scenarios.lock().map_err(|e| e.to_string())?;
+        for entry in &result.scenarios {
+            if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
+                if let Ok(mut scenarios) = serde_json::from_value::<Vec<crate::api_types::Scenario>>(
+                    entry.scenarios.clone(),
+                ) {
+                    for s in &mut scenarios {
+                        s.sheet_index = idx;
+                    }
+                    store.entry(idx).or_default().extend(scenarios);
+                }
+            }
+        }
+    }
+
+    // Materialize pulled outline groups (Wave B). One SheetOutline per sheet;
+    // the freshly appended sheet has no existing outline, so plain insert.
+    if !result.outlines.is_empty() {
+        let mut store = state.outlines.lock().map_err(|e| e.to_string())?;
+        for entry in &result.outlines {
+            if let Some(&idx) = pkg_to_index.get(&entry.sheet_id) {
+                if let Ok(outline) = serde_json::from_value::<crate::grouping::SheetOutline>(
+                    entry.outline.clone(),
+                ) {
+                    store.insert(idx, outline);
+                }
+            }
+        }
+    }
+
     // On-grid name snapshot for the pane-control collision guard below —
     // taken BEFORE the package's own on-grid controls materialize, so the
     // guard sees only the SUBSCRIBER's pre-existing names. Taking it after
@@ -1695,6 +2034,78 @@ pub fn calp_pull(
     for (id, name) in &applied_notebooks {
         sub_objects.push(sub_object("notebook", id.clone(), name.clone()));
     }
+
+    // Materialize pulled slicers (Wave A) onto their (remapped) local sheet —
+    // shared with the refresh path. Slicers carry the PACKAGE sheet id (CF/DV
+    // semantics); one whose sheet wasn't pulled is dropped, one whose id the
+    // subscriber already has is skipped. Ledger entries come from the APPLIED
+    // list. Slicers referencing pivots/tables keep working because pivot and
+    // table ids are stable EntityIds preserved through the package;
+    // BiConnection-sourced slicers are re-bound to the freshly materialized
+    // package connections below (remap_slicer_bi_connections runs inside
+    // load_embedded_data_sources, next to the ribbon-filter re-bind).
+    // Same sanitization discipline as on-grid controls: distributed
+    // computed-property formulas never materialize.
+    let applied_slicers = materialize_pulled_slicers(
+        &slicer_state,
+        &sanitize_distributed_slicers(&result.slicers),
+        |sid| pkg_to_index.get(&sid).copied(),
+    )?;
+    for (id, name) in &applied_slicers {
+        sub_objects.push(sub_object("slicer", id.clone(), name.clone()));
+    }
+
+    // Materialize pulled ribbon filters (Wave A) — workbook-scoped, BI-only.
+    // Filters whose data source is not embedded in the package are skipped
+    // (they could never re-bind on this machine); id/name collisions are
+    // skipped like pane controls. Inserted BEFORE load_embedded_data_sources
+    // runs below, so its remap_ribbon_filter_connections call re-binds the
+    // carried publisher connection ids onto the fresh package connections.
+    let pulled_ds_ids: std::collections::HashSet<String> = result
+        .data_sources
+        .iter()
+        .map(|ds| ds.definition.id.clone())
+        .collect();
+    let applied_ribbon_filters = materialize_pulled_ribbon_filters(
+        &pane_control_state,
+        &ribbon_filter_state,
+        &on_grid_snapshot,
+        &result.ribbon_filters,
+        &pulled_ds_ids,
+    )?;
+    for (id, name) in &applied_ribbon_filters {
+        sub_objects.push(sub_object("ribbonFilter", id.clone(), name.clone()));
+    }
+
+    // Materialize pulled saved pivot layouts (Wave A) — workbook-scoped,
+    // ADDITIVE with skip-if-id-present (a subscriber's same-id layout wins).
+    {
+        let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+        for layout in &result.pivot_layouts {
+            if layouts.iter().any(|l| l.id == layout.id) {
+                continue;
+            }
+            sub_objects.push(sub_object(
+                "pivotLayout",
+                layout.id.to_string(),
+                layout.name.clone(),
+            ));
+            layouts.push(layout.clone());
+        }
+    }
+
+    // Apply the publisher's document theme (Wave A) — singleton, guarded:
+    // only while the subscriber's theme is still the default. No ledger entry.
+    apply_pulled_theme(&state, result.theme.as_ref())?;
+
+    // Merge pulled extension data (Wave A) — additive, never overwrites the
+    // subscriber's keys. Each key ACTUALLY inserted gets an "extensionData"
+    // ledger entry (id = name = the map key), so the Package Explorer shows
+    // exactly which extension state came from the package.
+    for key in merge_pulled_extension_data(&state, &result.extension_data)? {
+        sub_objects.push(sub_object("extensionData", key.clone(), key));
+    }
+
     for def in &result.pivot_definitions {
         sub_objects.push(sub_object("pivot", def.id.to_string(), String::new()));
     }
@@ -1721,8 +2132,12 @@ pub fn calp_pull(
 
     // Auto-load embedded BI models from the pulled package.
     // This creates BI connections so that BI pivots have a live engine to query.
-    let embedded_connection_ids =
-        load_embedded_data_sources(&result.data_sources, &bi_state, &ribbon_filter_state);
+    let embedded_connection_ids = load_embedded_data_sources(
+        &result.data_sources,
+        &bi_state,
+        &ribbon_filter_state,
+        &slicer_state,
+    );
 
     // Restore pivot definitions from the package and render to grid.
     // The source_sheet_index in each definition is relative to the publisher's
@@ -1854,6 +2269,26 @@ pub struct PackageInspection {
     pub pane_control_count: usize,
     /// Their display names (per-object transparency, like table_names).
     pub pane_control_names: Vec<String>,
+    /// Slicers on the published sheets (Wave A).
+    pub slicer_count: usize,
+    /// Ribbon filters the package carries (workbook-scoped, BI-only; Wave A).
+    pub ribbon_filter_count: usize,
+    /// Saved pivot layouts the package carries (Wave A).
+    pub pivot_layout_count: usize,
+    /// Whether the package carries a document theme (always true for packages
+    /// published after Wave A; applied only if the subscriber's theme is
+    /// still the default).
+    pub has_document_theme: bool,
+    /// Extension-data keys the package carries (Wave A; merged additively —
+    /// keys the subscriber already has are never overwritten).
+    pub extension_data_count: usize,
+    /// Their key names (per-object transparency, like named_range_names), so
+    /// subscribing to extension state is informed, not a blind count.
+    pub extension_data_keys: Vec<String>,
+    /// Sheets carrying threaded comments (Wave B). Non-zero only when the
+    /// publisher explicitly opted in via "Include comments" at publish —
+    /// surfaced pre-pull so subscribing to shared discussion is informed.
+    pub comment_sheet_count: usize,
     /// S5 phase 2: the verified publisher's display name. Inspect is a pre-pull
     /// trust surface, so the manifest signature is checked here too.
     pub publisher_name: String,
@@ -1996,6 +2431,58 @@ pub fn calp_inspect_package(
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
+    // Wave A counts (slicers / ribbon filters / pivot layouts / theme /
+    // extension data), read from their optional artifacts like charts.
+    let slicer_count = match registry.read_artifact(&package_name, &version, "slicers.json") {
+        Ok(Some(bytes)) => serde_json::from_slice::<Vec<persistence::SavedSlicer>>(&bytes)
+            .map(|v| v.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let ribbon_filter_count =
+        match registry.read_artifact(&package_name, &version, "ribbon_filters.json") {
+            Ok(Some(bytes)) => {
+                serde_json::from_slice::<Vec<persistence::SavedRibbonFilter>>(&bytes)
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        };
+    let pivot_layout_count =
+        match registry.read_artifact(&package_name, &version, "pivot_layouts.json") {
+            Ok(Some(bytes)) => {
+                serde_json::from_slice::<Vec<persistence::SavedPivotLayout>>(&bytes)
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        };
+    let has_document_theme = matches!(
+        registry.read_artifact(&package_name, &version, "theme.json"),
+        Ok(Some(_))
+    );
+    // Extension data: surface the KEY NAMES, not just a count (the artifact
+    // is written from a BTreeMap, so the keys come back in stable order).
+    let extension_data_keys: Vec<String> =
+        match registry.read_artifact(&package_name, &version, "extension_data.json") {
+            Ok(Some(bytes)) => serde_json::from_slice::<
+                std::collections::BTreeMap<String, serde_json::Value>,
+            >(&bytes)
+            .map(|m| m.into_keys().collect())
+            .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    // Comments (Wave B) travel only when the publisher opted in; count the
+    // sheets carrying them so the pre-pull review can disclose the discussion.
+    let comment_sheet_count =
+        match registry.read_artifact(&package_name, &version, "comments.json") {
+            Ok(Some(bytes)) => {
+                serde_json::from_slice::<Vec<persistence::SavedSheetComments>>(&bytes)
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        };
 
     Ok(PackageInspection {
         package_name,
@@ -2042,6 +2529,13 @@ pub fn calp_inspect_package(
         control_sheet_count,
         pane_control_count: pane_control_names.len(),
         pane_control_names,
+        slicer_count,
+        ribbon_filter_count,
+        pivot_layout_count,
+        has_document_theme,
+        extension_data_count: extension_data_keys.len(),
+        extension_data_keys,
+        comment_sheet_count,
     })
 }
 
@@ -2096,6 +2590,8 @@ pub fn calp_get_package_objects(
     script_state: State<crate::scripting::types::ScriptState>,
     bi_state: State<BiState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<crate::slicer::SlicerState>,
     package_name: String,
     window: tauri::Window,
 ) -> Result<PackageObjectsResponse, String> {
@@ -2124,6 +2620,40 @@ pub fn calp_get_package_objects(
                 local_sheet_index: idx,
             }
         })
+        .collect();
+
+    // Wave A presence snapshots, each under its own SHORT lock released
+    // before the next is taken (and before the AppState/pane locks below) —
+    // no cross-family lock nesting, so no ordering constraint is engaged.
+    let slicer_sheets: std::collections::HashMap<String, usize> = slicer_state
+        .slicers
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .map(|s| (s.id.to_string(), s.sheet_index))
+        .collect();
+    let ribbon_filter_ids: std::collections::HashSet<String> = ribbon_filter_state
+        .filters
+        .lock()
+        .map_err(|e| e.to_string())?
+        .keys()
+        .map(|id| id.to_string())
+        .collect();
+    let pivot_layout_ids: std::collections::HashSet<String> = state
+        .pivot_layouts
+        .lock()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|l| l.id.to_string())
+        .collect();
+    // extensionData ledger entries use the extension-data map key as their id;
+    // "present" = the key still exists in the live workbook's extension state.
+    let extension_data_keys: std::collections::HashSet<String> = state
+        .extension_data
+        .lock()
+        .map_err(|e| e.to_string())?
+        .keys()
+        .cloned()
         .collect();
 
     let tables = state.tables.lock().map_err(|e| e.to_string())?;
@@ -2182,6 +2712,15 @@ pub fn calp_get_package_objects(
                     pane_controls.keys().any(|k| k.to_string() == o.id),
                     String::new(),
                 ),
+                // Wave A kinds: slicers resolve their sheet like charts;
+                // ribbon filters + pivot layouts are workbook-scoped.
+                "slicer" => slicer_sheets
+                    .get(&o.id)
+                    .map(|&idx| (true, sheet_name_at(idx)))
+                    .unwrap_or((false, String::new())),
+                "ribbonFilter" => (ribbon_filter_ids.contains(&o.id), String::new()),
+                "pivotLayout" => (pivot_layout_ids.contains(&o.id), String::new()),
+                "extensionData" => (extension_data_keys.contains(&o.id), String::new()),
                 "controlSheet" => sheet_ids
                     .iter()
                     .position(|id| id.to_string() == o.id)
@@ -2749,6 +3288,7 @@ pub fn calp_refresh_apply(
     bi_state: State<BiState>,
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
+    slicer_state: State<crate::slicer::SlicerState>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -2983,6 +3523,73 @@ pub fn calp_refresh_apply(
                 }
             }
         }
+
+        // Comments / scenarios / outlines (Wave B): RESET each refreshed
+        // sheet's entry, then apply v2's — CF/DV semantics, so threads/
+        // scenarios/groups the publisher added, changed, or removed in v2 all
+        // land (and a publisher who stopped opting comments in effectively
+        // retracts them from subscribers on the next refresh).
+        {
+            let mut store = state.comments.lock().map_err(|e| e.to_string())?;
+            for idx in &refreshed_indices {
+                store.remove(idx);
+            }
+            for payload in &payloads {
+                for entry in &payload.pull_result.comments {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Ok(threads) = serde_json::from_value::<
+                            Vec<crate::comments::Comment>,
+                        >(entry.comments.clone())
+                        {
+                            let sheet_map = store.entry(idx).or_default();
+                            for mut c in threads {
+                                c.sheet_index = idx;
+                                sheet_map.insert((c.row, c.col), c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let mut store = state.scenarios.lock().map_err(|e| e.to_string())?;
+            for idx in &refreshed_indices {
+                store.remove(idx);
+            }
+            for payload in &payloads {
+                for entry in &payload.pull_result.scenarios {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Ok(mut scenarios) = serde_json::from_value::<
+                            Vec<crate::api_types::Scenario>,
+                        >(entry.scenarios.clone())
+                        {
+                            for s in &mut scenarios {
+                                s.sheet_index = idx;
+                            }
+                            store.entry(idx).or_default().extend(scenarios);
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let mut store = state.outlines.lock().map_err(|e| e.to_string())?;
+            for idx in &refreshed_indices {
+                store.remove(idx);
+            }
+            for payload in &payloads {
+                for entry in &payload.pull_result.outlines {
+                    if let Some(&idx) = cfdv_pkg_to_index.get(&entry.sheet_id) {
+                        if let Ok(outline) = serde_json::from_value::<
+                            crate::grouping::SheetOutline,
+                        >(entry.outline.clone())
+                        {
+                            store.insert(idx, outline);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Cell types (distribution brick 4): refresh analog of the calp_pull
@@ -3160,14 +3767,19 @@ pub fn calp_refresh_apply(
             }
         }
         {
+            // Sheet locks BEFORE the controls lock: the sheet-structure
+            // commands (delete/move/copy_sheet) take controls while holding
+            // the sheet locks for their per-sheet HashMap-store remap, so
+            // sheet-then-controls is the canonical order — taking controls
+            // first here would be an AB/BA inversion against them.
+            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+            let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
             let mut controls = state.controls.lock().map_err(|e| e.to_string())?;
             controls.retain(|(sheet_idx, _, _), _| !refreshed.contains(sheet_idx));
             // Cloned under the ALREADY-HELD controls lock (calling
             // snapshot_on_grid_controls here would re-lock and deadlock);
             // released with this scope, before the pane/filter locks below.
             let snapshot = controls.clone();
-            let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-            let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
             for payload in &payloads {
                 // Same sanitization as first pull: distributed onSelect wiring
                 // (inline script source) never materializes.
@@ -3268,6 +3880,158 @@ pub fn calp_refresh_apply(
         orphaned
     };
 
+    // Slicers (Wave A): ledger-scoped REPLACE like charts — remove this
+    // package's own slicers (from the provenance ledger; subscriber-authored
+    // ones are never in it), then re-add the new version's set through the
+    // SAME materializer calp_pull uses. Slicers carry PACKAGE sheet ids
+    // (CF/DV semantics), so cfdv_pkg_to_index resolves the local sheet.
+    // Computed properties of removed slicers are dropped with them.
+    {
+        {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let mut slicers = slicer_state.slicers.lock().map_err(|e| e.to_string())?;
+            let mut computed_props = slicer_state
+                .computed_properties
+                .lock()
+                .map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    continue;
+                };
+                let owned: std::collections::HashSet<String> = sub
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == "slicer")
+                    .map(|o| o.id.clone())
+                    .collect();
+                if !owned.is_empty() {
+                    slicers.retain(|id, _| {
+                        let keep = !owned.contains(&id.to_string());
+                        if !keep {
+                            computed_props.remove(id);
+                        }
+                        keep
+                    });
+                }
+            }
+        }
+        for payload in &payloads {
+            // Same sanitization as first pull: distributed computed-property
+            // formulas never materialize.
+            let applied = materialize_pulled_slicers(
+                &slicer_state,
+                &sanitize_distributed_slicers(&payload.pull_result.slicers),
+                |sid| cfdv_pkg_to_index.get(&sid).copied(),
+            )?;
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for (id, name) in applied {
+                entries.push(ledger_entry("slicer", id, name));
+            }
+        }
+    }
+
+    // Ribbon filters (Wave A): same ledger-scoped replace, through the SAME
+    // guarded materializer calp_pull uses (data-source-unknown / id / name
+    // collisions are skipped, never clobbered). The carried connection ids
+    // still point at the publisher's connections here — the re-bind onto this
+    // workbook's package connections runs after the data-source refresh below.
+    {
+        {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let mut filters = ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    continue;
+                };
+                let owned: std::collections::HashSet<String> = sub
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == "ribbonFilter")
+                    .map(|o| o.id.clone())
+                    .collect();
+                if !owned.is_empty() {
+                    filters.retain(|id, _| !owned.contains(&id.to_string()));
+                }
+            }
+        }
+        for payload in &payloads {
+            let pulled_ds_ids: std::collections::HashSet<String> = payload
+                .pull_result
+                .data_sources
+                .iter()
+                .map(|ds| ds.definition.id.clone())
+                .collect();
+            let applied = materialize_pulled_ribbon_filters(
+                &pane_control_state,
+                &ribbon_filter_state,
+                &on_grid_snapshot,
+                &payload.pull_result.ribbon_filters,
+                &pulled_ds_ids,
+            )?;
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for (id, name) in applied {
+                entries.push(ledger_entry("ribbonFilter", id, name));
+            }
+        }
+    }
+
+    // Saved pivot layouts (Wave A): ledger-scoped replace, then re-add v2
+    // additively (a subscriber-authored same-id layout wins — locals are
+    // never in the ledger and are never removed).
+    {
+        {
+            let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+            let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+            for payload in &payloads {
+                let Some(sub) = subs.subscriptions.get(payload.subscription_index) else {
+                    continue;
+                };
+                let owned: std::collections::HashSet<String> = sub
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == "pivotLayout")
+                    .map(|o| o.id.clone())
+                    .collect();
+                if !owned.is_empty() {
+                    layouts.retain(|l| !owned.contains(&l.id.to_string()));
+                }
+            }
+        }
+        let mut layouts = state.pivot_layouts.lock().map_err(|e| e.to_string())?;
+        for payload in &payloads {
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for layout in &payload.pull_result.pivot_layouts {
+                if layouts.iter().any(|l| l.id == layout.id) {
+                    continue;
+                }
+                entries.push(ledger_entry(
+                    "pivotLayout",
+                    layout.id.to_string(),
+                    layout.name.clone(),
+                ));
+                layouts.push(layout.clone());
+            }
+        }
+    }
+
+    // Document theme (Wave A): same guarded singleton rule as first pull —
+    // the publisher's theme applies only while the subscriber's is still the
+    // default. Extension data: same additive merge as first pull — the
+    // publisher can never clobber subscriber extension state. Keys ACTUALLY
+    // inserted (new in this version) get fresh "extensionData" ledger entries;
+    // keys merged by an earlier pull carry over in the ledger merge below.
+    for payload in &payloads {
+        apply_pulled_theme(&state, payload.pull_result.theme.as_ref())?;
+        let inserted =
+            merge_pulled_extension_data(&state, &payload.pull_result.extension_data)?;
+        if !inserted.is_empty() {
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            for key in inserted {
+                entries.push(ledger_entry("extensionData", key.clone(), key));
+            }
+        }
+    }
+
     // Ledger entries for named ranges (upserted unconditionally above, so the
     // full v2 set is accurate). Script kinds (objectScript/moduleScript/
     // notebook) are recorded at their point of ACTUAL application below — the
@@ -3291,12 +4055,37 @@ pub fn calp_refresh_apply(
             &payload.pull_result.data_sources,
             &bi_state,
             &ribbon_filter_state,
+            &slicer_state,
         );
         if !added.is_empty() {
             let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
             for (id, name) in added {
                 entries.push(ledger_entry("dataSource", id, name));
             }
+        }
+    }
+
+    // Re-bind the just-refreshed ribbon filters + BI-sourced slicers (Wave A)
+    // onto THIS workbook's package connections. The v2 artifacts carry the
+    // PUBLISHER's connection uuids (== the stable package data-source ids);
+    // load_embedded_data_sources only remaps for data sources ADDED in this
+    // version, so rebuild the full ds-id -> connection map from the existing
+    // package connections and remap once more.
+    {
+        let ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
+            bi_state
+                .connections
+                .lock()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .filter_map(|(id, c)| c.package_data_source_id.clone().map(|ds| (ds, *id)))
+                .collect();
+        if !ds_to_conn.is_empty() {
+            crate::ribbon_filter::remap_ribbon_filter_connections(
+                &ribbon_filter_state,
+                &ds_to_conn,
+            );
+            remap_slicer_bi_connections(&slicer_state, &ds_to_conn);
         }
     }
 
@@ -3406,17 +4195,36 @@ pub fn calp_refresh_apply(
     // pane_controls.json, empty set included, and every payload enters
     // refresh_ledgers via the tables block), so the fresh entries are the
     // full truth — carrying old ones would resurrect ledger rows for controls
-    // the v2 removal just deleted. Subscriptions WITHOUT an update never get
-    // a payload, never enter refresh_ledgers, and keep their ledger wholesale.
+    // the v2 removal just deleted. The Wave A kinds (slicer, ribbonFilter,
+    // pivotLayout) follow the same rule: re-materialized for every payload
+    // above, so their fresh entries are the full truth too. extensionData
+    // carries over like pivots/dataSources: the merge is ADDITIVE-only (never
+    // removed or replaced on refresh), so entries from earlier pulls stay
+    // valid — fresh entries cover only keys newly inserted this refresh (a
+    // same-key fresh entry can only mean the subscriber deleted the key and
+    // this refresh re-seeded it, so it must not duplicate the carried row).
+    // Subscriptions WITHOUT an update never get a payload, never enter
+    // refresh_ledgers, and keep their ledger wholesale.
     for (sub_idx, new_entries) in refresh_ledgers {
         if let Some(sub) = subs.subscriptions.get_mut(sub_idx) {
             let mut objects: Vec<calp::manifest::SubscribedObject> = sub
                 .objects
                 .iter()
-                .filter(|o| o.kind == "pivot" || o.kind == "dataSource")
+                .filter(|o| {
+                    o.kind == "pivot" || o.kind == "dataSource" || o.kind == "extensionData"
+                })
                 .cloned()
                 .collect();
-            objects.extend(new_entries);
+            for entry in new_entries {
+                if entry.kind == "extensionData"
+                    && objects
+                        .iter()
+                        .any(|o| o.kind == "extensionData" && o.id == entry.id)
+                {
+                    continue;
+                }
+                objects.push(entry);
+            }
             sub.objects = objects;
         }
     }
@@ -6613,12 +7421,14 @@ fn read_pulled_model(
 
 /// Load embedded BI model data sources from a pulled package into BiState.
 /// Returns a mapping from package data source ID to the created connection ID.
-/// Also re-binds ribbon filters saved against a previous session's connection
-/// uuid to the freshly minted ones (via their stable data_source_id).
+/// Also re-binds ribbon filters AND BI-sourced slicers (Wave A) saved against
+/// a previous session's connection uuid to the freshly minted ones (via the
+/// stable data_source_id / publisher connection uuid respectively).
 fn load_embedded_data_sources(
     data_sources: &[calp::pull::PulledDataSource],
     bi_state: &BiState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
 ) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
     use crate::bi::types::{Connection, ConnectionType};
     use crate::bi::engine_registry::ModelKey;
@@ -6773,6 +7583,7 @@ fn load_embedded_data_sources(
     }
 
     crate::ribbon_filter::remap_ribbon_filter_connections(ribbon_filter_state, &ds_to_conn);
+    remap_slicer_bi_connections(slicer_state, &ds_to_conn);
 
     ds_to_conn
 }
@@ -6788,6 +7599,7 @@ fn refresh_embedded_data_sources(
     data_sources: &[calp::pull::PulledDataSource],
     bi_state: &BiState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    slicer_state: &crate::slicer::SlicerState,
 ) -> Vec<(String, String)> {
     let mut newly_created: Vec<(String, String)> = Vec::new();
     for ds in data_sources {
@@ -6802,8 +7614,12 @@ fn refresh_embedded_data_sources(
         };
         let Some(conn_id) = conn_id else {
             // Added in this version — materialize like a first pull.
-            let created =
-                load_embedded_data_sources(std::slice::from_ref(ds), bi_state, ribbon_filter_state);
+            let created = load_embedded_data_sources(
+                std::slice::from_ref(ds),
+                bi_state,
+                ribbon_filter_state,
+                slicer_state,
+            );
             if created.contains_key(&ds.definition.id) {
                 newly_created.push((ds.definition.id.clone(), ds.definition.name.clone()));
             }

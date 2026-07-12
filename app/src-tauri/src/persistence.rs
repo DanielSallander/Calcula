@@ -356,6 +356,79 @@ fn collect_cf_dv_for_save(
     (conditional_formats, data_validations)
 }
 
+/// Collect threaded comments + what-if scenarios + outline groups into the
+/// persisted, SheetId-keyed, opaque-payload carriers (Wave B — before this,
+/// all three lived only in AppState and were lost on every save/reload).
+/// Iterates the FULL per-sheet stores like collect_cf_dv_for_save; entries
+/// are sorted (outer Vec by sheet index, comments by cell) so the serialized
+/// artifact bytes are deterministic across saves/publishes.
+fn collect_comments_scenarios_outlines_for_save(
+    state: &AppState,
+    sheet_ids: &[SheetId],
+) -> (
+    Vec<persistence::SavedSheetComments>,
+    Vec<persistence::SavedSheetScenarios>,
+    Vec<persistence::SavedSheetOutline>,
+) {
+    let mut comments = Vec::new();
+    if let Ok(store) = state.comments.lock() {
+        let mut indices: Vec<usize> = store.keys().copied().collect();
+        indices.sort_unstable();
+        for idx in indices {
+            let Some(sheet_comments) = store.get(&idx) else { continue };
+            if sheet_comments.is_empty() {
+                continue;
+            }
+            // The (row, col) map keys are not JSON-representable; the payload
+            // is the thread list (each Comment carries its own row/col), in
+            // cell order for deterministic bytes.
+            let mut threads: Vec<&crate::comments::Comment> = sheet_comments.values().collect();
+            threads.sort_by_key(|c| (c.row, c.col));
+            if let Ok(value) = serde_json::to_value(&threads) {
+                comments.push(persistence::SavedSheetComments {
+                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    comments: value,
+                });
+            }
+        }
+    }
+    let mut scenarios = Vec::new();
+    if let Ok(store) = state.scenarios.lock() {
+        let mut indices: Vec<usize> = store.keys().copied().collect();
+        indices.sort_unstable();
+        for idx in indices {
+            let Some(sheet_scenarios) = store.get(&idx) else { continue };
+            if sheet_scenarios.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(sheet_scenarios) {
+                scenarios.push(persistence::SavedSheetScenarios {
+                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    scenarios: value,
+                });
+            }
+        }
+    }
+    let mut outlines = Vec::new();
+    if let Ok(store) = state.outlines.lock() {
+        let mut indices: Vec<usize> = store.keys().copied().collect();
+        indices.sort_unstable();
+        for idx in indices {
+            let Some(outline) = store.get(&idx) else { continue };
+            if outline.row_groups.is_empty() && outline.column_groups.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(outline) {
+                outlines.push(persistence::SavedSheetOutline {
+                    sheet_id: sheet_index_to_id(sheet_ids, idx),
+                    outline: value,
+                });
+            }
+        }
+    }
+    (comments, scenarios, outlines)
+}
+
 // (build_workbook_snapshot was deleted: .calp publish now builds its carrier
 // via build_workbook_for_save_with_slicers — the SAME collector as the .cala
 // save path — so package fidelity automatically tracks file fidelity. The
@@ -536,6 +609,16 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     workbook.conditional_formats = cf;
     workbook.data_validations = dv;
 
+    // ---- Comments + scenarios + outlines (per-sheet, Wave B) ----
+    // Without this, threaded comments, what-if scenarios, and outline-group
+    // structure lived only in AppState and vanished on every save/reload
+    // (collapsed outline groups survived only as anonymous hidden rows/cols).
+    let (comments, scenarios, outlines) =
+        collect_comments_scenarios_outlines_for_save(state, sheet_ids);
+    workbook.comments = comments;
+    workbook.scenarios = scenarios;
+    workbook.outlines = outlines;
+
     // ---- Controls (cell-anchored button/checkbox metadata, per-sheet) ----
     // Without this, onSelect wiring and formula-driven properties lived only
     // in AppState and vanished on every save/reload (and never published).
@@ -639,11 +722,23 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> per
 }
 
 fn saved_to_slicer(saved: &persistence::SavedSlicer, workbook: &persistence::Workbook) -> crate::slicer::Slicer {
+    saved_slicer_to_slicer_at(saved, sheet_id_to_index(workbook, saved.sheet_id))
+}
+
+/// Convert one SavedSlicer to the live entity at an explicit LOCAL sheet
+/// index. pub(crate): the .calp pull path (calp_commands) materializes pulled
+/// slicers through the same converter — it resolves the PACKAGE sheet id to
+/// the local index itself — so wire-format handling can never drift from
+/// .cala load.
+pub(crate) fn saved_slicer_to_slicer_at(
+    saved: &persistence::SavedSlicer,
+    sheet_index: usize,
+) -> crate::slicer::Slicer {
     crate::slicer::Slicer {
         id: saved.id,
         name: saved.name.clone(),
         header_text: saved.header_text.clone(),
-        sheet_index: sheet_id_to_index(workbook, saved.sheet_id),
+        sheet_index,
         x: saved.x,
         y: saved.y,
         width: saved.width,
@@ -692,6 +787,32 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer, workbook: &persistence::Wor
     }
 }
 
+/// Rebuild a saved slicer's computed properties (formula-driven attributes)
+/// as live entities, re-parsing each formula into a cached AST. pub(crate):
+/// shared with the .calp pull materializer (calp_commands) so restored
+/// computed properties behave identically to .cala load.
+pub(crate) fn slicer_computed_props_from_saved(
+    saved: &persistence::SavedSlicer,
+) -> Vec<crate::slicer::computed::SlicerComputedProperty> {
+    saved
+        .computed_properties
+        .iter()
+        .map(|sp| {
+            let cached_ast = parser::parse(&sp.formula)
+                .ok()
+                .map(|parsed| crate::convert_expr(&parsed));
+            crate::slicer::computed::SlicerComputedProperty {
+                id: sp.id,
+                slicer_id: saved.id,
+                attribute: sp.attribute.clone(),
+                formula: sp.formula.clone(),
+                cached_ast,
+                cached_value: None,
+            }
+        })
+        .collect()
+}
+
 /// Restore slicers from SavedSlicer format into SlicerState.
 fn restore_slicers(
     saved_slicers: &[persistence::SavedSlicer],
@@ -711,24 +832,7 @@ fn restore_slicers(
 
         // Restore computed properties
         if !saved.computed_properties.is_empty() {
-            let props: Vec<crate::slicer::computed::SlicerComputedProperty> = saved
-                .computed_properties
-                .iter()
-                .map(|sp| {
-                    let cached_ast = parser::parse(&sp.formula)
-                        .ok()
-                        .map(|parsed| crate::convert_expr(&parsed));
-                    crate::slicer::computed::SlicerComputedProperty {
-                        id: sp.id,
-                        slicer_id,
-                        attribute: sp.attribute.clone(),
-                        formula: sp.formula.clone(),
-                        cached_ast,
-                        cached_value: None,
-                    }
-                })
-                .collect();
-            computed_props.insert(slicer_id, props);
+            computed_props.insert(slicer_id, slicer_computed_props_from_saved(saved));
         }
     }
 }
@@ -798,7 +902,10 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
     }
 }
 
-fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribbon_filter::RibbonFilter {
+/// Convert one SavedRibbonFilter back to the live entity. pub(crate): the
+/// .calp pull path (calp_commands) materializes pulled ribbon filters through
+/// the same converter so wire-format handling can never drift from .cala load.
+pub(crate) fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribbon_filter::RibbonFilter {
     crate::ribbon_filter::RibbonFilter {
         id: saved.id,
         name: saved.name.clone(),
@@ -1873,6 +1980,57 @@ pub fn open_file(
             &mut behaviors,
             |sid| Some(sheet_id_to_index(&workbook, sid)),
         );
+    }
+
+    // Restore threaded comments (Wave B). Like CF/DV these were silently lost
+    // on every reload before this. The persisted payload is the thread list;
+    // rebuild the (row, col)-keyed store and re-stamp each thread's
+    // sheet_index with THIS session's index (the persisted one is stale).
+    if let Ok(mut store) = state.comments.lock() {
+        store.clear();
+        for entry in &workbook.comments {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Ok(threads) =
+                serde_json::from_value::<Vec<crate::comments::Comment>>(entry.comments.clone())
+            {
+                let sheet_map = store.entry(idx).or_default();
+                for mut c in threads {
+                    c.sheet_index = idx;
+                    sheet_map.insert((c.row, c.col), c);
+                }
+            }
+        }
+    }
+
+    // Restore what-if scenarios (Wave B), re-stamping sheet_index like comments.
+    if let Ok(mut store) = state.scenarios.lock() {
+        store.clear();
+        for entry in &workbook.scenarios {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Ok(mut scenarios) =
+                serde_json::from_value::<Vec<crate::api_types::Scenario>>(entry.scenarios.clone())
+            {
+                for s in &mut scenarios {
+                    s.sheet_index = idx;
+                }
+                store.entry(idx).or_default().extend(scenarios);
+            }
+        }
+    }
+
+    // Restore outline groups (Wave B). The collapsed groups' hidden rows/cols
+    // were already restored with the sheet metadata; this restores the group
+    // STRUCTURE so expand/collapse and outline symbols work after reload.
+    if let Ok(mut store) = state.outlines.lock() {
+        store.clear();
+        for entry in &workbook.outlines {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Ok(outline) =
+                serde_json::from_value::<crate::grouping::SheetOutline>(entry.outline.clone())
+            {
+                store.insert(idx, outline);
+            }
+        }
     }
 
     // Restore charts from workbook

@@ -149,6 +149,8 @@ fn publish_version(
         data_sources: Vec::new(),
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
+        include_comments: false,
+        min_app_version: String::new(),
     };
     publish::publish(reg, &request, prof).expect("publish failed");
 }
