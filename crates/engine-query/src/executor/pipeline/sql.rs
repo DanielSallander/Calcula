@@ -1,6 +1,7 @@
 //! Condition and compound-expression SQL rendering shared by the local
 //! aggregation paths, including USERELATIONSHIP override JOIN bookkeeping.
 
+use datafusion::prelude::SessionContext;
 use engine_core::compute::aggregate::AggregateOp;
 use engine_core::compute::context::{
     format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter,
@@ -231,6 +232,112 @@ fn qualify_condition_sql(expr: &Expression) -> QueryResult<String> {
 /// unfiltered — wrong — number (the TREATAS / set-membership footgun). The
 /// pushed connector path and the engine-core scalar `MeasureEngine` DO apply
 /// them; only this path cannot yet, so we refuse rather than mislead.
+/// Cap on IN-membership set sizes rendered as inline literal lists.
+const MAX_IN_SET_VALUES: usize = 50_000;
+
+/// Render resolved IN-membership filters (`KEEP(... IN set[col])` and
+/// TREATAS) as SQL conditions. DataFusion cannot execute an IN-subquery
+/// inside a CASE expression, so the set is materialized FIRST — a
+/// `SELECT DISTINCT` probe against the registered set-provider batch — and
+/// rendered as an inline literal list: `target."col" IN ('a', 'b', ...)`.
+/// An empty set renders `FALSE` (no row matches, DAX-blank semantics).
+/// The set-provider base table must be fetched/registered — the planner adds
+/// it to the fetch set.
+pub(super) async fn render_in_filter_conditions(
+    ctx: &SessionContext,
+    in_filters: &[engine_core::compute::context::ResolvedInFilter],
+    fact_model_name: &str,
+    fact_table: &str,
+    model: &DataModel,
+) -> QueryResult<Vec<String>> {
+    use datafusion::common::ScalarValue;
+    use engine_core::compute::sql_util::sql_quote_literal;
+
+    let mut out = Vec::new();
+    for inf in in_filters {
+        let base = inf.var_base_table.to_lowercase();
+        let mut probe = format!(
+            "SELECT DISTINCT {base}.{c} FROM {base}",
+            c = quote_ident_double(&inf.var_column)
+        );
+        if !inf.var_filters.is_empty() {
+            let parts: Vec<String> = inf
+                .var_filters
+                .iter()
+                .map(|f| {
+                    let val = format_filter_value(&f.table, &f.column, &f.value, model);
+                    format!(
+                        "{base}.{} {} {}",
+                        quote_ident_double(&f.column),
+                        f.operator.as_sql(),
+                        val
+                    )
+                })
+                .collect();
+            probe.push_str(&format!(" WHERE {}", parts.join(" AND ")));
+        }
+        let batches = ctx.sql(&probe).await?.collect().await?;
+
+        let mut values: Vec<String> = Vec::new();
+        for batch in &batches {
+            let col = batch.column(0);
+            for row in 0..batch.num_rows() {
+                let mut sv = ScalarValue::try_from_array(col, row)?;
+                if let ScalarValue::Dictionary(_, inner) = sv {
+                    sv = *inner;
+                }
+                match sv {
+                    ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+                        values.push(sql_quote_literal(&s));
+                    }
+                    ScalarValue::Int8(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::Int16(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::Int32(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::Int64(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::UInt32(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::UInt64(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::Float32(Some(v)) => values.push(v.to_string()),
+                    ScalarValue::Float64(Some(v)) => values.push(v.to_string()),
+                    // NULL set members never match an IN list — skip.
+                    sv if sv.is_null() => {}
+                    other => {
+                        return Err(crate::error::QueryError::InvalidQuery(format!(
+                            "TREATAS / KEEP-IN set '{}[{}]' has an unsupported value type \
+                             ({:?}); use a text or numeric column",
+                            inf.var_base_table,
+                            inf.var_column,
+                            other.data_type()
+                        )));
+                    }
+                }
+                if values.len() > MAX_IN_SET_VALUES {
+                    return Err(crate::error::QueryError::InvalidQuery(format!(
+                        "TREATAS / KEEP-IN set '{}[{}]' exceeds {MAX_IN_SET_VALUES} distinct \
+                         values",
+                        inf.var_base_table, inf.var_column
+                    )));
+                }
+            }
+        }
+
+        let target = if inf.table.eq_ignore_ascii_case(fact_model_name) {
+            fact_table.to_string()
+        } else {
+            inf.table.to_lowercase()
+        };
+        out.push(if values.is_empty() {
+            "FALSE".to_string()
+        } else {
+            format!(
+                "{target}.{} IN ({})",
+                quote_ident_double(&inf.column),
+                values.join(", ")
+            )
+        });
+    }
+    Ok(out)
+}
+
 pub(super) fn reject_unconsumed_in_filters(
     label: &str,
     ctx: &EvaluationContext,

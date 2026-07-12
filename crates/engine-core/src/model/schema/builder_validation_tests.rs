@@ -1085,3 +1085,40 @@ fn rejects_selected_measure_in_a_calculated_column() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
 }
+
+#[test]
+fn detail_rows_validated_at_build() {
+    // Well-formed refs to existing columns: accepted.
+    let ok = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["Sales[amount]".to_string()]),
+        )
+        .build();
+    assert!(ok.is_ok(), "got: {:?}", ok.err());
+
+    // Malformed ref (not Table[column]): rejected.
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["just_a_column".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Table[column]"), "got: {err}");
+
+    // Unknown column: rejected.
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["Sales[nonexistent]".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("nonexistent"), "got: {err}");
+}

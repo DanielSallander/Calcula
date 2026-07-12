@@ -169,7 +169,7 @@ impl Parser {
 
     /// Parse a `table[column]` pair (shared by RELATED / ISFILTERED /
     /// LOOKUPVALUE style arguments).
-    fn parse_bracketed_column(&mut self, func: &str) -> EngineResult<(String, String)> {
+    pub(super) fn parse_bracketed_column(&mut self, func: &str) -> EngineResult<(String, String)> {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {

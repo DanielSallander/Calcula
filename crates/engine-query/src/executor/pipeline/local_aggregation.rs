@@ -39,7 +39,8 @@ use super::order_limit::{
 };
 use super::sql::{
     axis_clear_partition, build_condition_sql_with_conditions, build_override_alias_map,
-    collect_qualified_tables, reject_unconsumed_in_filters, resolve_compound_sql, wrap_axis_clear,
+    collect_qualified_tables, render_in_filter_conditions,
+    resolve_compound_sql, wrap_axis_clear,
     GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
@@ -1562,9 +1563,17 @@ impl QueryExecutor {
             } else {
                 // Standard path: resolve the whole expression as a unit.
                 let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
-                // KEEP(... IN variable[column]) membership filters cannot be
-                // applied here and must not be silently dropped.
-                reject_unconsumed_in_filters(name, &eval_ctx)?;
+                // KEEP(... IN set[col]) / TREATAS membership filters render as
+                // IN-subquery conditions on the CASE (the planner fetched the
+                // set-provider tables).
+                let in_conditions = render_in_filter_conditions(
+                    &ctx,
+                    &eval_ctx.in_filters,
+                    fact_model_name,
+                    fact_table,
+                    model,
+                )
+                .await?;
                 let effective = eval_ctx.effective_filters(&[]);
 
                 // Record tables that need JOINs from resolved filters.
@@ -1587,19 +1596,32 @@ impl QueryExecutor {
                     &mut override_joins,
                 );
 
-                let has_case = !effective.is_empty() || !eval_ctx.conditions.is_empty();
+                let has_case = !effective.is_empty()
+                    || !eval_ctx.conditions.is_empty()
+                    || !in_conditions.is_empty();
 
                 // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
                 // present, else the plain aggregate.
                 let inner_sql = if has_case {
-                    let condition = build_condition_sql_with_conditions(
-                        &effective,
-                        &eval_ctx.conditions,
-                        fact_table,
-                        fact_model_name,
-                        model,
-                        &alias_map,
-                    )?;
+                    let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
+                        build_condition_sql_with_conditions(
+                            &effective,
+                            &eval_ctx.conditions,
+                            fact_table,
+                            fact_model_name,
+                            model,
+                            &alias_map,
+                        )?
+                    } else {
+                        String::new()
+                    };
+                    for c in &in_conditions {
+                        if condition.is_empty() {
+                            condition = c.clone();
+                        } else {
+                            condition.push_str(&format!(" AND {c}"));
+                        }
+                    }
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
                     stripped_expr.to_case_when_sql(&condition, measure_table)?

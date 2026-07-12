@@ -700,6 +700,27 @@ impl Expression {
     /// the qualifier as written: usually a model table name, but it may be a
     /// `VAR`/`QUERY` binding name in a table-variable expression — resolve it
     /// against the model's tables to keep only physical columns.
+    /// Every set-provider name of a `KEEP(... IN set[col])` / TREATAS
+    /// membership predicate in this tree — a table-variable name or a raw
+    /// model table (the TREATAS form). The planner fetches these so the
+    /// IN-subquery can execute on the local path.
+    pub fn keep_in_set_providers(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        self.collect_in_set_providers(&mut out);
+        out
+    }
+
+    fn collect_in_set_providers<'a>(&'a self, out: &mut Vec<&'a str>) {
+        if let Expression::Keep { in_predicates, .. } = self {
+            for p in in_predicates {
+                out.push(p.var_name.as_str());
+            }
+        }
+        for child in child_expressions(self) {
+            child.collect_in_set_providers(out);
+        }
+    }
+
     /// Every `LOOKUPVALUE` node in this tree, as `(target table, result
     /// column, search columns)`. Search EXPRESSIONS are not included — walk
     /// them via the other walkers (they are ordinary row-level

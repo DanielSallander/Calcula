@@ -60,6 +60,12 @@ pub enum TextFunction {
     /// Reverse a string: `REVERSE(text)`.
     /// Snowflake extension.
     Reverse,
+    /// Number of segments in a `PATH(...)` string: `PATHLENGTH(path)`.
+    /// NULL path yields NULL.
+    PathLength,
+    /// The n-th (1-based, root-first) segment of a `PATH(...)` string:
+    /// `PATHITEM(path, n)`. Out-of-range positions yield an empty string.
+    PathItem,
     /// Extract part of a delimited string: `SPLIT(text, delimiter, part_number)`.
     /// Maps to SQL `SPLIT_PART`. Part number is 1-based. Snowflake extension.
     Split,
@@ -204,6 +210,11 @@ impl TextFunction {
                 }
             }
             Self::Reverse => format!("REVERSE({})", args[0]),
+            Self::PathLength => format!(
+                "(CASE WHEN {a} IS NULL THEN NULL ELSE                  LENGTH({a}) - LENGTH(REPLACE({a}, '|', '')) + 1 END)",
+                a = args[0]
+            ),
+            Self::PathItem => format!("SPLIT_PART({}, '|', {})", args[0], args[1]),
             Self::Split => {
                 format!("SPLIT_PART({}, {}, {})", args[0], args[1], args[2])
             }
@@ -254,6 +265,8 @@ impl std::fmt::Display for TextFunction {
             Self::Lpad => write!(f, "LPAD"),
             Self::Rpad => write!(f, "RPAD"),
             Self::Reverse => write!(f, "REVERSE"),
+            Self::PathLength => write!(f, "PATHLENGTH"),
+            Self::PathItem => write!(f, "PATHITEM"),
             Self::Split => write!(f, "SPLIT"),
             Self::Format => write!(f, "FORMAT"),
             Self::Contains => write!(f, "CONTAINS"),

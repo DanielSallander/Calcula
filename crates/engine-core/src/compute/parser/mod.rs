@@ -305,6 +305,7 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "RESET_OUTER",
         "RESETOUTER",
         "ALLSELECTED",
+        "TREATAS",
         "USING",
         "USERELATIONSHIP",
         "CLEAREXCEPT",
@@ -425,6 +426,9 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "LPAD",
         "RPAD",
         "REVERSE",
+        "PATHLENGTH",
+        "PATHITEM",
+        "PATH",
         "SPLIT",
         "FORMAT",
         "CONTAINS",
@@ -655,6 +659,47 @@ pub fn parse_global(name: &str, table: &str, input: &str) -> EngineResult<Global
         });
     }
     Ok(GlobalVariable::new(name, table, expression))
+}
+
+/// Recognize `PATH(table[id_column], table[parent_column])` as the ENTIRE
+/// text of a calculated column — the generated parent-child path form.
+/// `None` = not a PATH call (parse as an ordinary expression); `Some(Ok)` =
+/// `(table, id_column, parent_column)`; `Some(Err)` = malformed PATH call.
+pub fn try_parse_path(input: &str) -> Option<Result<(String, String, String), String>> {
+    let trimmed = input.trim();
+    if trimmed.len() < 4 || !trimmed[..4].eq_ignore_ascii_case("PATH") {
+        return None;
+    }
+    let rest = trimmed[4..].trim_start();
+    let inner = rest.strip_prefix('(')?;
+    let Some(inner) = inner.trim_end().strip_suffix(')') else {
+        return Some(Err(
+            "PATH expects the form PATH(table[id], table[parent])".to_string()
+        ));
+    };
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.len() != 2 {
+        return Some(Err(
+            "PATH expects exactly two columns: PATH(table[id], table[parent])".to_string(),
+        ));
+    }
+    let parse_col = |s: &str| -> Option<(String, String)> {
+        let open = s.find('[')?;
+        let close = s.strip_suffix(']')?;
+        Some((s[..open].trim().to_string(), close[open + 1..].trim().to_string()))
+    };
+    let Some((t1, id_col)) = parse_col(parts[0]) else {
+        return Some(Err(format!("PATH: expected table[column], got '{}'", parts[0])));
+    };
+    let Some((t2, parent_col)) = parse_col(parts[1]) else {
+        return Some(Err(format!("PATH: expected table[column], got '{}'", parts[1])));
+    };
+    if !t1.eq_ignore_ascii_case(&t2) {
+        return Some(Err(
+            "PATH: both columns must be on the same table".to_string()
+        ));
+    }
+    Some(Ok((t1, id_col, parent_col)))
 }
 
 /// Recognize `CALENDAR(YYYY-MM-DD, YYYY-MM-DD)`. `None` = not a CALENDAR

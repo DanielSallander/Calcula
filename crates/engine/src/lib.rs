@@ -156,6 +156,7 @@ pub use engine_core::compute::measure::{
 pub use engine_core::compute::measure_engine::MeasureEngine;
 pub use engine_core::compute::parser::{
     parse_context, parse_global, parse_measure, parse_measure_expression, parse_table_variable,
+    try_parse_path,
 };
 pub use engine_core::compute::plan::{
     ExecutionPlan, PlanDuration, PlanNode, PlanOperation, PlanProperty, PlanValue,
@@ -172,7 +173,8 @@ pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
     ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
     FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
-    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PersistedAuthKind, PersistedConnection,
+    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PathSpec, Perspective, PersistedAuthKind,
+    PersistedConnection,
     PersistedSource, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, SourceKind,
     StatusBand, StorageMode, Table, TableSourceBinding, TableVariable,
 };
@@ -1909,6 +1911,235 @@ impl Engine {
     /// [`validate_active_role`](Self::validate_active_role) first; an unknown
     /// role here degrades safely to an empty slice (no enforcement), but
     /// validation guarantees that case never reaches a query.
+    /// Object-level security (OLS) gate: refuse a query that references a
+    /// table or column any ACTIVE role denies (`SecurityRole::denied_tables`
+    /// / `denied_columns`). Runs before planning on every aggregate query.
+    ///
+    /// Coverage: group-by / lookup / order-by columns, hierarchy group-by
+    /// (the hierarchy's table + level columns up to the requested depth), and
+    /// every qualified column reference in the requested measures' expanded
+    /// expression closure. Bare-column filters (`filters` / `in_filters` /
+    /// `or_filters`) carry no table qualifier, so they are matched
+    /// conservatively: a bare name that matches ANY denied column's name, or
+    /// that exists on a denied table, is refused (fail closed — a false deny
+    /// beats a leak).
+    ///
+    /// With multiple active roles a denial from ANY of them refuses the query
+    /// (v1: denials do not un-union; stricter than Power BI's permissive
+    /// multi-role union, and safe).
+    fn enforce_object_level_security(&self, request: &QueryRequest) -> QueryResult<()> {
+        // Collect the active roles' denial sets.
+        let mut denied_tables: Vec<&str> = Vec::new();
+        let mut denied_cols: Vec<(String, String)> = Vec::new();
+        for name in &self.active_roles {
+            let Ok(role) = self.model.security_role(name) else {
+                continue; // unknown role is validate_active_role's error
+            };
+            denied_tables.extend(role.denied_tables().iter().map(|s| s.as_str()));
+            for r in role.denied_columns() {
+                // Builder-validated shape: `Table[column]`.
+                let r = r.trim();
+                let Some(open) = r.find('[') else { continue };
+                let Some(body) = r.strip_suffix(']') else { continue };
+                denied_cols.push((
+                    body[..open].trim().to_string(),
+                    body[open + 1..].trim().to_string(),
+                ));
+            }
+        }
+        if denied_tables.is_empty() && denied_cols.is_empty() {
+            return Ok(());
+        }
+
+        let table_denied =
+            |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
+        let col_denied = |t: &str, c: &str| {
+            table_denied(t)
+                || denied_cols
+                    .iter()
+                    .any(|(dt, dc)| dt.eq_ignore_ascii_case(t) && dc.eq_ignore_ascii_case(c))
+        };
+        let deny = |object: String| -> QueryResult<()> {
+            Err(QueryError::Engine(EngineError::ObjectLevelSecurityDenied {
+                object,
+            }))
+        };
+
+        // Qualified references: group-by, lookups, order-by.
+        for col in &request.group_by {
+            if col_denied(&col.table, &col.column) {
+                return deny(format!("{}[{}]", col.table, col.column));
+            }
+        }
+        for lookup in &request.lookups {
+            if col_denied(&lookup.table, &lookup.column) {
+                return deny(format!("{}[{}]", lookup.table, lookup.column));
+            }
+            if let Some(key) = &lookup.key_column {
+                if col_denied(&lookup.table, key) {
+                    return deny(format!("{}[{}]", lookup.table, key));
+                }
+            }
+        }
+        for clause in &request.order_by {
+            if let OrderTarget::Column(col) = &clause.target {
+                if col_denied(&col.table, &col.column) {
+                    return deny(format!("{}[{}]", col.table, col.column));
+                }
+            }
+        }
+
+        // Hierarchy group-by: the hierarchy's table and its level columns up
+        // to the requested depth.
+        if let Some(h) = &request.hierarchy_group_by {
+            if let Ok(hierarchy) = self.model.hierarchy(&h.hierarchy) {
+                if table_denied(hierarchy.table()) {
+                    return deny(hierarchy.table().to_string());
+                }
+                for level in hierarchy.levels().iter().take(h.depth.max(1)) {
+                    if col_denied(hierarchy.table(), level.column()) {
+                        return deny(format!("{}[{}]", hierarchy.table(), level.column()));
+                    }
+                }
+            }
+        }
+
+        // Measures: every qualified column reference in the expanded
+        // expression closure of each requested measure.
+        let measure_names: std::collections::HashSet<String> = self
+            .model
+            .measures()
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+        let global_names: std::collections::HashSet<String> = self
+            .model
+            .global_variables()
+            .iter()
+            .map(|g| g.name().to_string())
+            .collect();
+        for measure_name in &request.measures {
+            let Ok(measure) = self.model.measure(measure_name) else {
+                continue; // unknown measure is the planner's error
+            };
+            let expression = if expression::has_measure_ref(measure.expression()) {
+                match expression::expand_measure_refs(measure.expression(), &self.model) {
+                    Ok(expanded) => std::borrow::Cow::Owned(expanded),
+                    Err(_) => std::borrow::Cow::Borrowed(measure.expression()),
+                }
+            } else {
+                std::borrow::Cow::Borrowed(measure.expression())
+            };
+            let deps = engine_core::compute::expression::extract_dependencies(
+                &expression,
+                &measure_names,
+                &global_names,
+            );
+            for (t, c) in &deps.columns {
+                if col_denied(t, c) {
+                    return deny(format!(
+                        "{t}[{c}] (referenced by measure '{measure_name}')"
+                    ));
+                }
+            }
+        }
+
+        // Bare-column filters: no table qualifier, so match conservatively.
+        let bare_denied = |c: &str| -> Option<String> {
+            if let Some((dt, dc)) = denied_cols
+                .iter()
+                .find(|(_, dc)| dc.eq_ignore_ascii_case(c))
+            {
+                return Some(format!("{dt}[{dc}]"));
+            }
+            for dt in &denied_tables {
+                if let Ok(table) = self.model.table(dt) {
+                    if table.column(c).is_ok() {
+                        return Some(format!("{dt}[{c}]"));
+                    }
+                }
+            }
+            None
+        };
+        for f in request.filters.iter().chain(request.or_filters.iter()) {
+            if let Some(object) = bare_denied(&f.column) {
+                return deny(object);
+            }
+        }
+        for f in &request.in_filters {
+            if let Some(object) = bare_denied(&f.column) {
+                return deny(object);
+            }
+        }
+        Ok(())
+    }
+
+    /// OLS gate for drillthrough: same denial sets as
+    /// [`enforce_object_level_security`](Self::enforce_object_level_security),
+    /// applied to a [`DetailRequest`] — the detail table itself, its projected
+    /// columns (all of them when `columns` is empty, since that is `SELECT *`),
+    /// and the requested dimension attributes.
+    fn enforce_detail_object_level_security(&self, request: &DetailRequest) -> QueryResult<()> {
+        let mut denied_tables: Vec<&str> = Vec::new();
+        let mut denied_cols: Vec<(String, String)> = Vec::new();
+        for name in &self.active_roles {
+            let Ok(role) = self.model.security_role(name) else {
+                continue;
+            };
+            denied_tables.extend(role.denied_tables().iter().map(|s| s.as_str()));
+            for r in role.denied_columns() {
+                let r = r.trim();
+                let Some(open) = r.find('[') else { continue };
+                let Some(body) = r.strip_suffix(']') else { continue };
+                denied_cols.push((
+                    body[..open].trim().to_string(),
+                    body[open + 1..].trim().to_string(),
+                ));
+            }
+        }
+        if denied_tables.is_empty() && denied_cols.is_empty() {
+            return Ok(());
+        }
+        let table_denied =
+            |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
+        let col_denied = |t: &str, c: &str| {
+            table_denied(t)
+                || denied_cols
+                    .iter()
+                    .any(|(dt, dc)| dt.eq_ignore_ascii_case(t) && dc.eq_ignore_ascii_case(c))
+        };
+        let deny = |object: String| -> QueryResult<()> {
+            Err(QueryError::Engine(EngineError::ObjectLevelSecurityDenied {
+                object,
+            }))
+        };
+        if table_denied(&request.table) {
+            return deny(request.table.clone());
+        }
+        if request.columns.is_empty() {
+            // `SELECT *` — any denied column ON the detail table refuses the
+            // whole request (the host should project explicit columns).
+            if let Some((dt, dc)) = denied_cols
+                .iter()
+                .find(|(dt, _)| dt.eq_ignore_ascii_case(&request.table))
+            {
+                return deny(format!("{dt}[{dc}]"));
+            }
+        } else {
+            for c in &request.columns {
+                if col_denied(&request.table, c) {
+                    return deny(format!("{}[{}]", request.table, c));
+                }
+            }
+        }
+        for dim in &request.dimension_columns {
+            if col_denied(&dim.table, &dim.column) {
+                return deny(format!("{}[{}]", dim.table, dim.column));
+            }
+        }
+        Ok(())
+    }
+
     fn active_role_filters(&self) -> QueryResult<Vec<FilterPredicate>> {
         // Single-role enforcement. The multi-role union is handled separately
         // (see `build_role_union_request`) and never reaches a path that calls
@@ -2292,6 +2523,9 @@ impl Engine {
         // unknown active role.
         self.validate_request_udfs(&request)?;
         self.validate_active_role()?;
+        // Object-level security: refuse (fail closed) before any planning or
+        // cache work when the active role denies an object this query touches.
+        self.enforce_object_level_security(&request)?;
 
         // Measure-value ranking (RANKX) is the OUTERMOST post-aggregation step:
         // run the underlying query (which may itself apply a HAVING filter),
@@ -2580,6 +2814,9 @@ impl Engine {
             if let Some(f) = measure.format_string_expression() {
                 resolved = resolved.with_format_string_expression(f);
             }
+            if let Some(d) = measure.detail_rows() {
+                resolved = resolved.with_detail_rows(d.to_vec());
+            }
             if let Some(d) = measure.description() {
                 resolved = resolved.with_description(d);
             }
@@ -2727,6 +2964,9 @@ impl Engine {
         }
         if let Some(f) = measure.format_string_expression() {
             resolved = resolved.with_format_string_expression(f);
+        }
+        if let Some(d) = measure.detail_rows() {
+            resolved = resolved.with_detail_rows(d.to_vec());
         }
         if let Some(d) = measure.description() {
             resolved = resolved.with_description(d);
@@ -3078,6 +3318,10 @@ impl Engine {
         // is a hard error, never a silent no-RLS run). There are no measures
         // in a DetailRequest, so no UDF validation is needed.
         self.validate_active_role()?;
+        // Object-level security: raw rows are the highest-leak surface —
+        // refuse before execution when the active role denies the detail
+        // table, a projected column, or a requested dimension attribute.
+        self.enforce_detail_object_level_security(&request)?;
         // Drillthrough returns raw fact rows; the multi-role union rewrite is
         // only wired through the aggregate `query` path. Fail closed rather
         // than emit unrestricted detail rows under multiple active roles.

@@ -111,6 +111,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::Kpi;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
@@ -266,8 +267,25 @@ use crate::model::table_variable::TableVariable;
 ///   (like the v10 KPI bump), so the [`ModelFormatTooNew`] gate refuses v18
 ///   files on a pre-v18 engine.
 ///
+/// - `19` — five additions in one bump (the DAX-gap batch):
+///   [`CalculatedColumn`](crate::model::CalculatedColumn) gained `path`
+///   (a generated parent-child `PATH(t[id], t[parent])` column computed in
+///   Rust at materialization), the expression tree gained the
+///   `TextFunction::PathLength` / `TextFunction::PathItem` variants
+///   (`PATHLENGTH` / `PATHITEM` over path columns),
+///   [`Measure`](crate::compute::measure::Measure) gained `detail_rows`
+///   (a DETAILROWS drill-through projection of qualified `Table[column]`
+///   refs), [`SecurityRole`](crate::model::SecurityRole) gained
+///   `denied_tables` / `denied_columns` (object-level security — the engine
+///   REFUSES queries touching denied objects while the role is active), and
+///   the model gained [`perspectives`](DataModel::perspectives) (named
+///   presentation subsets). A pre-v19 engine fails to deserialize the new
+///   text-function variants and would silently drop the rest (an OLS drop
+///   would even under-restrict), so the [`ModelFormatTooNew`] gate refuses
+///   v19 files on a pre-v19 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 18;
+pub const MODEL_FORMAT_VERSION: u32 = 19;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -350,6 +368,12 @@ pub struct DataModel {
     model_author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_description: Option<String>,
+    /// Author-defined perspectives: named presentation subsets of the model
+    /// (tables/columns/measures to show). Purely presentational — NOT a
+    /// security boundary (see [`Perspective`]). Empty by default and skipped
+    /// on serialization when empty (back-compat with pre-v19 model files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    perspectives: Vec<Perspective>,
 }
 
 impl DataModel {
@@ -373,6 +397,7 @@ impl DataModel {
             kpis: Vec::new(),
             context_columns: Vec::new(),
             sources: Vec::new(),
+            perspectives: Vec::new(),
         }
     }
 
@@ -649,6 +674,19 @@ impl DataModel {
         &self.security_roles
     }
 
+    /// Returns all perspectives defined in the model.
+    pub fn perspectives(&self) -> &[Perspective] {
+        &self.perspectives
+    }
+
+    /// Look up a perspective by name.
+    pub fn perspective(&self, name: &str) -> EngineResult<&Perspective> {
+        self.perspectives
+            .iter()
+            .find(|p| p.name() == name)
+            .ok_or_else(|| EngineError::InvalidData(format!("perspective '{name}' not found")))
+    }
+
     /// Look up a security role by name (exact match).
     ///
     /// Returns [`EngineError::SecurityRoleNotFound`] when no role with that
@@ -850,6 +888,16 @@ impl DataModel {
     pub fn with_security_roles(&self, roles: Vec<SecurityRole>) -> DataModel {
         let mut model = self.clone();
         model.security_roles = roles;
+        model
+    }
+
+    /// Returns a copy of this model with the perspective list replaced.
+    ///
+    /// Like [`with_security_roles`](Self::with_security_roles), callers should
+    /// re-`validate()` the result.
+    pub fn with_perspectives(&self, perspectives: Vec<Perspective>) -> DataModel {
+        let mut model = self.clone();
+        model.perspectives = perspectives;
         model
     }
 
@@ -1179,6 +1227,9 @@ impl DataModel {
         }
         for source in &self.sources {
             builder = builder.add_source(source.clone());
+        }
+        for p in &self.perspectives {
+            builder = builder.add_perspective(p.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

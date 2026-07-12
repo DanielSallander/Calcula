@@ -173,6 +173,7 @@ impl Parser {
             "RESET_INNER" | "RESETINNER" => self.parse_reset_inner_call(),
             "RESET_OUTER" | "RESETOUTER" => self.parse_reset_outer_call(),
             "ALLSELECTED" => self.parse_allselected_call(),
+            "TREATAS" => self.parse_treatas_call(),
             "USING" => self.parse_using_call(),
             "USERELATIONSHIP" => self.parse_use_relationship_call(),
             // Logical functions (function-call syntax)
@@ -317,6 +318,8 @@ impl Parser {
             "LPAD" => self.parse_text_call(TextFunction::Lpad, 2),
             "RPAD" => self.parse_text_call(TextFunction::Rpad, 2),
             "REVERSE" => self.parse_text_call(TextFunction::Reverse, 1),
+            "PATHLENGTH" => self.parse_text_call(TextFunction::PathLength, 1),
+            "PATHITEM" => self.parse_text_call(TextFunction::PathItem, 2),
             "SPLIT" => self.parse_text_call(TextFunction::Split, 3),
             "FORMAT" => self.parse_text_call(TextFunction::Format, 2),
             "CONTAINS" => self.parse_text_call(TextFunction::Contains, 2),

@@ -104,6 +104,88 @@ fn clear_model() -> DataModel {
 }
 
 #[tokio::test]
+async fn treatas_applies_disconnected_table_as_virtual_filter() {
+    // Fact(currency, amount) + a DISCONNECTED Curr(code) table (no
+    // relationship). TREATAS(Curr[code], Fact[currency]) restricts the fact
+    // to the currencies visible in Curr — including a slicer on Curr[code].
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Fact",
+                vec![
+                    Column::new("currency", DataType::String),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new("Curr", vec![Column::new("code", DataType::String)])
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(expression_measure(
+            "SelectedRevenue",
+            parse_measure("SUM(Fact[amount], TREATAS(Curr[code], Fact[currency]))").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Fact", 0, SourceBinding::new("public", "fact"));
+    engine.bind_table("Curr", 0, SourceBinding::new("public", "curr"));
+    engine
+        .cache
+        .store(
+            "Fact",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("currency", ArrowType::Utf8, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec!["EUR", "USD", "EUR", "SEK"])),
+                    Arc::new(Float64Array::from(vec![100.0, 40.0, 30.0, 20.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+        .cache
+        .store(
+            "Curr",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("code", ArrowType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(vec!["EUR", "USD"]))],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    // No slicer: Curr lists EUR + USD -> 100 + 40 + 30 = 170 (SEK excluded).
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["SelectedRevenue".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 170.0);
+
+    // Slicer on the DISCONNECTED table: only EUR -> 130.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["SelectedRevenue".into()],
+            filters: vec![FilterCondition::new("code", FilterOperator::Equal, "EUR")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(as_f64(batches[0].column(0).as_ref(), 0), 130.0);
+}
+
+#[tokio::test]
 async fn dynamic_format_string_follows_outer_context() {
     let engine = clear_engine();
 

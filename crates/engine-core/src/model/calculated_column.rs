@@ -23,6 +23,23 @@ pub struct CalculatedColumn {
     expression: Expression,
     /// The resulting data type.
     data_type: DataType,
+    /// When set, this column is a GENERATED parent-child path
+    /// (`PATH(t[id], t[parent])`): a `|`-separated root-first id chain per
+    /// row, computed in Rust during materialization (a recursive walk that
+    /// row-level SQL cannot express). The `expression` then holds a
+    /// placeholder `Blank`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<PathSpec>,
+}
+
+/// The id/parent columns of a `PATH(...)` calculated column. Both must be
+/// physical columns on the host table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathSpec {
+    /// The row-identifier column.
+    pub id_column: String,
+    /// The parent-identifier column (NULL = root).
+    pub parent_column: String,
 }
 
 impl CalculatedColumn {
@@ -41,7 +58,33 @@ impl CalculatedColumn {
             table: table.into(),
             expression,
             data_type,
+            path: None,
         }
+    }
+
+    /// Create a generated parent-child PATH column (`PATH(t[id], t[parent])`).
+    /// Always `String`-typed; computed in Rust during materialization.
+    pub fn new_path(
+        name: impl Into<String>,
+        table: impl Into<String>,
+        id_column: impl Into<String>,
+        parent_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            table: table.into(),
+            expression: Expression::Blank,
+            data_type: DataType::String,
+            path: Some(PathSpec {
+                id_column: id_column.into(),
+                parent_column: parent_column.into(),
+            }),
+        }
+    }
+
+    /// The PATH spec, when this is a generated parent-child path column.
+    pub fn path(&self) -> Option<&PathSpec> {
+        self.path.as_ref()
     }
 
     /// Returns the column name.

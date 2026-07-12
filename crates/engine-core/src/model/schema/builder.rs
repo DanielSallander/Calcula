@@ -13,6 +13,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::{Kpi, KpiTarget};
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
@@ -37,6 +38,7 @@ pub struct DataModelBuilder {
     pub(super) date_table: Option<String>,
     pub(super) script_functions: Vec<ScriptFunction>,
     pub(super) security_roles: Vec<SecurityRole>,
+    pub(super) perspectives: Vec<Perspective>,
     pub(super) calculation_groups: Vec<CalculationGroup>,
     pub(super) kpis: Vec<Kpi>,
     pub(super) context_columns: Vec<ContextColumn>,
@@ -192,6 +194,14 @@ impl DataModelBuilder {
     /// ```
     pub fn add_security_role(mut self, role: SecurityRole) -> Self {
         self.security_roles.push(role);
+        self
+    }
+
+    /// Add a perspective (a named presentation subset of the model) to the
+    /// model. At `build()` time the engine validates that the name is unique
+    /// and that every referenced table/column/measure exists.
+    pub fn add_perspective(mut self, perspective: Perspective) -> Self {
+        self.perspectives.push(perspective);
         self
     }
 
@@ -459,6 +469,40 @@ impl DataModelBuilder {
                     )));
                 }
                 fmt_expr.validate()?;
+            }
+            // DETAILROWS: every drill-through projection ref must be a
+            // well-formed `Table[column]` naming an existing table and an
+            // existing physical or calculated column — fail at build, not at
+            // first drill.
+            if let Some(refs) = measure.detail_rows() {
+                for r in refs {
+                    let parsed = r.trim().find('[').and_then(|open| {
+                        r.trim().strip_suffix(']').map(|body| {
+                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                        })
+                    });
+                    let Some((t_name, c_name)) = parsed else {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "measure '{}': detail rows entry '{}' is not of the form \
+                             Table[column]",
+                            measure.name(),
+                            r
+                        )));
+                    };
+                    let Some(table) = self.tables.iter().find(|t| t.name() == t_name) else {
+                        return Err(EngineError::TableNotFound(t_name));
+                    };
+                    let is_calc = self
+                        .calculated_columns
+                        .iter()
+                        .any(|cc| cc.table() == t_name && cc.name() == c_name);
+                    if !is_calc && table.column(&c_name).is_err() {
+                        return Err(EngineError::ExpressionColumnNotFound {
+                            table: t_name,
+                            column: c_name,
+                        });
+                    }
+                }
             }
             for gvar in measure.expression().root_query_scoped_names() {
                 if global_variable_names.contains(&gvar.to_ascii_lowercase()) {
@@ -870,6 +914,30 @@ impl DataModelBuilder {
                     reason: format!("table '{}' not found", cc.table()),
                 })?;
 
+            // Generated PATH columns: id/parent must be physical columns on
+            // the host; the expression is a placeholder with nothing to check.
+            if let Some(spec) = cc.path() {
+                for col in [&spec.id_column, &spec.parent_column] {
+                    if table.column(col).is_err() {
+                        return Err(EngineError::ExpressionColumnNotFound {
+                            table: cc.table().to_string(),
+                            column: col.to_string(),
+                        });
+                    }
+                }
+                if table.column(cc.name()).is_ok() {
+                    return Err(EngineError::InvalidCalculatedColumn {
+                        name: cc.name().to_string(),
+                        reason: format!(
+                            "name conflicts with physical column '{}' in table '{}'",
+                            cc.name(),
+                            cc.table()
+                        ),
+                    });
+                }
+                continue;
+            }
+
             // Must not contain aggregate nodes.
             if cc.expression().has_aggregate() {
                 return Err(EngineError::InvalidCalculatedColumn {
@@ -960,8 +1028,19 @@ impl DataModelBuilder {
             // All bare referenced columns must exist in the host table.
             // `column_references()` also yields the column part of qualified
             // and LOOKUPVALUE references — tolerated via `cross_table_cols`.
+            // Generated PATH columns on the same table are also referencable
+            // (they are appended to the batch BEFORE expression columns
+            // materialize, e.g. PATHLENGTH(t[Path])).
+            let path_col_names: std::collections::HashSet<&str> = self
+                .calculated_columns
+                .iter()
+                .filter(|other| {
+                    other.path().is_some() && other.table().eq_ignore_ascii_case(cc.table())
+                })
+                .map(|other| other.name())
+                .collect();
             for col_ref in cc.expression().column_references() {
-                if cross_table_cols.contains(col_ref) {
+                if cross_table_cols.contains(col_ref) || path_col_names.contains(col_ref) {
                     continue;
                 }
                 if table.column(col_ref).is_err() {
@@ -1651,6 +1730,119 @@ impl DataModelBuilder {
                         )));
                     }
                 }
+                // Object-level security denials must name real objects — a
+                // denial pointing at a phantom object would silently protect
+                // nothing (same rationale as the filter checks above).
+                for t_name in role.denied_tables() {
+                    if !self.tables.iter().any(|t| t.name() == t_name.as_str()) {
+                        return Err(EngineError::InvalidData(format!(
+                            "security role '{}' denies unknown table '{}'",
+                            role.name(),
+                            t_name
+                        )));
+                    }
+                }
+                for r in role.denied_columns() {
+                    let parsed = r.trim().find('[').and_then(|open| {
+                        r.trim().strip_suffix(']').map(|body| {
+                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                        })
+                    });
+                    let Some((t_name, c_name)) = parsed else {
+                        return Err(EngineError::InvalidData(format!(
+                            "security role '{}': denied column '{}' is not of the form \
+                             Table[column]",
+                            role.name(),
+                            r
+                        )));
+                    };
+                    let Some(table) = self.tables.iter().find(|t| t.name() == t_name) else {
+                        return Err(EngineError::InvalidData(format!(
+                            "security role '{}' denies a column on unknown table '{}'",
+                            role.name(),
+                            t_name
+                        )));
+                    };
+                    let is_calc = self
+                        .calculated_columns
+                        .iter()
+                        .any(|cc| cc.table() == t_name && cc.name() == c_name);
+                    if !is_calc && table.column(&c_name).is_err() {
+                        return Err(EngineError::InvalidData(format!(
+                            "security role '{}' denies unknown column '{}' on table '{}'",
+                            role.name(),
+                            c_name,
+                            t_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        // 12b. Validate perspectives: unique legal names, and every
+        // referenced table / qualified column / measure must exist — a
+        // perspective naming a phantom object would silently show nothing.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for p in &self.perspectives {
+                p.validate()?;
+                if !seen.insert(p.name()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate perspective '{}'",
+                        p.name()
+                    )));
+                }
+                for t_name in p.tables() {
+                    if !self.tables.iter().any(|t| t.name() == t_name.as_str()) {
+                        return Err(EngineError::InvalidData(format!(
+                            "perspective '{}' references unknown table '{}'",
+                            p.name(),
+                            t_name
+                        )));
+                    }
+                }
+                for r in p.columns() {
+                    let parsed = r.trim().find('[').and_then(|open| {
+                        r.trim().strip_suffix(']').map(|body| {
+                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                        })
+                    });
+                    let Some((t_name, c_name)) = parsed else {
+                        return Err(EngineError::InvalidData(format!(
+                            "perspective '{}': column ref '{}' is not of the form Table[column]",
+                            p.name(),
+                            r
+                        )));
+                    };
+                    let Some(table) = self.tables.iter().find(|t| t.name() == t_name) else {
+                        return Err(EngineError::InvalidData(format!(
+                            "perspective '{}' references a column on unknown table '{}'",
+                            p.name(),
+                            t_name
+                        )));
+                    };
+                    let is_calc = self
+                        .calculated_columns
+                        .iter()
+                        .any(|cc| cc.table() == t_name && cc.name() == c_name);
+                    if !is_calc && table.column(&c_name).is_err() {
+                        return Err(EngineError::InvalidData(format!(
+                            "perspective '{}' references unknown column '{}' on table '{}'",
+                            p.name(),
+                            c_name,
+                            t_name
+                        )));
+                    }
+                }
+                for m_name in p.measures() {
+                    if !self.measures.iter().any(|m| m.name() == m_name.as_str()) {
+                        return Err(EngineError::InvalidData(format!(
+                            "perspective '{}' references unknown measure '{}'",
+                            p.name(),
+                            m_name
+                        )));
+                    }
+                }
             }
         }
 
@@ -1858,6 +2050,7 @@ impl DataModelBuilder {
             date_table: self.date_table,
             script_functions: self.script_functions,
             security_roles: self.security_roles,
+            perspectives: self.perspectives,
             calculation_groups: self.calculation_groups,
             kpis: self.kpis,
             context_columns: self.context_columns,

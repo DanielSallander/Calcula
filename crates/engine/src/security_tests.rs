@@ -1699,3 +1699,212 @@ fn role_cache_key_folds_identity_custom_data_and_all_roles() {
     let b = e.role_cache_key();
     assert_ne!(a, b);
 }
+
+// --- Object-level security (OLS): denied tables / columns fail closed ---
+
+/// The RLS star schema plus an `Analyst` role with object-level denials:
+/// the whole `Category` table, and `Geography[region]` at column granularity
+/// (its sibling `Geography[id]` stays accessible).
+fn ols_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("geo_id", DataType::Int64),
+                    Column::new("cat_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Geography",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("region", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_table(
+            Table::new(
+                "Category",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("name", DataType::String),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Geo",
+            "Sales",
+            "geo_id",
+            "Geography",
+            "id",
+        ))
+        .add_relationship(Relationship::many_to_one(
+            "Sales_Cat",
+            "Sales",
+            "cat_id",
+            "Category",
+            "id",
+        ))
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_security_role(
+            SecurityRole::new("Analyst")
+                .with_denied_tables(vec!["Category".to_string()])
+                .with_denied_columns(vec!["Geography[region]".to_string()]),
+        )
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.bind_table("Geography", 0, SourceBinding::new("public", "geography"));
+    engine.bind_table("Category", 0, SourceBinding::new("public", "category"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+    engine.cache.store("Geography", geo_batch()).unwrap();
+    engine.cache.store("Category", cat_batch()).unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn ols_denied_table_refuses_group_by_and_no_role_allows_it() {
+    let mut engine = ols_engine();
+    // Without the role, grouping by Category works.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Category", "name")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(grouped(&batches, "name", "Revenue").len(), 2);
+
+    // With the role active, the same query is refused.
+    engine.set_active_role(Some("Analyst".into()));
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Category", "name")],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+    assert!(err.contains("Category"), "got: {err}");
+}
+
+#[tokio::test]
+async fn ols_denied_column_refuses_group_by_but_not_sibling_column() {
+    let mut engine = ols_engine();
+    engine.set_active_role(Some("Analyst".into()));
+
+    // Geography[region] is denied at column granularity.
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Geography", "region")],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+    assert!(err.contains("Geography[region]"), "got: {err}");
+
+    // The sibling column Geography[id] is NOT denied: grouping by it works.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Geography", "id")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!batches.is_empty());
+
+    // A bare-column filter naming the denied column is refused too.
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            filters: vec![crate::FilterCondition::new(
+                "region",
+                crate::FilterOperator::Equal,
+                "West",
+            )],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+}
+
+#[tokio::test]
+async fn ols_denied_table_refuses_drillthrough() {
+    let mut engine = ols_engine();
+    engine.set_active_role(Some("Analyst".into()));
+
+    // Drilling the denied table itself is refused.
+    let err = engine
+        .query_rows(crate::DetailRequest::new("Category", 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+
+    // Drilling Sales with a denied dimension attribute is refused.
+    let err = engine
+        .query_rows(
+            crate::DetailRequest::new("Sales", 10)
+                .with_dimension_columns(vec![ColumnRef::new("Geography", "region")]),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("object-level security"), "got: {err}");
+
+    // Plain Sales drillthrough (no denied objects) still works.
+    let batches = engine
+        .query_rows(crate::DetailRequest::new("Sales", 10))
+        .await
+        .unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
+}
+
+#[test]
+fn ols_denials_validated_at_build() {
+    // Unknown denied table: rejected.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        )
+        .add_security_role(
+            SecurityRole::new("R").with_denied_tables(vec!["Phantom".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Phantom"), "got: {err}");
+
+    // Malformed denied column ref: rejected.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        )
+        .add_security_role(
+            SecurityRole::new("R").with_denied_columns(vec!["not_qualified".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Table[column]"), "got: {err}");
+}

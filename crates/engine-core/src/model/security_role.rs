@@ -83,6 +83,16 @@ pub struct SecurityRole {
     /// Per-table row filters. Predicates AND together within a table; a row
     /// of a filtered table is visible only if it satisfies all of them.
     table_filters: Vec<FilterPredicate>,
+    /// Object-level security: model tables this role may not access AT ALL.
+    /// A query under the role that references a denied table **fails closed**,
+    /// and hosts hide denied tables from field lists. (Power BI OLS.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    denied_tables: Vec<String>,
+    /// Object-level security: qualified `Table[column]` references this role
+    /// may not access. Same fail-closed query gate + field-list hiding as
+    /// [`denied_tables`](Self::denied_tables), at column granularity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    denied_columns: Vec<String>,
 }
 
 impl SecurityRole {
@@ -94,6 +104,8 @@ impl SecurityRole {
         Self {
             name: name.into(),
             table_filters: Vec::new(),
+            denied_tables: Vec::new(),
+            denied_columns: Vec::new(),
         }
     }
 
@@ -131,6 +143,30 @@ impl SecurityRole {
     /// The role's per-table row filters (AND-combined within each table).
     pub fn table_filters(&self) -> &[FilterPredicate] {
         &self.table_filters
+    }
+
+    /// Deny this role all access to the named tables (object-level security).
+    pub fn with_denied_tables(mut self, tables: Vec<String>) -> Self {
+        self.denied_tables = tables;
+        self
+    }
+
+    /// Deny this role access to the given qualified `Table[column]` refs
+    /// (object-level security).
+    pub fn with_denied_columns(mut self, columns: Vec<String>) -> Self {
+        self.denied_columns = columns;
+        self
+    }
+
+    /// Tables this role may not access at all (object-level security).
+    pub fn denied_tables(&self) -> &[String] {
+        &self.denied_tables
+    }
+
+    /// Qualified `Table[column]` refs this role may not access (object-level
+    /// security).
+    pub fn denied_columns(&self) -> &[String] {
+        &self.denied_columns
     }
 
     /// Validate the role for safe use.

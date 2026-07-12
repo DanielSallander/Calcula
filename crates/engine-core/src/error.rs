@@ -367,6 +367,14 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// The active role's object-level security denies access to a model
+    /// object this query references (fail closed).
+    #[error("object-level security: the active role denies access to {object}")]
+    ObjectLevelSecurityDenied {
+        /// The denied object, rendered as `table` or `Table[column]`.
+        object: String,
+    },
+
     /// An aggregation was attempted on an unsupported column type.
     #[error("Aggregation '{operation}' is not supported on column type '{column_type}'")]
     UnsupportedAggregation {

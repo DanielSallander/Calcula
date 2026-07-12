@@ -332,6 +332,26 @@ impl Expression {
                 .any(|c| c.has_lookup_value())
     }
 
+    /// Returns `true` if this tree contains a `PATHLENGTH(...)` or
+    /// `PATHITEM(...)` call ([`TextFunction::PathLength`] /
+    /// [`TextFunction::PathItem`]) anywhere. Drives the host's
+    /// format-version stamping (v19) — a pre-v19 engine fails to
+    /// deserialize these variants.
+    ///
+    /// [`TextFunction::PathLength`]: super::TextFunction::PathLength
+    /// [`TextFunction::PathItem`]: super::TextFunction::PathItem
+    pub fn contains_path_functions(&self) -> bool {
+        matches!(
+            self,
+            Expression::TextFunc {
+                function: super::TextFunction::PathLength | super::TextFunction::PathItem,
+                ..
+            }
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_path_functions())
+    }
+
     /// Returns `true` if this tree contains an [`Expression::Query`]
     /// (table-producing two-stage aggregation) node anywhere.
     ///

@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use crate::compute::expression::Expression;
 use crate::compute::sql_util::quote_ident_double;
 use crate::compute::udf::{session_context_with_udfs, UdfRegistry};
-use crate::error::EngineResult;
+use crate::error::{EngineError, EngineResult};
 use crate::model::calculated_column::CalculatedColumn;
 
 /// Evaluate a row-level expression against a `RecordBatch`, producing a new column.
@@ -95,13 +95,45 @@ pub async fn materialize_calculated_columns_with_udfs(
         return Ok(batch.clone());
     }
 
+    // Generated PATH columns are computed in Rust FIRST (a recursive
+    // parent-walk row-level SQL cannot express) and appended to the batch, so
+    // ordinary expression columns below may reference them (e.g.
+    // PATHLENGTH(t[Path])).
+    let mut batch = batch.clone();
+    let (path_cols, calculated_columns): (Vec<_>, Vec<_>) = calculated_columns
+        .iter()
+        .cloned()
+        .partition(|cc| cc.path().is_some());
+    for cc in &path_cols {
+        let spec = cc.path().expect("partitioned on path().is_some()");
+        let path_array = compute_path_column(&batch, &spec.id_column, &spec.parent_column)
+            .map_err(|reason| EngineError::InvalidCalculatedColumn {
+                name: cc.name().to_string(),
+                reason,
+            })?;
+        let mut fields: Vec<Field> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        fields.push(Field::new(cc.name(), DataType::Utf8, true));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(path_array));
+        batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+    }
+    if calculated_columns.is_empty() {
+        return Ok(batch);
+    }
+    let batch = &batch;
+
     // Build all calculated columns in a single DataFusion query for efficiency.
     let ctx = session_context_with_udfs(udfs);
     ctx.register_batch("t", batch.clone())?;
 
     // SELECT *, expr1 AS name1, expr2 AS name2, ... FROM t
     let mut select_parts: Vec<String> = vec!["*".to_string()];
-    for cc in calculated_columns {
+    for cc in &calculated_columns {
         let expr_sql = cc.expression().to_sql_string()?;
         select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
     }
@@ -118,7 +150,7 @@ pub async fn materialize_calculated_columns_with_udfs(
             .iter()
             .map(|f| f.as_ref().clone())
             .collect();
-        for cc in calculated_columns {
+        for cc in &calculated_columns {
             fields.push(Field::new(cc.name(), cc.data_type().to_arrow(), true));
         }
         return Ok(RecordBatch::new_empty(Arc::new(Schema::new(fields))));
@@ -131,6 +163,94 @@ pub async fn materialize_calculated_columns_with_udfs(
         let combined = arrow::compute::concat_batches(&schema, &batches)?;
         Ok(combined)
     }
+}
+
+/// Maximum parent-chain depth for `PATH(...)` — beyond this, treat as a cycle.
+const MAX_PATH_DEPTH: usize = 512;
+
+/// Compute a `PATH(id, parent)` column over a batch: for each row, the
+/// `|`-separated root-first chain of ids from the root ancestor down to the
+/// row itself. NULL parent = root; a parent id with no matching row ends the
+/// chain (treated as the root's parent); a cycle or a chain deeper than
+/// [`MAX_PATH_DEPTH`] is an error. Ids render via their string form.
+fn compute_path_column(
+    batch: &RecordBatch,
+    id_column: &str,
+    parent_column: &str,
+) -> Result<arrow::array::StringArray, String> {
+    use datafusion::common::ScalarValue;
+
+    let id_idx = batch
+        .schema()
+        .index_of(id_column)
+        .map_err(|_| format!("PATH id column '{id_column}' not found"))?;
+    let parent_idx = batch
+        .schema()
+        .index_of(parent_column)
+        .map_err(|_| format!("PATH parent column '{parent_column}' not found"))?;
+    let id_arr = batch.column(id_idx);
+    let parent_arr = batch.column(parent_idx);
+
+    let scalar_key = |arr: &std::sync::Arc<dyn arrow::array::Array>,
+                      row: usize|
+     -> Result<Option<String>, String> {
+        let mut sv = ScalarValue::try_from_array(arr, row).map_err(|e| e.to_string())?;
+        if let ScalarValue::Dictionary(_, inner) = sv {
+            sv = *inner;
+        }
+        if sv.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(match sv {
+            ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => s,
+            ScalarValue::Int8(Some(v)) => v.to_string(),
+            ScalarValue::Int16(Some(v)) => v.to_string(),
+            ScalarValue::Int32(Some(v)) => v.to_string(),
+            ScalarValue::Int64(Some(v)) => v.to_string(),
+            ScalarValue::UInt32(Some(v)) => v.to_string(),
+            ScalarValue::UInt64(Some(v)) => v.to_string(),
+            other => {
+                return Err(format!(
+                    "PATH id/parent columns must be integer or text (got {:?})",
+                    other.data_type()
+                ));
+            }
+        }))
+    };
+
+    // id -> parent map over the whole table.
+    let mut parent_of: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for row in 0..batch.num_rows() {
+        if let Some(id) = scalar_key(id_arr, row)? {
+            parent_of.insert(id, scalar_key(parent_arr, row)?);
+        }
+    }
+
+    let mut out: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let Some(id) = scalar_key(id_arr, row)? else {
+            out.push(None);
+            continue;
+        };
+        let mut chain = vec![id.clone()];
+        let mut current = id.clone();
+        loop {
+            let Some(Some(parent)) = parent_of.get(&current) else {
+                break; // root (NULL parent) or dangling parent id
+            };
+            if chain.len() >= MAX_PATH_DEPTH || chain.contains(parent) {
+                return Err(format!(
+                    "PATH cycle or chain deeper than {MAX_PATH_DEPTH} at id '{id}'"
+                ));
+            }
+            chain.push(parent.clone());
+            current = parent.clone();
+        }
+        chain.reverse();
+        out.push(Some(chain.join("|")));
+    }
+    Ok(arrow::array::StringArray::from(out))
 }
 
 #[cfg(test)]

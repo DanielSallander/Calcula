@@ -1084,7 +1084,17 @@ impl<'a> ContextResolver<'a> {
                 });
             }
 
-            let var = self.model.table_variable(&current)?;
+            let var = match self.model.table_variable(&current) {
+                Ok(var) => var,
+                // Raw MODEL TABLE as the set provider (the TREATAS form:
+                // `target IN (SELECT col FROM source_table)`, no filters of
+                // its own — the query's own filters on the source apply at
+                // fetch time).
+                Err(_) if self.model.table(&current).is_ok() => {
+                    return Ok((current, filters));
+                }
+                Err(e) => return Err(e),
+            };
             // Add this variable's filters
             for filter in var.filters() {
                 filters.push(ResolvedFilter::from_predicate(filter));

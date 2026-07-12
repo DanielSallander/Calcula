@@ -26,6 +26,7 @@ impl Parser {
                         | "RESET_INNER"
                         | "RESET_OUTER"
                         | "ALLSELECTED"
+                        | "TREATAS"
                         | "USING"
                         | "USERELATIONSHIP"
                 );
@@ -87,6 +88,28 @@ impl Parser {
             variables: Vec::new(),
             conditions,
             in_predicates: in_preds,
+        })
+    }
+
+    /// Parse `TREATAS(source_table[column], target_table[column])` — the
+    /// DAX-compatible virtual-relationship filter: the target column is
+    /// restricted to the set of values of the source column (as the query's
+    /// own filters leave it), with no model relationship required. Sugar for
+    /// a KEEP with a single IN-membership predicate whose set provider is
+    /// the raw source table.
+    pub(super) fn parse_treatas_call(&mut self) -> EngineResult<Expression> {
+        let (src_table, src_column) = self.parse_bracketed_column("TREATAS")?;
+        self.expect(&Token::Comma)?;
+        let (tgt_table, tgt_column) = self.parse_bracketed_column("TREATAS")?;
+        self.expect(&Token::RParen)?;
+        Ok(Expression::Keep {
+            expr: Box::new(expr::lit_int(0)), // placeholder
+            filters: Vec::new(),
+            variables: Vec::new(),
+            conditions: Vec::new(),
+            in_predicates: vec![crate::compute::expression::InPredicate::new(
+                tgt_table, tgt_column, src_table, src_column,
+            )],
         })
     }
 

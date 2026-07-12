@@ -143,6 +143,8 @@ fn format_text_function(func: &TextFunction) -> &'static str {
         TextFunction::StartsWith => "STARTSWITH",
         TextFunction::EndsWith => "ENDSWITH",
         TextFunction::InitCap => "INITCAP",
+        TextFunction::PathLength => "PATHLENGTH",
+        TextFunction::PathItem => "PATHITEM",
     }
 }
 

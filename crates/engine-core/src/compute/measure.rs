@@ -44,6 +44,14 @@ pub struct Measure {
     /// string; validated (parse + scalar-only) at model build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format_string_expression: Option<String>,
+    /// DETAILROWS: qualified `Table[column]` references that define the
+    /// drill-through projection for this measure. Hosts apply it when a user
+    /// drills a cell of this measure: detail-table refs become the projected
+    /// detail columns, other-table refs become looked-up dimension attributes.
+    /// Validated at model build (tables/columns must exist). `None` = the
+    /// host's default drill projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail_rows: Option<Vec<String>>,
     /// Human-readable description shown by host applications.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -75,6 +83,8 @@ impl<'de> Deserialize<'de> for Measure {
             #[serde(default)]
             format_string_expression: Option<String>,
             #[serde(default)]
+            detail_rows: Option<Vec<String>>,
+            #[serde(default)]
             description: Option<String>,
             #[serde(default)]
             is_hidden: bool,
@@ -88,6 +98,7 @@ impl<'de> Deserialize<'de> for Measure {
             source: f.source,
             format_string: f.format_string,
             format_string_expression: f.format_string_expression,
+            detail_rows: f.detail_rows,
             description: f.description,
             is_hidden: f.is_hidden,
             cached_table,
@@ -110,6 +121,7 @@ impl Measure {
             source: None,
             format_string: None,
             format_string_expression: None,
+            detail_rows: None,
             description: None,
             is_hidden: false,
             cached_table,
@@ -175,6 +187,18 @@ impl Measure {
     /// Returns the dynamic format string expression, if any.
     pub fn format_string_expression(&self) -> Option<&str> {
         self.format_string_expression.as_deref()
+    }
+
+    /// Set the DETAILROWS drill-through projection: qualified `Table[column]`
+    /// references applied by hosts when drilling a cell of this measure.
+    pub fn with_detail_rows(mut self, refs: Vec<String>) -> Self {
+        self.detail_rows = Some(refs);
+        self
+    }
+
+    /// Returns the DETAILROWS drill-through projection, if any.
+    pub fn detail_rows(&self) -> Option<&[String]> {
+        self.detail_rows.as_deref()
     }
 
     /// Set the human-readable description of this measure.

@@ -1346,6 +1346,34 @@ impl PushdownPlanner {
                     }
                 }
             }
+            // Set-provider tables of KEEP-IN / TREATAS membership predicates
+            // in the requested measures: the CASE renders an IN-subquery over
+            // them, so they must be fetched. Table-variable providers resolve
+            // through their source chain to the base table.
+            for measure_name in &request.measures {
+                let Ok(measure) = model.measure(measure_name) else {
+                    continue;
+                };
+                let expanded = engine_core::compute::expression::expand_measure_refs(
+                    measure.expression(),
+                    model,
+                )
+                .unwrap_or_else(|_| measure.expression().clone());
+                for provider in expanded.keep_in_set_providers() {
+                    let mut current = provider.to_string();
+                    let mut hops = 0;
+                    while let Ok(var) = model.table_variable(&current) {
+                        current = var.source().to_string();
+                        hops += 1;
+                        if hops > 32 {
+                            break; // cycle guard; build validation rejects cycles
+                        }
+                    }
+                    if model.table(&current).is_ok() && seen.insert(current.to_lowercase()) {
+                        calc_col_extra_tables.push(current);
+                    }
+                }
+            }
         }
 
         // Compute the exact source columns each fetch needs. Tables whose

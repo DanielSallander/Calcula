@@ -19,7 +19,8 @@ use crate::request::ColumnRef;
 use super::fetch::register_partitioned_table;
 use super::sql::{
     axis_clear_partition, build_condition_sql_with_conditions, build_override_alias_map,
-    collect_qualified_tables, reject_unconsumed_in_filters, resolve_compound_sql, wrap_axis_clear,
+    collect_qualified_tables, render_in_filter_conditions,
+    resolve_compound_sql, wrap_axis_clear,
     GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
@@ -109,7 +110,14 @@ impl QueryExecutor {
                     format!("{expr_sql} AS {}", quote_ident_double(name))
                 } else {
                     let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
-                    reject_unconsumed_in_filters(name, &eval_ctx)?;
+                    let in_conditions = render_in_filter_conditions(
+                        ctx,
+                        &eval_ctx.in_filters,
+                        fact_model_name,
+                        fact_table,
+                        model,
+                    )
+                    .await?;
                     let effective = eval_ctx.effective_filters(&[]);
 
                     for f in &effective {
@@ -129,17 +137,30 @@ impl QueryExecutor {
                         &mut override_joins,
                     );
 
-                    let has_case = !effective.is_empty() || !eval_ctx.conditions.is_empty();
+                    let has_case = !effective.is_empty()
+                        || !eval_ctx.conditions.is_empty()
+                        || !in_conditions.is_empty();
 
                     let inner_sql = if has_case {
-                        let condition = build_condition_sql_with_conditions(
-                            &effective,
-                            &eval_ctx.conditions,
-                            fact_table,
-                            fact_model_name,
-                            model,
-                            &alias_map,
-                        )?;
+                        let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
+                            build_condition_sql_with_conditions(
+                                &effective,
+                                &eval_ctx.conditions,
+                                fact_table,
+                                fact_model_name,
+                                model,
+                                &alias_map,
+                            )?
+                        } else {
+                            String::new()
+                        };
+                        for c in &in_conditions {
+                            if condition.is_empty() {
+                                condition = c.clone();
+                            } else {
+                                condition.push_str(&format!(" AND {c}"));
+                            }
+                        }
                         let measure_table = &measure.table().to_lowercase();
                         stripped_expr.to_case_when_sql(&condition, measure_table)?
                     } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {

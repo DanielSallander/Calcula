@@ -350,3 +350,140 @@ async fn group_by_calculated_column() {
     assert_eq!(by_size.get("big"), Some(&100.0));
     assert_eq!(by_size.get("small"), Some(&90.0));
 }
+
+// ---- Generated parent-child PATH columns ----
+
+/// Emp(id, mgr, salary): 1 is the root (NULL mgr), 2 and 3 report to 1,
+/// 4 reports to 2. Calculated columns:
+/// - `Path = PATH(Emp[id], Emp[mgr])` — Rust-computed root-first chain;
+/// - `Level = PATHLENGTH(Emp[Path])` — expression column over the path;
+/// - `Root = PATHITEM(Emp[Path], 1)` — first (root) element.
+fn path_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Emp",
+                vec![
+                    Column::new("id", DataType::Int64),
+                    Column::new("mgr", DataType::Int64),
+                    Column::new("salary", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_calculated_column(CalculatedColumn::new_path("Path", "Emp", "id", "mgr"))
+        .add_calculated_column(CalculatedColumn::new(
+            "Level",
+            "Emp",
+            parse_measure_expression("PATHLENGTH(Emp[Path])").unwrap(),
+            DataType::Int64,
+        ))
+        .add_calculated_column(CalculatedColumn::new(
+            "Root",
+            "Emp",
+            parse_measure_expression("PATHITEM(Emp[Path], 1)").unwrap(),
+            DataType::String,
+        ))
+        .add_measure(Measure::new(
+            "Payroll",
+            parse_measure_expression("SUM(Emp[salary])").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Emp", 0, SourceBinding::new("public", "emp"));
+    engine
+        .cache
+        .store(
+            "Emp",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("id", ArrowType::Int64, true),
+                    Field::new("mgr", ArrowType::Int64, true),
+                    Field::new("salary", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+                    Arc::new(Int64Array::from(vec![None, Some(1), Some(1), Some(2)])),
+                    Arc::new(Float64Array::from(vec![1000.0, 500.0, 400.0, 200.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn path_column_groups_by_full_chain() {
+    let engine = path_engine();
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Payroll".into()],
+            group_by: vec![ColumnRef::new("Emp", "Path")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let by_path = grouped(&batches, "Path", "Payroll");
+    assert_eq!(by_path.get("1"), Some(&1000.0));
+    assert_eq!(by_path.get("1|2"), Some(&500.0));
+    assert_eq!(by_path.get("1|3"), Some(&400.0));
+    assert_eq!(by_path.get("1|2|4"), Some(&200.0));
+}
+
+#[tokio::test]
+async fn pathlength_and_pathitem_over_path_column() {
+    let engine = path_engine();
+    // Group by Level (PATHLENGTH over the generated Path column).
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Payroll".into()],
+            group_by: vec![ColumnRef::new("Emp", "Level")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut by_level = HashMap::new();
+    for b in &batches {
+        let li = b.schema().index_of("Level").unwrap();
+        let mi = b.schema().index_of("Payroll").unwrap();
+        for row in 0..b.num_rows() {
+            by_level.insert(
+                as_f64(b.column(li).as_ref(), row) as i64,
+                as_f64(b.column(mi).as_ref(), row),
+            );
+        }
+    }
+    assert_eq!(by_level.get(&1), Some(&1000.0)); // root
+    assert_eq!(by_level.get(&2), Some(&900.0)); // 2 + 3
+    assert_eq!(by_level.get(&3), Some(&200.0)); // 4
+
+    // Everyone's Root is "1".
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Payroll".into()],
+            group_by: vec![ColumnRef::new("Emp", "Root")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let by_root = grouped(&batches, "Root", "Payroll");
+    assert_eq!(by_root.len(), 1);
+    assert_eq!(by_root.get("1"), Some(&2100.0));
+}
+
+#[tokio::test]
+async fn path_validation_fails_closed() {
+    // Unknown parent column: rejected at build.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Emp", vec![Column::new("id", DataType::Int64)]).unwrap(),
+        )
+        .add_calculated_column(CalculatedColumn::new_path("Path", "Emp", "id", "boss"))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("boss"), "got: {err}");
+}
