@@ -1,18 +1,22 @@
-//! Time-intelligence function parsing: `YTD`, `QTD`, `MTD`, `PRIORYEAR`,
-//! `SAMEPERIODLASTYEAR`, `PRIORPERIOD`, `DATESINPERIOD`.
+//! Time-intelligence function parsing: `YTD`, `QTD`, `MTD`, `WTD`,
+//! `PRIORYEAR`, `SAMEPERIODLASTYEAR`, `PRIORPERIOD`, `DATESINPERIOD`,
+//! `DATESBETWEEN`.
 //!
 //! These parse to the [`Expression::ToDate`] / [`Expression::PeriodShift`] /
-//! [`Expression::DatesInPeriod`] sugar variants, which the engine lowers onto
-//! the Window/Offset machinery (axis path) or a concrete date-range filter
-//! (filter-context path) at execution time (see `compute::time_intelligence`).
+//! [`Expression::DatesInPeriod`] / [`Expression::DatesBetween`] sugar
+//! variants, which the engine lowers onto the Window/Offset machinery (axis
+//! path) or a concrete date-range filter (filter-context path) at execution
+//! time (see `compute::time_intelligence`).
+
+use chrono::NaiveDate;
 
 use crate::compute::expression::DateGranularity;
 
 use super::*;
 
 impl Parser {
-    /// Parse `YTD(expr)` / `QTD(expr)` / `MTD(expr)` (the opening `(` has
-    /// been consumed by the function-call dispatcher).
+    /// Parse `YTD(expr)` / `QTD(expr)` / `MTD(expr)` / `WTD(expr)` (the
+    /// opening `(` has been consumed by the function-call dispatcher).
     pub(super) fn parse_to_date_call(
         &mut self,
         granularity: DateGranularity,
@@ -84,15 +88,17 @@ impl Parser {
                 "YEAR" => DateGranularity::Year,
                 "QUARTER" => DateGranularity::Quarter,
                 "MONTH" => DateGranularity::Month,
+                "WEEK" => DateGranularity::Week,
                 _ => {
                     return Err(self.parse_err_prev(format!(
-                        "PRIORPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, or MONTH"
+                        "PRIORPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, MONTH, \
+                         or WEEK"
                     )));
                 }
             },
             tok => {
                 return Err(self.parse_err_prev(format!(
-                    "PRIORPERIOD: expected interval keyword (YEAR, QUARTER, or MONTH), \
+                    "PRIORPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, or WEEK), \
                      got {tok:?}"
                 )));
             }
@@ -141,21 +147,71 @@ impl Parser {
                 "YEAR" => DateGranularity::Year,
                 "QUARTER" => DateGranularity::Quarter,
                 "MONTH" => DateGranularity::Month,
+                "WEEK" => DateGranularity::Week,
                 _ => {
                     return Err(self.parse_err_prev(format!(
-                        "DATESINPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, or MONTH"
+                        "DATESINPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, MONTH, \
+                         or WEEK"
                     )));
                 }
             },
             tok => {
                 return Err(self.parse_err_prev(format!(
-                    "DATESINPERIOD: expected interval keyword (YEAR, QUARTER, or MONTH), got {tok:?}"
+                    "DATESINPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, or WEEK), \
+                     got {tok:?}"
                 )));
             }
         };
 
         self.expect(&Token::RParen)?;
         Ok(expr::dates_in_period(inner, intervals, granularity))
+    }
+
+    /// Parse `DATESBETWEEN(expr, "start", "end")`.
+    ///
+    /// Both bounds are REQUIRED quoted ISO `YYYY-MM-DD` string literals (an
+    /// unquoted date literal would lex as arithmetic). Both must parse as
+    /// calendar dates and `start` must not be after `end` — violations are
+    /// parse errors, never a silently-empty range.
+    pub(super) fn parse_dates_between_call(&mut self) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let start = self.parse_dates_between_bound("start")?;
+        self.expect(&Token::Comma)?;
+        let end = self.parse_dates_between_bound("end")?;
+
+        // Both bounds parsed above; compare as dates, not strings.
+        let start_date = NaiveDate::parse_from_str(&start, "%Y-%m-%d").expect("validated");
+        let end_date = NaiveDate::parse_from_str(&end, "%Y-%m-%d").expect("validated");
+        if start_date > end_date {
+            return Err(self.parse_err_prev(format!(
+                "DATESBETWEEN: start date \"{start}\" is after end date \"{end}\""
+            )));
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(expr::dates_between(inner, start, end))
+    }
+
+    /// Parse one `DATESBETWEEN` bound: a quoted ISO `YYYY-MM-DD` string
+    /// literal, validated as a real calendar date.
+    fn parse_dates_between_bound(&mut self, which: &str) -> EngineResult<String> {
+        let s = match self.advance()?.clone() {
+            Token::StringLit(s) => s,
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "DATESBETWEEN: expected a quoted ISO {which} date (\"YYYY-MM-DD\"), \
+                     got {tok:?}"
+                )));
+            }
+        };
+        if NaiveDate::parse_from_str(&s, "%Y-%m-%d").is_err() {
+            return Err(self.parse_err_prev(format!(
+                "DATESBETWEEN: invalid {which} date \"{s}\" — expected an ISO calendar date \
+                 (YYYY-MM-DD)"
+            )));
+        }
+        Ok(s)
     }
 }
 
@@ -367,6 +423,113 @@ mod tests {
         };
         assert!(
             message.contains("invalid interval 'FORTNIGHT'"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_wtd_is_week_to_date() {
+        let expr = parse_measure_expression("WTD(SUM(fact_sales[amount]))").unwrap();
+        let Expression::ToDate {
+            expr: inner,
+            granularity,
+        } = &expr
+        else {
+            panic!("expected ToDate, got {expr:?}");
+        };
+        assert_eq!(*granularity, DateGranularity::Week);
+        assert!(matches!(inner.as_ref(), Expression::Aggregate { .. }));
+        assert!(expr.has_window(), "time intel must route as window-ish");
+        assert!(expr.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_week_interval_in_priorperiod_and_datesinperiod() {
+        let pp = parse_measure_expression("PRIORPERIOD(SUM(f[x]), -1, WEEK)").unwrap();
+        assert!(matches!(
+            pp,
+            Expression::PeriodShift {
+                offset: -1,
+                granularity: DateGranularity::Week,
+                ..
+            }
+        ));
+        let dip = parse_measure_expression("DATESINPERIOD(SUM(f[x]), -4, \"week\")").unwrap();
+        assert!(matches!(
+            dip,
+            Expression::DatesInPeriod {
+                intervals: -4,
+                granularity: DateGranularity::Week,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_dates_between() {
+        let expr = parse_measure_expression(
+            "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-01-01\", \"2024-06-30\")",
+        )
+        .unwrap();
+        let Expression::DatesBetween {
+            expr: inner,
+            start,
+            end,
+        } = &expr
+        else {
+            panic!("expected DatesBetween, got {expr:?}");
+        };
+        assert_eq!(start, "2024-01-01");
+        assert_eq!(end, "2024-06-30");
+        assert!(matches!(inner.as_ref(), Expression::Aggregate { .. }));
+        assert!(expr.has_window(), "DATESBETWEEN must route as window-ish");
+        assert!(expr.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_dates_between_same_day_range_is_valid() {
+        // A single-day range (start == end) is a legal inclusive range.
+        let expr =
+            parse_measure_expression("DATESBETWEEN(SUM(f[x]), \"2024-03-15\", \"2024-03-15\")")
+                .unwrap();
+        assert!(matches!(expr, Expression::DatesBetween { .. }));
+    }
+
+    #[test]
+    fn parse_dates_between_invalid_date_positions_error() {
+        let input = "DATESBETWEEN(SUM(f[x]), \"2024-02-30\", \"2024-12-31\")";
+        let err = parse_measure_expression(input).unwrap_err();
+        let EngineError::ParseError { message, .. } = err else {
+            panic!("expected ParseError, got {err:?}");
+        };
+        assert!(
+            message.contains("invalid start date \"2024-02-30\""),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_dates_between_inverted_range_errors() {
+        let err =
+            parse_measure_expression("DATESBETWEEN(SUM(f[x]), \"2024-12-31\", \"2024-01-01\")")
+                .unwrap_err();
+        let EngineError::ParseError { message, .. } = err else {
+            panic!("expected ParseError, got {err:?}");
+        };
+        assert!(message.contains("after end date"), "got: {message}");
+    }
+
+    #[test]
+    fn parse_dates_between_unquoted_date_errors() {
+        // An unquoted date literal lexes as arithmetic — rejected with a
+        // message pointing at the quoted-ISO requirement.
+        let err = parse_measure_expression("DATESBETWEEN(SUM(f[x]), 2024-01-01, \"2024-12-31\")")
+            .unwrap_err();
+        let EngineError::ParseError { message, .. } = err else {
+            panic!("expected ParseError, got {err:?}");
+        };
+        assert!(
+            message.contains("quoted ISO start date"),
             "got: {message}"
         );
     }

@@ -13,6 +13,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::{Kpi, KpiTarget};
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::culture::Culture;
 use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
@@ -36,9 +37,11 @@ pub struct DataModelBuilder {
     pub(super) hierarchies: Vec<Hierarchy>,
     pub(super) default_lookup_resolution: Option<String>,
     pub(super) date_table: Option<String>,
+    pub(super) fiscal_year_end_month: Option<u32>,
     pub(super) script_functions: Vec<ScriptFunction>,
     pub(super) security_roles: Vec<SecurityRole>,
     pub(super) perspectives: Vec<Perspective>,
+    pub(super) cultures: Vec<Culture>,
     pub(super) calculation_groups: Vec<CalculationGroup>,
     pub(super) kpis: Vec<Kpi>,
     pub(super) context_columns: Vec<ContextColumn>,
@@ -205,6 +208,14 @@ impl DataModelBuilder {
         self
     }
 
+    /// Add a culture (per-locale metadata translations) to the model. At
+    /// `build()` time the engine validates that the locale is unique and
+    /// that every translated table/column/measure exists.
+    pub fn add_culture(mut self, culture: Culture) -> Self {
+        self.cultures.push(culture);
+        self
+    }
+
     /// Add a calculation group to the model.
     ///
     /// A calculation group is a set of named calculation items — reusable
@@ -282,6 +293,19 @@ impl DataModelBuilder {
     /// strings).
     pub fn mark_date_table(mut self, table_name: impl Into<String>) -> Self {
         self.date_table = Some(table_name.into());
+        self
+    }
+
+    /// Set the fiscal year end month (1-12) for time intelligence.
+    ///
+    /// Unset = calendar years (Dec 31 year end). When set — e.g. `6` for a
+    /// June 30 year end — filter-context `YTD`/`QTD` period boundaries start
+    /// at the fiscal year/quarter starts (the fiscal year begins the month
+    /// AFTER the year end). Axis-mode time intelligence partitions by the
+    /// date table's own columns and is unaffected. Build-time validation
+    /// rejects a month outside 1-12.
+    pub fn fiscal_year_end_month(mut self, month: u32) -> Self {
+        self.fiscal_year_end_month = Some(month);
         self
     }
 
@@ -438,6 +462,15 @@ impl DataModelBuilder {
         for measure in &self.measures {
             measure.expression().validate()?;
             measure.expression().validate_query_scoped_top_level()?;
+            // THISROW is an anchor-row tool for calculated columns; a
+            // measure has no anchor row.
+            if measure.expression().has_this_row() {
+                return Err(EngineError::InvalidExpression(format!(
+                    "measure '{}' uses THISROW, which is only supported in calculated \
+                     columns (inside an aggregate over ITERATE)",
+                    measure.name()
+                )));
+            }
             // LOOKUPVALUE is a row-context tool resolved during
             // calculated-column materialization; a measure has no host row.
             if measure.expression().has_lookup_value() {
@@ -938,12 +971,42 @@ impl DataModelBuilder {
                 continue;
             }
 
-            // Must not contain aggregate nodes.
-            if cc.expression().has_aggregate() {
-                return Err(EngineError::InvalidCalculatedColumn {
+            // Aggregates are rejected EXCEPT in the THISROW shape: plain
+            // aggregates directly over ITERATE(host, ...), optionally
+            // referencing the anchor row via THISROW(host[col]). Those
+            // materialize as a self-join + GROUP BY rewrite.
+            if cc.expression().has_aggregate() || cc.expression().has_this_row() {
+                crate::compute::expression::validate_thisrow_calculated_column(
+                    cc.expression(),
+                    cc.table(),
+                )
+                .map_err(|reason| EngineError::InvalidCalculatedColumn {
                     name: cc.name().to_string(),
-                    reason: "calculated columns must not contain aggregate expressions".into(),
-                });
+                    reason,
+                })?;
+                // The self-join rewrite appends synthetic `__tr_*` columns
+                // (`__tr_rid`, `__tr_agg_N`) — a real column with that prefix
+                // on the host table would collide at materialization.
+                let clash = table
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .chain(
+                        self.calculated_columns
+                            .iter()
+                            .filter(|other| other.table().eq_ignore_ascii_case(cc.table()))
+                            .map(|other| other.name().to_string()),
+                    )
+                    .find(|name| name.starts_with("__tr_"));
+                if let Some(name) = clash {
+                    return Err(EngineError::InvalidCalculatedColumn {
+                        name: cc.name().to_string(),
+                        reason: format!(
+                            "the host table carries a column named '{name}' — the '__tr_' \
+                             prefix is reserved for THISROW materialization"
+                        ),
+                    });
+                }
             }
 
             // Must not contain context manipulation nodes.
@@ -1687,6 +1750,17 @@ impl DataModelBuilder {
             }
         }
 
+        // 11c. Validate the fiscal year end month: a calendar month (1-12).
+        // An out-of-range month would silently produce wrong fiscal period
+        // boundaries in filter-context time intelligence.
+        if let Some(month) = self.fiscal_year_end_month {
+            if !(1..=12).contains(&month) {
+                return Err(EngineError::InvalidData(format!(
+                    "fiscal year end month must be between 1 and 12, got {month}"
+                )));
+            }
+        }
+
         // 12. Validate security roles. Roles travel inside shared model files
         // (a trust boundary) AND are a security control, so each is checked
         // here at build time:
@@ -1840,6 +1914,74 @@ impl DataModelBuilder {
                             "perspective '{}' references unknown measure '{}'",
                             p.name(),
                             m_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        // 12c. Validate cultures: unique legal locales, and every translated
+        // table / qualified column / measure must exist -- a translation
+        // naming a phantom object would silently show nothing.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for c in &self.cultures {
+                c.validate()?;
+                if !seen.insert(c.locale().to_ascii_lowercase()) {
+                    return Err(EngineError::DuplicateName(format!(
+                        "Duplicate culture '{}'",
+                        c.locale()
+                    )));
+                }
+                for tr in c.tables() {
+                    if !self.tables.iter().any(|t| t.name() == tr.object.as_str()) {
+                        return Err(EngineError::InvalidData(format!(
+                            "culture '{}' translates unknown table '{}'",
+                            c.locale(),
+                            tr.object
+                        )));
+                    }
+                }
+                for tr in c.columns() {
+                    let r = tr.object.trim();
+                    let parsed = r.find('[').and_then(|open| {
+                        r.strip_suffix(']').map(|body| {
+                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                        })
+                    });
+                    let Some((t_name, c_name)) = parsed else {
+                        return Err(EngineError::InvalidData(format!(
+                            "culture '{}': column ref '{}' is not of the form Table[column]",
+                            c.locale(),
+                            tr.object
+                        )));
+                    };
+                    let Some(table) = self.tables.iter().find(|t| t.name() == t_name) else {
+                        return Err(EngineError::InvalidData(format!(
+                            "culture '{}' translates a column on unknown table '{}'",
+                            c.locale(),
+                            t_name
+                        )));
+                    };
+                    let is_calc = self
+                        .calculated_columns
+                        .iter()
+                        .any(|cc| cc.table() == t_name && cc.name() == c_name);
+                    if !is_calc && table.column(&c_name).is_err() {
+                        return Err(EngineError::InvalidData(format!(
+                            "culture '{}' translates unknown column '{}' on table '{}'",
+                            c.locale(),
+                            c_name,
+                            t_name
+                        )));
+                    }
+                }
+                for tr in c.measures() {
+                    if !self.measures.iter().any(|m| m.name() == tr.object.as_str()) {
+                        return Err(EngineError::InvalidData(format!(
+                            "culture '{}' translates unknown measure '{}'",
+                            c.locale(),
+                            tr.object
                         )));
                     }
                 }
@@ -2048,9 +2190,11 @@ impl DataModelBuilder {
             hierarchies: self.hierarchies,
             default_lookup_resolution: self.default_lookup_resolution,
             date_table: self.date_table,
+            fiscal_year_end_month: self.fiscal_year_end_month,
             script_functions: self.script_functions,
             security_roles: self.security_roles,
             perspectives: self.perspectives,
+            cultures: self.cultures,
             calculation_groups: self.calculation_groups,
             kpis: self.kpis,
             context_columns: self.context_columns,

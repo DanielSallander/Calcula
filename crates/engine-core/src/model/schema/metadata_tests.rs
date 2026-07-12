@@ -51,10 +51,12 @@ fn model_format_version_is_current() {
     // and cross-table calculated-column references; v18 added the measure
     // format_string_expression (dynamic format strings); v19 added the
     // DAX-gap batch (PATH calculated columns + PATHLENGTH/PATHITEM, measure
-    // detail_rows, security-role OLS denials, perspectives).
+    // detail_rows, security-role OLS denials, perspectives); v20 added the
+    // second DAX-gap batch (THISROW anchor rows, DATESBETWEEN, Week
+    // granularity/WTD, fiscal_year_end_month, cultures/translations).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 19);
+    assert_eq!(MODEL_FORMAT_VERSION, 20);
 }
 
 #[test]

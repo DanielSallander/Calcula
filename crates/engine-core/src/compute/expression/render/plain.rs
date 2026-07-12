@@ -3,7 +3,7 @@
 
 use crate::compute::aggregate::AggregateOp;
 use crate::compute::expression::{Expression, FilterPredicate, ScalarFunction};
-use crate::compute::sql_util::sql_quote_literal;
+use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::error::{EngineError, EngineResult};
 
 use super::dialect::udf_call_unsupported;
@@ -214,6 +214,18 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             // Defensive fallback: the facade folds ISFILTERED to a literal
             // before planning; an unresolved marker means "no direct filter".
             Expression::IsFiltered { .. } => "FALSE".to_string(),
+            // Anchor-row reference: valid only when the THISROW
+            // materialization configured an anchor alias — fail closed
+            // everywhere else (measures, pushdown, lookup resolution).
+            Expression::ThisRow { column, .. } => match &self.thisrow_alias {
+                Some(alias) => format!("{}.{}", alias, quote_ident_double(column)),
+                None => {
+                    return Err(EngineError::InvalidExpression(
+                        "THISROW(...) is only valid inside an aggregate over                          ITERATE(...) in a calculated column"
+                            .to_string(),
+                    ))
+                }
+            },
             // LOOKUPVALUE is rewritten to a join during calculated-column
             // materialization; one reaching a renderer is a misuse.
             Expression::LookupValue { .. } => {
@@ -268,12 +280,13 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. } => {
                 return Err(EngineError::InvalidExpression(
                     "time-intelligence expression (YTD/QTD/MTD/PRIORYEAR/PRIORPERIOD/\
-                     DATESINPERIOD/CLOSINGBALANCE/OPENINGBALANCE) must be lowered to a window \
-                     expression before SQL generation; this is an internal error — the measure \
-                     should have routed through the window execution path"
+                     DATESINPERIOD/DATESBETWEEN/CLOSINGBALANCE/OPENINGBALANCE) must be lowered \
+                     to a window expression before SQL generation; this is an internal error — \
+                     the measure should have routed through the window execution path"
                         .to_string(),
                 ));
             }

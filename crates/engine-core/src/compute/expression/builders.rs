@@ -453,6 +453,22 @@ pub fn dates_in_period(
     }
 }
 
+/// Create a `DATESBETWEEN` absolute-range expression.
+///
+/// `start` and `end` are inclusive ISO `YYYY-MM-DD` dates (validated at parse
+/// and model build).
+pub fn dates_between(
+    expr: Expression,
+    start: impl Into<String>,
+    end: impl Into<String>,
+) -> Expression {
+    Expression::DatesBetween {
+        expr: Box::new(expr),
+        start: start.into(),
+        end: end.into(),
+    }
+}
+
 /// Create a `CLOSINGBALANCE` semi-additive balance (the inner measure at the
 /// **last** date of the current context).
 pub fn closing_balance(expr: Expression) -> Expression {
@@ -510,6 +526,16 @@ pub fn is_in_scope(table: impl Into<String>, column: impl Into<String>) -> Expre
 /// Create an ISFILTERED expression: `ISFILTERED(table[column])`.
 pub fn is_filtered(table: impl Into<String>, column: impl Into<String>) -> Expression {
     Expression::IsFiltered {
+        table: table.into(),
+        column: column.into(),
+    }
+}
+
+/// Anchor-row column reference: `THISROW(table[column])` — the value of the
+/// column in the row a calculated column is being computed for, as seen from
+/// inside a nested `ITERATE` over the same table.
+pub fn this_row(table: impl Into<String>, column: impl Into<String>) -> Expression {
+    Expression::ThisRow {
         table: table.into(),
         column: column.into(),
     }

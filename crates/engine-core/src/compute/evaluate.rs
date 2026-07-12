@@ -122,46 +122,166 @@ pub async fn materialize_calculated_columns_with_udfs(
         columns.push(Arc::new(path_array));
         batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
     }
-    if calculated_columns.is_empty() {
-        return Ok(batch);
-    }
-    let batch = &batch;
+    // THISROW columns (aggregates over ITERATE, optionally with anchor-row
+    // references) materialize LAST via a self-join rewrite, over a batch that
+    // already carries the path + plain expression columns.
+    let (thisrow_cols, expr_cols): (Vec<_>, Vec<_>) = calculated_columns
+        .into_iter()
+        .partition(|cc| cc.expression().has_aggregate() || cc.expression().has_this_row());
 
-    // Build all calculated columns in a single DataFusion query for efficiency.
+    let result = if expr_cols.is_empty() {
+        batch
+    } else {
+        // Build all plain expression columns in a single DataFusion query.
+        let ctx = session_context_with_udfs(udfs);
+        ctx.register_batch("t", batch.clone())?;
+
+        // SELECT *, expr1 AS name1, expr2 AS name2, ... FROM t
+        let mut select_parts: Vec<String> = vec!["*".to_string()];
+        for cc in &expr_cols {
+            let expr_sql = cc.expression().to_sql_string()?;
+            select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
+        }
+
+        let sql = format!("SELECT {} FROM t", select_parts.join(", "));
+        let df = ctx.sql(&sql).await?;
+        let batches = df.collect().await?;
+
+        if batches.is_empty() {
+            // Build an empty batch with the extended schema.
+            let mut fields: Vec<Field> = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.as_ref().clone())
+                .collect();
+            for cc in &expr_cols {
+                fields.push(Field::new(cc.name(), cc.data_type().to_arrow(), true));
+            }
+            RecordBatch::new_empty(Arc::new(Schema::new(fields)))
+        } else if batches.len() == 1 {
+            batches[0].clone()
+        } else {
+            let schema = batches[0].schema();
+            arrow::compute::concat_batches(&schema, &batches)?
+        }
+    };
+
+    if thisrow_cols.is_empty() {
+        return Ok(result);
+    }
+    materialize_thisrow_columns(&result, &thisrow_cols, udfs).await
+}
+
+/// Materialize THISROW calculated columns onto `batch` via a self-join:
+///
+/// ```sql
+/// SELECT t.*, <outer expr with __tr_agg_N placeholders> AS "Name", ...
+/// FROM t
+/// LEFT JOIN (
+///     SELECT __anchor."__tr_rid" AS "__tr_rid",
+///            AGG(<iterated expr; refs -> __scan, THISROW -> __anchor>) AS "__tr_agg_N", ...
+///     FROM t AS __anchor CROSS JOIN t AS __scan
+///     GROUP BY __anchor."__tr_rid"
+/// ) AS __tr ON __tr."__tr_rid" = t."__tr_rid"
+/// ORDER BY t."__tr_rid"
+/// ```
+///
+/// `__tr_rid` is a synthetic per-row id appended (and afterwards dropped) so
+/// the per-anchor aggregates join back to their rows and the original row
+/// order is preserved. Inherently O(N^2) over the host table — the THISROW
+/// contract (documented) targets dimension-sized tables.
+async fn materialize_thisrow_columns(
+    batch: &RecordBatch,
+    cols: &[CalculatedColumn],
+    udfs: &UdfRegistry,
+) -> EngineResult<RecordBatch> {
+    use crate::compute::expression::{
+        extract_thisrow_aggregates, DataFusionDialect, SqlRenderer, TableAliasQualifier,
+    };
+
+    // 1. Append the synthetic row id.
+    let n = batch.num_rows();
+    let mut fields: Vec<Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
+    fields.push(Field::new("__tr_rid", DataType::Int64, false));
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(arrow::array::Int64Array::from_iter_values(
+        0..n as i64,
+    )));
+    let with_rid = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+
     let ctx = session_context_with_udfs(udfs);
-    ctx.register_batch("t", batch.clone())?;
+    ctx.register_batch("t", with_rid)?;
 
-    // SELECT *, expr1 AS name1, expr2 AS name2, ... FROM t
-    let mut select_parts: Vec<String> = vec!["*".to_string()];
-    for cc in &calculated_columns {
-        let expr_sql = cc.expression().to_sql_string()?;
-        select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
-    }
+    // 2. Extract each column's aggregates (globally numbered placeholders)
+    //    and render: aggregate internals against the __scan alias with
+    //    THISROW against __anchor; the outer expression bare (placeholders
+    //    resolve to the joined sub-select, everything else to t).
+    // Rendering is scoped so the non-Send renderer (borrowing a dyn
+    // qualifier) is dropped before the first await.
+    let (outer_selects, agg_selects) = {
+        let scan_qualifier = TableAliasQualifier { alias: "__scan" };
+        let agg_renderer =
+            SqlRenderer::new(DataFusionDialect, &scan_qualifier).with_thisrow_alias("__anchor");
+        let mut all_aggs: Vec<Expression> = Vec::new();
+        let mut outer_selects: Vec<String> = Vec::new();
+        for cc in cols {
+            let outer = extract_thisrow_aggregates(cc.expression(), &mut all_aggs);
+            let outer_sql = outer.to_sql_string()?;
+            outer_selects.push(format!("{outer_sql} AS {}", quote_ident_double(cc.name())));
+        }
+        let mut agg_selects: Vec<String> = Vec::new();
+        for (i, agg) in all_aggs.iter().enumerate() {
+            let agg_sql = agg_renderer.render(agg)?;
+            agg_selects.push(format!("{agg_sql} AS \"__tr_agg_{i}\""));
+        }
+        (outer_selects, agg_selects)
+    };
 
-    let sql = format!("SELECT {} FROM t", select_parts.join(", "));
+    let sql = format!(
+        "SELECT t.*, {outer} FROM t LEFT JOIN (\
+         SELECT __anchor.\"__tr_rid\" AS \"__tr_rid\", {aggs} \
+         FROM t AS __anchor CROSS JOIN t AS __scan \
+         GROUP BY __anchor.\"__tr_rid\") AS __tr \
+         ON __tr.\"__tr_rid\" = t.\"__tr_rid\" ORDER BY t.\"__tr_rid\"",
+        outer = outer_selects.join(", "),
+        aggs = agg_selects.join(", "),
+    );
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
 
+    // 3. Drop the synthetic row id from the result.
+    let strip_rid = |b: &RecordBatch| -> EngineResult<RecordBatch> {
+        let schema = b.schema();
+        let keep: Vec<usize> = (0..schema.fields().len())
+            .filter(|&i| schema.field(i).name() != "__tr_rid")
+            .collect();
+        Ok(b.project(&keep)?)
+    };
+
     if batches.is_empty() {
-        // Build an empty batch with the extended schema.
         let mut fields: Vec<Field> = batch
             .schema()
             .fields()
             .iter()
             .map(|f| f.as_ref().clone())
             .collect();
-        for cc in &calculated_columns {
+        for cc in cols {
             fields.push(Field::new(cc.name(), cc.data_type().to_arrow(), true));
         }
         return Ok(RecordBatch::new_empty(Arc::new(Schema::new(fields))));
     }
-
     if batches.len() == 1 {
-        Ok(batches[0].clone())
+        strip_rid(&batches[0])
     } else {
         let schema = batches[0].schema();
         let combined = arrow::compute::concat_batches(&schema, &batches)?;
-        Ok(combined)
+        strip_rid(&combined)
     }
 }
 

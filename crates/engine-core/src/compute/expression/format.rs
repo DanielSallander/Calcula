@@ -637,6 +637,11 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("ISFILTERED({tbl}[{column}])")
         }
 
+        // --- Anchor-row reference ---
+        Expression::ThisRow { table: tbl, column } => {
+            format!("THISROW({tbl}[{column}])")
+        }
+
         // --- Row lookup ---
         Expression::LookupValue {
             table: tbl,
@@ -762,6 +767,7 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 DateGranularity::Year => "YTD",
                 DateGranularity::Quarter => "QTD",
                 DateGranularity::Month => "MTD",
+                DateGranularity::Week => "WTD",
             };
             format!("{func}({inner_str})")
         }
@@ -778,6 +784,7 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                     DateGranularity::Year => "YEAR",
                     DateGranularity::Quarter => "QUARTER",
                     DateGranularity::Month => "MONTH",
+                    DateGranularity::Week => "WEEK",
                 };
                 format!("PRIORPERIOD({inner_str}, {offset}, \"{unit}\")")
             }
@@ -792,8 +799,17 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 DateGranularity::Year => "YEAR",
                 DateGranularity::Quarter => "QUARTER",
                 DateGranularity::Month => "MONTH",
+                DateGranularity::Week => "WEEK",
             };
             format!("DATESINPERIOD({inner_str}, {intervals}, \"{unit}\")")
+        }
+        Expression::DatesBetween {
+            expr: inner,
+            start,
+            end,
+        } => {
+            let inner_str = format_expr(inner, table, Precedence::Lowest);
+            format!("DATESBETWEEN({inner_str}, \"{start}\", \"{end}\")")
         }
 
         // --- Host/script UDF call ---

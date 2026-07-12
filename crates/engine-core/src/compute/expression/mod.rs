@@ -32,14 +32,15 @@ mod walkers;
 
 pub use builders::{
     agg, and, blank, block, block_with_globals, call, clear, clear_except, clear_inner,
-    clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_in_period, datetime_fn,
+    clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_between,
+    dates_in_period, datetime_fn,
     expr_literal_from_arrow, expr_literal_from_scalar, first_value, has_one_value, if_error,
     if_expr, index_expr, is_blank, is_filtered, is_in_scope, iterate, keep, keep_conditions,
     keep_in, keep_vars,
     lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
     period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
-    scalar_fn, selected_value, switch, table_ref, text_fn, to_date, traverse, use_relationship,
-    using, window_expr, xor,
+    scalar_fn, selected_value, switch, table_ref, text_fn, this_row, to_date, traverse,
+    use_relationship, using, window_expr, xor,
 };
 pub use format::{expression_to_formula, measure_to_formula};
 pub use functions::{DateTimeFunction, ScalarFunction};
@@ -56,7 +57,8 @@ pub use render::{
 };
 pub use text::TextFunction;
 pub use transform::{
-    extract_lookup_joins, resolve_is_filtered, resolve_is_in_scope, LookupJoinSpec,
+    extract_lookup_joins, extract_thisrow_aggregates, resolve_is_filtered, resolve_is_in_scope,
+    validate_thisrow_calculated_column, LookupJoinSpec,
 };
 pub use validate::is_valid_call_name;
 pub(crate) use validate::validate_call_name;
@@ -129,6 +131,10 @@ pub enum DateGranularity {
     Quarter,
     /// Month-level: `MTD`, `PRIORPERIOD(…, "MONTH")`.
     Month,
+    /// Week-level: `WTD`, `PRIORPERIOD(…, "WEEK")` — ISO weeks starting
+    /// Monday. Filter-context only in v1 (a date column on the query axis
+    /// fails closed).
+    Week,
 }
 
 impl std::fmt::Display for DateGranularity {
@@ -137,6 +143,7 @@ impl std::fmt::Display for DateGranularity {
             Self::Year => write!(f, "Year"),
             Self::Quarter => write!(f, "Quarter"),
             Self::Month => write!(f, "Month"),
+            Self::Week => write!(f, "Week"),
         }
     }
 }
@@ -671,6 +678,22 @@ pub enum Expression {
         granularity: DateGranularity,
     },
 
+    /// Absolute date-range evaluation: `DATESBETWEEN(expr, "start", "end")`.
+    ///
+    /// Evaluates the inner aggregate over the INCLUSIVE `[start, end]` ISO date
+    /// range on the model's date table (both bounds required, validated at
+    /// parse and model build). Filter-context only, like
+    /// [`DatesInPeriod`](Self::DatesInPeriod) — a date column on the query axis
+    /// fails closed.
+    DatesBetween {
+        /// The inner (aggregate) expression.
+        expr: Box<Expression>,
+        /// Inclusive ISO start date (`YYYY-MM-DD`).
+        start: String,
+        /// Inclusive ISO end date (`YYYY-MM-DD`).
+        end: String,
+    },
+
     /// Semi-additive balance: the inner measure evaluated at a **single date
     /// boundary** of the current date context — `CLOSINGBALANCE` (the last date)
     /// or `OPENINGBALANCE` (the first date).
@@ -816,6 +839,24 @@ pub enum Expression {
         table: String,
         /// The per-row expression.
         expression: Box<Expression>,
+    },
+
+    /// Anchor-row column reference: `THISROW(table[column])`.
+    ///
+    /// Valid ONLY inside an `ITERATE(host, ...)` wrapped by an aggregate in a
+    /// CALCULATED COLUMN on `host`: refers to the column's value in the row
+    /// the calculated column is being COMPUTED FOR (the anchor row), while
+    /// plain references inside the same `ITERATE` see the row being scanned.
+    /// The EARLIER concept, named for what it does. Canonical use:
+    /// `Rank = COUNT(ITERATE(Sales, IF(Sales[amount] > THISROW(Sales[amount]), 1, BLANK()))) + 1`.
+    /// Materialized as a self-join + GROUP BY rewrite (inherently O(N^2) over
+    /// the host table — intended for dimension-sized tables). Rejected in
+    /// measures and outside the aggregate-over-ITERATE shape at model build.
+    ThisRow {
+        /// The host table (must be the calculated column's table).
+        table: String,
+        /// The anchor row's column.
+        column: String,
     },
 
     /// Percentile aggregation: `PERCENTILE(column, k)`.

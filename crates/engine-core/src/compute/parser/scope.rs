@@ -213,6 +213,31 @@ impl Parser {
         Ok(expr::is_filtered(table, column))
     }
 
+    /// Parse `THISROW(table[column])` — the anchor-row column reference used
+    /// inside a nested `ITERATE` in a calculated column (the EARLIER concept).
+    pub(super) fn parse_thisrow_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("THISROW: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("THISROW: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::this_row(table, column))
+    }
+
     /// Parse `CLEAREXCEPT(table, col1, col2, ...)` as a context argument.
     ///
     /// Returns a placeholder ClearExcept wrapping Blank — the actual inner

@@ -2237,6 +2237,312 @@ async fn dates_in_period_positive_interval_fails_closed() {
 }
 
 // ===========================================================================
+// DATESBETWEEN: absolute inclusive date range (filter-context only).
+// Fixture datekeys are the first of each month, 2023-01-01 .. 2024-12-01.
+// ===========================================================================
+
+#[tokio::test]
+async fn dates_between_sums_exactly_the_absolute_range() {
+    // [2024-01-01, 2024-03-31] covers the Jan/Feb/Mar 2024 datekeys (first of
+    // month). 2024 monthly total = 3m → 3 * (1+2+3) = 18.
+    let v = run(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-01-01\", \"2024-03-31\")",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(18.0));
+}
+
+#[tokio::test]
+async fn dates_between_bounds_are_inclusive() {
+    // Bounds exactly on datekeys: [2024-02-01, 2024-03-01] keeps Feb AND Mar
+    // (both ends inclusive) = 3 * (2+3) = 15.
+    let v = run(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-02-01\", \"2024-03-01\")",
+        true,
+        request(&[]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(15.0));
+}
+
+#[tokio::test]
+async fn dates_between_composes_with_a_slicer_and_a_dimension() {
+    // Range = all of 2024; a region slicer (request filter) restricts the fact
+    // rows and the non-date dimension splits the result: east = 78 only.
+    let batches = run(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-01-01\", \"2024-12-31\")",
+        true,
+        request_with_filters(
+            &[("fact_sales", "region")],
+            &[("region", FilterOperator::Equal, "east")],
+        ),
+    )
+    .await
+    .unwrap();
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let region = combined
+        .column(combined.schema().index_of("region").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let vals = measure_column(&combined, "m");
+    let mut by_region = HashMap::new();
+    for i in 0..combined.num_rows() {
+        by_region.insert(region.value(i).to_string(), vals[i]);
+    }
+    // Only the east row survives the slicer; 2024 east total = 1+…+12 = 78.
+    assert_eq!(by_region.len(), 1, "slicer keeps only east");
+    assert_eq!(by_region["east"], Some(78.0));
+}
+
+#[tokio::test]
+async fn dates_between_on_axis_fails_closed() {
+    let err = run(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-01-01\", \"2024-03-31\")",
+        true,
+        request(&[("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { function, reason }) = &err else {
+        panic!("expected TimeIntelligence error, got {err:?}");
+    };
+    assert_eq!(function, "DATESBETWEEN");
+    assert!(
+        reason.contains("not supported with a date column on the query axis"),
+        "got: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn dates_between_parse_errors_are_rejected() {
+    // Malformed date.
+    let err = parse_measure_expression(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-13-99\", \"2024-12-31\")",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("invalid start date"),
+        "got: {err}"
+    );
+    // start > end.
+    let err = parse_measure_expression(
+        "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-12-31\", \"2024-01-01\")",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("after end date"), "got: {err}");
+    // Unquoted bound (would lex as arithmetic) is rejected up front.
+    assert!(parse_measure_expression(
+        "DATESBETWEEN(SUM(fact_sales[amount]), 2024-01-01, \"2024-12-31\")"
+    )
+    .is_err());
+}
+
+// ===========================================================================
+// WTD: week-to-date (ISO weeks starting Monday; filter-context only).
+// Daily fixture spanning two ISO weeks: 2024-07-01 (Mon) .. 2024-07-14 (Sun).
+// ===========================================================================
+
+/// Daily star fixture for week-level tests: `dim_date` has one row per day
+/// 2024-07-01..2024-07-14 (ISO weeks 27 and 28), `fact_sales` one east row per
+/// day with `amount` = day-of-month.
+async fn run_daily(measure_source: &str, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
+    let model = model_with_measure(measure_source, true);
+
+    let mut date_id = Vec::new();
+    let mut datekey = Vec::new();
+    let mut year = Vec::new();
+    let mut quarter = Vec::new();
+    let mut month = Vec::new();
+    let mut f_date_id = Vec::new();
+    let mut f_region = Vec::new();
+    let mut f_amount = Vec::new();
+    for d in 1i64..=14 {
+        date_id.push(20240700 + d);
+        datekey.push(days_from_civil(2024, 7, d));
+        year.push(2024i64);
+        quarter.push(3i64);
+        month.push(7i64);
+        f_date_id.push(20240700 + d);
+        f_region.push("east");
+        f_amount.push(d as f64);
+    }
+    let dim = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("datekey", DataType::Date32, true),
+            Field::new("year", DataType::Int64, true),
+            Field::new("quarter", DataType::Int64, true),
+            Field::new("month", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(date_id)),
+            Arc::new(Date32Array::from(datekey)),
+            Arc::new(Int64Array::from(year)),
+            Arc::new(Int64Array::from(quarter)),
+            Arc::new(Int64Array::from(month)),
+        ],
+    )
+    .unwrap();
+    let fact = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("date_id", DataType::Int64, true),
+            Field::new("region", DataType::Utf8, true),
+            Field::new("amount", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(f_date_id)),
+            Arc::new(StringArray::from(f_region)),
+            Arc::new(Float64Array::from(f_amount)),
+        ],
+    )
+    .unwrap();
+
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim).unwrap();
+    cache.store("fact_sales", fact).unwrap();
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+    let plan = PushdownPlanner::plan(request_ref(&request), &model, &registry, &[])?;
+    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[]).await
+}
+
+#[tokio::test]
+async fn filter_context_wtd_sums_from_monday_of_the_as_of_week() {
+    // No date filter → as-of = 2024-07-14 (Sunday of ISO week 28). WTD spans
+    // Monday 2024-07-08 .. 2024-07-14 = 8+9+10+11+12+13+14 = 77 — NOT the
+    // whole fixture (105) and NOT month-to-date.
+    let v = run_daily("WTD(SUM(fact_sales[amount]))", request(&[]))
+        .await
+        .unwrap();
+    assert_eq!(scalar_measure(&v), Some(77.0));
+}
+
+#[tokio::test]
+async fn filter_context_wtd_respects_the_date_filter_as_of() {
+    // Date context capped at Wednesday 2024-07-10 (via the roleless `date_id`
+    // column, `date_id = 202407dd`) → as-of = 2024-07-10 → WTD = 8+9+10 = 27.
+    // The week boundary (Monday 07-08) is honoured even though earlier fixture
+    // days exist — proving the window resets mid-data, not at the data start.
+    let v = run_daily(
+        "WTD(SUM(fact_sales[amount]))",
+        request_with_filters(
+            &[],
+            &[("date_id", FilterOperator::LessThanOrEqual, "20240710")],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&v), Some(27.0));
+}
+
+#[tokio::test]
+async fn wtd_on_axis_fails_closed() {
+    let err = run_daily(
+        "WTD(SUM(fact_sales[amount]))",
+        request(&[("dim_date", "month")]),
+    )
+    .await
+    .unwrap_err();
+    let QueryError::Engine(EngineError::TimeIntelligence { function, reason }) = &err else {
+        panic!("expected TimeIntelligence error, got {err:?}");
+    };
+    assert_eq!(function, "WTD");
+    assert!(reason.contains("filter context"), "got: {reason}");
+}
+
+// ===========================================================================
+// Fiscal year support: DataModel::fiscal_year_end_month moves the
+// filter-context YTD/QTD boundaries to the fiscal year/quarter starts.
+// ===========================================================================
+
+#[tokio::test]
+async fn fiscal_ytd_starts_at_the_fiscal_year_start() {
+    // Fiscal year end June 30 → fiscal years start July 1. Context = 2024
+    // months 1..8 → as-of = 2024-08-01; fiscal YTD spans Jul+Aug 2024 =
+    // 3*(7+8) = 45 — NOT the calendar YTD (3*(1+…+8) = 108).
+    let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true)
+        .with_fiscal_year_end_month(Some(6));
+    let req = request_with_filters(
+        &[],
+        &[
+            ("year", FilterOperator::Equal, "2024"),
+            ("month", FilterOperator::LessThanOrEqual, "8"),
+        ],
+    );
+    let batches = run_model(&model, dim_date_batch(), &[], req.clone())
+        .await
+        .unwrap();
+    let fiscal = scalar_measure(&batches);
+    assert_eq!(fiscal, Some(45.0));
+
+    // The identical query on the calendar model differs (108).
+    let calendar_model = model_with_measure("YTD(SUM(fact_sales[amount]))", true);
+    let batches = run_model(&calendar_model, dim_date_batch(), &[], req)
+        .await
+        .unwrap();
+    let calendar = scalar_measure(&batches);
+    assert_eq!(calendar, Some(108.0));
+    assert_ne!(fiscal, calendar, "fiscal YTD must differ from calendar YTD");
+}
+
+#[tokio::test]
+async fn fiscal_qtd_uses_three_month_blocks_from_the_fiscal_year_start() {
+    // Fiscal year end June 30 → fiscal quarters are Jul-Sep, Oct-Dec, Jan-Mar,
+    // Apr-Jun. Context = 2024 months 1..8 → as-of = 2024-08-01 → fiscal QTD =
+    // Jul+Aug = 45; calendar QTD would be Jul+Aug too (Q3 starts in July), so
+    // pin a context where they differ: months 1..5 → as-of = 2024-05-01.
+    // Fiscal quarter containing May starts Apr 1 → QTD = 3*(4+5) = 27;
+    // calendar Q2 also starts Apr 1 — still equal. Use months 1..3 instead:
+    // as-of = 2024-03-01; fiscal quarter (Jan-Mar) starts Jan 1 = calendar.
+    // With a June 30 year end the quarter GRID aligns with the calendar, so
+    // assert against a February year end (fiscal quarters Mar-May, Jun-Aug,
+    // Sep-Nov, Dec-Feb): as-of = 2024-05-01 → QTD = Mar+Apr+May = 3*(3+4+5)
+    // = 36 — calendar QTD would be Apr+May = 27.
+    let model = model_with_measure("QTD(SUM(fact_sales[amount]))", true)
+        .with_fiscal_year_end_month(Some(2));
+    let req = request_with_filters(
+        &[],
+        &[
+            ("year", FilterOperator::Equal, "2024"),
+            ("month", FilterOperator::LessThanOrEqual, "5"),
+        ],
+    );
+    let batches = run_model(&model, dim_date_batch(), &[], req).await.unwrap();
+    assert_eq!(scalar_measure(&batches), Some(36.0));
+}
+
+#[test]
+fn fiscal_year_end_month_out_of_range_is_rejected_at_build() {
+    let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true)
+        .with_fiscal_year_end_month(Some(13));
+    let err = model.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("between 1 and 12"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn fiscal_year_end_month_accessor_and_validate() {
+    let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true)
+        .with_fiscal_year_end_month(Some(6));
+    assert_eq!(model.fiscal_year_end_month(), Some(6));
+    model.validate().unwrap();
+
+    // Clearing reverts to calendar years.
+    let cleared = model.with_fiscal_year_end_month(None);
+    assert_eq!(cleared.fiscal_year_end_month(), None);
+    cleared.validate().unwrap();
+}
+
+// ===========================================================================
 // Totals (ROLLUP) × filter-context time intelligence (Phase 1).
 //
 // A filter-context TI measure (YTD/QTD/MTD, DATESINPERIOD, CLOSING/OPENING-

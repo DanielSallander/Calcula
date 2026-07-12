@@ -485,6 +485,8 @@ impl<'a> ProjectionCollector<'a> {
                 table_or_var,
                 column,
             } => self.add_qualified(table_or_var, column),
+            // THISROW's anchor column is an ordinary input of its host table.
+            Expression::ThisRow { table, column } => self.add_qualified(table, column),
             Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -626,6 +628,7 @@ impl<'a> ProjectionCollector<'a> {
                         | Expression::ToDate { .. }
                         | Expression::PeriodShift { .. }
                         | Expression::DatesInPeriod { .. }
+                        | Expression::DatesBetween { .. }
                         | Expression::SemiAdditiveBalance { .. } => {
                             self.intermediate_tables.insert(name.to_lowercase());
                         }
@@ -802,6 +805,7 @@ impl<'a> ProjectionCollector<'a> {
             Expression::ToDate { expr: inner, .. }
             | Expression::PeriodShift { expr: inner, .. }
             | Expression::DatesInPeriod { expr: inner, .. }
+            | Expression::DatesBetween { expr: inner, .. }
             | Expression::SemiAdditiveBalance { expr: inner, .. } => self.walk(inner),
             // UDF call: the function body is opaque, but its arguments are
             // ordinary expressions whose column requirements must be fetched.

@@ -153,6 +153,7 @@ fn to_date_name(granularity: DateGranularity) -> &'static str {
         DateGranularity::Year => "YTD",
         DateGranularity::Quarter => "QTD",
         DateGranularity::Month => "MTD",
+        DateGranularity::Week => "WTD",
     }
 }
 
@@ -166,12 +167,41 @@ fn period_shift_name(offset: i64, granularity: DateGranularity) -> &'static str 
 }
 
 /// Anchor roles for a granularity: the columns that define one period.
+///
+/// Week is filter-context only in v1 (`reject_week_on_axis` fails the axis
+/// path before anchors are resolved); its anchors are listed for completeness
+/// (an ISO week does not nest in a year, so a Year+Week axis window would be
+/// wrong at year boundaries).
 fn anchor_roles(granularity: DateGranularity) -> &'static [DateRole] {
     match granularity {
         DateGranularity::Year => &[DateRole::Year],
         DateGranularity::Quarter => &[DateRole::Year, DateRole::Quarter],
         DateGranularity::Month => &[DateRole::Year, DateRole::Month],
+        DateGranularity::Week => &[DateRole::Year, DateRole::Week],
     }
+}
+
+/// Fail closed for `Week` granularity on the AXIS path (a date column on the
+/// query axis): ISO weeks cross year boundaries, so the Year-anchored window
+/// partitioning the axis path uses would silently mis-bucket the year-spanning
+/// week. Week time intelligence is filter-context only in v1.
+fn reject_week_on_axis(
+    function: &str,
+    granularity: DateGranularity,
+    group_by: &[(String, String)],
+) -> EngineResult<()> {
+    if granularity != DateGranularity::Week {
+        return Ok(());
+    }
+    Err(time_intelligence_error(
+        function,
+        format!(
+            "{function} (Week granularity) is not supported with a date column on the query \
+             axis ({}); remove the date column from group_by to evaluate it from the current \
+             date filter context",
+            format_group_by(group_by)
+        ),
+    ))
 }
 
 /// Date-table columns present in the query's group_by, with their roles,
@@ -348,6 +378,7 @@ fn lower_to_date(
     group_by: &[(String, String)],
 ) -> EngineResult<(Expression, String)> {
     let function = to_date_name(granularity);
+    reject_week_on_axis(function, granularity, group_by)?;
     let axis = resolve_date_axis(function, model, group_by)?;
 
     // Anchors: the period columns the running total resets on.
@@ -414,6 +445,7 @@ fn finer_roles_list(granularity: DateGranularity) -> &'static str {
         DateGranularity::Year => "Quarter, Month, Week, Day, DateKey",
         DateGranularity::Quarter => "Month, Week, Day, DateKey",
         DateGranularity::Month => "Week, Day, DateKey",
+        DateGranularity::Week => "Day, DateKey",
     }
 }
 
@@ -426,6 +458,7 @@ fn lower_period_shift(
     group_by: &[(String, String)],
 ) -> EngineResult<(Expression, String)> {
     let function = period_shift_name(offset, granularity);
+    reject_week_on_axis(function, granularity, group_by)?;
     let axis = resolve_date_axis(function, model, group_by)?;
 
     let mut order_by: Vec<(String, String)> = Vec::new();
@@ -574,6 +607,35 @@ pub fn time_intelligence_route(
         )));
     }
 
+    // DATESBETWEEN (absolute inclusive date range) is filter-context only: the
+    // range is fixed, so a date column on the axis fails closed rather than
+    // silently computing the same whole-range value on every axis row.
+    if let Expression::DatesBetween { .. } = expr {
+        let function = "DATESBETWEEN";
+        let axis = resolve_date_axis(function, model, group_by)?;
+        if !axis.present.is_empty() {
+            return Err(time_intelligence_error(
+                function,
+                format!(
+                    "DATESBETWEEN (an absolute date range) is not supported with a date column \
+                     on the query axis ({}); remove the date column from group_by to evaluate \
+                     it over the fixed range from the current context",
+                    format_group_by(group_by)
+                ),
+            ));
+        }
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        return Ok(Some(TimeIntelligenceRoute::FilterContext(
+            FilterContextPlan {
+                function: function.to_string(),
+                date_table,
+                date_key_column,
+                // The range is absolute: as-of/min probes are ignored.
+                needs_min_context_date: false,
+            },
+        )));
+    }
+
     // CLOSINGBALANCE / OPENINGBALANCE: a semi-additive balance pinned to a single
     // boundary date of the current context. Filter-context only — a date on the
     // axis fails closed (the per-row balance is the AXIS LAST/FIRST primitive,
@@ -607,7 +669,7 @@ pub fn time_intelligence_route(
         )));
     }
 
-    let (function, _granularity, is_shift) = match expr {
+    let (function, granularity, is_shift) = match expr {
         Expression::ToDate {
             expr: _,
             granularity,
@@ -628,6 +690,9 @@ pub fn time_intelligence_route(
     // error rather than silently switching semantics).
     let axis = resolve_date_axis(function, model, group_by)?;
     if !axis.present.is_empty() {
+        // Week granularity has no axis form in v1 — fail closed here instead
+        // of handing it to the axis lowering (see `reject_week_on_axis`).
+        reject_week_on_axis(function, granularity, group_by)?;
         return Ok(Some(TimeIntelligenceRoute::Axis));
     }
 
@@ -766,8 +831,7 @@ pub fn lower_time_intelligence_filtered(
                 format!("the as-of date probe returned an out-of-range value ({as_of_days} days)"),
             )
         })?;
-        let months_back = intervals * months_per_period(*granularity);
-        let start = shift_months(as_of, months_back)
+        let start = shift_periods(as_of, *intervals, *granularity)
             .and_then(|d| d.succ_opt())
             .ok_or_else(|| {
                 time_intelligence_error(
@@ -787,6 +851,55 @@ pub fn lower_time_intelligence_filtered(
             &date_key_column,
             start,
             as_of,
+            description,
+        );
+    }
+
+    // DATESBETWEEN: an ABSOLUTE inclusive [start, end] range. The bounds were
+    // validated at parse/build; re-parse defensively (the AST can arrive
+    // deserialized from a model file). The as-of/min probes are ignored — the
+    // range does not depend on the current date context.
+    if let Expression::DatesBetween {
+        expr: inner,
+        start,
+        end,
+    } = expr
+    {
+        let function = "DATESBETWEEN";
+        let (date_table, date_key_column) = require_date_key(function, model)?;
+        let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d").map_err(|_| {
+            time_intelligence_error(
+                function,
+                format!(
+                    "invalid start date \"{start}\" — expected an ISO calendar date (YYYY-MM-DD)"
+                ),
+            )
+        })?;
+        let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d").map_err(|_| {
+            time_intelligence_error(
+                function,
+                format!(
+                    "invalid end date \"{end}\" — expected an ISO calendar date (YYYY-MM-DD)"
+                ),
+            )
+        })?;
+        if start_date > end_date {
+            return Err(time_intelligence_error(
+                function,
+                format!("start date \"{start}\" is after end date \"{end}\""),
+            ));
+        }
+        let description = format!(
+            "DATESBETWEEN (filter context) absolute range [{start_date}..{end_date}] on \
+             {date_table}.{date_key_column}"
+        );
+        return build_filtered_range_keep(
+            inner,
+            model,
+            &date_table,
+            &date_key_column,
+            start_date,
+            end_date,
             description,
         );
     }
@@ -880,10 +993,9 @@ pub fn lower_time_intelligence_filtered(
     let (start, end_inclusive, description) = if is_shift {
         // PeriodShift / DATEADD / PARALLELPERIOD: shift the whole current window
         // [min_ctx, as_of] by `offset` periods. The shift is by calendar months
-        // (offset × months-per-period) so YEAR/QUARTER/MONTH all work; for a
-        // context that already spans exactly one period this equals "the prior
-        // period".
-        let months = offset * months_per_period(granularity);
+        // (offset × months-per-period) for YEAR/QUARTER/MONTH and by whole
+        // 7-day weeks for WEEK; for a context that already spans exactly one
+        // period this equals "the prior period".
         let min_ctx = date32_to_naive(min_context_days).ok_or_else(|| {
             time_intelligence_error(
                 function,
@@ -893,13 +1005,13 @@ pub fn lower_time_intelligence_filtered(
                 ),
             )
         })?;
-        let start = shift_months(min_ctx, months).ok_or_else(|| {
+        let start = shift_periods(min_ctx, offset, granularity).ok_or_else(|| {
             time_intelligence_error(
                 function,
                 format!("shifting {min_ctx} by {offset} {granularity}(s) overflowed the calendar"),
             )
         })?;
-        let end = shift_months(as_of, months).ok_or_else(|| {
+        let end = shift_periods(as_of, offset, granularity).ok_or_else(|| {
             time_intelligence_error(
                 function,
                 format!("shifting {as_of} by {offset} {granularity}(s) overflowed the calendar"),
@@ -912,12 +1024,13 @@ pub fn lower_time_intelligence_filtered(
         (start, end, desc)
     } else {
         // ToDate: [start-of-period(as_of), as_of].
-        let start = start_of_period(as_of, granularity).ok_or_else(|| {
-            time_intelligence_error(
-                function,
-                format!("computing the start of the {granularity} for {as_of} overflowed"),
-            )
-        })?;
+        let start = start_of_period(as_of, granularity, model.fiscal_year_end_month())
+            .ok_or_else(|| {
+                time_intelligence_error(
+                    function,
+                    format!("computing the start of the {granularity} for {as_of} overflowed"),
+                )
+            })?;
         let desc = format!(
             "{function} (filter context) range [{start}..{as_of}] on \
              {date_table}.{date_key_column}"
@@ -1034,15 +1147,56 @@ fn naive_to_iso(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
-/// Start of the calendar period containing `date` for the given granularity.
-fn start_of_period(date: NaiveDate, granularity: DateGranularity) -> Option<NaiveDate> {
+/// Start of the period containing `date` for the given granularity.
+///
+/// `fiscal_year_end_month` (the model's [`DataModel::fiscal_year_end_month`])
+/// moves the Year and Quarter boundaries to the fiscal calendar: the fiscal
+/// year starts the month AFTER the fiscal year end (e.g. `Some(6)` = June 30
+/// year end → years start July 1), and fiscal quarters are 3-month blocks
+/// from that start. `None` means calendar years (Dec 31 year end), which
+/// reduces exactly to the old Gregorian behavior. Month and Week (the Monday
+/// of the date's ISO week) are unaffected by the fiscal setting.
+fn start_of_period(
+    date: NaiveDate,
+    granularity: DateGranularity,
+    fiscal_year_end_month: Option<u32>,
+) -> Option<NaiveDate> {
     match granularity {
-        DateGranularity::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1),
+        DateGranularity::Year => {
+            let start_month = fiscal_start_month(fiscal_year_end_month);
+            let year = if date.month() >= start_month {
+                date.year()
+            } else {
+                date.year() - 1
+            };
+            NaiveDate::from_ymd_opt(year, start_month, 1)
+        }
         DateGranularity::Quarter => {
-            let q_start_month = (date.month0() / 3) * 3 + 1;
-            NaiveDate::from_ymd_opt(date.year(), q_start_month, 1)
+            // Quarters are 3-month blocks from the fiscal year start: floor
+            // the months-since-fiscal-year-start to a multiple of 3.
+            let fiscal_year_start =
+                start_of_period(date, DateGranularity::Year, fiscal_year_end_month)?;
+            let months_since = i64::from(date.year() - fiscal_year_start.year()) * 12
+                + i64::from(date.month())
+                - i64::from(fiscal_year_start.month());
+            shift_months(fiscal_year_start, (months_since / 3) * 3)
         }
         DateGranularity::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
+        DateGranularity::Week => {
+            // The Monday of the date's ISO week.
+            date.checked_sub_signed(chrono::Duration::days(i64::from(
+                date.weekday().num_days_from_monday(),
+            )))
+        }
+    }
+}
+
+/// First month (1-12) of the fiscal year: the month after the fiscal year
+/// end. `None` = calendar years, i.e. January.
+fn fiscal_start_month(fiscal_year_end_month: Option<u32>) -> u32 {
+    match fiscal_year_end_month {
+        Some(fye) => (fye % 12) + 1,
+        None => 1,
     }
 }
 
@@ -1059,12 +1213,34 @@ fn shift_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {
         .find_map(|d| NaiveDate::from_ymd_opt(year, month, d))
 }
 
-/// Months per `DateGranularity` period (for `DATESINPERIOD` window sizing).
+/// Shift `date` by `offset` periods of the given granularity (negative =
+/// earlier): whole 7-day weeks for `Week`, calendar months (`offset` ×
+/// months-per-period, day clamped via [`shift_months`]) otherwise. Used by
+/// `DATESINPERIOD` window sizing and the filter-context `PeriodShift`.
+fn shift_periods(
+    date: NaiveDate,
+    offset: i64,
+    granularity: DateGranularity,
+) -> Option<NaiveDate> {
+    match granularity {
+        DateGranularity::Week => {
+            date.checked_add_signed(chrono::Duration::days(offset.checked_mul(7)?))
+        }
+        _ => shift_months(date, offset.checked_mul(months_per_period(granularity))?),
+    }
+}
+
+/// Months per `DateGranularity` period (for month-based period shifts; `Week`
+/// has no whole-month size and is handled by [`shift_periods`] directly).
 fn months_per_period(granularity: DateGranularity) -> i64 {
     match granularity {
         DateGranularity::Year => 12,
         DateGranularity::Quarter => 3,
         DateGranularity::Month => 1,
+        // Unreachable via shift_periods (Week shifts by days); a bare caller
+        // would treat a week as its containing month, so keep it out of the
+        // month math entirely.
+        DateGranularity::Week => unreachable!("Week periods are day-based, not month-based"),
     }
 }
 
@@ -1706,7 +1882,7 @@ mod tests {
 
     #[test]
     fn start_of_period_quarter_boundaries() {
-        // Each month maps to the first month of its quarter.
+        // Each month maps to the first month of its quarter (calendar years).
         for (m, q_start) in [
             (1, 1),
             (3, 1),
@@ -1719,10 +1895,222 @@ mod tests {
         ] {
             let d = NaiveDate::from_ymd_opt(2024, m, 15).unwrap();
             assert_eq!(
-                start_of_period(d, DateGranularity::Quarter).unwrap(),
+                start_of_period(d, DateGranularity::Quarter, None).unwrap(),
                 NaiveDate::from_ymd_opt(2024, q_start, 1).unwrap(),
                 "month {m}"
             );
         }
+    }
+
+    #[test]
+    fn start_of_period_fiscal_year_and_quarter() {
+        // Fiscal year end June 30 → fiscal years start July 1.
+        let fye = Some(6);
+        // 2024-08-15 is in the fiscal year starting 2024-07-01.
+        let d = NaiveDate::from_ymd_opt(2024, 8, 15).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Year, fye).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()
+        );
+        // 2024-03-10 is still in the fiscal year that started 2023-07-01.
+        let d = NaiveDate::from_ymd_opt(2024, 3, 10).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Year, fye).unwrap(),
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap()
+        );
+        // Fiscal quarters are 3-month blocks from July: Jul-Sep, Oct-Dec,
+        // Jan-Mar, Apr-Jun. 2024-08-15 → Q starting 2024-07-01; 2024-03-10 →
+        // Q starting 2024-01-01; 2024-05-01 → Q starting 2024-04-01.
+        let d = NaiveDate::from_ymd_opt(2024, 8, 15).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Quarter, fye).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()
+        );
+        let d = NaiveDate::from_ymd_opt(2024, 3, 10).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Quarter, fye).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
+        let d = NaiveDate::from_ymd_opt(2024, 5, 1).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Quarter, fye).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn start_of_period_fiscal_december_end_equals_calendar() {
+        // A December year end is exactly the calendar year: Some(12) == None.
+        for m in 1u32..=12 {
+            let d = NaiveDate::from_ymd_opt(2024, m, 15).unwrap();
+            for g in [
+                DateGranularity::Year,
+                DateGranularity::Quarter,
+                DateGranularity::Month,
+                DateGranularity::Week,
+            ] {
+                assert_eq!(
+                    start_of_period(d, g, Some(12)),
+                    start_of_period(d, g, None),
+                    "month {m}, {g}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn start_of_period_week_is_monday_of_iso_week() {
+        // 2024-07-10 is a Wednesday → its ISO week starts Monday 2024-07-08.
+        let d = NaiveDate::from_ymd_opt(2024, 7, 10).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Week, None).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 7, 8).unwrap()
+        );
+        // A Monday is its own week start.
+        let d = NaiveDate::from_ymd_opt(2024, 7, 8).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Week, None).unwrap(),
+            d
+        );
+        // A Sunday belongs to the week that started six days earlier — even
+        // across a month boundary (2024-06-30 → Monday 2024-06-24).
+        let d = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        assert_eq!(
+            start_of_period(d, DateGranularity::Week, None).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 24).unwrap()
+        );
+    }
+
+    #[test]
+    fn shift_periods_week_moves_whole_weeks() {
+        let d = NaiveDate::from_ymd_opt(2024, 7, 10).unwrap();
+        assert_eq!(
+            shift_periods(d, -2, DateGranularity::Week).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 6, 26).unwrap()
+        );
+        // Month-based granularities defer to shift_months.
+        assert_eq!(
+            shift_periods(d, -1, DateGranularity::Quarter).unwrap(),
+            shift_months(d, -3).unwrap()
+        );
+    }
+
+    #[test]
+    fn filtered_wtd_uses_monday_of_iso_week() {
+        let model = model();
+        let wtd = expr::to_date(sum_amount(), DateGranularity::Week);
+        // As-of = 2024-07-10 (Wednesday) → range [2024-07-08, 2024-07-11).
+        let as_of = days(2024, 7, 10);
+        let (lowered, desc) = lower_time_intelligence_filtered(&wtd, &model, as_of, as_of).unwrap();
+        let Expression::Keep { filters, .. } = &lowered else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].value, "2024-07-08");
+        assert_eq!(filters[1].value, "2024-07-11");
+        assert!(desc.contains("WTD"));
+    }
+
+    #[test]
+    fn wtd_on_axis_fails_closed() {
+        let model = model();
+        let wtd = expr::to_date(sum_amount(), DateGranularity::Week);
+        let group_by = pairs(&[("dim_date", "year"), ("dim_date", "month")]);
+
+        // Route: a date column on the axis must be a typed error, not Axis.
+        let err = time_intelligence_route(&wtd, &model, &group_by).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("WTD"), "got: {msg}");
+        assert!(msg.contains("filter context"), "got: {msg}");
+
+        // The direct axis lowering fails closed the same way.
+        let err = lower_time_intelligence(&wtd, &model, &group_by).unwrap_err();
+        assert!(err.to_string().contains("WTD"), "got: {err}");
+    }
+
+    #[test]
+    fn filtered_fiscal_ytd_starts_at_fiscal_year_start() {
+        // Model with fiscal year end June 30: YTD at 2024-08-15 runs from
+        // 2024-07-01 (fiscal), not 2024-01-01 (calendar).
+        let fiscal_model = model().with_fiscal_year_end_month(Some(6));
+        let ytd = expr::to_date(sum_amount(), DateGranularity::Year);
+        let as_of = days(2024, 8, 15);
+        let (lowered, _) =
+            lower_time_intelligence_filtered(&ytd, &fiscal_model, as_of, as_of).unwrap();
+        let Expression::Keep { filters, .. } = &lowered else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].value, "2024-07-01");
+        assert_eq!(filters[1].value, "2024-08-16");
+
+        // The calendar model differs: start = 2024-01-01.
+        let (calendar, _) =
+            lower_time_intelligence_filtered(&ytd, &model(), as_of, as_of).unwrap();
+        let Expression::Keep { filters, .. } = &calendar else {
+            panic!("expected Keep");
+        };
+        assert_eq!(filters[0].value, "2024-01-01");
+    }
+
+    #[test]
+    fn filtered_dates_between_builds_absolute_half_open_range() {
+        let model = model();
+        let db = expr::dates_between(sum_amount(), "2024-02-01", "2024-06-15");
+        // The probes are ignored: pass an unrelated as-of date.
+        let as_of = days(2025, 12, 31);
+        let (lowered, desc) = lower_time_intelligence_filtered(&db, &model, as_of, as_of).unwrap();
+        let Expression::Keep {
+            expr: inner,
+            filters,
+            ..
+        } = &lowered
+        else {
+            panic!("expected Keep, got {lowered:?}");
+        };
+        let Expression::Clear { targets, .. } = inner.as_ref() else {
+            panic!("expected Clear inside Keep");
+        };
+        assert!(
+            targets.iter().any(|t| matches!(
+                t,
+                ClearTarget::Column { column, .. } if column == "datekey"
+            )),
+            "datekey must be cleared"
+        );
+        assert_eq!(filters[0].operator, ComparisonOp::GreaterThanOrEqual);
+        assert_eq!(filters[0].value, "2024-02-01");
+        assert_eq!(filters[1].operator, ComparisonOp::LessThan);
+        assert_eq!(filters[1].value, "2024-06-16");
+        assert!(desc.contains("DATESBETWEEN"));
+    }
+
+    #[test]
+    fn route_dates_between_is_filter_context_only() {
+        let model = model();
+        let db = expr::dates_between(sum_amount(), "2024-02-01", "2024-06-15");
+
+        // No date column on the axis → filter-context plan, no min probe.
+        let route = time_intelligence_route(&db, &model, &pairs(&[("fact_sales", "region")]))
+            .unwrap();
+        let Some(TimeIntelligenceRoute::FilterContext(plan)) = route else {
+            panic!("expected FilterContext, got {route:?}");
+        };
+        assert_eq!(plan.function, "DATESBETWEEN");
+        assert!(!plan.needs_min_context_date, "the range is absolute");
+
+        // A date column on the axis fails closed with a typed error.
+        let err = time_intelligence_route(&db, &model, &pairs(&[("dim_date", "year")]))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("DATESBETWEEN"), "got: {msg}");
+        assert!(msg.contains("query axis"), "got: {msg}");
+    }
+
+    #[test]
+    fn filtered_dates_between_rejects_inverted_range() {
+        let model = model();
+        let db = expr::dates_between(sum_amount(), "2024-06-15", "2024-02-01");
+        let as_of = days(2024, 12, 31);
+        let err = lower_time_intelligence_filtered(&db, &model, as_of, as_of).unwrap_err();
+        assert!(err.to_string().contains("after end date"), "got: {err}");
     }
 }

@@ -458,7 +458,16 @@ fn calendar_parses_and_synthesizes_fixed_schema() {
     let cols: Vec<&str> = derived.columns().iter().map(|c| c.name()).collect();
     assert_eq!(
         cols,
-        vec!["date", "year", "quarter", "month", "month_name", "day", "day_of_week"]
+        vec![
+            "date",
+            "year",
+            "quarter",
+            "month",
+            "month_name",
+            "day",
+            "day_of_week",
+            "week"
+        ]
     );
 }
 

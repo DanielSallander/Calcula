@@ -340,6 +340,7 @@ fn walk(
         Expression::ToDate { expr: inner, .. }
         | Expression::PeriodShift { expr: inner, .. }
         | Expression::DatesInPeriod { expr: inner, .. }
+        | Expression::DatesBetween { expr: inner, .. }
         | Expression::SemiAdditiveBalance { expr: inner, .. } => {
             walk(inner, measure_names, global_names, block_vars, deps);
         }
@@ -356,6 +357,7 @@ fn walk(
         // Leaves with no sub-expressions.
         Expression::IsInScope { .. }
         | Expression::IsFiltered { .. }
+        | Expression::ThisRow { .. }
         | Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
         | Expression::LiteralString(_)

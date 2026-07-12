@@ -171,6 +171,7 @@ pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
+    Culture, NameTranslation,
     ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
     FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
     JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PathSpec, Perspective, PersistedAuthKind,

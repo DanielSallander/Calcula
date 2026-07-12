@@ -158,6 +158,10 @@ pub struct SqlRenderer<'a, D: Dialect> {
     dialect: D,
     qualifier: &'a dyn ColumnQualifier,
     keep: KeepRendering,
+    /// Alias that `THISROW(t[col])` references render against
+    /// (`alias."col"`). Only the calculated-column THISROW materialization
+    /// sets this; everywhere else a `ThisRow` node fails rendering closed.
+    thisrow_alias: Option<String>,
 }
 
 impl<'a, D: Dialect> SqlRenderer<'a, D> {
@@ -172,7 +176,17 @@ impl<'a, D: Dialect> SqlRenderer<'a, D> {
             dialect,
             qualifier,
             keep: KeepRendering::PassThrough,
+            thisrow_alias: None,
         }
+    }
+
+    /// Render `THISROW(t[col])` references against the given anchor-row
+    /// alias (`alias."col"`). Used by the calculated-column THISROW
+    /// materialization; without this, a `ThisRow` node fails rendering.
+    #[must_use]
+    pub fn with_thisrow_alias(mut self, alias: impl Into<String>) -> Self {
+        self.thisrow_alias = Some(alias.into());
+        self
     }
 
     /// Render simple KEEP filter predicates as conditional aggregation

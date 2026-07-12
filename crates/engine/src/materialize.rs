@@ -79,6 +79,31 @@ impl Engine {
                     .to_string(),
             });
         }
+        // A snapshot from an older engine may carry a stale schema (e.g. the
+        // 7-column pre-v20 calendar without `week`). Reject the mismatch so
+        // the caller warns and the table re-materializes on the next
+        // refresh_stale pass instead of serving a batch whose columns the
+        // model no longer matches.
+        let declared: Vec<String> = table
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        let schema = batch.schema();
+        let snapshot: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+        if snapshot != declared {
+            return Err(EngineError::MaterializationFailed {
+                name: name.to_string(),
+                reason: format!(
+                    "snapshot schema {snapshot:?} does not match the declared columns \
+                     {declared:?} — the table will re-materialize on the next refresh"
+                ),
+            });
+        }
         self.store_refreshed_table(name, vec![batch]).map(|_| ())
     }
 
@@ -245,13 +270,14 @@ const MONTH_NAMES: [&str; 12] = [
 
 /// Generate a `CALENDAR(start, end)` batch: one row per day, with the fixed
 /// calendar schema (declared by the derived table synthesized at build) —
-/// date, year, quarter, month, month_name, day, day_of_week (ISO, 1 = Monday).
+/// date, year, quarter, month, month_name, day, day_of_week (ISO, 1 = Monday),
+/// week (ISO week number).
 fn build_calendar_batch(
     spec: &engine_core::model::global_variable::CalendarSpec,
     schema: Arc<arrow::datatypes::Schema>,
 ) -> Result<RecordBatch, String> {
     use arrow::array::{Date32Array, Int64Array, StringArray};
-    use engine_core::model::global_variable::civil_from_days;
+    use engine_core::model::global_variable::{civil_from_days, iso_week_from_days};
 
     spec.validate()?;
     let (start, end) = spec
@@ -266,6 +292,7 @@ fn build_calendar_batch(
     let mut month_names = Vec::with_capacity(len);
     let mut days = Vec::with_capacity(len);
     let mut weekdays = Vec::with_capacity(len);
+    let mut weeks = Vec::with_capacity(len);
     for d in start..=end {
         let (year, month, day) = civil_from_days(d);
         dates.push(d as i32);
@@ -276,6 +303,7 @@ fn build_calendar_batch(
         days.push(i64::from(day));
         // 1970-01-01 (day 0) was a Thursday; ISO weekday Monday = 1.
         weekdays.push((d + 3).rem_euclid(7) + 1);
+        weeks.push(iso_week_from_days(d));
     }
 
     RecordBatch::try_new(
@@ -288,6 +316,7 @@ fn build_calendar_batch(
             Arc::new(StringArray::from(month_names)),
             Arc::new(Int64Array::from(days)),
             Arc::new(Int64Array::from(weekdays)),
+            Arc::new(Int64Array::from(weeks)),
         ],
     )
     .map_err(|e| e.to_string())

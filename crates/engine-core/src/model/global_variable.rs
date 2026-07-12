@@ -129,6 +129,18 @@ pub fn days_from_civil(mut year: i64, month: u32, day: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// ISO-8601 week number (1-53) for days since 1970-01-01. ISO weeks start on
+/// Monday; a date's week belongs to the ISO year containing that week's
+/// Thursday (so Jan 1 can fall in week 52/53 of the previous ISO year).
+pub fn iso_week_from_days(z: i64) -> i64 {
+    // 1970-01-01 (day 0) was a Thursday; ISO weekday Monday = 1.
+    let weekday = (z + 3).rem_euclid(7) + 1;
+    // The Thursday of this date's ISO week decides the ISO year.
+    let thursday = z + 4 - weekday;
+    let (year, _, _) = civil_from_days(thursday);
+    (thursday - days_from_civil(year, 1, 1)) / 7 + 1
+}
+
 /// Civil (year, month, day) for days since 1970-01-01 (Hinnant's algorithm).
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
@@ -153,6 +165,7 @@ pub fn calendar_table_columns() -> Vec<Column> {
         Column::new("month_name", DataType::String),
         Column::new("day", DataType::Int64),
         Column::new("day_of_week", DataType::Int64),
+        Column::new("week", DataType::Int64),
     ]
 }
 
@@ -469,6 +482,21 @@ mod tests {
         let gv = GlobalVariable::new("city_sales", "fact_sales", expr);
 
         assert!(gv.is_query());
+    }
+
+    #[test]
+    fn iso_week_matches_known_boundaries() {
+        let days = |y, m, d| days_from_civil(y, m, d);
+        // 2024-01-01 is a Monday → ISO week 1.
+        assert_eq!(iso_week_from_days(days(2024, 1, 1)), 1);
+        // 2023-01-01 is a Sunday → belongs to 2022-W52.
+        assert_eq!(iso_week_from_days(days(2023, 1, 1)), 52);
+        // 2020-12-31 (Thursday) is in W53 of the long ISO year 2020.
+        assert_eq!(iso_week_from_days(days(2020, 12, 31)), 53);
+        // 2024-12-30 (Monday) starts 2025-W01.
+        assert_eq!(iso_week_from_days(days(2024, 12, 30)), 1);
+        // Mid-year sanity: 2024-07-10 (Wednesday) is in W28.
+        assert_eq!(iso_week_from_days(days(2024, 7, 10)), 28);
     }
 
     #[test]

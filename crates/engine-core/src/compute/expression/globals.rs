@@ -172,7 +172,9 @@ fn collect_query_global_refs(
             collect_query_global_refs(expr, model, found);
             collect_query_global_refs(alternate, model, found);
         }
-        Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
+        Expression::IsInScope { .. }
+        | Expression::IsFiltered { .. }
+        | Expression::ThisRow { .. } => {}
         Expression::LookupValue { search, .. } => {
             for (_, e) in search {
                 collect_query_global_refs(e, model, found);
@@ -251,6 +253,7 @@ fn collect_query_global_refs(
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
         | Expression::DatesInPeriod { expr, .. }
+        | Expression::DatesBetween { expr, .. }
         | Expression::SemiAdditiveBalance { expr, .. } => {
             collect_query_global_refs(expr, model, found);
         }

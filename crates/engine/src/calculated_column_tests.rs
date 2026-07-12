@@ -487,3 +487,170 @@ async fn path_validation_fails_closed() {
         .to_string();
     assert!(err.contains("boss"), "got: {err}");
 }
+
+// ---- THISROW (anchor-row) calculated columns ----
+
+/// Sales(prod_id, amount) rows (1,100),(2,40),(1,30),(2,20) with two THISROW
+/// calculated columns:
+/// - `Rank` — dense count of strictly-larger amounts + 1 (1,2,3,4);
+/// - `GroupShare` — amount / the anchor row's product total (prod 1 = 130,
+///   prod 2 = 60).
+fn thisrow_engine() -> Engine {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_calculated_column(CalculatedColumn::new(
+            "Rank",
+            "Sales",
+            parse_measure_expression(
+                "COUNT(ITERATE(Sales, IF(Sales[amount] > THISROW(Sales[amount]), 1, BLANK()))) + 1",
+            )
+            .unwrap(),
+            DataType::Int64,
+        ))
+        .add_calculated_column(CalculatedColumn::new(
+            "GroupShare",
+            "Sales",
+            parse_measure_expression(
+                "Sales[amount] / SUM(ITERATE(Sales, IF(Sales[prod_id] = THISROW(Sales[prod_id]), Sales[amount], BLANK())))",
+            )
+            .unwrap(),
+            DataType::Float64,
+        ))
+        .add_measure(Measure::new(
+            "Revenue",
+            parse_measure_expression("SUM(Sales[amount])").unwrap(),
+        ))
+        .add_measure(Measure::new(
+            "ShareTotal",
+            parse_measure_expression("SUM(Sales[GroupShare])").unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine
+        .cache
+        .store(
+            "Sales",
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("prod_id", ArrowType::Int64, true),
+                    Field::new("amount", ArrowType::Float64, true),
+                ])),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 1, 2])),
+                    Arc::new(Float64Array::from(vec![100.0, 40.0, 30.0, 20.0])),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn thisrow_rank_column_groups_correctly() {
+    let engine = thisrow_engine();
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Sales", "Rank")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut by_rank = HashMap::new();
+    for b in &batches {
+        let ri = b.schema().index_of("Rank").unwrap();
+        let mi = b.schema().index_of("Revenue").unwrap();
+        for row in 0..b.num_rows() {
+            by_rank.insert(
+                as_f64(b.column(ri).as_ref(), row) as i64,
+                as_f64(b.column(mi).as_ref(), row),
+            );
+        }
+    }
+    assert_eq!(by_rank.len(), 4, "got: {by_rank:?}");
+    assert_eq!(by_rank.get(&1), Some(&100.0));
+    assert_eq!(by_rank.get(&2), Some(&40.0));
+    assert_eq!(by_rank.get(&3), Some(&30.0));
+    assert_eq!(by_rank.get(&4), Some(&20.0));
+}
+
+#[tokio::test]
+async fn thisrow_group_share_sums_to_group_count() {
+    let engine = thisrow_engine();
+    // Each product's shares sum to 1.0 -> the grand ShareTotal is 2.0.
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["ShareTotal".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let b = &batches[0];
+    let i = b.schema().index_of("ShareTotal").unwrap();
+    assert!((as_f64(b.column(i).as_ref(), 0) - 2.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn thisrow_validation_fails_closed() {
+    // THISROW in a measure: rejected at build.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        )
+        .add_measure(Measure::new(
+            "Bad",
+            parse_measure_expression(
+                "SUM(ITERATE(Sales, IF(Sales[amount] > THISROW(Sales[amount]), 1, 0)))",
+            )
+            .unwrap(),
+        ))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("THISROW"), "got: {err}");
+
+    // A bare aggregate (not over ITERATE) in a calculated column: still rejected.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        )
+        .add_calculated_column(CalculatedColumn::new(
+            "Bad",
+            "Sales",
+            parse_measure_expression("SUM(Sales[amount])").unwrap(),
+            DataType::Float64,
+        ))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ITERATE"), "got: {err}");
+
+    // THISROW outside ITERATE in a calculated column: rejected.
+    let err = DataModel::builder()
+        .add_table(
+            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
+        )
+        .add_calculated_column(CalculatedColumn::new(
+            "Bad",
+            "Sales",
+            parse_measure_expression("THISROW(Sales[amount]) * 2").unwrap(),
+            DataType::Float64,
+        ))
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("THISROW"), "got: {err}");
+}

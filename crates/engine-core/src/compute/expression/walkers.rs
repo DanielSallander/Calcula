@@ -157,7 +157,9 @@ impl Expression {
                 expr.collect_column_refs(refs);
                 alternate.collect_column_refs(refs);
             }
-            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
+            Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. } => {}
             Expression::ClearExcept { expr, .. }
             | Expression::Iterate {
                 expression: expr, ..
@@ -201,6 +203,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => {
                 // The date axis comes from the query's group_by at lowering
                 // time, not from the expression — only the inner measure
@@ -384,7 +387,9 @@ impl Expression {
                 expr.collect_context_filter_tables(tables);
                 alternate.collect_context_filter_tables(tables);
             }
-            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => {}
+            Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. } => {}
             Expression::ClearExcept { expr, .. } => {
                 expr.collect_context_filter_tables(tables);
             }
@@ -449,6 +454,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => {
                 // The date-table axis is supplied by the query's group_by at
                 // lowering time; no structural table references live here.
@@ -540,6 +546,7 @@ impl Expression {
             | Expression::Blank
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. }
             | Expression::RankWindow { .. } => {}
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
@@ -667,6 +674,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_measure_refs(names),
             Expression::InList { expr, values } => {
                 expr.collect_measure_refs(names);
@@ -789,6 +797,10 @@ impl Expression {
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
             | Expression::RankWindow { .. } => {}
+            // The anchor column must be fetched like any other input.
+            Expression::ThisRow { table, column } => {
+                refs.push((table.as_str(), column.as_str()));
+            }
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::And(left, right)
@@ -915,6 +927,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => {
                 expr.collect_qualified_column_refs(refs)
             }
@@ -980,6 +993,7 @@ impl Expression {
             | Expression::Blank
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. }
             | Expression::RankWindow { .. } => {}
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
@@ -1106,6 +1120,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_call_names(names),
             Expression::InList { expr, values } => {
                 expr.collect_call_names(names);
@@ -1163,6 +1178,7 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::Blank
         | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. }
         | Expression::RankWindow { .. } => {}
         Expression::Query { aggregates, .. } => {
             out.extend(aggregates.iter().map(|(e, _)| e));
@@ -1228,6 +1244,7 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::ToDate { expr: inner, .. }
         | Expression::PeriodShift { expr: inner, .. }
         | Expression::DatesInPeriod { expr: inner, .. }
+        | Expression::DatesBetween { expr: inner, .. }
         | Expression::SemiAdditiveBalance { expr: inner, .. } => out.push(inner),
         Expression::Keep {
             expr, conditions, ..

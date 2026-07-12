@@ -604,23 +604,26 @@ impl QueryExecutor {
         // (e.g. start-of-year for YTD) algebraically from the DateKey; a fiscal
         // (non-Gregorian) calendar reads them from the Year/Quarter/Month *role
         // columns* instead (see `probe_fiscal_period_start`). On a fiscal calendar
-        // only ToDate (YTD/QTD/MTD) and SemiAdditiveBalance (a boundary-day
-        // balance, calendar-agnostic) are supported; period shifts and
-        // DATESINPERIOD need fiscal-period arithmetic and fail closed.
+        // only ToDate (YTD/QTD/MTD/WTD), SemiAdditiveBalance (a boundary-day
+        // balance, calendar-agnostic), and DatesBetween (absolute ISO bounds,
+        // calendar-agnostic) are supported; period shifts and DATESINPERIOD need
+        // fiscal-period arithmetic and fail closed.
         let is_gregorian = Self::calendar_is_gregorian(ctx, plan_info, model).await?;
         if !is_gregorian
             && !matches!(
                 stripped_expr,
-                Expression::ToDate { .. } | Expression::SemiAdditiveBalance { .. }
+                Expression::ToDate { .. }
+                    | Expression::SemiAdditiveBalance { .. }
+                    | Expression::DatesBetween { .. }
             )
         {
             return Err(QueryError::Engine(EngineError::TimeIntelligence {
                 function: plan_info.function.clone(),
                 reason: "on a non-Gregorian (fiscal) date table, filter-context time intelligence \
-                         supports only YTD/QTD/MTD and CLOSINGBALANCE/OPENINGBALANCE; period \
-                         shifts (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) and DATESINPERIOD over a \
-                         fiscal calendar are not yet supported — put a date column on the group-by \
-                         axis (the axis path honours the role columns)"
+                         supports only YTD/QTD/MTD/WTD, CLOSINGBALANCE/OPENINGBALANCE, and \
+                         DATESBETWEEN; period shifts (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) and \
+                         DATESINPERIOD over a fiscal calendar are not yet supported — put a date \
+                         column on the group-by axis (the axis path honours the role columns)"
                     .to_string(),
             }));
         }
@@ -937,6 +940,7 @@ impl QueryExecutor {
             DateGranularity::Year => vec![role_col(DateRole::Year)],
             DateGranularity::Quarter => vec![role_col(DateRole::Year), role_col(DateRole::Quarter)],
             DateGranularity::Month => vec![role_col(DateRole::Year), role_col(DateRole::Month)],
+            DateGranularity::Week => vec![role_col(DateRole::Year), role_col(DateRole::Week)],
         }
         .into_iter()
         .collect();
@@ -945,8 +949,8 @@ impl QueryExecutor {
                 function: plan_info.function.clone(),
                 reason: format!(
                     "fiscal {granularity:?}-to-date needs the date table '{}' to carry the role \
-                     column(s) that define the period (Year, and Quarter/Month); assign them with \
-                     Column::with_date_role",
+                     column(s) that define the period (Year, and Quarter/Month/Week); assign \
+                     them with Column::with_date_role",
                     plan_info.date_table
                 ),
             }
@@ -1210,9 +1214,10 @@ fn read_date_as_days(batch: &RecordBatch, column: &str) -> QueryResult<Option<i3
 /// Whether a window-family measure is a FILTER-CONTEXT time-intelligence node
 /// that composes with `TotalsMode::Rollup` **or** a ragged hierarchy (v1).
 ///
-/// Only a bare `ToDate` (YTD/QTD/MTD), `DatesInPeriod`, `SemiAdditiveBalance`
-/// (CLOSING/OPENINGBALANCE), or `PeriodShift` (PRIORYEAR/PRIORPERIOD/
-/// PARALLELPERIOD) whose route is [`TimeIntelligenceRoute::FilterContext`]
+/// Only a bare `ToDate` (YTD/QTD/MTD/WTD), `DatesInPeriod`, `DatesBetween`,
+/// `SemiAdditiveBalance` (CLOSING/OPENINGBALANCE), or `PeriodShift`
+/// (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) whose route is
+/// [`TimeIntelligenceRoute::FilterContext`]
 /// qualifies: each lowers to an ordinary `Keep(Clear(inner),[DateKey range])`
 /// aggregate, so per-level recomputation under `GROUP BY ROLLUP` is exact — the
 /// subtotal / grand-total is the measure re-evaluated over the rolled-up row set,
@@ -1265,8 +1270,8 @@ pub(super) fn is_composable_filter_context_ti(
 }
 
 /// A single time-intelligence node that composes with ROLLUP / a hierarchy: a
-/// bare filter-context `ToDate` / `DatesInPeriod` / `SemiAdditiveBalance` /
-/// `PeriodShift`.
+/// bare filter-context `ToDate` / `DatesInPeriod` / `DatesBetween` /
+/// `SemiAdditiveBalance` / `PeriodShift`.
 fn is_composable_ti_leaf(
     expr: &Expression,
     model: &DataModel,
@@ -1276,6 +1281,7 @@ fn is_composable_ti_leaf(
         expr,
         Expression::ToDate { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. }
             | Expression::PeriodShift { .. }
     ) {
@@ -1622,6 +1628,7 @@ fn is_simple_window_leaf(expr: &Expression) -> bool {
         Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. }
             | Expression::Window { .. }
             | Expression::Offset { .. }

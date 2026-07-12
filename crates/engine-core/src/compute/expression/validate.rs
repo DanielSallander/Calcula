@@ -112,7 +112,8 @@ impl Expression {
             | Expression::Blank
             | Expression::MeasureRef(_)
             | Expression::IsInScope { .. }
-            | Expression::IsFiltered { .. } => Ok(()),
+            | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. } => Ok(()),
             // SELECTEDMEASURE() is only legal inside a calculation item. For
             // ordinary measures / calculated columns it must never appear: it
             // would reach the renderer unsubstituted (an internal error).
@@ -497,6 +498,27 @@ impl Expression {
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => {
+                expr.validate_inner(allow_selected_measure)
+            }
+            // The bounds are data (they may arrive deserialized from a model
+            // file, bypassing the parser): re-check they are real ISO dates
+            // in order, so a malformed range fails at build, not mid-query.
+            Expression::DatesBetween { expr, start, end } => {
+                let parse = |which: &str, s: &str| {
+                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                        EngineError::InvalidExpression(format!(
+                            "DATESBETWEEN: invalid {which} date \"{s}\" — expected an ISO \
+                             calendar date (YYYY-MM-DD)"
+                        ))
+                    })
+                };
+                let start_date = parse("start", start)?;
+                let end_date = parse("end", end)?;
+                if start_date > end_date {
+                    return Err(EngineError::InvalidExpression(format!(
+                        "DATESBETWEEN: start date \"{start}\" is after end date \"{end}\""
+                    )));
+                }
                 expr.validate_inner(allow_selected_measure)
             }
             Expression::InList { expr, values } => {

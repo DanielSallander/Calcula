@@ -175,11 +175,12 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             // (mirrors the plain renderer; fail closed).
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
-            | Expression::DatesInPeriod { .. } => {
+            | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. } => {
                 return Err(EngineError::InvalidExpression(
                     "time-intelligence expression (YTD/QTD/MTD/PRIORYEAR/PRIORPERIOD/\
-                     DATESINPERIOD) must be lowered to a window expression before SQL \
-                     generation; this is an internal error — the measure should have routed \
+                     DATESINPERIOD/DATESBETWEEN) must be lowered to a window expression before \
+                     SQL generation; this is an internal error — the measure should have routed \
                      through the window execution path"
                         .to_string(),
                 ));

@@ -213,6 +213,7 @@ impl Parser {
             "YTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Year),
             "QTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Quarter),
             "MTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Month),
+            "WTD" => self.parse_to_date_call(crate::compute::expression::DateGranularity::Week),
             "PRIORYEAR" => self.parse_prioryear_call(),
             // SAMEPERIODLASTYEAR is a synonym for PRIORYEAR (shift -1 YEAR).
             "SAMEPERIODLASTYEAR" => self.parse_prioryear_call(),
@@ -222,6 +223,9 @@ impl Parser {
             // the scalar single-date `DATEADD(date, n, unit)` function.)
             "PARALLELPERIOD" => self.parse_priorperiod_call(),
             "DATESINPERIOD" => self.parse_dates_in_period_call(),
+            // DATESBETWEEN evaluates the inner aggregate over an ABSOLUTE
+            // inclusive ISO date range (filter-context only).
+            "DATESBETWEEN" => self.parse_dates_between_call(),
             // Semi-additive balances: the measure pinned to the last (closing)
             // or first (opening) date of the current context.
             "CLOSINGBALANCE" => self.parse_balance_call(false),
@@ -289,6 +293,7 @@ impl Parser {
             "CLEAREXCEPT" | "CLEAR_EXCEPT" => self.parse_clearexcept_call(),
             // Iterator
             "ITERATE" => self.parse_iterate_call(),
+            "THISROW" => self.parse_thisrow_call(),
             // Explicit relationship traversal
             "TRAVERSE" => self.parse_traverse_call(),
             // Percentile

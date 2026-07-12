@@ -111,6 +111,7 @@ use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::Kpi;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
+use crate::model::culture::Culture;
 use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
@@ -284,8 +285,24 @@ use crate::model::table_variable::TableVariable;
 ///   would even under-restrict), so the [`ModelFormatTooNew`] gate refuses
 ///   v19 files on a pre-v19 engine.
 ///
+/// - `20` — the second DAX-gap batch, in one bump: the expression tree gained
+///   the `ThisRow` variant (`THISROW(t[col])` anchor-row references in
+///   calculated columns, materialized via a self-join rewrite) and the
+///   `DatesBetween` variant (`DATESBETWEEN(expr, "start", "end")` absolute
+///   date ranges); [`DateGranularity`](crate::compute::expression::DateGranularity)
+///   gained `Week` (`WTD`, week-based shifts — an enum value a pre-v20 engine
+///   fails to deserialize); the model gained
+///   [`fiscal_year_end_month`](DataModel::fiscal_year_end_month) (fiscal-year
+///   time-intelligence boundaries) and [`cultures`](DataModel::cultures)
+///   (per-locale metadata translations). Generated `CALENDAR` tables also
+///   gained a `week` column (derived at build — no serde impact, but
+///   pre-v20 calculated-table snapshots re-materialize on schema mismatch).
+///   A pre-v20 engine fails on the new variants and would silently drop the
+///   rest, so the [`ModelFormatTooNew`] gate refuses v20 files on a pre-v20
+///   engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 19;
+pub const MODEL_FORMAT_VERSION: u32 = 20;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -314,6 +331,13 @@ pub struct DataModel {
     default_lookup_resolution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     date_table: Option<String>,
+    /// Fiscal year end month (1-12) for time intelligence: `None` = calendar
+    /// years (Dec 31). When set (e.g. `6` = June 30), filter-context YTD/QTD
+    /// boundaries start at the fiscal year/quarter starts. Axis-mode time
+    /// intelligence partitions by the date table's own columns and is
+    /// unaffected (carry fiscal columns in the date table for that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fiscal_year_end_month: Option<u32>,
     /// Author-defined sandboxed script functions (Rhai), compiled to scalar
     /// UDFs and callable from measures. Empty by default and skipped on
     /// serialization when empty (back-compat with pre-v4 model files).
@@ -374,6 +398,13 @@ pub struct DataModel {
     /// on serialization when empty (back-compat with pre-v19 model files).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     perspectives: Vec<Perspective>,
+    /// Author-defined cultures: per-locale display-name/description
+    /// translations for tables, columns, and measures. Purely presentational
+    /// (hosts swap display text; object names stay stable). Empty by default
+    /// and skipped on serialization when empty (back-compat with pre-v20
+    /// model files). See [`Culture`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cultures: Vec<Culture>,
 }
 
 impl DataModel {
@@ -391,6 +422,7 @@ impl DataModel {
             hierarchies: Vec::new(),
             default_lookup_resolution: None,
             date_table: None,
+            fiscal_year_end_month: None,
             script_functions: Vec::new(),
             security_roles: Vec::new(),
             calculation_groups: Vec::new(),
@@ -398,6 +430,7 @@ impl DataModel {
             context_columns: Vec::new(),
             sources: Vec::new(),
             perspectives: Vec::new(),
+            cultures: Vec::new(),
         }
     }
 
@@ -687,6 +720,18 @@ impl DataModel {
             .ok_or_else(|| EngineError::InvalidData(format!("perspective '{name}' not found")))
     }
 
+    /// Returns all cultures (metadata translations) defined in the model.
+    pub fn cultures(&self) -> &[Culture] {
+        &self.cultures
+    }
+
+    /// Look up a culture by locale id (case-insensitive).
+    pub fn culture(&self, locale: &str) -> Option<&Culture> {
+        self.cultures
+            .iter()
+            .find(|c| c.locale().eq_ignore_ascii_case(locale))
+    }
+
     /// Look up a security role by name (exact match).
     ///
     /// Returns [`EngineError::SecurityRoleNotFound`] when no role with that
@@ -901,6 +946,16 @@ impl DataModel {
         model
     }
 
+    /// Returns a copy of this model with the culture list replaced.
+    ///
+    /// Like [`with_perspectives`](Self::with_perspectives), callers should
+    /// re-`validate()` the result.
+    pub fn with_cultures(&self, cultures: Vec<Culture>) -> DataModel {
+        let mut model = self.clone();
+        model.cultures = cultures;
+        model
+    }
+
     /// Returns a copy of the model with its calculation-group list REPLACED
     /// (caller-validates contract, see [`DataModel::with_measures`]).
     pub fn with_calculation_groups(&self, groups: Vec<CalculationGroup>) -> DataModel {
@@ -964,6 +1019,16 @@ impl DataModel {
     pub fn with_date_table(&self, date_table: Option<String>) -> DataModel {
         let mut model = self.clone();
         model.date_table = date_table;
+        model
+    }
+
+    /// Returns a copy of the model with the fiscal year end month REPLACED
+    /// (`None` = calendar years). No validation itself — callers run
+    /// [`DataModel::validate`] on the result (see [`DataModel::with_measures`]),
+    /// which rejects a month outside 1-12.
+    pub fn with_fiscal_year_end_month(&self, month: Option<u32>) -> DataModel {
+        let mut model = self.clone();
+        model.fiscal_year_end_month = month;
         model
     }
 
@@ -1053,6 +1118,16 @@ impl DataModel {
     /// `PRIORPERIOD`).
     pub fn date_table(&self) -> Option<&str> {
         self.date_table.as_deref()
+    }
+
+    /// Returns the fiscal year end month (1-12) used by filter-context time
+    /// intelligence, if set.
+    ///
+    /// `None` means calendar years (Dec 31 year end). When set — e.g. `6` for
+    /// a June 30 year end — filter-context `YTD`/`QTD` period boundaries start
+    /// at the fiscal year/quarter starts instead of Jan 1 / calendar quarters.
+    pub fn fiscal_year_end_month(&self) -> Option<u32> {
+        self.fiscal_year_end_month
     }
 
     /// Returns all measures that belong to a specific group.
@@ -1231,11 +1306,17 @@ impl DataModel {
         for p in &self.perspectives {
             builder = builder.add_perspective(p.clone());
         }
+        for c in &self.cultures {
+            builder = builder.add_culture(c.clone());
+        }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());
         }
         if let Some(dt) = &self.date_table {
             builder = builder.mark_date_table(dt.clone());
+        }
+        if let Some(month) = self.fiscal_year_end_month {
+            builder = builder.fiscal_year_end_month(month);
         }
         builder.build()?;
         Ok(())
@@ -1507,6 +1588,43 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(model.format_version(), MODEL_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn fiscal_year_end_month_builds_serializes_and_validates() {
+        // Builder carries the value through build().
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .fiscal_year_end_month(6)
+            .build()
+            .unwrap();
+        assert_eq!(model.fiscal_year_end_month(), Some(6));
+
+        // Additive + optional: survives a JSON round-trip and re-validation.
+        let json = serde_json::to_string(&model).unwrap();
+        let deserialized: DataModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.fiscal_year_end_month(), Some(6));
+        deserialized.validate().unwrap();
+
+        // None is skipped on serialization (no field bloat for the default).
+        let cleared = model.with_fiscal_year_end_month(None);
+        let json = serde_json::to_string(&cleared).unwrap();
+        assert!(!json.contains("fiscal_year_end_month"), "None is skipped");
+        assert_eq!(cleared.fiscal_year_end_month(), None);
+
+        // Out-of-range month fails at build with a clear error.
+        let err = DataModel::builder()
+            .add_table(sales_table())
+            .fiscal_year_end_month(0)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("between 1 and 12"), "got: {err}");
+        let err = DataModel::builder()
+            .add_table(sales_table())
+            .fiscal_year_end_month(13)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("between 1 and 12"), "got: {err}");
     }
 
     #[test]

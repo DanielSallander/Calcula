@@ -187,6 +187,7 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
         | Expression::ToDate { .. }
         | Expression::PeriodShift { .. }
         | Expression::DatesInPeriod { .. }
+        | Expression::DatesBetween { .. }
         | Expression::Query { .. } => true,
         // Host-registered UDFs have no source-SQL equivalent — they exist
         // only in the local DataFusion session, so any expression containing

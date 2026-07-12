@@ -83,7 +83,9 @@ impl Expression {
             Expression::IfError { expr, alternate } => {
                 expr.has_aggregate() || alternate.has_aggregate()
             }
-            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => false,
+            Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. } => false,
             Expression::ClearExcept { expr, .. } => expr.has_aggregate(),
             Expression::Iterate { expression, .. } => expression.has_aggregate(),
             Expression::Percentile { .. } => true,
@@ -100,6 +102,7 @@ impl Expression {
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. } => true,
             Expression::InList { expr, values } => {
                 expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
@@ -203,7 +206,9 @@ impl Expression {
             Expression::IfError { expr, alternate } => {
                 expr.has_context_ops() || alternate.has_context_ops()
             }
-            Expression::IsInScope { .. } | Expression::IsFiltered { .. } => false,
+            Expression::IsInScope { .. }
+            | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. } => false,
             Expression::ClearExcept { .. } => true,
             Expression::Iterate { expression, .. } => expression.has_context_ops(),
             Expression::Percentile {
@@ -226,6 +231,7 @@ impl Expression {
             Expression::ToDate { expr, .. }
             | Expression::PeriodShift { expr, .. }
             | Expression::DatesInPeriod { expr, .. }
+            | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.has_context_ops(),
             Expression::InList { expr, values } => {
                 expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
@@ -352,6 +358,45 @@ impl Expression {
             .any(|c| c.contains_path_functions())
     }
 
+    /// Returns `true` if this tree contains a `THISROW(...)` anchor-row
+    /// reference ([`Expression::ThisRow`]) anywhere. Drives calculated-column
+    /// validation, measure rejection, and the host's format-version stamping
+    /// (v20).
+    pub fn has_this_row(&self) -> bool {
+        matches!(self, Expression::ThisRow { .. })
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.has_this_row())
+    }
+
+    /// Returns `true` if this tree contains a `DATESBETWEEN(...)` node
+    /// ([`Expression::DatesBetween`]) anywhere. Drives the host's
+    /// format-version stamping (v20).
+    pub fn contains_dates_between(&self) -> bool {
+        matches!(self, Expression::DatesBetween { .. })
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.contains_dates_between())
+    }
+
+    /// Returns `true` if this tree uses the `Week` date granularity anywhere
+    /// (`WTD`, week-based `PRIORPERIOD`/`DATESINPERIOD`). A pre-v20 engine
+    /// fails to deserialize the enum value — drives the host's
+    /// format-version stamping (v20).
+    pub fn contains_week_granularity(&self) -> bool {
+        let here = match self {
+            Expression::ToDate { granularity, .. }
+            | Expression::PeriodShift { granularity, .. }
+            | Expression::DatesInPeriod { granularity, .. } => {
+                matches!(granularity, super::DateGranularity::Week)
+            }
+            _ => false,
+        };
+        here || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_week_granularity())
+    }
+
     /// Returns `true` if this tree contains an [`Expression::Query`]
     /// (table-producing two-stage aggregation) node anywhere.
     ///
@@ -429,6 +474,7 @@ impl Expression {
                 | Expression::ToDate { .. }
                 | Expression::PeriodShift { .. }
                 | Expression::DatesInPeriod { .. }
+                | Expression::DatesBetween { .. }
                 | Expression::SemiAdditiveBalance { .. }
         )
     }
@@ -460,6 +506,7 @@ impl Expression {
                 | Expression::ToDate { .. }
                 | Expression::PeriodShift { .. }
                 | Expression::DatesInPeriod { .. }
+                | Expression::DatesBetween { .. }
                 | Expression::SemiAdditiveBalance { .. }
         ) || super::child_expressions(self)
             .iter()
@@ -468,7 +515,7 @@ impl Expression {
 
     /// Returns `true` if this expression contains a FILTER-CONTEXT
     /// time-intelligence node (`ToDate`/`PeriodShift`/`DatesInPeriod`/
-    /// `SemiAdditiveBalance`) — at the top level or nested inside a compound
+    /// `DatesBetween`/`SemiAdditiveBalance`) — at the top level or nested inside a compound
     /// combinator (`+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR`), the shapes
     /// a compound time-intelligence measure (e.g. YoY = `YTD − PRIORYEAR`) uses.
     ///
@@ -483,6 +530,7 @@ impl Expression {
             Expression::ToDate { .. }
             | Expression::PeriodShift { .. }
             | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. } => true,
             Expression::BinaryOp { left, right, .. } => {
                 left.contains_time_intelligence() || right.contains_time_intelligence()

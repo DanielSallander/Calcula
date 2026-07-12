@@ -50,6 +50,7 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
         | Expression::DatesInPeriod { expr, .. }
+        | Expression::DatesBetween { expr, .. }
         | Expression::SemiAdditiveBalance { expr, .. } => has_measure_ref(expr),
         Expression::SafeDivide {
             numerator,
@@ -307,6 +308,11 @@ fn expand_measure_refs_inner(
             expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
             intervals: *intervals,
             granularity: *granularity,
+        }),
+        Expression::DatesBetween { expr, start, end } => Ok(Expression::DatesBetween {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            start: start.clone(),
+            end: end.clone(),
         }),
         Expression::SemiAdditiveBalance { expr, opening } => Ok(Expression::SemiAdditiveBalance {
             expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
@@ -614,6 +620,7 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::ToDate { expr, .. }
         | Expression::PeriodShift { expr, .. }
         | Expression::DatesInPeriod { expr, .. }
+        | Expression::DatesBetween { expr, .. }
         | Expression::SemiAdditiveBalance { expr, .. } => infer_fact_table(expr),
         Expression::InList { expr, values } => {
             infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))

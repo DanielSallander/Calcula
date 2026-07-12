@@ -60,6 +60,10 @@ impl Expression {
                 table: table.clone(),
                 column: column.clone(),
             },
+            Expression::ThisRow { table, column } => Expression::ThisRow {
+                table: table.clone(),
+                column: column.clone(),
+            },
             Expression::LookupValue {
                 table,
                 result_column,
@@ -242,6 +246,11 @@ impl Expression {
                 expr: Box::new(expr.substitute_vars(env)),
                 intervals: *intervals,
                 granularity: *granularity,
+            },
+            Expression::DatesBetween { expr, start, end } => Expression::DatesBetween {
+                expr: Box::new(expr.substitute_vars(env)),
+                start: start.clone(),
+                end: end.clone(),
             },
             Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
                 expr: Box::new(expr.substitute_vars(env)),
@@ -848,6 +857,11 @@ impl Expression {
                 intervals: *intervals,
                 granularity: *granularity,
             },
+            Expression::DatesBetween { expr, start, end } => Expression::DatesBetween {
+                expr: Box::new(expr.substitute_selected_measure(replacement)),
+                start: start.clone(),
+                end: end.clone(),
+            },
             Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 opening: *opening,
@@ -964,6 +978,7 @@ impl Expression {
             | Expression::Blank
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
+            | Expression::ThisRow { .. }
             | Expression::RankWindow { .. } => self.clone(),
             Expression::LookupValue {
                 table,
@@ -1017,6 +1032,7 @@ impl Expression {
                             | Expression::ToDate { .. }
                             | Expression::PeriodShift { .. }
                             | Expression::DatesInPeriod { .. }
+                            | Expression::DatesBetween { .. }
                             | Expression::SemiAdditiveBalance { .. }
                     ) {
                         continue;
@@ -1180,6 +1196,242 @@ pub fn extract_lookup_joins(expr: &Expression, specs: &mut Vec<LookupJoinSpec>) 
         // Leaves and anything non-row-level (impossible post-validation).
         _ => expr.clone(),
     }
+}
+
+/// Replace every plain `AGG(ITERATE(host, ...))` node in a THISROW
+/// calculated-column expression with a bare placeholder column reference
+/// (`__tr_agg_N`), collecting the replaced aggregate nodes in order. The
+/// materializer renders each collected node into the anchor/scan self-join
+/// sub-select and the placeholder resolves to the joined result column.
+/// Shape is builder-validated ([`validate_thisrow_calculated_column`]), so
+/// every `Aggregate` node here is over `ITERATE`.
+pub fn extract_thisrow_aggregates(
+    expr: &Expression,
+    aggregates: &mut Vec<Expression>,
+) -> Expression {
+    match expr {
+        Expression::Aggregate { .. } => {
+            let placeholder = format!("__tr_agg_{}", aggregates.len());
+            aggregates.push(expr.clone());
+            Expression::ColumnRef(placeholder)
+        }
+        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+            left: Box::new(extract_thisrow_aggregates(left, aggregates)),
+            op: *op,
+            right: Box::new(extract_thisrow_aggregates(right, aggregates)),
+        },
+        Expression::Comparison { left, op, right } => Expression::Comparison {
+            left: Box::new(extract_thisrow_aggregates(left, aggregates)),
+            op: *op,
+            right: Box::new(extract_thisrow_aggregates(right, aggregates)),
+        },
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expression::If {
+            condition: Box::new(extract_thisrow_aggregates(condition, aggregates)),
+            then_expr: Box::new(extract_thisrow_aggregates(then_expr, aggregates)),
+            else_expr: Box::new(extract_thisrow_aggregates(else_expr, aggregates)),
+        },
+        Expression::Switch {
+            expr: e,
+            cases,
+            default,
+        } => Expression::Switch {
+            expr: Box::new(extract_thisrow_aggregates(e, aggregates)),
+            cases: cases
+                .iter()
+                .map(|(v, r)| {
+                    (
+                        extract_thisrow_aggregates(v, aggregates),
+                        extract_thisrow_aggregates(r, aggregates),
+                    )
+                })
+                .collect(),
+            default: default
+                .as_ref()
+                .map(|d| Box::new(extract_thisrow_aggregates(d, aggregates))),
+        },
+        Expression::And(l, r) => Expression::And(
+            Box::new(extract_thisrow_aggregates(l, aggregates)),
+            Box::new(extract_thisrow_aggregates(r, aggregates)),
+        ),
+        Expression::Or(l, r) => Expression::Or(
+            Box::new(extract_thisrow_aggregates(l, aggregates)),
+            Box::new(extract_thisrow_aggregates(r, aggregates)),
+        ),
+        Expression::Xor(l, r) => Expression::Xor(
+            Box::new(extract_thisrow_aggregates(l, aggregates)),
+            Box::new(extract_thisrow_aggregates(r, aggregates)),
+        ),
+        Expression::Not(inner) => {
+            Expression::Not(Box::new(extract_thisrow_aggregates(inner, aggregates)))
+        }
+        Expression::IsBlank(inner) => {
+            Expression::IsBlank(Box::new(extract_thisrow_aggregates(inner, aggregates)))
+        }
+        Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        },
+        Expression::TextFunc { function, args } => Expression::TextFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        },
+        Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        },
+        Expression::Call { name, args } => Expression::Call {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        },
+        Expression::Coalesce(args) => Expression::Coalesce(
+            args.iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        ),
+        Expression::IfError { expr: e, alternate } => Expression::IfError {
+            expr: Box::new(extract_thisrow_aggregates(e, aggregates)),
+            alternate: Box::new(extract_thisrow_aggregates(alternate, aggregates)),
+        },
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Expression::SafeDivide {
+            numerator: Box::new(extract_thisrow_aggregates(numerator, aggregates)),
+            denominator: Box::new(extract_thisrow_aggregates(denominator, aggregates)),
+            alternate: alternate
+                .as_ref()
+                .map(|a| Box::new(extract_thisrow_aggregates(a, aggregates))),
+        },
+        Expression::InList { expr: e, values } => Expression::InList {
+            expr: Box::new(extract_thisrow_aggregates(e, aggregates)),
+            values: values
+                .iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        },
+        Expression::Greatest(args) => Expression::Greatest(
+            args.iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        ),
+        Expression::Least(args) => Expression::Least(
+            args.iter()
+                .map(|a| extract_thisrow_aggregates(a, aggregates))
+                .collect(),
+        ),
+        Expression::NullIf { expr: e, value } => Expression::NullIf {
+            expr: Box::new(extract_thisrow_aggregates(e, aggregates)),
+            value: Box::new(extract_thisrow_aggregates(value, aggregates)),
+        },
+        // Leaves and anything non-row-level (impossible post-validation).
+        _ => expr.clone(),
+    }
+}
+
+/// Validate the THISROW calculated-column shape for a column on `host`:
+///
+/// - every aggregate is a PLAIN aggregate directly over `ITERATE(host, ...)`
+///   (no windows, time intelligence, QUERY, or implicit aggregates);
+/// - the iterated expression contains no nested aggregates or iterations;
+/// - `THISROW(t[c])` appears ONLY inside such an `ITERATE`, with `t == host`.
+///
+/// Returns a human-readable reason on violation (the builder wraps it into
+/// `EngineError::InvalidCalculatedColumn`).
+pub fn validate_thisrow_calculated_column(expr: &Expression, host: &str) -> Result<(), String> {
+    fn walk(expr: &Expression, host: &str, in_iterate: bool) -> Result<(), String> {
+        match expr {
+            Expression::Aggregate { operand, .. } => match operand.as_ref() {
+                Expression::Iterate { table, expression } => {
+                    if !table.eq_ignore_ascii_case(host) {
+                        return Err(format!(
+                            "ITERATE over '{table}' -- a THISROW calculated column may only \
+                             iterate its host table '{host}'"
+                        ));
+                    }
+                    if expression.has_aggregate() {
+                        return Err(
+                            "nested aggregates inside ITERATE are not supported in \
+                             calculated columns"
+                                .to_string(),
+                        );
+                    }
+                    walk(expression, host, true)
+                }
+                _ => Err(
+                    "aggregates in calculated columns are only supported as \
+                     AGG(ITERATE(host, ...)) together with THISROW(...)"
+                        .to_string(),
+                ),
+            },
+            Expression::ThisRow { table, .. } => {
+                if !in_iterate {
+                    return Err(
+                        "THISROW(...) is only valid inside an aggregate over ITERATE(...)"
+                            .to_string(),
+                    );
+                }
+                if !table.eq_ignore_ascii_case(host) {
+                    return Err(format!(
+                        "THISROW references '{table}' but the calculated column lives on \
+                         '{host}'"
+                    ));
+                }
+                Ok(())
+            }
+            // Implicit / two-stage aggregates stay rejected in calculated columns.
+            Expression::Percentile { .. }
+            | Expression::Query { .. }
+            | Expression::HasOneValue { .. }
+            | Expression::SelectedValue { .. }
+            | Expression::FirstValue { .. }
+            | Expression::Window { .. }
+            | Expression::Offset { .. }
+            | Expression::Index { .. }
+            | Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
+            | Expression::SemiAdditiveBalance { .. }
+            | Expression::CountIf { .. }
+            | Expression::ListAgg { .. }
+            | Expression::MaxBy { .. }
+            | Expression::MinBy { .. }
+            | Expression::RankWindow { .. } => Err(
+                "only plain aggregates over ITERATE(...) are supported in THISROW \
+                 calculated columns (no windows, time intelligence, or QUERY)"
+                    .to_string(),
+            ),
+            Expression::Iterate { .. } => Err(
+                "ITERATE(...) in a calculated column must be wrapped directly in an \
+                 aggregate (e.g. COUNT(ITERATE(...)))"
+                    .to_string(),
+            ),
+            _ => {
+                for child in super::child_expressions(expr) {
+                    walk(child, host, in_iterate)?;
+                }
+                Ok(())
+            }
+        }
+    }
+    walk(expr, host, false)
 }
 
 /// Replace every `ISFILTERED(table[column])` marker with the literal answer
