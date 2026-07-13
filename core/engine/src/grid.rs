@@ -47,6 +47,7 @@ impl Grid {
         if col > self.max_col {
             self.max_col = col;
         }
+        crate::lookup_cache::notify_write(row, col);
         self.cells.insert((row, col), cell);
     }
 
@@ -54,6 +55,7 @@ impl Grid {
     /// Use when doing bulk inserts followed by a single `update_bounds()` call.
     #[inline(always)]
     pub fn set_cell_unchecked(&mut self, row: u32, col: u32, cell: Cell) {
+        crate::lookup_cache::notify_write(row, col);
         self.cells.insert((row, col), cell);
     }
 
@@ -78,6 +80,7 @@ impl Grid {
     /// If the cell was at a boundary (max_row or max_col), recalculates bounds.
     pub fn clear_cell(&mut self, row: u32, col: u32) {
         let was_at_boundary = row == self.max_row || col == self.max_col;
+        crate::lookup_cache::notify_write(row, col);
         self.cells.remove(&(row, col));
         
         // Only recalculate bounds if we cleared a cell at a boundary
@@ -89,6 +92,7 @@ impl Grid {
     /// Clears all cells in the given rectangular region without per-cell
     /// bounds recalculation. Bounds are recalculated once at the end.
     pub fn clear_region(&mut self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
+        crate::lookup_cache::notify_write_rect(start_row, end_row, start_col, end_col);
         for row in start_row..=end_row {
             for col in start_col..=end_col {
                 self.cells.remove(&(row, col));

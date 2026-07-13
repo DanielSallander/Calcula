@@ -25,6 +25,7 @@ use crate::cube::{cube_call_key, CubeBinding, CubeCallResult, CubePrefetch, Cube
 use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
+use crate::lookup_cache;
 use crate::style::StyleRegistry;
 
 use std::cell::RefCell;
@@ -239,6 +240,31 @@ impl EvalResult {
             }
             // List and Dict are opaque to flatten — they are treated as single values
             other => vec![other.clone()],
+        }
+    }
+
+    /// Consuming counterpart of `flatten()`: identical output, but MOVES the
+    /// leaves out of an owned value instead of cloning every element.
+    /// NOTE: deliberately mirrors `flatten()` — List/Dict remain opaque single
+    /// values. Do NOT confuse with the separate `flatten_into` helper used by
+    /// script interop, which unpacks List items (different semantics).
+    pub fn into_flatten(self) -> Vec<EvalResult> {
+        match self {
+            EvalResult::Array(arr) => {
+                let mut result = Vec::new();
+                Self::into_flatten_collect(arr, &mut result);
+                result
+            }
+            other => vec![other],
+        }
+    }
+
+    fn into_flatten_collect(arr: Vec<EvalResult>, out: &mut Vec<EvalResult>) {
+        for item in arr {
+            match item {
+                EvalResult::Array(inner) => Self::into_flatten_collect(inner, out),
+                other => out.push(other),
+            }
         }
     }
 }
@@ -744,35 +770,46 @@ impl<'a> Evaluator<'a> {
         let num_rows = max_row - min_row + 1;
         let num_cols = max_col - min_col + 1;
 
+        // Adaptive extraction: for rects larger than the populated-cell count,
+        // one pass over the sparse cell map beats a hash probe per coordinate.
+        // Output is positionally identical either way: row-major, absent cells
+        // materialize as Number(0.0), same conversions.
+        let area = num_rows as u64 * num_cols as u64;
+        let flat: Vec<EvalResult> = if area <= grid.cells.len() as u64 {
+            let mut flat = Vec::with_capacity(area as usize);
+            for r in min_row..=max_row {
+                for c in min_col..=max_col {
+                    flat.push(match grid.get_cell(r, c) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    });
+                }
+            }
+            flat
+        } else {
+            let mut flat = vec![EvalResult::Number(0.0); area as usize];
+            for (&(r, c), cell) in grid.cells.iter() {
+                if r >= min_row && r <= max_row && c >= min_col && c <= max_col {
+                    let idx = (r - min_row) as u64 * num_cols as u64 + (c - min_col) as u64;
+                    flat[idx as usize] = self.cell_value_to_result(&cell.value);
+                }
+            }
+            flat
+        };
+
         if num_rows > 1 && num_cols > 1 {
             // Multi-row, multi-column range → 2D array (array of row arrays)
             // This is needed for VLOOKUP/HLOOKUP/INDEX to work correctly
             let mut rows = Vec::with_capacity(num_rows as usize);
-            for r in min_row..=max_row {
-                let mut row = Vec::with_capacity(num_cols as usize);
-                for c in min_col..=max_col {
-                    let result = match grid.get_cell(r, c) {
-                        Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
-                    };
-                    row.push(result);
-                }
+            let mut iter = flat.into_iter();
+            for _ in 0..num_rows {
+                let row: Vec<EvalResult> = iter.by_ref().take(num_cols as usize).collect();
                 rows.push(EvalResult::Array(row));
             }
             EvalResult::Array(rows)
         } else {
             // Single-row or single-column range → flat 1D array
-            let mut values = Vec::new();
-            for r in min_row..=max_row {
-                for c in min_col..=max_col {
-                    let result = match grid.get_cell(r, c) {
-                        Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Number(0.0),
-                    };
-                    values.push(result);
-                }
-            }
-            EvalResult::Array(values)
+            EvalResult::Array(flat)
         }
     }
 
@@ -1172,7 +1209,7 @@ impl<'a> Evaluator<'a> {
     fn eval_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         let result = match (left, right) {
             (EvalResult::Number(l), EvalResult::Number(r)) => (l - r).abs() < f64::EPSILON,
-            (EvalResult::Text(l), EvalResult::Text(r)) => l.to_uppercase() == r.to_uppercase(),
+            (EvalResult::Text(l), EvalResult::Text(r)) => crate::text_cmp::eq_ci(l, r),
             (EvalResult::Boolean(l), EvalResult::Boolean(r)) => l == r,
             // Cross-type comparisons
             (EvalResult::Number(n), EvalResult::Text(s))
@@ -1202,7 +1239,7 @@ impl<'a> Evaluator<'a> {
                 // String comparison
                 match (left, right) {
                     (EvalResult::Text(l), EvalResult::Text(r)) => {
-                        EvalResult::Boolean(l.to_uppercase() < r.to_uppercase())
+                        EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_lt())
                     }
                     _ => EvalResult::Error(CellError::Value),
                 }
@@ -1215,7 +1252,7 @@ impl<'a> Evaluator<'a> {
             (Some(l), Some(r)) => EvalResult::Boolean(l > r),
             _ => match (left, right) {
                 (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(l.to_uppercase() > r.to_uppercase())
+                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_gt())
                 }
                 _ => EvalResult::Error(CellError::Value),
             },
@@ -1227,7 +1264,7 @@ impl<'a> Evaluator<'a> {
             (Some(l), Some(r)) => EvalResult::Boolean(l <= r),
             _ => match (left, right) {
                 (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(l.to_uppercase() <= r.to_uppercase())
+                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_le())
                 }
                 _ => EvalResult::Error(CellError::Value),
             },
@@ -1239,7 +1276,7 @@ impl<'a> Evaluator<'a> {
             (Some(l), Some(r)) => EvalResult::Boolean(l >= r),
             _ => match (left, right) {
                 (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(l.to_uppercase() >= r.to_uppercase())
+                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_ge())
                 }
                 _ => EvalResult::Error(CellError::Value),
             },
@@ -2822,9 +2859,21 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
+        // FAST PATH eligibility (PERF-03): literal same-sheet 1-D vectors on
+        // both sides. Decided structurally so no argument evaluates twice;
+        // materialization of literal ranges is pure, so deferring it to the
+        // fallback below is unobservable.
+        let fast = self.xlookup_fast_descs(&args[1], &args[2]);
+
         // Evaluate lookup_array and return_array (flatten ranges into flat lists)
-        let lookup_array = self.evaluate(&args[1]).flatten();
-        let return_array = self.evaluate(&args[2]).flatten();
+        let mut arrays_pre = if fast.is_none() {
+            Some((
+                self.evaluate(&args[1]).into_flatten(),
+                self.evaluate(&args[2]).into_flatten(),
+            ))
+        } else {
+            None
+        };
 
         // match_mode (default 0 = exact match)
         let match_mode: i32 = if args.len() > 4 {
@@ -2853,6 +2902,60 @@ impl<'a> Evaluator<'a> {
         if !matches!(search_mode, 1 | -1 | 2 | -2) {
             return EvalResult::Error(CellError::Value);
         }
+
+        if let Some((key_rect, key_axis, ret_rect, ret_axis, ret_len)) = fast {
+            if match_mode == 0 && search_mode == 1 {
+                use crate::lookup_cache as lc;
+                let grid = self.get_grid_for_sheet(&None);
+                let watch = Self::axis_watch_rect(&key_rect, key_axis);
+                let served = lc::with_active(|cache| {
+                    let key = lc::EntryKey {
+                        grid: Self::grid_addr(grid),
+                        rect: key_rect,
+                        kind: lc::EntryKind::Exact { family: lc::EqFamily::Xlookup, axis: key_axis },
+                    };
+                    cache
+                        .exact(key, [Some(watch), None], || {
+                            lc::ExactIndex::build(
+                                lc::EqFamily::Xlookup,
+                                &self.cache_vector(grid, &key_rect, key_axis),
+                            )
+                        })
+                        .map(|ix| ix.first_match(lc::EqFamily::Xlookup, &lookup_val))
+                });
+                if let Some(Some(io)) = served {
+                    return match io {
+                        Some(idx) if (idx as usize) < ret_len => {
+                            let (r, c) = match ret_axis {
+                                lc::Axis::RectCol(col) => (ret_rect.min_row + idx, col),
+                                lc::Axis::RectRow(row) => (row, ret_rect.min_col + idx),
+                                _ => unreachable!(),
+                            };
+                            match grid.get_cell(r, c) {
+                                Some(cell) => self.cell_value_to_result(&cell.value),
+                                None => EvalResult::Number(0.0),
+                            }
+                        }
+                        Some(_) => EvalResult::Error(CellError::NA),
+                        None => {
+                            if args.len() > 3 {
+                                self.evaluate(&args[3])
+                            } else {
+                                EvalResult::Error(CellError::NA)
+                            }
+                        }
+                    };
+                }
+                // No active pass / cache full: fall through to the legacy path.
+            }
+        }
+        let (lookup_array, return_array) = match arrays_pre.take() {
+            Some(pair) => pair,
+            None => (
+                self.evaluate(&args[1]).into_flatten(),
+                self.evaluate(&args[2]).into_flatten(),
+            ),
+        };
 
         // Find the matching index
         let found_index = match match_mode {
@@ -3303,9 +3406,9 @@ impl<'a> Evaluator<'a> {
         match (a.as_number(), b.as_number()) {
             (Some(na), Some(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
             _ => {
-                let sa = a.as_text().to_uppercase();
-                let sb = b.as_text().to_uppercase();
-                sa.cmp(&sb)
+                let sa = a.as_text();
+                let sb = b.as_text();
+                crate::text_cmp::cmp_ci(&sa, &sb)
             }
         }
     }
@@ -3316,7 +3419,7 @@ impl<'a> Evaluator<'a> {
         match (a, b) {
             (EvalResult::Number(n1), EvalResult::Number(n2)) => (n1 - n2).abs() < f64::EPSILON,
             (EvalResult::Text(s1), EvalResult::Text(s2)) => {
-                s1.to_uppercase() == s2.to_uppercase()
+                crate::text_cmp::eq_ci(s1, s2)
             }
             (EvalResult::Boolean(b1), EvalResult::Boolean(b2)) => b1 == b2,
             // Cross-type: number vs text that parses to number
@@ -3580,8 +3683,14 @@ impl<'a> Evaluator<'a> {
             CriteriaMatch::ExactBool(b) => {
                 matches!(value, EvalResult::Boolean(v) if v == b)
             }
-            CriteriaMatch::ExactText(s) => value.as_text().to_uppercase() == *s,
-            CriteriaMatch::TextNotEqual(s) => value.as_text().to_uppercase() != *s,
+            CriteriaMatch::ExactText(s) => match value {
+                EvalResult::Text(t) => crate::text_cmp::eq_ci_folded(t, s),
+                other => crate::text_cmp::eq_ci_folded(&other.as_text(), s),
+            },
+            CriteriaMatch::TextNotEqual(s) => match value {
+                EvalResult::Text(t) => !crate::text_cmp::eq_ci_folded(t, s),
+                other => !crate::text_cmp::eq_ci_folded(&other.as_text(), s),
+            },
             CriteriaMatch::Compare(op, n) => {
                 if let Some(v) = value.as_number() {
                     match op {
@@ -3604,7 +3713,7 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluates an argument and flattens it into a Vec of individual values.
     fn eval_flat(&self, arg: &Expression) -> Vec<EvalResult> {
-        self.evaluate(arg).flatten()
+        self.evaluate(arg).into_flatten()
     }
 
     // ==================== Conditional Aggregate Functions ====================
@@ -3613,9 +3722,29 @@ impl<'a> Evaluator<'a> {
         if args.len() < 2 || args.len() > 3 {
             return EvalResult::Error(CellError::Value);
         }
-        let range_vals = self.eval_flat(&args[0]);
+        // FAST PATH (PERF-14): text/bool exact-match SUMIF over literal
+        // vectors (bucket sums accumulated in flat order = bit-identical).
+        let fast = self.literal_vector_desc(&args[0]).and_then(|(rect, axis)| {
+            if args.len() == 3 {
+                self.literal_vector_desc(&args[2])
+                    .map(|value| (rect, axis, Some(value)))
+            } else {
+                Some((rect, axis, None))
+            }
+        });
+        let range_vals_pre = if fast.is_none() { Some(self.eval_flat(&args[0])) } else { None };
         let criteria = self.parse_criteria(&self.evaluate(&args[1]));
-        let sum_vals = if args.len() == 3 { self.eval_flat(&args[2]) } else { range_vals.clone() };
+        if let Some((rect, axis, value_desc)) = fast {
+            if let Some(total) = self.criteria_sum_cached(rect, axis, value_desc, &criteria) {
+                return EvalResult::Number(total);
+            }
+        }
+        let range_vals = match range_vals_pre {
+            Some(v) => v,
+            None => self.eval_flat(&args[0]),
+        };
+        let sum_vals_owned = if args.len() == 3 { Some(self.eval_flat(&args[2])) } else { None };
+        let sum_vals: &[EvalResult] = sum_vals_owned.as_deref().unwrap_or(&range_vals);
         let mut total = 0.0;
         for (i, val) in range_vals.iter().enumerate() {
             if self.matches_criteria(val, &criteria) {
@@ -3658,8 +3787,19 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 {
             return EvalResult::Error(CellError::Value);
         }
-        let range_vals = self.eval_flat(&args[0]);
+        // FAST PATH (PERF-14): aggregate index over a literal vector.
+        let fast = self.literal_vector_desc(&args[0]);
+        let range_vals_pre = if fast.is_none() { Some(self.eval_flat(&args[0])) } else { None };
         let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        if let Some((rect, axis)) = fast {
+            if let Some(count) = self.criteria_count_cached(rect, axis, &criteria) {
+                return EvalResult::Number(count as f64);
+            }
+        }
+        let range_vals = match range_vals_pre {
+            Some(v) => v,
+            None => self.eval_flat(&args[0]),
+        };
         let count = range_vals.iter().filter(|v| self.matches_criteria(v, &criteria)).count();
         EvalResult::Number(count as f64)
     }
@@ -3695,7 +3835,8 @@ impl<'a> Evaluator<'a> {
         }
         let range_vals = self.eval_flat(&args[0]);
         let criteria = self.parse_criteria(&self.evaluate(&args[1]));
-        let avg_vals = if args.len() == 3 { self.eval_flat(&args[2]) } else { range_vals.clone() };
+        let avg_vals_owned = if args.len() == 3 { Some(self.eval_flat(&args[2])) } else { None };
+        let avg_vals: &[EvalResult] = avg_vals_owned.as_deref().unwrap_or(&range_vals);
         let mut total = 0.0;
         let mut count = 0usize;
         for (i, val) in range_vals.iter().enumerate() {
@@ -3857,7 +3998,7 @@ impl<'a> Evaluator<'a> {
     fn eval_values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
         match (a, b) {
             (EvalResult::Number(x), EvalResult::Number(y)) => (x - y).abs() < 1e-10,
-            (EvalResult::Text(x), EvalResult::Text(y)) => x.to_uppercase() == y.to_uppercase(),
+            (EvalResult::Text(x), EvalResult::Text(y)) => crate::text_cmp::eq_ci(x, y),
             (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
             _ => false,
         }
@@ -5218,8 +5359,71 @@ impl<'a> Evaluator<'a> {
 
     // ==================== Lookup & Reference Functions (Batch 3) ====================
 
+    /// If the expression is a literal same-sheet rectangular range
+    /// (Range { sheet: None, CellRef..CellRef }), returns its normalized
+    /// 0-based rect: (min_row, max_row, min_col, max_col, rows, cols).
+    /// The coordinate math mirrors eval_range exactly (1-based rows, reversed
+    /// ranges normalized).
+    fn literal_range_rect(&self, expr: &Expression) -> Option<(u32, u32, u32, u32, usize, usize)> {
+        if let Expression::Range { sheet: None, start, end, .. } = expr {
+            if let (
+                Expression::CellRef { col: sc, row: sr, .. },
+                Expression::CellRef { col: ec, row: er, .. },
+            ) = (start.as_ref(), end.as_ref())
+            {
+                let sc_idx = col_to_index(sc);
+                let ec_idx = col_to_index(ec);
+                let sr_idx = sr - 1;
+                let er_idx = er - 1;
+                let (min_row, max_row) = (sr_idx.min(er_idx), sr_idx.max(er_idx));
+                let (min_col, max_col) = (sc_idx.min(ec_idx), sc_idx.max(ec_idx));
+                let rows = (max_row - min_row + 1) as usize;
+                let cols = (max_col - min_col + 1) as usize;
+                return Some((min_row, max_row, min_col, max_col, rows, cols));
+            }
+        }
+        None
+    }
+
     fn fn_index(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+
+        // Fast path: INDEX over a literal same-sheet range fetches ONE cell
+        // directly instead of materializing (and double-copying) the whole
+        // range. Replicates the slow path's addressing exactly, INCLUDING its
+        // quirks: flat row-major indexing (a col_num overflow WRAPS into the
+        // next row rather than erroring — do not "fix" this here), the 1-D
+        // branch ignoring col_num entirely, and row/col_num 0 behaving as 1.
+        // Skipping the array evaluation is unobservable (a pure grid read);
+        // args[1]/args[2] evaluate in the same order as the slow path.
+        if let Some((min_row, _, min_col, _, rows, cols)) = self.literal_range_rect(&args[0]) {
+            let row_num = match self.evaluate(&args[1]).as_number() {
+                Some(n) if n >= 1.0 => (n as usize) - 1,
+                Some(n) if n == 0.0 => 0,
+                _ => return EvalResult::Error(CellError::Value),
+            };
+            let col_num = if args.len() == 3 {
+                match self.evaluate(&args[2]).as_number() {
+                    Some(n) if n >= 1.0 => (n as usize) - 1,
+                    Some(n) if n == 0.0 => 0,
+                    _ => return EvalResult::Error(CellError::Value),
+                }
+            } else {
+                0
+            };
+            let flat_idx = if cols <= 1 { row_num } else { row_num * cols + col_num };
+            if flat_idx >= rows * cols {
+                return EvalResult::Error(CellError::Ref);
+            }
+            let r = min_row + (flat_idx / cols) as u32;
+            let c = min_col + (flat_idx % cols) as u32;
+            let grid = self.get_grid_for_sheet(&None);
+            return match grid.get_cell(r, c) {
+                Some(cell) => self.cell_value_to_result(&cell.value),
+                None => EvalResult::Number(0.0),
+            };
+        }
+
         let array = self.eval_flat(&args[0]);
         let row_num = match self.evaluate(&args[1]).as_number() {
             Some(n) if n >= 1.0 => (n as usize) - 1,
@@ -5267,20 +5471,36 @@ impl<'a> Evaluator<'a> {
     fn fn_match(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
         let lookup_val = self.evaluate(&args[0]);
-        let lookup_array = self.eval_flat(&args[1]);
+        // FAST PATH (PERF-03): literal vector -> pass-cache index/binary search.
+        let fast_vec = self.literal_vector_desc(&args[1]);
+        let lookup_array_pre = if fast_vec.is_none() { Some(self.eval_flat(&args[1])) } else { None };
         let match_type = if args.len() == 3 {
             match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) }
         } else { 1 };
+
+        if let Some((rect, axis)) = fast_vec {
+            if let Some(result) = self.match_cached(&lookup_val, rect, axis, match_type) {
+                return result;
+            }
+        }
+        let lookup_array = match lookup_array_pre {
+            Some(v) => v,
+            None => self.eval_flat(&args[1]),
+        };
 
         match match_type {
             0 => {
                 // Exact match (supports wildcards)
                 let is_wildcard = matches!(&lookup_val, EvalResult::Text(s) if s.contains('*') || s.contains('?'));
+                let pattern = if is_wildcard {
+                    Some(lookup_val.as_text().to_uppercase())
+                } else {
+                    None
+                };
                 for (i, val) in lookup_array.iter().enumerate() {
-                    if is_wildcard {
-                        let pattern = lookup_val.as_text().to_uppercase();
+                    if let Some(pattern) = &pattern {
                         let text = val.as_text().to_uppercase();
-                        if self.xlookup_wildcard_match(&pattern, &text) {
+                        if self.xlookup_wildcard_match(pattern, &text) {
                             return EvalResult::Number((i + 1) as f64);
                         }
                     } else if self.eval_values_equal(&lookup_val, val) {
@@ -11695,6 +11915,459 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 impl<'a> Evaluator<'a> {
+
+    // ==================== Lookup index cache (PERF-03 / PERF-14) ====================
+    //
+    // The fast paths below serve lookups from a pass-scoped index instead of
+    // re-scanning their ranges per call (design + invalidation rules in
+    // lookup_cache.rs). Every fast path:
+    //   - decides eligibility STRUCTURALLY, never evaluating an argument twice
+    //     (literal ranges are pure reads, so skipping their materialization is
+    //     unobservable and the relative order of effectful args is preserved);
+    //   - mirrors the legacy path bug-for-bug (absent cells materialize as
+    //     Number(0.0), first-match-wins, error cells never match, whole-column
+    //     refs use the populated-only compacted ordering);
+    //   - returns None to fall back to the UNCHANGED linear scan whenever the
+    //     situation is not provably identical (no active pass, mixed-type or
+    //     unsorted keys for approximate modes, wildcards, cache cap reached).
+
+    /// Cache identity of a grid for the duration of one pass.
+    #[inline]
+    fn grid_addr(grid: &Grid) -> usize {
+        grid as *const Grid as usize
+    }
+
+    /// Describes a cache-eligible key vector: a literal same-sheet rect
+    /// (1D column/row, or 2D flattened row-major) or a single whole-column
+    /// reference (populated-only, ascending).
+    fn literal_vector_desc(
+        &self,
+        expr: &Expression,
+    ) -> Option<(lookup_cache::Rect, lookup_cache::Axis)> {
+        if let Some((min_row, max_row, min_col, max_col, rows, cols)) =
+            self.literal_range_rect(expr)
+        {
+            let rect = lookup_cache::Rect { min_row, max_row, min_col, max_col };
+            let axis = if cols == 1 {
+                lookup_cache::Axis::RectCol(min_col)
+            } else if rows == 1 {
+                lookup_cache::Axis::RectRow(min_row)
+            } else {
+                lookup_cache::Axis::RectFlat
+            };
+            return Some((rect, axis));
+        }
+        if let Expression::ColumnRef { sheet: None, start_col, end_col, .. } = expr {
+            let sc = col_to_index(start_col);
+            let ec = col_to_index(end_col);
+            if sc == ec {
+                let rect = lookup_cache::Rect {
+                    min_row: 0,
+                    max_row: u32::MAX,
+                    min_col: sc,
+                    max_col: sc,
+                };
+                return Some((rect, lookup_cache::Axis::WholeCol(sc)));
+            }
+        }
+        None
+    }
+
+    /// The sub-rectangle a key vector actually reads (for invalidation).
+    fn axis_watch_rect(rect: &lookup_cache::Rect, axis: lookup_cache::Axis) -> lookup_cache::Rect {
+        match axis {
+            lookup_cache::Axis::RectCol(col) => lookup_cache::Rect {
+                min_row: rect.min_row,
+                max_row: rect.max_row,
+                min_col: col,
+                max_col: col,
+            },
+            lookup_cache::Axis::RectRow(row) => lookup_cache::Rect {
+                min_row: row,
+                max_row: row,
+                min_col: rect.min_col,
+                max_col: rect.max_col,
+            },
+            lookup_cache::Axis::RectFlat => *rect,
+            lookup_cache::Axis::WholeCol(col) => lookup_cache::Rect {
+                min_row: 0,
+                max_row: u32::MAX,
+                min_col: col,
+                max_col: col,
+            },
+        }
+    }
+
+    /// Materializes the key vector for `axis` exactly as the corresponding
+    /// evaluation path would see it (eval_range padding rules for rects,
+    /// eval_column_ref's populated-only ascending order for whole columns).
+    fn cache_vector(
+        &self,
+        grid: &Grid,
+        rect: &lookup_cache::Rect,
+        axis: lookup_cache::Axis,
+    ) -> Vec<EvalResult> {
+        let fetch = |r: u32, c: u32| match grid.get_cell(r, c) {
+            Some(cell) => self.cell_value_to_result(&cell.value),
+            None => EvalResult::Number(0.0),
+        };
+        match axis {
+            lookup_cache::Axis::RectCol(col) => {
+                (rect.min_row..=rect.max_row).map(|r| fetch(r, col)).collect()
+            }
+            lookup_cache::Axis::RectRow(row) => {
+                (rect.min_col..=rect.max_col).map(|c| fetch(row, c)).collect()
+            }
+            lookup_cache::Axis::RectFlat => {
+                let rows = (rect.max_row - rect.min_row + 1) as usize;
+                let cols = (rect.max_col - rect.min_col + 1) as usize;
+                let mut out = Vec::with_capacity(rows * cols);
+                for r in rect.min_row..=rect.max_row {
+                    for c in rect.min_col..=rect.max_col {
+                        out.push(fetch(r, c));
+                    }
+                }
+                out
+            }
+            lookup_cache::Axis::WholeCol(col) => {
+                if (grid.max_row as usize) <= grid.cells.len() {
+                    let mut out = Vec::new();
+                    for row in 0..=grid.max_row {
+                        if let Some(cell) = grid.get_cell(row, col) {
+                            out.push(self.cell_value_to_result(&cell.value));
+                        }
+                    }
+                    out
+                } else {
+                    let mut rows: Vec<(u32, &crate::cell::Cell)> = grid
+                        .cells
+                        .iter()
+                        .filter_map(|((r, c), cell)| if *c == col { Some((*r, cell)) } else { None })
+                        .collect();
+                    rows.sort_by_key(|(r, _)| *r);
+                    rows.into_iter()
+                        .map(|(_, cell)| self.cell_value_to_result(&cell.value))
+                        .collect()
+                }
+            }
+        }
+    }
+
+    /// Serve VLOOKUP/HLOOKUP over a literal same-sheet 2D rect from the pass
+    /// cache. Returns None to fall back to the legacy scan.
+    #[allow(clippy::too_many_arguments)]
+    fn vlookup_hlookup_cached(
+        &self,
+        lookup_val: &EvalResult,
+        rect: lookup_cache::Rect,
+        rows_n: usize,
+        cols_n: usize,
+        index_num: usize,
+        range_lookup: bool,
+        hlookup: bool,
+    ) -> Option<EvalResult> {
+        use crate::lookup_cache as lc;
+        // Same bounds outcome as the legacy path, checked before any scan.
+        let cross_len = if hlookup { rows_n } else { cols_n };
+        if index_num > cross_len {
+            return Some(EvalResult::Error(CellError::Ref));
+        }
+        let grid = self.get_grid_for_sheet(&None);
+        let axis = if hlookup {
+            lc::Axis::RectRow(rect.min_row)
+        } else {
+            lc::Axis::RectCol(rect.min_col)
+        };
+        let watch = Self::axis_watch_rect(&rect, axis);
+        let key_grid = Self::grid_addr(grid);
+
+        let idx_opt: Option<usize> = if range_lookup {
+            // Approximate mode: binary search ONLY on homogeneous verified-
+            // sorted keys probed by a same-class needle; anything else keeps
+            // the legacy scan (preserving its behavior on unsorted/mixed data).
+            let served = lc::with_active(|cache| {
+                let key = lc::EntryKey {
+                    grid: key_grid,
+                    rect,
+                    kind: lc::EntryKind::Sorted {
+                        family: lc::CmpFamily::CompareValues,
+                        axis,
+                        descending: false,
+                    },
+                };
+                let sk = cache.sorted(key, [Some(watch), None], || {
+                    lc::SortedKeys::build(
+                        lc::CmpFamily::CompareValues,
+                        &self.cache_vector(grid, &rect, axis),
+                        false,
+                    )
+                })?;
+                match lookup_val {
+                    EvalResult::Number(x) if !x.is_nan() && sk.is_numbers() => {
+                        Some(sk.rightmost_le_number(*x))
+                    }
+                    EvalResult::Text(s) if sk.is_texts() => {
+                        Some(sk.rightmost_le_text(&s.to_uppercase()))
+                    }
+                    _ => None,
+                }
+            });
+            match served {
+                Some(Some(io)) => io,
+                _ => return None,
+            }
+        } else {
+            let served = lc::with_active(|cache| {
+                let key = lc::EntryKey {
+                    grid: key_grid,
+                    rect,
+                    kind: lc::EntryKind::Exact { family: lc::EqFamily::Vlookup, axis },
+                };
+                cache
+                    .exact(key, [Some(watch), None], || {
+                        lc::ExactIndex::build(
+                            lc::EqFamily::Vlookup,
+                            &self.cache_vector(grid, &rect, axis),
+                        )
+                    })
+                    .map(|ix| ix.first_match(lc::EqFamily::Vlookup, lookup_val).map(|i| i as usize))
+            });
+            match served {
+                Some(Some(io)) => io,
+                _ => return None,
+            }
+        };
+
+        Some(match idx_opt {
+            Some(i) => {
+                let (r, c) = if hlookup {
+                    (rect.min_row + index_num as u32 - 1, rect.min_col + i as u32)
+                } else {
+                    (rect.min_row + i as u32, rect.min_col + index_num as u32 - 1)
+                };
+                match grid.get_cell(r, c) {
+                    Some(cell) => self.cell_value_to_result(&cell.value),
+                    None => EvalResult::Number(0.0),
+                }
+            }
+            None => EvalResult::Error(CellError::NA),
+        })
+    }
+
+    /// Serve MATCH over a literal vector from the pass cache.
+    /// Returns None to fall back to the legacy scan.
+    fn match_cached(
+        &self,
+        lookup_val: &EvalResult,
+        rect: lookup_cache::Rect,
+        axis: lookup_cache::Axis,
+        match_type: i32,
+    ) -> Option<EvalResult> {
+        use crate::lookup_cache as lc;
+        let grid = self.get_grid_for_sheet(&None);
+        let watch = Self::axis_watch_rect(&rect, axis);
+        let key_grid = Self::grid_addr(grid);
+        let to_result = |io: Option<usize>| match io {
+            Some(i) => EvalResult::Number((i + 1) as f64),
+            None => EvalResult::Error(CellError::NA),
+        };
+        match match_type {
+            0 => {
+                if matches!(lookup_val, EvalResult::Text(s) if s.contains('*') || s.contains('?')) {
+                    return None; // wildcard exact match keeps the scan
+                }
+                let served = lc::with_active(|cache| {
+                    let key = lc::EntryKey {
+                        grid: key_grid,
+                        rect,
+                        kind: lc::EntryKind::Exact { family: lc::EqFamily::Match, axis },
+                    };
+                    cache
+                        .exact(key, [Some(watch), None], || {
+                            lc::ExactIndex::build(
+                                lc::EqFamily::Match,
+                                &self.cache_vector(grid, &rect, axis),
+                            )
+                        })
+                        .map(|ix| {
+                            ix.first_match(lc::EqFamily::Match, lookup_val).map(|i| i as usize)
+                        })
+                });
+                match served {
+                    Some(Some(io)) => Some(to_result(io)),
+                    _ => None,
+                }
+            }
+            1 | -1 => {
+                let descending = match_type == -1;
+                let served = lc::with_active(|cache| {
+                    let key = lc::EntryKey {
+                        grid: key_grid,
+                        rect,
+                        kind: lc::EntryKind::Sorted {
+                            family: lc::CmpFamily::XlookupCompare,
+                            axis,
+                            descending,
+                        },
+                    };
+                    let sk = cache.sorted(key, [Some(watch), None], || {
+                        lc::SortedKeys::build(
+                            lc::CmpFamily::XlookupCompare,
+                            &self.cache_vector(grid, &rect, axis),
+                            descending,
+                        )
+                    })?;
+                    // Same-class rule: xlookup_compare compares numerically
+                    // only when BOTH sides coerce, else by as_text — a
+                    // cross-class probe is not binary-searchable.
+                    if let Some(x) = lookup_val.as_number() {
+                        if !x.is_nan() && sk.is_numbers() {
+                            return Some(if descending {
+                                sk.rightmost_ge_number(x)
+                            } else {
+                                sk.rightmost_le_number(x)
+                            });
+                        }
+                    } else if sk.is_texts() {
+                        let folded = lookup_val.as_text().to_uppercase();
+                        return Some(if descending {
+                            sk.rightmost_ge_text(&folded)
+                        } else {
+                            sk.rightmost_le_text(&folded)
+                        });
+                    }
+                    None
+                });
+                match served {
+                    Some(Some(io)) => Some(to_result(io)),
+                    _ => None,
+                }
+            }
+            _ => None, // invalid match_type: the legacy path produces its error
+        }
+    }
+
+    /// Structural eligibility for the XLOOKUP fast path: both arrays literal
+    /// same-sheet 1D rect vectors. Returns the descriptors + return length.
+    fn xlookup_fast_descs(
+        &self,
+        key_expr: &Expression,
+        ret_expr: &Expression,
+    ) -> Option<(
+        lookup_cache::Rect,
+        lookup_cache::Axis,
+        lookup_cache::Rect,
+        lookup_cache::Axis,
+        usize,
+    )> {
+        let (k_rect, k_axis) = self.literal_vector_desc(key_expr)?;
+        let (r_rect, r_axis) = self.literal_vector_desc(ret_expr)?;
+        let one_d = |a: &lookup_cache::Axis| {
+            matches!(a, lookup_cache::Axis::RectCol(_) | lookup_cache::Axis::RectRow(_))
+        };
+        if !one_d(&k_axis) || !one_d(&r_axis) {
+            return None;
+        }
+        let ret_len = match r_axis {
+            lookup_cache::Axis::RectCol(_) => (r_rect.max_row - r_rect.min_row + 1) as usize,
+            lookup_cache::Axis::RectRow(_) => (r_rect.max_col - r_rect.min_col + 1) as usize,
+            _ => unreachable!(),
+        };
+        Some((k_rect, k_axis, r_rect, r_axis, ret_len))
+    }
+
+    /// Serve COUNTIF over a literal vector from the pass cache.
+    fn criteria_count_cached(
+        &self,
+        rect: lookup_cache::Rect,
+        axis: lookup_cache::Axis,
+        criteria: &CriteriaMatch,
+    ) -> Option<u32> {
+        use crate::lookup_cache as lc;
+        if matches!(criteria, CriteriaMatch::Wildcard(_)) {
+            return None;
+        }
+        let grid = self.get_grid_for_sheet(&None);
+        let watch = Self::axis_watch_rect(&rect, axis);
+        let served = lc::with_active(|cache| {
+            let key = lc::EntryKey {
+                grid: Self::grid_addr(grid),
+                rect,
+                kind: lc::EntryKind::Criteria { axis, value: None },
+            };
+            cache
+                .criteria(key, [Some(watch), None], || {
+                    lc::CriteriaIndex::build(&self.cache_vector(grid, &rect, axis), None)
+                })
+                .map(|ci| match criteria {
+                    CriteriaMatch::ExactNumber(n) => ci.count_exact_number(*n),
+                    CriteriaMatch::ExactBool(b) => ci.count_exact_bool(*b),
+                    CriteriaMatch::ExactText(s) => ci.count_exact_text(s),
+                    CriteriaMatch::TextNotEqual(s) => ci.count_text_not_equal(s),
+                    CriteriaMatch::Compare(op, n) => match op {
+                        CriteriaOp::Greater => ci.count_greater(*n),
+                        CriteriaOp::GreaterEqual => ci.count_greater_equal(*n),
+                        CriteriaOp::Less => ci.count_less(*n),
+                        CriteriaOp::LessEqual => ci.count_less_equal(*n),
+                        CriteriaOp::NotEqual => ci.count_not_equal(*n),
+                    },
+                    CriteriaMatch::Wildcard(_) => unreachable!(),
+                })
+        });
+        match served {
+            Some(Some(count)) => Some(count),
+            _ => None,
+        }
+    }
+
+    /// Serve text/bool exact-match SUMIF from the pass cache. Bucket sums are
+    /// accumulated in flat (scan) order at build, so results are bit-identical.
+    fn criteria_sum_cached(
+        &self,
+        rect: lookup_cache::Rect,
+        axis: lookup_cache::Axis,
+        value_desc: Option<(lookup_cache::Rect, lookup_cache::Axis)>,
+        criteria: &CriteriaMatch,
+    ) -> Option<f64> {
+        use crate::lookup_cache as lc;
+        if !matches!(criteria, CriteriaMatch::ExactText(_) | CriteriaMatch::ExactBool(_)) {
+            return None; // numeric/compare SUMIF keeps the scan (float order)
+        }
+        let grid = self.get_grid_for_sheet(&None);
+        let watch = Self::axis_watch_rect(&rect, axis);
+        let value_watch = value_desc
+            .map(|(vr, va)| Self::axis_watch_rect(&vr, va))
+            .unwrap_or(watch);
+        let served = lc::with_active(|cache| {
+            let key = lc::EntryKey {
+                grid: Self::grid_addr(grid),
+                rect,
+                kind: lc::EntryKind::Criteria {
+                    axis,
+                    value: Some(value_desc.map(|(vr, _)| vr).unwrap_or(rect)),
+                },
+            };
+            cache
+                .criteria(key, [Some(watch), Some(value_watch)], || {
+                    let vals = self.cache_vector(grid, &rect, axis);
+                    let paired = match value_desc {
+                        Some((vr, va)) => self.cache_vector(grid, &vr, va),
+                        None => vals.clone(),
+                    };
+                    lc::CriteriaIndex::build(&vals, Some(&paired))
+                })
+                .map(|ci| match criteria {
+                    CriteriaMatch::ExactText(s) => ci.sum_exact_text(s),
+                    CriteriaMatch::ExactBool(b) => ci.sum_exact_bool(*b),
+                    _ => unreachable!(),
+                })
+        });
+        match served {
+            Some(Some(total)) => Some(total),
+            _ => None,
+        }
+    }
+
     // ==================== VLOOKUP / HLOOKUP / LOOKUP ====================
 
     fn fn_vlookup(&self, args: &[Expression]) -> EvalResult {
@@ -11708,7 +12381,19 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
-        let table = self.evaluate(&args[1]);
+        // FAST PATH eligibility (PERF-03): literal same-sheet TRUE-2D rect.
+        // 1-D rects keep the legacy path on purpose: eval_range materializes
+        // them FLAT and table_row_views then treats the vector as a single
+        // ROW — a load-bearing quirk this fast path must not change.
+        let fast_rect = self
+            .literal_range_rect(&args[1])
+            .filter(|&(_, _, _, _, rows, cols)| rows > 1 && cols > 1);
+        let table_pre = if fast_rect.is_none() {
+            Some(self.evaluate(&args[1]))
+        } else {
+            None
+        };
+
         let col_index = match self.evaluate(&args[2]).as_number() {
             Some(n) => n as usize,
             None => return EvalResult::Error(CellError::Value),
@@ -11727,8 +12412,23 @@ impl<'a> Evaluator<'a> {
             true
         };
 
-        // Extract table as 2D rows
-        let rows = self.extract_2d_rows(&table);
+        if let Some((min_row, max_row, min_col, max_col, rows_n, cols_n)) = fast_rect {
+            let rect = lookup_cache::Rect { min_row, max_row, min_col, max_col };
+            if let Some(result) = self.vlookup_hlookup_cached(
+                &lookup_val, rect, rows_n, cols_n, col_index, range_lookup, false,
+            ) {
+                return result;
+            }
+        }
+
+        // Legacy scan (ineligible arg, no active pass, or unusable sorted keys).
+        let table = match table_pre {
+            Some(t) => t,
+            None => self.evaluate(&args[1]),
+        };
+
+        // View table as 2D rows (borrowed — no per-call table clone)
+        let rows = self.table_row_views(&table);
         if rows.is_empty() {
             return EvalResult::Error(CellError::NA);
         }
@@ -11773,7 +12473,17 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
-        let table = self.evaluate(&args[1]);
+        // FAST PATH (PERF-03): literal same-sheet TRUE-2D rect (see fn_vlookup
+        // for why 1-D rects must keep the legacy path).
+        let fast_rect = self
+            .literal_range_rect(&args[1])
+            .filter(|&(_, _, _, _, rows, cols)| rows > 1 && cols > 1);
+        let table_pre = if fast_rect.is_none() {
+            Some(self.evaluate(&args[1]))
+        } else {
+            None
+        };
+
         let row_index = match self.evaluate(&args[2]).as_number() {
             Some(n) => n as usize,
             None => return EvalResult::Error(CellError::Value),
@@ -11792,12 +12502,26 @@ impl<'a> Evaluator<'a> {
             true
         };
 
-        let rows = self.extract_2d_rows(&table);
+        if let Some((min_row, max_row, min_col, max_col, rows_n, cols_n)) = fast_rect {
+            let rect = lookup_cache::Rect { min_row, max_row, min_col, max_col };
+            if let Some(result) = self.vlookup_hlookup_cached(
+                &lookup_val, rect, rows_n, cols_n, row_index, range_lookup, true,
+            ) {
+                return result;
+            }
+        }
+
+        let table = match table_pre {
+            Some(t) => t,
+            None => self.evaluate(&args[1]),
+        };
+
+        let rows = self.table_row_views(&table);
         if rows.is_empty() || row_index > rows.len() {
             return EvalResult::Error(CellError::Ref);
         }
 
-        let first_row = &rows[0];
+        let first_row = rows[0];
 
         if range_lookup {
             let mut best_col: Option<usize> = None;
@@ -11833,13 +12557,15 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
-        let lookup_vector = self.evaluate(&args[1]).flatten();
+        let lookup_vector = self.evaluate(&args[1]).into_flatten();
 
-        let result_vector = if args.len() == 3 {
-            self.evaluate(&args[2]).flatten()
+        let result_vector_owned = if args.len() == 3 {
+            Some(self.evaluate(&args[2]).into_flatten())
         } else {
-            lookup_vector.clone()
+            None
         };
+        let result_vector: &[EvalResult] =
+            result_vector_owned.as_deref().unwrap_or(&lookup_vector);
 
         // Approximate match: find largest value <= lookup_val (assumed sorted ascending)
         let mut best_idx: Option<usize> = None;
@@ -11857,7 +12583,32 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// Borrowing counterpart of `extract_2d_rows`: views the table as rows
+    /// WITHOUT cloning any element (same shape rules, including the flat-1D
+    /// "single row" interpretation). Callers clone only the matched cell.
+    fn table_row_views<'t>(&self, table: &'t EvalResult) -> Vec<&'t [EvalResult]> {
+        match table {
+            EvalResult::Array(items) => {
+                if items.is_empty() {
+                    return Vec::new();
+                }
+                match &items[0] {
+                    EvalResult::Array(_) => items
+                        .iter()
+                        .map(|row| match row {
+                            EvalResult::Array(cols) => cols.as_slice(),
+                            other => std::slice::from_ref(other),
+                        })
+                        .collect(),
+                    _ => vec![items.as_slice()],
+                }
+            }
+            other => vec![std::slice::from_ref(other)],
+        }
+    }
+
     /// Helper: extract 2D rows from an EvalResult (typically an Array from a range).
+    #[allow(dead_code)]
     fn extract_2d_rows(&self, table: &EvalResult) -> Vec<Vec<EvalResult>> {
         match table {
             EvalResult::Array(items) => {
@@ -11891,9 +12642,11 @@ impl<'a> Evaluator<'a> {
                 if na < nb { -1 } else if na > nb { 1 } else { 0 }
             }
             (EvalResult::Text(ta), EvalResult::Text(tb)) => {
-                let la = ta.to_uppercase();
-                let lb = tb.to_uppercase();
-                if la < lb { -1 } else if la > lb { 1 } else { 0 }
+                match crate::text_cmp::cmp_ci(ta, tb) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Greater => 1,
+                    std::cmp::Ordering::Equal => 0,
+                }
             }
             (EvalResult::Number(_), _) => -1,
             (_, EvalResult::Number(_)) => 1,
@@ -16160,5 +16913,212 @@ mod cube_serve_tests {
         let ast = parser::parse(r#"=CUBEVALUE("Sales","[Revenue]")"#).unwrap();
         let ev = Evaluator::new(&grid);
         assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::NA));
+    }
+}
+
+
+#[cfg(test)]
+mod lookup_cache_differential_tests {
+    //! Differential battery: every cache-served lookup/criteria result must be
+    //! IDENTICAL to the legacy scan's result — including quirks (empty cells
+    //! materializing as 0.0, first-match-wins across epsilon-near duplicates,
+    //! ASCII-vs-Unicode case folds, cross-typing, whole-column compaction).
+
+    use super::*;
+    use crate::cell::Cell;
+    use crate::grid::Grid;
+    use crate::lookup_cache;
+
+    fn eval_formula(grid: &Grid, formula: &str) -> EvalResult {
+        let ast = parser::parse(formula).expect("formula parses");
+        let eval = Evaluator::new(grid);
+        eval.evaluate(&ast)
+    }
+
+    fn error_cell(e: CellError) -> Cell {
+        let mut c = Cell::new_number(0.0);
+        c.value = CellValue::Error(e);
+        c
+    }
+
+    /// Mixed-type lookup table in A1:C12 (key col A, payloads B/C), sorted
+    /// numeric E1:F6, sorted text G1:H5, sparse whole-column data in H,
+    /// descending numbers in J1:J4.
+    fn nasty_grid() -> Grid {
+        let mut g = Grid::new();
+        g.set_cell(0, 0, Cell::new_text("Apple".to_string()));
+        g.set_cell(1, 0, Cell::new_number(5.0));
+        g.set_cell(2, 0, Cell::new_text("apple".to_string())); // case dup
+        g.set_cell(3, 0, Cell::new_number(5.0 + 0.5e-10)); // epsilon-near dup
+        g.set_cell(4, 0, Cell::new_boolean(true));
+        // row 5 col 0 EMPTY -> materializes as Number(0.0)
+        g.set_cell(6, 0, Cell::new_text("STRASSE".to_string()));
+        g.set_cell(7, 0, Cell::new_text("Stra\u{df}e".to_string())); // unicode fold
+        g.set_cell(8, 0, Cell::new_text("5".to_string())); // parseable text
+        g.set_cell(9, 0, error_cell(CellError::Div0));
+        g.set_cell(10, 0, Cell::new_number(0.0)); // explicit zero AFTER the empty
+        g.set_cell(11, 0, Cell::new_text("zebra".to_string()));
+        for r in 0..12u32 {
+            g.set_cell(r, 1, Cell::new_number(100.0 + r as f64));
+            g.set_cell(r, 2, Cell::new_text(format!("p{}", r)));
+        }
+        // Sorted numeric key column E (col 4); payload F left mostly empty.
+        for (i, v) in [1.0, 3.0, 3.0, 7.0, 10.0, 15.0].iter().enumerate() {
+            g.set_cell(i as u32, 4, Cell::new_number(*v));
+        }
+        g.set_cell(0, 5, Cell::new_text("f0".to_string()));
+        // Sorted text key column G (col 6).
+        for (i, v) in ["alpha", "beta", "beta", "delta", "zeta"].iter().enumerate() {
+            g.set_cell(i as u32, 6, Cell::new_text(v.to_string()));
+        }
+        // Sparse whole-column data H (col 7).
+        g.set_cell(2, 7, Cell::new_text("x".to_string()));
+        g.set_cell(5, 7, Cell::new_number(9.0));
+        g.set_cell(9, 7, Cell::new_text("x".to_string()));
+        // Descending numbers J (col 9).
+        for (i, v) in [9.0, 7.0, 5.0, 1.0].iter().enumerate() {
+            g.set_cell(i as u32, 9, Cell::new_number(*v));
+        }
+        g
+    }
+
+    const FORMULAS: &[&str] = &[
+        // ---- VLOOKUP exact ----
+        "=VLOOKUP(\"APPLE\",A1:C12,2,FALSE)",
+        "=VLOOKUP(\"apple\",A1:C12,3,FALSE)",
+        "=VLOOKUP(5,A1:C12,2,FALSE)",
+        "=VLOOKUP(5.00000000004,A1:C12,2,FALSE)", // inside 1e-10 of rows 2 AND 4
+        "=VLOOKUP(0,A1:C12,2,FALSE)",             // empty row 6 (as 0.0) beats row 11
+        "=VLOOKUP(TRUE,A1:C12,2,FALSE)",
+        "=VLOOKUP(\"stra\u{df}e\",A1:C12,2,FALSE)", // ASCII fold: matches row 8 only
+        "=VLOOKUP(\"strasse\",A1:C12,2,FALSE)",
+        "=VLOOKUP(\"5\",A1:C12,2,FALSE)",       // no cross-typing in VLOOKUP
+        "=VLOOKUP(\"missing\",A1:C12,2,FALSE)",
+        "=VLOOKUP(9,A1:C12,5,FALSE)",             // col bound -> #REF
+        // ---- VLOOKUP approximate ----
+        "=VLOOKUP(3,E1:F6,1,TRUE)",
+        "=VLOOKUP(0.5,E1:F6,1,TRUE)",
+        "=VLOOKUP(100,E1:F6,2,TRUE)",
+        "=VLOOKUP(\"m\",E1:F6,1,TRUE)",         // class mismatch -> scan fallback
+        "=VLOOKUP(6,A1:C12,2,TRUE)",               // unsorted mixed -> scan fallback
+        "=VLOOKUP(\"beta\",G1:H5,1,TRUE)",
+        "=VLOOKUP(\"c\",G1:H5,1,TRUE)",
+        // ---- HLOOKUP ----
+        "=HLOOKUP(\"apple\",A1:C12,3,FALSE)",
+        "=HLOOKUP(100,A1:C12,2,FALSE)",
+        "=HLOOKUP(\"nope\",A1:C12,2,FALSE)",
+        // ---- MATCH exact ----
+        "=MATCH(\"apple\",A1:A12,0)",
+        "=MATCH(5,A1:A12,0)",
+        "=MATCH(0,A1:A12,0)",
+        "=MATCH(\"zebra\",A1:A12,0)",
+        "=MATCH(\"app*\",A1:A12,0)",             // wildcard -> scan
+        "=MATCH(\"p1\",A1:C12,0)",               // 2D flattened row-major
+        "=MATCH(\"x\",H:H,0)",                    // whole-column compaction
+        "=MATCH(9,H:H,0)",
+        // ---- MATCH approximate ----
+        "=MATCH(7,E1:E6,1)",
+        "=MATCH(2,E1:E6,1)",
+        "=MATCH(0.5,E1:E6,1)",
+        "=MATCH(TRUE,E1:E6,1)",                     // bool coerces (xlookup_compare)
+        "=MATCH(\"gamma\",G1:G5,1)",
+        "=MATCH(6,J1:J4,-1)",
+        "=MATCH(10,J1:J4,-1)",
+        "=MATCH(0.5,J1:J4,-1)",
+        // ---- XLOOKUP exact ----
+        "=XLOOKUP(5,A1:A12,B1:B12)",
+        "=XLOOKUP(\"5\",A1:A12,B1:B12)",          // cross-typing both directions
+        "=XLOOKUP(\"apple\",A1:A12,B1:B12)",
+        "=XLOOKUP(\"nope\",A1:A12,B1:B12)",
+        "=XLOOKUP(\"nope\",A1:A12,B1:B12,\"fallback\")",
+        "=XLOOKUP(\"zebra\",A1:A12,B1:B5)",       // hit beyond return len -> #N/A
+        "=XLOOKUP(TRUE,A1:A12,C1:C12)",
+        // ---- COUNTIF ----
+        "=COUNTIF(A1:A12,\"apple\")",
+        "=COUNTIF(A1:A12,5)",
+        "=COUNTIF(A1:A12,\">4\")",
+        "=COUNTIF(A1:A12,\"<=1\")",
+        "=COUNTIF(A1:A12,\"<>5\")",
+        "=COUNTIF(A1:A12,\"<>apple\")",
+        "=COUNTIF(A1:A12,TRUE)",
+        "=COUNTIF(A1:A12,\"z*\")",                // wildcard -> scan
+        "=COUNTIF(A1:A12,0)",                        // counts the EMPTY cell too
+        "=COUNTIF(H:H,\"x\")",
+        // ---- SUMIF ----
+        "=SUMIF(A1:A12,\"apple\",B1:B12)",
+        "=SUMIF(A1:A12,TRUE,B1:B12)",
+        "=SUMIF(A1:A12,\"apple\")",               // 2-arg: sums the range itself
+        "=SUMIF(A1:A12,5,B1:B12)",                   // numeric -> scan fallback
+        "=SUMIF(A1:A12,\"apple\",B1:B3)",          // shorter sum range
+    ];
+
+    #[test]
+    fn cached_results_equal_scan_results() {
+        let grid = nasty_grid();
+        for f in FORMULAS {
+            let scanned = eval_formula(&grid, f);
+            let (first, second) = {
+                let _pass = lookup_cache::begin_pass();
+                (eval_formula(&grid, f), eval_formula(&grid, f))
+            };
+            assert_eq!(first, second, "index build vs hit mismatch for {}", f);
+            assert_eq!(scanned, first, "cache diverged from scan for {}", f);
+        }
+    }
+
+    #[test]
+    fn cache_invalidates_on_mid_pass_writes() {
+        let mut grid = nasty_grid();
+        let _pass = lookup_cache::begin_pass();
+        assert_eq!(
+            eval_formula(&grid, "=COUNTIF(A1:A12,\"apple\")"),
+            EvalResult::Number(2.0)
+        );
+        // A write INSIDE the watched range (as a driver write-back would do)
+        // must invalidate the index.
+        grid.set_cell(11, 0, Cell::new_text("Apple".to_string())); // was "zebra"
+        assert_eq!(
+            eval_formula(&grid, "=COUNTIF(A1:A12,\"apple\")"),
+            EvalResult::Number(3.0)
+        );
+        // A write OUTSIDE leaves the (rebuilt) index valid and correct.
+        grid.set_cell(0, 30, Cell::new_number(1.0));
+        assert_eq!(
+            eval_formula(&grid, "=COUNTIF(A1:A12,\"apple\")"),
+            EvalResult::Number(3.0)
+        );
+        // Same for a lookup: fresh value visible after in-range write.
+        assert_eq!(
+            eval_formula(&grid, "=VLOOKUP(\"zebra\",A1:C12,2,FALSE)"),
+            EvalResult::Error(CellError::NA)
+        );
+    }
+
+    #[test]
+    fn index_fast_path_replicates_flat_addressing_quirks() {
+        let grid = nasty_grid();
+        // Plain hit.
+        assert_eq!(
+            eval_formula(&grid, "=INDEX(A1:C12,2,2)"),
+            EvalResult::Number(101.0)
+        );
+        // Column-overflow WRAPS into the next row (flat row-major addressing):
+        // A1:B3 flat = [A1,B1,A2,B2,A3,B3]; (1,3) -> idx 0*2+2 = 2 -> A2 = 5.
+        assert_eq!(
+            eval_formula(&grid, "=INDEX(A1:B3,1,3)"),
+            EvalResult::Number(5.0)
+        );
+        // Past the end -> #REF.
+        assert_eq!(
+            eval_formula(&grid, "=INDEX(A1:B3,3,3)"),
+            EvalResult::Error(CellError::Ref)
+        );
+        // 1-D branch ignores col_num entirely.
+        assert_eq!(
+            eval_formula(&grid, "=INDEX(B1:B12,3,5)"),
+            EvalResult::Number(102.0)
+        );
+        // Empty cell inside the range -> 0.0.
+        assert_eq!(eval_formula(&grid, "=INDEX(A1:A12,6)"), EvalResult::Number(0.0));
     }
 }

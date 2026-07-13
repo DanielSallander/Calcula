@@ -21,6 +21,10 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine::{extract_dependencies, Cell, CellCoord, DependencyGraph, EvalResult, Evaluator, Grid};
 
+/// Lookup-family benches use a smaller top size: the *scan* variants are
+/// O(M) per call and 1M-row scans would dominate wall-clock for no insight.
+const LOOKUP_SIZES: &[u32] = &[1_000, 100_000];
+
 /// Cell counts spanning small / large / the headline 1M.
 const SIZES: &[u32] = &[1_000, 100_000, 1_000_000];
 
@@ -127,11 +131,120 @@ fn bench_sum_whole_column(c: &mut Criterion) {
     group.finish();
 }
 
+/// A two-column lookup table: A = shuffled-ish unique numeric keys,
+/// B = payloads. Deterministic (no RNG) but not sorted, so exact-match paths
+/// are exercised, not the sorted fast path.
+fn build_lookup_grid(n: u32) -> Grid {
+    let mut grid = Grid::new();
+    for r in 0..n {
+        // Bit-reversal-ish permutation keeps keys unique and unsorted.
+        let key = ((r as u64 * 2_654_435_761) % (n as u64 * 4)) as f64;
+        grid.set_cell_unchecked(r, 0, Cell::new_number(key));
+        grid.set_cell_unchecked(r, 1, Cell::new_number(r as f64));
+    }
+    grid.update_bounds(n.saturating_sub(1), 1);
+    grid
+}
+
+/// PERF-03: exact-match VLOOKUP with and without the pass-scoped lookup index.
+/// `scan` = today's per-call O(M) path; `cached` = one index build amortized
+/// across the pass, O(1) probes after (the fill-down shape).
+fn bench_vlookup_exact(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vlookup_exact");
+    for &n in LOOKUP_SIZES {
+        let grid = build_lookup_grid(n);
+        // Probe an existing key near the END of the table (worst case for scan).
+        let probe_key = ((n as u64 - 1) * 2_654_435_761) % (n as u64 * 4);
+        let formula = format!("=VLOOKUP({},A1:B{},2,FALSE)", probe_key, n);
+        let cell = Cell::new_formula(formula);
+        let ast = cell.get_ast().expect("vlookup parses").clone();
+        let eval = Evaluator::new(&grid);
+        let expected = EvalResult::Number((n - 1) as f64);
+        assert_eq!(eval.evaluate(&ast), expected);
+
+        group.sample_size(samples_for(n));
+        group.bench_with_input(BenchmarkId::new("scan", n), &n, |b, _| {
+            b.iter(|| black_box(eval.evaluate(black_box(&ast))));
+        });
+        group.bench_with_input(BenchmarkId::new("cached", n), &n, |b, _| {
+            let _pass = engine::begin_lookup_pass();
+            assert_eq!(eval.evaluate(&ast), expected); // build the index once
+            b.iter(|| black_box(eval.evaluate(black_box(&ast))));
+        });
+    }
+    group.finish();
+}
+
+/// PERF-14: COUNTIF over an unsorted numeric column, scan vs aggregate index.
+fn bench_countif(c: &mut Criterion) {
+    let mut group = c.benchmark_group("countif");
+    for &n in LOOKUP_SIZES {
+        let grid = build_lookup_grid(n);
+        let probe_key = ((n as u64 / 2) * 2_654_435_761) % (n as u64 * 4);
+        let formula = format!("=COUNTIF(A1:A{},{})", n, probe_key);
+        let cell = Cell::new_formula(formula);
+        let ast = cell.get_ast().expect("countif parses").clone();
+        let eval = Evaluator::new(&grid);
+        assert_eq!(eval.evaluate(&ast), EvalResult::Number(1.0));
+
+        group.sample_size(samples_for(n));
+        group.bench_with_input(BenchmarkId::new("scan", n), &n, |b, _| {
+            b.iter(|| black_box(eval.evaluate(black_box(&ast))));
+        });
+        group.bench_with_input(BenchmarkId::new("cached", n), &n, |b, _| {
+            let _pass = engine::begin_lookup_pass();
+            assert_eq!(eval.evaluate(&ast), EvalResult::Number(1.0));
+            b.iter(|| black_box(eval.evaluate(black_box(&ast))));
+        });
+    }
+    group.finish();
+}
+
+/// PERF-03 end-to-end shape: a whole simulated fill-down pass — K lookups
+/// against an M-row table under ONE pass guard (index built once, K-1 hits).
+/// Compare against the same K lookups with no guard (K full scans).
+fn bench_vlookup_filldown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vlookup_filldown_1k_lookups");
+    const K: u64 = 1_000;
+    for &n in LOOKUP_SIZES {
+        let grid = build_lookup_grid(n);
+        let eval = Evaluator::new(&grid);
+        // K distinct probes so neither variant can shortcut.
+        let asts: Vec<_> = (0..K)
+            .map(|i| {
+                let key = ((i % n as u64) * 2_654_435_761) % (n as u64 * 4);
+                let cell = Cell::new_formula(format!("=VLOOKUP({},A1:B{},2,FALSE)", key, n));
+                cell.get_ast().expect("parses").clone()
+            })
+            .collect();
+        group.sample_size(10);
+        group.bench_with_input(BenchmarkId::new("scan", n), &n, |b, _| {
+            b.iter(|| {
+                for ast in &asts {
+                    black_box(eval.evaluate(black_box(ast)));
+                }
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("cached_pass", n), &n, |b, _| {
+            b.iter(|| {
+                let _pass = engine::begin_lookup_pass();
+                for ast in &asts {
+                    black_box(eval.evaluate(black_box(ast)));
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_grid_populate,
     bench_viewport_read,
     bench_recalc_cascade,
-    bench_sum_whole_column
+    bench_sum_whole_column,
+    bench_vlookup_exact,
+    bench_countif,
+    bench_vlookup_filldown
 );
 criterion_main!(benches);

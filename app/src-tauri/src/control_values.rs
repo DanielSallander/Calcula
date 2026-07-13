@@ -403,6 +403,8 @@ pub(crate) fn recalc_control_dependents_core(
     ribbon_filter_state: &RibbonFilterState,
     changed_names: Option<Vec<String>>,
 ) -> Result<Vec<CellData>, String> {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     // Respect manual calculation mode — this is the dependent cascade of a
     // control mutation, and update_cell gates its cascade the same way.
     {

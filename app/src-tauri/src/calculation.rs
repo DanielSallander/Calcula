@@ -318,6 +318,8 @@ fn partition_formula_cells(
 /// by repeatedly evaluating the circular group until convergence.
 #[tauri::command]
 pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
     // on the frontend before calling). Shared via Arc so each formula's eval gets
     // it cheaply; None => cube cells preserve their last value (see eval_cube).
@@ -572,6 +574,8 @@ pub(crate) fn recalculate_sheet_values(
     sheet_index: usize,
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     // GET.CONTROLVALUE snapshot: built BEFORE any grid locks (canonical lock
     // order). None (states unreachable at the call site) => those formulas
     // evaluate to #N/A for this pass (v1).

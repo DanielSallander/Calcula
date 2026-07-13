@@ -623,6 +623,8 @@ fn update_cell_impl(
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
     cube_results: Option<engine::CubePrefetch>,
 ) -> Result<UpdateCellResult, String> {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     use std::time::Instant;
     let perf_t0 = Instant::now();
 
@@ -1884,6 +1886,8 @@ pub fn update_cells_batch(
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
 ) -> Result<Vec<CellData>, String> {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     // GET.CONTROLVALUE snapshot: built ONCE per batch, BEFORE the grid locks
     // in the core (canonical lock order); shared across every evaluation.
     let control_values = crate::control_values::build_control_values(
@@ -4444,6 +4448,8 @@ pub fn fill_range(
     target_end_row: u32,
     target_end_col: u32,
 ) -> Result<Vec<CellData>, String> {
+    // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
+    let _lookup_pass = engine::begin_lookup_pass();
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();
