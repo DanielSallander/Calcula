@@ -1,5 +1,6 @@
 {
   "muted": ["PERF", "Styles"],
   "mutedBackendCategories": ["ACTION"],
-  "mutedBackendLevels": []
+  "mutedBackendLevels": [],
+  "debugBackendEnabled": false
 }

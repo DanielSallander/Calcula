@@ -6,8 +6,8 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 use once_cell::sync::Lazy;
 
 // ============================================================================
@@ -25,10 +25,34 @@ pub static LOG_FILE: Lazy<Mutex<Option<File>>> = Lazy::new(|| Mutex::new(None));
 static LOG_PATH: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
 
 /// Muted categories — log calls with these categories are suppressed entirely
-static MUTED_CATEGORIES: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static MUTED_CATEGORIES: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 
 /// Muted levels — log calls with these levels are suppressed entirely
-static MUTED_LEVELS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static MUTED_LEVELS: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
+
+/// Master switch for backend debug-level logging (log_debug!/log_enter!/log_exit!).
+/// OFF by default: debug logging sits on hot paths (e.g. per-cell number formatting
+/// during recalc), where each line costs format! allocations, lock acquisitions and
+/// a file write. The macros check this flag BEFORE evaluating their format arguments,
+/// so a disabled call is a single relaxed atomic load.
+/// Re-enable at runtime via the set_debug_logging command or with
+/// "debugBackendEnabled": true in app/log-filter.config.json.
+static DEBUG_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Cheap gate used by the D-level macros. Inlined to a single atomic load.
+#[inline(always)]
+pub fn debug_log_enabled() -> bool {
+    DEBUG_LOG_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Turn backend debug-level logging on/off at runtime.
+pub fn set_debug_log_enabled(enabled: bool) {
+    DEBUG_LOG_ENABLED.store(enabled, Ordering::Relaxed);
+    eprintln!(
+        "[LOG_FILTER] Backend debug logging {}",
+        if enabled { "ENABLED" } else { "disabled" }
+    );
+}
 
 /// Get next sequence number
 pub fn next_seq() -> u64 {
@@ -141,12 +165,12 @@ pub fn init_log_file() -> Result<PathBuf, String> {
 
 /// Check if a log call should be suppressed based on muted categories/levels
 fn is_muted(level: &str, category: &str) -> bool {
-    if let Ok(cats) = MUTED_CATEGORIES.lock() {
+    if let Ok(cats) = MUTED_CATEGORIES.read() {
         if cats.contains(category) {
             return true;
         }
     }
-    if let Ok(lvls) = MUTED_LEVELS.lock() {
+    if let Ok(lvls) = MUTED_LEVELS.read() {
         if lvls.contains(level) {
             return true;
         }
@@ -316,6 +340,9 @@ pub struct LogFilterConfig {
     pub muted_backend_categories: Vec<String>,
     #[serde(default)]
     pub muted_backend_levels: Vec<String>,
+    /// Backend debug-level logging master switch (default OFF — hot-path cost).
+    #[serde(default)]
+    pub debug_backend_enabled: bool,
 }
 
 /// Load log filter config from app/log-filter.config.json.
@@ -330,6 +357,7 @@ pub fn load_log_filter_config() -> Result<LogFilterConfig, String> {
             muted: vec![],
             muted_backend_categories: vec![],
             muted_backend_levels: vec![],
+            debug_backend_enabled: false,
         });
     }
 
@@ -340,14 +368,15 @@ pub fn load_log_filter_config() -> Result<LogFilterConfig, String> {
         .map_err(|e| format!("Failed to parse log filter config: {}", e))?;
 
     // Apply backend filters
-    if let Ok(mut cats) = MUTED_CATEGORIES.lock() {
+    if let Ok(mut cats) = MUTED_CATEGORIES.write() {
         cats.clear();
         cats.extend(config.muted_backend_categories.clone());
     }
-    if let Ok(mut lvls) = MUTED_LEVELS.lock() {
+    if let Ok(mut lvls) = MUTED_LEVELS.write() {
         lvls.clear();
         lvls.extend(config.muted_backend_levels.clone());
     }
+    set_debug_log_enabled(config.debug_backend_enabled);
 
     let cat_count = config.muted_backend_categories.len();
     let lvl_count = config.muted_backend_levels.len();
@@ -369,14 +398,21 @@ pub fn get_log_filter_config() -> Result<LogFilterConfig, String> {
 /// Set backend log filter at runtime (from frontend logFilter API)
 #[tauri::command]
 pub fn set_log_filter(muted_categories: Vec<String>, muted_levels: Vec<String>) -> Result<(), String> {
-    if let Ok(mut cats) = MUTED_CATEGORIES.lock() {
+    if let Ok(mut cats) = MUTED_CATEGORIES.write() {
         cats.clear();
         cats.extend(muted_categories);
     }
-    if let Ok(mut lvls) = MUTED_LEVELS.lock() {
+    if let Ok(mut lvls) = MUTED_LEVELS.write() {
         lvls.clear();
         lvls.extend(muted_levels);
     }
+    Ok(())
+}
+
+/// Toggle backend debug-level logging at runtime (log_debug!/log_enter!/log_exit!).
+#[tauri::command]
+pub fn set_debug_logging(enabled: bool) -> Result<(), String> {
+    set_debug_log_enabled(enabled);
     Ok(())
 }
 
@@ -384,10 +420,16 @@ pub fn set_log_filter(muted_categories: Vec<String>, muted_levels: Vec<String>) 
 // MACRO DEFINITIONS & EXPORTS
 // ============================================================================
 
+// NOTE: all D-level macros check debug_log_enabled() BEFORE evaluating their
+// format arguments — a disabled call site costs one relaxed atomic load, no
+// allocation, no locks, no I/O. Toggle via set_debug_logging (command) or
+// "debugBackendEnabled" in log-filter.config.json.
 #[macro_export]
 macro_rules! log_debug {
     ($cat:expr, $($arg:tt)*) => {
-        $crate::logging::write_log("D", $cat, &format!($($arg)*))
+        if $crate::logging::debug_log_enabled() {
+            $crate::logging::write_log("D", $cat, &format!($($arg)*))
+        }
     };
 }
 
@@ -417,20 +459,28 @@ macro_rules! log_error {
 #[macro_export]
 macro_rules! log_enter {
     ($cat:expr, $func:expr) => {
-        $crate::logging::write_log_enter("D", $cat, $func, "")
+        if $crate::logging::debug_log_enabled() {
+            $crate::logging::write_log_enter("D", $cat, $func, "")
+        }
     };
     ($cat:expr, $func:expr, $($arg:tt)*) => {
-        $crate::logging::write_log_enter("D", $cat, $func, &format!($($arg)*))
+        if $crate::logging::debug_log_enabled() {
+            $crate::logging::write_log_enter("D", $cat, $func, &format!($($arg)*))
+        }
     };
 }
 
 #[macro_export]
 macro_rules! log_exit {
     ($cat:expr, $func:expr) => {
-        $crate::logging::write_log_exit("D", $cat, $func, "")
+        if $crate::logging::debug_log_enabled() {
+            $crate::logging::write_log_exit("D", $cat, $func, "")
+        }
     };
     ($cat:expr, $func:expr, $($arg:tt)*) => {
-        $crate::logging::write_log_exit("D", $cat, $func, &format!($($arg)*))
+        if $crate::logging::debug_log_enabled() {
+            $crate::logging::write_log_exit("D", $cat, $func, &format!($($arg)*))
+        }
     };
 }
 

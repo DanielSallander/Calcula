@@ -30,6 +30,29 @@ type ParserValue = Value;
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+// ============================================================================
+// HOT-PATH COLLECTION ALIASES
+// ============================================================================
+// Coordinate-keyed maps on the recalculation hot path use FxHash: the default
+// SipHash costs 2-3x more per probe for these tiny keys, and its DoS
+// resistance buys nothing for our own coordinates.
+
+/// Set of same-sheet cell coordinates (row, col).
+pub type CoordSet = FxHashSet<(u32, u32)>;
+/// cell -> set of cells (dependencies/dependents graphs).
+pub type DependencyMap = FxHashMap<(u32, u32), CoordSet>;
+/// column/row index -> dependent formula cells (whole-column/row references).
+pub type StripeDependentsMap = FxHashMap<u32, CoordSet>;
+/// formula cell -> column/row indices it depends on (for cleanup).
+pub type StripeDependenciesMap = FxHashMap<(u32, u32), FxHashSet<u32>>;
+/// (sheet_name, row, col) -> dependent formula cells on other sheets.
+pub type CrossSheetDependentsMap =
+    FxHashMap<(String, u32, u32), FxHashSet<(usize, u32, u32)>>;
+/// formula cell (sheet_index, row, col) -> cross-sheet cells it depends on.
+pub type CrossSheetDependenciesMap =
+    FxHashMap<(usize, u32, u32), FxHashSet<(String, u32, u32)>>;
 use persistence::{FileState, UserFilesState};
 use engine::UndoStack;
 pub use identity;
@@ -201,8 +224,8 @@ pub struct AppState {
     pub default_row_height: Mutex<f64>,
     /// Default column width for columns without custom widths (pixels)
     pub default_column_width: Mutex<f64>,
-    pub dependents: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
-    pub dependencies: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
+    pub dependents: Mutex<DependencyMap>,
+    pub dependencies: Mutex<DependencyMap>,
     /// Calculation mode: "automatic" or "manual"
     pub calculation_mode: Mutex<String>,
     /// Iterative calculation: allow circular references to converge
@@ -212,17 +235,17 @@ pub struct AppState {
     /// Maximum change threshold for convergence (stop when delta < this value)
     pub max_change: Mutex<f64>,
     /// Column-level dependencies: column index -> set of formula cells that depend on entire column
-    pub column_dependents: Mutex<HashMap<u32, HashSet<(u32, u32)>>>,
+    pub column_dependents: Mutex<StripeDependentsMap>,
     /// Row-level dependencies: row index -> set of formula cells that depend on entire row
-    pub row_dependents: Mutex<HashMap<u32, HashSet<(u32, u32)>>>,
+    pub row_dependents: Mutex<StripeDependentsMap>,
     /// Track which columns each formula cell depends on (for cleanup)
-    pub column_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
+    pub column_dependencies: Mutex<StripeDependenciesMap>,
     /// Track which rows each formula cell depends on (for cleanup)
-    pub row_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
+    pub row_dependencies: Mutex<StripeDependenciesMap>,
     /// Cross-sheet dependencies: (sheet_name, row, col) -> set of (sheet_index, row, col) that depend on it
-    pub cross_sheet_dependents: Mutex<HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>>,
+    pub cross_sheet_dependents: Mutex<CrossSheetDependentsMap>,
     /// Track which cross-sheet cells each formula depends on (for cleanup)
-    pub cross_sheet_dependencies: Mutex<HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>>,
+    pub cross_sheet_dependencies: Mutex<CrossSheetDependenciesMap>,
     pub undo_stack: Mutex<UndoStack>,
     /// Freeze pane configurations per sheet
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
@@ -404,18 +427,18 @@ pub fn create_app_state() -> AppState {
         all_row_heights: Mutex::new(vec![HashMap::new()]),
         default_row_height: Mutex::new(24.0),
         default_column_width: Mutex::new(100.0),
-        dependents: Mutex::new(HashMap::new()),
-        dependencies: Mutex::new(HashMap::new()),
+        dependents: Mutex::new(DependencyMap::default()),
+        dependencies: Mutex::new(DependencyMap::default()),
         calculation_mode: Mutex::new("automatic".to_string()),
         iteration_enabled: Mutex::new(false),
         max_iterations: Mutex::new(100),
         max_change: Mutex::new(0.001),
-        column_dependents: Mutex::new(HashMap::new()),
-        row_dependents: Mutex::new(HashMap::new()),
-        column_dependencies: Mutex::new(HashMap::new()),
-        row_dependencies: Mutex::new(HashMap::new()),
-        cross_sheet_dependents: Mutex::new(HashMap::new()),
-        cross_sheet_dependencies: Mutex::new(HashMap::new()),
+        column_dependents: Mutex::new(StripeDependentsMap::default()),
+        row_dependents: Mutex::new(StripeDependentsMap::default()),
+        column_dependencies: Mutex::new(StripeDependenciesMap::default()),
+        row_dependencies: Mutex::new(StripeDependenciesMap::default()),
+        cross_sheet_dependents: Mutex::new(CrossSheetDependentsMap::default()),
+        cross_sheet_dependencies: Mutex::new(CrossSheetDependenciesMap::default()),
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         split_configs: Mutex::new(vec![SplitConfig::default()]),
@@ -874,27 +897,27 @@ pub fn resolve_spill_refs_in_ast(
 /// Result of extracting references from a formula expression
 pub struct ExtractedRefs {
     /// Individual cell references (row, col) on the current sheet - 0-indexed
-    pub cells: HashSet<(u32, u32)>,
+    pub cells: CoordSet,
     /// Column references (column indices)
-    pub columns: HashSet<u32>,
+    pub columns: FxHashSet<u32>,
     /// Row references (row indices) - 0-indexed
-    pub rows: HashSet<u32>,
+    pub rows: FxHashSet<u32>,
     /// Cross-sheet cell references (sheet_name, row, col) - row is 0-indexed
-    pub cross_sheet_cells: HashSet<(String, u32, u32)>,
+    pub cross_sheet_cells: FxHashSet<(String, u32, u32)>,
 }
 
 impl ExtractedRefs {
     pub fn new() -> Self {
         ExtractedRefs {
-            cells: HashSet::new(),
-            columns: HashSet::new(),
-            rows: HashSet::new(),
-            cross_sheet_cells: HashSet::new(),
+            cells: CoordSet::default(),
+            columns: FxHashSet::default(),
+            rows: FxHashSet::default(),
+            cross_sheet_cells: FxHashSet::default(),
         }
     }
 }
 
-pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> HashSet<(u32, u32)> {
+pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> CoordSet {
     let refs = extract_all_references(expr, grid);
     refs.cells
 }
@@ -3132,12 +3155,12 @@ fn parse_number(s: &str, locale: &engine::LocaleSettings) -> Option<f64> {
 
 pub fn update_dependencies(
     cell_pos: (u32, u32),
-    new_refs: HashSet<(u32, u32)>,
-    dependencies: &mut HashMap<(u32, u32), HashSet<(u32, u32)>>,
-    dependents: &mut HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    new_refs: CoordSet,
+    dependencies: &mut DependencyMap,
+    dependents: &mut DependencyMap,
 ) {
     let old_refs = dependencies.remove(&cell_pos).unwrap_or_default();
-    
+
     for old_ref in &old_refs {
         if let Some(deps) = dependents.get_mut(old_ref) {
             deps.remove(&cell_pos);
@@ -3149,7 +3172,7 @@ pub fn update_dependencies(
     for new_ref in &new_refs {
         dependents
             .entry(*new_ref)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(cell_pos);
     }
     if !new_refs.is_empty() {
@@ -3159,12 +3182,12 @@ pub fn update_dependencies(
 
 pub fn update_column_dependencies(
     cell_pos: (u32, u32),
-    new_cols: HashSet<u32>,
-    column_dependencies: &mut HashMap<(u32, u32), HashSet<u32>>,
-    column_dependents: &mut HashMap<u32, HashSet<(u32, u32)>>,
+    new_cols: FxHashSet<u32>,
+    column_dependencies: &mut StripeDependenciesMap,
+    column_dependents: &mut StripeDependentsMap,
 ) {
     let old_cols = column_dependencies.remove(&cell_pos).unwrap_or_default();
-    
+
     for old_col in &old_cols {
         if let Some(deps) = column_dependents.get_mut(old_col) {
             deps.remove(&cell_pos);
@@ -3173,14 +3196,14 @@ pub fn update_column_dependencies(
             }
         }
     }
-    
+
     for new_col in &new_cols {
         column_dependents
             .entry(*new_col)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(cell_pos);
     }
-    
+
     if !new_cols.is_empty() {
         column_dependencies.insert(cell_pos, new_cols);
     }
@@ -3188,12 +3211,12 @@ pub fn update_column_dependencies(
 
 pub fn update_row_dependencies(
     cell_pos: (u32, u32),
-    new_rows: HashSet<u32>,
-    row_dependencies: &mut HashMap<(u32, u32), HashSet<u32>>,
-    row_dependents: &mut HashMap<u32, HashSet<(u32, u32)>>,
+    new_rows: FxHashSet<u32>,
+    row_dependencies: &mut StripeDependenciesMap,
+    row_dependents: &mut StripeDependentsMap,
 ) {
     let old_rows = row_dependencies.remove(&cell_pos).unwrap_or_default();
-    
+
     for old_row in &old_rows {
         if let Some(deps) = row_dependents.get_mut(old_row) {
             deps.remove(&cell_pos);
@@ -3202,14 +3225,14 @@ pub fn update_row_dependencies(
             }
         }
     }
-    
+
     for new_row in &new_rows {
         row_dependents
             .entry(*new_row)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(cell_pos);
     }
-    
+
     if !new_rows.is_empty() {
         row_dependencies.insert(cell_pos, new_rows);
     }
@@ -3217,12 +3240,12 @@ pub fn update_row_dependencies(
 
 pub fn update_cross_sheet_dependencies(
     formula_cell: (usize, u32, u32),
-    new_refs: HashSet<(String, u32, u32)>,
-    cross_sheet_dependencies: &mut HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>,
-    cross_sheet_dependents: &mut HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>,
+    new_refs: FxHashSet<(String, u32, u32)>,
+    cross_sheet_dependencies: &mut CrossSheetDependenciesMap,
+    cross_sheet_dependents: &mut CrossSheetDependentsMap,
 ) {
     let old_refs = cross_sheet_dependencies.remove(&formula_cell).unwrap_or_default();
-    
+
     for old_ref in &old_refs {
         if let Some(deps) = cross_sheet_dependents.get_mut(old_ref) {
             deps.remove(&formula_cell);
@@ -3231,11 +3254,11 @@ pub fn update_cross_sheet_dependencies(
             }
         }
     }
-    
+
     for new_ref in &new_refs {
         cross_sheet_dependents
             .entry(new_ref.clone())
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(formula_cell);
     }
 
@@ -3244,34 +3267,77 @@ pub fn update_cross_sheet_dependencies(
     }
 }
 
+/// Topological recalc order for a single edited cell: all transitive
+/// dependents, precedents before dependents. The changed cell itself is NOT
+/// included (it was just evaluated) unless a dependency cycle leads back to it.
 pub fn get_recalculation_order(
     changed_cell: (u32, u32),
-    dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    dependents: &DependencyMap,
 ) -> Vec<(u32, u32)> {
-    // Collect all cells reachable from the changed cell via BFS.
-    let mut all_cells = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(changed_cell);
+    recalc_order_from_seeds(&[changed_cell], dependents, false)
+}
+
+/// Multi-root topological recalc ordering over the dependents graph (Kahn's
+/// algorithm on the induced subgraph). Shared by the single-cell edit cascade,
+/// batch edits (paste/fill) and the control-value recalc.
+///
+/// `include_seeds`:
+/// - `true`  — the seeds are members of the ordering (batch edits: formula
+///   cells written by the batch are re-evaluated AFTER the batch cells they
+///   read, fixing in-batch stale values; a seed fed by another member is
+///   ordered after its precedents).
+/// - `false` — the seeds are expansion roots only (single-cell edit: the
+///   edited cell was already evaluated); a seed still appears in the result
+///   if a dependency cycle reaches back to it.
+///
+/// Ordering is deterministic: zero-degree seeds first (call order), then
+/// remaining zero-degree members sorted by coordinate; cycle members are
+/// appended sorted at the end so they are still recalculated once.
+pub fn recalc_order_from_seeds(
+    seeds: &[(u32, u32)],
+    dependents: &DependencyMap,
+    include_seeds: bool,
+) -> Vec<(u32, u32)> {
+    // Member set: everything reachable from the seeds via dependent edges
+    // (plus the seeds themselves when include_seeds).
+    let mut members = CoordSet::default();
+    let mut queue: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    if include_seeds {
+        for &seed in seeds {
+            if members.insert(seed) {
+                queue.push_back(seed);
+            }
+        }
+    } else {
+        queue.extend(seeds.iter().copied());
+    }
     while let Some(cell) = queue.pop_front() {
         if let Some(deps) = dependents.get(&cell) {
-            for dep in deps {
-                if all_cells.insert(*dep) {
-                    queue.push_back(*dep);
+            for &dep in deps {
+                if members.insert(dep) {
+                    queue.push_back(dep);
                 }
             }
         }
     }
 
-    if all_cells.is_empty() {
+    if members.is_empty() {
         return Vec::new();
     }
 
-    // Build in-degree map for the subgraph of reachable cells.
-    // in_degree counts how many *reachable* precedents feed into each cell.
-    let mut in_degree: HashMap<(u32, u32), usize> = all_cells.iter().map(|c| (*c, 0)).collect();
-    for cell in std::iter::once(&changed_cell).chain(all_cells.iter()) {
+    // In-degree over the induced subgraph: only member -> member edges impose
+    // ordering. Edges from non-member seeds are deliberately NOT counted —
+    // those sources are already up to date when the cascade runs. (Counting
+    // them would leave every member with in-degree >= 1 and an empty Kahn
+    // seed queue — the bug this rewrite fixes.)
+    let mut in_degree: FxHashMap<(u32, u32), u32> =
+        members.iter().map(|c| (*c, 0)).collect();
+    for cell in &members {
         if let Some(deps) = dependents.get(cell) {
             for dep in deps {
+                if dep == cell {
+                    continue; // self-loop: handled by the cycle fallback
+                }
                 if let Some(deg) = in_degree.get_mut(dep) {
                     *deg += 1;
                 }
@@ -3279,35 +3345,55 @@ pub fn get_recalculation_order(
         }
     }
 
-    // Kahn's algorithm: start from cells whose only precedent is the changed
-    // cell (in-degree 1 from changed_cell, which we counted above).
-    let mut ready: std::collections::VecDeque<(u32, u32)> = in_degree
+    // Kahn's algorithm. Deterministic start order: seeds first (call order),
+    // then remaining zero-degree members sorted by coordinate.
+    let mut queued = CoordSet::default();
+    let mut ready: std::collections::VecDeque<(u32, u32)> = std::collections::VecDeque::new();
+    for &seed in seeds {
+        if in_degree.get(&seed) == Some(&0) && queued.insert(seed) {
+            ready.push_back(seed);
+        }
+    }
+    let mut rest: Vec<(u32, u32)> = members
         .iter()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(&cell, _)| cell)
+        .copied()
+        .filter(|c| in_degree[c] == 0 && !queued.contains(c))
         .collect();
-    let mut result = Vec::with_capacity(all_cells.len());
+    rest.sort_unstable();
+    for c in rest {
+        queued.insert(c);
+        ready.push_back(c);
+    }
 
+    let mut result = Vec::with_capacity(members.len());
     while let Some(cell) = ready.pop_front() {
         result.push(cell);
         if let Some(deps) = dependents.get(&cell) {
             for dep in deps {
                 if let Some(deg) = in_degree.get_mut(dep) {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        ready.push_back(*dep);
+                    if *deg > 0 {
+                        *deg -= 1;
+                        if *deg == 0 && queued.insert(*dep) {
+                            ready.push_back(*dep);
+                        }
                     }
                 }
             }
         }
     }
 
-    // If there are unreached cells (circular dependencies), append them so
-    // they still get recalculated (even if the order isn't perfect).
-    for cell in &all_cells {
-        if !result.contains(cell) {
-            result.push(*cell);
-        }
+    // Members not emitted are on dependency cycles: append them (sorted, so
+    // the order is deterministic) so they still get recalculated once.
+    // O(n) via the emitted-set — never Vec::contains per cell.
+    if result.len() < members.len() {
+        let done: CoordSet = result.iter().copied().collect();
+        let mut leftovers: Vec<(u32, u32)> = members
+            .iter()
+            .copied()
+            .filter(|c| !done.contains(c))
+            .collect();
+        leftovers.sort_unstable();
+        result.extend(leftovers);
     }
 
     result
@@ -3315,11 +3401,11 @@ pub fn get_recalculation_order(
 
 pub fn get_column_row_dependents(
     changed_cell: (u32, u32),
-    column_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
-    row_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
-) -> HashSet<(u32, u32)> {
+    column_dependents: &StripeDependentsMap,
+    row_dependents: &StripeDependentsMap,
+) -> CoordSet {
     let (row, col) = changed_cell;
-    let mut result = HashSet::new();
+    let mut result = CoordSet::default();
     
     if let Some(col_deps) = column_dependents.get(&col) {
         for dep in col_deps {
@@ -3858,6 +3944,7 @@ pub fn run() {
             logging::sort_log_file,
             logging::get_log_filter_config,
             logging::set_log_filter,
+            logging::set_debug_logging,
             // Calculation mode commands
             calculation::set_calculation_mode,
             calculation::get_calculation_mode,

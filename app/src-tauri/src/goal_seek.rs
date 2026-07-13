@@ -3,7 +3,7 @@
 // CONTEXT: Uses the secant method to find a variable cell value that makes
 //          a target formula evaluate to a desired result.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{CellData, GoalSeekParams, GoalSeekResult};
@@ -22,9 +22,9 @@ use engine::{Cell, CellValue, Grid, StyleRegistry};
 fn variable_affects_target(
     variable_pos: (u32, u32),
     target_pos: (u32, u32),
-    dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
-    column_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
-    row_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
+    dependents: &crate::DependencyMap,
+    column_dependents: &crate::StripeDependentsMap,
+    row_dependents: &crate::StripeDependentsMap,
 ) -> bool {
     let mut visited = HashSet::new();
     let mut stack = vec![variable_pos];
@@ -353,9 +353,9 @@ fn finalize_result(
     grids: &mut [Grid],
     styles: &StyleRegistry,
     merged_regions: &HashSet<crate::api_types::MergedRegion>,
-    dependents_map: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
-    column_dependents_map: &HashMap<u32, HashSet<(u32, u32)>>,
-    row_dependents_map: &HashMap<u32, HashSet<(u32, u32)>>,
+    dependents_map: &crate::DependencyMap,
+    column_dependents_map: &crate::StripeDependentsMap,
+    row_dependents_map: &crate::StripeDependentsMap,
     sheet_names: &[String],
     active_sheet: usize,
     variable_pos: (u32, u32),

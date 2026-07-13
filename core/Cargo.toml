@@ -12,3 +12,24 @@ members = [
 ]
 exclude = ["pivot-bench"]
 resolver = "2"
+
+# Optimize dev/test builds: `"*"` covers external dependencies only — workspace
+# members must be named explicitly so `cargo test -p engine` runs optimized
+# engine code. Leave debug-assertions/overflow-checks at dev defaults (on).
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.engine]
+opt-level = 3
+
+[profile.dev.package.parser]
+opt-level = 3
+
+[profile.dev.package.calcula-crypto]
+opt-level = 3
+
+# `bench` inherits from `release`, so committed benchmarks measure this codegen.
+# No panic = "abort" anywhere (catch_unwind is load-bearing in the app).
+[profile.release]
+lto = "thin"
+codegen-units = 1

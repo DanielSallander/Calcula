@@ -4,8 +4,13 @@
 //! for all cell data. It uses a sparse storage strategy (HashMap) to
 //! efficiently handle massive spreadsheets where most cells are empty.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use crate::cell::{Cell, CellValue};
+
+/// Sparse cell storage keyed by (row, col). Uses FxHash — every formula
+/// evaluation probes this map per referenced cell, and the default SipHash
+/// costs 2-3x more per probe for these tiny keys.
+pub type CellMap = FxHashMap<(u32, u32), Cell>;
 
 /// The Grid struct holds the state of the spreadsheet data.
 /// It uses a sparse representation (HashMap) mapping coordinates to Cells.
@@ -14,7 +19,7 @@ use crate::cell::{Cell, CellValue};
 pub struct Grid {
     /// Sparse storage: keys are (row, col), values are Cell instances.
     /// Row and Col are 0-based indices.
-    pub cells: HashMap<(u32, u32), Cell>,
+    pub cells: CellMap,
 
     /// Tracks the highest row index currently in use.
     pub max_row: u32,
@@ -27,7 +32,7 @@ impl Grid {
     /// Creates a new, empty Grid.
     pub fn new() -> Self {
         Grid {
-            cells: HashMap::new(),
+            cells: CellMap::default(),
             max_row: 0,
             max_col: 0,
         }

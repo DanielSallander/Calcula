@@ -5,7 +5,7 @@ use crate::pivot::utils::{
     col_index_to_letter, parse_cell_ref, parse_range, strip_sheet_prefix,
 };
 use engine::{Cell, CellError, CellStyle, CellValue, Grid, NumberFormat};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[test]
 fn test_format_number_integer() {
@@ -189,11 +189,11 @@ fn test_col_letter_to_index() {
 
 #[test]
 fn test_dependency_tracking() {
-    let mut dependencies: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
-    let mut dependents: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
+    let mut dependencies = crate::DependencyMap::default();
+    let mut dependents = crate::DependencyMap::default();
 
     // Cell B1 (0, 1) references A1 (0, 0)
-    let mut refs = HashSet::new();
+    let mut refs = crate::CoordSet::default();
     refs.insert((0, 0));
     update_dependencies((0, 1), refs, &mut dependencies, &mut dependents);
 
@@ -204,7 +204,7 @@ fn test_dependency_tracking() {
     assert!(dependencies.get(&(0, 1)).unwrap().contains(&(0, 0)));
 
     // Now update B1 to reference A2 instead
-    let mut new_refs = HashSet::new();
+    let mut new_refs = crate::CoordSet::default();
     new_refs.insert((1, 0));
     update_dependencies((0, 1), new_refs, &mut dependencies, &mut dependents);
 
@@ -216,6 +216,63 @@ fn test_dependency_tracking() {
 
     // Check that A2 now has B1 as a dependent
     assert!(dependents.get(&(1, 0)).unwrap().contains(&(0, 1)));
+}
+
+/// Regression test for the recalc-ordering bug: with a chain
+/// A1 -> B1=A1 -> C1=B1, editing A1 MUST order B1 before C1, or C1 is
+/// evaluated against B1's stale value (the cascade does not recurse).
+/// The old Kahn seeding counted the changed cell's edges, left every member
+/// with in-degree >= 1, and emitted everything in hash order.
+#[test]
+fn test_recalculation_order_is_topological() {
+    let mut dependents = crate::DependencyMap::default();
+    let a1 = (0u32, 0u32);
+    let b1 = (0u32, 1u32);
+    let c1 = (0u32, 2u32);
+    let d1 = (0u32, 3u32);
+    // A1 -> B1 -> C1 -> D1
+    dependents.insert(a1, crate::CoordSet::from_iter([b1]));
+    dependents.insert(b1, crate::CoordSet::from_iter([c1]));
+    dependents.insert(c1, crate::CoordSet::from_iter([d1]));
+
+    let order = crate::get_recalculation_order(a1, &dependents);
+    assert_eq!(order, vec![b1, c1, d1]);
+    // The edited cell itself is not re-evaluated.
+    assert!(!order.contains(&a1));
+}
+
+/// A cycle that reaches back to the edited cell still recalculates every
+/// member exactly once (order best-effort), including the edited cell.
+#[test]
+fn test_recalculation_order_cycle_back_to_root() {
+    let mut dependents = crate::DependencyMap::default();
+    let a1 = (0u32, 0u32);
+    let b1 = (0u32, 1u32);
+    dependents.insert(a1, crate::CoordSet::from_iter([b1]));
+    dependents.insert(b1, crate::CoordSet::from_iter([a1]));
+
+    let order = crate::get_recalculation_order(a1, &dependents);
+    assert_eq!(order.len(), 2);
+    assert!(order.contains(&a1));
+    assert!(order.contains(&b1));
+}
+
+/// Multi-root ordering with seeds included (the batch-edit contract): a
+/// formula cell written by the batch that reads another batch cell must be
+/// ordered after it — the in-batch staleness fix.
+#[test]
+fn test_multi_root_order_includes_and_orders_seeds() {
+    let mut dependents = crate::DependencyMap::default();
+    let a1 = (0u32, 0u32);
+    let b1 = (0u32, 1u32);
+    let c1 = (0u32, 2u32);
+    // A1 -> B1 -> C1; the "batch" writes C1 (a formula reading B1) FIRST,
+    // then B1, then A1 — evaluation order must still be A1, B1, C1.
+    dependents.insert(a1, crate::CoordSet::from_iter([b1]));
+    dependents.insert(b1, crate::CoordSet::from_iter([c1]));
+
+    let order = crate::recalc_order_from_seeds(&[c1, b1, a1], &dependents, true);
+    assert_eq!(order, vec![a1, b1, c1]);
 }
 
 // ============================================================================

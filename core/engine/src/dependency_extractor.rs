@@ -6,8 +6,11 @@
 //! all cells within the range. Column and row references expand based on
 //! the provided grid bounds.
 
-use crate::coord::{col_to_index, CellCoord};
-use std::collections::HashSet;
+use crate::coord::col_to_index;
+#[cfg(test)]
+use crate::coord::CellCoord;
+use rustc_hash::FxHashSet;
+use crate::dependency_graph::CoordSet;
 
 // Re-export AST types from the parser crate.
 // The engine uses these directly — no mirrored copies needed.
@@ -77,7 +80,7 @@ pub fn get_sheets_in_range(start: &str, end: &str, sheet_order: &[String]) -> Ve
 /// # Returns
 /// A set of (row, col) coordinates for all cells referenced by the expression.
 /// Note: This version ignores sheet references for backward compatibility.
-pub fn extract_dependencies(expr: &Expression) -> HashSet<CellCoord> {
+pub fn extract_dependencies(expr: &Expression) -> CoordSet {
     extract_dependencies_with_bounds(expr, GridBounds::default())
 }
 
@@ -94,8 +97,8 @@ pub fn extract_dependencies(expr: &Expression) -> HashSet<CellCoord> {
 pub fn extract_dependencies_with_bounds(
     expr: &Expression,
     bounds: GridBounds,
-) -> HashSet<CellCoord> {
-    let mut deps = HashSet::new();
+) -> CoordSet {
+    let mut deps = Default::default();
     extract_recursive(expr, &mut deps, bounds);
     deps
 }
@@ -105,14 +108,14 @@ pub fn extract_dependencies_with_bounds(
 pub fn extract_dependencies_with_sheets(
     expr: &Expression,
     bounds: GridBounds,
-) -> HashSet<SheetCellRef> {
-    let mut deps = HashSet::new();
+) -> FxHashSet<SheetCellRef> {
+    let mut deps = Default::default();
     extract_recursive_with_sheets(expr, &mut deps, bounds);
     deps
 }
 
 /// Recursive helper for dependency extraction (backward compatible, ignores sheets).
-fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: GridBounds) {
+fn extract_recursive(expr: &Expression, deps: &mut CoordSet, bounds: GridBounds) {
     match expr {
         Expression::Literal(_) => {
             // Literals don't reference any cells
@@ -254,7 +257,7 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
 /// Recursive helper for dependency extraction with sheet context.
 fn extract_recursive_with_sheets(
     expr: &Expression,
-    deps: &mut HashSet<SheetCellRef>,
+    deps: &mut FxHashSet<SheetCellRef>,
     bounds: GridBounds,
 ) {
     match expr {
@@ -363,7 +366,7 @@ fn extract_recursive_with_sheets(
         // in the range. Without sheet_order info, we tag with start and end sheets.
         Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
             // Extract the inner reference's cells (without sheet prefix)
-            let mut inner_deps = HashSet::new();
+            let mut inner_deps = CoordSet::default();
             extract_recursive(reference, &mut inner_deps, bounds);
 
             // Tag each cell with both bookend sheets as dependencies.
@@ -430,12 +433,12 @@ pub fn extract_3d_dependencies(
     inner_ref: &Expression,
     sheet_order: &[String],
     bounds: GridBounds,
-) -> HashSet<SheetCellRef> {
-    let mut deps = HashSet::new();
+) -> FxHashSet<SheetCellRef> {
+    let mut deps = FxHashSet::default();
     let sheets = get_sheets_in_range(start_sheet, end_sheet, sheet_order);
 
     // Extract inner reference cells (without sheet context)
-    let mut inner_deps = HashSet::new();
+    let mut inner_deps = CoordSet::default();
     extract_recursive(inner_ref, &mut inner_deps, bounds);
 
     // Tag each cell with each sheet in the range
@@ -456,7 +459,7 @@ pub fn extract_3d_dependencies(
 mod tests {
     use super::*;
 
-    fn set_of(coords: &[CellCoord]) -> HashSet<CellCoord> {
+    fn set_of(coords: &[CellCoord]) -> CoordSet {
         coords.iter().cloned().collect()
     }
 

@@ -10,7 +10,7 @@ use engine::{Cell, GridSnapshot, UndoMergeRegion};
 use once_cell::sync::Lazy;
 
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tauri::State;
 
 // Pre-compiled regexes for formula reference shifting (avoids ~2.6ms per Regex::new call)
@@ -520,8 +520,8 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState
 // ============================================================================
 
 /// Shift all cell positions in a HashMap where the key is (row, col)
-fn shift_cell_positions_for_row_insert<V: Clone>(
-    map: &mut HashMap<(u32, u32), V>,
+fn shift_cell_positions_for_row_insert<V: Clone, S: std::hash::BuildHasher>(
+    map: &mut HashMap<(u32, u32), V, S>,
     from_row: u32,
     count: u32,
 ) {
@@ -533,8 +533,8 @@ fn shift_cell_positions_for_row_insert<V: Clone>(
 }
 
 /// Shift all cell positions in a HashMap where the key is (row, col)
-fn shift_cell_positions_for_col_insert<V: Clone>(
-    map: &mut HashMap<(u32, u32), V>,
+fn shift_cell_positions_for_col_insert<V: Clone, S: std::hash::BuildHasher>(
+    map: &mut HashMap<(u32, u32), V, S>,
     from_col: u32,
     count: u32,
 ) {
@@ -546,7 +546,7 @@ fn shift_cell_positions_for_col_insert<V: Clone>(
 }
 
 /// Shift cell references inside a HashSet<(u32, u32)>
-fn shift_cell_set_for_row_insert(set: &HashSet<(u32, u32)>, from_row: u32, count: u32) -> HashSet<(u32, u32)> {
+fn shift_cell_set_for_row_insert(set: &crate::CoordSet, from_row: u32, count: u32) -> crate::CoordSet {
     set.iter()
         .map(|(r, c)| {
             let new_r = if *r >= from_row { *r + count } else { *r };
@@ -555,7 +555,7 @@ fn shift_cell_set_for_row_insert(set: &HashSet<(u32, u32)>, from_row: u32, count
         .collect()
 }
 
-fn shift_cell_set_for_col_insert(set: &HashSet<(u32, u32)>, from_col: u32, count: u32) -> HashSet<(u32, u32)> {
+fn shift_cell_set_for_col_insert(set: &crate::CoordSet, from_col: u32, count: u32) -> crate::CoordSet {
     set.iter()
         .map(|(r, c)| {
             let new_c = if *c >= from_col { *c + count } else { *c };
@@ -565,7 +565,7 @@ fn shift_cell_set_for_col_insert(set: &HashSet<(u32, u32)>, from_col: u32, count
 }
 
 /// Shift row indices in row_dependents map
-fn shift_row_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_row: u32, count: u32) {
+fn shift_row_indices(map: &mut crate::StripeDependentsMap, from_row: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for (row_idx, cell_set) in entries {
         let new_row_idx = if row_idx >= from_row { row_idx + count } else { row_idx };
@@ -576,7 +576,7 @@ fn shift_row_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_row: u32,
 }
 
 /// Shift column indices in column_dependents map
-fn shift_col_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_col: u32, count: u32) {
+fn shift_col_indices(map: &mut crate::StripeDependentsMap, from_col: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for (col_idx, cell_set) in entries {
         let new_col_idx = if col_idx >= from_col { col_idx + count } else { col_idx };
@@ -587,11 +587,11 @@ fn shift_col_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_col: u32,
 }
 
 /// Shift row dependencies (cell -> set of row indices)
-fn shift_row_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_row: u32, count: u32) {
+fn shift_row_dependencies_map(map: &mut crate::StripeDependenciesMap, from_row: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for ((r, c), row_set) in entries {
         let new_r = if r >= from_row { r + count } else { r };
-        let new_row_set: HashSet<u32> = row_set
+        let new_row_set: rustc_hash::FxHashSet<u32> = row_set
             .iter()
             .map(|row_idx| if *row_idx >= from_row { *row_idx + count } else { *row_idx })
             .collect();
@@ -600,11 +600,11 @@ fn shift_row_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_
 }
 
 /// Shift column dependencies (cell -> set of col indices)
-fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_col: u32, count: u32) {
+fn shift_col_dependencies_map(map: &mut crate::StripeDependenciesMap, from_col: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for ((r, c), col_set) in entries {
         let new_c = if c >= from_col { c + count } else { c };
-        let new_col_set: HashSet<u32> = col_set
+        let new_col_set: rustc_hash::FxHashSet<u32> = col_set
             .iter()
             .map(|col_idx| if *col_idx >= from_col { *col_idx + count } else { *col_idx })
             .collect();
@@ -1311,8 +1311,8 @@ fn shift_formula_col_references_for_fill(formula: &str, delta: i32) -> String {
 // ============================================================================
 
 /// Shift cell positions for row deletion (move cells up)
-fn shift_cell_positions_for_row_delete<V: Clone>(
-    map: &mut HashMap<(u32, u32), V>,
+fn shift_cell_positions_for_row_delete<V: Clone, S: std::hash::BuildHasher>(
+    map: &mut HashMap<(u32, u32), V, S>,
     from_row: u32,
     count: u32,
 ) {
@@ -1328,8 +1328,8 @@ fn shift_cell_positions_for_row_delete<V: Clone>(
 }
 
 /// Shift cell positions for column deletion (move cells left)
-fn shift_cell_positions_for_col_delete<V: Clone>(
-    map: &mut HashMap<(u32, u32), V>,
+fn shift_cell_positions_for_col_delete<V: Clone, S: std::hash::BuildHasher>(
+    map: &mut HashMap<(u32, u32), V, S>,
     from_col: u32,
     count: u32,
 ) {
@@ -1345,7 +1345,7 @@ fn shift_cell_positions_for_col_delete<V: Clone>(
 }
 
 /// Shift cell references inside a HashSet for row deletion
-fn shift_cell_set_for_row_delete(set: &HashSet<(u32, u32)>, from_row: u32, count: u32) -> HashSet<(u32, u32)> {
+fn shift_cell_set_for_row_delete(set: &crate::CoordSet, from_row: u32, count: u32) -> crate::CoordSet {
     set.iter()
         .filter(|(r, _)| *r < from_row || *r >= from_row + count)
         .map(|(r, c)| {
@@ -1356,7 +1356,7 @@ fn shift_cell_set_for_row_delete(set: &HashSet<(u32, u32)>, from_row: u32, count
 }
 
 /// Shift cell references inside a HashSet for column deletion
-fn shift_cell_set_for_col_delete(set: &HashSet<(u32, u32)>, from_col: u32, count: u32) -> HashSet<(u32, u32)> {
+fn shift_cell_set_for_col_delete(set: &crate::CoordSet, from_col: u32, count: u32) -> crate::CoordSet {
     set.iter()
         .filter(|(_, c)| *c < from_col || *c >= from_col + count)
         .map(|(r, c)| {
@@ -1367,7 +1367,7 @@ fn shift_cell_set_for_col_delete(set: &HashSet<(u32, u32)>, from_col: u32, count
 }
 
 /// Shift row indices in row_dependents map for deletion
-fn shift_row_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_row: u32, count: u32) {
+fn shift_row_indices_for_delete(map: &mut crate::StripeDependentsMap, from_row: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for (row_idx, cell_set) in entries {
         // Skip rows in the deleted range
@@ -1383,7 +1383,7 @@ fn shift_row_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, fro
 }
 
 /// Shift column indices in column_dependents map for deletion
-fn shift_col_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_col: u32, count: u32) {
+fn shift_col_indices_for_delete(map: &mut crate::StripeDependentsMap, from_col: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for (col_idx, cell_set) in entries {
         // Skip columns in the deleted range
@@ -1399,7 +1399,7 @@ fn shift_col_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, fro
 }
 
 /// Shift row dependencies for deletion
-fn shift_row_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_row: u32, count: u32) {
+fn shift_row_dependencies_map_for_delete(map: &mut crate::StripeDependenciesMap, from_row: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for ((r, c), row_set) in entries {
         // Skip cells in the deleted range
@@ -1407,7 +1407,7 @@ fn shift_row_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
             continue;
         }
         let new_r = if r >= from_row + count { r - count } else { r };
-        let new_row_set: HashSet<u32> = row_set
+        let new_row_set: rustc_hash::FxHashSet<u32> = row_set
             .iter()
             .filter(|row_idx| **row_idx < from_row || **row_idx >= from_row + count)
             .map(|row_idx| if *row_idx >= from_row + count { *row_idx - count } else { *row_idx })
@@ -1419,7 +1419,7 @@ fn shift_row_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
 }
 
 /// Shift column dependencies for deletion
-fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_col: u32, count: u32) {
+fn shift_col_dependencies_map_for_delete(map: &mut crate::StripeDependenciesMap, from_col: u32, count: u32) {
     let entries: Vec<_> = map.drain().collect();
     for ((r, c), col_set) in entries {
         // Skip cells in the deleted range
@@ -1427,7 +1427,7 @@ fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
             continue;
         }
         let new_c = if c >= from_col + count { c - count } else { c };
-        let new_col_set: HashSet<u32> = col_set
+        let new_col_set: rustc_hash::FxHashSet<u32> = col_set
             .iter()
             .filter(|col_idx| **col_idx < from_col || **col_idx >= from_col + count)
             .map(|col_idx| if *col_idx >= from_col + count { *col_idx - count } else { *col_idx })
@@ -2146,7 +2146,7 @@ pub fn relocate_cell_references(
             crate::update_row_dependencies((*r, *c), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
 
             // Normalize cross-sheet refs
-            let normalized_cross: HashSet<(String, u32, u32)> = refs
+            let normalized_cross: rustc_hash::FxHashSet<(String, u32, u32)> = refs
                 .cross_sheet_cells
                 .iter()
                 .filter_map(|(parsed_name, cr, cc)| {

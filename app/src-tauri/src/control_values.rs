@@ -240,84 +240,12 @@ fn formula_mentions_control_value(formula: &str) -> bool {
 /// still get recalculated (same policy as `get_recalculation_order`).
 fn multi_root_recalc_order(
     seeds: &[(u32, u32)],
-    dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    dependents: &crate::DependencyMap,
 ) -> Vec<(u32, u32)> {
-    // Member set = seeds + everything reachable from them via dependent edges.
-    let mut members: HashSet<(u32, u32)> = seeds.iter().copied().collect();
-    let mut queue: VecDeque<(u32, u32)> = seeds.iter().copied().collect();
-    while let Some(cell) = queue.pop_front() {
-        if let Some(deps) = dependents.get(&cell) {
-            for dep in deps {
-                if members.insert(*dep) {
-                    queue.push_back(*dep);
-                }
-            }
-        }
-    }
-
-    // In-degree over the induced subgraph (member -> member edges only).
-    let mut in_degree: HashMap<(u32, u32), usize> =
-        members.iter().map(|c| (*c, 0)).collect();
-    for cell in &members {
-        if let Some(deps) = dependents.get(cell) {
-            for dep in deps {
-                if dep == cell {
-                    continue; // self-loop: leave to the cycle fallback
-                }
-                if let Some(deg) = in_degree.get_mut(dep) {
-                    *deg += 1;
-                }
-            }
-        }
-    }
-
-    // Kahn's algorithm. Deterministic start order: seeds first (scan order),
-    // then remaining zero-degree members sorted by coordinate.
-    let mut queued: HashSet<(u32, u32)> = HashSet::new();
-    let mut ready: VecDeque<(u32, u32)> = VecDeque::new();
-    for &seed in seeds {
-        if in_degree.get(&seed) == Some(&0) && queued.insert(seed) {
-            ready.push_back(seed);
-        }
-    }
-    let mut rest: Vec<(u32, u32)> = members
-        .iter()
-        .copied()
-        .filter(|c| in_degree[c] == 0 && !queued.contains(c))
-        .collect();
-    rest.sort_unstable();
-    for c in rest {
-        queued.insert(c);
-        ready.push_back(c);
-    }
-
-    let mut result = Vec::with_capacity(members.len());
-    while let Some(cell) = ready.pop_front() {
-        result.push(cell);
-        if let Some(deps) = dependents.get(&cell) {
-            for dep in deps {
-                if let Some(deg) = in_degree.get_mut(dep) {
-                    if *deg > 0 {
-                        *deg -= 1;
-                        if *deg == 0 && queued.insert(*dep) {
-                            ready.push_back(*dep);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Cycles: append so they still get recalculated (order imperfect).
-    if result.len() < members.len() {
-        let done: HashSet<(u32, u32)> = result.iter().copied().collect();
-        let mut leftovers: Vec<(u32, u32)> =
-            members.iter().copied().filter(|c| !done.contains(c)).collect();
-        leftovers.sort_unstable();
-        result.extend(leftovers);
-    }
-
-    result
+    // Shared Kahn implementation (lib.rs); include_seeds=true keeps this
+    // pass's contract: seeds are members of the ordering, a seed fed by
+    // another member is ordered after its precedents, cycles appended sorted.
+    crate::recalc_order_from_seeds(seeds, dependents, true)
 }
 
 /// Sheet-level recalc plan for the other-sheet pass: starting from the sheets
@@ -686,6 +614,9 @@ pub(crate) fn recalc_control_dependents_core(
         let mut updated_cells: Vec<CellData> = Vec::new();
         let mut cache_hits = 0u32;
         let mut cache_misses = 0u32;
+        // PERF-20: same wide-cascade formula trim as update_cell's cascade.
+        let include_cascade_formulas =
+            affected.len() <= crate::commands::data::CASCADE_FORMULA_LIMIT;
 
         for &(row, col) in &affected {
             let cell_opt = grid.get_cell(row, col).cloned();
@@ -722,6 +653,7 @@ pub(crate) fn recalc_control_dependents_core(
                         &mut updated_cells,
                         &mut cache_hits,
                         &mut cache_misses,
+                        include_cascade_formulas,
                     );
                 }
             }
@@ -754,6 +686,7 @@ pub(crate) fn recalc_control_dependents_core(
             &initial_changed,
             &affected,
             &mut updated_cells,
+            include_cascade_formulas,
         );
 
         updated_cells
@@ -877,9 +810,9 @@ mod tests {
     fn multi_root_order_puts_seed_precedents_first() {
         // A(0,0) -> B(1,0) -> C(2,0); both A and B are seeds (B listed first
         // in scan order). B must still evaluate AFTER A.
-        let mut dependents: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
-        dependents.insert((0, 0), HashSet::from([(1, 0)]));
-        dependents.insert((1, 0), HashSet::from([(2, 0)]));
+        let mut dependents = crate::DependencyMap::default();
+        dependents.insert((0, 0), crate::CoordSet::from_iter([(1, 0)]));
+        dependents.insert((1, 0), crate::CoordSet::from_iter([(2, 0)]));
 
         let order = multi_root_recalc_order(&[(1, 0), (0, 0)], &dependents);
         let pos = |c: (u32, u32)| order.iter().position(|&x| x == c).unwrap();
@@ -891,9 +824,9 @@ mod tests {
     #[test]
     fn multi_root_order_appends_cycles() {
         // A -> B -> A cycle, seeded at A: both must appear exactly once.
-        let mut dependents: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
-        dependents.insert((0, 0), HashSet::from([(0, 1)]));
-        dependents.insert((0, 1), HashSet::from([(0, 0)]));
+        let mut dependents = crate::DependencyMap::default();
+        dependents.insert((0, 0), crate::CoordSet::from_iter([(0, 1)]));
+        dependents.insert((0, 1), crate::CoordSet::from_iter([(0, 0)]));
 
         let order = multi_root_recalc_order(&[(0, 0)], &dependents);
         assert_eq!(order.len(), 2);

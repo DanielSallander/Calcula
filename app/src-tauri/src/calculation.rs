@@ -200,7 +200,7 @@ fn cell_value_as_f64(value: &engine::CellValue) -> f64 {
 /// group is a Vec of (row, col, formula) that must be iterated together.
 fn partition_formula_cells(
     formula_cells: &[(u32, u32, String)],
-    dependencies_map: &std::collections::HashMap<(u32, u32), std::collections::HashSet<(u32, u32)>>,
+    dependencies_map: &crate::DependencyMap,
 ) -> (Vec<(u32, u32, String)>, Vec<Vec<(u32, u32, String)>>) {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -633,8 +633,7 @@ pub(crate) fn recalculate_sheet_values(
     };
 
     // Local same-sheet dependency map for evaluation ordering.
-    let mut local_deps: std::collections::HashMap<(u32, u32), std::collections::HashSet<(u32, u32)>> =
-        std::collections::HashMap::new();
+    let mut local_deps = crate::DependencyMap::default();
     for (row, col, _f) in &formula_cells {
         if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
             if let Some(ast) = &cell.ast {

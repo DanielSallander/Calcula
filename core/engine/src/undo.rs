@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use crate::cell::Cell;
+use crate::grid::CellMap;
 
 /// Maximum number of undo operations to keep in history.
 const MAX_HISTORY_SIZE: usize = 100;
@@ -21,7 +22,7 @@ pub struct UndoMergeRegion {
 /// Snapshot of grid state for reversing structural changes (insert/delete rows/columns).
 #[derive(Debug, Clone)]
 pub struct GridSnapshot {
-    pub cells: HashMap<(u32, u32), Cell>,
+    pub cells: CellMap,
     pub row_heights: HashMap<u32, f64>,
     pub column_widths: HashMap<u32, f64>,
     pub merged_regions: HashSet<UndoMergeRegion>,

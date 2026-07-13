@@ -33,7 +33,8 @@ pub use cube::{
 };
 pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
-pub use dependency_graph::{CycleError, DependencyGraph};
+pub use dependency_graph::{CoordSet, CycleError, DependencyGraph};
+pub use grid::CellMap;
 pub use evaluator::{EvalContext, EvalResult, Evaluator, GatherRegionData, GatherSubmission};
 pub use grid::Grid;
 pub use formula_locale::{delocalize_formula, localize_formula};
@@ -91,7 +92,7 @@ mod tests {
         grid.set_cell(c1.0, c1.1, Cell::new_formula("=A1+B1".to_string()));
 
         // Set up dependencies
-        let mut deps = std::collections::HashSet::new();
+        let mut deps = CoordSet::default();
         deps.insert(a1);
         deps.insert(b1);
         graph.set_dependencies(c1, deps);
@@ -109,12 +110,12 @@ mod tests {
         // A1 depends on B1
         let a1 = a1_to_coord("A", 1);
         let b1 = a1_to_coord("B", 1);
-        let mut deps = std::collections::HashSet::new();
+        let mut deps = CoordSet::default();
         deps.insert(b1);
         graph.set_dependencies(a1, deps);
 
         // Try to make B1 depend on A1 (would create cycle)
-        let mut new_deps = std::collections::HashSet::new();
+        let mut new_deps = CoordSet::default();
         new_deps.insert(a1);
         assert!(graph.would_create_cycle(b1, &new_deps));
     }

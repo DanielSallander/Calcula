@@ -46,8 +46,29 @@ reqwest = { version = "0.12", features = ["stream", "multipart", "json", "blocki
 tempfile = "3.10"
 sys-locale = "0.3"
 zeroize = "1.8"
+rustc-hash = "2"
 windows = { version = "0.61", features = ["Win32_Security_Credentials"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# The app is normally run via `tauri dev` (dev profile), so dependencies — the
+# calculation engine above all — must be optimized even there. `"*"` covers path
+# dependencies (engine, parser, ...) but NOT this crate itself, so incremental
+# rebuilds of app code stay fast while the engine runs at full speed.
+# Do NOT set panic = "abort" in any profile: pivot/operations.rs relies on
+# std::panic::catch_unwind. Leave debug-assertions/overflow-checks at their
+# dev defaults (on) so debug_assert!/overflow guards keep firing in dev builds.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.engine]
+opt-level = 3
+
+[profile.dev.package.parser]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

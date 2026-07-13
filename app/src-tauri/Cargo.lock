@@ -133,6 +133,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
+ "rustc-hash 2.1.1",
  "schemars 1.2.0",
  "script-engine",
  "serde",
@@ -2241,6 +2242,7 @@ version = "0.1.0"
 dependencies = [
  "identity",
  "parser",
+ "rustc-hash 2.1.1",
  "serde",
 ]
 

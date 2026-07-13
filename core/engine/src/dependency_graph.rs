@@ -18,8 +18,12 @@
 //!    cells that need recalculation in the correct order.
 //! 3. Use `would_create_cycle()` to check before committing a formula change.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+use rustc_hash::{FxHashMap, FxHashSet};
 use crate::coord::CellCoord;
+
+/// Coordinate set used throughout the dependency graph (FxHash — hot path).
+pub type CoordSet = FxHashSet<CellCoord>;
 
 /// Error type for cycle detection.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,19 +54,19 @@ impl std::error::Error for CycleError {}
 pub struct DependencyGraph {
     /// For each cell, the set of cells it directly depends on (its precedents).
     /// If A3 = A1 + A2, then precedents[A3] = {A1, A2}.
-    precedents: HashMap<CellCoord, HashSet<CellCoord>>,
+    precedents: FxHashMap<CellCoord, CoordSet>,
 
     /// For each cell, the set of cells that directly depend on it (its dependents).
     /// If A3 = A1 + A2, then dependents[A1] contains A3, and dependents[A2] contains A3.
-    dependents: HashMap<CellCoord, HashSet<CellCoord>>,
+    dependents: FxHashMap<CellCoord, CoordSet>,
 }
 
 impl DependencyGraph {
     /// Creates a new, empty dependency graph.
     pub fn new() -> Self {
         DependencyGraph {
-            precedents: HashMap::new(),
-            dependents: HashMap::new(),
+            precedents: FxHashMap::default(),
+            dependents: FxHashMap::default(),
         }
     }
 
@@ -75,7 +79,7 @@ impl DependencyGraph {
     ///
     /// # Note
     /// This does NOT check for cycles. Use `would_create_cycle()` first if needed.
-    pub fn set_dependencies(&mut self, cell: CellCoord, new_precedents: HashSet<CellCoord>) {
+    pub fn set_dependencies(&mut self, cell: CellCoord, new_precedents: CoordSet) {
         // First, remove old dependencies
         self.clear_dependencies(cell);
 
@@ -85,7 +89,7 @@ impl DependencyGraph {
             for &prec in &new_precedents {
                 self.dependents
                     .entry(prec)
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(cell);
             }
 
@@ -122,7 +126,7 @@ impl DependencyGraph {
     ///
     /// # Returns
     /// A reference to the set of precedents, or None if the cell has no precedents.
-    pub fn get_precedents(&self, cell: CellCoord) -> Option<&HashSet<CellCoord>> {
+    pub fn get_precedents(&self, cell: CellCoord) -> Option<&CoordSet> {
         self.precedents.get(&cell)
     }
 
@@ -133,7 +137,7 @@ impl DependencyGraph {
     ///
     /// # Returns
     /// A reference to the set of dependents, or None if no cells depend on this cell.
-    pub fn get_dependents(&self, cell: CellCoord) -> Option<&HashSet<CellCoord>> {
+    pub fn get_dependents(&self, cell: CellCoord) -> Option<&CoordSet> {
         self.dependents.get(&cell)
     }
 
@@ -146,7 +150,7 @@ impl DependencyGraph {
     ///
     /// # Returns
     /// `true` if adding these dependencies would create a cycle, `false` otherwise.
-    pub fn would_create_cycle(&self, cell: CellCoord, new_precedents: &HashSet<CellCoord>) -> bool {
+    pub fn would_create_cycle(&self, cell: CellCoord, new_precedents: &CoordSet) -> bool {
         // A cell depending on itself is a trivial cycle
         if new_precedents.contains(&cell) {
             return true;
@@ -167,7 +171,7 @@ impl DependencyGraph {
     /// This is used for cycle detection: if precedent P can reach cell C,
     /// then C depending on P would create a cycle.
     fn can_reach(&self, start: CellCoord, target: CellCoord) -> bool {
-        let mut visited = HashSet::new();
+        let mut visited = CoordSet::default();
         let mut stack = vec![start];
 
         while let Some(current) = stack.pop() {
@@ -217,8 +221,8 @@ impl DependencyGraph {
 
     /// Gets all transitive dependents of a cell (not including the cell itself).
     /// Uses BFS to traverse the dependent chains.
-    fn get_all_dependents(&self, cell: CellCoord) -> HashSet<CellCoord> {
-        let mut result = HashSet::new();
+    fn get_all_dependents(&self, cell: CellCoord) -> CoordSet {
+        let mut result = CoordSet::default();
         let mut queue = VecDeque::new();
 
         // Start with direct dependents
@@ -256,9 +260,9 @@ impl DependencyGraph {
     /// # Returns
     /// - `Ok(Vec<CellCoord>)` - The sorted cells.
     /// - `Err(CycleError)` - If a cycle is detected among the cells.
-    fn topological_sort(&self, cells: &HashSet<CellCoord>) -> Result<Vec<CellCoord>, CycleError> {
+    fn topological_sort(&self, cells: &CoordSet) -> Result<Vec<CellCoord>, CycleError> {
         // Build in-degree map (only counting edges within the subset)
-        let mut in_degree: HashMap<CellCoord, usize> = HashMap::new();
+        let mut in_degree: FxHashMap<CellCoord, usize> = FxHashMap::default();
         for &cell in cells {
             in_degree.insert(cell, 0);
         }
@@ -323,7 +327,7 @@ impl DependencyGraph {
             return Vec::new();
         }
 
-        let cell_set: HashSet<CellCoord> = cycle_cells.iter().cloned().collect();
+        let cell_set: CoordSet = cycle_cells.iter().cloned().collect();
         let start = cycle_cells[0];
         let mut path = vec![start];
         let mut current = start;
@@ -444,7 +448,7 @@ mod tests {
         (row, col)
     }
 
-    fn set_of(coords: &[CellCoord]) -> HashSet<CellCoord> {
+    fn set_of(coords: &[CellCoord]) -> CoordSet {
         coords.iter().cloned().collect()
     }
 

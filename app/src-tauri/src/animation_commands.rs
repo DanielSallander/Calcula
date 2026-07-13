@@ -13,7 +13,7 @@
 //          so a trusted built-in extension reaches them through the gated
 //          ExtensionContext.invokeBackend door with no capability friction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{
@@ -105,9 +105,9 @@ fn apply_set_ops_and_recalc(
     sheet_idx: usize,
     sheet_names: &[String],
     styles: &StyleRegistry,
-    dependents_map: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
-    column_dependents_map: &HashMap<u32, HashSet<(u32, u32)>>,
-    row_dependents_map: &HashMap<u32, HashSet<(u32, u32)>>,
+    dependents_map: &crate::DependencyMap,
+    column_dependents_map: &crate::StripeDependentsMap,
+    row_dependents_map: &crate::StripeDependentsMap,
     merged_regions: &HashSet<MergedRegion>,
     locale: &engine::LocaleSettings,
     ops: &[((u32, u32), SetOp)],
@@ -495,7 +495,7 @@ mod tests {
     }
 
     /// A1 (literal) with B1 = A1*2 depending on it.
-    fn model() -> (Vec<Grid>, Grid, HashMap<(u32, u32), HashSet<(u32, u32)>>) {
+    fn model() -> (Vec<Grid>, Grid, crate::DependencyMap) {
         let mut g = Grid::new();
         g.set_cell(0, 0, Cell::new_number(10.0)); // A1 = 10
         g.set_cell(0, 1, Cell::new_formula("A1*2".to_string())); // B1 = A1*2
@@ -503,8 +503,8 @@ mod tests {
         active.set_cell(0, 0, Cell::new_number(10.0));
         active.set_cell(0, 1, Cell::new_formula("A1*2".to_string()));
 
-        let mut deps: HashMap<(u32, u32), HashSet<(u32, u32)>> = HashMap::new();
-        let mut b1 = HashSet::new();
+        let mut deps = crate::DependencyMap::default();
+        let mut b1 = crate::CoordSet::default();
         b1.insert((0, 1)); // B1 depends on A1
         deps.insert((0, 0), b1);
 
@@ -514,8 +514,8 @@ mod tests {
     #[test]
     fn apply_then_restore_round_trips_literal_and_dependent() {
         let (mut grids, mut active, deps) = model();
-        let coldeps = HashMap::new();
-        let rowdeps = HashMap::new();
+        let coldeps = crate::StripeDependentsMap::default();
+        let rowdeps = crate::StripeDependentsMap::default();
         let merged = HashSet::new();
         let styles = StyleRegistry::new();
         let names = vec!["Sheet1".to_string()];
@@ -561,8 +561,8 @@ mod tests {
     #[test]
     fn restore_clears_a_cell_that_was_originally_empty() {
         let (mut grids, mut active, deps) = model();
-        let coldeps = HashMap::new();
-        let rowdeps = HashMap::new();
+        let coldeps = crate::StripeDependentsMap::default();
+        let rowdeps = crate::StripeDependentsMap::default();
         let merged = HashSet::new();
         let styles = StyleRegistry::new();
         let names = vec!["Sheet1".to_string()];

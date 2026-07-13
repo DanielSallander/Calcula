@@ -34,6 +34,14 @@ fn formula_display(cell: &engine::Cell, locale: &engine::LocaleSettings) -> Opti
         .map(|f| format!("={}", engine::localize_formula(&f, locale)))
 }
 
+/// Cascade payload trim (PERF-20): dependents recalculated by an edit only
+/// need `display` + style for repaint — the grid refetches visible cells and
+/// the formula bar fetches on selection. Rendering + localizing an AST per
+/// dependent and shipping it as JSON dominates wide-cascade IPC payloads, so
+/// formulas are included only for small cascades (where UI consumers keep
+/// their exact current behavior) and dropped for wide ones.
+pub(crate) const CASCADE_FORMULA_LIMIT: usize = 64;
+
 /// Check if any cell in the given range is a spilled value (not the spill origin).
 /// Returns Ok(()) if the range is safe to modify, or Err with a user-facing message
 /// identifying the origin formula cell.
@@ -45,17 +53,54 @@ fn check_spill_protection(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
+    fn spill_err(origin_r: u32, origin_c: u32) -> String {
+        let col_letter = crate::pivot::utils::col_index_to_letter(origin_c);
+        let cell_ref = format!("{}{}", col_letter, origin_r + 1);
+        format!(
+            "We can't delete this value\n\nThe value contained in this cell is spilled from the formula in {}. To delete this value, you will need to modify that formula.",
+            cell_ref
+        )
+    }
+
+    // Fast path: single-cell ranges (batch writes and clear_cell check one
+    // cell at a time) — the map key IS the cell, so one probe replaces a scan
+    // over every spilled cell in the workbook.
+    if start_row == end_row && start_col == end_col {
+        if let Some(&(origin_r, origin_c)) =
+            spill_hosts.get(&(active_sheet, start_row, start_col))
+        {
+            return Err(spill_err(origin_r, origin_c));
+        }
+        return Ok(());
+    }
+
+    // Inverted ranges match nothing (empty interval) — same as the old scan.
+    if end_row < start_row || end_col < start_col {
+        return Ok(());
+    }
+
+    // Adaptive: probe each coordinate when the rect is smaller than the map;
+    // otherwise scan the map once (previous behavior — covers whole-column
+    // selections without iterating 4 billion coordinates).
+    let area = (end_row as u64 - start_row as u64 + 1)
+        .saturating_mul(end_col as u64 - start_col as u64 + 1);
+    if area <= spill_hosts.len() as u64 {
+        for r in start_row..=end_row {
+            for c in start_col..=end_col {
+                if let Some(&(origin_r, origin_c)) = spill_hosts.get(&(active_sheet, r, c)) {
+                    return Err(spill_err(origin_r, origin_c));
+                }
+            }
+        }
+        return Ok(());
+    }
+
     for (&(sheet, r, c), &(origin_r, origin_c)) in spill_hosts.iter() {
         if sheet == active_sheet
             && r >= start_row && r <= end_row
             && c >= start_col && c <= end_col
         {
-            let col_letter = crate::pivot::utils::col_index_to_letter(origin_c);
-            let cell_ref = format!("{}{}", col_letter, origin_r + 1);
-            return Err(format!(
-                "We can't delete this value\n\nThe value contained in this cell is spilled from the formula in {}. To delete this value, you will need to modify that formula.",
-                cell_ref
-            ));
+            return Err(spill_err(origin_r, origin_c));
         }
     }
     Ok(())
@@ -704,25 +749,25 @@ fn update_cell_impl(
         // Clear cross-sheet dependencies for this cell
         update_cross_sheet_dependencies(
             (active_sheet, row, col),
-            HashSet::new(),
+            Default::default(),
             &mut cross_sheet_dependencies_map,
             &mut cross_sheet_dependents_map,
         );
         update_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut dependencies_map,
             &mut dependents_map,
         );
         update_column_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut column_dependencies_map,
             &mut column_dependents_map,
         );
         update_row_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
@@ -857,7 +902,7 @@ fn update_cell_impl(
 
                 // Normalize cross-sheet references: match sheet names case-insensitively
                 // to the official sheet_names list
-                let normalized_cross_sheet_refs: HashSet<(String, u32, u32)> = refs
+                let normalized_cross_sheet_refs: rustc_hash::FxHashSet<(String, u32, u32)> = refs
                     .cross_sheet_cells
                     .iter()
                     .filter_map(|(parsed_sheet_name, r, c)| {
@@ -1010,26 +1055,26 @@ fn update_cell_impl(
         // Clear dependencies for non-formula cells
         update_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut dependencies_map,
             &mut dependents_map,
         );
         // Clear cross-sheet dependencies for non-formula cells
         update_cross_sheet_dependencies(
             (active_sheet, row, col),
-            HashSet::new(),
+            Default::default(),
             &mut cross_sheet_dependencies_map,
             &mut cross_sheet_dependents_map,
         );
         update_column_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut column_dependencies_map,
             &mut column_dependents_map,
         );
         update_row_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
@@ -1106,8 +1151,8 @@ fn update_cell_impl(
             row, col, recalc_order, dependents_map.get(&(row, col)));
 
         // Also get column/row dependents (formulas with column or row references)
-        // Use a HashSet for O(1) lookup instead of O(n) Vec::contains
-        let recalc_set: HashSet<(u32, u32)> = recalc_order.iter().copied().collect();
+        // Use a set for O(1) lookup instead of O(n) Vec::contains
+        let recalc_set: crate::CoordSet = recalc_order.iter().copied().collect();
         let col_row_deps =
             get_column_row_dependents((row, col), &column_dependents_map, &row_dependents_map);
         for dep in col_row_deps {
@@ -1120,6 +1165,8 @@ fn update_cell_impl(
         let mut perf_cache_hits: u32 = 0;
         let mut perf_cache_misses: u32 = 0;
         let mut perf_eval_total = std::time::Duration::ZERO;
+        // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
+        let include_cascade_formulas = recalc_order.len() <= CASCADE_FORMULA_LIMIT;
 
         for &(dep_row, dep_col) in &recalc_order {
             // Clone dep_cell upfront to release the immutable borrow on grid,
@@ -1154,6 +1201,7 @@ fn update_cell_impl(
                         &mut updated_cells,
                         &mut perf_cache_hits,
                         &mut perf_cache_misses,
+                        include_cascade_formulas,
                     );
                     perf_eval_total += perf_eval_start.elapsed();
                 }
@@ -1180,6 +1228,7 @@ fn update_cell_impl(
             &[(row, col)],
             &recalc_order,
             &mut updated_cells,
+            include_cascade_formulas,
         );
         let perf_t6_cross_sheet = Instant::now();
         let perf_cross_sheet_count = updated_cells.len().saturating_sub(1 + perf_same_sheet_count);
@@ -1325,6 +1374,7 @@ pub(crate) fn reevaluate_formula_cell(
     updated_cells: &mut Vec<CellData>,
     cache_hits: &mut u32,
     cache_misses: &mut u32,
+    include_formula: bool,
 ) {
     // Per-cell EvalContext with the dependent's OWN position — current_row/
     // current_col MUST be set so the preserve semantics can engage (see the
@@ -1546,7 +1596,11 @@ pub(crate) fn reevaluate_formula_cell(
         col: dep_col,
         display: dep_display,
         display_color: None,
-        formula: formula_display(&updated_dep, locale),
+        formula: if include_formula {
+            formula_display(&updated_dep, locale)
+        } else {
+            None
+        },
         style_index: updated_dep.style_index,
         row_span: dep_row_span,
         col_span: dep_col_span,
@@ -1580,11 +1634,8 @@ pub(crate) fn cascade_cross_sheet_dependents(
     grids: &mut Vec<Grid>,
     sheet_names: &[String],
     active_sheet: usize,
-    cross_sheet_dependents_map: &std::collections::HashMap<
-        (String, u32, u32),
-        HashSet<(usize, u32, u32)>,
-    >,
-    dependents_map: &std::collections::HashMap<(u32, u32), HashSet<(u32, u32)>>,
+    cross_sheet_dependents_map: &crate::CrossSheetDependentsMap,
+    dependents_map: &crate::DependencyMap,
     user_files: &std::collections::HashMap<String, Vec<u8>>,
     control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
     styles: &StyleRegistry,
@@ -1593,6 +1644,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
     initial_changed: &[(u32, u32)],
     already_recalced: &[(u32, u32)],
     updated_cells: &mut Vec<CellData>,
+    include_formulas: bool,
 ) {
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
@@ -1694,7 +1746,11 @@ pub(crate) fn cascade_cross_sheet_dependents(
                                 col: *dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: formula_display(&updated_dep, locale),
+                                formula: if include_formulas {
+                                    formula_display(&updated_dep, locale)
+                                } else {
+                                    None
+                                },
                                 style_index: updated_dep.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -1780,7 +1836,11 @@ pub(crate) fn cascade_cross_sheet_dependents(
                                 col: ss_dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: formula_display(&updated_dep, locale),
+                                formula: if include_formulas {
+                                    formula_display(&updated_dep, locale)
+                                } else {
+                                    None
+                                },
                                 style_index: updated_dep.style_index,
                                 row_span: 1,
                                 col_span: 1,
@@ -2048,25 +2108,25 @@ pub(crate) fn update_cells_batch_with_controls(
             // Clear dependencies
             update_cross_sheet_dependencies(
                 (active_sheet, row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut cross_sheet_dependencies_map,
                 &mut cross_sheet_dependents_map,
             );
             update_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut dependencies_map,
                 &mut dependents_map,
             );
             update_column_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut column_dependencies_map,
                 &mut column_dependents_map,
             );
             update_row_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut row_dependencies_map,
                 &mut row_dependents_map,
             );
@@ -2188,7 +2248,7 @@ pub(crate) fn update_cells_batch_with_controls(
                     );
 
                     // Normalize cross-sheet references
-                    let normalized_cross_sheet_refs: HashSet<(String, u32, u32)> = refs
+                    let normalized_cross_sheet_refs: rustc_hash::FxHashSet<(String, u32, u32)> = refs
                         .cross_sheet_cells
                         .iter()
                         .filter_map(|(parsed_sheet_name, r, c)| {
@@ -2333,25 +2393,25 @@ pub(crate) fn update_cells_batch_with_controls(
             // Clear dependencies for non-formula cells
             update_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut dependencies_map,
                 &mut dependents_map,
             );
             update_cross_sheet_dependencies(
                 (active_sheet, row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut cross_sheet_dependencies_map,
                 &mut cross_sheet_dependents_map,
             );
             update_column_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut column_dependencies_map,
                 &mut column_dependents_map,
             );
             update_row_dependencies(
                 (row, col),
-                HashSet::new(),
+                Default::default(),
                 &mut row_dependencies_map,
                 &mut row_dependents_map,
             );
@@ -2402,29 +2462,23 @@ pub(crate) fn update_cells_batch_with_controls(
 
     // Recalculate dependents if automatic mode - do this ONCE after all updates
     if *calc_mode == "automatic" {
-        // Collect all dependents from all updated cells
-        let mut all_recalc_order: Vec<(u32, u32)> = Vec::new();
-        let mut recalc_set: HashSet<(u32, u32)> = HashSet::new();
+        // One multi-root traversal for the whole batch: a single BFS + Kahn
+        // over the union of affected cells instead of one full pass per edited
+        // cell. Batch cells are members of the ordering, so a formula written
+        // by this batch is re-evaluated AFTER the batch cells it reads (fixes
+        // in-batch stale values); value-only batch cells are skipped by the
+        // formula check in the evaluation loop below.
+        let mut all_recalc_order: Vec<(u32, u32)> =
+            crate::recalc_order_from_seeds(&cells_needing_recalc, &dependents_map, true);
+        let mut recalc_set: crate::CoordSet = all_recalc_order.iter().copied().collect();
 
-        // Also track updated cells so we don't re-add them
-        let updated_set: HashSet<(u32, u32)> = cells_needing_recalc.iter().copied().collect();
-
+        // Also get column/row dependents (appended after the topological
+        // order, mirroring update_cell).
         for (row, col) in &cells_needing_recalc {
-            let recalc_order = get_recalculation_order((*row, *col), &dependents_map);
-            for dep in recalc_order {
-                // Skip cells that were part of the batch update itself
-                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
-                    recalc_set.insert(dep);
-                    all_recalc_order.push(dep);
-                }
-            }
-
-            // Also get column/row dependents
             let col_row_deps =
                 get_column_row_dependents((*row, *col), &column_dependents_map, &row_dependents_map);
             for dep in col_row_deps {
-                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
-                    recalc_set.insert(dep);
+                if recalc_set.insert(dep) {
                     all_recalc_order.push(dep);
                 }
             }
@@ -2434,6 +2488,9 @@ pub(crate) fn update_cells_batch_with_controls(
         let batch_tables = state.tables.lock().unwrap();
         let batch_table_names = state.table_names.lock().unwrap();
         let batch_named_ranges = state.named_ranges.lock().unwrap();
+
+        // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
+        let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
 
         // Recalculate all dependents
         for (dep_row, dep_col) in &all_recalc_order {
@@ -2510,7 +2567,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                 col: *dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: formula_display(&updated_with_ast, &locale),
+                                formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
                                 style_index: updated_with_ast.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -2549,7 +2606,7 @@ pub(crate) fn update_cells_batch_with_controls(
                         col: *dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: formula_display(&updated_dep, &locale),
+                        formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -2629,7 +2686,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: formula_display(&updated_dep, &locale),
+                                    formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -2719,26 +2776,26 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     // Clear cross-sheet dependencies
     update_cross_sheet_dependencies(
         (active_sheet, row, col),
-        HashSet::new(),
+        Default::default(),
         &mut cross_sheet_dependencies_map,
         &mut cross_sheet_dependents_map,
     );
 
     update_dependencies(
         (row, col),
-        HashSet::new(),
+        Default::default(),
         &mut dependencies_map,
         &mut dependents_map,
     );
     update_column_dependencies(
         (row, col),
-        HashSet::new(),
+        Default::default(),
         &mut column_dependencies_map,
         &mut column_dependents_map,
     );
     update_row_dependencies(
         (row, col),
-        HashSet::new(),
+        Default::default(),
         &mut row_dependencies_map,
         &mut row_dependents_map,
     );
@@ -2839,25 +2896,25 @@ pub fn clear_range(
         // Clear dependencies
         update_cross_sheet_dependencies(
             (active_sheet, row, col),
-            HashSet::new(),
+            Default::default(),
             &mut cross_sheet_dependencies_map,
             &mut cross_sheet_dependents_map,
         );
         update_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut dependencies_map,
             &mut dependents_map,
         );
         update_column_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut column_dependencies_map,
             &mut column_dependents_map,
         );
         update_row_dependencies(
             (row, col),
-            HashSet::new(),
+            Default::default(),
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
@@ -2996,25 +3053,25 @@ pub fn clear_range_with_options(
                 // Clear dependencies
                 update_cross_sheet_dependencies(
                     (active_sheet, row, col),
-                    HashSet::new(),
+                    Default::default(),
                     &mut cross_sheet_dependencies_map,
                     &mut cross_sheet_dependents_map,
                 );
                 update_dependencies(
                     (row, col),
-                    HashSet::new(),
+                    Default::default(),
                     &mut dependencies_map,
                     &mut dependents_map,
                 );
                 update_column_dependencies(
                     (row, col),
-                    HashSet::new(),
+                    Default::default(),
                     &mut column_dependencies_map,
                     &mut column_dependents_map,
                 );
                 update_row_dependencies(
                     (row, col),
-                    HashSet::new(),
+                    Default::default(),
                     &mut row_dependencies_map,
                     &mut row_dependents_map,
                 );
@@ -3065,25 +3122,25 @@ pub fn clear_range_with_options(
                     // Clear dependencies since formula is gone
                     update_cross_sheet_dependencies(
                         (active_sheet, row, col),
-                        HashSet::new(),
+                        Default::default(),
                         &mut cross_sheet_dependencies_map,
                         &mut cross_sheet_dependents_map,
                     );
                     update_dependencies(
                         (row, col),
-                        HashSet::new(),
+                        Default::default(),
                         &mut dependencies_map,
                         &mut dependents_map,
                     );
                     update_column_dependencies(
                         (row, col),
-                        HashSet::new(),
+                        Default::default(),
                         &mut column_dependencies_map,
                         &mut column_dependents_map,
                     );
                     update_row_dependencies(
                         (row, col),
-                        HashSet::new(),
+                        Default::default(),
                         &mut row_dependencies_map,
                         &mut row_dependents_map,
                     );
@@ -4606,7 +4663,7 @@ pub fn fill_range(
                             );
 
                             // Cross-sheet dependencies
-                            let normalized_cross_sheet_refs: HashSet<(String, u32, u32)> = refs
+                            let normalized_cross_sheet_refs: rustc_hash::FxHashSet<(String, u32, u32)> = refs
                                 .cross_sheet_cells
                                 .iter()
                                 .filter_map(|(parsed_sheet_name, r, c)| {
@@ -4705,25 +4762,25 @@ pub fn fill_range(
                 // Clear dependencies for this cell
                 update_cross_sheet_dependencies(
                     (active_sheet, tr, tc),
-                    HashSet::new(),
+                    Default::default(),
                     &mut cross_sheet_dependencies_map,
                     &mut cross_sheet_dependents_map,
                 );
                 update_dependencies(
                     (tr, tc),
-                    HashSet::new(),
+                    Default::default(),
                     &mut dependencies_map,
                     &mut dependents_map,
                 );
                 update_column_dependencies(
                     (tr, tc),
-                    HashSet::new(),
+                    Default::default(),
                     &mut column_dependencies_map,
                     &mut column_dependents_map,
                 );
                 update_row_dependencies(
                     (tr, tc),
-                    HashSet::new(),
+                    Default::default(),
                     &mut row_dependencies_map,
                     &mut row_dependents_map,
                 );
@@ -4764,23 +4821,17 @@ pub fn fill_range(
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
-        let mut all_recalc_order: Vec<(u32, u32)> = Vec::new();
-        let mut recalc_set: HashSet<(u32, u32)> = HashSet::new();
-        let updated_set: HashSet<(u32, u32)> = cells_needing_recalc.iter().copied().collect();
+        // One multi-root traversal for the whole fill (see update_cells_batch):
+        // fixes in-fill stale values and avoids one BFS + Kahn per filled cell.
+        let mut all_recalc_order: Vec<(u32, u32)> =
+            crate::recalc_order_from_seeds(&cells_needing_recalc, &dependents_map, true);
+        let mut recalc_set: crate::CoordSet = all_recalc_order.iter().copied().collect();
 
         for (row, col) in &cells_needing_recalc {
-            let recalc_order = get_recalculation_order((*row, *col), &dependents_map);
-            for dep in recalc_order {
-                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
-                    recalc_set.insert(dep);
-                    all_recalc_order.push(dep);
-                }
-            }
             let col_row_deps =
                 get_column_row_dependents((*row, *col), &column_dependents_map, &row_dependents_map);
             for dep in col_row_deps {
-                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
-                    recalc_set.insert(dep);
+                if recalc_set.insert(dep) {
                     all_recalc_order.push(dep);
                 }
             }
@@ -4790,6 +4841,9 @@ pub fn fill_range(
         let batch_tables = state.tables.lock().unwrap();
         let batch_table_names = state.table_names.lock().unwrap();
         let batch_named_ranges = state.named_ranges.lock().unwrap();
+
+        // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
+        let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
 
         for (dep_row, dep_col) in &all_recalc_order {
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
@@ -4855,7 +4909,7 @@ pub fn fill_range(
                             updated_cells.push(CellData {
                                 row: *dep_row, col: *dep_col, display: dep_display,
                                 display_color: None,
-                                formula: formula_display(&updated_with_ast, &locale),
+                                formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
                                 style_index: updated_with_ast.style_index,
                                 row_span: drspan, col_span: dcspan,
                                 sheet_index: None, rich_text: None, accounting_layout: None,
@@ -4881,7 +4935,7 @@ pub fn fill_range(
                     updated_cells.push(CellData {
                         row: *dep_row, col: *dep_col, display: dep_display,
                         display_color: None,
-                        formula: formula_display(&updated_dep, &locale),
+                        formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                         style_index: updated_dep.style_index,
                         row_span: drspan, col_span: dcspan,
                         sheet_index: None, rich_text: None, accounting_layout: None,
@@ -4933,7 +4987,7 @@ pub fn fill_range(
                                 updated_cells.push(CellData {
                                     row: *dep_row, col: *dep_col, display: dep_display,
                                     display_color: None,
-                                    formula: formula_display(&updated_dep, &locale),
+                                    formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
                                     style_index: updated_dep.style_index,
                                     row_span: 1, col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx), rich_text: None, accounting_layout: None,
