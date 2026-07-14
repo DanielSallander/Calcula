@@ -53,10 +53,12 @@ fn model_format_version_is_current() {
     // DAX-gap batch (PATH calculated columns + PATHLENGTH/PATHITEM, measure
     // detail_rows, security-role OLS denials, perspectives); v20 added the
     // second DAX-gap batch (THISROW anchor rows, DATESBETWEEN, Week
-    // granularity/WTD, fiscal_year_end_month, cultures/translations).
+    // granularity/WTD, fiscal_year_end_month, cultures/translations);
+    // v21 added writeback columns (model writeback_columns, Table
+    // is_writeback_store, CalculatedColumn generated_by).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 20);
+    assert_eq!(MODEL_FORMAT_VERSION, 21);
 }
 
 #[test]

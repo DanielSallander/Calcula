@@ -125,6 +125,17 @@ impl Engine {
             return self.materialize_calculated_table_inner(table_name).await;
         }
 
+        // A writeback store table has no source connector either — its data
+        // is FED by the host (`Engine::set_writeback_data`). "Refreshing" it
+        // keeps the host-fed data; an uncached store is seeded EMPTY so
+        // dependent queries always work.
+        if table.is_writeback_store() {
+            if self.cache.contains(table_name) {
+                return Ok(OptimizationStats::default());
+            }
+            return self.store_refreshed_table(table_name, Vec::new());
+        }
+
         // Incremental path: only when the table has an `incremental_refresh`
         // policy AND a cached batch already exists. The first load (empty
         // cache) has no stable rows to retain, so it takes the full path.
@@ -273,11 +284,24 @@ impl Engine {
     /// implementation, tables ordered before the failing one are stored and
     /// later ones are not.
     pub async fn refresh_all_in_memory(&mut self) -> EngineResult<()> {
+        // Writeback stores have no connector: seed the uncached ones EMPTY
+        // (host feeds arrive separately) and keep them out of the fetch list.
+        let writeback_stores: Vec<String> = self
+            .model
+            .tables()
+            .iter()
+            .filter(|t| t.is_writeback_store() && !self.cache.contains(t.name()))
+            .map(|t| t.name().to_string())
+            .collect();
+        for name in writeback_stores {
+            self.store_refreshed_table(&name, Vec::new())?;
+        }
+
         let table_names: Vec<String> = self
             .model
             .tables()
             .iter()
-            .filter(|t| t.is_in_memory())
+            .filter(|t| t.is_in_memory() && !t.is_writeback_store())
             .map(|t| t.name().to_string())
             .collect();
 
@@ -322,6 +346,21 @@ impl Engine {
     /// statement only) and is skipped entirely — recorded as a poll failure —
     /// when the policy is [`SourceQueryPolicy::Disabled`].
     pub async fn refresh_stale(&mut self) -> EngineResult<RefreshReport> {
+        // Writeback stores never fetch: seed any uncached ones EMPTY so
+        // dependent queries (query_auto_refresh runs through here) always
+        // work even before the host's first feed, then exclude them from
+        // every staleness path below.
+        let unseeded_stores: Vec<String> = self
+            .model
+            .tables()
+            .iter()
+            .filter(|t| t.is_writeback_store() && !self.cache.contains(t.name()))
+            .map(|t| t.name().to_string())
+            .collect();
+        for name in unseeded_stores {
+            self.store_refreshed_table(&name, Vec::new())?;
+        }
+
         // Collect in-memory tables with their staleness info. Derived tables
         // of materialized calculated tables are handled separately below —
         // they materialize AFTER the physical tables they read from, and only
@@ -330,7 +369,7 @@ impl Engine {
             .model
             .tables()
             .iter()
-            .filter(|t| t.is_in_memory() && !t.is_calculated())
+            .filter(|t| t.is_in_memory() && !t.is_calculated() && !t.is_writeback_store())
             .map(|t| {
                 let strategies = t.refresh_strategies();
                 let locally_stale = if strategies.is_empty() {

@@ -81,6 +81,121 @@ pub(crate) fn reconcile_calculated_tables(
 
     Ok(tables)
 }
+
+/// Synthesize the store tables + generated lookup columns of every
+/// [`WritebackColumn`]: per column a hidden HISTORY table
+/// (`__wb_{id}_hist`: key columns + value + submitter/timestamp/state), a
+/// hidden CURRENT table (`__wb_{id}`: key columns + value), and a generated
+/// cross-table `LOOKUPVALUE` calculated column on the host table (marked
+/// `generated_by`) — so the user-facing column rides the ordinary
+/// deduplicated-LEFT-JOIN materialization path.
+///
+/// Idempotent (same contract as [`reconcile_calculated_tables`]): previously
+/// synthesized artifacts (`is_writeback_store` tables, `generated_by`
+/// columns) are dropped and re-synthesized, so build/validate replays
+/// converge on a mutated or deserialized model.
+pub(crate) fn reconcile_writeback_model(
+    tables: Vec<Table>,
+    calculated_columns: Vec<CalculatedColumn>,
+    writeback_columns: &[WritebackColumn],
+) -> EngineResult<(Vec<Table>, Vec<CalculatedColumn>)> {
+    use crate::model::table::StorageMode;
+    use crate::types::DataType;
+
+    let mut tables: Vec<Table> = tables
+        .into_iter()
+        .filter(|t| !t.is_writeback_store())
+        .collect();
+    let mut columns: Vec<CalculatedColumn> = calculated_columns
+        .into_iter()
+        .filter(|c| c.generated_by().is_none())
+        .collect();
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for wb in writeback_columns {
+        wb.validate()?;
+        if !seen_ids.insert(wb.id().to_string()) {
+            return Err(EngineError::DuplicateName(format!(
+                "Duplicate writeback column id '{}'",
+                wb.id()
+            )));
+        }
+        let host = tables
+            .iter()
+            .find(|t| t.name().eq_ignore_ascii_case(wb.table()))
+            .ok_or_else(|| EngineError::TableNotFound(wb.table().to_string()))?;
+        if !host.is_in_memory() {
+            return Err(EngineError::InvalidData(format!(
+                "writeback column '{}': host table '{}' must use InMemory storage — the \
+                 generated lookup joins against local batches (DirectQuery hosts are not \
+                 supported yet)",
+                wb.name(),
+                wb.table()
+            )));
+        }
+        if host
+            .columns()
+            .iter()
+            .any(|c| c.name().eq_ignore_ascii_case(wb.name()))
+        {
+            return Err(EngineError::DuplicateName(format!(
+                "writeback column '{}' collides with a physical column on table '{}'",
+                wb.name(),
+                wb.table()
+            )));
+        }
+        // Resolve key-column types from the host's physical columns. v1
+        // restricts keys to Int64/String: pivot editing round-trips key
+        // values through display labels, which is lossy for float/date.
+        let mut key_types: Vec<(String, DataType)> = Vec::with_capacity(wb.key_columns().len());
+        for key in wb.key_columns() {
+            let col = host
+                .columns()
+                .iter()
+                .find(|c| c.name().eq_ignore_ascii_case(key))
+                .ok_or_else(|| {
+                    EngineError::InvalidData(format!(
+                        "writeback column '{}': key column '{}' does not exist on table '{}'",
+                        wb.name(),
+                        key,
+                        wb.table()
+                    ))
+                })?;
+            match col.data_type() {
+                DataType::Int64 | DataType::String => {}
+                other => {
+                    return Err(EngineError::InvalidData(format!(
+                        "writeback column '{}': key column '{}' has type {:?} — v1 supports \
+                         Int64 and String keys only",
+                        wb.name(),
+                        key,
+                        other
+                    )));
+                }
+            }
+            key_types.push((col.name().to_string(), col.data_type().clone()));
+        }
+
+        let mut hist = Table::new(wb.history_table_name(), wb.history_columns(&key_types))?
+            .with_storage_mode(StorageMode::InMemory)
+            .writeback_store();
+        if wb.expose_history() {
+            hist.set_display_name(Some(format!("{} {} History", wb.table(), wb.name())));
+            hist.set_hidden(false);
+        } else {
+            hist.set_hidden(true);
+        }
+        let mut cur = Table::new(wb.current_table_name(), wb.current_columns(&key_types))?
+            .with_storage_mode(StorageMode::InMemory)
+            .writeback_store();
+        cur.set_hidden(true);
+        tables.push(hist);
+        tables.push(cur);
+        columns.push(wb.generated_column());
+    }
+
+    Ok((tables, columns))
+}
 pub(crate) use validation::{
     validate_identifier, validate_metadata_text, MAX_METADATA_DESCRIPTION_CHARS,
     MAX_METADATA_NAME_CHARS,
@@ -96,6 +211,8 @@ mod hierarchy_tests;
 mod metadata_tests;
 #[cfg(test)]
 mod test_fixtures;
+#[cfg(test)]
+mod writeback_tests;
 
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +233,7 @@ use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
+use crate::model::writeback_column::WritebackColumn;
 
 /// Current version of the model-file (JSON) format written by this engine.
 ///
@@ -301,8 +419,21 @@ use crate::model::table_variable::TableVariable;
 ///   rest, so the [`ModelFormatTooNew`] gate refuses v20 files on a pre-v20
 ///   engine.
 ///
+/// - `21` — writeback columns: the model gained
+///   [`writeback_columns`](DataModel::writeback_columns) (designer-declared,
+///   host-fed input columns on model tables — see
+///   [`WritebackColumn`](crate::model::WritebackColumn)),
+///   [`Table`](crate::model::Table) gained `is_writeback_store` (marks the
+///   synthesized history/current store tables), and
+///   [`CalculatedColumn`](crate::model::CalculatedColumn) gained
+///   `generated_by` (marks the generated LOOKUPVALUE column). A pre-v21
+///   engine would silently drop the definitions, mis-treat the store tables
+///   as ordinary connector tables (failing their refresh), and list the
+///   generated column as hand-authored — so the [`ModelFormatTooNew`] gate
+///   refuses v21 files on a pre-v21 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 20;
+pub const MODEL_FORMAT_VERSION: u32 = 21;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -405,6 +536,13 @@ pub struct DataModel {
     /// model files). See [`Culture`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cultures: Vec<Culture>,
+    /// Designer-declared writeback columns: host-fed, per-key input columns
+    /// on model tables. Each synthesizes two hidden `is_writeback_store`
+    /// tables + a generated LOOKUPVALUE calculated column at build/mutation
+    /// time (see [`WritebackColumn`]). Empty by default and skipped on
+    /// serialization when empty (back-compat with pre-v21 model files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    writeback_columns: Vec<WritebackColumn>,
 }
 
 impl DataModel {
@@ -431,6 +569,7 @@ impl DataModel {
             sources: Vec::new(),
             perspectives: Vec::new(),
             cultures: Vec::new(),
+            writeback_columns: Vec::new(),
         }
     }
 
@@ -1005,6 +1144,34 @@ impl DataModel {
         Ok(model)
     }
 
+    /// The writeback columns declared on this model's tables.
+    pub fn writeback_columns(&self) -> &[WritebackColumn] {
+        &self.writeback_columns
+    }
+
+    /// Returns a copy of the model with its writeback-column list REPLACED,
+    /// and the synthesized store tables + generated lookup columns reconciled
+    /// to match (synthesized/refreshed/removed). Otherwise caller-validates
+    /// contract, see [`DataModel::with_measures`]; note that removing a
+    /// writeback column drops its store tables here, so a subsequent
+    /// [`DataModel::validate`] fails closed if relationships (or other
+    /// entities) still reference them.
+    pub fn with_writeback_columns(
+        &self,
+        writeback_columns: Vec<WritebackColumn>,
+    ) -> EngineResult<DataModel> {
+        let mut model = self.clone();
+        let (tables, columns) = reconcile_writeback_model(
+            std::mem::take(&mut model.tables),
+            std::mem::take(&mut model.calculated_columns),
+            &writeback_columns,
+        )?;
+        model.tables = tables;
+        model.calculated_columns = columns;
+        model.writeback_columns = writeback_columns;
+        Ok(model)
+    }
+
     /// Returns a copy of the model with its script-function list REPLACED
     /// (caller-validates contract, see [`DataModel::with_measures`]).
     pub fn with_script_functions(&self, script_functions: Vec<ScriptFunction>) -> DataModel {
@@ -1308,6 +1475,9 @@ impl DataModel {
         }
         for c in &self.cultures {
             builder = builder.add_culture(c.clone());
+        }
+        for wb in &self.writeback_columns {
+            builder = builder.add_writeback_column(wb.clone());
         }
         if let Some(dlr) = &self.default_lookup_resolution {
             builder = builder.default_lookup_resolution(dlr.clone());

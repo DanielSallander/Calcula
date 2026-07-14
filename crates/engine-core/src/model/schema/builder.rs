@@ -18,6 +18,7 @@ use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
+use crate::model::writeback_column::WritebackColumn;
 
 use super::{
     apply_lookup_placeholder, validate_identifier, validate_metadata_text, DataModel,
@@ -46,12 +47,21 @@ pub struct DataModelBuilder {
     pub(super) kpis: Vec<Kpi>,
     pub(super) context_columns: Vec<ContextColumn>,
     pub(super) sources: Vec<PersistedSource>,
+    pub(super) writeback_columns: Vec<WritebackColumn>,
 }
 
 impl DataModelBuilder {
     /// Add a table to the model.
     pub fn add_table(mut self, table: Table) -> Self {
         self.tables.push(table);
+        self
+    }
+
+    /// Add a writeback column (a host-fed, per-key input column — see
+    /// [`WritebackColumn`]). Its store tables and generated lookup column are
+    /// synthesized during [`build`](Self::build).
+    pub fn add_writeback_column(mut self, writeback_column: WritebackColumn) -> Self {
+        self.writeback_columns.push(writeback_column);
         self
     }
 
@@ -325,6 +335,19 @@ impl DataModelBuilder {
         // hierarchies, RLS — exactly like hand-authored tables.
         self.tables =
             super::reconcile_calculated_tables(std::mem::take(&mut self.tables), &self.global_variables)?;
+
+        // 0-wb. Synthesize the writeback store tables + generated lookup
+        // columns of writeback columns (same idempotent-reconcile contract as
+        // 0-ct), so they too participate in every check below.
+        {
+            let (tables, calculated_columns) = super::reconcile_writeback_model(
+                std::mem::take(&mut self.tables),
+                std::mem::take(&mut self.calculated_columns),
+                &self.writeback_columns,
+            )?;
+            self.tables = tables;
+            self.calculated_columns = calculated_columns;
+        }
 
         // 0. Identifier validation. Table, column, calculated-column, and
         // measure names are later interpolated into quoted SQL identifiers
@@ -2199,6 +2222,7 @@ impl DataModelBuilder {
             kpis: self.kpis,
             context_columns: self.context_columns,
             sources: self.sources,
+            writeback_columns: self.writeback_columns,
             // Descriptive metadata is set post-build (with_model_metadata); a
             // freshly built model carries none.
             model_name: None,

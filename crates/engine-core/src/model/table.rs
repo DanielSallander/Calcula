@@ -304,6 +304,14 @@ pub struct Table {
     /// instead of fetching from a connector. Never hand-authored.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_calculated: bool,
+    /// `true` when this table is a synthesized WRITEBACK STORE (the history
+    /// or current table of a [`WritebackColumn`](crate::model::WritebackColumn),
+    /// synthesized at model build/mutation time): its data is FED by the host
+    /// (`Engine::set_writeback_data`), never fetched from a connector.
+    /// Staleness refresh seeds it EMPTY when uncached and otherwise leaves it
+    /// alone. Never hand-authored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_writeback_store: bool,
 }
 
 impl Table {
@@ -334,6 +342,7 @@ impl Table {
             incremental_refresh: None,
             source_binding: None,
             is_calculated: false,
+            is_writeback_store: false,
         })
     }
 
@@ -350,6 +359,21 @@ impl Table {
     /// table's QUERY at refresh, not fetched from a connector).
     pub fn is_calculated(&self) -> bool {
         self.is_calculated
+    }
+
+    /// Mark this table as a writeback store (consumed by the model builder's
+    /// writeback-column synthesis — see
+    /// [`Table::is_writeback_store`](Self::is_writeback_store)).
+    pub fn writeback_store(mut self) -> Self {
+        self.is_writeback_store = true;
+        self
+    }
+
+    /// Returns `true` when this table is a synthesized writeback store (the
+    /// history or current table of a writeback column): host-fed data, no
+    /// connector, seeded EMPTY by staleness refresh when uncached.
+    pub fn is_writeback_store(&self) -> bool {
+        self.is_writeback_store
     }
 
     /// Replace this table's model name (the name measures and queries use).

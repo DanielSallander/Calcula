@@ -30,6 +30,12 @@ pub struct CalculatedColumn {
     /// placeholder `Blank`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<PathSpec>,
+    /// When set, this column is machinery GENERATED from another model entity
+    /// (the value is that entity's id — today: a writeback column). Generated
+    /// columns are re-synthesized idempotently at model build, excluded from
+    /// editor listings, and never user-deletable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generated_by: Option<String>,
 }
 
 /// The id/parent columns of a `PATH(...)` calculated column. Both must be
@@ -59,6 +65,7 @@ impl CalculatedColumn {
             expression,
             data_type,
             path: None,
+            generated_by: None,
         }
     }
 
@@ -79,7 +86,21 @@ impl CalculatedColumn {
                 id_column: id_column.into(),
                 parent_column: parent_column.into(),
             }),
+            generated_by: None,
         }
+    }
+
+    /// Mark this column as machinery generated from another model entity
+    /// (see the `generated_by` field).
+    pub fn with_generated_by(mut self, entity_id: impl Into<String>) -> Self {
+        self.generated_by = Some(entity_id.into());
+        self
+    }
+
+    /// The id of the model entity this column was generated from, when it is
+    /// synthesized machinery (today: a writeback column's id).
+    pub fn generated_by(&self) -> Option<&str> {
+        self.generated_by.as_deref()
     }
 
     /// The PATH spec, when this is a generated parent-child path column.

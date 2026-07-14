@@ -277,11 +277,11 @@ fn context_pushdown_fact_filters(
 /// The `(schema, table)` a `FetchRequest` should target for a model table.
 ///
 /// Normally the registered source binding. Derived tables of materialized
-/// calculated tables have no source binding by design — the in-memory cache
-/// serves them, filled by materialization at refresh — so they get a
-/// placeholder (no schema, model table name); the executor's cached-table
-/// path never sends it to a connector, and a cache miss fails closed at
-/// fetch time.
+/// calculated tables and writeback STORE tables have no source binding by
+/// design — the in-memory cache serves them (filled by materialization at
+/// refresh, or by host writeback feeds) — so they get a placeholder (no
+/// schema, model table name); the executor's cached-table path never sends
+/// it to a connector, and a cache miss fails closed at fetch time.
 fn fetch_target_for(
     registry: &SourceRegistry,
     model: &DataModel,
@@ -290,11 +290,11 @@ fn fetch_target_for(
     match registry.binding_for(table_name) {
         Ok(binding) => Ok((Some(binding.schema.clone()), binding.table.clone())),
         Err(err) => {
-            let is_calculated = model
+            let is_cache_only = model
                 .tables()
                 .iter()
-                .any(|t| t.name() == table_name && t.is_calculated());
-            if is_calculated {
+                .any(|t| t.name() == table_name && (t.is_calculated() || t.is_writeback_store()));
+            if is_cache_only {
                 Ok((None, table_name.to_string()))
             } else {
                 Err(err)
@@ -853,18 +853,19 @@ impl PushdownPlanner {
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names,
-        // and derived tables of materialized calculated tables — those have no
-        // source connector by design: the in-memory cache serves them, filled
-        // by materialization at refresh).
+        // derived tables of materialized calculated tables, and writeback
+        // STORE tables — those have no source connector by design: the
+        // in-memory cache serves them, filled by materialization at refresh
+        // or by host writeback feeds).
         for table in &all_tables {
             if query_binding_names.contains(&table.to_lowercase()) {
                 continue;
             }
-            let is_calculated = model
+            let is_cache_only = model
                 .tables()
                 .iter()
-                .any(|t| t.name() == *table && t.is_calculated());
-            if !registry.has_table(table) && !is_calculated {
+                .any(|t| t.name() == *table && (t.is_calculated() || t.is_writeback_store()));
+            if !registry.has_table(table) && !is_cache_only {
                 return Err(QueryError::SourceNotRegistered(table.to_string()));
             }
         }

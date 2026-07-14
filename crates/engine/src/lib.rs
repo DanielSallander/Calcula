@@ -87,6 +87,7 @@ mod model_io;
 mod query_cache;
 mod refresh;
 mod source_wiring;
+mod writeback;
 
 #[cfg(test)]
 mod calc_group_tests;
@@ -120,6 +121,8 @@ mod security_tests;
 mod test_fixtures;
 #[cfg(test)]
 mod topn_tests;
+#[cfg(test)]
+mod writeback_tests;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -177,7 +180,8 @@ pub use engine_core::model::{
     JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PathSpec, Perspective, PersistedAuthKind,
     PersistedConnection,
     PersistedSource, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, SourceKind,
-    StatusBand, StorageMode, Table, TableSourceBinding, TableVariable,
+    StatusBand, StorageMode, Table, TableSourceBinding, TableVariable, WritebackColumn,
+    WritebackColumnKind, WritebackConstraints, WritebackProjection, WRITEBACK_RESERVED_COLUMNS,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -214,6 +218,7 @@ pub use engine_query::{
     QueryExecutor, QueryPlan,
 };
 pub use source_wiring::{SourceCredential, WireReport};
+pub use writeback::WritebackSlot;
 
 // ---------------------------------------------------------------------------
 

@@ -16,6 +16,7 @@ pub mod security_role;
 pub mod source;
 pub mod table;
 pub mod table_variable;
+pub mod writeback_column;
 
 pub use calculated_column::{CalculatedColumn, PathSpec};
 pub use culture::{Culture, NameTranslation};
@@ -37,3 +38,7 @@ pub use source::{
 };
 pub use table::{IncrementalRefresh, RefreshStrategy, StorageMode, Table};
 pub use table_variable::TableVariable;
+pub use writeback_column::{
+    WritebackColumn, WritebackColumnKind, WritebackConstraints, WritebackProjection,
+    WRITEBACK_RESERVED_COLUMNS,
+};
