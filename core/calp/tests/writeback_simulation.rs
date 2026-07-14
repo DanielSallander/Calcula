@@ -135,6 +135,7 @@ fn publish_version(
     regions: Vec<WritebackRegionDeclaration>,
 ) {
     let request = PublishRequest {
+        model_writebacks: None,
         workbook: wb,
         package_name: PKG.to_string(),
         version,
@@ -194,6 +195,7 @@ fn commit(
             .unwrap_or_else(|e| panic!("schema rejected {who:?} row {row}: {e}"));
     }
     let sub = WritebackSubmission {
+        model_key: None,
         id: sub_id.to_string(),
         region_id: region.id.clone(),
         cell_row: row,

@@ -19,8 +19,10 @@ import {
   clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
   IconInsertPivot,
+  registerCommitGuard,
+  showToast,
 } from "@api";
-import { emitAppEvent } from "@api/events";
+import { emitAppEvent, onAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
 import { hasObjectScript, drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
 
@@ -101,6 +103,13 @@ import {
   restorePreviousView,
   markUserCancelled,
 } from "./lib/pivotViewStore";
+import {
+  prepareWritebackContexts,
+  resolveWritebackCell,
+  submitWritebackValue,
+  handleWritebackModelChanged,
+  resetWritebackEditingState,
+} from "./lib/writebackEditing";
 import { drawPivotCell, DEFAULT_PIVOT_THEME, createPivotTheme } from "./rendering/pivot";
 import type { PivotCellDrawResult, PivotTheme } from "./rendering/pivot";
 import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
@@ -900,6 +909,9 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // Update BI connection status for overlay badges (non-blocking)
     updateBiConnectionStatus(regions);
 
+    // Rebuild writeback editability contexts so edit guards stay synchronous (non-blocking)
+    prepareWritebackContexts(regions);
+
     // Notify other components (selection handler, etc.)
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
 
@@ -1135,14 +1147,51 @@ function activate(context: ExtensionContext): void {
   context.ui.overlays.register(PivotFilterOverlayDefinition);
   context.ui.overlays.register(PivotHeaderFilterOverlayDefinition);
 
-  // Register edit guard - block editing in pivot regions (synchronous using cached regions)
+  // Register edit guard - block editing in pivot regions (synchronous using cached regions).
+  // Exception: writeback-editable cells (a writeback column placed as LOOKUP,
+  // on a leaf data row with a complete key) may open the editor — the commit
+  // guard below routes the value to the model instead of the grid.
   cleanupFunctions.push(
     context.grid.editGuards.register(async (row, col) => {
       const region = findPivotRegionAtCell(row, col);
       if (region) {
+        if (resolveWritebackCell(region.pivotId, row, col)) return null;
         return { blocked: true, message: "You can't change this part of the PivotTable." };
       }
       return null;
+    })
+  );
+
+  // Commit interception for writeback cells: the typed value goes to the BI
+  // model via biWritebackSetValue and NEVER into the grid — the pivot owns
+  // those cells. On success the pivot refreshes so the projected value renders.
+  cleanupFunctions.push(
+    registerCommitGuard(async (row, col, value) => {
+      const region = findPivotRegionAtCell(row, col);
+      if (!region) return null;
+      const target = resolveWritebackCell(region.pivotId, row, col);
+      // Non-writeback pivot cells never reach a commit (the edit guard blocks
+      // the editor), so only writeback targets are handled here.
+      if (!target) return null;
+      try {
+        await submitWritebackValue(target, value);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        showToast(msg, { type: "error" });
+        // Keep the editor open so the user can correct the value.
+        return { action: "retry" };
+      }
+      // Same refresh path the context menu's Refresh uses.
+      refreshPivotCache(region.pivotId)
+        .then(() => window.dispatchEvent(new Event("pivot:refresh")))
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!msg.includes("superseded") && !msg.includes("cancelled")) {
+            showToast(`Value saved, but the pivot refresh failed: ${msg}`, { type: "warning" });
+          }
+        });
+      // Always cancel the raw grid write — the value lives in the model.
+      return { action: "block" };
     })
   );
 
@@ -1288,6 +1337,16 @@ function activate(context: ExtensionContext): void {
             startRow <= region.startRow && endRow >= region.endRow &&
             startCol <= region.startCol && endCol >= region.endCol;
           if (!fullyContained) {
+            // Single-cell exception: the editor may open on a writeback-editable
+            // cell (this guard runs before the edit guard in the editing path).
+            // Commits there are intercepted, so no raw write can follow.
+            if (
+              startRow === endRow &&
+              startCol === endCol &&
+              resolveWritebackCell(region.pivotId, startRow, startCol)
+            ) {
+              continue;
+            }
             return { blocked: true, message: pivotStructuralGuardMessage };
           }
         }
@@ -1501,6 +1560,12 @@ function activate(context: ExtensionContext): void {
 
           const pivotRowIndex = row - regionBounds.startRow;
           const pivotColIndex = col - regionBounds.startCol;
+
+          // Writeback-editable cells open the grid editor on double-click:
+          // don't consume, so the core editing path (whose range/edit guards
+          // also allow these cells) starts edit mode.
+          if (resolveWritebackCell(pivotId, row, col)) return false;
+
           const pivotRow = cachedView.rows[pivotRowIndex];
           if (!pivotRow) return true;
           const cell = pivotRow.cells[pivotColIndex];
@@ -1775,6 +1840,14 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
 
+  // BI model changed (Model Editor): writeback column definitions may have
+  // changed — drop the cached metas and rebuild editability contexts.
+  cleanupFunctions.push(
+    onAppEvent<{ connectionId?: string }>("bi:model-changed", (detail) => {
+      handleWritebackModelChanged(detail?.connectionId);
+    })
+  );
+
   // Bridge the backend "pivots:refresh" Tauri event (emitted after an OUT-OF-BAND
   // MCP create_pivot) to the window "pivot:refresh" event, so an AI-created pivot
   // appears live without a reload — mirroring the Charts charts:refresh bridge.
@@ -1963,6 +2036,7 @@ function deactivate(): void {
 
   // Reset handler state
   resetSelectionHandlerState();
+  resetWritebackEditingState();
 
   // Clear transition state
   transitionBounds.clear();

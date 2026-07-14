@@ -31,6 +31,8 @@ import type {
   PivotId,
   CalculatedFieldDef,
   AppliedCalcGroup,
+  DropZoneType,
+  DragField,
 } from './types';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 
@@ -221,6 +223,10 @@ export function PivotEditor({
     }
     return set;
   });
+  // Mirrors lookupColumns for the persistence effect below. Auto-lookup on
+  // add pre-syncs it so a lookup change carried by an accompanying zone
+  // update doesn't fire a second BI query.
+  const lookupColumnsRef = React.useRef(lookupColumns);
 
   // Applied calculation group: the group whose items multiply the value fields
   // on the Values axis. v1 applies all items of the selected group (null = none).
@@ -542,10 +548,48 @@ export function PivotEditor({
     [lookupColumns, rows, columns, filters]
   );
 
+  // Auto-lookup on add: a writeback column is typed per LEAF row, which
+  // requires LOOKUP placement. Default it to lookup when first added to the
+  // report, respecting the same-table GROUP guardrail (the backend rejects a
+  // lookup with no GROUP field from its table). The ref pre-sync makes the
+  // accompanying zone update carry (and persist) the new lookup set, so the
+  // lookup effect below doesn't fire a second BI query.
+  const autoLookupWritebackColumn = useCallback(
+    (fieldName: string) => {
+      if (!biModel) return;
+      const dotIndex = fieldName.indexOf('.');
+      if (dotIndex === -1) return;
+      const table = fieldName.substring(0, dotIndex);
+      const column = fieldName.substring(dotIndex + 1);
+      const colMeta = biModel.tables
+        .find((t) => t.name === table)
+        ?.columns.find((c) => c.name === column);
+      if (!colMeta?.isWritebackColumn || lookupColumnsRef.current.has(fieldName)) return;
+      const hasSameTableGroup = [...rows, ...columns, ...filters].some((f) => {
+        const d = f.name.indexOf('.');
+        return (
+          d !== -1 &&
+          f.name.substring(0, d) === table &&
+          f.name !== fieldName &&
+          !lookupColumnsRef.current.has(f.name)
+        );
+      });
+      if (!hasSameTableGroup) return;
+      const next = new Set(lookupColumnsRef.current);
+      next.add(fieldName);
+      lookupColumnsRef.current = next;
+      setLookupColumns(next);
+    },
+    [biModel, rows, columns, filters]
+  );
+
   // BI column toggle: add/remove dimension field
   const handleBiColumnToggle = useCallback(
     (table: string, column: string, _isNumeric: boolean, checked: boolean) => {
       const fieldName = `${table}.${column}`;
+      if (checked) {
+        autoLookupWritebackColumn(fieldName);
+      }
       // Create a synthetic SourceField for the toggle handler.
       // Always set isNumeric=false so columns go to Rows (dimensions),
       // not Values. Only measures (via handleBiMeasureToggle) go to Values.
@@ -556,7 +600,19 @@ export function PivotEditor({
       };
       handleFieldToggle(field, checked);
     },
-    [handleFieldToggle]
+    [handleFieldToggle, autoLookupWritebackColumn]
+  );
+
+  // Drop wrapper: fresh field-list drops of a writeback column into Rows
+  // default to LOOKUP (zone-to-zone moves keep the user's chosen mode).
+  const handleDropWithAutoLookup = useCallback(
+    (zone: DropZoneType, dragField: DragField, insertIndex?: number) => {
+      if (isBiPivot && zone === 'rows' && dragField.sourceIndex === -1 && !dragField.fromZone) {
+        autoLookupWritebackColumn(dragField.name);
+      }
+      handleDrop(zone, dragField, insertIndex);
+    },
+    [isBiPivot, autoLookupWritebackColumn, handleDrop]
   );
 
   // BI measure toggle: add/remove measure to Values zone
@@ -623,7 +679,6 @@ export function PivotEditor({
   // Persist lookup columns to backend whenever they change.
   // Uses a lightweight command (no BI query) for metadata-only updates,
   // and only triggers a full re-query if the change affects a field in a zone.
-  const lookupColumnsRef = React.useRef(lookupColumns);
   useEffect(() => {
     // Skip the initial render
     if (lookupColumnsRef.current === lookupColumns) return;
@@ -844,7 +899,7 @@ export function PivotEditor({
           columns={columns}
           rows={rows}
           values={values}
-          onDrop={handleDrop}
+          onDrop={handleDropWithAutoLookup}
           onRemove={handleRemove}
           onReorder={handleReorder}
           onValuesAggregationChange={handleAggregationChange}

@@ -445,6 +445,11 @@ pub struct BiColumnInfo {
     /// physical column, but groupable like an ordinary dimension.
     #[serde(default)]
     pub is_context_column: bool,
+    /// True for a WRITEBACK column (engine v21): end users type its values;
+    /// groupable/aggregatable like an ordinary column via its generated
+    /// lookup column.
+    #[serde(default)]
+    pub is_writeback_column: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

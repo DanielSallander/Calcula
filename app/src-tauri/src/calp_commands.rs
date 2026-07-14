@@ -205,6 +205,9 @@ struct PublishAssembly {
     writeback_regions: Option<Vec<calp::WritebackRegionDeclaration>>,
     object_scripts: Option<Vec<persistence::SavedObjectScript>>,
     data_sources: Vec<calp::publish::PublishDataSource>,
+    /// Writeback COLUMN declarations derived from the captured models
+    /// (engine v21) — governance for model-keyed submissions.
+    model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration>,
     excluded_regions: Vec<calp::publish::ExcludedRegion>,
 }
 
@@ -317,8 +320,9 @@ fn assemble_publish_workbook(
         if scripts.is_empty() { None } else { Some(scripts.clone()) }
     };
 
-    // Capture active BI connections as data sources
-    let data_sources = capture_bi_data_sources(bi_state)?;
+    // Capture active BI connections as data sources (+ their writeback-column
+    // declarations for governed model-keyed submissions).
+    let (data_sources, model_writebacks) = capture_bi_data_sources(&state, bi_state)?;
 
     // Validate BI pivot definitions against the embedded model before publishing.
     // This catches mismatched field names (e.g., grid-style "Category" instead of
@@ -350,6 +354,7 @@ fn assemble_publish_workbook(
         writeback_regions,
         object_scripts,
         data_sources,
+        model_writebacks,
         excluded_regions,
     })
 }
@@ -552,6 +557,7 @@ pub fn calp_publish(
         writeback_regions,
         object_scripts,
         data_sources,
+        model_writebacks,
         excluded_regions,
     } = assembly;
 
@@ -573,6 +579,11 @@ pub fn calp_publish(
         now,
         published_by: params.published_by,
         writeback_regions,
+        model_writebacks: if model_writebacks.is_empty() {
+            None
+        } else {
+            Some(model_writebacks)
+        },
         object_scripts,
         // None => publish all standalone module scripts / notebooks carried in
         // the carrier above (C8). They distribute as inert, transparent data.
@@ -591,7 +602,16 @@ pub fn calp_publish(
     // silently dropping those artifacts. Same version source the gate
     // compares against (set_host_app_version(env!("CARGO_PKG_VERSION")) at
     // startup). Cell-only packages stay pullable by older apps.
-    if calp::publish::carries_wave_content(&request) {
+    if calp::publish::carries_wave_content(&request)
+        // Model writeback declarations are inert to pre-feature apps (they
+        // only consult writeback_regions), but the columns' VALUES would be
+        // invisible there (pre-v21 engines refuse the model anyway) — declare
+        // this app's version as the minimum for an honest gate.
+        || request
+            .model_writebacks
+            .as_ref()
+            .is_some_and(|m| !m.is_empty())
+    {
         request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
     }
 
@@ -661,11 +681,15 @@ pub fn calp_publish_model(
 
     // Capture ONLY the requested connection as a package data source (the
     // capture serializes the live engine model, credential-free).
-    let data_sources: Vec<calp::publish::PublishDataSource> =
-        capture_bi_data_sources(&bi_state)?
-            .into_iter()
-            .filter(|ds| ds.id == params.connection_id)
-            .collect();
+    let (all_sources, all_model_writebacks) = capture_bi_data_sources(&state, &bi_state)?;
+    let data_sources: Vec<calp::publish::PublishDataSource> = all_sources
+        .into_iter()
+        .filter(|ds| ds.id == params.connection_id)
+        .collect();
+    let model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration> = all_model_writebacks
+        .into_iter()
+        .filter(|d| d.data_source_id == params.connection_id)
+        .collect();
     if data_sources.is_empty() {
         // capture_bi_data_sources silently skips a busy engine — distinguish
         // that from a genuinely missing connection so the error is actionable.
@@ -699,6 +723,11 @@ pub fn calp_publish_model(
         now: now.clone(),
         published_by: params.published_by,
         writeback_regions: None,
+        model_writebacks: if model_writebacks.is_empty() {
+            None
+        } else {
+            Some(model_writebacks)
+        },
         object_scripts: None,
         module_scripts: None,
         notebooks: None,
@@ -707,9 +736,18 @@ pub fn calp_publish_model(
         custom_objects: Vec::new(),
         include_comments: false, // dataset package: no sheets, no comments
         // Model-only package: no Wave A/B artifacts, so no minimum — it stays
-        // pullable by older apps.
+        // pullable by older apps. Writeback columns are the exception: a
+        // pre-v21 engine refuses the model, so gate honestly.
         min_app_version: String::new(),
     };
+    let mut request = request;
+    if request
+        .model_writebacks
+        .as_ref()
+        .is_some_and(|m| !m.is_empty())
+    {
+        request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
+    }
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
@@ -2138,6 +2176,11 @@ pub fn calp_pull(
         &ribbon_filter_state,
         &slicer_state,
     );
+    // Re-queue the writeback->BI dataset refresh: the hook fired by
+    // rebuild_writeback_index above ran before these connections existed, so
+    // engines created here would otherwise miss their writeback data until the
+    // next mutation.
+    crate::bi::writeback_source::invalidate_writeback_bi();
 
     // Restore pivot definitions from the package and render to grid.
     // The source_sheet_index in each definition is relative to the publisher's
@@ -5114,7 +5157,7 @@ fn owning_subscription_for_region(
 /// Versions of a package strictly OLDER than `resolved_version` (semver
 /// order). Used for lenient carry-forward — a subscriber pinned behind must
 /// not see submissions made against newer versions.
-fn older_package_versions(
+pub(crate) fn older_package_versions(
     registry: &dyn calp::RegistryTransport,
     package_name: &str,
     resolved_version: &str,
@@ -5176,7 +5219,11 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
 }
 
 /// Drop the cached GATHER map after anything that changes submission data.
+/// The same events make the BI writeback dataset tables stale, so this also
+/// queues their (async, fire-and-forget) re-provision — one hook covers every
+/// mutation path: submit, clear, approve/reject, pull, refresh, open, detach.
 pub(crate) fn invalidate_gather_cache(state: &AppState) {
+    crate::bi::writeback_source::invalidate_writeback_bi();
     if let Ok(mut cache) = state.gather_cache.lock() {
         *cache = None;
     }
@@ -5340,6 +5387,7 @@ pub fn calp_save_writeback_draft(
     let submission = calp::writeback::WritebackSubmission {
         id: submission_id,
         region_id: region_id.clone(),
+        model_key: None,
         cell_row: row,
         cell_col: col,
         cell_id: Some(cell_id),
@@ -5827,6 +5875,257 @@ fn require_publisher(
     }
 }
 
+/// Resolve the subscription that declares a model writeback column, returning
+/// (package, resolved version, registry path, the SIGNED declaration). The
+/// declaration always comes from the signature-verified manifest — it is the
+/// governance every submit gate below re-validates against.
+fn owning_subscription_for_model_writeback(
+    state: &AppState,
+    writeback_id: &str,
+) -> Result<(String, String, String, calp::writeback::ModelWritebackDeclaration), String> {
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    for sub in &subs.subscriptions {
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        let registry_path = sub
+            .registry_url
+            .strip_prefix("file://")
+            .unwrap_or(&sub.registry_url)
+            .to_string();
+        let Ok(registry) = crate::calp_registry::open_registry(&registry_path) else {
+            continue;
+        };
+        let Ok((_, manifest)) = calp::integrity::verify_and_load_manifest_via(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &calcula_profile_dir(),
+        ) else {
+            continue;
+        };
+        if let Some(decl) = manifest
+            .model_writebacks
+            .as_ref()
+            .and_then(|d| d.iter().find(|d| d.id == writeback_id))
+        {
+            return Ok((
+                sub.package_name.clone(),
+                sub.resolved_version.clone(),
+                registry_path,
+                decl.clone(),
+            ));
+        }
+    }
+    Err(format!(
+        "No subscription declares writeback column '{}' — the package may need a re-pull",
+        writeback_id
+    ))
+}
+
+/// Submit one model writeback entry to the owning package's registry
+/// (SUBSCRIBED connections — bi_writeback_set_value routes here).
+///
+/// P0-parity gates, all against the SIGNED manifest's declaration (never the
+/// local model, which a crafted .cala could have widened): the column must be
+/// declared; the key arity must match; the value must pass the declared
+/// schema; a masterData column only accepts its designated editors. The
+/// record lands as `Submitted` — masterData projections count it only once
+/// the publisher approves (`OnApproval`), History projections immediately.
+pub(crate) fn submit_model_writeback(
+    state: &AppState,
+    wb: &bi_engine::WritebackColumn,
+    key: Vec<String>,
+    value: calp::writeback::SubmissionValue,
+    identity: &calp::SubmitterIdentity,
+) -> Result<(), String> {
+    let (package_name, resolved_version, registry_path, decl) =
+        owning_subscription_for_model_writeback(state, wb.id())?;
+
+    if key.len() != decl.key_columns.len() {
+        return Err(format!(
+            "'{}' expects {} key value(s) per its published declaration, got {}",
+            decl.column,
+            decl.key_columns.len(),
+            key.len()
+        ));
+    }
+    if let Some(schema) = &decl.schema {
+        if !matches!(value, calp::writeback::SubmissionValue::Empty) {
+            schema
+                .validate(&value)
+                .map_err(|msg| format!("'{}': {}", decl.column, msg))?;
+        } else if schema.required {
+            return Err(format!("'{}' requires a value (clearing is not allowed)", decl.column));
+        }
+    }
+    if decl.kind == "masterData" && !decl.allowed_editors.is_empty() {
+        let id = identity.id.to_lowercase();
+        let name = identity.display_name.to_lowercase();
+        let allowed = decl.allowed_editors.iter().any(|e| {
+            let e = e.trim().to_lowercase();
+            !e.is_empty() && (id == e || name == e || name.contains(&e) || e.contains(&name))
+        });
+        if !allowed {
+            return Err(format!(
+                "'{}' is a master data column — only its designated editors can change it",
+                decl.column
+            ));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let submission = calp::writeback::WritebackSubmission {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7())
+            .to_string()
+            .to_lowercase(),
+        region_id: wb.id().to_string(),
+        cell_row: 0,
+        cell_col: 0,
+        cell_id: None,
+        submitter: identity.clone(),
+        value,
+        state: calp::writeback::SubmissionState::Submitted,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        submitted_at: Some(now.clone()),
+        review_reason: None,
+        reviewed_by: None,
+        model_key: Some(key),
+        extra: Default::default(),
+    };
+
+    let registry =
+        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    registry
+        .save_model_submission(&package_name, &resolved_version, &submission)
+        .map_err(|e| e.to_string())?;
+
+    // Audit + refresh (the gather invalidation also queues the BI feeds).
+    {
+        let user = audit_user(state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::WritebackSubmitted,
+                &format!(
+                    "Submitted model writeback '{}' ({}.{}) to {} v{}",
+                    wb.name(),
+                    decl.table,
+                    decl.column,
+                    package_name,
+                    resolved_version
+                ),
+                &user,
+                &now,
+            );
+        }
+    }
+    invalidate_gather_cache(state);
+    Ok(())
+}
+
+/// List a model writeback column's registry submissions (publisher review).
+#[tauri::command]
+pub fn calp_list_model_submissions(
+    state: State<AppState>,
+    writeback_id: String,
+    window: tauri::Window,
+) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let (package_name, resolved_version, registry_path, _) =
+        owning_subscription_for_model_writeback(&state, &writeback_id)?;
+    let registry =
+        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let mut subs: Vec<calp::writeback::WritebackSubmission> = registry
+        .load_all_submissions(&package_name, &resolved_version)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|s| s.region_id == writeback_id && s.model_key.is_some())
+        .collect();
+    subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
+    Ok(subs)
+}
+
+/// Approve or reject a MODEL writeback submission (publisher action, engine
+/// v21 writeback columns). Same authorization as grid submissions: possession
+/// of the package's signing key. Rewrites the submission's registry file in
+/// place (same id -> same slot filename), so the history record keeps its
+/// identity while its state changes.
+#[tauri::command]
+pub fn calp_set_model_submission_state(
+    state: State<AppState>,
+    writeback_id: String,
+    submission_id: String,
+    new_state: String,
+    reason: Option<String>,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let target_state = match new_state.as_str() {
+        "approved" => calp::writeback::SubmissionState::Approved,
+        "rejected" => calp::writeback::SubmissionState::Rejected,
+        "submitted" => calp::writeback::SubmissionState::Submitted,
+        _ => {
+            return Err(format!(
+                "Invalid submission state '{}'. Must be 'approved', 'rejected', or 'submitted'",
+                new_state
+            ))
+        }
+    };
+
+    let (package_name, resolved_version, registry_path, _) =
+        owning_subscription_for_model_writeback(&state, &writeback_id)?;
+    let registry =
+        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+
+    // AUTHORIZATION (P0 parity): approve/reject is publisher-only — without
+    // this any subscriber could self-approve a masterData value.
+    require_publisher(&registry, &package_name, &resolved_version)?;
+
+    let mut submission = registry
+        .load_all_submissions(&package_name, &resolved_version)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|s| s.id == submission_id && s.region_id == writeback_id && s.model_key.is_some())
+        .ok_or_else(|| {
+            format!(
+                "No model submission '{}' found for writeback column '{}'",
+                submission_id, writeback_id
+            )
+        })?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let reviewer = get_subscriber_identity(&state).ok().map(|i| i.display_name);
+    submission.state = target_state;
+    submission.updated_at = now.clone();
+    submission.review_reason = reason
+        .as_ref()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    submission.reviewed_by = reviewer;
+
+    registry
+        .save_model_submission(&package_name, &resolved_version, &submission)
+        .map_err(|e| e.to_string())?;
+
+    {
+        let user = audit_user(&state);
+        if let Ok(mut audit) = state.audit_log.lock() {
+            audit.record(
+                calp::audit::AuditEvent::WritebackReviewed,
+                &format!(
+                    "Model writeback submission {} in {} v{} set to {}",
+                    submission_id, package_name, resolved_version, new_state
+                ),
+                &user,
+                &now,
+            );
+        }
+    }
+    invalidate_gather_cache(&state);
+    Ok(())
+}
+
 /// Approve or reject a submitted writeback value (publisher action).
 /// Rewrites the submission's registry file with the new state; `on_approval`
 /// regions only aggregate Approved submissions in GATHER.
@@ -6010,7 +6309,7 @@ fn load_region_current_submissions(
 }
 
 /// The string label for a submission state.
-fn submission_state_str(s: &calp::writeback::SubmissionState) -> &'static str {
+pub(crate) fn submission_state_str(s: &calp::writeback::SubmissionState) -> &'static str {
     use calp::writeback::SubmissionState::*;
     match s {
         Draft => "draft",
@@ -6439,7 +6738,9 @@ fn compute_response_status(
 /// (own_only hides others; own_plus_aggregate keeps values but anonymizes other
 /// submitters). Pure + unit-tested — this is the privacy AND integrity boundary
 /// for what reaches an aggregate, so it must never silently change.
-fn apply_gather_governance(
+/// `pub(crate)`: also the mandatory filter for subscriber-audience writeback
+/// dataset tables (bi::writeback_source) — one governance path, never two.
+pub(crate) fn apply_gather_governance(
     mut submissions: Vec<calp::writeback::WritebackSubmission>,
     region: &calp::WritebackRegionDeclaration,
     own_identity: Option<&calp::SubmitterIdentity>,
@@ -6547,6 +6848,71 @@ fn apply_gather_governance(
         _ => {}
     }
 
+    submissions
+}
+
+/// Lenient version-binding carry-forward, extracted (behavior-preserving) from
+/// `build_gather_data` so the writeback dataset builder (bi::writeback_source)
+/// merges IDENTICALLY: submissions made against strictly OLDER versions of the
+/// same region carry forward — but only when that version's region schema is
+/// compatible with the current one (matching check_region_compatibility: both
+/// schemas present → compare; either absent → compatible; region absent in that
+/// version → nothing to carry). Newest `updated_at` wins per (submitter, cell)
+/// slot. A `Strict` version binding disables carry-forward entirely.
+pub(crate) fn merge_lenient_submissions(
+    mut submissions: Vec<calp::writeback::WritebackSubmission>,
+    older: &[(
+        Vec<calp::WritebackRegionDeclaration>,
+        std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>>,
+    )],
+    region: &calp::WritebackRegionDeclaration,
+) -> Vec<calp::writeback::WritebackSubmission> {
+    let lenient = !matches!(
+        region.version_binding,
+        Some(calp::writeback::VersionBinding::Strict)
+    );
+    if !lenient || older.is_empty() {
+        return submissions;
+    }
+
+    let mut slots: std::collections::HashMap<(String, u32, u32), usize> = submissions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ((s.submitter.id.clone(), s.cell_row, s.cell_col), i))
+        .collect();
+    for (old_regions, old_by_region) in older {
+        let compatible = match old_regions.iter().find(|r| r.id == region.id) {
+            None => false,
+            Some(old_r) => match (&old_r.schema, &region.schema) {
+                (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
+                _ => true,
+            },
+        };
+        if !compatible {
+            continue;
+        }
+        let Some(older_subs) = old_by_region.get(&region.id) else {
+            continue;
+        };
+        for candidate in older_subs.iter().cloned() {
+            let key = (
+                candidate.submitter.id.clone(),
+                candidate.cell_row,
+                candidate.cell_col,
+            );
+            match slots.get(&key) {
+                Some(&i) => {
+                    if candidate.updated_at > submissions[i].updated_at {
+                        submissions[i] = candidate;
+                    }
+                }
+                None => {
+                    submissions.push(candidate);
+                    slots.insert(key, submissions.len() - 1);
+                }
+            }
+        }
+    }
     submissions
 }
 
@@ -6662,61 +7028,12 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
 
         // Aggregate per region
         for region in regions {
-            let mut submissions = current_by_region.remove(&region.id).unwrap_or_default();
+            let submissions = current_by_region.remove(&region.id).unwrap_or_default();
 
             // Lenient version binding: submissions made against earlier
             // versions of the same region carry forward instead of being
-            // silently dropped on every version bump — but only when that
-            // version's region schema is compatible with the current one.
-            // Newest wins per (submitter, cell) slot.
-            let lenient = !matches!(
-                region.version_binding,
-                Some(calp::writeback::VersionBinding::Strict)
-            );
-            if lenient && !older.is_empty() {
-                let mut slots: std::collections::HashMap<(String, u32, u32), usize> =
-                    submissions
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| ((s.submitter.id.clone(), s.cell_row, s.cell_col), i))
-                        .collect();
-                for (old_regions, old_by_region) in &older {
-                    // Schema gate, matching check_region_compatibility: both
-                    // schemas present → compare; either absent → compatible;
-                    // region absent in that version → nothing to carry.
-                    let compatible = match old_regions.iter().find(|r| r.id == region.id) {
-                        None => false,
-                        Some(old_r) => match (&old_r.schema, &region.schema) {
-                            (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
-                            _ => true,
-                        },
-                    };
-                    if !compatible {
-                        continue;
-                    }
-                    let Some(older_subs) = old_by_region.get(&region.id) else {
-                        continue;
-                    };
-                    for candidate in older_subs.iter().cloned() {
-                        let key = (
-                            candidate.submitter.id.clone(),
-                            candidate.cell_row,
-                            candidate.cell_col,
-                        );
-                        match slots.get(&key) {
-                            Some(&i) => {
-                                if candidate.updated_at > submissions[i].updated_at {
-                                    submissions[i] = candidate;
-                                }
-                            }
-                            None => {
-                                submissions.push(candidate);
-                                slots.insert(key, submissions.len() - 1);
-                            }
-                        }
-                    }
-                }
-            }
+            // silently dropped on every version bump.
+            let submissions = merge_lenient_submissions(submissions, &older, region);
 
             let submissions = apply_gather_governance(submissions, region, own_identity.as_ref());
 
@@ -6792,6 +7109,7 @@ mod gather_governance_tests {
     ) -> WritebackSubmission {
         WritebackSubmission {
             id: format!("sub-{submitter_id}"),
+            model_key: None,
             region_id: "r".to_string(),
             cell_row: 0,
             cell_col: 0,
@@ -7139,6 +7457,182 @@ mod gather_governance_tests {
 }
 
 #[cfg(test)]
+mod merge_lenient_tests {
+    //! Parity tests for `merge_lenient_submissions` — the version carry-forward
+    //! loop extracted (behavior-preserving) out of `build_gather_data` so the
+    //! writeback dataset builder merges identically. These pin the extracted
+    //! behavior: slot newest-wins, strict binding, schema gate, absent region.
+    use super::merge_lenient_submissions;
+    use std::collections::HashMap;
+
+    use calp::writeback::{
+        RegionSelector, SubmissionState, SubmissionValue, ValueSchema, ValueType, VersionBinding,
+        WritebackRegionDeclaration, WritebackSubmission,
+    };
+    use calp::SubmitterIdentity;
+
+    fn region(
+        version_binding: Option<VersionBinding>,
+        schema: Option<ValueSchema>,
+    ) -> WritebackRegionDeclaration {
+        let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        WritebackRegionDeclaration {
+            id: "r".to_string(),
+            selector: RegionSelector {
+                sheet_id,
+                row_start: 0,
+                row_end: 0,
+                col_start: 0,
+                col_end: 0,
+            },
+            mode: None,
+            schema,
+            visibility: None,
+            submission_policy: None,
+            version_binding,
+            lifecycle: None,
+            aggregation_hint: None,
+            expected_respondents: Vec::new(),
+            extra: HashMap::new(),
+        }
+    }
+
+    fn schema_of(value_type: ValueType) -> ValueSchema {
+        ValueSchema {
+            value_type,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn submission(submitter_id: &str, value: f64, updated_at: &str) -> WritebackSubmission {
+        WritebackSubmission {
+            id: format!("sub-{submitter_id}-{updated_at}"),
+            model_key: None,
+            region_id: "r".to_string(),
+            cell_row: 0,
+            cell_col: 0,
+            cell_id: None,
+            submitter: SubmitterIdentity {
+                display_name: submitter_id.to_string(),
+                id: submitter_id.to_string(),
+                extra: HashMap::new(),
+            },
+            value: SubmissionValue::Number { value },
+            state: SubmissionState::Submitted,
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+            submitted_at: Some(updated_at.to_string()),
+            review_reason: None,
+            reviewed_by: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn older_with(
+        region_decl: Option<WritebackRegionDeclaration>,
+        subs: Vec<WritebackSubmission>,
+    ) -> (
+        Vec<WritebackRegionDeclaration>,
+        HashMap<String, Vec<WritebackSubmission>>,
+    ) {
+        let mut by_region = HashMap::new();
+        if !subs.is_empty() {
+            by_region.insert("r".to_string(), subs);
+        }
+        (region_decl.into_iter().collect(), by_region)
+    }
+
+    // 1. Carry-forward fills a missing slot; an occupied slot keeps whichever
+    //    record has the NEWEST updated_at (both directions).
+    #[test]
+    fn carry_forward_fills_slots_and_newest_wins() {
+        let r = region(None, None);
+        let current = vec![submission("alice", 10.0, "2026-06-20T10:00:00Z")];
+        let older = vec![older_with(
+            Some(region(None, None)),
+            vec![
+                submission("alice", 1.0, "2026-06-10T10:00:00Z"), // older -> current wins
+                submission("bob", 2.0, "2026-06-11T10:00:00Z"),   // new slot -> carried
+            ],
+        )];
+        let out = merge_lenient_submissions(current, &older, &r);
+        assert_eq!(out.len(), 2);
+        let alice = out.iter().find(|s| s.submitter.id == "alice").unwrap();
+        assert_eq!(alice.value, SubmissionValue::Number { value: 10.0 });
+        assert!(out.iter().any(|s| s.submitter.id == "bob"));
+
+        // Reverse: the OLDER version holds the newer record for the same slot.
+        let r2 = region(None, None);
+        let current2 = vec![submission("alice", 10.0, "2026-06-05T10:00:00Z")];
+        let older2 = vec![older_with(
+            Some(region(None, None)),
+            vec![submission("alice", 99.0, "2026-06-10T10:00:00Z")],
+        )];
+        let out2 = merge_lenient_submissions(current2, &older2, &r2);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0].value, SubmissionValue::Number { value: 99.0 });
+    }
+
+    // 2. Strict version binding disables carry-forward entirely.
+    #[test]
+    fn strict_binding_carries_nothing() {
+        let r = region(Some(VersionBinding::Strict), None);
+        let older = vec![older_with(
+            Some(region(None, None)),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        let out = merge_lenient_submissions(Vec::new(), &older, &r);
+        assert!(out.is_empty());
+    }
+
+    // 3. Schema gate: an older version with an INCOMPATIBLE schema is skipped;
+    //    a compatible (identical) schema is carried; either side lacking a
+    //    schema counts as compatible.
+    #[test]
+    fn schema_gate_controls_carry() {
+        let r = region(None, Some(schema_of(ValueType::Number)));
+        let incompatible = vec![older_with(
+            Some(region(None, Some(schema_of(ValueType::Text)))),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert!(merge_lenient_submissions(Vec::new(), &incompatible, &r).is_empty());
+
+        let compatible = vec![older_with(
+            Some(region(None, Some(schema_of(ValueType::Number)))),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert_eq!(merge_lenient_submissions(Vec::new(), &compatible, &r).len(), 1);
+
+        let schemaless_old = vec![older_with(
+            Some(region(None, None)),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert_eq!(
+            merge_lenient_submissions(Vec::new(), &schemaless_old, &r).len(),
+            1
+        );
+    }
+
+    // 4. A version where the region did not exist yet carries nothing, even if
+    //    stray submission files name the region id.
+    #[test]
+    fn region_absent_in_older_version_carries_nothing() {
+        let r = region(None, None);
+        let older = vec![older_with(
+            None, // region not declared in that version
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert!(merge_lenient_submissions(Vec::new(), &older, &r).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod writeback_export_tests {
     //! The Parquet export/rollup encoder (used by both the on-demand export and
     //! the auto-materialized `_rollup.parquet`).
@@ -7150,6 +7644,7 @@ mod writeback_export_tests {
     fn sub(row: u32, col: u32, value: SubmissionValue) -> WritebackSubmission {
         WritebackSubmission {
             id: format!("s-{row}-{col}"),
+            model_key: None,
             region_id: "r1".to_string(),
             cell_row: row,
             cell_col: col,
@@ -7841,18 +8336,26 @@ fn restore_pulled_pivots(
 /// data. The deprecated query-region path (direct cell insertion) is gone —
 /// BI data flows to subscribers through pivots (and CUBE formulas, planned).
 fn capture_bi_data_sources(
+    state: &AppState,
     bi_state: &BiState,
-) -> Result<Vec<calp::publish::PublishDataSource>, String> {
+) -> Result<
+    (
+        Vec<calp::publish::PublishDataSource>,
+        Vec<calp::writeback::ModelWritebackDeclaration>,
+    ),
+    String,
+> {
     let connections = bi_state.connections.lock().map_err(|e| e.to_string())?;
 
     let mut data_sources = Vec::new();
+    let mut model_writebacks: Vec<calp::writeback::ModelWritebackDeclaration> = Vec::new();
 
     for conn in connections.values() {
         // Get the engine and serialize the model. Connections without a
         // loaded engine have nothing to embed. Materialized calculated
         // tables also snapshot their cached data (Arrow IPC) so subscribers
         // without source access still see the derived tables.
-        let (model_json, calculated_table_snapshots) = match &conn.engine {
+        let (model_json, calculated_table_snapshots, wb_columns) = match &conn.engine {
             Some(engine_arc) => {
                 match engine_arc.try_lock() {
                     Ok(engine) => {
@@ -7893,7 +8396,9 @@ fn capture_bi_data_sources(
                                 ),
                             }
                         }
-                        (v, snapshots)
+                        let wb_columns: Vec<bi_engine::WritebackColumn> =
+                            engine.model().writeback_columns().to_vec();
+                        (v, snapshots, wb_columns)
                     }
                     Err(_) => {
                         crate::log_warn!("CALP", "Engine busy for connection {}, skipping", conn.id);
@@ -7928,6 +8433,36 @@ fn capture_bi_data_sources(
             }
         }).collect();
 
+        // Writeback columns (engine v21): declare each for governed
+        // model-keyed submissions, and ship the publisher's collected history
+        // as the subscribers' baseline (history-preserving distribution).
+        let writeback_history_json = if wb_columns.is_empty() {
+            None
+        } else {
+            for wb in &wb_columns {
+                model_writebacks.push(model_writeback_declaration(wb, &ds_id));
+            }
+            let store = state.model_writeback.lock().map_err(|e| e.to_string())?;
+            let baseline: std::collections::HashMap<
+                String,
+                Vec<crate::bi::writeback::ModelWritebackEntry>,
+            > = wb_columns
+                .iter()
+                .filter_map(|wb| {
+                    store
+                        .entries
+                        .get(wb.id())
+                        .filter(|v| !v.is_empty())
+                        .map(|v| (wb.id().to_string(), v.clone()))
+                })
+                .collect();
+            if baseline.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_value(&baseline).map_err(|e| e.to_string())?)
+            }
+        };
+
         data_sources.push(calp::publish::PublishDataSource {
             id: ds_id,
             name: conn.name.clone(),
@@ -7937,10 +8472,56 @@ fn capture_bi_data_sources(
             model_json,
             bindings,
             calculated_table_snapshots,
+            writeback_history_json,
         });
     }
 
-    Ok(data_sources)
+    Ok((data_sources, model_writebacks))
+}
+
+/// Map an engine writeback column to its .calp governance declaration.
+/// MasterData columns force `OnApproval`; History columns default to
+/// `OnSubmit` (a submission counts once explicitly submitted).
+fn model_writeback_declaration(
+    wb: &bi_engine::WritebackColumn,
+    ds_id: &str,
+) -> calp::writeback::ModelWritebackDeclaration {
+    use calp::writeback::{SubmissionPolicy, ValueSchema, ValueType};
+    let c = wb.constraints();
+    let has_enum = c.map(|c| !c.enum_values.is_empty()).unwrap_or(false);
+    let value_type = match wb.data_type() {
+        bi_engine::DataType::Int64 | bi_engine::DataType::Int32 => ValueType::Integer,
+        bi_engine::DataType::Boolean => ValueType::Boolean,
+        bi_engine::DataType::String if has_enum => ValueType::Enum,
+        bi_engine::DataType::String => ValueType::Text,
+        _ => ValueType::Number,
+    };
+    let master = wb.kind() == bi_engine::WritebackColumnKind::MasterData;
+    calp::writeback::ModelWritebackDeclaration {
+        id: wb.id().to_string(),
+        data_source_id: ds_id.to_string(),
+        table: wb.table().to_string(),
+        column: wb.name().to_string(),
+        key_columns: wb.key_columns().to_vec(),
+        kind: if master { "masterData" } else { "history" }.to_string(),
+        schema: Some(ValueSchema {
+            value_type,
+            required: c.map(|c| c.required).unwrap_or(false),
+            min: c.and_then(|c| c.min),
+            max: c.and_then(|c| c.max),
+            enum_values: c.map(|c| c.enum_values.clone()).unwrap_or_default(),
+            max_length: c.and_then(|c| c.max_length),
+            pattern: c.and_then(|c| c.pattern.clone()),
+            extra: Default::default(),
+        }),
+        allowed_editors: wb.allowed_editors().to_vec(),
+        submission_policy: Some(if master {
+            SubmissionPolicy::OnApproval
+        } else {
+            SubmissionPolicy::OnSubmit
+        }),
+        extra: Default::default(),
+    }
 }
 
 /// Serialize a RecordBatch as Arrow IPC stream bytes (the calculated-table

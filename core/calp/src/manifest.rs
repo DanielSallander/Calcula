@@ -115,6 +115,12 @@ pub struct VersionManifest {
     /// does not interpret the semantic sub-fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
+    /// Model writeback COLUMN declarations (engine v21 writeback columns,
+    /// distributed): submissions keyed by host-row key values instead of grid
+    /// coordinates. Absent for packages without writeback columns; pre-feature
+    /// apps ignore it (they only consult `writeback_regions`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_writebacks: Option<Vec<crate::writeback::ModelWritebackDeclaration>>,
     /// Object scripts bundled with the package. Scripts travel with the package
     /// and are loaded on the subscriber side. Subscribers cannot edit these
     /// scripts but can add their own script layers on top.

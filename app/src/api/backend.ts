@@ -3429,6 +3429,9 @@ export interface BiColumnInfo {
   /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
    *  physical column, but groupable like an ordinary dimension. */
   isContextColumn?: boolean;
+  /** True for a WRITEBACK column (engine v21): end users type its values;
+   *  groupable like an ordinary column via its generated lookup column. */
+  isWritebackColumn?: boolean;
 }
 
 export interface BiMeasureInfo {
@@ -3919,6 +3922,32 @@ export interface ModelOverview {
   modelDescription: string | null;
   /** The model's persisted data-source catalog (drives the Connections tab). */
   sources: ModelSourceInfo[];
+  /** Designer-declared writeback columns (engine v21). */
+  writebackColumns: ModelWritebackColumnInfo[];
+}
+
+/** One writeback column definition (engine v21), as shown in the Model Editor. */
+export interface ModelWritebackColumnInfo {
+  id: string;
+  name: string;
+  table: string;
+  dataType: string;
+  keyColumns: string[];
+  /** "history" | "masterData" */
+  kind: string;
+  /** "blank" | "latest" | "expression" */
+  projectionMode: string;
+  projectionExpression: string | null;
+  required: boolean;
+  min: number | null;
+  max: number | null;
+  enumValues: string[];
+  maxLength: number | null;
+  pattern: string | null;
+  allowedEditors: string[];
+  exposeHistory: boolean;
+  /** The synthesized history table's model name (for reports over it). */
+  historyTable: string;
 }
 
 /** One entry in the model's persisted data-source catalog (secret-free). */
@@ -4849,6 +4878,205 @@ export async function biModelImportFromFile(): Promise<ConnectionInfo | null> {
       ?.replace(/\.[^.]+$/, "") ?? "";
   const name = stem.trim() || "Imported Model";
   return invoke<ConnectionInfo>("bi_model_import_from_file", { name, path: selected });
+}
+
+// ── Writeback datasets (writeback submissions as model tables) ──────────────
+
+/** One importable writeback dataset: a writeback region within a subscribed
+ *  package, with this workbook's audience-filtered row count. */
+export interface WritebackTableInfo {
+  regionId: string;
+  packageName: string;
+  packageVersion: string;
+  displayName: string;
+  /** "publisher" (all submissions, review fields) | "subscriber" (governed view). */
+  audience: string;
+  rowCount: number;
+  sheetName: string;
+  rangeRef: string;
+  /** Whether the queried connection's model already has this region's table. */
+  alreadyImported: boolean;
+}
+
+/** Result of re-provisioning writeback dataset data on one engine. */
+export interface WritebackSourceReport {
+  refreshedTables: string[];
+  staleBindings: string[];
+}
+
+/** List every writeback dataset this workbook can import as model tables.
+ *  Pass a connection id to have `alreadyImported` reflect that model. */
+export async function biListWritebackTables(
+  connectionId?: string,
+): Promise<WritebackTableInfo[]> {
+  return invoke<WritebackTableInfo[]>("bi_list_writeback_tables", {
+    connectionId: connectionId ?? null,
+  });
+}
+
+/** Import writeback regions as tables of one connection's model (adds the
+ *  writeback source on first use, then one table per region). */
+export async function biImportWritebackTables(
+  connectionId: string,
+  regionIds: string[],
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_import_writeback_tables", { connectionId, regionIds });
+}
+
+/** Rebuild writeback dataset data on every open connection (manual refresh;
+ *  runs automatically after submit/approve/pull). */
+export async function biRefreshWritebackData(): Promise<WritebackSourceReport[]> {
+  return invoke<WritebackSourceReport[]>("bi_refresh_writeback_data", {});
+}
+
+// ── Model writeback COLUMNS (engine v21) ─────────────────────────────────────
+
+/** One writeback column definition, projected for pivot editing. */
+export interface BiWritebackFieldMeta {
+  id: string;
+  table: string;
+  name: string;
+  dataType: string;
+  /** "history" | "masterData" */
+  kind: string;
+  /** Key column names on the host table, in submission order. */
+  keyColumns: string[];
+  required: boolean;
+  enumValues: string[];
+}
+
+/** One collected entry of a writeback column (append-only history). */
+export interface ModelWritebackEntry {
+  key: string[];
+  value:
+    | { type: "number"; value: number }
+    | { type: "text"; value: string }
+    | { type: "boolean"; value: boolean }
+    | { type: "empty" };
+  submitterId: string;
+  submitterName: string;
+  submittedAt: string;
+  /** "draft" | "submitted" | "approved" | "rejected" */
+  state: string;
+}
+
+/** List the writeback columns of one connection's model. */
+export async function biWritebackListColumns(
+  connectionId: string,
+): Promise<BiWritebackFieldMeta[]> {
+  return invoke<BiWritebackFieldMeta[]>("bi_writeback_list_columns", { connectionId });
+}
+
+/** Enter (or clear, with null) one value of a writeback column, identified by
+ *  the host row's key values (in the column's keyColumns order). Appends an
+ *  immutable history entry and re-projects the displayed values. */
+export async function biWritebackSetValue(
+  connectionId: string,
+  writebackId: string,
+  key: string[],
+  value: string | null,
+): Promise<void> {
+  return invoke<void>("bi_writeback_set_value", { connectionId, writebackId, key, value });
+}
+
+/** Inspect the collected entries of one writeback column (history order). */
+export async function biWritebackGetValues(
+  writebackId: string,
+): Promise<ModelWritebackEntry[]> {
+  return invoke<ModelWritebackEntry[]>("bi_writeback_get_values", { writebackId });
+}
+
+/** Add or update a writeback column definition on a connection's model. */
+export async function biModelUpsertWritebackColumn(params: {
+  connectionId: string;
+  originalId?: string | null;
+  name: string;
+  table: string;
+  dataType: string;
+  keyColumns: string[];
+  /** "history" | "masterData" */
+  kind: string;
+  /** "blank" | "latest" | "expression" */
+  projectionMode: string;
+  projectionExpression?: string | null;
+  required: boolean;
+  min?: number | null;
+  max?: number | null;
+  enumValues: string[];
+  maxLength?: number | null;
+  pattern?: string | null;
+  allowedEditors: string[];
+  exposeHistory: boolean;
+}): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_upsert_writeback_column", {
+    connectionId: params.connectionId,
+    originalId: params.originalId ?? null,
+    name: params.name,
+    table: params.table,
+    dataType: params.dataType,
+    keyColumns: params.keyColumns,
+    kind: params.kind,
+    projectionMode: params.projectionMode,
+    projectionExpression: params.projectionExpression ?? null,
+    required: params.required,
+    min: params.min ?? null,
+    max: params.max ?? null,
+    enumValues: params.enumValues,
+    maxLength: params.maxLength ?? null,
+    pattern: params.pattern ?? null,
+    allowedEditors: params.allowedEditors,
+    exposeHistory: params.exposeHistory,
+  });
+}
+
+/** Delete a writeback column definition (collected history stays in the
+ *  workbook store). */
+export async function biModelDeleteWritebackColumn(
+  connectionId: string,
+  id: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_writeback_column", { connectionId, id });
+}
+
+/** One registry submission of a model writeback column (distributed flow). */
+export interface ModelWritebackSubmission {
+  id: string;
+  regionId: string;
+  modelKey?: string[] | null;
+  submitter: { displayName: string; id: string };
+  value:
+    | { type: "number"; value: number }
+    | { type: "text"; value: string }
+    | { type: "boolean"; value: boolean }
+    | { type: "empty" };
+  /** "draft" | "submitted" | "approved" | "rejected" */
+  state: string;
+  submittedAt?: string | null;
+  reviewReason?: string | null;
+  reviewedBy?: string | null;
+}
+
+/** List a model writeback column's registry submissions (publisher review). */
+export async function calpListModelSubmissions(
+  writebackId: string,
+): Promise<ModelWritebackSubmission[]> {
+  return invoke<ModelWritebackSubmission[]>("calp_list_model_submissions", { writebackId });
+}
+
+/** Approve/reject a model writeback submission (publisher-only; the registry
+ *  record keeps its identity while its state changes). */
+export async function calpSetModelSubmissionState(
+  writebackId: string,
+  submissionId: string,
+  newState: "approved" | "rejected" | "submitted",
+  reason?: string,
+): Promise<void> {
+  return invoke<void>("calp_set_model_submission_state", {
+    writebackId,
+    submissionId,
+    newState,
+    reason: reason ?? null,
+  });
 }
 
 /** Delete a connection by ID. */

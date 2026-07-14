@@ -146,6 +146,11 @@ pub struct PulledDataSource {
     /// to the Arrow IPC stream artifact). Empty when the package carries
     /// none. Integrity-verified with the rest of the artifacts.
     pub calculated_table_snapshots: Vec<(String, PathBuf)>,
+    /// Absolute path to the publisher's writeback-column history baseline
+    /// (models/{id}/writeback_history.json), when the package carries one.
+    /// Opaque JSON (host-defined entry shape); integrity-verified like every
+    /// artifact.
+    pub writeback_history_path: Option<PathBuf>,
 }
 
 /// A sheet pulled from a package, ready to be inserted into a workbook.
@@ -600,10 +605,20 @@ pub fn pull(
                     ))
                 })
                 .collect::<Result<Vec<_>, CalpError>>()?;
+            // Writeback-column baseline is optional: probe by manifest-derived
+            // path; absent (or non-local transport) resolves to None.
+            let writeback_history_path = registry
+                .local_artifact_path(
+                    pkg,
+                    ver,
+                    &format!("models/{}/writeback_history.json", ds.id),
+                )?
+                .filter(|p| p.exists());
             Ok(PulledDataSource {
                 definition: ds.clone(),
                 model_path,
                 calculated_table_snapshots,
+                writeback_history_path,
             })
         })
         .collect::<Result<Vec<_>, CalpError>>()?;
@@ -689,6 +704,7 @@ mod tests {
     fn publish_test_package(reg: &LocalRegistry, prof: &std::path::Path) -> persistence::Workbook {
         let wb = make_test_workbook();
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "test-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -751,6 +767,7 @@ mod tests {
         let wb = make_test_workbook();
         let sheet0_id = wb.sheets[0].id;
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "co-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -818,6 +835,7 @@ mod tests {
         wb.sheets = vec![sheet];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "styled-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -880,6 +898,7 @@ mod tests {
         ];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "controls-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -961,6 +980,7 @@ mod tests {
         let custom_id = wb.pane_controls[1].id;
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "pane-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1041,6 +1061,7 @@ mod tests {
                 controls.clone()
             };
             let publish_req = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "pane-det".to_string(),
                 version,
@@ -1141,6 +1162,7 @@ mod tests {
         ];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "slicer-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1205,6 +1227,7 @@ mod tests {
         // Cell-only workbook: no Wave A/B content -> hosts stamp nothing.
         let plain_wb = make_test_workbook();
         let mut plain_req = PublishRequest {
+            model_writebacks: None,
             workbook: &plain_wb,
             package_name: "min-app-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1284,6 +1307,7 @@ mod tests {
         }];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "filter-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1351,6 +1375,7 @@ mod tests {
         }];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "layout-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1403,6 +1428,7 @@ mod tests {
         wb.theme = engine::theme::ThemeDefinition::facet();
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "theme-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1454,6 +1480,7 @@ mod tests {
         );
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "ext-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1547,6 +1574,7 @@ mod tests {
 
         let wb = persistence::Workbook::new();
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "sales-model".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1570,6 +1598,7 @@ mod tests {
                 }),
                 bindings: Vec::new(),
                 calculated_table_snapshots: Vec::new(),
+                writeback_history_json: None,
             }],
             excluded_regions: Vec::new(),
             custom_objects: Vec::new(),
@@ -1630,6 +1659,7 @@ mod tests {
         });
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "fidelity-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1711,6 +1741,7 @@ mod tests {
         include_comments: bool,
     ) -> PublishRequest<'a> {
         PublishRequest {
+            model_writebacks: None,
             workbook: wb,
             package_name: "wave-b-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1839,6 +1870,7 @@ mod tests {
         wb.sheets = vec![sheet];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "charted-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1899,6 +1931,7 @@ mod tests {
         wb.sheets = vec![sheet];
 
         let publish_req = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "sparked-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1970,6 +2003,7 @@ mod tests {
         // Publish v1.0.0, v1.1.0, v2.0.0
         for (maj, min) in [(1, 0), (1, 1), (2, 0)] {
             let request = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "versioned".to_string(),
                 version: SemVer::new(maj, min, 0),
@@ -2165,6 +2199,7 @@ mod tests {
         // after publish — they are a separate trust domain and must not
         // trip the publisher-artifact integrity gate.
         let submission = crate::writeback::WritebackSubmission {
+            model_key: None,
             id: "sub-1".to_string(),
             region_id: "r1".to_string(),
             cell_row: 0,
@@ -2250,6 +2285,7 @@ mod tests {
         }
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "d9-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -2339,6 +2375,7 @@ mod tests {
         }];
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "c8-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -2458,6 +2495,7 @@ mod tests {
             source_package: None,
         }];
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "evil-pkg".to_string(),
             version: SemVer::new(1, 0, 0),

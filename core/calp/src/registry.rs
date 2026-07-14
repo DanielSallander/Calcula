@@ -360,6 +360,62 @@ impl LocalRegistry {
         atomic_write(&path, content.as_bytes())
     }
 
+    /// Save a MODEL-KEYED submission (a writeback COLUMN entry, engine v21).
+    ///
+    /// Unlike grid slots, model submissions are APPEND-ONLY history: every
+    /// save gets its own file (`{region}_{key-hash16}_{submission-id}.json`),
+    /// so re-entering a value for the same row preserves the prior records —
+    /// the whole submission history stays reportable. The loaders pick these
+    /// up unchanged (they read every `.json` in a submitter's directory).
+    pub fn save_model_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &crate::writeback::WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        // Filename components originate from third-party content — apply the
+        // same charset gate as grid slots to the two that are joined raw.
+        let path_safe = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
+        if !path_safe(&submission.region_id) {
+            return Err(CalpError::Registry(format!(
+                "Invalid writeback region id '{}': only alphanumerics, '-' and '_' are allowed",
+                submission.region_id
+            )));
+        }
+        if !path_safe(&submission.id) {
+            return Err(CalpError::Registry(format!(
+                "Invalid submission id '{}': only alphanumerics, '-' and '_' are allowed",
+                submission.id
+            )));
+        }
+        let key = submission.model_key.as_deref().ok_or_else(|| {
+            CalpError::Registry("a model submission must carry model_key".to_string())
+        })?;
+
+        // Stable 16-hex digest of the canonical key tuple, so one row's
+        // history sorts/groups together on disk (cosmetic; loaders re-derive
+        // grouping from model_key).
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for part in key {
+            part.hash(&mut hasher);
+            0x1fu8.hash(&mut hasher); // unit separator: ["ab","c"] != ["a","bc"]
+        }
+        let key_hash = hasher.finish();
+
+        let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
+        let path = sub_dir.join(format!(
+            "{}_{:016x}_{}.json",
+            submission.region_id, key_hash, submission.id
+        ));
+        let content = serde_json::to_string_pretty(submission)?;
+        atomic_write(&path, content.as_bytes())
+    }
+
     /// Load EVERY submission for a package version across all submitters and
     /// regions in a single tree scan. Callers that need several regions
     /// should use this and bucket by region_id — calling
@@ -811,6 +867,15 @@ impl RegistryTransport for LocalRegistry {
         LocalRegistry::save_submission(self, package_name, version, submission)
     }
 
+    fn save_model_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        LocalRegistry::save_model_submission(self, package_name, version, submission)
+    }
+
     fn load_submissions(
         &self,
         package_name: &str,
@@ -905,6 +970,7 @@ mod tests {
 
         let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
         let ver_manifest = VersionManifest {
+            model_writebacks: None,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -988,6 +1054,7 @@ mod tests {
         assert!(!reg.version_exists("pkg", "1.0.0"));
 
         let ver_manifest = VersionManifest {
+            model_writebacks: None,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1020,6 +1087,7 @@ mod tests {
 
     fn make_test_submission(region_id: &str, submitter_name: &str) -> crate::writeback::WritebackSubmission {
         crate::writeback::WritebackSubmission {
+        model_key: None,
             id: format!("sub-{}-{}", region_id, submitter_name),
             region_id: region_id.to_string(),
             cell_row: 0,
@@ -1041,6 +1109,42 @@ mod tests {
         }
     }
 
+    // Model-keyed submissions are APPEND-ONLY: two saves for the SAME row key
+    // yield two files (grid slots would replace), both load, and a re-save of
+    // an existing submission id replaces in place (the approval path).
+    #[test]
+    fn model_submission_append_semantics() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        let mut first = make_test_submission("wb-col-1", "alice");
+        first.id = "sub-1".to_string();
+        first.model_key = Some(vec!["7".to_string()]);
+        let mut second = make_test_submission("wb-col-1", "alice");
+        second.id = "sub-2".to_string();
+        second.model_key = Some(vec!["7".to_string()]); // same row key
+        second.value = crate::writeback::SubmissionValue::Number { value: 99.0 };
+
+        reg.save_model_submission("pkg", "1.0.0", &first).unwrap();
+        reg.save_model_submission("pkg", "1.0.0", &second).unwrap();
+        let loaded = reg.load_all_submissions("pkg", "1.0.0").unwrap();
+        assert_eq!(loaded.len(), 2, "same-key saves must both persist");
+
+        // Approval rewrites the SAME id in place — no third file.
+        let mut approved = second.clone();
+        approved.state = crate::writeback::SubmissionState::Approved;
+        reg.save_model_submission("pkg", "1.0.0", &approved).unwrap();
+        let loaded = reg.load_all_submissions("pkg", "1.0.0").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|s| s.id == "sub-2"
+            && matches!(s.state, crate::writeback::SubmissionState::Approved)));
+
+        // A model submission without a key is refused.
+        let mut keyless = make_test_submission("wb-col-1", "bob");
+        keyless.model_key = None;
+        assert!(reg.save_model_submission("pkg", "1.0.0", &keyless).is_err());
+    }
+
     #[test]
     fn submission_save_and_load() {
         let (_dir, reg) = create_test_registry();
@@ -1048,6 +1152,7 @@ mod tests {
 
         // Create a version directory
         let ver_manifest = VersionManifest {
+            model_writebacks: None,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),
@@ -1094,6 +1199,7 @@ mod tests {
         let (_dir, reg) = create_test_registry();
         create_test_package(&reg, "pkg");
         let ver_manifest = VersionManifest {
+            model_writebacks: None,
             format_version: 1,
             package_name: "pkg".to_string(),
             version: "1.0.0".to_string(),

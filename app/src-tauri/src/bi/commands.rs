@@ -32,7 +32,7 @@ use super::engine_registry::{EngineRegistry, ModelKey};
 // ---------------------------------------------------------------------------
 
 /// Convert 0-based column index to Excel-style column letter (0 -> A, 25 -> Z, 26 -> AA).
-fn index_to_col(mut idx: u32) -> String {
+pub(crate) fn index_to_col(mut idx: u32) -> String {
     let mut result = String::new();
     loop {
         result.insert(0, (b'A' + (idx % 26) as u8) as char);
@@ -238,6 +238,9 @@ pub(crate) fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
     let tables = model
         .tables()
         .iter()
+        // Hidden writeback STORE tables are synthesized machinery; only an
+        // exposed history table (designer opt-in) appears as a table.
+        .filter(|t| !t.is_writeback_store() || !t.is_hidden())
         .map(|t| {
             let mut columns: Vec<BiColumnInfo> = t
                 .columns()
@@ -246,6 +249,7 @@ pub(crate) fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
                     name: c.name().to_string(),
                     data_type: format!("{:?}", c.data_type()),
                     is_context_column: false,
+                    is_writeback_column: false,
                 })
                 .collect();
             // Context columns: Studio-authored dynamic-segmentation columns,
@@ -255,6 +259,21 @@ pub(crate) fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
                     name: cc.name().to_string(),
                     data_type: format!("{:?}", cc.data_type()),
                     is_context_column: true,
+                    is_writeback_column: false,
+                });
+            }
+            // Writeback columns (engine v21): end-user input columns, served
+            // by their generated lookup column — groupable like dimensions.
+            for wb in model
+                .writeback_columns()
+                .iter()
+                .filter(|wb| wb.table().eq_ignore_ascii_case(t.name()))
+            {
+                columns.push(BiColumnInfo {
+                    name: wb.name().to_string(),
+                    data_type: format!("{:?}", wb.data_type()),
+                    is_context_column: false,
+                    is_writeback_column: true,
                 });
             }
             BiTableInfo {
@@ -1196,6 +1215,11 @@ const DAX_GAP_V19_MIN_FORMAT_VERSION: u64 = 19;
 /// translations).
 const DAX_GAP_V20_MIN_FORMAT_VERSION: u64 = 20;
 
+/// Minimum schema `format_version` required by writeback columns. A pre-v21
+/// engine would silently drop the definitions and mis-treat the synthesized
+/// store tables as ordinary connector tables.
+const WRITEBACK_COLUMN_MIN_FORMAT_VERSION: u64 = 21;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1264,7 +1288,9 @@ pub fn stamp_feature_format_version(
         || model.fiscal_year_end_month().is_some()
         || !model.cultures().is_empty();
 
-    let required = if uses_v20 {
+    let required = if !model.writeback_columns().is_empty() {
+        WRITEBACK_COLUMN_MIN_FORMAT_VERSION
+    } else if uses_v20 {
         DAX_GAP_V20_MIN_FORMAT_VERSION
     } else if uses_v19 {
         DAX_GAP_V19_MIN_FORMAT_VERSION
@@ -1755,6 +1781,11 @@ async fn create_connection_core(
         info.table_count,
         info.measure_count
     );
+
+    // A created/imported/reopened model may carry writeback dataset tables
+    // (source id `calp_writeback`). Their in-memory connector can't be rebuilt
+    // from the persisted catalog, so queue a re-provision now.
+    super::writeback_source::invalidate_writeback_bi();
 
     Ok(info)
 }

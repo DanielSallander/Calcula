@@ -1454,6 +1454,18 @@ pub fn save_file(
         }
     }
 
+    // Serialize model writeback entries (writeback COLUMN history) into
+    // user_files — the single source of truth the engine stores rebuild from.
+    {
+        let store = state.model_writeback.lock().map_err(|e| e.to_string())?;
+        if !store.entries.is_empty() {
+            let json = serde_json::to_vec_pretty(&*store).map_err(|e| e.to_string())?;
+            workbook
+                .user_files
+                .insert("model_writeback_values.json".to_string(), json);
+        }
+    }
+
     // Serialize AutoFilter state (per-sheet filters incl. criteria) into
     // user_files (BUG-0013: filters and the table<->autofilter linkage were
     // lost across save/reload).
@@ -2090,6 +2102,24 @@ pub fn open_file(
                 calp::writeback::WritebackLayer::new();
         }
     }
+
+    // Restore model writeback entries (writeback COLUMN history) and reset
+    // the Blank-projection session floor: this open is a new session, so
+    // Blank columns start blank while their history stays intact. The engine
+    // feeds run right after (the connections were restored above).
+    {
+        let restored = workbook
+            .user_files
+            .remove("model_writeback_values.json")
+            .and_then(|bytes| {
+                serde_json::from_slice::<crate::bi::writeback::ModelWritebackStore>(&bytes).ok()
+            })
+            .unwrap_or_default();
+        *state.model_writeback.lock().map_err(|e| e.to_string())? = restored;
+        *state.model_writeback_floor.lock().map_err(|e| e.to_string())? =
+            chrono::Utc::now().to_rfc3339();
+    }
+    crate::bi::writeback::queue_model_writeback_refresh();
 
     // Rebuild the in-memory writeback index/declarations from the restored
     // subscriptions' registry manifests. Without this, writeback regions

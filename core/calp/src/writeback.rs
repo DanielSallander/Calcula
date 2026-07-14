@@ -161,6 +161,48 @@ pub struct WritebackRegionDeclaration {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// A model writeback COLUMN declaration in the .calp manifest (engine v21
+/// writeback columns, distributed): a designer-declared input column on a BI
+/// model table. Unlike [`WritebackRegionDeclaration`], submissions are keyed
+/// by the host ROW's key values (`WritebackSubmission::model_key`), not by
+/// grid coordinates — the declaration's `id` doubles as the submission
+/// `region_id`. Pre-feature apps ignore this field entirely (they only
+/// consult `writeback_regions`), so model submissions are inert to them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelWritebackDeclaration {
+    /// The writeback column's stable id (lowercase `[a-z0-9-]`; also the
+    /// submission `region_id` and the registry slot prefix).
+    pub id: String,
+    /// The package data source (embedded model) this column belongs to.
+    pub data_source_id: String,
+    /// Host table and user-facing column name (review/display).
+    pub table: String,
+    pub column: String,
+    /// Key column names on the host table, in submission-key order — a
+    /// submission's `model_key` values pair with these positionally.
+    pub key_columns: Vec<String>,
+    /// "history" (anyone writes, all history counts) | "masterData"
+    /// (approval-gated shared value; `allowed_editors` gates who may write).
+    #[serde(default)]
+    pub kind: String,
+    /// What values the column accepts (validated at submit AND read-side,
+    /// exactly like grid regions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<ValueSchema>,
+    /// Identities (names/ids, matched like `expected_respondents`) allowed to
+    /// write a masterData column. Empty = no editor restriction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_editors: Vec<String>,
+    /// When contributions join the shared view. masterData columns are
+    /// treated as `OnApproval` regardless (fail closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_policy: Option<SubmissionPolicy>,
+    /// Forward-compatibility: preserves unknown fields from future versions.
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
 /// Best-effort date recognizer for writeback validation: accepts common
 /// year-first / day-first / month-first formats and the date part of an ISO
 /// datetime. Rejects free text — so "1/1/26" is accepted but "garbagexx" is not.
@@ -746,6 +788,12 @@ pub struct WritebackSubmission {
     /// Display name of the publisher who made the approve/reject decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_by: Option<String>,
+    /// MODEL-KEYED submission (writeback COLUMN, engine v21): the host row's
+    /// key VALUES, pairing positionally with the declaration's `key_columns`.
+    /// When set, `region_id` is the writeback column id and
+    /// `cell_row`/`cell_col` are 0. Absent for grid-region submissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<Vec<String>>,
     /// Forward-compatibility.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
@@ -1534,6 +1582,7 @@ mod tests {
 
     fn make_submission(region_id: &str, row: u32, col: u32, value: f64, submitter: &str) -> WritebackSubmission {
         WritebackSubmission {
+            model_key: None,
             id: format!("sub-{}-{}-{}", region_id, row, col),
             region_id: region_id.to_string(),
             cell_row: row,

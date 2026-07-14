@@ -1509,8 +1509,8 @@ mod tests {
             tables: vec![BiTableInfo {
                 name: "Sales".to_string(),
                 columns: vec![
-                    BiColumnInfo { name: "Region".to_string(), data_type: "Text".to_string(), is_context_column: false },
-                    BiColumnInfo { name: "Segment".to_string(), data_type: "Text".to_string(), is_context_column: true },
+                    BiColumnInfo { name: "Region".to_string(), data_type: "Text".to_string(), is_context_column: false, is_writeback_column: false },
+                    BiColumnInfo { name: "Segment".to_string(), data_type: "Text".to_string(), is_context_column: true, is_writeback_column: false },
                 ],
             }],
             measures: vec![BiMeasureInfo { name: "Revenue".to_string(), table: "Sales".to_string() }],

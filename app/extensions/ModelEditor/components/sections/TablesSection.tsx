@@ -7,6 +7,7 @@ import React, { useEffect, useState } from "react";
 import {
   biModelDeleteCalcColumn,
   biModelDeleteTable,
+  biModelDeleteWritebackColumn,
   biModelRefreshTable,
   biModelSetTableRefresh,
   biModelSetTableSourceBinding,
@@ -18,6 +19,7 @@ import type {
   ModelOverview,
   ModelSourceInfo,
   ModelTableInfo,
+  ModelWritebackColumnInfo,
   RefreshStrategyDto,
 } from "@api";
 
@@ -31,6 +33,7 @@ const STRATEGY_TYPES = [
 import { Badge, Field, SELECTION_BG, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
+import { WritebackColumnModal } from "./WritebackColumnModal";
 import { SqlEditorModal } from "../SqlEditorModal";
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
@@ -40,6 +43,9 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   const [selectedName, setSelectedName] = useState<string | null>(tables[0]?.name ?? null);
   const [physicalEdit, setPhysicalEdit] = useState<ModelColumnInfo | null>(null);
   const [calcEdit, setCalcEdit] = useState<{ existing: ModelColumnInfo | null } | null>(null);
+  const [writebackEdit, setWritebackEdit] = useState<{
+    existing: ModelWritebackColumnInfo | null;
+  } | null>(null);
 
   // Keep the selection valid when the table set changes (e.g. a table was just
   // deleted or imported) — the render-time "adjust state on prop change" pattern
@@ -51,11 +57,30 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   }
 
   const table = tables.find((t) => t.name === selectedName) ?? null;
+  // Writeback columns live on the MODEL (overview.writebackColumns), not in
+  // the table's column list — pick out the selected table's here.
+  const writebackCols = table
+    ? overview.writebackColumns.filter((w) => w.table === table.name)
+    : [];
 
   const deleteCalcColumn = async (col: ModelColumnInfo) => {
     if (!window.confirm(`Delete calculated column '${col.name}'?`)) return;
     try {
       applyOverview(await biModelDeleteCalcColumn(connectionId, col.name));
+    } catch (err: unknown) {
+      reportError(err);
+    }
+  };
+
+  const deleteWritebackColumn = async (col: ModelWritebackColumnInfo) => {
+    if (
+      !window.confirm(
+        `Delete writeback column '${col.name}'? Its history/current store tables are removed from the model; collected entries stay in the workbook store.`,
+      )
+    )
+      return;
+    try {
+      applyOverview(await biModelDeleteWritebackColumn(connectionId, col.id));
     } catch (err: unknown) {
       reportError(err);
     }
@@ -127,13 +152,23 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
             )}
 
             <div style={{ ...styles.sectionHeader, marginTop: 12, marginBottom: 8 }}>
-              <span style={styles.sectionTitle}>Columns ({table.columns.length})</span>
+              <span style={styles.sectionTitle}>
+                Columns ({table.columns.length + writebackCols.length})
+              </span>
               <button
                 style={styles.btn}
                 disabled={readOnly}
                 onClick={() => setCalcEdit({ existing: null })}
               >
                 Add calculated column
+              </button>
+              <button
+                style={styles.btn}
+                disabled={readOnly}
+                title="A typed input column end users fill in from pivots"
+                onClick={() => setWritebackEdit({ existing: null })}
+              >
+                Add writeback column
               </button>
             </div>
             <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
@@ -202,6 +237,58 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                       </td>
                     </tr>
                   ))}
+                  {writebackCols.map((w) => (
+                    <tr key={`wb-${w.id}`}>
+                      <td style={styles.td}>
+                        <strong>{w.name}</strong> <Badge tone="warn">✎ writeback</Badge>{" "}
+                        {w.kind === "masterData" && <Badge tone="neutral">master data</Badge>}
+                      </td>
+                      <td style={styles.td}>{w.dataType}</td>
+                      <td style={{ ...styles.td, ...styles.muted }} colSpan={3}>
+                        keys: {w.keyColumns.join(", ")}
+                        {w.exposeHistory ? ` · history: ${w.historyTable}` : ""}
+                      </td>
+                      <td
+                        style={{
+                          ...styles.td,
+                          fontFamily: "Consolas, 'Cascadia Code', monospace",
+                          maxWidth: 240,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={
+                          w.projectionMode === "expression"
+                            ? (w.projectionExpression ?? undefined)
+                            : w.projectionMode === "latest"
+                              ? "Shows the latest submitted value"
+                              : "Blank on reload — values are collected, not displayed"
+                        }
+                      >
+                        {w.projectionMode === "expression"
+                          ? (w.projectionExpression ?? "")
+                          : w.projectionMode === "latest"
+                            ? "(latest value)"
+                            : "(blank on reload)"}
+                      </td>
+                      <td style={{ ...styles.td, whiteSpace: "nowrap", textAlign: "right" }}>
+                        <button
+                          style={styles.smallBtn}
+                          disabled={readOnly}
+                          onClick={() => setWritebackEdit({ existing: w })}
+                        >
+                          Edit
+                        </button>{" "}
+                        <button
+                          style={styles.smallBtn}
+                          disabled={readOnly}
+                          onClick={() => void deleteWritebackColumn(w)}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -232,6 +319,19 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
           onSaved={(o) => {
             applyOverview(o);
             setCalcEdit(null);
+          }}
+        />
+      )}
+      {table && writebackEdit && (
+        <WritebackColumnModal
+          connectionId={connectionId}
+          table={table}
+          existing={writebackEdit.existing}
+          overview={overview}
+          onClose={() => setWritebackEdit(null)}
+          onSaved={(o) => {
+            applyOverview(o);
+            setWritebackEdit(null);
           }}
         />
       )}

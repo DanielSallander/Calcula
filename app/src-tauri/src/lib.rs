@@ -386,6 +386,14 @@ pub struct AppState {
     /// registry submission file. Invalidated explicitly on submit/refresh and
     /// expired by time so other subscribers' new submissions still appear.
     pub gather_cache: Mutex<Option<(std::time::Instant, std::collections::HashMap<String, engine::GatherRegionData>)>>,
+    /// Collected entries of model writeback COLUMNS (engine v21), keyed by
+    /// writeback column id. Append-only history; persisted in .cala
+    /// user_files. See bi::writeback.
+    pub model_writeback: Mutex<crate::bi::writeback::ModelWritebackStore>,
+    /// Session floor (ISO timestamp) for Blank-projection writeback columns:
+    /// entries before it are hidden ("blank on reload"). Reset at workbook
+    /// open/new.
+    pub model_writeback_floor: Mutex<String>,
 }
 
 impl AppState {
@@ -519,6 +527,8 @@ pub fn create_app_state() -> AppState {
         id_registry: Mutex::new(identity::IdRegistry::new()),
         writeback_draft_regions: Mutex::new(Vec::new()),
         writeback_layer: Mutex::new(calp::writeback::WritebackLayer::new()),
+        model_writeback: Mutex::new(crate::bi::writeback::ModelWritebackStore::default()),
+        model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
     };
 
     // Register the initial sheet in the IdRegistry
@@ -4202,6 +4212,18 @@ pub fn run() {
             bi::model_editor::bi_model_delete_source,
             bi::model_editor::bi_model_set_table_source_binding,
             bi::model_editor::bi_model_connect_source,
+            // Writeback dataset commands (writeback submissions as model tables)
+            bi::writeback_source::bi_list_writeback_tables,
+            bi::writeback_source::bi_import_writeback_tables,
+            bi::writeback_source::bi_refresh_writeback_data,
+            // Model writeback COLUMN commands (engine v21)
+            bi::writeback::bi_writeback_set_value,
+            bi::writeback::bi_writeback_get_values,
+            bi::writeback::bi_writeback_list_columns,
+            calp_commands::calp_list_model_submissions,
+            calp_commands::calp_set_model_submission_state,
+            bi::model_editor::bi_model_upsert_writeback_column,
+            bi::model_editor::bi_model_delete_writeback_column,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,
@@ -4627,6 +4649,11 @@ pub fn run() {
     // Apply the persisted Script Security level (B5) before the app runs, so the
     // user's choice survives relaunch instead of resetting to "prompt".
     scripting::hydrate_security_level(app.handle());
+
+    // Install the handle for the writeback->BI dataset refresh hook, so deep
+    // writeback mutation paths (which only see &AppState) can re-provision the
+    // BI writeback source without threading an AppHandle everywhere.
+    bi::writeback_source::set_app_handle(app.handle().clone());
 
     app.run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {

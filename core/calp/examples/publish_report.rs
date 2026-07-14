@@ -461,6 +461,7 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
         model_json: bundle, // embed full ModelBundle (includes connectionSpecs)
         bindings,
         calculated_table_snapshots: Vec::new(),
+        writeback_history_json: None,
     })
 }
 
@@ -583,6 +584,7 @@ fn main() {
         now,
         published_by: "Calcula CLI".to_string(),
         writeback_regions: None,
+        model_writebacks: None,
         object_scripts: None,
         module_scripts: None,
         notebooks: None,

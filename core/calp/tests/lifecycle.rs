@@ -108,6 +108,7 @@ fn publish_version(
     regions: Option<Vec<WritebackRegionDeclaration>>,
 ) {
     let request = PublishRequest {
+        model_writebacks: None,
         workbook: wb,
         package_name: package.to_string(),
         version,
@@ -150,6 +151,7 @@ fn make_submission(
     sub_id: &str,
 ) -> calp::writeback::WritebackSubmission {
     calp::writeback::WritebackSubmission {
+        model_key: None,
         id: sub_id.to_string(),
         region_id: region_id.to_string(),
         cell_row: row,

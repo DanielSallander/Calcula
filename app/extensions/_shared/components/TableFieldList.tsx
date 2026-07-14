@@ -24,6 +24,9 @@ export interface BiModelColumn {
   /** True for a Studio-authored CONTEXT column (dynamic segmentation). Not a
    *  physical column, but groupable like an ordinary dimension. */
   isContextColumn?: boolean;
+  /** True for a WRITEBACK column: end users type its values in pivot cells
+   *  when it is placed as a lookup on leaf rows. */
+  isWritebackColumn?: boolean;
   /** Model-authored description (shown as a field-list tooltip). */
   description?: string;
 }
@@ -255,6 +258,20 @@ const treeStyles = {
     user-select: none;
     flex-shrink: 0;
   `,
+  writebackBadge: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    background: #dafbe1;
+    color: #1a7f37;
+    user-select: none;
+    flex-shrink: 0;
+  `,
   hierarchyItem: css`
     display: flex;
     align-items: center;
@@ -338,6 +355,7 @@ function TreeFieldItem({
   isLookup,
   lookupResolution,
   isContextColumn,
+  isWritebackColumn,
   description,
   onToggle,
   onLookupToggle,
@@ -350,6 +368,7 @@ function TreeFieldItem({
   isLookup?: boolean;
   lookupResolution?: string;
   isContextColumn?: boolean;
+  isWritebackColumn?: boolean;
   description?: string;
   onToggle: (checked: boolean) => void;
   onLookupToggle?: () => void;
@@ -402,6 +421,15 @@ function TreeFieldItem({
           title="Context column — dynamic segmentation computed by the model"
         >
           CTX
+        </span>
+      )}
+      {/* Writeback-column badge — user-entered values */}
+      {isWritebackColumn && (
+        <span
+          className={treeStyles.writebackBadge}
+          title="Writeback column — users can type values when placed as a lookup on leaf rows"
+        >
+          {'✎'}
         </span>
       )}
       {/* G/L toggle badge — only for dimension columns, not measures */}
@@ -893,6 +921,7 @@ export function TableFieldList({
                         isLookup={lookupColumns?.has(colKey)}
                         lookupResolution={col.lookupResolution}
                         isContextColumn={col.isContextColumn}
+                        isWritebackColumn={col.isWritebackColumn}
                         description={
                           cultureLookup.columnDescription(table.name, col.name) ?? col.description
                         }

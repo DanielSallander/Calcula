@@ -176,6 +176,7 @@ pub fn skin_publish(
         locked_sheets: Vec::new(),
         locked_cells: Vec::new(),
         writeback_regions: None,
+        model_writebacks: None,
         object_scripts: Vec::new(),
         module_scripts: Vec::new(),
         notebooks: Vec::new(),

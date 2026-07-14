@@ -854,6 +854,7 @@ mod tests {
         let wb = make_workbook();
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "Sales Report".to_string(),
             version: SemVer::new(1, 2, 0),
@@ -980,6 +981,7 @@ mod tests {
         wb.sheets = vec![Sheet::new("Blank".to_string())];
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "blank-pkg".to_string(),
             version: SemVer::new(1, 0, 0),

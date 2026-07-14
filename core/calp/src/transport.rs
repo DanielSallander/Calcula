@@ -156,6 +156,16 @@ pub trait RegistryTransport {
         submission: &WritebackSubmission,
     ) -> Result<(), CalpError>;
 
+    /// Save a MODEL-KEYED submission (writeback COLUMN entry): append-only —
+    /// every save gets its own file so the full submission history is
+    /// preserved. See `LocalRegistry::save_model_submission`.
+    fn save_model_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<(), CalpError>;
+
     fn load_submissions(
         &self,
         package_name: &str,
@@ -283,6 +293,14 @@ impl RegistryTransport for Box<dyn RegistryTransport> {
         submission: &WritebackSubmission,
     ) -> Result<(), CalpError> {
         (**self).save_submission(package_name, version, submission)
+    }
+    fn save_model_submission(
+        &self,
+        package_name: &str,
+        version: &str,
+        submission: &WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        (**self).save_model_submission(package_name, version, submission)
     }
     fn load_submissions(
         &self,

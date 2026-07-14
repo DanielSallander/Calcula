@@ -401,6 +401,7 @@ mod tests {
 
         for ver in [(1, 0, 0), (1, 1, 0)] {
             let request = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "test-pkg".to_string(),
                 version: SemVer::new(ver.0, ver.1, ver.2),
@@ -580,6 +581,7 @@ mod tests {
             let mut wb = make_workbook();
             wb.pane_controls = controls;
             let request = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "pane-refresh".to_string(),
                 version,

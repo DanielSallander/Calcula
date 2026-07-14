@@ -245,6 +245,9 @@ export interface BiModelColumn {
   /** Sort-by column name: sort this column's pivot items by another column's values.
    *  Example: monthName sorted by monthNumber for calendar ordering. */
   sortByColumn?: string;
+  /** True for a WRITEBACK column: end users type its values in pivot cells
+   *  when it is placed as a lookup on leaf rows. */
+  isWritebackColumn?: boolean;
 }
 
 /** Ragged hierarchy behavior — how to handle missing intermediate levels. */

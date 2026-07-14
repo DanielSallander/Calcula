@@ -252,6 +252,15 @@ impl RegistryTransport for HttpRegistry {
         Err(Self::read_only_err("save submission"))
     }
 
+    fn save_model_submission(
+        &self,
+        _package_name: &str,
+        _version: &str,
+        _submission: &WritebackSubmission,
+    ) -> Result<(), CalpError> {
+        Err(Self::read_only_err("save model submission"))
+    }
+
     fn load_submissions(
         &self,
         _package_name: &str,

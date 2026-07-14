@@ -28,6 +28,12 @@ pub struct PublishDataSource {
     /// written to models/{id}/calculated_tables/{index}.arrow so subscribers
     /// without source access still see the derived tables' data.
     pub calculated_table_snapshots: Vec<CalculatedTableSnapshot>,
+    /// The publisher's collected writeback-column history (opaque JSON,
+    /// host-defined entry shape), written to
+    /// models/{id}/writeback_history.json when present — so a model's
+    /// writeback columns don't arrive empty at subscribers (history-preserving
+    /// distribution baseline).
+    pub writeback_history_json: Option<serde_json::Value>,
 }
 
 /// One materialized calculated table's data snapshot to embed.
@@ -61,6 +67,10 @@ pub struct PublishRequest<'a> {
     pub published_by: String,
     /// Writeback region declarations to include in the manifest.
     pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
+    /// Model writeback COLUMN declarations to include in the manifest (engine
+    /// v21 writeback columns, distributed). Governance for model-keyed
+    /// submissions — see [`crate::writeback::ModelWritebackDeclaration`].
+    pub model_writebacks: Option<Vec<crate::writeback::ModelWritebackDeclaration>>,
     /// Object scripts to include in the package.
     /// If None, all workbook object scripts are published.
     pub object_scripts: Option<Vec<SavedObjectScript>>,
@@ -446,6 +456,7 @@ pub fn publish(
         locked_sheets: Vec::new(),
         locked_cells: Vec::new(),
         writeback_regions: request.writeback_regions.clone(),
+        model_writebacks: request.model_writebacks.clone(),
         object_scripts: published_scripts,
         module_scripts: published_modules,
         notebooks: published_notebooks,
@@ -936,6 +947,15 @@ pub fn publish(
             &format!("models/{}/model.json", ds.id),
             serde_json::to_string_pretty(&ds.model_json)?.as_bytes(),
         )?;
+        // Writeback-column baseline: the publisher's collected history, so
+        // the columns don't arrive empty at subscribers.
+        if let Some(history) = &ds.writeback_history_json {
+            registry.write_artifact(
+                pkg, ver,
+                &format!("models/{}/writeback_history.json", ds.id),
+                serde_json::to_string_pretty(history)?.as_bytes(),
+            )?;
+        }
         for (i, snap) in ds.calculated_table_snapshots.iter().enumerate() {
             registry.write_artifact(
                 pkg, ver,
@@ -1117,6 +1137,7 @@ mod tests {
         ];
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "dangle".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1172,6 +1193,7 @@ mod tests {
         )];
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "covered".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1238,6 +1260,7 @@ mod tests {
         let wb = make_test_workbook();
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "test-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1308,6 +1331,7 @@ mod tests {
         let wb = make_test_workbook();
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "partial".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1342,6 +1366,7 @@ mod tests {
         let wb = make_test_workbook();
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "checked".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1415,6 +1440,7 @@ mod tests {
         // identical across versions (only the manifest differs).
         for v in [SemVer::new(1, 0, 0), SemVer::new(1, 0, 1)] {
             let request = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "dedup".to_string(),
                 version: v,
@@ -1476,6 +1502,7 @@ mod tests {
         let wb = make_test_workbook();
 
         let request = PublishRequest {
+            model_writebacks: None,
             workbook: &wb,
             package_name: "dup".to_string(),
             version: SemVer::new(1, 0, 0),
@@ -1508,6 +1535,7 @@ mod tests {
 
         for (major, minor) in [(1, 0), (1, 1), (2, 0)] {
             let request = PublishRequest {
+            model_writebacks: None,
                 workbook: &wb,
                 package_name: "multi".to_string(),
                 version: SemVer::new(major, minor, 0),

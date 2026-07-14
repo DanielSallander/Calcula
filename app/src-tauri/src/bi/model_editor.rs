@@ -1315,6 +1315,35 @@ pub struct ModelOverview {
     /// The model's persisted data-source catalog (engine v14). Drives the
     /// Connections tab; a model may bind different tables to different sources.
     pub sources: Vec<ModelSourceInfo>,
+    /// Designer-declared writeback columns (engine v21): host-fed, per-key
+    /// input columns on model tables.
+    pub writeback_columns: Vec<ModelWritebackColumnInfo>,
+}
+
+/// One writeback column definition, projected for the Model Editor.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelWritebackColumnInfo {
+    pub id: String,
+    pub name: String,
+    pub table: String,
+    pub data_type: String,
+    pub key_columns: Vec<String>,
+    /// "history" | "masterData"
+    pub kind: String,
+    /// "blank" | "latest" | "expression"
+    pub projection_mode: String,
+    pub projection_expression: Option<String>,
+    pub required: bool,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub enum_values: Vec<String>,
+    pub max_length: Option<usize>,
+    pub pattern: Option<String>,
+    pub allowed_editors: Vec<String>,
+    pub expose_history: bool,
+    /// The synthesized history table's model name (for reports over it).
+    pub history_table: String,
 }
 
 /// One entry in the model's persisted data-source catalog (secret-free).
@@ -1742,6 +1771,10 @@ fn build_overview(
     let tables = base
         .tables()
         .iter()
+        // Writeback store tables are synthesized machinery — the designer
+        // manages them through the writeback column definition, never
+        // directly.
+        .filter(|t| !t.is_writeback_store())
         .map(|t| {
             let mut columns: Vec<ModelColumnInfo> = t
                 .columns()
@@ -1762,7 +1795,9 @@ fn build_overview(
             columns.extend(
                 base.calculated_columns()
                     .iter()
-                    .filter(|cc| cc.table() == t.name())
+                    // Generated lookup columns (writeback machinery) are
+                    // edited through their writeback column, not here.
+                    .filter(|cc| cc.table() == t.name() && cc.generated_by().is_none())
                     .map(|cc| ModelColumnInfo {
                         name: cc.name().to_string(),
                         data_type: format!("{:?}", cc.data_type()),
@@ -2017,6 +2052,43 @@ fn build_overview(
         model_author: base.model_author().map(|s| s.to_string()),
         model_description: base.model_description().map(|s| s.to_string()),
         sources: build_source_infos(base),
+        writeback_columns: base
+            .writeback_columns()
+            .iter()
+            .map(|wb| {
+                let (projection_mode, projection_expression) = match wb.projection() {
+                    bi_engine::WritebackProjection::Blank => ("blank", None),
+                    bi_engine::WritebackProjection::Latest => ("latest", None),
+                    bi_engine::WritebackProjection::Expression(e) => {
+                        ("expression", Some(e.clone()))
+                    }
+                };
+                let c = wb.constraints();
+                ModelWritebackColumnInfo {
+                    id: wb.id().to_string(),
+                    name: wb.name().to_string(),
+                    table: wb.table().to_string(),
+                    data_type: format!("{:?}", wb.data_type()),
+                    key_columns: wb.key_columns().to_vec(),
+                    kind: match wb.kind() {
+                        bi_engine::WritebackColumnKind::History => "history",
+                        bi_engine::WritebackColumnKind::MasterData => "masterData",
+                    }
+                    .to_string(),
+                    projection_mode: projection_mode.to_string(),
+                    projection_expression,
+                    required: c.map(|c| c.required).unwrap_or(false),
+                    min: c.and_then(|c| c.min),
+                    max: c.and_then(|c| c.max),
+                    enum_values: c.map(|c| c.enum_values.clone()).unwrap_or_default(),
+                    max_length: c.and_then(|c| c.max_length),
+                    pattern: c.and_then(|c| c.pattern.clone()),
+                    allowed_editors: wb.allowed_editors().to_vec(),
+                    expose_history: wb.expose_history(),
+                    history_table: wb.history_table_name(),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -2055,7 +2127,9 @@ pub fn bi_model_get_overview(
 
 /// Shared tail for every ME-2..4 mutation: run the edit through
 /// apply_model_edit, mark the document dirty, return the fresh overview.
-async fn mutate_and_overview<F>(
+/// `pub(super)`: also the mutation path for writeback dataset imports
+/// (bi::writeback_source).
+pub(super) async fn mutate_and_overview<F>(
     bi_state: &BiState,
     file_state: &FileState,
     connection_id: ConnectionId,
@@ -2231,12 +2305,168 @@ pub async fn bi_model_delete_calc_column(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
         let mut columns = base.calculated_columns().to_vec();
+        // A generated column (writeback machinery) is deleted through its
+        // writeback column, never directly — retaining it here would only
+        // have it re-synthesized on the next reconcile anyway.
+        if columns
+            .iter()
+            .any(|c| c.name() == name && c.generated_by().is_some())
+        {
+            return Err(format!(
+                "'{}' is generated by a writeback column — delete the writeback column instead",
+                name
+            ));
+        }
         let before = columns.len();
         columns.retain(|c| c.name() != name);
         if columns.len() == before {
             return Err(format!("Calculated column '{}' not found", name));
         }
         let edited = base.with_calculated_columns(columns);
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await
+}
+
+/// Add or update a writeback column (engine v21): a host-fed, per-key input
+/// column on a model table. The engine synthesizes its store tables and
+/// generated lookup column at validate; this command then re-feeds the live
+/// engine so the stores exist and any collected values re-project.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_upsert_writeback_column(
+    state: State<'_, crate::AppState>,
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_id: Option<String>,
+    name: String,
+    table: String,
+    data_type: String,
+    key_columns: Vec<String>,
+    kind: String,
+    projection_mode: String,
+    projection_expression: Option<String>,
+    required: bool,
+    min: Option<f64>,
+    max: Option<f64>,
+    enum_values: Vec<String>,
+    max_length: Option<usize>,
+    pattern: Option<String>,
+    allowed_editors: Vec<String>,
+    expose_history: bool,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Column name cannot be empty".to_string());
+    }
+    let dt = data_type_from_str(&data_type)?;
+    let kind = match kind.trim() {
+        "history" | "" => bi_engine::WritebackColumnKind::History,
+        "masterData" | "master_data" => bi_engine::WritebackColumnKind::MasterData,
+        other => return Err(format!("Unknown writeback column kind '{}'", other)),
+    };
+    let projection = match projection_mode.trim() {
+        "blank" => bi_engine::WritebackProjection::Blank,
+        "latest" | "" => bi_engine::WritebackProjection::Latest,
+        "expression" => {
+            let text = projection_expression
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("The expression projection needs an expression")?;
+            // Editor-time pre-check: the engine rewrites `history[...]` to the
+            // synthesized table name before parsing; approximate that here so
+            // an unparsable expression fails at save, not at first projection.
+            let probe = text
+                .replace("history[", "__wb_probe_hist[")
+                .replace("History[", "__wb_probe_hist[")
+                .replace("HISTORY[", "__wb_probe_hist[");
+            bi_engine::parse_measure_expression(&probe)
+                .map_err(|e| format!("Projection expression does not parse: {}", e))?;
+            bi_engine::WritebackProjection::Expression(text.to_string())
+        }
+        other => return Err(format!("Unknown projection mode '{}'", other)),
+    };
+    let constraints = bi_engine::WritebackConstraints {
+        required,
+        min,
+        max,
+        enum_values: enum_values
+            .into_iter()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty())
+            .collect(),
+        max_length,
+        pattern: pattern.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+    };
+    let editors: Vec<String> = allowed_editors
+        .into_iter()
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let id = original_id
+        .clone()
+        .unwrap_or_else(|| identity::EntityId::from_bytes(identity::generate_uuid_v7()).to_string().to_lowercase());
+
+    let overview = mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut wbs = base.writeback_columns().to_vec();
+        if let Some(orig) = &original_id {
+            let before = wbs.len();
+            wbs.retain(|w| w.id() != orig);
+            if wbs.len() == before {
+                return Err(format!("Writeback column '{}' not found", orig));
+            }
+        }
+        let wb = bi_engine::WritebackColumn::new(
+            id.clone(),
+            trimmed.clone(),
+            table.clone(),
+            dt.clone(),
+            key_columns.clone(),
+        )
+        .with_kind(kind)
+        .with_projection(projection.clone())
+        .with_constraints(constraints.clone())
+        .with_allowed_editors(editors.clone())
+        .with_expose_history(expose_history);
+        wbs.push(wb);
+        let edited = base.with_writeback_columns(wbs).map_err(|e| format!("{}", e))?;
+        edited.validate().map_err(|e| format!("{}", e))?;
+        Ok(edited)
+    })
+    .await?;
+
+    // Re-feed the live engine: the (re)synthesized stores get their history
+    // and projected values immediately, so pivots work without a manual step.
+    super::writeback::refresh_model_writeback(&state, &bi_state).await;
+
+    Ok(overview)
+}
+
+/// Delete a writeback column (its store tables and generated lookup column
+/// go with it; collected entries stay in the workbook store for history).
+#[tauri::command]
+pub async fn bi_model_delete_writeback_column(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    id: String,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
+        let mut wbs = base.writeback_columns().to_vec();
+        let before = wbs.len();
+        wbs.retain(|w| w.id() != id);
+        if wbs.len() == before {
+            return Err(format!("Writeback column '{}' not found", id));
+        }
+        let edited = base.with_writeback_columns(wbs).map_err(|e| format!("{}", e))?;
         edited.validate().map_err(|e| format!("{}", e))?;
         Ok(edited)
     })

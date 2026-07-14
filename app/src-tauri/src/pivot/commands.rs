@@ -4637,6 +4637,9 @@ pub(crate) fn extract_bi_model_metadata(
         .tables()
         .iter()
         .filter(|t| !table_denied(t.name()))
+        // Hidden writeback STORE tables are synthesized machinery; only an
+        // exposed history table (designer opt-in) appears in the field list.
+        .filter(|t| !t.is_writeback_store() || !t.is_hidden())
         .map(|t| {
             let is_numeric_dt = |dt: &bi_engine::DataType| {
                 matches!(
@@ -4660,6 +4663,7 @@ pub(crate) fn extract_bi_model_metadata(
                         lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
                         sort_by_column: c.sort_by_column().map(|s| s.to_string()),
                         is_context_column: false,
+                        is_writeback_column: false,
                         description: c.description().map(|s| s.to_string()),
                     }
                 })
@@ -4680,7 +4684,30 @@ pub(crate) fn extract_bi_model_metadata(
                     lookup_resolution: None,
                     sort_by_column: None,
                     is_context_column: true,
+                    is_writeback_column: false,
                     description: cc.description().map(|s| s.to_string()),
+                });
+            }
+            // Writeback columns (engine v21): end-user input columns, served
+            // by their generated lookup column — groupable like dimensions.
+            for wb in model
+                .writeback_columns()
+                .iter()
+                .filter(|wb| wb.table().eq_ignore_ascii_case(t.name()))
+            {
+                if col_denied(t.name(), wb.name()) {
+                    continue;
+                }
+                let dt = wb.data_type();
+                columns.push(BiModelColumnMeta {
+                    name: wb.name().to_string(),
+                    data_type: format!("{:?}", dt),
+                    is_numeric: is_numeric_dt(dt),
+                    lookup_resolution: None,
+                    sort_by_column: None,
+                    is_context_column: false,
+                    is_writeback_column: true,
+                    description: wb.description().map(|s| s.to_string()),
                 });
             }
             BiModelTableMeta {

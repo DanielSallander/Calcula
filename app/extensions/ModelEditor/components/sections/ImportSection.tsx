@@ -4,8 +4,15 @@
 //          (embedded, path-less connection).
 
 import React, { useEffect, useState } from "react";
-import { biModelImportSqlSource, biModelImportTables, biModelListSourceTables } from "@api";
-import type { ConnectionInfo, ModelOverview, SourceTableInfo } from "@api";
+import {
+  biImportWritebackTables,
+  biListWritebackTables,
+  biModelImportSqlSource,
+  biModelImportTables,
+  biModelListSourceTables,
+  biRefreshWritebackData,
+} from "@api";
+import type { ConnectionInfo, ModelOverview, SourceTableInfo, WritebackTableInfo } from "@api";
 import { styles } from "../editorShared";
 import { NewModelDialog } from "../NewModelDialog";
 import { SqlEditorModal } from "../SqlEditorModal";
@@ -43,6 +50,13 @@ export function ImportSection({
   const [sqlError, setSqlError] = useState<string | null>(null);
   const [showSqlEditor, setShowSqlEditor] = useState(false);
 
+  // ── Writeback datasets ────────────────────────────────────────────────────
+  const [writeback, setWriteback] = useState<WritebackTableInfo[]>([]);
+  const [wbChecked, setWbChecked] = useState<Set<string>>(new Set());
+  const [wbImporting, setWbImporting] = useState(false);
+  const [wbRefreshing, setWbRefreshing] = useState(false);
+  const [wbError, setWbError] = useState<string | null>(null);
+
   // ── New model dialog ──────────────────────────────────────────────────────
   const [showNew, setShowNew] = useState(false);
 
@@ -54,6 +68,24 @@ export function ImportSection({
     setSqlText("");
     setSqlError(null);
     setShowSqlEditor(false);
+    setWbChecked(new Set());
+    setWbError(null);
+  }, [connectionId]);
+
+  // Writeback datasets are local registry reads (no database connection), so
+  // list them automatically; an empty list hides the card entirely.
+  useEffect(() => {
+    let cancelled = false;
+    biListWritebackTables(connectionId || undefined)
+      .then((list) => {
+        if (!cancelled) setWriteback(list);
+      })
+      .catch(() => {
+        if (!cancelled) setWriteback([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [connectionId]);
 
   const keyOf = (t: { schema: string; name: string }): string => `${t.schema}.${t.name}`;
@@ -103,6 +135,45 @@ export function ImportSection({
       setSqlError(String(err));
     } finally {
       setSqlImporting(false);
+    }
+  };
+
+  const reloadWriteback = async () => {
+    try {
+      setWriteback(await biListWritebackTables(connectionId || undefined));
+    } catch {
+      setWriteback([]);
+    }
+  };
+
+  const importWriteback = async () => {
+    const ids = writeback
+      .filter((w) => !w.alreadyImported && wbChecked.has(w.regionId))
+      .map((w) => w.regionId);
+    if (ids.length === 0) return;
+    setWbImporting(true);
+    setWbError(null);
+    try {
+      applyOverview(await biImportWritebackTables(connectionId, ids));
+      setWbChecked(new Set());
+      await reloadWriteback();
+    } catch (err: unknown) {
+      setWbError(String(err));
+    } finally {
+      setWbImporting(false);
+    }
+  };
+
+  const refreshWriteback = async () => {
+    setWbRefreshing(true);
+    setWbError(null);
+    try {
+      await biRefreshWritebackData();
+      await reloadWriteback();
+    } catch (err: unknown) {
+      setWbError(String(err));
+    } finally {
+      setWbRefreshing(false);
     }
   };
 
@@ -211,6 +282,109 @@ export function ImportSection({
           </div>
         )}
       </div>
+
+      {/* ── Card: Writeback data (only when the workbook can see any) ─────── */}
+      {writeback.length > 0 && (
+        <div style={{ ...styles.card, maxWidth: 560 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Writeback data</div>
+          <div style={{ ...styles.hint, marginBottom: 8 }}>
+            Collected writeback submissions as model tables (one row per submission) — query them,
+            pivot them, build relationships to them. Publishers see every submission with review
+            state; subscribers see their governed view. Data refreshes automatically after
+            submit/approve/pull.
+          </div>
+          <div
+            style={{
+              maxHeight: 220,
+              overflowY: "auto",
+              border: "1px solid #eee",
+              borderRadius: 3,
+            }}
+          >
+            {writeback.map((w) => (
+              <label
+                key={w.regionId}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "3px 8px",
+                  fontSize: 12,
+                  opacity: w.alreadyImported ? 0.55 : 1,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  disabled={w.alreadyImported}
+                  checked={w.alreadyImported || wbChecked.has(w.regionId)}
+                  onChange={(e) => {
+                    setWbChecked((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(w.regionId);
+                      else next.delete(w.regionId);
+                      return next;
+                    });
+                  }}
+                />
+                <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {w.displayName}
+                </span>
+                <span
+                  title={
+                    w.audience === "publisher"
+                      ? "You hold this package's publisher key — all submissions, all states, review fields."
+                      : "Your governed view — the same visibility/approval rules as GATHER."
+                  }
+                  style={{
+                    fontSize: 10,
+                    padding: "1px 6px",
+                    borderRadius: 8,
+                    background: w.audience === "publisher" ? "#e8f0fe" : "#f0f0f0",
+                    color: w.audience === "publisher" ? "#1a5dab" : "#555",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {w.audience === "publisher" ? "Publisher — all submissions" : "My governed view"}
+                </span>
+                <span style={{ ...styles.muted, fontSize: 11, whiteSpace: "nowrap" }}>
+                  {w.rowCount} row{w.rowCount === 1 ? "" : "s"}
+                </span>
+                {w.alreadyImported && <span style={styles.hint}>(imported)</span>}
+              </label>
+            ))}
+          </div>
+          {wbError && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#a4262c", whiteSpace: "pre-wrap" }}>
+              {wbError}
+            </div>
+          )}
+          <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+            <button
+              style={styles.primaryBtn}
+              disabled={readOnly || !connectionId || wbImporting || wbChecked.size === 0}
+              onClick={() => void importWriteback()}
+            >
+              {wbImporting
+                ? "Importing…"
+                : wbChecked.size > 0
+                  ? `Import ${wbChecked.size} dataset${wbChecked.size === 1 ? "" : "s"}`
+                  : "Import"}
+            </button>
+            <button
+              style={styles.btn}
+              disabled={wbRefreshing}
+              onClick={() => void refreshWriteback()}
+            >
+              {wbRefreshing ? "Refreshing…" : "Refresh data"}
+            </button>
+          </div>
+          {!connectionId && (
+            <div style={{ ...styles.hint, marginTop: 6 }}>
+              Select a connection to import into (or create a blank model below).
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Card 2: SQL query source ──────────────────────────────────────── */}
       <div style={{ ...styles.card, maxWidth: 560 }}>
