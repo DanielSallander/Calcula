@@ -13,6 +13,10 @@ import * as S from "./FormulaAutocompleteOverlay.styles";
 const DROPDOWN_WIDTH = 340;
 const DROPDOWN_MAX_HEIGHT = 220;
 const HINT_GAP = 4;
+// Approximate height of the argument-hint card (signature + active-param label
+// + a short description). Used to keep the hint clear of the dropdown when the
+// dropdown is flipped above the editor cell near the viewport bottom.
+const ARGUMENT_HINT_HEIGHT = 72;
 
 /**
  * Main overlay component for formula autocomplete.
@@ -64,7 +68,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
   let hintY: number;
   if (visible) {
     hintY = showAbove
-      ? dropdownY - 24 - HINT_GAP
+      ? dropdownY - ARGUMENT_HINT_HEIGHT - HINT_GAP
       : dropdownY + estimatedDropdownHeight + HINT_GAP;
   } else {
     hintY = anchorRect.y + HINT_GAP;
@@ -193,9 +197,11 @@ function HighlightedName({
 }
 
 /**
- * Renders the function syntax with the active argument highlighted.
- * Parses the syntax string (e.g., "SUM(number1, [number2], ...)") and
- * bolds the argument at `activeArgIndex`.
+ * Renders an intellisense card for the enclosing function: the signature with
+ * the active argument shown as a filled chip, a label naming the active
+ * parameter (and whether it is optional), and the function description.
+ *
+ * Parses the syntax string (e.g., "SUM(number1, [number2], ...)").
  */
 function ArgumentHint({
   func,
@@ -204,15 +210,20 @@ function ArgumentHint({
   func: FunctionInfo;
   activeArgIndex: number;
 }): React.ReactElement {
-  const { syntax } = func;
+  const { syntax, description } = func;
 
   // Parse: "SUM(number1, [number2], ...)" -> extract args between parens
   const openParen = syntax.indexOf("(");
   const closeParen = syntax.lastIndexOf(")");
 
   if (openParen === -1 || closeParen === -1 || closeParen <= openParen) {
-    // Fallback: just show the full syntax
-    return <span>{syntax}</span>;
+    // Fallback: no parseable parameter list -- show the raw syntax + description.
+    return (
+      <>
+        <S.SignatureLine>{syntax}</S.SignatureLine>
+        {description && <S.HintDescription>{description}</S.HintDescription>}
+      </>
+    );
   }
 
   const funcName = syntax.substring(0, openParen);
@@ -222,22 +233,66 @@ function ArgumentHint({
   const args = splitArguments(argsStr);
   const displaySep = (getCachedLocale()?.listSeparator ?? ",") + " ";
 
+  // Which listed parameter to treat as active. For variadic functions the
+  // cursor can move past the last listed parameter -- keep the last repeatable
+  // named parameter highlighted rather than highlighting nothing.
+  const activeIdx = resolveActiveArgIndex(args, activeArgIndex);
+  const activeArgText = activeIdx >= 0 ? args[activeIdx] : "";
+  const activeIsOptional = activeArgText.startsWith("[");
+  const activeParamName = stripArgDecorations(activeArgText);
+
   return (
-    <span>
-      <S.FnName>{funcName}</S.FnName>(
-      {args.map((arg, i) => (
-        <React.Fragment key={i}>
-          {i > 0 && displaySep}
-          {i === activeArgIndex ? (
-            <S.ActiveArg>{arg}</S.ActiveArg>
-          ) : (
-            <span>{arg}</span>
-          )}
-        </React.Fragment>
-      ))}
-      )
-    </span>
+    <>
+      <S.SignatureLine>
+        <S.FnName>{funcName}</S.FnName>(
+        {args.map((arg, i) => (
+          <React.Fragment key={i}>
+            {i > 0 && displaySep}
+            {i === activeIdx ? (
+              <S.ActiveArg>{arg}</S.ActiveArg>
+            ) : (
+              <S.InactiveArg>{arg}</S.InactiveArg>
+            )}
+          </React.Fragment>
+        ))}
+        )
+      </S.SignatureLine>
+      {activeParamName && activeParamName !== "..." && (
+        <S.ActiveParamLabel>
+          <strong>{activeParamName}</strong>
+          {activeIsOptional && <S.ParamOptionalNote>optional</S.ParamOptionalNote>}
+        </S.ActiveParamLabel>
+      )}
+      {description && <S.HintDescription>{description}</S.HintDescription>}
+    </>
   );
+}
+
+/**
+ * Pick which listed parameter is "active" for the given argument index,
+ * clamping into range and keeping the last repeatable parameter highlighted
+ * for variadic functions (whose syntax ends in "...").
+ */
+function resolveActiveArgIndex(args: string[], activeArgIndex: number): number {
+  if (args.length === 0) return -1;
+  if (activeArgIndex < 0) return 0;
+  if (activeArgIndex < args.length) return activeArgIndex;
+
+  // Past the last listed parameter. If the function is variadic, keep the last
+  // NAMED parameter before the trailing "..." highlighted; otherwise clamp.
+  const last = args[args.length - 1];
+  if (last === "..." || last.endsWith("...")) {
+    return Math.max(0, args.length - 2);
+  }
+  return args.length - 1;
+}
+
+/**
+ * Strip decorative characters from a parameter token so the active-param label
+ * shows a clean name: "[number2]" -> "number2", "value..." -> "value".
+ */
+function stripArgDecorations(arg: string): string {
+  return arg.replace(/^\[|\]$/g, "").replace(/\.\.\.$/, "").trim();
 }
 
 /**

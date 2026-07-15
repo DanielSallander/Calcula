@@ -41,10 +41,16 @@ function getListSeparator(): string {
 }
 
 /**
- * Check if a character is a valid function name character (letters, digits, underscore).
+ * Check if a character can be part of a function name token: letters, digits,
+ * underscore, and the dot.
+ *
+ * The dot is allowed so dotted built-in names such as `GET.CONTROLVALUE`,
+ * `GET.ROW.HEIGHT`, and `GET.CELL.FILLCOLOR` are captured as a single token.
+ * Numeric tokens that happen to contain a dot (e.g. `3.14`) are filtered out
+ * afterwards by the "must start with a letter/underscore" trigger guard.
  */
-function isIdentifierChar(ch: string): boolean {
-  return /[A-Za-z0-9_]/.test(ch);
+function isFunctionNameChar(ch: string): boolean {
+  return /[A-Za-z0-9_.]/.test(ch);
 }
 
 /**
@@ -79,11 +85,14 @@ export function parseTokenAtCursor(value: string, cursorPosition: number): Token
   const listSep = getListSeparator();
 
   // Scan backwards from cursor to find the token start.
-  // A token is a contiguous sequence of identifier characters.
+  // A token is a contiguous sequence of function-name characters (letters,
+  // digits, underscore, and dots). Dots are included so dotted built-in names
+  // like GET.CONTROLVALUE filter as a single token once the user types past
+  // the dot (e.g. "=GET.CONT" -> token "GET.CONT").
   let tokenStart = cursorPosition;
   while (tokenStart > 0) {
     const ch = value[tokenStart - 1];
-    if (!isIdentifierChar(ch)) {
+    if (!isFunctionNameChar(ch)) {
       break;
     }
     tokenStart--;
@@ -110,13 +119,11 @@ export function parseTokenAtCursor(value: string, cursorPosition: number): Token
       shouldTrigger = false;
     }
 
-    // Also reject if the token is purely numeric (row number)
-    if (/^\d+$/.test(token)) {
-      shouldTrigger = false;
-    }
-
-    // Reject if the token starts with $ (absolute reference marker)
-    if (token.startsWith("$")) {
+    // Function and named-range names always begin with a letter or underscore.
+    // This one guard rejects numbers and decimals ("3", "3.14"), absolute-ref
+    // markers ("$B$2"), and bare/leading dots -- while still allowing dotted
+    // built-in names like "GET.CONTROLVALUE" (which begin with a letter).
+    if (!/^[A-Za-z_]/.test(token)) {
       shouldTrigger = false;
     }
   }
@@ -134,68 +141,88 @@ export function parseTokenAtCursor(value: string, cursorPosition: number): Token
 }
 
 /**
- * Walk backwards through the formula to find the enclosing function call
- * and determine which argument the cursor is in.
+ * Extract the function name immediately to the left of an opening paren.
+ * Dots are allowed so dotted built-ins (e.g. GET.CONTROLVALUE) resolve as a
+ * single name instead of just the tail segment ("CONTROLVALUE") -- without
+ * which the argument hint could never be looked up for those functions.
+ *
+ * @returns The raw (not upper-cased) name, or null for a bare grouping paren.
+ */
+function extractNameBeforeParen(value: string, parenIndex: number): string | null {
+  const nameEnd = parenIndex;
+  let nameStart = parenIndex - 1;
+  while (nameStart >= 0 && isFunctionNameChar(value[nameStart])) {
+    nameStart--;
+  }
+  nameStart++;
+
+  // Trim any leading dots/digits that a preceding literal could contribute
+  // (e.g. "=3.SUM(" -> keep "SUM"); real names start with a letter/underscore.
+  while (nameStart < nameEnd && !/[A-Za-z_]/.test(value[nameStart])) {
+    nameStart++;
+  }
+
+  return nameStart < nameEnd ? value.substring(nameStart, nameEnd) : null;
+}
+
+/**
+ * Find the enclosing function call at the cursor and which argument the cursor
+ * is in.
+ *
+ * The formula is scanned FORWARD from the start up to the cursor, maintaining a
+ * stack of open parentheses. Scanning forward (rather than backward from the
+ * cursor) is what makes string handling correct: a quote is unambiguously an
+ * OPENING quote the first time it is seen, so a half-typed string argument with
+ * only an opening quote (e.g. `=GET.CONTROLVALUE("Region`) no longer swallows
+ * the enclosing `(` and function name -- the argument hint stays visible while
+ * the user types a string argument.
  *
  * @param value - The full formula string
  * @param cursorPosition - Current cursor position
- * @returns The enclosing function name and argument index
+ * @returns The innermost enclosing function name and argument index
  */
 function findEnclosingFunction(
   value: string,
   cursorPosition: number
 ): { enclosingFunction: string | null; argumentIndex: number } {
-  let parenDepth = 0;
-  let argIndex = 0;
-  let inString = false;
-  let stringChar = "";
   const listSep = getListSeparator();
 
-  for (let i = cursorPosition - 1; i >= 0; i--) {
+  // Each frame: the function name owning the paren (null for a bare grouping
+  // paren) and the argument index the cursor is at within that call.
+  const stack: Array<{ name: string | null; argIndex: number }> = [];
+  let inString = false;
+  let stringChar = "";
+
+  const end = Math.min(cursorPosition, value.length);
+  for (let i = 0; i < end; i++) {
     const ch = value[i];
 
-    // Track string literals to ignore parentheses/commas inside them
-    if ((ch === '"' || ch === "'") && !inString) {
+    if (inString) {
+      // A matching quote closes the string. (Excel's "" escape nets out to
+      // close-then-reopen, which leaves us in-string -- the correct result.)
+      if (ch === stringChar) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
       inString = true;
       stringChar = ch;
-      continue;
-    }
-    if (inString && ch === stringChar) {
-      inString = false;
-      continue;
-    }
-    if (inString) {
-      continue;
-    }
-
-    if (ch === ")") {
-      parenDepth++;
     } else if (ch === "(") {
-      if (parenDepth === 0) {
-        // Found the opening paren of the enclosing function.
-        // Look back to extract the function name.
-        let nameEnd = i;
-        let nameStart = i - 1;
-        while (nameStart >= 0 && isIdentifierChar(value[nameStart])) {
-          nameStart--;
-        }
-        nameStart++;
-
-        if (nameStart < nameEnd) {
-          const funcName = value.substring(nameStart, nameEnd).toUpperCase();
-          return {
-            enclosingFunction: funcName,
-            argumentIndex: argIndex,
-          };
-        }
-        // Opening paren without a function name (e.g., grouping parens)
-        return { enclosingFunction: null, argumentIndex: -1 };
-      }
-      parenDepth--;
-    } else if (ch === listSep && parenDepth === 0) {
-      argIndex++;
+      stack.push({ name: extractNameBeforeParen(value, i), argIndex: 0 });
+    } else if (ch === ")") {
+      stack.pop();
+    } else if (ch === listSep && stack.length > 0) {
+      stack[stack.length - 1].argIndex++;
     }
   }
 
+  // The innermost open call determines the hint. A bare grouping paren has no
+  // name -> no hint (matching the prior behavior for e.g. "=SUM((").
+  const top = stack[stack.length - 1];
+  if (top && top.name) {
+    return { enclosingFunction: top.name.toUpperCase(), argumentIndex: top.argIndex };
+  }
   return { enclosingFunction: null, argumentIndex: -1 };
 }
