@@ -244,14 +244,16 @@ function summaryOf(md: string): string {
 // Panel
 // ---------------------------------------------------------------------------
 
+// The panel is frameless: it fills whatever container it is placed in (the
+// measure editor mounts it inside a resizable/collapsible "Function reference"
+// blade that supplies the title bar and collapse control), so it only owns the
+// search box and the doc reader.
 export function FunctionDocsPanel({
   docs,
   loading,
-  onClose,
 }: {
   docs: FunctionDocDto[];
   loading: boolean;
-  onClose: () => void;
 }): React.ReactElement {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -270,33 +272,13 @@ export function FunctionDocsPanel({
   return (
     <div
       style={{
-        width: 380,
-        flexShrink: 0,
-        // Matches the editor's height so the row doesn't grow; the body scrolls.
-        height: 322,
+        flex: 1,
+        minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        border: "1px solid #ddd",
-        borderRadius: 4,
         background: "#fff",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "6px 8px",
-          borderBottom: "1px solid #eee",
-          background: "#f7f8fa",
-        }}
-      >
-        <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Function reference</span>
-        <button style={styles.smallBtn} onClick={onClose} title="Hide function reference">
-          Close
-        </button>
-      </div>
-
       {current ? (
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
           <div style={{ padding: "6px 8px", borderBottom: "1px solid #f0f0f0" }}>

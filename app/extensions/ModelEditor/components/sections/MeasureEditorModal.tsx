@@ -4,6 +4,20 @@
 //          (positioned markers) and installs the edit via
 //          bi_model_upsert_measure on save. Ported from the old main-window
 //          MeasureEditorDialog.
+//
+// LAYOUT: a workspace-style modal that puts the FORMULA editor front and centre.
+//   ┌ Name ───────────┐ ┌ Description ────────────────────────────┐
+//   ├─────────────────────────────────────────────────────────────┤
+//   │ Tables & │        Formula editor (fills)          │ Function │
+//   │ columns  │                                        │ reference│
+//   │ (blade)  │                                        │ (blade)  │
+//   ├─────────────────────────────────────────────────────────────┤
+//   │ ▸ More options (Folder, Format, Dynamic format, Detail rows) │
+//   └─────────────────────────────────────────────────────────────┘
+//   The two side "blades" are independently collapsible, resizable (drag the
+//   inner edge) and can be swapped left/right; the chosen arrangement persists
+//   in localStorage so it survives across sessions. The default is the arrangement
+//   drawn above.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
@@ -142,7 +156,7 @@ function FolderField({
           <option value="">(No folder)</option>
           {groups.map((g) => (
             <option key={g} value={g} title={g}>
-              {`${"  ".repeat(folderDepth(g))}${splitFolderPath(g).slice(-1)[0]}`}
+              {`${"  ".repeat(folderDepth(g))}${splitFolderPath(g).slice(-1)[0]}`}
             </option>
           ))}
           <option value="__new__">New folder…</option>
@@ -182,6 +196,254 @@ function byteToUtf16Offset(text: string, byteOffset: number): number {
   return new TextDecoder().decode(new TextEncoder().encode(text).subarray(0, byteOffset)).length;
 }
 
+// ===========================================================================
+// Blade layout (collapsible / resizable / swappable side panes) + persistence
+// ===========================================================================
+
+type BladeSide = "left" | "right";
+
+interface BladeLayout {
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+  leftWidth: number;
+  rightWidth: number;
+  /** false = tree on the left / docs on the right (the default). */
+  swapped: boolean;
+}
+
+const LAYOUT_KEY = "calcula.measureEditor.layout.v1";
+const LEFT_MIN = 160;
+const LEFT_MAX = 480;
+const RIGHT_MIN = 220;
+const RIGHT_MAX = 560;
+const WORKSPACE_HEIGHT = "clamp(300px, 58vh, 640px)";
+
+const DEFAULT_LAYOUT: BladeLayout = {
+  leftCollapsed: false,
+  rightCollapsed: false,
+  leftWidth: 240,
+  rightWidth: 360,
+  swapped: false,
+};
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** Coerce a (possibly corrupt / out-of-range / wrong-typed) persisted layout into
+ *  a valid one, so state is ALWAYS clamped — otherwise a bad stored width would
+ *  load into state and get re-persisted unclamped, only masked by the render's
+ *  defensive clamp. */
+function normalizeLayout(l: Partial<BladeLayout>): BladeLayout {
+  const width = (v: unknown, def: number, lo: number, hi: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? clamp(v, lo, hi) : def;
+  return {
+    leftCollapsed: Boolean(l.leftCollapsed),
+    rightCollapsed: Boolean(l.rightCollapsed),
+    leftWidth: width(l.leftWidth, DEFAULT_LAYOUT.leftWidth, LEFT_MIN, LEFT_MAX),
+    rightWidth: width(l.rightWidth, DEFAULT_LAYOUT.rightWidth, RIGHT_MIN, RIGHT_MAX),
+    swapped: Boolean(l.swapped),
+  };
+}
+
+function loadLayout(): BladeLayout {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    if (!raw) return { ...DEFAULT_LAYOUT };
+    return normalizeLayout(JSON.parse(raw) as Partial<BladeLayout>);
+  } catch {
+    return { ...DEFAULT_LAYOUT };
+  }
+}
+
+function saveLayout(layout: BladeLayout): void {
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+  } catch {
+    // localStorage may be unavailable (private mode / quota) — layout just
+    // won't persist; not worth surfacing.
+  }
+}
+
+const iconBtnStyle: React.CSSProperties = {
+  border: "1px solid transparent",
+  background: "transparent",
+  color: "#666",
+  cursor: "pointer",
+  fontSize: 12,
+  lineHeight: 1,
+  padding: "2px 5px",
+  borderRadius: 3,
+};
+
+/** Draggable divider between a side pane and the centre editor. Lives as a
+ *  sibling in the workspace row (not inside the pane) so the pane's rounded
+ *  overflow never clips it and it always presents a full grab target. Dragging
+ *  away from the centre grows the pane; the parent clamps the resulting width. */
+function ResizeHandle({
+  side,
+  width,
+  onWidthChange,
+}: {
+  side: BladeSide;
+  width: number;
+  onWidthChange: (next: number) => void;
+}): React.ReactElement {
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const onDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      dragRef.current = { startX: e.clientX, startW: width };
+      const move = (ev: MouseEvent): void => {
+        const d = dragRef.current;
+        if (!d) return;
+        // The left pane's divider is on its right edge (drag right -> wider); the
+        // right pane's is on its left edge (drag left -> wider).
+        const delta = side === "left" ? ev.clientX - d.startX : d.startX - ev.clientX;
+        onWidthChange(d.startW + delta);
+      };
+      const up = (): void => {
+        dragRef.current = null;
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    },
+    [side, width, onWidthChange],
+  );
+  return (
+    <div
+      onMouseDown={onDown}
+      title="Drag to resize"
+      style={{
+        flexShrink: 0,
+        width: 7,
+        cursor: "col-resize",
+        alignSelf: "stretch",
+        display: "flex",
+        justifyContent: "center",
+      }}
+    >
+      <div style={{ width: 1, height: "100%", background: "#ddd" }} />
+    </div>
+  );
+}
+
+/** A collapsible side pane. Collapsed it becomes a thin rail with a rotated
+ *  label; expanded it shows a title bar (swap + collapse controls) over the pane
+ *  content. Its width is driven by the parent and changed by a sibling
+ *  <ResizeHandle>. */
+function Blade({
+  side,
+  title,
+  collapsed,
+  onToggleCollapsed,
+  width,
+  onSwap,
+  children,
+}: {
+  side: BladeSide;
+  title: string;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  width: number;
+  onSwap: () => void;
+  children: React.ReactNode;
+}): React.ReactElement {
+
+  if (collapsed) {
+    return (
+      <div
+        onClick={onToggleCollapsed}
+        title={`Expand ${title}`}
+        style={{
+          width: 30,
+          flexShrink: 0,
+          cursor: "pointer",
+          border: "1px solid #ddd",
+          borderRadius: 4,
+          background: "#f2f3f5",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          padding: "8px 0",
+        }}
+      >
+        <span style={{ fontSize: 12, color: "#888" }}>{side === "left" ? "▸" : "◂"}</span>
+        <span
+          style={{
+            writingMode: "vertical-rl",
+            transform: "rotate(180deg)",
+            fontSize: 11,
+            fontWeight: 600,
+            color: "#555",
+            whiteSpace: "nowrap",
+            letterSpacing: 0.3,
+          }}
+        >
+          {title}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width,
+        flexShrink: 0,
+        display: "flex",
+        flexDirection: "column",
+        border: "1px solid #ddd",
+        borderRadius: 4,
+        background: "#fafafa",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          padding: "4px 4px 4px 8px",
+          borderBottom: "1px solid #eee",
+          background: "#f2f3f5",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            fontWeight: 600,
+            fontSize: 12,
+            color: "#555",
+            flex: 1,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {title}
+        </span>
+        <button style={iconBtnStyle} onClick={onSwap} title="Move to the other side">
+          ⇄
+        </button>
+        <button
+          style={iconBtnStyle}
+          onClick={onToggleCollapsed}
+          title={`Collapse ${title}`}
+        >
+          {side === "left" ? "◂" : "▸"}
+        </button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function MeasureEditorModal({
   connectionId,
   existing,
@@ -209,6 +471,18 @@ export function MeasureEditorModal({
   const [group, setGroup] = useState(normalizeFolderPath(existing?.group ?? ""));
   const [formula, setFormula] = useState(existing?.formula ?? "");
 
+  // The secondary attributes live in a collapsible "More options" section under
+  // the editor. Open it up-front when editing a measure that already sets any of
+  // them, so those values are not hidden behind a click.
+  const [advancedOpen, setAdvancedOpen] = useState(
+    Boolean(
+      (existing?.group ?? "") ||
+        (existing?.formatString ?? "") ||
+        (existing?.formatStringExpression ?? "") ||
+        (existing?.detailRows?.length ?? 0),
+    ),
+  );
+
   // Existing folders in this model (including intermediate/nested ones) — offered
   // in the folder dropdown so the user can file this measure into a folder that
   // already exists.
@@ -221,14 +495,35 @@ export function MeasureEditorModal({
   const [busy, setBusy] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
 
+  // Side-pane arrangement (collapsed / widths / swapped), persisted across sessions.
+  const [layout, setLayout] = useState<BladeLayout>(() => loadLayout());
+  useEffect(() => {
+    saveLayout(layout);
+  }, [layout]);
+
+  const toggleCollapsed = useCallback((s: BladeSide) => {
+    setLayout((l) =>
+      s === "left"
+        ? { ...l, leftCollapsed: !l.leftCollapsed }
+        : { ...l, rightCollapsed: !l.rightCollapsed },
+    );
+  }, []);
+  const setBladeWidth = useCallback((s: BladeSide, w: number) => {
+    setLayout((l) =>
+      s === "left"
+        ? { ...l, leftWidth: clamp(w, LEFT_MIN, LEFT_MAX) }
+        : { ...l, rightWidth: clamp(w, RIGHT_MIN, RIGHT_MAX) },
+    );
+  }, []);
+  const toggleSwap = useCallback(() => setLayout((l) => ({ ...l, swapped: !l.swapped })), []);
+
   // Function-reference (wiki) pane — lazily loaded from the engine's docs the
-  // first time it is opened, then kept for the life of the dialog.
-  const [showDocs, setShowDocs] = useState(false);
+  // first time the docs blade is visible, then kept for the life of the dialog.
   const [docs, setDocs] = useState<FunctionDocDto[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
   const docsLoadedRef = useRef(false);
-  // Guards the lazy docs fetch (kicked off from an event handler) against
-  // resolving after the dialog has already closed.
+  // Guards the lazy docs fetch (kicked off from an effect) against resolving
+  // after the dialog has already closed.
   const mountedRef = useRef(true);
   useEffect(
     () => () => {
@@ -237,23 +532,23 @@ export function MeasureEditorModal({
     [],
   );
 
-  const toggleDocs = useCallback(() => {
-    setShowDocs((prev) => !prev);
-    if (!docsLoadedRef.current) {
-      docsLoadedRef.current = true;
-      setDocsLoading(true);
-      void biModelFunctionDocs()
-        .then((d) => {
-          if (mountedRef.current) setDocs(d);
-        })
-        .catch(() => {
-          if (mountedRef.current) setDocs([]);
-        })
-        .finally(() => {
-          if (mountedRef.current) setDocsLoading(false);
-        });
-    }
-  }, []);
+  // The docs pane occupies whichever side is NOT holding the tree.
+  const docsSideCollapsed = layout.swapped ? layout.leftCollapsed : layout.rightCollapsed;
+  useEffect(() => {
+    if (docsSideCollapsed || docsLoadedRef.current) return;
+    docsLoadedRef.current = true;
+    setDocsLoading(true);
+    void biModelFunctionDocs()
+      .then((d) => {
+        if (mountedRef.current) setDocs(d);
+      })
+      .catch(() => {
+        if (mountedRef.current) setDocs([]);
+      })
+      .finally(() => {
+        if (mountedRef.current) setDocsLoading(false);
+      });
+  }, [docsSideCollapsed]);
 
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
@@ -397,10 +692,37 @@ export function MeasureEditorModal({
     onSaved,
   ]);
 
+  // Render one side pane. Which content it holds depends on `swapped`; the
+  // collapsed/width state is tracked per physical side (left/right).
+  const renderBlade = (side: BladeSide): React.ReactElement => {
+    const isTree = side === (layout.swapped ? "right" : "left");
+    const collapsed = side === "left" ? layout.leftCollapsed : layout.rightCollapsed;
+    const width =
+      side === "left"
+        ? clamp(layout.leftWidth, LEFT_MIN, LEFT_MAX)
+        : clamp(layout.rightWidth, RIGHT_MIN, RIGHT_MAX);
+    return (
+      <Blade
+        side={side}
+        title={isTree ? "Tables & columns" : "Function reference"}
+        collapsed={collapsed}
+        onToggleCollapsed={() => toggleCollapsed(side)}
+        width={width}
+        onSwap={toggleSwap}
+      >
+        {isTree ? (
+          <MeasureTreeContent overview={overview} onInsert={insertRef} />
+        ) : (
+          <FunctionDocsPanel docs={docs} loading={docsLoading} />
+        )}
+      </Blade>
+    );
+  };
+
   return (
     <Modal
       title={existing ? `Edit Measure: ${existing.name}` : "New Measure"}
-      width={showDocs ? 1300 : 900}
+      width={1280}
       onClose={onClose}
       footer={
         <>
@@ -421,7 +743,7 @@ export function MeasureEditorModal({
         </>
       }
     >
-      <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12 }}>
+      <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>
         Model measures are part of the connection&apos;s model — they persist in this workbook and
         ship when the model is published as a package.
       </div>
@@ -441,66 +763,81 @@ export function MeasureEditorModal({
         </div>
       )}
 
-      <Field label="Name">
-        <input
-          style={styles.input}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Revenue"
-        />
-      </Field>
-      <Field label="Description (optional)">
-        <input
-          style={styles.input}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-      </Field>
-      <FolderField value={group} onChange={setGroup} groups={existingGroups} />
-      <FormatField value={formatString} onChange={setFormatString} />
+      {/* Identity row — Name and Description stay on top. */}
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+        <Field label="Name" flex={1}>
+          <input
+            style={styles.input}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Revenue"
+          />
+        </Field>
+        <Field label="Description (optional)" flex={2}>
+          <input
+            style={styles.input}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </Field>
+      </div>
 
-      <Field
-        label="Dynamic format (optional)"
-        hint='An expression evaluated once per query under the active filters, returning the format string — e.g. IF([SelectedCurrency] = "EUR", "#,##0.00 €", "$#,##0.00"). Overrides the static format when it yields a value.'
+      {/* Workspace: editor front-and-centre, flanked by the two blades. */}
+      <div
+        style={{
+          height: WORKSPACE_HEIGHT,
+          display: "flex",
+          gap: 6,
+          alignItems: "stretch",
+          marginBottom: 10,
+        }}
       >
-        <input
-          style={styles.input}
-          value={formatStringExpression}
-          onChange={(e) => setFormatStringExpression(e.target.value)}
-          placeholder='IF(SUM(fact[amount]) > 1000000, "#,##0,,\"M\"", "#,##0")'
-        />
-      </Field>
-
-      <Field
-        label="Detail rows (optional)"
-        hint="Drill-through projection: comma-separated Table[column] references returned when a user drills a cell of this measure. Fact-table columns become the detail columns; other tables' columns are looked up beside each row. Leave empty for the default projection."
-      >
-        <input
-          style={styles.input}
-          value={detailRows}
-          onChange={(e) => setDetailRows(e.target.value)}
-          placeholder="Sales[order_id], Sales[amount], Customer[name]"
-        />
-      </Field>
-
-      <Field
-        label="Formula"
-        hint="Leave empty for a BLANK() placeholder. Reference other measures as [Name], columns as Table[column]; add notes with /* … */ or // comments. Use GVAR for a query-scoped value — e.g. GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)."
-      >
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
-          <button style={styles.smallBtn} onClick={toggleDocs}>
-            {showDocs ? "Hide function reference" : "\u{1F4D6} Function reference"}
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-          <MeasureTreePanel overview={overview} onInsert={insertRef} />
+        {renderBlade("left")}
+        {!layout.leftCollapsed && (
+          <ResizeHandle
+            side="left"
+            width={clamp(layout.leftWidth, LEFT_MIN, LEFT_MAX)}
+            onWidthChange={(w) => setBladeWidth("left", w)}
+          />
+        )}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#444" }}>Formula</span>
+            <span
+              style={{
+                ...styles.hint,
+                flex: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title="Leave empty for a BLANK() placeholder. Reference other measures as [Name], columns as Table[column]; add notes with /* … */ or // comments. Use GVAR for a query-scoped value — e.g. GVAR grand = SUM(Sales[amount]) RETURN DIVIDE(SUM(Sales[amount]), grand)."
+            >
+              Reference measures as [Name], columns as Table[column]. Drag from the tree to insert.
+            </span>
+          </div>
           <div
-            style={{ flex: 1, minWidth: 0, border: "1px solid #ccc", borderRadius: 3 }}
+            style={{
+              flex: 1,
+              minHeight: 120,
+              border: "1px solid #ccc",
+              borderRadius: 3,
+              overflow: "hidden",
+            }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={handleEditorDrop}
           >
             <Editor
-              height="320px"
+              height="100%"
               language={MEASURE_LANGUAGE_ID}
               value={formula}
               onChange={(v) => {
@@ -514,14 +851,77 @@ export function MeasureEditorModal({
                 fontSize: 13,
                 wordWrap: "on",
                 scrollBeyondLastLine: false,
+                automaticLayout: true,
               }}
             />
           </div>
-          {showDocs && (
-            <FunctionDocsPanel docs={docs} loading={docsLoading} onClose={() => setShowDocs(false)} />
-          )}
         </div>
-      </Field>
+        {!layout.rightCollapsed && (
+          <ResizeHandle
+            side="right"
+            width={clamp(layout.rightWidth, RIGHT_MIN, RIGHT_MAX)}
+            onWidthChange={(w) => setBladeWidth("right", w)}
+          />
+        )}
+        {renderBlade("right")}
+      </div>
+
+      {/* Secondary attributes — hidden by default, expandable on click. */}
+      <div style={{ border: "1px solid #e5e5e5", borderRadius: 4, marginBottom: 8 }}>
+        <button
+          onClick={() => setAdvancedOpen((o) => !o)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            width: "100%",
+            padding: "8px 10px",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            color: "#444",
+            textAlign: "left",
+          }}
+        >
+          <span style={{ color: "#888", width: 10 }}>{advancedOpen ? "▾" : "▸"}</span>
+          More options
+          {!advancedOpen && (
+            <span style={{ ...styles.hint, fontWeight: 400 }}>
+              Folder, Format, Dynamic format, Detail rows
+            </span>
+          )}
+        </button>
+        {advancedOpen && (
+          <div style={{ padding: "4px 12px 8px", borderTop: "1px solid #f0f0f0" }}>
+            <FolderField value={group} onChange={setGroup} groups={existingGroups} />
+            <FormatField value={formatString} onChange={setFormatString} />
+            <Field
+              label="Dynamic format (optional)"
+              hint='An expression evaluated once per query under the active filters, returning the format string — e.g. IF([SelectedCurrency] = "EUR", "#,##0.00 €", "$#,##0.00"). Overrides the static format when it yields a value.'
+            >
+              <input
+                style={styles.input}
+                value={formatStringExpression}
+                onChange={(e) => setFormatStringExpression(e.target.value)}
+                placeholder='IF(SUM(fact[amount]) > 1000000, "#,##0,,\"M\"", "#,##0")'
+              />
+            </Field>
+            <Field
+              label="Detail rows (optional)"
+              hint="Drill-through projection: comma-separated Table[column] references returned when a user drills a cell of this measure. Fact-table columns become the detail columns; other tables' columns are looked up beside each row. Leave empty for the default projection."
+            >
+              <input
+                style={styles.input}
+                value={detailRows}
+                onChange={(e) => setDetailRows(e.target.value)}
+                placeholder="Sales[order_id], Sales[amount], Customer[name]"
+              />
+            </Field>
+          </div>
+        )}
+      </div>
 
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
       {status && <div style={{ color: "green", marginBottom: 8, fontSize: 12 }}>{status}</div>}
@@ -530,8 +930,9 @@ export function MeasureEditorModal({
 }
 
 /** Explorable tree of the model's tables/columns/measures. Click a leaf to
- *  insert its reference at the cursor, or drag it onto the editor. */
-function MeasureTreePanel({
+ *  insert its reference at the cursor, or drag it onto the editor. Frameless:
+ *  it fills the "Tables & columns" blade, which supplies the title bar. */
+function MeasureTreeContent({
   overview,
   onInsert,
 }: {
@@ -550,11 +951,12 @@ function MeasureTreePanel({
     e.dataTransfer.setData("text/plain", text);
     e.dataTransfer.effectAllowed = "copy";
   };
-  const headerStyle: React.CSSProperties = {
+  const subHeaderStyle: React.CSSProperties = {
     padding: "4px 8px",
     fontWeight: 600,
     color: "#555",
     borderBottom: "1px solid #eee",
+    borderTop: "1px solid #eee",
     position: "sticky",
     top: 0,
     background: "#f2f2f2",
@@ -571,16 +973,13 @@ function MeasureTreePanel({
   return (
     <div
       style={{
-        width: 240,
-        flexShrink: 0,
-        border: "1px solid #ddd",
-        borderRadius: 3,
+        flex: 1,
+        minHeight: 0,
         overflowY: "auto",
         fontSize: 12,
         background: "#fafafa",
       }}
     >
-      <div style={headerStyle}>Tables &amp; columns</div>
       {overview.tables.length === 0 && (
         <div style={{ padding: "6px 8px", color: "#999" }}>No tables yet.</div>
       )}
@@ -628,7 +1027,7 @@ function MeasureTreePanel({
       })}
       {overview.measures.length > 0 && (
         <>
-          <div style={{ ...headerStyle, borderTop: "1px solid #eee" }}>Measures</div>
+          <div style={subHeaderStyle}>Measures</div>
           {overview.measures.map((m) => (
             <div
               key={m.name}
