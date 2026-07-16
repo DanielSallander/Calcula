@@ -2229,6 +2229,9 @@ impl DataModelBuilder {
             model_version: None,
             model_author: None,
             model_description: None,
+            // Extension data is set post-build (with_extension_data); a
+            // freshly built model carries none.
+            extension_data: std::collections::BTreeMap::new(),
         };
 
         // 10. Validate measure references are acyclic and target existing measures.

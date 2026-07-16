@@ -214,6 +214,8 @@ mod test_fixtures;
 #[cfg(test)]
 mod writeback_tests;
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::compute::measure::{Measure, MeasureGroup};
@@ -432,8 +434,17 @@ use crate::model::writeback_column::WritebackColumn;
 ///   generated column as hand-authored — so the [`ModelFormatTooNew`] gate
 ///   refuses v21 files on a pre-v21 engine.
 ///
+/// - `22` — open model metadata: the model gained
+///   [`extension_data`](DataModel::extension_data), a namespaced
+///   (`vendor.feature`) map of opaque JSON values that host applications and
+///   their extensions attach to the model (annotations, tool state, script
+///   connector bindings). The engine never interprets entries; they travel
+///   wherever the model travels. A pre-v22 engine would silently drop the
+///   map on resave — destroying third-party data — so the
+///   [`ModelFormatTooNew`] gate refuses v22 files on a pre-v22 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 21;
+pub const MODEL_FORMAT_VERSION: u32 = 22;
 
 /// A data model consisting of tables and relationships between them.
 ///
@@ -543,6 +554,15 @@ pub struct DataModel {
     /// serialization when empty (back-compat with pre-v21 model files).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     writeback_columns: Vec<WritebackColumn>,
+    /// Open, namespaced metadata for host applications and their extensions
+    /// (`vendor.feature` keys, opaque JSON values). The engine never
+    /// interprets entries; they travel wherever the model travels (host
+    /// persistence, packages). A `BTreeMap` so serialization is
+    /// deterministic — model bytes feed package checksums and signatures.
+    /// Empty by default and skipped on serialization when empty (back-compat
+    /// with pre-v22 model files).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    extension_data: BTreeMap<String, serde_json::Value>,
 }
 
 impl DataModel {
@@ -1092,6 +1112,26 @@ impl DataModel {
     pub fn with_cultures(&self, cultures: Vec<Culture>) -> DataModel {
         let mut model = self.clone();
         model.cultures = cultures;
+        model
+    }
+
+    /// Returns the open extension-data map (namespaced `vendor.feature` keys,
+    /// opaque JSON values). The engine never interprets entries.
+    pub fn extension_data(&self) -> &BTreeMap<String, serde_json::Value> {
+        &self.extension_data
+    }
+
+    /// Returns a copy of this model with the extension-data map REPLACED.
+    ///
+    /// Entries are opaque to the engine, so no re-`validate()` is needed on
+    /// their account — but callers following the copy-on-edit convention may
+    /// validate anyway.
+    pub fn with_extension_data(
+        &self,
+        extension_data: BTreeMap<String, serde_json::Value>,
+    ) -> DataModel {
+        let mut model = self.clone();
+        model.extension_data = extension_data;
         model
     }
 
@@ -1795,6 +1835,49 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("between 1 and 12"), "got: {err}");
+    }
+
+    #[test]
+    fn extension_data_builds_serializes_and_round_trips() {
+        // A freshly built model carries no extension data — and the empty map
+        // is skipped on serialization (no field bloat, pre-v22 byte parity).
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .build()
+            .unwrap();
+        assert!(model.extension_data().is_empty());
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("extension_data"), "empty map is skipped");
+
+        // Entries are opaque JSON, replaced copy-on-edit, and survive a
+        // round-trip; the original model is untouched.
+        let mut data = std::collections::BTreeMap::new();
+        data.insert(
+            "acme.lint".to_string(),
+            serde_json::json!({ "suppress": ["M-042"], "level": 2 }),
+        );
+        let tagged = model.with_extension_data(data);
+        assert!(model.extension_data().is_empty(), "original untouched");
+        assert_eq!(tagged.extension_data().len(), 1);
+
+        let json = serde_json::to_string(&tagged).unwrap();
+        let deserialized: DataModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.extension_data().get("acme.lint"),
+            Some(&serde_json::json!({ "suppress": ["M-042"], "level": 2 }))
+        );
+        deserialized.validate().unwrap();
+
+        // BTreeMap keys serialize in a deterministic order (model bytes feed
+        // package checksums/signatures).
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("z.last".to_string(), serde_json::json!(1));
+        data.insert("a.first".to_string(), serde_json::json!(2));
+        let two = model.with_extension_data(data);
+        let json = serde_json::to_string(&two).unwrap();
+        let a = json.find("a.first").unwrap();
+        let z = json.find("z.last").unwrap();
+        assert!(a < z, "keys serialize in sorted order");
     }
 
     #[test]

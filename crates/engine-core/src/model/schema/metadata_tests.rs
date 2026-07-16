@@ -55,10 +55,12 @@ fn model_format_version_is_current() {
     // second DAX-gap batch (THISROW anchor rows, DATESBETWEEN, Week
     // granularity/WTD, fiscal_year_end_month, cultures/translations);
     // v21 added writeback columns (model writeback_columns, Table
-    // is_writeback_store, CalculatedColumn generated_by).
+    // is_writeback_store, CalculatedColumn generated_by);
+    // v22 added open model metadata (model extension_data — namespaced
+    // opaque JSON for host applications and their extensions).
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 21);
+    assert_eq!(MODEL_FORMAT_VERSION, 22);
 }
 
 #[test]
