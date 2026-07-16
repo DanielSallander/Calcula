@@ -249,6 +249,67 @@ export const vCubeMembers: Validator = ([connection, level]) => {
   return true;
 };
 
+/** cap.biModelInfo args: [connectionId]. */
+export const vBiModelInfo: Validator = ([connectionId]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  return true;
+};
+
+/** The model-object kinds a script may mutate via bi.model. This list is UX
+ *  (clear early errors); the AUTHORITATIVE kind gate is Rust-side in
+ *  script_bi_model — RLS roles, sources/connections, storage-mode and
+ *  refresh knobs are not dispatchable there regardless of what reaches it. */
+export const BI_MODEL_SCRIPTABLE_KINDS: ReadonlySet<string> = new Set([
+  "measure", "calcColumn", "relationship", "hierarchy", "kpi", "calcGroup",
+  "perspective", "culture", "scriptFunction", "calculatedTable",
+  "tableVariable", "context", "contextColumn", "metadata", "dateTable",
+  "extensionData",
+]);
+
+/** cap.biModelUpsert / cap.biModelDelete args: [connectionId, kind, payload]. */
+export const vBiModelMutation: Validator = ([connectionId, kind, payload]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  if (!isBoundedString(kind, MAX_KEY) || !BI_MODEL_SCRIPTABLE_KINDS.has(kind as string)) {
+    return `kind must be one of: ${[...BI_MODEL_SCRIPTABLE_KINDS].join(", ")}`;
+  }
+  if (payload !== undefined && (typeof payload !== "object" || payload === null || Array.isArray(payload))) {
+    return "payload must be an object";
+  }
+  return true;
+};
+
+/** cap.connectorRegister args: [connectionId, def]. Deep validation happens in
+ *  the trusted connector host + the Rust gate; this is the cheap shape gate. */
+export const vConnectorRegister: Validator = ([connectionId, def]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  if (typeof def !== "object" || def === null) return "def must be an object";
+  const d = def as { sourceId?: unknown; tables?: unknown };
+  if (!isBoundedString(d.sourceId, MAX_KEY) || !(d.sourceId as string).startsWith("script:")) {
+    return "def.sourceId must be a string starting with 'script:'";
+  }
+  if (!Array.isArray(d.tables) || d.tables.length === 0 || d.tables.length > 64) {
+    return "def.tables must be a non-empty array (max 64)";
+  }
+  return true;
+};
+
+/** cap.connectorRemove args: [connectionId, sourceId]. */
+export const vConnectorRemove: Validator = ([connectionId, sourceId]) => {
+  if (!isBoundedString(connectionId, MAX_KEY) || (connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
+  }
+  if (!isBoundedString(sourceId, MAX_KEY) || !(sourceId as string).startsWith("script:")) {
+    return "sourceId must be a string starting with 'script:'";
+  }
+  return true;
+};
+
 export const vUdf: Validator = ([name, args]) => {
   if (!isBoundedString(name, MAX_KEY) || (name as string).length === 0) {
     return "udf name must be a non-empty string";

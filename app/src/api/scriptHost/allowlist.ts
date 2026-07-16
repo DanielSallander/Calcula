@@ -8,7 +8,8 @@
 import {
   vAny, vNotify, vExpose, vCall, vHook, vGetState, vSetState, vDecl, vNone,
   vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vBiQuery, vBiSql,
-  vCubeValue, vCubeKpi, vCubeMembers,
+  vCubeValue, vCubeKpi, vCubeMembers, vBiModelInfo, vBiModelMutation,
+  vConnectorRegister, vConnectorRemove,
   vKey, vKV, vUdf, type Validator,
 } from "./validators";
 import { AppEvents } from "../events";
@@ -87,6 +88,33 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.cubeMembers":       { tier: "restricted", capability: "bi.query", class: "net",
                              validate: vCubeMembers, limits: { maxRows: 100_000 },
                              desc: "List the distinct members of a BI model level (column)" },
+  // ---- bi.model (model-extensibility Phase 2): governed model MUTATION.
+  //      The desc strings ARE the consent text. The Rust gateway
+  //      (script_bi_model) re-checks the grant, the kind set, the rate limit,
+  //      and the read-only-subscribed rule authoritatively; every mutation
+  //      lands on the user's model undo stack. ----
+  "cap.biModelInfo":       { tier: "restricted", capability: "bi.model", class: "read",
+                             validate: vBiModelInfo,
+                             desc: "Read this workbook's BI model definitions (tables, measures, relationships — never security roles or connection targets)" },
+  "cap.biModelUpsert":     { tier: "restricted", capability: "bi.model", class: "mutate",
+                             validate: vBiModelMutation, limits: { perMinute: 30 },
+                             desc: "Create or update BI model definitions (measures, calc columns, relationships, hierarchies, KPIs, ...) — undoable; never security roles, connections or credentials" },
+  "cap.biModelDelete":     { tier: "restricted", capability: "bi.model", class: "mutate",
+                             validate: vBiModelMutation, limits: { perMinute: 30 },
+                             desc: "Delete BI model definitions (measures, calc columns, relationships, hierarchies, KPIs, ...) — undoable; never security roles, connections or credentials" },
+  // ---- bi.connector (model-extensibility Phase 3): script-fed data sources.
+  //      Register/remove go through here (consent names the reach: "feeds
+  //      external data into your BI model"); the FEED cycle is host-driven
+  //      (the trusted connector host calls the script's exposed fetchTable and
+  //      hands rows to the Rust bi_script_source gate, which re-checks the
+  //      grant + caps volume). Secrets are slot-named, injected server-side
+  //      inside the net-fetch gate — never readable by the script. ----
+  "cap.connectorRegister": { tier: "restricted", capability: "bi.connector", class: "mutate",
+                             validate: vConnectorRegister,
+                             desc: "Register itself as a data connector feeding external data into this workbook's BI model (undoable; scheduled refresh only after consent)" },
+  "cap.connectorRemove":   { tier: "restricted", capability: "bi.connector", class: "mutate",
+                             validate: vConnectorRemove,
+                             desc: "Remove its own data connector (and the model tables it feeds)" },
   "cap.storageGet":        { tier: "restricted", capability: "storage", class: "read",
                              validate: vKey, desc: "Read script-private data stored in the workbook" },
   "cap.storageSet":        { tier: "restricted", capability: "storage", class: "mutate",
@@ -132,4 +160,35 @@ export const SCRIPT_SUBSCRIBABLE_APP_EVENTS: ReadonlySet<string> = new Set([
   AppEvents.COLUMNS_DELETED,
   AppEvents.ROW_RESIZED,
   AppEvents.COLUMN_RESIZED,
+  AppEvents.BI_MODEL_CHANGED,
+  AppEvents.BI_REFRESH_COMPLETED,
 ]);
+
+/**
+ * Thin an app-event payload before it crosses into a SANDBOXED subscriber
+ * (worker realm). The BI model events' full payloads carry object names —
+ * model metadata that otherwise requires the `bi.query` capability to
+ * enumerate — so sandboxed scripts get only what lets them know to re-read
+ * through their own sanctioned (capability-gated) path. Trusted main-thread
+ * subscribers keep the full payload. Every other event passes through
+ * unchanged.
+ */
+export function thinAppEventForScripts(eventName: string, payload: unknown): unknown {
+  if (eventName === AppEvents.BI_MODEL_CHANGED) {
+    const p = (payload ?? {}) as { connectionId?: string; domain?: string; revision?: number };
+    return { connectionId: p.connectionId, domain: p.domain, revision: p.revision };
+  }
+  if (eventName === AppEvents.BI_REFRESH_COMPLETED) {
+    const p = (payload ?? {}) as {
+      connectionId?: string;
+      durationMs?: number;
+      tables?: Array<{ ok?: boolean }>;
+    };
+    return {
+      connectionId: p.connectionId,
+      durationMs: p.durationMs,
+      ok: (p.tables ?? []).every((t) => t?.ok !== false),
+    };
+  }
+  return payload;
+}

@@ -23,7 +23,7 @@ import {
 import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
-import { onAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
+import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
 
 import {
   registerExtensionRegistryService,
@@ -441,6 +441,21 @@ export function bootstrapShell(): void {
   }).catch(() => {
     // No Tauri runtime (e.g. a non-webview/test context) — the bridge is a
     // no-op there; in-app writes still refresh through their return values.
+  });
+
+  // Model-extensibility Phase 1: bridge the Rust-emitted BI model lifecycle
+  // events onto the @api event bus. The backend is the single emitter (its
+  // model-install choke points fire exactly once per edit); this bridge is the
+  // single re-emitter, so extension subscribers see each event once.
+  void listenTauriEvent("bi:model-changed", (payload) => {
+    emitAppEvent(AppEvents.BI_MODEL_CHANGED, payload);
+  }).catch(() => {
+    // No Tauri runtime (test context) — no BI backend, nothing to bridge.
+  });
+  void listenTauriEvent("bi:refresh-completed", (payload) => {
+    emitAppEvent(AppEvents.BI_REFRESH_COMPLETED, payload);
+  }).catch(() => {
+    // No Tauri runtime (test context) — no BI backend, nothing to bridge.
   });
 
   // Tier-7 core-purity: Core no longer dispatches feature-named refresh events on

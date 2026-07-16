@@ -137,6 +137,8 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   storage: "Store script-private data in this workbook",
   "ui.html": "Render sandboxed HTML inside its object",
   "formula.udf": "Evaluate its functions in worksheet formulas",
+  "bi.model": "Modify this workbook's BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
+  "bi.connector": "Feed external data into this workbook's BI model as a data connector",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */

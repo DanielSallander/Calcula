@@ -52,6 +52,27 @@ pub struct HttpFetchRequest {
     pub method: Option<String>,
     pub headers: Option<HashMap<String, String>>,
     pub body: Option<String>,
+    /// Server-side secret-header injection (model-extensibility Phase 3):
+    /// the script names a SLOT of a connector it OWNS; the gate resolves the
+    /// stored secret and attaches the header. The secret never enters the JS
+    /// realm — and the normal credential-header strip still applies to
+    /// caller-supplied headers.
+    pub secret_header: Option<SecretHeaderSpec>,
+}
+
+/// A named connector-secret slot to inject as a request header.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretHeaderSpec {
+    /// The script connector's source id (e.g. "script:crm").
+    pub source_id: String,
+    /// The declared slot name (e.g. "apiKey").
+    pub slot: String,
+    /// Header to set (e.g. "Authorization", "X-Api-Key").
+    pub header: String,
+    /// Value template — "{}" is replaced by the secret (e.g. "Bearer {}");
+    /// omitted = the raw secret.
+    pub format: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -111,8 +132,15 @@ pub fn grant_script_bi(
     window: Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    if capability != "bi.query" && capability != "bi.sql" {
-        return Err(format!("InvalidCapability: {} (expected bi.query or bi.sql)", capability));
+    if capability != "bi.query"
+        && capability != "bi.sql"
+        && capability != "bi.model"
+        && capability != "bi.connector"
+    {
+        return Err(format!(
+            "InvalidCapability: {} (expected bi.query, bi.sql, bi.model or bi.connector)",
+            capability
+        ));
     }
     cap_store.grant_bi(&script_id, &capability);
     log_info!(
@@ -221,6 +249,7 @@ fn is_credential_header(name: &str) -> bool {
 pub async fn script_http_fetch(
     cap_store: State<'_, CapabilityStore>,
     app_state: State<'_, AppState>,
+    bi_state: State<'_, crate::bi::BiState>,
     request: HttpFetchRequest,
     window: Window,
 ) -> Result<HttpFetchResponse, String> {
@@ -334,6 +363,55 @@ pub async fn script_http_fetch(
             }
             builder = builder.header(name, value);
         }
+    }
+
+    // (g2) Server-side secret-header injection (model-extensibility Phase 3).
+    // Requirements, all authoritative here: the caller holds the bi.connector
+    // grant; the named connector is INSTALLED and OWNED by this script (the
+    // binding in the model's extension_data names its owner); a secret is
+    // stored for the slot. The secret is attached to the outbound request
+    // only — it is never returned to the caller in any error or response.
+    if let Some(spec) = &request.secret_header {
+        if !cap_store.is_bi_granted(&script_id, "bi.connector") {
+            log_warn!(
+                "SECURITY",
+                "script_http_fetch DENIED (secretHeader without bi.connector): script={} slot={}",
+                script_id,
+                spec.slot
+            );
+            record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader without bi.connector"));
+            return Err("PermissionDenied: secretHeader requires the bi.connector capability".to_string());
+        }
+        match crate::bi::script_source::find_binding_owner(&bi_state, &spec.source_id) {
+            Some(owner) if owner == script_id => {}
+            _ => {
+                log_warn!(
+                    "SECURITY",
+                    "script_http_fetch DENIED (secretHeader for unowned connector): script={} source={}",
+                    script_id,
+                    spec.source_id
+                );
+                record_capability_call(&app_state.audit_log, "net.fetch", &script_id, false, Some(&origin), Some("secretHeader for unowned connector"));
+                return Err(format!(
+                    "PermissionDenied: connector '{}' is not installed or not owned by this script",
+                    spec.source_id
+                ));
+            }
+        }
+        let Some(secret) =
+            crate::bi::script_source::resolve_connector_secret(&spec.source_id, &spec.slot)
+        else {
+            return Err(format!(
+                "HostError: no secret stored for slot '{}' of '{}' — set it via Connector Secrets",
+                spec.slot, spec.source_id
+            ));
+        };
+        let value = match &spec.format {
+            Some(f) if f.contains("{}") => f.replacen("{}", &secret, 1),
+            Some(f) => format!("{}{}", f, secret),
+            None => secret,
+        };
+        builder = builder.header(&spec.header, value);
     }
 
     // (h) Attach body if present and send.

@@ -22,11 +22,12 @@ import {
   type ScriptHandle,
 } from "./broker";
 import { CAPABILITY_ID_SET, type CapabilityId } from "./capabilityIds";
-import { ALLOWLIST } from "./allowlist";
+import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
 import {
   fetchOriginOf,
   grantBiCapability,
   grantNetOrigin,
+  RUST_MIRRORED_BI_CAPS,
   hasFetchOrigin,
   recordCapabilityGrant,
   requestCapabilityGrant,
@@ -337,9 +338,16 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
   }
   if (reg.kind === "event") {
     // Forward a host app-event to the worker's subscribed handler. The event
-    // name is namespaced the same way scripts' subscriptions are.
-    const unsub = onAppEvent(scriptSubscribeEventName(reg.eventName) as never, (payload: unknown) => {
-      mw.worker.postMessage({ t: "appEvent", handlerId: reg.handlerId, payload } as HX2W);
+    // name is namespaced the same way scripts' subscriptions are; payloads
+    // crossing into the sandbox are THINNED for events whose full payload
+    // carries capability-gated metadata (BI model events).
+    const eventName = scriptSubscribeEventName(reg.eventName);
+    const unsub = onAppEvent(eventName as never, (payload: unknown) => {
+      mw.worker.postMessage({
+        t: "appEvent",
+        handlerId: reg.handlerId,
+        payload: thinAppEventForScripts(eventName, payload),
+      } as HX2W);
     });
     mw.regCleanups.set(reg.regId, unsub);
     return;
@@ -448,9 +456,9 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
   });
   if (decision !== "deny") {
     recordCapabilityGrant(handle.scriptId, cap);
-    // Mirror BI grants into the authoritative Rust store (bi_query/script_bi_sql
-    // re-check it). net.fetch is mirrored above per-origin via grantNetOrigin.
-    if (cap === "bi.query" || cap === "bi.sql") {
+    // Mirror BI-family grants into the authoritative Rust store (the Rust
+    // gates re-check it). net.fetch is mirrored above per-origin.
+    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
       await grantBiCapability(handle.scriptId, cap);
     }
   }
@@ -526,6 +534,32 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       const [connectionId, sql] = args as [string, string];
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_bi_sql", { connectionId, sql, scriptId });
+    }
+    case "cap.biModelInfo": {
+      // Sanitized model read (never security roles / connection targets).
+      const [connectionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId,
+        action: "info",
+        kind: null,
+        payload: null,
+      });
+    }
+    case "cap.biModelUpsert":
+    case "cap.biModelDelete": {
+      // Governed model mutation via the authoritative Rust gateway (grant +
+      // kind set + rate limit re-checked there; undoable; audited).
+      const [connectionId, kind, payload] = args as [string, string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId,
+        action: method === "cap.biModelUpsert" ? "upsert" : "delete",
+        kind,
+        payload: payload ?? null,
+      });
     }
     default:
       throw new BrokerError("UnknownMethod", `No extension host implementation for ${method}`);

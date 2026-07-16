@@ -24,6 +24,7 @@ import {
 } from "./manifest";
 import { getRegionAtCell, getConnections, connect, updateConnection } from "../_shared/lib/bi-api";
 import { ModelDialog } from "./components/ModelDialog";
+import { registerModelOverlayDistribution } from "./lib/modelOverlayDistribution";
 
 const MODEL_DIALOG_ID = "bi:modelDialog";
 
@@ -107,6 +108,10 @@ function activate(context: ExtensionContext): void {
       },
     ],
   });
+
+  // 7. Model overlays (model-extensibility Phase 4): carry workbook-layer
+  //    calculated measures on subscribed datasets inside .calp packages.
+  cleanupFunctions.push(registerModelOverlayDistribution());
 
   isActivated = true;
   console.log("[BI Extension] Activated successfully.");

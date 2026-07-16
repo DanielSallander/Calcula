@@ -188,6 +188,10 @@ pub struct ConnectionInfo {
     pub is_connected: bool,
     pub table_count: usize,
     pub measure_count: usize,
+    /// For connections materialized from a pulled .calp package: the stable
+    /// package data-source id. The model-overlay distribution channel keys
+    /// its targets on this. None for locally created connections.
+    pub package_data_source_id: Option<String>,
 }
 
 impl Connection {
@@ -221,6 +225,7 @@ impl Connection {
             is_connected: self.is_connected,
             table_count,
             measure_count,
+            package_data_source_id: self.package_data_source_id.clone(),
         }
     }
 }

@@ -127,11 +127,22 @@ export async function syncNetOriginsToBackend(scriptId: string): Promise<void> {
   }
 }
 
+/** The BI-family capabilities whose authoritative gate lives in the Rust
+ *  CapabilityStore (bi_query / script_bi_sql / script_bi_model / the
+ *  connector host re-check it per call). Grants for these are mirrored to
+ *  Rust on grant, on mount, and on reconcile. */
+export const RUST_MIRRORED_BI_CAPS: ReadonlySet<CapabilityId> = new Set([
+  "bi.query",
+  "bi.sql",
+  "bi.model",
+  "bi.connector",
+] as CapabilityId[]);
+
 /** Mirror one granted BI capability to the Rust store (called immediately on
- *  grant). bi_query / script_bi_sql re-check the store authoritatively. */
+ *  grant). The Rust gates re-check the store authoritatively per call. */
 export async function grantBiCapability(
   scriptId: string,
-  cap: "bi.query" | "bi.sql",
+  cap: CapabilityId,
 ): Promise<void> {
   await invokeBackend("grant_script_bi", { scriptId, capability: cap });
 }
@@ -141,7 +152,7 @@ export async function grantBiCapability(
 export async function syncBiGrantsToBackend(scriptId: string): Promise<void> {
   const { caps } = getScriptGrants(scriptId);
   for (const cap of caps) {
-    if (cap === "bi.query" || cap === "bi.sql") {
+    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
       try {
         await invokeBackend("grant_script_bi", { scriptId, capability: cap });
       } catch {
@@ -163,7 +174,7 @@ export async function reconcileBackendGrants(scriptId: string): Promise<void> {
       await invokeBackend("grant_script_net_origin", { scriptId, origin });
     }
     for (const cap of caps) {
-      if (cap === "bi.query" || cap === "bi.sql") {
+      if (RUST_MIRRORED_BI_CAPS.has(cap)) {
         await invokeBackend("grant_script_bi", { scriptId, capability: cap });
       }
     }
@@ -201,11 +212,11 @@ export async function revokeCapability(scriptId: string, cap: CapabilityId): Pro
   if (!s) return;
   s.caps.delete(cap);
   if (cap === "net.fetch") s.origins.clear();
-  // For any capability the Rust store tracks (net origins, bi.query, bi.sql),
+  // For any capability the Rust store tracks (net origins + the BI family),
   // reconcile the authoritative store to the now-reduced live grant set rather
   // than coarse-dropping the whole entry — so revoking one cap leaves the
   // script's other grants intact in Rust.
-  if (cap === "net.fetch" || cap === "bi.query" || cap === "bi.sql") {
+  if (cap === "net.fetch" || RUST_MIRRORED_BI_CAPS.has(cap)) {
     await reconcileBackendGrants(scriptId);
   }
 }
@@ -236,6 +247,8 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   storage: "store data on this device",
   "ui.html": "render custom HTML UI",
   "formula.udf": "evaluate worksheet formulas (user-defined functions)",
+  "bi.model": "modify your BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
+  "bi.connector": "feed external data into your BI model as a data connector",
 };
 
 /** One-line description of a capability id, for transparency UI (extension

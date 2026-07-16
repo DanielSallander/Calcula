@@ -10,6 +10,7 @@ pub mod model_editor;
 pub mod engine_registry;
 pub mod credential_cache;
 pub mod script_provider;
+pub mod script_source;
 pub mod writeback;
 pub mod writeback_source;
 

@@ -3312,6 +3312,9 @@ export interface ConnectionInfo {
   isConnected: boolean;
   tableCount: number;
   measureCount: number;
+  /** For connections materialized from a pulled .calp package: the stable
+   *  package data-source id (model-overlay targeting). Null for local ones. */
+  packageDataSourceId: string | null;
 }
 
 export interface CreateConnectionRequest {
@@ -4467,6 +4470,50 @@ export async function biModelRefreshTable(
   tableName: string,
 ): Promise<void> {
   return invoke<void>("bi_model_refresh_table", { connectionId, tableName });
+}
+
+// ---------------------------------------------------------------------------
+// Model extension data (design: docs/design/model-extensibility.md §5.1-5.2)
+// ---------------------------------------------------------------------------
+// Namespaced ("vendor.feature") opaque JSON entries on the BI model itself
+// (engine v22). They travel wherever the model travels (.cala save, .calp
+// dataset packages). Writes require an editable base model, ride the model
+// undo stack, and emit BI_MODEL_CHANGED (domain "extensionData"); reads work
+// on any model, including package-subscribed (read-only) ones.
+
+/** Read one extension-data entry (null when absent). */
+export async function biModelExtensionDataGet(
+  connectionId: string,
+  key: string,
+): Promise<unknown> {
+  return invoke<unknown>("bi_model_extension_data", { connectionId, op: "get", key, value: null });
+}
+
+/** List the model's extension-data keys. */
+export async function biModelExtensionDataList(connectionId: string): Promise<string[]> {
+  return invoke<string[]>("bi_model_extension_data", {
+    connectionId,
+    op: "list",
+    key: null,
+    value: null,
+  });
+}
+
+/** Set one extension-data entry (opaque JSON; per-key quota 256 KB). */
+export async function biModelExtensionDataSet(
+  connectionId: string,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  await invoke<unknown>("bi_model_extension_data", { connectionId, op: "set", key, value });
+}
+
+/** Delete one extension-data entry (errors when absent). */
+export async function biModelExtensionDataDelete(
+  connectionId: string,
+  key: string,
+): Promise<void> {
+  await invoke<unknown>("bi_model_extension_data", { connectionId, op: "delete", key, value: null });
 }
 
 export interface FunctionDefDto {

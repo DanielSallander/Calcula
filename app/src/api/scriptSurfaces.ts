@@ -50,7 +50,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     runtime: "worker-realm",
     containment:
       "Per-script hardened worker; no DOM/Tauri; every privileged call broker-mediated",
-    capabilities: ["net.fetch", "bi.query", "storage", "ui.html", "formula.udf"],
+    capabilities: ["net.fetch", "bi.query", "storage", "ui.html", "formula.udf", "bi.model", "bi.connector"],
     gate: "Tier broker + R19 ceiling + per-package consent",
     executesUserCode: true,
   },

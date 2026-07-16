@@ -130,6 +130,16 @@ export const AppEvents = {
   // Dimension events (row/column resize)
   ROW_RESIZED: "app:row-resized",
   COLUMN_RESIZED: "app:column-resized",
+
+  // BI model lifecycle events (design: docs/design/model-extensibility.md §5.3).
+  // Emitted by the Rust model-install choke points (Tauri wire names
+  // "bi:model-changed" / "bi:refresh-completed") and bridged onto this bus by
+  // the Shell under the app: prefix convention. Payloads are METADATA-ONLY
+  // (never expressions, row data, or role definitions); sandboxed script
+  // subscribers receive a THINNED payload (see scriptHost/allowlist.ts
+  // thinAppEventForScripts).
+  BI_MODEL_CHANGED: "app:bi-model-changed",
+  BI_REFRESH_COMPLETED: "app:bi-refresh-completed",
 } as const;
 
 /**
@@ -179,6 +189,33 @@ export interface CellValuesChangedPayload {
  */
 export interface CellsUpdatedPayload {
   changes: CellValueChange[];
+}
+
+/** The change domain reported by a BI_MODEL_CHANGED event. */
+export type BiModelChangeDomain =
+  | "measure" | "calcColumn" | "relationship" | "hierarchy" | "kpi"
+  | "calcGroup" | "scriptFunction" | "table" | "context" | "contextColumn"
+  | "variable" | "calculatedTable" | "perspective" | "culture" | "role"
+  | "writebackColumn" | "source" | "extensionData" | "metadata" | "bulk";
+
+/** Payload of AppEvents.BI_MODEL_CHANGED (metadata-only, never expressions). */
+export interface BiModelChangedPayload {
+  connectionId: string;
+  domain: BiModelChangeDomain;
+  /** Changed object's name when cheaply determinable (single add/edit/rename). */
+  objectName?: string;
+  source: "user" | "script" | "extension" | "undo" | "redo" | "package";
+  /** Set when the mutation came through the consent-gated script gateway. */
+  scriptId?: string;
+  /** Monotonic per-model revision — detect missed events, then re-read. */
+  revision: number;
+}
+
+/** Payload of AppEvents.BI_REFRESH_COMPLETED. */
+export interface BiRefreshCompletedPayload {
+  connectionId: string;
+  tables: Array<{ name: string; ok: boolean; error?: string }>;
+  durationMs: number;
 }
 
 /** Payload emitted with FILL_COMPLETED event. */

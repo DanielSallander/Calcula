@@ -32,6 +32,13 @@
  *  - formula.udf  : evaluate a registered user-defined function from a worksheet
  *                   formula (purely frontend/in-worker — NO Rust enforcement; the
  *                   JS impl runs in the owning script's realm through the broker)
+ *  - bi.model     : create/update/delete BI model DEFINITIONS (measures,
+ *                   relationships, hierarchies, ...) through the consent-gated
+ *                   script_bi_model gateway — undoable, audited, rate-limited;
+ *                   RLS roles + connections/credentials stay privileged
+ *  - bi.connector : register a script-fed data connector (feeds tables into
+ *                   the BI model via the host orchestrator; named distinctly
+ *                   from net.fetch so consent says what it means)
  */
 export const ALL_CAPABILITY_IDS = [
   "net.fetch",
@@ -40,6 +47,8 @@ export const ALL_CAPABILITY_IDS = [
   "storage",
   "ui.html",
   "formula.udf",
+  "bi.model",
+  "bi.connector",
 ] as const;
 
 export type CapabilityId = (typeof ALL_CAPABILITY_IDS)[number];

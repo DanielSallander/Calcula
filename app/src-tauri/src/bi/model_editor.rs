@@ -305,7 +305,7 @@ fn delete_measure_model(
 /// Fetch the EDITABLE base model + the connection's calculated-measure overlay.
 /// Package-subscribed models are read-only: they reconstruct from the package
 /// on every refresh, so local edits would silently vanish.
-fn editable_base(
+pub(super) fn editable_base(
     bi_state: &BiState,
     connection_id: ConnectionId,
 ) -> Result<(bi_engine::DataModel, Vec<super::types::CalculatedMeasure>), String> {
@@ -371,6 +371,250 @@ fn record_model_undo(model_key: &Option<ModelKey>, pre_edit: bi_engine::DataMode
     }
 }
 
+// ---------------------------------------------------------------------------
+// Model lifecycle events (design: docs/design/model-extensibility.md §5.3)
+// ---------------------------------------------------------------------------
+//
+// `bi:model-changed` / `bi:refresh-completed` are emitted app-wide from the
+// model-install choke points (`apply_model_edit`, undo/redo/import installs),
+// so emission is exactly-once per edit by construction. Payloads are
+// METADATA-ONLY — never expressions, row data, or role definitions — so the
+// event stream can never become an un-capability-checked read channel;
+// subscribers re-read through their own sanctioned read path.
+
+/// Per-model monotonically increasing revision, so subscribers can cheaply
+/// detect missed events and re-read. Process-local (resets on relaunch).
+fn next_model_revision(model_key: &Option<ModelKey>) -> u64 {
+    static REVS: OnceLock<Mutex<HashMap<Option<ModelKey>, u64>>> = OnceLock::new();
+    let revs = REVS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut revs = revs.lock().unwrap();
+    let r = revs.entry(model_key.clone()).or_insert(0);
+    *r += 1;
+    *r
+}
+
+tokio::task_local! {
+    /// Script attribution for broker-routed model mutations (the Phase-2
+    /// `script_bi_model` gateway wraps its dispatch in a scope carrying the
+    /// calling script's id). Outside a scope, mutations are user/extension
+    /// driven and read as `None`.
+    pub(crate) static SCRIPT_MUTATION_ATTRIBUTION: Option<String>;
+}
+
+/// The script id attributed to the current mutation, if the call came through
+/// the consent-gated script gateway.
+fn current_script_attribution() -> Option<String> {
+    SCRIPT_MUTATION_ATTRIBUTION
+        .try_with(|a| a.clone())
+        .unwrap_or(None)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelChangedPayload {
+    connection_id: ConnectionId,
+    domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_name: Option<String>,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_id: Option<String>,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RefreshCompletedTable {
+    pub name: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshCompletedPayload {
+    connection_id: ConnectionId,
+    tables: Vec<RefreshCompletedTable>,
+    duration_ms: u64,
+}
+
+/// Diff two base models into the single changed DOMAIN, with the changed
+/// object's name when it is cheaply determinable (single add/remove/rename/
+/// in-place edit). Deriving the domain from the models — instead of threading
+/// it through every command — keeps emission exactly-once at the choke points
+/// with no per-call-site bookkeeping to forget.
+fn changed_domain(
+    before: &bi_engine::DataModel,
+    after: &bi_engine::DataModel,
+) -> (String, Option<String>) {
+    fn list_diff<T: serde::Serialize>(
+        changes: &mut Vec<(&'static str, Option<String>)>,
+        domain: &'static str,
+        before: &[T],
+        after: &[T],
+        name_of: impl Fn(&T) -> String,
+    ) {
+        let bv = serde_json::to_value(before).unwrap_or(serde_json::Value::Null);
+        let av = serde_json::to_value(after).unwrap_or(serde_json::Value::Null);
+        if bv == av {
+            return;
+        }
+        let bn: HashSet<String> = before.iter().map(&name_of).collect();
+        let an: HashSet<String> = after.iter().map(&name_of).collect();
+        let mut sym: Vec<String> = bn.symmetric_difference(&an).cloned().collect();
+        let name = match sym.len() {
+            0 => {
+                // In-place edit: the single entry whose serialization differs.
+                let mut changed: Vec<String> = after
+                    .iter()
+                    .filter(|a| {
+                        let n = name_of(a);
+                        match before.iter().find(|b| name_of(b) == n) {
+                            Some(b) => {
+                                serde_json::to_value(a).ok() != serde_json::to_value(b).ok()
+                            }
+                            None => true,
+                        }
+                    })
+                    .map(&name_of)
+                    .collect();
+                if changed.len() == 1 { changed.pop() } else { None }
+            }
+            1 => sym.pop(),
+            2 => {
+                // Likely a rename: report the NEW name when exactly one is new.
+                let mut added: Vec<String> = an.difference(&bn).cloned().collect();
+                if added.len() == 1 { added.pop() } else { None }
+            }
+            _ => None,
+        };
+        changes.push((domain, name));
+    }
+
+    let mut c: Vec<(&'static str, Option<String>)> = Vec::new();
+    list_diff(&mut c, "measure", before.measures(), after.measures(), |m| m.name().to_string());
+    list_diff(&mut c, "calcColumn", before.calculated_columns(), after.calculated_columns(), |x| x.name().to_string());
+    list_diff(&mut c, "relationship", before.relationships(), after.relationships(), |r| r.name().to_string());
+    list_diff(&mut c, "hierarchy", before.hierarchies(), after.hierarchies(), |h| h.name().to_string());
+    list_diff(&mut c, "kpi", before.kpis(), after.kpis(), |k| k.name().to_string());
+    list_diff(&mut c, "calcGroup", before.calculation_groups(), after.calculation_groups(), |g| g.name().to_string());
+    list_diff(&mut c, "scriptFunction", before.script_functions(), after.script_functions(), |f| f.name().to_string());
+    list_diff(&mut c, "table", before.tables(), after.tables(), |t| t.name().to_string());
+    list_diff(&mut c, "context", before.contexts(), after.contexts(), |x| x.name().to_string());
+    list_diff(&mut c, "contextColumn", before.context_columns(), after.context_columns(), |x| x.name().to_string());
+    list_diff(&mut c, "variable", before.table_variables(), after.table_variables(), |v| v.name().to_string());
+    list_diff(&mut c, "calculatedTable", before.global_variables(), after.global_variables(), |v| v.name().to_string());
+    list_diff(&mut c, "perspective", before.perspectives(), after.perspectives(), |p| p.name().to_string());
+    list_diff(&mut c, "culture", before.cultures(), after.cultures(), |x| x.locale().to_string());
+    list_diff(&mut c, "role", before.security_roles(), after.security_roles(), |r| r.name().to_string());
+    list_diff(&mut c, "writebackColumn", before.writeback_columns(), after.writeback_columns(), |w| w.name().to_string());
+    list_diff(&mut c, "source", before.sources(), after.sources(), |s| s.id.clone());
+
+    if before.extension_data() != after.extension_data() {
+        let bk: HashSet<&String> = before.extension_data().keys().collect();
+        let ak: HashSet<&String> = after.extension_data().keys().collect();
+        let mut sym: Vec<String> = bk.symmetric_difference(&ak).map(|k| (*k).clone()).collect();
+        let name = if sym.len() == 1 {
+            sym.pop()
+        } else if sym.is_empty() {
+            let mut changed: Vec<String> = after
+                .extension_data()
+                .iter()
+                .filter(|(k, v)| before.extension_data().get(*k) != Some(v))
+                .map(|(k, _)| k.clone())
+                .collect();
+            if changed.len() == 1 { changed.pop() } else { None }
+        } else {
+            None
+        };
+        c.push(("extensionData", name));
+    }
+
+    match c.len() {
+        0 => {
+            // No entity list changed: a scalar/metadata edit (date table,
+            // fiscal year, default lookup resolution, descriptive metadata).
+            ("metadata".to_string(), None)
+        }
+        1 => (c[0].0.to_string(), c[0].1.clone()),
+        _ => {
+            // Prefer the AUTHORED domain when a single edit fans out into
+            // synthesized side effects (writeback column -> store tables +
+            // generated column; materialized calculated table -> derived
+            // table). Otherwise it is a genuine bulk change.
+            const PRIORITY: &[&str] = &["writebackColumn", "calculatedTable", "measure", "calcColumn"];
+            for p in PRIORITY {
+                if let Some(e) = c.iter().find(|e| e.0 == *p) {
+                    return (p.to_string(), e.1.clone());
+                }
+            }
+            ("bulk".to_string(), None)
+        }
+    }
+}
+
+/// Emit `bi:model-changed` app-wide for every connection sharing `model_key`.
+/// Fire-and-forget (event loss must never fail an edit); the frontend bridge
+/// re-emits on the `@api` event bus.
+fn emit_model_changed(
+    bi_state: &BiState,
+    model_key: &Option<ModelKey>,
+    before: &bi_engine::DataModel,
+    after: &bi_engine::DataModel,
+    source: &str,
+    script_id: Option<String>,
+) {
+    let Some(app) = super::writeback_source::app_handle() else {
+        return;
+    };
+    let (domain, object_name) = changed_domain(before, after);
+    let revision = next_model_revision(model_key);
+    let ids: Vec<ConnectionId> = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns
+            .iter()
+            .filter(|(_, c)| c.model_key == *model_key)
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    use tauri::Emitter;
+    for connection_id in ids {
+        let _ = app.emit(
+            "bi:model-changed",
+            ModelChangedPayload {
+                connection_id,
+                domain: domain.clone(),
+                object_name: object_name.clone(),
+                source: source.to_string(),
+                script_id: script_id.clone(),
+                revision,
+            },
+        );
+    }
+}
+
+/// Emit `bi:refresh-completed` (per-table outcomes + duration) app-wide.
+/// Fire-and-forget, metadata-only.
+pub(crate) fn emit_refresh_completed(
+    connection_id: &ConnectionId,
+    tables: Vec<RefreshCompletedTable>,
+    duration_ms: u64,
+) {
+    let Some(app) = super::writeback_source::app_handle() else {
+        return;
+    };
+    use tauri::Emitter;
+    let _ = app.emit(
+        "bi:refresh-completed",
+        RefreshCompletedPayload {
+            connection_id: connection_id.clone(),
+            tables,
+            duration_ms,
+        },
+    );
+}
+
 /// Install a base model on the connection's shared engine and mirror it onto
 /// every connection sharing that model. Shared by undo and redo (does NOT touch
 /// the undo stacks). Lock order engine -> connections, as elsewhere.
@@ -405,7 +649,7 @@ async fn install_base_model(
     Ok(())
 }
 
-async fn apply_model_edit<F>(
+pub(super) async fn apply_model_edit<F>(
     bi_state: &BiState,
     connection_id: ConnectionId,
     edit: F,
@@ -454,6 +698,11 @@ where
         }
     }
     drop(guard);
+    // Lifecycle event BEFORE the undo record consumes `base` (fire-and-forget;
+    // source is "script" when the Phase-2 gateway's attribution scope is set).
+    let script_id = current_script_attribution();
+    let source = if script_id.is_some() { "script" } else { "user" };
+    emit_model_changed(bi_state, &model_key, &base, &new_base, source, script_id);
     // Record the pre-edit state for undo (after a successful install).
     record_model_undo(&model_key, base);
     Ok(new_base)
@@ -3831,11 +4080,33 @@ pub async fn bi_model_refresh_table(
             .ok_or("No model loaded for this connection")?
     };
     let mut engine = engine_arc.lock().await;
-    engine
-        .refresh_table(&table_name)
-        .await
-        .map_err(|e| format!("{}", e))?;
-    Ok(())
+    let started = std::time::Instant::now();
+    let outcome = engine.refresh_table(&table_name).await;
+    drop(engine);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(()) => {
+            emit_refresh_completed(
+                &connection_id,
+                vec![RefreshCompletedTable { name: table_name, ok: true, error: None }],
+                duration_ms,
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{}", e);
+            emit_refresh_completed(
+                &connection_id,
+                vec![RefreshCompletedTable {
+                    name: table_name,
+                    ok: false,
+                    error: Some(msg.clone()),
+                }],
+                duration_ms,
+            );
+            Err(msg)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3895,17 +4166,18 @@ pub async fn bi_model_undo(
     };
     let prev = {
         let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
-        let stacks = store.entry(model_key).or_default();
+        let stacks = store.entry(model_key.clone()).or_default();
         let Some(prev) = stacks.undo.pop() else {
             return Err("Nothing to undo".to_string());
         };
-        stacks.redo.push(current_base);
+        stacks.redo.push(current_base.clone());
         if stacks.redo.len() > MAX_MODEL_UNDO {
             stacks.redo.remove(0);
         }
         prev
     };
     install_base_model(&bi_state, &connection_id, &prev).await?;
+    emit_model_changed(&bi_state, &model_key, &current_base, &prev, "undo", None);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
     Ok(build_overview(&prev, &bindings, true, None))
 }
@@ -3932,19 +4204,658 @@ pub async fn bi_model_redo(
     };
     let next = {
         let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
-        let stacks = store.entry(model_key).or_default();
+        let stacks = store.entry(model_key.clone()).or_default();
         let Some(next) = stacks.redo.pop() else {
             return Err("Nothing to redo".to_string());
         };
-        stacks.undo.push(current_base);
+        stacks.undo.push(current_base.clone());
         if stacks.undo.len() > MAX_MODEL_UNDO {
             stacks.undo.remove(0);
         }
         next
     };
     install_base_model(&bi_state, &connection_id, &next).await?;
+    emit_model_changed(&bi_state, &model_key, &current_base, &next, "redo", None);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
     Ok(build_overview(&next, &bindings, true, None))
+}
+
+// ---------------------------------------------------------------------------
+// Model extension data (design: docs/design/model-extensibility.md §5.1-5.2)
+// ---------------------------------------------------------------------------
+
+/// Per-key size quota for extension-data values (matches the script-storage
+/// quota: enough for tool state and annotations, hostile to data blobs).
+const MODEL_EXTENSION_DATA_MAX_VALUE_BYTES: usize = 262_144;
+
+/// Extension-data keys are namespaced `vendor.feature` — a non-empty vendor
+/// segment, a dot, a non-empty rest. Keeps third-party entries collision-free
+/// (the `calcula.` prefix is reserved for built-in features).
+fn validate_extension_data_key(key: &str) -> Result<(), String> {
+    if key.len() > 200 {
+        return Err("Extension-data key is too long (max 200 chars)".to_string());
+    }
+    let mut parts = key.splitn(2, '.');
+    let vendor = parts.next().unwrap_or("");
+    let feature = parts.next().unwrap_or("");
+    if vendor.trim().is_empty() || feature.trim().is_empty() || key.contains(char::is_whitespace) {
+        return Err(format!(
+            "Extension-data keys must be namespaced 'vendor.feature' (got '{}')",
+            key
+        ));
+    }
+    Ok(())
+}
+
+/// Read/write the model's open extension-data map (namespaced opaque JSON,
+/// engine v22). One multiplexed command (stack-headroom budget):
+/// `op: "get" | "list" | "set" | "delete"`. Reads work on any model
+/// (including package-subscribed ones); writes require an editable base
+/// model, ride the model undo stack, and emit `bi:model-changed`
+/// (domain `extensionData`) like every other model edit.
+#[tauri::command]
+pub async fn bi_model_extension_data(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    op: String,
+    key: Option<String>,
+    value: Option<serde_json::Value>,
+    window: tauri::Window,
+) -> Result<serde_json::Value, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+
+    match op.as_str() {
+        "get" | "list" => {
+            let base = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?
+            };
+            if op == "list" {
+                let keys: Vec<&String> = base.extension_data().keys().collect();
+                return serde_json::to_value(keys).map_err(|e| e.to_string());
+            }
+            let key = key.ok_or("'get' requires a key")?;
+            Ok(base
+                .extension_data()
+                .get(&key)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null))
+        }
+        "set" | "delete" => {
+            let _ = editable_base(&bi_state, connection_id.clone())?;
+            let key = key.ok_or_else(|| format!("'{}' requires a key", op))?;
+            validate_extension_data_key(&key)?;
+            let new_value = if op == "set" {
+                let v = value.ok_or("'set' requires a value")?;
+                let serialized = serde_json::to_vec(&v).map_err(|e| e.to_string())?;
+                if serialized.len() > MODEL_EXTENSION_DATA_MAX_VALUE_BYTES {
+                    return Err(format!(
+                        "Extension-data value for '{}' is {} bytes; the per-key quota is 256 KB",
+                        key,
+                        serialized.len()
+                    ));
+                }
+                Some(v)
+            } else {
+                None
+            };
+            let key_for_edit = key.clone();
+            apply_model_edit(&bi_state, connection_id.clone(), move |base, _calculated| {
+                let mut data = base.extension_data().clone();
+                match &new_value {
+                    Some(v) => {
+                        data.insert(key_for_edit.clone(), v.clone());
+                    }
+                    None => {
+                        if data.remove(&key_for_edit).is_none() {
+                            return Err(format!("No extension-data entry '{}'", key_for_edit));
+                        }
+                    }
+                }
+                // Entries are opaque to the engine — nothing to re-validate.
+                Ok(base.with_extension_data(data))
+            })
+            .await?;
+            *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+            crate::log_info!(
+                "BI",
+                "model editor: extension_data {} '{}' (conn {})",
+                op,
+                key,
+                connection_id
+            );
+            Ok(serde_json::Value::Null)
+        }
+        other => Err(format!(
+            "Unknown extension-data op '{}' (expected get|list|set|delete)",
+            other
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script gateway (design: docs/design/model-extensibility.md §6) — the ONE
+// broker-reachable door for consented model mutation. The bi_model_* commands
+// stay on the biData denylist; sandboxed scripts and distributed extensions
+// reach model definitions only through here, behind the `bi.model` capability
+// (frontend broker gate + the authoritative Rust re-check below), a Rust-side
+// allowed-KIND set (RLS roles, connections/credentials, storage-mode/refresh
+// knobs are NOT dispatchable), a per-script rate limit, the always-on audit
+// trail, and the same apply_model_edit funnel every mutation uses — so undo
+// and bi:model-changed (source:"script", via the task-local attribution)
+// ride along for free.
+// ---------------------------------------------------------------------------
+
+/// Authoritative per-script mutation rate limit for the model gateway
+/// (the allowlist row's `perMinute` is advisory UX). Own bucket — never
+/// shared with net.fetch's rate window.
+const BI_MODEL_MUTATIONS_PER_MINUTE: usize = 30;
+
+fn check_gateway_rate(script_id: &str) -> Result<(), String> {
+    static WINDOWS: OnceLock<Mutex<HashMap<String, Vec<std::time::Instant>>>> = OnceLock::new();
+    let windows = WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut windows = windows.lock().unwrap();
+    let now = std::time::Instant::now();
+    let window = windows.entry(script_id.to_string()).or_default();
+    window.retain(|t| now.duration_since(*t).as_secs() < 60);
+    if window.len() >= BI_MODEL_MUTATIONS_PER_MINUTE {
+        return Err(format!(
+            "RateLimited: bi.model allows {} model mutations per minute",
+            BI_MODEL_MUTATIONS_PER_MINUTE
+        ));
+    }
+    window.push(now);
+    Ok(())
+}
+
+/// Pull a typed field out of the gateway payload (absent -> serde default
+/// for Option<T>, a clear error for required fields).
+fn gateway_field<T: serde::de::DeserializeOwned>(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<T, String> {
+    serde_json::from_value(payload.get(key).cloned().unwrap_or(serde_json::Value::Null))
+        .map_err(|e| format!("payload field '{}': {}", key, e))
+}
+
+/// The sanitized model-info DTO for `action: "info"` — a WHITELIST projection
+/// of the full overview. Excluded on purpose: `securityRoles` (the "who may
+/// see" boundary — not even names), `sources` (connection targets), and each
+/// table's `sourceId`. Precedent: the full overview is window-guarded to
+/// MAIN_AND_MODEL_EDITOR precisely because it carries those fields.
+fn sanitized_model_info(overview: &ModelOverview) -> Result<serde_json::Value, String> {
+    let full = serde_json::to_value(overview).map_err(|e| e.to_string())?;
+    let full = full.as_object().ok_or("overview did not serialize to an object")?;
+    const WHITELIST: &[&str] = &[
+        "editable",
+        "readOnlyReason",
+        "tables",
+        "relationships",
+        "hierarchies",
+        "kpis",
+        "perspectives",
+        "cultures",
+        "calculationGroups",
+        "measures",
+        "contexts",
+        "contextColumns",
+        "tableVariables",
+        "globalVariables",
+        "scriptFunctions",
+        "dateTable",
+        "defaultLookupResolution",
+        "modelName",
+        "modelVersion",
+        "modelAuthor",
+        "modelDescription",
+        "writebackColumns",
+    ];
+    let mut out = serde_json::Map::new();
+    for key in WHITELIST {
+        if let Some(v) = full.get(*key) {
+            let mut v = v.clone();
+            if *key == "tables" {
+                if let Some(tables) = v.as_array_mut() {
+                    for t in tables {
+                        if let Some(t) = t.as_object_mut() {
+                            t.remove("sourceId");
+                        }
+                    }
+                }
+            }
+            out.insert((*key).to_string(), v);
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// Multiplexed, consent-gated model gateway for sandboxed scripts and
+/// distributed extensions: `action: "upsert" | "delete" | "info"` over an
+/// allowed-kind set. Mirrors the `script_bi_sql` precedent: the frontend
+/// broker gates on the `bi.model` capability; this command re-checks the
+/// grant authoritatively, enforces the kind set server-side, rejects
+/// package-subscribed models, dispatches into the SAME command logic the
+/// Model Editor uses, and records the always-on audit entry.
+#[tauri::command]
+pub async fn script_bi_model(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    cap_store: State<'_, crate::scripting::CapabilityStore>,
+    app_state: State<'_, crate::AppState>,
+    connection_id: ConnectionId,
+    script_id: String,
+    action: String,
+    kind: Option<String>,
+    payload: Option<serde_json::Value>,
+    window: tauri::Window,
+) -> Result<serde_json::Value, String> {
+    // Broker-routed calls run in the main window.
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // Authoritative capability re-check (A3): the renderer may be compromised,
+    // so the TS broker's gate is not sufficient.
+    if !cap_store.is_bi_granted(&script_id, "bi.model") {
+        crate::log_warn!(
+            "SECURITY",
+            "script_bi_model DENIED (bi.model not granted): script={}",
+            script_id
+        );
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            &script_id,
+            false,
+            None,
+            Some("bi.model not granted"),
+        );
+        return Err("PermissionDenied: bi.model not granted for this script".to_string());
+    }
+
+    // Read: the sanitized whitelist projection (never roles / connection targets).
+    if action == "info" {
+        let (base, bindings, editable, read_only_reason) = {
+            let conns = bi_state.connections.lock().unwrap();
+            let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+            let editable = conn.package_data_source_id.is_none();
+            (
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?,
+                conn.bindings.clone(),
+                editable,
+                if editable { None } else { Some("Package-subscribed model".to_string()) },
+            )
+        };
+        let overview = build_overview(&base, &bindings, editable, read_only_reason);
+        let info = sanitized_model_info(&overview)?;
+        crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            &script_id,
+            true,
+            Some(&format!("info — connection {}", connection_id)),
+            None,
+        );
+        return Ok(info);
+    }
+
+    // Mutations from here on.
+    if action != "upsert" && action != "delete" {
+        return Err(format!(
+            "Unknown action '{}' (expected upsert|delete|info)",
+            action
+        ));
+    }
+    let kind = kind.ok_or("Mutations require a 'kind'")?;
+    check_gateway_rate(&script_id)?;
+    // Clear read-only error before any dispatch (defense in depth: every
+    // dispatched command re-checks through editable_base / apply_model_edit).
+    let _ = editable_base(&bi_state, connection_id.clone())?;
+
+    let p = payload
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let sid = script_id.clone();
+    let audit_action = action.clone();
+    let audit_kind = kind.clone();
+    let conn = connection_id.clone();
+    let w = window.clone();
+
+    // Dispatch inside the attribution scope so apply_model_edit emits
+    // bi:model-changed with source:"script" + this script's id. The kind set
+    // below IS the security boundary: RLS roles, sources/connections,
+    // storage-mode and refresh knobs are not dispatchable here.
+    let result: Result<serde_json::Value, String> = SCRIPT_MUTATION_ATTRIBUTION
+        .scope(Some(script_id.clone()), async move {
+            let bs = bi_state;
+            let fs = file_state;
+            match (kind.as_str(), action.as_str()) {
+                ("measure", "upsert") => serde_json::to_value(
+                    bi_model_upsert_measure(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "formula")?,
+                        gateway_field(&p, "description")?,
+                        gateway_field(&p, "formatString")?,
+                        gateway_field(&p, "formatStringExpression")?,
+                        gateway_field(&p, "detailRows")?,
+                        gateway_field(&p, "group")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("measure", "delete") => serde_json::to_value(
+                    bi_model_delete_measure(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calcColumn", "upsert") => serde_json::to_value(
+                    bi_model_upsert_calc_column(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "table")?,
+                        gateway_field(&p, "formula")?,
+                        gateway_field(&p, "dataType")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calcColumn", "delete") => serde_json::to_value(
+                    bi_model_delete_calc_column(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("relationship", "upsert") => serde_json::to_value(
+                    bi_model_upsert_relationship(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "fromTable")?,
+                        gateway_field(&p, "toTable")?,
+                        gateway_field(&p, "conditions")?,
+                        gateway_field(&p, "cardinality")?,
+                        gateway_field::<Option<bool>>(&p, "active")?.unwrap_or(true),
+                        gateway_field(&p, "filterPropagation")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("relationship", "delete") => serde_json::to_value(
+                    bi_model_delete_relationship(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("hierarchy", "upsert") => serde_json::to_value(
+                    bi_model_upsert_hierarchy(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "table")?,
+                        gateway_field(&p, "levels")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("hierarchy", "delete") => serde_json::to_value(
+                    bi_model_delete_hierarchy(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("kpi", "upsert") => serde_json::to_value(
+                    bi_model_upsert_kpi(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "baseMeasure")?,
+                        gateway_field(&p, "targetMeasure")?,
+                        gateway_field(&p, "targetConstant")?,
+                        gateway_field::<Option<Vec<KpiBandDto>>>(&p, "statusBands")?
+                            .unwrap_or_default(),
+                        gateway_field(&p, "description")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("kpi", "delete") => serde_json::to_value(
+                    bi_model_delete_kpi(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calcGroup", "upsert") => serde_json::to_value(
+                    bi_model_upsert_calc_group(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "items")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calcGroup", "delete") => serde_json::to_value(
+                    bi_model_delete_calc_group(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("perspective", "upsert") => serde_json::to_value(
+                    bi_model_upsert_perspective(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field::<Option<Vec<String>>>(&p, "tables")?.unwrap_or_default(),
+                        gateway_field::<Option<Vec<String>>>(&p, "columns")?.unwrap_or_default(),
+                        gateway_field::<Option<Vec<String>>>(&p, "measures")?.unwrap_or_default(),
+                        gateway_field(&p, "description")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("perspective", "delete") => serde_json::to_value(
+                    bi_model_delete_perspective(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("culture", "upsert") => serde_json::to_value(
+                    bi_model_upsert_culture(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalLocale")?,
+                        gateway_field(&p, "locale")?,
+                        gateway_field::<Option<Vec<NameTranslationDto>>>(&p, "tables")?
+                            .unwrap_or_default(),
+                        gateway_field::<Option<Vec<NameTranslationDto>>>(&p, "columns")?
+                            .unwrap_or_default(),
+                        gateway_field::<Option<Vec<NameTranslationDto>>>(&p, "measures")?
+                            .unwrap_or_default(),
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("culture", "delete") => serde_json::to_value(
+                    bi_model_delete_culture(bs, fs, conn, gateway_field(&p, "locale")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("scriptFunction", "upsert") => serde_json::to_value(
+                    bi_model_upsert_script_function(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field::<Option<Vec<ScriptParamDto>>>(&p, "params")?
+                            .unwrap_or_default(),
+                        gateway_field(&p, "returnType")?,
+                        gateway_field(&p, "body")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("scriptFunction", "delete") => serde_json::to_value(
+                    bi_model_delete_script_function(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calculatedTable", "upsert") => serde_json::to_value(
+                    bi_model_upsert_global_variable(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "table")?,
+                        gateway_field(&p, "expression")?,
+                        gateway_field(&p, "dynamic")?,
+                        gateway_field(&p, "cascade")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("calculatedTable", "delete") => serde_json::to_value(
+                    bi_model_delete_global_variable(
+                        bs, fs, conn,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "cascade")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("tableVariable", "upsert") => serde_json::to_value(
+                    bi_model_upsert_table_variable(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "source")?,
+                        gateway_field::<Option<Vec<RoleFilterDto>>>(&p, "filters")?
+                            .unwrap_or_default(),
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("tableVariable", "delete") => serde_json::to_value(
+                    bi_model_delete_table_variable(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("context", "upsert") => serde_json::to_value(
+                    bi_model_upsert_context(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "operations")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("context", "delete") => serde_json::to_value(
+                    bi_model_delete_context(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("contextColumn", "upsert") => serde_json::to_value(
+                    bi_model_upsert_context_column(
+                        bs, fs, conn,
+                        gateway_field(&p, "originalName")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "table")?,
+                        gateway_field(&p, "expression")?,
+                        gateway_field(&p, "dataType")?,
+                        gateway_field(&p, "description")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("contextColumn", "delete") => serde_json::to_value(
+                    bi_model_delete_context_column(bs, fs, conn, gateway_field(&p, "name")?, w)
+                        .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("metadata", "upsert") => serde_json::to_value(
+                    bi_model_set_metadata(
+                        bs, fs, conn,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "version")?,
+                        gateway_field(&p, "author")?,
+                        gateway_field(&p, "description")?,
+                        w,
+                    )
+                    .await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("dateTable", "upsert") => serde_json::to_value(
+                    bi_model_set_date_table(bs, fs, conn, gateway_field(&p, "table")?, w).await?,
+                )
+                .map_err(|e| e.to_string()),
+                ("extensionData", "upsert") => {
+                    let key: String = gateway_field(&p, "key")?;
+                    let value: serde_json::Value = p
+                        .get("value")
+                        .cloned()
+                        .ok_or("extensionData upsert requires 'value'")?;
+                    bi_model_extension_data(
+                        bs, fs, conn,
+                        "set".to_string(),
+                        Some(key),
+                        Some(value),
+                        w,
+                    )
+                    .await
+                }
+                ("extensionData", "delete") => {
+                    bi_model_extension_data(
+                        bs, fs, conn,
+                        "delete".to_string(),
+                        Some(gateway_field(&p, "key")?),
+                        None,
+                        w,
+                    )
+                    .await
+                }
+                (other, act) => Err(format!(
+                    "Kind '{}' is not scriptable via bi.model (action '{}'). Security roles, \
+                     data sources/connections, storage modes and refresh policies stay \
+                     privileged.",
+                    other, act
+                )),
+            }
+        })
+        .await;
+
+    // Always-on audit (success + failure), mirroring bi.query/bi.sql.
+    match &result {
+        Ok(_) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            &sid,
+            true,
+            Some(&format!(
+                "{} {} — connection {}",
+                audit_action, audit_kind, connection_id
+            )),
+            None,
+        ),
+        Err(e) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            &sid,
+            false,
+            Some(&format!(
+                "{} {} — connection {}",
+                audit_action, audit_kind, connection_id
+            )),
+            Some(e),
+        ),
+    }
+    result
 }
 
 /// One entry of the engine's built-in function catalog (for editor
@@ -4280,6 +5191,7 @@ pub async fn bi_model_import_tables(
             .unwrap_or_default()
     };
     drop(guard);
+    emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
 
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
     crate::log_info!(
@@ -4441,6 +5353,7 @@ pub async fn bi_model_import_sql_source(
             .unwrap_or_default()
     };
     drop(guard);
+    emit_model_changed(&bi_state, &model_key, &base, &new_base, "user", None);
 
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
     crate::log_info!(

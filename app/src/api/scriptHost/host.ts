@@ -40,7 +40,7 @@ import {
   invalidateSlicerBitmaps,
   sanitizeSandboxGeometry,
 } from "./renderCache";
-import { ALLOWLIST } from "./allowlist";
+import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
 import {
   fetchOriginOf,
   grantBiCapability,
@@ -50,6 +50,7 @@ import {
   requestCapabilityGrant,
   resetAllGrants,
   revokeBackendCapabilities,
+  RUST_MIRRORED_BI_CAPS,
   syncBiGrantsToBackend,
   syncNetOriginsToBackend,
   wasDeniedThisSession,
@@ -627,9 +628,9 @@ async function maybeRequestCapabilityGrant(
   });
   if (decision !== "deny") {
     recordCapabilityGrant(handle.scriptId, cap);
-    // Mirror BI grants to the authoritative Rust store (bi_query/script_bi_sql
+    // Mirror BI-family grants to the authoritative Rust store (the Rust gates
     // re-check it per call).
-    if (cap === "bi.query" || cap === "bi.sql") {
+    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
       await grantBiCapability(handle.scriptId, cap);
     }
   }
@@ -818,7 +819,14 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // trusts these args for permission. Worker arg shape: [url, init?].
       const [url, init] = args as [
         string,
-        { method?: string; headers?: Record<string, string>; body?: string } | undefined,
+        {
+          method?: string;
+          headers?: Record<string, string>;
+          body?: string;
+          /** Connector-secret injection (bi.connector): a SLOT name; the Rust
+           *  gate resolves + attaches the value server-side (never in JS). */
+          secretHeader?: { sourceId: string; slot: string; header: string; format?: string };
+        } | undefined,
       ];
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_http_fetch", {
@@ -828,6 +836,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
           method: init?.method,
           headers: init?.headers,
           body: init?.body,
+          secretHeader: init?.secretHeader ?? null,
         },
       });
     }
@@ -877,6 +886,55 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const [connectionId, sql] = args as [string, string];
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_bi_sql", { connectionId, sql, scriptId: definition.id });
+    }
+    case "cap.biModelInfo": {
+      // Sanitized model read: the Rust gateway projects a WHITELIST of the
+      // overview (never security roles or connection targets).
+      const [connectionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId: definition.id,
+        action: "info",
+        kind: null,
+        payload: null,
+      });
+    }
+    case "cap.biModelUpsert":
+    case "cap.biModelDelete": {
+      // Governed model mutation: the Rust gateway re-checks the bi.model
+      // grant, enforces the allowed-kind set + rate limit authoritatively,
+      // rejects package-subscribed models, and routes through the same
+      // undoable funnel the Model Editor uses.
+      const [connectionId, kind, payload] = args as [string, string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId: definition.id,
+        action: method === "cap.biModelUpsert" ? "upsert" : "delete",
+        kind,
+        payload: payload ?? null,
+      });
+    }
+    case "cap.connectorRegister": {
+      // The connector host records the AUTHORITATIVE script identity (from the
+      // definition, never from args), installs via the Rust gate, runs the
+      // initial feed, and arms the refresh schedule.
+      const [connectionId, def] = args as [string, unknown];
+      const { registerScriptConnectorForScript } = await import("../scriptConnectors");
+      return registerScriptConnectorForScript(
+        definition.id,
+        definition.objectType,
+        definition.instanceId,
+        connectionId,
+        def as never,
+      );
+    }
+    case "cap.connectorRemove": {
+      const [connectionId, sourceId] = args as [string, string];
+      const { removeScriptConnectorForScript } = await import("../scriptConnectors");
+      await removeScriptConnectorForScript(definition.id, connectionId, sourceId);
+      return undefined;
     }
     case "cap.cubeValue": {
       // CUBE convenience over the bi.query trust class: a measure sliced by member
@@ -1284,7 +1342,15 @@ function addForwarder(mw: MountedWorker, hook: string, unsub: CleanupFn): void {
 
 function wireAppEventForwarder(mw: MountedWorker, hook: string, eventName: string): void {
   if (mw.forwarders.has(hook)) return;
-  addForwarder(mw, hook, onAppEvent(eventName, (detail) => forwardEvent(mw, hook, detail)));
+  // Payloads crossing into the sandbox are THINNED for events whose full
+  // payload carries capability-gated metadata (BI model events).
+  addForwarder(
+    mw,
+    hook,
+    onAppEvent(eventName, (detail) =>
+      forwardEvent(mw, hook, thinAppEventForScripts(eventName, detail)),
+    ),
+  );
 }
 
 /**

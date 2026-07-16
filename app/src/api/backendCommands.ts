@@ -60,6 +60,10 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "keychain_set_password",
     "keychain_delete_password",
     "keychain_has_password",
+    // Connector secrets (script-fed sources): user-UI only. Values are
+    // write/delete-only from the frontend; the resolve path lives inside the
+    // Rust net-fetch gate and never returns a value to any caller.
+    "connector_secrets",
   ],
   // Installing / removing / scanning extensions from disk.
   extensionManagement: [
@@ -119,6 +123,12 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_set_table_storage_mode",
     "bi_model_set_table_refresh",
     "bi_model_refresh_table",
+    "bi_model_extension_data",
+    // Script-gateway doors: reachable by scripts ONLY through the broker's
+    // consent-gated methods (cap.biModel* / cap.connector*); the Rust gates
+    // re-check the grants authoritatively.
+    "script_bi_model",
+    "bi_script_source",
     "bi_model_function_catalog",
     "bi_model_function_docs",
     "bi_model_undo",

@@ -214,6 +214,20 @@ export function buildExtensionContext(post: PostFn): {
           return brokerCall("cap.cubeMembers", [connection, level]) as Promise<string[]>;
         },
       },
+      // Governed model definitions (the bi.model capability): sanitized read +
+      // undoable, audited mutation via the Rust script_bi_model gateway. RLS
+      // roles, connections/credentials, storage/refresh knobs are not reachable.
+      biModel: {
+        info(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelInfo", [connectionId]);
+        },
+        upsert(connectionId: string, kind: string, payload: Record<string, unknown>): Promise<unknown> {
+          return brokerCall("cap.biModelUpsert", [connectionId, kind, payload]);
+        },
+        delete(connectionId: string, kind: string, payload: Record<string, unknown>): Promise<unknown> {
+          return brokerCall("cap.biModelDelete", [connectionId, kind, payload]);
+        },
+      },
     },
 
     // Surfaces that cannot cross the worker boundary throw on access.

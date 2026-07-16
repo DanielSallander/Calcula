@@ -1474,6 +1474,7 @@ mod tests {
             is_connected: connected,
             table_count: tables,
             measure_count: measures,
+            package_data_source_id: None,
         }
     }
 

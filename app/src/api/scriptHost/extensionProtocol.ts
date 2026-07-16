@@ -107,6 +107,9 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   "cap.biQuery",
   "cap.biListConnections",
   "cap.biSql",
+  "cap.biModelInfo",
+  "cap.biModelUpsert",
+  "cap.biModelDelete",
 ]);
 
 /** Host deadline (ms) for a relayed handler invocation before it is abandoned. */

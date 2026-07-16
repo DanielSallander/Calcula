@@ -1220,6 +1220,13 @@ const DAX_GAP_V20_MIN_FORMAT_VERSION: u64 = 20;
 /// store tables as ordinary connector tables.
 const WRITEBACK_COLUMN_MIN_FORMAT_VERSION: u64 = 21;
 
+/// Minimum schema `format_version` required by model `extension_data`
+/// (open namespaced metadata — annotations, tool state, script-connector
+/// bindings). A pre-v22 engine would silently drop the map on resave,
+/// destroying third-party data, so a model that carries any entry must be
+/// stamped >= 22 to fail closed with the clean "update Calcula" gate.
+const EXTENSION_DATA_MIN_FORMAT_VERSION: u64 = 22;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1288,7 +1295,9 @@ pub fn stamp_feature_format_version(
         || model.fiscal_year_end_month().is_some()
         || !model.cultures().is_empty();
 
-    let required = if !model.writeback_columns().is_empty() {
+    let required = if !model.extension_data().is_empty() {
+        EXTENSION_DATA_MIN_FORMAT_VERSION
+    } else if !model.writeback_columns().is_empty() {
         WRITEBACK_COLUMN_MIN_FORMAT_VERSION
     } else if uses_v20 {
         DAX_GAP_V20_MIN_FORMAT_VERSION
@@ -1390,6 +1399,25 @@ mod format_gate_tests {
         stamp_feature_format_version(&model, &mut json);
         // No GVAR → the stamp is left exactly as-is (never lowered or raised).
         assert_eq!(json.get("format_version").and_then(|v| v.as_u64()), Some(5));
+    }
+
+    #[test]
+    fn stamps_extension_data_model_to_v22() {
+        let model = model_with_measure("Total", "SUM(Sales[amount])");
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("acme.notes".to_string(), serde_json::json!({ "reviewed": true }));
+        let model = model.with_extension_data(data);
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(5u64));
+        stamp_feature_format_version(&model, &mut json);
+        // extension_data outranks every older feature minimum (a pre-v22
+        // engine would silently drop the map on resave).
+        assert_eq!(
+            json.get("format_version").and_then(|v| v.as_u64()),
+            Some(EXTENSION_DATA_MIN_FORMAT_VERSION)
+        );
     }
 
     #[test]

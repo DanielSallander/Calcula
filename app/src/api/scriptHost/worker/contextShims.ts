@@ -253,11 +253,24 @@ interface BiConnectionSummary {
   measureCount?: number;
 }
 
+/** Connector-secret header injection spec (bi.connector; resolved server-side). */
+interface SecretHeaderShim {
+  sourceId: string;
+  slot: string;
+  header: string;
+  format?: string;
+}
+
 /** context.caps.* — thin RPC wrappers that add no authority of their own. */
 function buildCapsShim(rt: WorkerRuntime): {
   fetch: (
     url: string,
-    init?: { method?: string; headers?: Record<string, string>; body?: string },
+    init?: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      secretHeader?: SecretHeaderShim;
+    },
   ) => Promise<CapsFetchResponse>;
   storage: {
     get(key: string): Promise<string | null>;
@@ -270,6 +283,15 @@ function buildCapsShim(rt: WorkerRuntime): {
     value(connection: string, ...members: string[]): Promise<number | null>;
     kpi(connection: string, kpi: string, property: number): Promise<number | null>;
     members(connection: string, level: string): Promise<string[]>;
+  };
+  biModel: {
+    info(connectionId: string): Promise<unknown>;
+    upsert(connectionId: string, kind: string, payload: Record<string, unknown>): Promise<unknown>;
+    delete(connectionId: string, kind: string, payload: Record<string, unknown>): Promise<unknown>;
+  };
+  connector: {
+    register(connectionId: string, def: Record<string, unknown>): Promise<unknown>;
+    remove(connectionId: string, sourceId: string): Promise<void>;
   };
 } {
   return {
@@ -312,6 +334,30 @@ function buildCapsShim(rt: WorkerRuntime): {
       },
       async members(connection: string, level: string) {
         return (await call(rt, "cap.cubeMembers", [connection, level])) as string[];
+      },
+    },
+    // Governed model definitions (the bi.model capability): a sanitized read
+    // plus undoable, audited mutation over the Rust script_bi_model gateway.
+    biModel: {
+      async info(connectionId: string) {
+        return call(rt, "cap.biModelInfo", [connectionId]);
+      },
+      async upsert(connectionId: string, kind: string, payload: Record<string, unknown>) {
+        return call(rt, "cap.biModelUpsert", [connectionId, kind, payload]);
+      },
+      async delete(connectionId: string, kind: string, payload: Record<string, unknown>) {
+        return call(rt, "cap.biModelDelete", [connectionId, kind, payload]);
+      },
+    },
+    // Script-fed data connector (the bi.connector capability). The script also
+    // exposes `fetchTable` (context.expose) — the trusted host calls it per
+    // declared table and hands the rows to the volume-capped Rust gate.
+    connector: {
+      async register(connectionId: string, def: Record<string, unknown>) {
+        return call(rt, "cap.connectorRegister", [connectionId, def]);
+      },
+      async remove(connectionId: string, sourceId: string) {
+        await call(rt, "cap.connectorRemove", [connectionId, sourceId]);
       },
     },
   };

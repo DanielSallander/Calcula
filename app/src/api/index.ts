@@ -448,6 +448,10 @@ export {
   biModelSetTableStorageMode,
   biModelSetTableRefresh,
   biModelRefreshTable,
+  biModelExtensionDataGet,
+  biModelExtensionDataList,
+  biModelExtensionDataSet,
+  biModelExtensionDataDelete,
   biModelFunctionCatalog,
   biModelFunctionDocs,
   biModelUndo,
@@ -1105,6 +1109,17 @@ export {
   validateParam,
 } from "./customFunctions";
 export type { CustomFunctionUdf, CustomFunctionLibrary } from "./customFunctions";
+// Script-fed data connectors (model-extensibility Phase 3): the trusted
+// connector host + the privileged connector-secrets UI wrappers.
+export {
+  refreshScriptConnector,
+  listScriptConnectors,
+  resetScriptConnectors,
+  connectorSecretsList,
+  connectorSecretsSet,
+  connectorSecretsDelete,
+} from "./scriptConnectors";
+export type { ScriptConnectorDef, ScriptConnectorTableDef } from "./scriptConnectors";
 // Sandboxed chart marks (B8.D.2): author/persist/mount/register a chart-mark library.
 export {
   installChartMarkLibrary,

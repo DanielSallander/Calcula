@@ -190,6 +190,11 @@ const SERVER_AUDITED_METHODS: ReadonlySet<string> = new Set([
   "cap.fetch", // -> script_http_fetch
   "cap.biQuery", // -> bi_query
   "cap.biSql", // -> script_bi_sql
+  "cap.biModelInfo", // -> script_bi_model (info)
+  "cap.biModelUpsert", // -> script_bi_model (upsert)
+  "cap.biModelDelete", // -> script_bi_model (delete)
+  "cap.connectorRegister", // -> bi_script_source (install)
+  "cap.connectorRemove", // -> bi_script_source (removeBind)
 ]);
 
 /** Broker-side policy denial codes — raised by checkPolicy BEFORE any backend gate. */
