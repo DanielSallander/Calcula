@@ -19,7 +19,7 @@ import {
 } from "../lib/measureLanguage";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
-// in the same window (mirrors MeasureEditorModal / SqlEditorModal).
+// in the same window (mirrors sections/ExpressionWorkspace / SqlEditorModal).
 const prevGetWorker = self.MonacoEnvironment?.getWorker;
 self.MonacoEnvironment = {
   getWorker(id: string, label: string) {

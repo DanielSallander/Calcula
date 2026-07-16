@@ -3362,6 +3362,78 @@ pub async fn bi_model_delete_calc_group(
 // ME-6: calculated tables (engine term: global variables)
 // ---------------------------------------------------------------------------
 
+/// Collect the BARE (unqualified) column references of an expression, exactly —
+/// `Table[column]` references are excluded, including inside constructs the
+/// engine's reference walkers don't descend or qualify (LOOKUPVALUE search
+/// args, window ORDER BY, nested QUERY bindings). Implemented as a serde-tree
+/// walk so it is variant-complete by construction: the serialized form is the
+/// persisted model format, so the `ColumnRef` key is stable, and user strings
+/// only ever appear as JSON values, never as keys.
+fn bare_column_refs(expr: &bi_engine::Expression, out: &mut std::collections::BTreeSet<String>) {
+    fn walk(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    if key == "ColumnRef" {
+                        if let Some(name) = val.as_str() {
+                            out.insert(name.to_string());
+                            continue;
+                        }
+                    }
+                    walk(val, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Ok(v) = serde_json::to_value(expr) {
+        walk(&v, out);
+    }
+}
+
+/// Rewrite every bare `ColumnRef` in a serialized expression tree into a
+/// `QualifiedColumnRef` on `table`, mapping each column to its canonical model
+/// spelling via `columns` (keyed by ASCII-lowercased name). AST-level on
+/// purpose: rendering to text and re-parsing is NOT a round-trip (the
+/// formatter drops grouping parentheses and emits display-only forms like
+/// `STDEV.S` / `COUNTROWS()` that the parser rejects).
+fn qualify_bare_refs(
+    v: &mut serde_json::Value,
+    table: &str,
+    columns: &std::collections::BTreeMap<String, String>,
+) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(serde_json::Value::String(name)) = map.get("ColumnRef") {
+                    let column = columns
+                        .get(&name.to_ascii_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
+                    *v = serde_json::json!({
+                        "QualifiedColumnRef": { "table_or_var": table, "column": column }
+                    });
+                    return;
+                }
+            }
+            for (_key, val) in map.iter_mut() {
+                qualify_bare_refs(val, table, columns);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                qualify_bare_refs(item, table, columns);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Add or update a calculated table (a model-level named QUERY(...) expression,
 /// evaluated dynamically in the referencing query's filter context). Parsed by
 /// the engine `parse_global`, which rejects non-QUERY expressions.
@@ -3391,14 +3463,212 @@ pub async fn bi_model_upsert_global_variable(
         let gv = bi_engine::parse_global(trimmed, table.trim(), &expression)
             .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
         // A generated CALENDAR reads from no table (and forces materialized
-        // mode itself); QUERY forms need the host table.
+        // mode itself). For QUERY forms the editor no longer asks for a host
+        // table — infer it from the expression's first qualified column
+        // (measure refs expanded first, so QUERY([Revenue] BY dim[city])
+        // resolves through the measure's home table), mirroring how measures
+        // resolve their home table.
         let gv = if gv.calendar().is_some() {
             gv
-        } else {
-            if table.trim().is_empty() {
-                return Err("Calculated table must specify a table".to_string());
-            }
+        } else if !table.trim().is_empty() {
             gv.with_dynamic(dynamic)
+        } else {
+            // A materialized calculated table's OLD derived table is still in
+            // base.tables() while its definition is being edited — never treat
+            // it as an owner or anchor for its own expression (an innocent
+            // bare ref would otherwise self-qualify against it and only fail
+            // at refresh).
+            let self_name = original_name.as_deref();
+            let not_self =
+                |t: &str| self_name.is_none_or(|s| !t.eq_ignore_ascii_case(s));
+            // Name comparisons are ASCII-case-insensitive to match the
+            // evaluator's table lookups; the stored home table is always the
+            // model's canonical spelling.
+            let canonical = |name: &str| -> Option<String> {
+                base.tables()
+                    .iter()
+                    .map(|t| t.name())
+                    .find(|t| t.eq_ignore_ascii_case(name))
+                    .map(|t| t.to_string())
+            };
+            // A referenced name may be another calculated table or a table
+            // variable — valid in expressions, but the model builder requires
+            // the home table to be a REAL model table. Resolve through their
+            // (already-validated) home tables; the hop bound guards against a
+            // malformed cycle.
+            let resolve_real = |cand: &str| -> Option<String> {
+                let mut cand = cand.to_string();
+                for _ in 0..8 {
+                    if let Some(c) = canonical(&cand) {
+                        return Some(c);
+                    }
+                    if let Some(g) = base
+                        .global_variables()
+                        .iter()
+                        .find(|g| g.name().eq_ignore_ascii_case(&cand))
+                    {
+                        cand = g.table().to_string();
+                    } else if let Some(v) = base
+                        .table_variables()
+                        .iter()
+                        .find(|v| v.name().eq_ignore_ascii_case(&cand))
+                    {
+                        cand = v.source().to_string();
+                    } else {
+                        return None;
+                    }
+                }
+                None
+            };
+            // Does `table_name` own column `b` (physical or calculated)? Returns
+            // the column's canonical model spelling. Bare calculated-column
+            // refs are legal in measures, so they must be legal here too.
+            let owned_column = |table_name: &str, b: &str| -> Option<String> {
+                let t = base.tables().iter().find(|t| t.name() == table_name)?;
+                t.columns()
+                    .iter()
+                    .map(|c| c.name())
+                    .chain(
+                        base.calculated_columns()
+                            .iter()
+                            .filter(|c| c.table().eq_ignore_ascii_case(table_name))
+                            .map(|c| c.name()),
+                    )
+                    .find(|c| c.eq_ignore_ascii_case(b))
+                    .map(str::to_string)
+            };
+            // The persisted AST must be ALL-QUALIFIED: at query/refresh time
+            // the engine rebuilds each aggregate as a measure and infers its
+            // fact table from the expression itself (never from the stored
+            // home table), so a bare operand column either fails evaluation or
+            // binds to an unintended table — and the overview renders bare
+            // refs against the stored home table, re-qualifying them on the
+            // next edit round-trip. Bare refs are collected from the
+            // USER-AUTHORED aggregates only (bare refs inside a referenced
+            // measure's body are that measure's own home-table business) and
+            // rewritten per aggregate, since that is evaluation's binding
+            // scope.
+            let mut expr_value = serde_json::to_value(gv.expression())
+                .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
+            let bi_engine::Expression::Query { aggregates: raw_aggregates, .. } = gv.expression()
+            else {
+                return Err(format!(
+                    "Calculated table '{}' must be a table-producing QUERY(...) expression",
+                    trimmed
+                ));
+            };
+            let mut rewrote = false;
+            for (idx, (agg_expr, alias)) in raw_aggregates.iter().enumerate() {
+                let mut bare = std::collections::BTreeSet::new();
+                bare_column_refs(agg_expr, &mut bare);
+                if bare.is_empty() {
+                    continue;
+                }
+                let label = if alias.trim().is_empty() {
+                    format!("aggregate {}", idx + 1)
+                } else {
+                    format!("'{}'", alias)
+                };
+                let bare_list = bare.iter().cloned().collect::<Vec<_>>().join(", ");
+                let owners: Vec<&str> = base
+                    .tables()
+                    .iter()
+                    .map(|t| t.name())
+                    .filter(|t| not_self(t))
+                    .filter(|t| bare.iter().all(|b| owned_column(t, b).is_some()))
+                    .collect();
+                // Evaluation binds bare refs to the aggregate's inferred home
+                // table — when several tables own the columns, prefer that
+                // anchor (it is the binding that already worked at HEAD).
+                let anchor = bi_engine::expression::expand_measure_refs(agg_expr, base)
+                    .ok()
+                    .and_then(|e| bi_engine::infer_fact_table(&e))
+                    .and_then(|c| resolve_real(&c))
+                    .filter(|a| not_self(a));
+                let owner: String = match owners.as_slice() {
+                    [one] => (*one).to_string(),
+                    [] => {
+                        return Err(format!(
+                            "Calculated table '{}': no model table has all of the \
+                             unqualified columns {} used by {} — qualify them as \
+                             Table[column]",
+                            trimmed, bare_list, label
+                        ));
+                    }
+                    many => match &anchor {
+                        Some(a) if many.iter().any(|t| t.eq_ignore_ascii_case(a)) => a.clone(),
+                        _ => {
+                            return Err(format!(
+                                "Calculated table '{}': the unqualified columns {} used \
+                                 by {} exist in more than one table ({}) — qualify them \
+                                 as Table[column]",
+                                trimmed,
+                                bare_list,
+                                label,
+                                many.join(", ")
+                            ));
+                        }
+                    },
+                };
+                let columns: std::collections::BTreeMap<String, String> = bare
+                    .iter()
+                    .map(|b| {
+                        (
+                            b.to_ascii_lowercase(),
+                            owned_column(&owner, b).unwrap_or_else(|| b.clone()),
+                        )
+                    })
+                    .collect();
+                let slot = expr_value
+                    .get_mut("Query")
+                    .and_then(|q| q.get_mut("aggregates"))
+                    .and_then(|a| a.as_array_mut())
+                    .and_then(|a| a.get_mut(idx))
+                    .and_then(|pair| pair.get_mut(0))
+                    .ok_or_else(|| {
+                        format!("Calculated table '{}': unexpected expression shape", trimmed)
+                    })?;
+                qualify_bare_refs(slot, &owner, &columns);
+                rewrote = true;
+            }
+            let expr_final: bi_engine::Expression = if rewrote {
+                serde_json::from_value(expr_value)
+                    .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?
+            } else {
+                gv.expression().clone()
+            };
+            // Home table (metadata + builder validation — the AST is
+            // all-qualified now): engine-standard inference over the
+            // REWRITTEN, measure-expanded aggregates — so a bare-authored and
+            // a qualified-authored definition store the same home — then the
+            // first BY table as the last anchor.
+            let expanded = bi_engine::expression::expand_measure_refs(&expr_final, base)
+                .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
+            let bi_engine::Expression::Query { aggregates, group_by } = &expanded else {
+                return Err(format!(
+                    "Calculated table '{}' must be a table-producing QUERY(...) expression",
+                    trimmed
+                ));
+            };
+            let cand = aggregates
+                .iter()
+                .find_map(|(e, _)| bi_engine::infer_fact_table(e))
+                .or_else(|| group_by.first().map(|(t, _)| t.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "Calculated table '{}' must reference at least one model \
+                         column so its home table can be inferred",
+                        trimmed
+                    )
+                })?;
+            let home = resolve_real(&cand).ok_or_else(|| {
+                format!(
+                    "Calculated table '{}': cannot resolve a home table from '{}' — \
+                     reference at least one model table column in the expression",
+                    trimmed, cand
+                )
+            })?;
+            bi_engine::GlobalVariable::new(trimmed, home, expr_final).with_dynamic(dynamic)
         };
 
         let mut globals = base.global_variables().to_vec();
@@ -4892,9 +5162,9 @@ pub struct FunctionDocDto {
     pub markdown: String,
 }
 
-/// The engine's per-function reference docs, read from `docs/functions` at
-/// runtime so edits there reflect without recompiling the engine. Returns an
-/// empty list when the docs folder is not present (e.g. a packaged build).
+/// The engine's per-function reference docs, embedded into the engine crate
+/// at BUILD time from its `docs/functions/*.md` (see the engine's build.rs) —
+/// no filesystem access at runtime; edits there require an engine rebuild.
 #[tauri::command]
 pub fn bi_model_function_docs(window: tauri::Window) -> Result<Vec<FunctionDocDto>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;

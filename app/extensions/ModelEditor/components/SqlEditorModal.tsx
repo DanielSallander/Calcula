@@ -11,7 +11,7 @@ import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { Modal, styles } from "./editorShared";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
-// living in the same window (mirrors MeasureEditorModal).
+// living in the same window (mirrors sections/ExpressionWorkspace).
 const prevGetWorker = self.MonacoEnvironment?.getWorker;
 self.MonacoEnvironment = {
   getWorker(id: string, label: string) {

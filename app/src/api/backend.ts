@@ -4241,7 +4241,9 @@ export async function biModelUpsertGlobalVariable(params: {
   connectionId: string;
   originalName?: string | null;
   name: string;
-  table: string;
+  /** Home table. Omit (or pass "") to infer it from the expression's first
+   *  qualified column — the editor no longer asks for one. */
+  table?: string;
   expression: string;
   /** Default true (dynamic). False = materialized at refresh. */
   dynamic?: boolean;
@@ -4257,7 +4259,7 @@ export async function biModelUpsertGlobalVariable(params: {
     connectionId: params.connectionId,
     originalName: params.originalName ?? null,
     name: params.name,
-    table: params.table,
+    table: params.table ?? "",
     expression: params.expression,
     dynamic: params.dynamic ?? true,
     cascade: params.cascade ?? false,
@@ -4533,8 +4535,8 @@ export interface FunctionDocDto {
   markdown: string;
 }
 
-/** The engine's per-function reference docs (read from docs/functions at
- *  runtime; empty when the docs folder isn't present). */
+/** The engine's per-function reference docs (embedded into the engine at
+ *  BUILD time from its docs/functions/*.md; returns instantly). */
 export async function biModelFunctionDocs(): Promise<FunctionDocDto[]> {
   return invoke<FunctionDocDto[]>("bi_model_function_docs", {});
 }

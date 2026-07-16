@@ -1,8 +1,9 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/FunctionDocsPanel.tsx
-// PURPOSE: A wiki-like function-reference pane for the measure editor. Lists the
-//          engine's built-in functions (read live from docs/functions in the
-//          Calcula Engine Lib) and renders the selected function's Markdown doc
-//          in a reader-friendly way, with clickable cross-links between docs.
+// PURPOSE: A wiki-like function-reference pane for the model expression
+//          editors. Lists the engine's built-in functions (embedded into the
+//          engine at BUILD time from its docs/functions/*.md) and renders the
+//          selected function's Markdown doc in a reader-friendly way, with
+//          clickable cross-links between docs.
 
 import React, { useMemo, useState } from "react";
 import type { FunctionDocDto } from "@api";
@@ -304,7 +305,7 @@ export function FunctionDocsPanel({
             {loading && <div style={{ ...styles.muted, padding: 10, fontSize: 12 }}>Loading…</div>}
             {!loading && docs.length === 0 && (
               <div style={{ ...styles.muted, padding: 10, fontSize: 12 }}>
-                No function docs found (the engine&apos;s docs/functions folder was not readable).
+                No function docs found (none were embedded in this engine build).
               </div>
             )}
             {filtered.map((d) => (
