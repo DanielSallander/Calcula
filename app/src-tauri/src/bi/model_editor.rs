@@ -153,10 +153,14 @@ fn build_measure(
 
 /// Add (original_name = None) or replace/rename (Some) a measure in the
 /// model's measure list, returning the edited + validated model.
+/// `hidden_override`: None = carry the original's hidden flag (the formula
+/// editor has no hidden control); Some(h) = set it explicitly (the inspector
+/// pane's Hidden toggle).
 fn upsert_measure_model(
     base: &bi_engine::DataModel,
     original_name: Option<&str>,
     measure: bi_engine::Measure,
+    hidden_override: Option<bool>,
 ) -> Result<bi_engine::DataModel, String> {
     let mut measures: Vec<bi_engine::Measure> = base.measures().to_vec();
     let measure_name = measure.name().to_string();
@@ -171,11 +175,23 @@ fn upsert_measure_model(
                     measure.name()
                 ));
             }
-            // Editing must not silently unhide a hidden measure (the editor
-            // has no hidden control yet — the flag simply carries over).
             let mut incoming = measure;
-            if measures[idx].is_hidden() && !incoming.is_hidden() {
-                incoming = incoming.hidden();
+            match hidden_override {
+                // Editing must not silently unhide a hidden measure — without
+                // an explicit override the flag simply carries over.
+                None => {
+                    if measures[idx].is_hidden() && !incoming.is_hidden() {
+                        incoming = incoming.hidden();
+                    }
+                }
+                Some(true) => {
+                    if !incoming.is_hidden() {
+                        incoming = incoming.hidden();
+                    }
+                }
+                // A freshly built measure is not hidden — leaving it is the
+                // explicit unhide.
+                Some(false) => {}
             }
             measures[idx] = incoming;
         }
@@ -186,7 +202,11 @@ fn upsert_measure_model(
                     measure.name()
                 ));
             }
-            measures.push(measure);
+            let mut incoming = measure;
+            if hidden_override == Some(true) && !incoming.is_hidden() {
+                incoming = incoming.hidden();
+            }
+            measures.push(incoming);
         }
     }
     let mut edited = base.with_measures(measures);
@@ -763,7 +783,7 @@ pub fn bi_model_validate_measure(
         });
     }
     let dry_run = build_measure(&name, &formula, None, None, None, None)
-        .and_then(|m| upsert_measure_model(&base, original_name.as_deref(), m))
+        .and_then(|m| upsert_measure_model(&base, original_name.as_deref(), m, None))
         .and_then(|edited| build_combined_model(&edited, &calculated));
     Ok(match dry_run {
         Ok(_) => MeasureValidation { ok: true, message: None, position: None },
@@ -786,6 +806,9 @@ pub async fn bi_model_upsert_measure(
     format_string_expression: Option<String>,
     detail_rows: Option<Vec<String>>,
     group: Option<String>,
+    // None = keep the original's hidden flag; Some(h) = set it explicitly
+    // (the measure inspector's Hidden toggle).
+    hidden: Option<bool>,
     window: tauri::Window,
 ) -> Result<Vec<ModelMeasureInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -817,6 +840,16 @@ pub async fn bi_model_upsert_measure(
                 if let Some(f) = format_string.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
                     m = m.with_format_string(f);
                 }
+                // Dynamic format must ride along too — omitting it here would
+                // wipe it on EVERY metadata-only edit of a sourceless measure
+                // (rename, description, folder, hidden).
+                if let Some(f) = format_string_expression
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                {
+                    m = m.with_format_string_expression(f);
+                }
                 if let Some(refs) = detail_rows.as_deref() {
                     let cleaned: Vec<String> = refs
                         .iter()
@@ -847,7 +880,7 @@ pub async fn bi_model_upsert_measure(
             .as_deref()
             .filter(|o| !o.eq_ignore_ascii_case(new_name.trim()))
             .map(|o| o.to_string());
-        let edited = upsert_measure_model(base, orig.as_deref(), measure)?;
+        let edited = upsert_measure_model(base, orig.as_deref(), measure, hidden)?;
         // A rename must carry presentation references along (perspectives and
         // culture translations point at the measure BY NAME; leaving the old
         // name would fail validation and brick the rename).
@@ -1161,8 +1194,12 @@ pub struct ModelColumnInfo {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub is_hidden: bool,
-    /// True for a calculated column (refresh-time, expression-derived).
+    /// True for a user-authored expression column (static calculated OR
+    /// dynamic context-driven — see `is_dynamic`).
     pub is_calculated: bool,
+    /// True for a context-driven column: its expression references a measure,
+    /// so the value re-derives per query under the active filters.
+    pub is_dynamic: bool,
     /// The calculated column's formula rendering (None for physical columns).
     pub formula: Option<String>,
     /// Resolution expression when this column is used as a lookup (physical
@@ -2035,6 +2072,7 @@ fn build_overview(
                     description: c.description().map(|s| s.to_string()),
                     is_hidden: c.is_hidden(),
                     is_calculated: false,
+                    is_dynamic: false,
                     formula: None,
                     lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
                     sort_by_column: c.sort_by_column().map(|s| s.to_string()),
@@ -2051,15 +2089,21 @@ fn build_overview(
                         name: cc.name().to_string(),
                         data_type: format!("{:?}", cc.data_type()),
                         display_name: None,
-                        description: None,
+                        description: cc.description().map(|s| s.to_string()),
                         is_hidden: false,
                         is_calculated: true,
+                        is_dynamic: false,
                         formula: Some(calc_column_formula(cc)),
                         lookup_resolution: None,
                         sort_by_column: None,
                         format_string: None,
                     }),
             );
+            // Context-driven (dynamic) columns are deliberately NOT merged in
+            // here: table.columns feeds pickers that require MATERIALIZED
+            // columns (sort-by, refresh date column, role filters,
+            // relationships). The Tables tab composes its merged grid from
+            // overview.contextColumns instead.
             ModelTableInfo {
                 name: t.name().to_string(),
                 display_name: t.display_name().map(|s| s.to_string()),
@@ -2471,9 +2515,16 @@ pub async fn bi_model_update_column(
     .await
 }
 
-/// Add or update a refresh-time calculated column.
+/// Add or update a user-authored expression column on a table, ROUTED by its
+/// formula: an expression that references a measure becomes a context-driven
+/// column (dynamic — the scalar re-resolves per query under the active
+/// filters); one that does not becomes a static calculated column computed at
+/// refresh. `PATH(...)` is always static. An edit that flips the kind removes
+/// the original from the other store; validation fails closed if that leaves
+/// dangling references (e.g. a relationship on a column turning dynamic).
 #[tauri::command]
-pub async fn bi_model_upsert_calc_column(
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_upsert_model_column(
     bi_state: State<'_, BiState>,
     file_state: State<'_, FileState>,
     connection_id: ConnectionId,
@@ -2482,6 +2533,7 @@ pub async fn bi_model_upsert_calc_column(
     table: String,
     formula: String,
     data_type: String,
+    description: Option<String>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -2490,53 +2542,173 @@ pub async fn bi_model_upsert_calc_column(
         if trimmed.is_empty() {
             return Err("Column name cannot be empty".to_string());
         }
+        if table.trim().is_empty() {
+            return Err("Column must specify a table".to_string());
+        }
+        if formula.trim().is_empty() {
+            return Err(format!("Column '{}' has an empty formula", trimmed));
+        }
+
+        // Locate the original in EITHER store (generated machinery columns are
+        // excluded from editor listings and stay untouchable here).
+        let orig_calc = original_name.as_deref().and_then(|o| {
+            base.calculated_columns()
+                .iter()
+                .position(|c| c.name() == o && c.generated_by().is_none())
+        });
+        let orig_ctx = original_name
+            .as_deref()
+            .and_then(|o| base.context_columns().iter().position(|c| c.name() == o));
+        if let Some(orig) = original_name.as_deref() {
+            if orig_calc.is_none() && orig_ctx.is_none() {
+                return Err(format!("Column '{}' not found", orig));
+            }
+        }
+
+        // Description: Some("") clears, Some(text) sets, None CARRIES the
+        // original's — so callers that don't know about descriptions (the
+        // script gateway) can edit a formula without wiping them.
+        let description = match description {
+            Some(s) => {
+                let t = s.trim().to_string();
+                if t.is_empty() { None } else { Some(t) }
+            }
+            None => orig_calc
+                .and_then(|i| base.calculated_columns()[i].description())
+                .or_else(|| orig_ctx.and_then(|i| base.context_columns()[i].description()))
+                .map(str::to_string),
+        };
+
+        // When editing and the submitted type string round-trips the ORIGINAL
+        // column's Debug form (e.g. "Decimal(18, 2)" — not offered by the
+        // editable dropdown), keep the original type instead of failing or
+        // silently coercing.
+        let original_dt = orig_calc
+            .map(|i| base.calculated_columns()[i].data_type().clone())
+            .or_else(|| orig_ctx.map(|i| base.context_columns()[i].data_type().clone()))
+            .filter(|dt| format!("{:?}", dt) == data_type);
+
+        enum NewColumn {
+            Static(bi_engine::CalculatedColumn),
+            Dynamic(bi_engine::ContextColumn),
+        }
         // `PATH(t[id], t[parent])` as the whole formula = a generated
-        // parent-child path column, computed in Rust at materialization.
+        // parent-child path column, computed in Rust at materialization —
+        // always static.
         let new_col = match bi_engine::try_parse_path(&formula) {
             Some(Ok((path_table, id_col, parent_col))) => {
                 if !path_table.eq_ignore_ascii_case(&table) {
                     return Err(format!(
-                        "Calculated column '{}': PATH columns must reference the host table \
-                         '{}', got '{}'",
+                        "Column '{}': PATH columns must reference the host table '{}', got '{}'",
                         trimmed, table, path_table
                     ));
                 }
-                bi_engine::CalculatedColumn::new_path(trimmed, table.clone(), id_col, parent_col)
+                let mut col =
+                    bi_engine::CalculatedColumn::new_path(trimmed, table.clone(), id_col, parent_col);
+                if let Some(d) = &description {
+                    col = col.with_description(d);
+                }
+                NewColumn::Static(col)
             }
             Some(Err(reason)) => {
-                return Err(format!("Calculated column '{}': {}", trimmed, reason));
+                return Err(format!("Column '{}': {}", trimmed, reason));
             }
             None => {
                 let expr = bi_engine::parse_measure_expression(&formula)
-                    .map_err(|e| format!("Calculated column '{}': {}", trimmed, e))?;
-                // When editing and the submitted type string round-trips the ORIGINAL
-                // column's Debug form (e.g. "Decimal(18, 2)" — not offered by the
-                // editable dropdown), keep the original type instead of failing or
-                // silently coercing.
-                let dt = match original_name
-                    .as_deref()
-                    .and_then(|o| base.calculated_columns().iter().find(|c| c.name() == o))
-                    .filter(|c| format!("{:?}", c.data_type()) == data_type)
-                {
-                    Some(orig) => orig.data_type().clone(),
+                    .map_err(|e| format!("Column '{}': {}", trimmed, e))?;
+                let dt = match original_dt {
+                    Some(dt) => dt,
                     None => data_type_from_str(&data_type)?,
                 };
-                bi_engine::CalculatedColumn::new(trimmed, table.clone(), expr, dt)
+                // Dynamic when the expression references a measure — OR
+                // another DYNAMIC column (qualified or bare on the host
+                // table): a per-query value is transitively per-query, and
+                // routing it static would fail refresh with an unusable
+                // "unknown column" error. Self-references are ignored so an
+                // edit doesn't stay dynamic merely because it was.
+                let refs_dynamic_column = {
+                    let quals = expr.qualified_column_references();
+                    let mut bare = std::collections::BTreeSet::new();
+                    bare_column_refs(&expr, &mut bare);
+                    base.context_columns()
+                        .iter()
+                        .filter(|cc| original_name.as_deref() != Some(cc.name()))
+                        .any(|cc| {
+                            quals.iter().any(|(t, c)| {
+                                t.eq_ignore_ascii_case(cc.table())
+                                    && c.eq_ignore_ascii_case(cc.name())
+                            }) || (cc.table().eq_ignore_ascii_case(&table)
+                                && bare.iter().any(|b| b.eq_ignore_ascii_case(cc.name())))
+                        })
+                };
+                if expr_references_measure(&expr) || refs_dynamic_column {
+                    let mut col = bi_engine::ContextColumn::new(trimmed, table.trim(), expr, dt);
+                    if let Some(d) = &description {
+                        col = col.with_description(d);
+                    }
+                    NewColumn::Dynamic(col)
+                } else {
+                    let mut col =
+                        bi_engine::CalculatedColumn::new(trimmed, table.clone(), expr, dt);
+                    if let Some(d) = &description {
+                        col = col.with_description(d);
+                    }
+                    NewColumn::Static(col)
+                }
             }
         };
 
-        let mut columns = base.calculated_columns().to_vec();
-        match original_name.as_deref() {
-            Some(orig) => {
-                let Some(idx) = columns.iter().position(|c| c.name() == orig) else {
-                    return Err(format!("Calculated column '{}' not found", orig));
-                };
-                columns[idx] = new_col;
-            }
-            None => columns.push(new_col),
+        // Remove the original from whichever store held it, check for a name
+        // collision across BOTH stores (case-insensitive, matching the
+        // evaluator's lookups), then install — back at the original position
+        // when the kind is unchanged, so edits don't shuffle the column list.
+        let mut calc = base.calculated_columns().to_vec();
+        let mut ctx = base.context_columns().to_vec();
+        if let Some(i) = orig_calc {
+            calc.remove(i);
         }
-        let edited = base.with_calculated_columns(columns);
-        edited.validate().map_err(|e| format!("{}", e))?;
+        if let Some(i) = orig_ctx {
+            ctx.remove(i);
+        }
+        if calc.iter().any(|c| c.name().eq_ignore_ascii_case(trimmed))
+            || ctx.iter().any(|c| c.name().eq_ignore_ascii_case(trimmed))
+        {
+            return Err(format!("A column named '{}' already exists", trimmed));
+        }
+        let flipped = match &new_col {
+            NewColumn::Static(_) => orig_ctx.is_some(),
+            NewColumn::Dynamic(_) => orig_calc.is_some(),
+        };
+        match new_col {
+            NewColumn::Static(c) => match orig_calc {
+                Some(i) => calc.insert(i, c),
+                None => calc.push(c),
+            },
+            NewColumn::Dynamic(c) => match orig_ctx {
+                Some(i) => ctx.insert(i, c),
+                None => ctx.push(c),
+            },
+        }
+        let edited = base.with_calculated_columns(calc).with_context_columns(ctx);
+        edited.validate().map_err(|e| {
+            if flipped {
+                // A kind flip changes what may reference the column — the raw
+                // engine error ("unknown column") never says why, so name the
+                // cause.
+                format!(
+                    "Column '{}' changed kind (its formula {} references a measure or \
+                     dynamic column, so it is now {}): {}. Anything bound to the old \
+                     column — relationships, hierarchies, sort-by, measures — must be \
+                     updated first.",
+                    trimmed,
+                    if orig_calc.is_some() { "now" } else { "no longer" },
+                    if orig_calc.is_some() { "dynamic (per-query)" } else { "static" },
+                    e
+                )
+            } else {
+                format!("{}", e)
+            }
+        })?;
         Ok(edited)
     })
     .await
@@ -3394,6 +3566,23 @@ fn bare_column_refs(expr: &bi_engine::Expression, out: &mut std::collections::BT
     if let Ok(v) = serde_json::to_value(expr) {
         walk(&v, out);
     }
+}
+
+/// Does the expression reference a MEASURE anywhere? Same serde-walk approach
+/// as `bare_column_refs` (variant-complete; `MeasureRef` is a stable key of
+/// the persisted model format). This is the discriminator between a static
+/// calculated column and a context-driven (per-query) one.
+fn expr_references_measure(expr: &bi_engine::Expression) -> bool {
+    fn walk(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .any(|(key, val)| (key == "MeasureRef" && val.is_string()) || walk(val)),
+            serde_json::Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    serde_json::to_value(expr).map(|v| walk(&v)).unwrap_or(false)
 }
 
 /// Rewrite every bare `ColumnRef` in a serialized expression tree into a
@@ -4815,6 +5004,7 @@ pub async fn script_bi_model(
                         gateway_field(&p, "formatStringExpression")?,
                         gateway_field(&p, "detailRows")?,
                         gateway_field(&p, "group")?,
+                        gateway_field(&p, "hidden")?,
                         w,
                     )
                     .await?,
@@ -4824,14 +5014,21 @@ pub async fn script_bi_model(
                     bi_model_delete_measure(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
                 )
                 .map_err(|e| e.to_string()),
+                // Routed like the editor UI: a formula that references a
+                // measure (or dynamic column) lands as a CONTEXT column — the
+                // old un-routed path let scripts install static columns with
+                // measure refs that validate but break at refresh. A column
+                // that routes dynamic is subsequently addressed via the
+                // "contextColumn" kind.
                 ("calcColumn", "upsert") => serde_json::to_value(
-                    bi_model_upsert_calc_column(
+                    bi_model_upsert_model_column(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
                         gateway_field(&p, "name")?,
                         gateway_field(&p, "table")?,
                         gateway_field(&p, "formula")?,
                         gateway_field(&p, "dataType")?,
+                        gateway_field(&p, "description")?,
                         w,
                     )
                     .await?,
@@ -6650,10 +6847,45 @@ mod tests {
             .unwrap()
     }
 
+    /// The column-routing discriminator: bracketed-bare `[Name]` is a MEASURE
+    /// reference (dynamic column); bare and `Table[column]` refs are not.
+    #[test]
+    fn expr_references_measure_discriminates() {
+        let dynamic = bi_engine::parse_measure_expression(
+            "IF(Sales[amount] <= [Revenue], \"low\", \"high\")",
+        )
+        .unwrap();
+        assert!(expr_references_measure(&dynamic));
+        let stat = bi_engine::parse_measure_expression("amount * 2").unwrap();
+        assert!(!expr_references_measure(&stat));
+        let qualified = bi_engine::parse_measure_expression("Sales[amount] - Sales[amount]").unwrap();
+        assert!(!expr_references_measure(&qualified));
+    }
+
+    /// hidden_override: Some(true) hides on create and edit, None carries the
+    /// original's flag, Some(false) explicitly unhides.
+    #[test]
+    fn hidden_override_paths() {
+        let m = build_measure("Orders", "COUNT(Sales[country])", None, None, None, None).unwrap();
+        let base = upsert_measure_model(&base_model(), None, m, Some(true)).unwrap();
+        assert!(base.measures().iter().find(|m| m.name() == "Orders").unwrap().is_hidden());
+
+        // None = carry: a metadata edit must not silently unhide.
+        let m2 = build_measure("Orders", "COUNT(Sales[country])", Some("desc"), None, None, None)
+            .unwrap();
+        let carried = upsert_measure_model(&base, Some("Orders"), m2, None).unwrap();
+        assert!(carried.measures().iter().find(|m| m.name() == "Orders").unwrap().is_hidden());
+
+        // Some(false) = explicit unhide (the inspector's toggle).
+        let m3 = build_measure("Orders", "COUNT(Sales[country])", None, None, None, None).unwrap();
+        let unhidden = upsert_measure_model(&carried, Some("Orders"), m3, Some(false)).unwrap();
+        assert!(!unhidden.measures().iter().find(|m| m.name() == "Orders").unwrap().is_hidden());
+    }
+
     #[test]
     fn add_measure_preserves_source_text() {
         let m = build_measure("Orders", "COUNT(Sales[country])", Some("How many"), None, None, None).unwrap();
-        let edited = upsert_measure_model(&base_model(), None, m).unwrap();
+        let edited = upsert_measure_model(&base_model(), None, m, None).unwrap();
         let added = edited.measures().iter().find(|m| m.name() == "Orders").unwrap();
         assert_eq!(added.source(), Some("COUNT(Sales[country])"));
         assert_eq!(added.description(), Some("How many"));
@@ -6663,7 +6895,7 @@ mod tests {
     #[test]
     fn add_rejects_name_collision() {
         let m = build_measure("Revenue", "SUM(Sales[amount])", None, None, None, None).unwrap();
-        let err = upsert_measure_model(&base_model(), None, m).unwrap_err();
+        let err = upsert_measure_model(&base_model(), None, m, None).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
 
@@ -6671,11 +6903,11 @@ mod tests {
     fn update_replaces_in_place_and_rename_collision_is_rejected() {
         let base = base_model();
         let m = build_measure("Orders", "COUNT(Sales[country])", None, None, None, None).unwrap();
-        let base = upsert_measure_model(&base, None, m).unwrap();
+        let base = upsert_measure_model(&base, None, m, None).unwrap();
 
         // Update the formula in place.
         let m2 = build_measure("Orders", "COUNT(Sales[amount])", None, None, None, None).unwrap();
-        let edited = upsert_measure_model(&base, Some("Orders"), m2).unwrap();
+        let edited = upsert_measure_model(&base, Some("Orders"), m2, None).unwrap();
         assert_eq!(
             edited.measures().iter().find(|m| m.name() == "Orders").unwrap().source(),
             Some("COUNT(Sales[amount])")
@@ -6683,7 +6915,7 @@ mod tests {
 
         // Renaming onto an existing name is rejected.
         let m3 = build_measure("Revenue", "COUNT(Sales[amount])", None, None, None, None).unwrap();
-        let err = upsert_measure_model(&base, Some("Orders"), m3).unwrap_err();
+        let err = upsert_measure_model(&base, Some("Orders"), m3, None).unwrap_err();
         assert!(err.contains("already exists"), "got: {}", err);
     }
 
@@ -6691,12 +6923,12 @@ mod tests {
     fn rename_rewrites_dependent_references() {
         let base = base_model();
         let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None, None).unwrap();
-        let base = upsert_measure_model(&base, None, dep).unwrap();
+        let base = upsert_measure_model(&base, None, dep, None).unwrap();
 
         // Rename Revenue -> Income: Boosted's [Revenue] follows the rename
         // (upsert rewrites dependent references before validating).
         let renamed = build_measure("Income", "SUM(Sales[amount])", None, None, None, None).unwrap();
-        let edited = upsert_measure_model(&base, Some("Revenue"), renamed).unwrap();
+        let edited = upsert_measure_model(&base, Some("Revenue"), renamed, None).unwrap();
         assert!(edited.measures().iter().all(|m| m.name() != "Revenue"));
         let boosted = edited
             .measures()
@@ -6715,7 +6947,7 @@ mod tests {
     fn delete_refuses_when_referenced_and_lists_referrers() {
         let base = base_model();
         let dep = build_measure("Boosted", "[Revenue] + SUM(Sales[amount])", None, None, None, None).unwrap();
-        let base = upsert_measure_model(&base, None, dep).unwrap();
+        let base = upsert_measure_model(&base, None, dep, None).unwrap();
 
         let err = delete_measure_model(&base, &[], "Revenue").unwrap_err();
         assert!(err.contains("Boosted"), "got: {}", err);
@@ -6743,7 +6975,7 @@ mod tests {
         ]);
         let edited_measure =
             build_measure("Revenue", "SUM(Sales[amount]) * 2", None, None, None, None).unwrap();
-        let edited = upsert_measure_model(&base, Some("Revenue"), edited_measure).unwrap();
+        let edited = upsert_measure_model(&base, Some("Revenue"), edited_measure, None).unwrap();
         assert!(edited.measures()[0].is_hidden(), "edit must not unhide");
     }
 
@@ -6753,7 +6985,7 @@ mod tests {
         // table from the measure it builds on.
         let base = base_model();
         let m = build_measure("Doubled", "[Revenue] * 2", None, None, None, None).unwrap();
-        let edited = upsert_measure_model(&base, None, m).unwrap();
+        let edited = upsert_measure_model(&base, None, m, None).unwrap();
         let doubled = edited
             .measures()
             .iter()
@@ -6767,10 +6999,10 @@ mod tests {
         let base = base_model();
         // A constant measure legitimately has no home table...
         let konst = build_measure("Konst", "42", None, None, None, None).unwrap();
-        let base = upsert_measure_model(&base, None, konst).unwrap();
+        let base = upsert_measure_model(&base, None, konst, None).unwrap();
         // ...but a measure referencing ONLY it cannot resolve a table.
         let bad = build_measure("Bad", "[Konst] * 2", None, None, None, None).unwrap();
-        let err = upsert_measure_model(&base, None, bad).unwrap_err();
+        let err = upsert_measure_model(&base, None, bad, None).unwrap_err();
         assert!(err.contains("column form"), "got: {}", err);
     }
 

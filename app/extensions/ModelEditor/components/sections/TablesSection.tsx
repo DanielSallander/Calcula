@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from "react";
 import {
   biModelDeleteCalcColumn,
+  biModelDeleteContextColumn,
   biModelDeleteTable,
   biModelDeleteWritebackColumn,
   biModelRefreshTable,
@@ -62,11 +63,38 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   const writebackCols = table
     ? overview.writebackColumns.filter((w) => w.table === table.name)
     : [];
+  // Dynamic (context-driven) columns are shaped like column rows for the grid
+  // but deliberately kept OUT of table.columns — pickers that require
+  // materialized columns (sort-by, refresh date column, role filters,
+  // relationships) must never see them.
+  const dynamicCols: ModelColumnInfo[] = table
+    ? overview.contextColumns
+        .filter((c) => c.table === table.name)
+        .map((c) => ({
+          name: c.name,
+          dataType: c.dataType,
+          displayName: null,
+          description: c.description,
+          isHidden: false,
+          isCalculated: true,
+          isDynamic: true,
+          formula: c.expression,
+          lookupResolution: null,
+          sortByColumn: null,
+          formatString: null,
+        }))
+    : [];
 
+  // Static and dynamic calculated columns live in different model stores —
+  // the row's isDynamic flag routes the delete.
   const deleteCalcColumn = async (col: ModelColumnInfo) => {
     if (!window.confirm(`Delete calculated column '${col.name}'?`)) return;
     try {
-      applyOverview(await biModelDeleteCalcColumn(connectionId, col.name));
+      applyOverview(
+        col.isDynamic
+          ? await biModelDeleteContextColumn(connectionId, col.name)
+          : await biModelDeleteCalcColumn(connectionId, col.name),
+      );
     } catch (err: unknown) {
       reportError(err);
     }
@@ -153,7 +181,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
 
             <div style={{ ...styles.sectionHeader, marginTop: 12, marginBottom: 8 }}>
               <span style={styles.sectionTitle}>
-                Columns ({table.columns.length + writebackCols.length})
+                Columns ({table.columns.length + dynamicCols.length + writebackCols.length})
               </span>
               <button
                 style={styles.btn}
@@ -185,10 +213,13 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                   </tr>
                 </thead>
                 <tbody>
-                  {table.columns.map((c) => (
+                  {[...table.columns, ...dynamicCols].map((c) => (
                     <tr key={c.name}>
                       <td style={styles.td}>
-                        <strong>{c.name}</strong> {c.isCalculated && <Badge tone="ok">calc</Badge>}
+                        <strong>{c.name}</strong> {c.isCalculated && <Badge tone="ok">calc</Badge>}{" "}
+                        {c.isDynamic && (
+                          <Badge tone="neutral">dynamic</Badge>
+                        )}
                       </td>
                       <td style={styles.td}>{c.dataType}</td>
                       <td style={styles.td}>{c.displayName ?? ""}</td>

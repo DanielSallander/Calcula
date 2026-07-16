@@ -79,7 +79,7 @@ interface BladeLayout {
 // One arrangement shared by ALL model-expression editors (measures,
 // calculated tables, calculation groups) — moving a blade in one editor
 // moves it everywhere.
-const LAYOUT_KEY = "calcula.modelEditor.workspace.layout.v1";
+const LAYOUT_KEY = "calcula.modelEditor.workspace.layout.v2";
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
 const RIGHT_MIN = 220;
@@ -88,7 +88,10 @@ const WORKSPACE_HEIGHT = "clamp(300px, 58vh, 640px)";
 
 const DEFAULT_LAYOUT: BladeLayout = {
   leftCollapsed: false,
-  rightCollapsed: false,
+  // The function reference starts as a collapsed rail — the editor is the
+  // star; expand the blade (or drag/double-click functions out of it) when
+  // reference material is wanted.
+  rightCollapsed: true,
   leftWidth: 240,
   rightWidth: 360,
   swapped: false,
@@ -507,7 +510,11 @@ export const ExpressionWorkspace = forwardRef<
         {isTree ? (
           <ModelTreeContent overview={overview} onInsert={insertRef} />
         ) : (
-          <FunctionDocsPanel docs={docs ?? []} loading={docs === null} />
+          <FunctionDocsPanel
+            docs={docs ?? []}
+            loading={docs === null}
+            onInsert={(text) => insertRef(text)}
+          />
         )}
       </Blade>
     );

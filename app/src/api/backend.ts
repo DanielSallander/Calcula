@@ -3609,6 +3609,8 @@ export async function biModelUpsertMeasure(params: {
   detailRows?: string[] | null;
   /** Display folder (Studio-style measure group); null/empty = ungrouped. */
   group?: string | null;
+  /** Omit/null = keep the original's hidden flag; boolean = set explicitly. */
+  hidden?: boolean | null;
 }): Promise<ModelMeasureInfo[]> {
   return invoke<ModelMeasureInfo[]>("bi_model_upsert_measure", {
     connectionId: params.connectionId,
@@ -3620,6 +3622,7 @@ export async function biModelUpsertMeasure(params: {
     formatStringExpression: params.formatStringExpression ?? null,
     detailRows: params.detailRows ?? null,
     group: params.group ?? null,
+    hidden: params.hidden ?? null,
   });
 }
 
@@ -3656,7 +3659,10 @@ export interface ModelColumnInfo {
   displayName: string | null;
   description: string | null;
   isHidden: boolean;
+  /** User-authored expression column (static calculated OR dynamic — see isDynamic). */
   isCalculated: boolean;
+  /** Context-driven column: references a measure, re-derives per query. */
+  isDynamic: boolean;
   formula: string | null;
   /** Lookup resolution expression (physical columns only). */
   lookupResolution: string | null;
@@ -4022,7 +4028,19 @@ export async function biModelUpdateColumn(params: {
   });
 }
 
-export async function biModelUpsertCalcColumn(params: {
+export async function biModelDeleteCalcColumn(
+  connectionId: string,
+  name: string,
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_delete_calc_column", { connectionId, name });
+}
+
+/** Add or update a user-authored expression column, ROUTED by its formula:
+ *  referencing a measure (or another dynamic column) makes it a dynamic
+ *  (context-driven, per-query) column; otherwise it is a static calculated
+ *  column computed at refresh. PATH(...) is always static. Kind flips on
+ *  edit are handled atomically. */
+export async function biModelUpsertModelColumn(params: {
   connectionId: string;
   originalName?: string | null;
   name: string;
@@ -4030,22 +4048,18 @@ export async function biModelUpsertCalcColumn(params: {
   formula: string;
   /** "String" | "Int32" | "Int64" | "Float64" | "Boolean" | "Date" | "Timestamp" */
   dataType: string;
+  /** "" clears; omit/null CARRIES the original's description on edit. */
+  description?: string | null;
 }): Promise<ModelOverview> {
-  return invoke<ModelOverview>("bi_model_upsert_calc_column", {
+  return invoke<ModelOverview>("bi_model_upsert_model_column", {
     connectionId: params.connectionId,
     originalName: params.originalName ?? null,
     name: params.name,
     table: params.table,
     formula: params.formula,
     dataType: params.dataType,
+    description: params.description ?? null,
   });
-}
-
-export async function biModelDeleteCalcColumn(
-  connectionId: string,
-  name: string,
-): Promise<ModelOverview> {
-  return invoke<ModelOverview>("bi_model_delete_calc_column", { connectionId, name });
 }
 
 export async function biModelUpsertRelationship(params: {
@@ -4387,26 +4401,6 @@ export async function biModelDeleteContext(
   name: string,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_delete_context", { connectionId, name });
-}
-
-export async function biModelUpsertContextColumn(params: {
-  connectionId: string;
-  originalName?: string | null;
-  name: string;
-  table: string;
-  expression: string;
-  dataType: string;
-  description?: string | null;
-}): Promise<ModelOverview> {
-  return invoke<ModelOverview>("bi_model_upsert_context_column", {
-    connectionId: params.connectionId,
-    originalName: params.originalName ?? null,
-    name: params.name,
-    table: params.table,
-    expression: params.expression,
-    dataType: params.dataType,
-    description: params.description ?? null,
-  });
 }
 
 export async function biModelDeleteContextColumn(

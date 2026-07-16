@@ -4157,7 +4157,7 @@ pub fn run() {
             bi::model_editor::bi_model_get_overview,
             bi::model_editor::bi_model_update_table,
             bi::model_editor::bi_model_update_column,
-            bi::model_editor::bi_model_upsert_calc_column,
+            bi::model_editor::bi_model_upsert_model_column,
             bi::model_editor::bi_model_delete_calc_column,
             bi::model_editor::bi_model_upsert_relationship,
             bi::model_editor::bi_model_delete_relationship,

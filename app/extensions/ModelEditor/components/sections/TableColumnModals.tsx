@@ -1,10 +1,12 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/TableColumnModals.tsx
 // PURPOSE: The two column modals of the Tables section: metadata editing for
 //          physical columns (bi_model_update_column) and the add/edit modal
-//          for calculated columns (bi_model_upsert_calc_column).
+//          for calculated columns (bi_model_upsert_model_column — the backend
+//          routes the column to static/refresh-time or dynamic/per-query by
+//          whether its formula references a measure).
 
 import React, { useState } from "react";
-import { biModelUpdateColumn, biModelUpsertCalcColumn } from "@api";
+import { biModelUpdateColumn, biModelUpsertModelColumn } from "@api";
 import type { ModelColumnInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import { ExpressionEditorModal } from "../ExpressionEditorModal";
@@ -236,6 +238,7 @@ export function CalcColumnModal({
   onSaved: (overview: ModelOverview) => void;
 }): React.ReactElement {
   const [name, setName] = useState(existing?.name ?? "");
+  const [description, setDescription] = useState(existing?.description ?? "");
   const [formula, setFormula] = useState(existing?.formula ?? "");
   // Keep the editing column's EXACT dataType string even when it is not one
   // of the standard options (e.g. "Decimal(18, 2)") — it becomes an extra
@@ -257,13 +260,16 @@ export function CalcColumnModal({
     setError(null);
     try {
       onSaved(
-        await biModelUpsertCalcColumn({
+        await biModelUpsertModelColumn({
           connectionId,
           originalName: existing?.name ?? null,
           name: name.trim(),
           table,
           formula,
           dataType,
+          // Always a string: "" explicitly CLEARS (null would mean "carry the
+          // original's description" — the script-gateway-friendly default).
+          description: description.trim(),
         }),
       );
     } catch (err: unknown) {
@@ -320,12 +326,19 @@ export function CalcColumnModal({
       </Field>
       <Field
         label="Formula"
-        hint="Row-level expression over this table's columns, e.g. [revenue] - [cost]."
+        hint='Row-level expression over this table&apos;s columns, e.g. revenue - cost. [Name] in brackets references a MEASURE — e.g. IF(Invoice[paid_date] <= [AsOfDate], "Paid", "Open") — and makes the column DYNAMIC: the measure re-resolves per query under the active filters. Without measure references it is static, computed at model refresh.'
       >
         <textarea
           style={{ ...styles.textarea, minHeight: 80 }}
           value={formula}
           onChange={(e) => setFormula(e.target.value)}
+        />
+      </Field>
+      <Field label="Description (optional)">
+        <input
+          style={styles.input}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
         />
       </Field>
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}

@@ -1,23 +1,15 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/ContextsSection.tsx
-// PURPOSE: Contexts + Context Columns section of the Model Editor window.
-//          Contexts are named, composable filter-operation lists (referenced by
-//          measures via using(expr, context)); the operations editor bridges the
-//          flat operation DTO to the engine's ContextOp enum. Context columns are
-//          groupable, per-query columns computed from a scalar measure.
+// PURPOSE: Contexts section of the Model Editor window. Contexts are named,
+//          composable filter-operation lists (referenced by measures via
+//          using(expr, context)); the operations editor bridges the flat
+//          operation DTO to the engine's ContextOp enum. (Context COLUMNS are
+//          edited as dynamic calculated columns under the Tables tab — the
+//          backend routes a column by whether its formula references a
+//          measure.)
 
 import React, { useState } from "react";
-import {
-  biModelDeleteContext,
-  biModelDeleteContextColumn,
-  biModelUpsertContext,
-  biModelUpsertContextColumn,
-} from "@api";
-import type {
-  ContextOpDto,
-  ModelContextColumnInfo,
-  ModelContextInfo,
-  ModelOverview,
-} from "@api";
+import { biModelDeleteContext, biModelUpsertContext } from "@api";
+import type { ContextOpDto, ModelContextInfo, ModelOverview } from "@api";
 import {
   Badge,
   emptyFilterDraft,
@@ -30,10 +22,6 @@ import {
   styles,
 } from "../editorShared";
 import type { FilterDraft, SectionCtx } from "../editorShared";
-
-// Data types offered by the context-column editor (mirrors the calc-column set;
-// Decimal is excluded — it needs precision/scale not surfaced here).
-const DATA_TYPES = ["String", "Int32", "Int64", "Float64", "Boolean", "Date", "Timestamp"];
 
 const OP_TYPES = [
   { value: "keep", label: "Keep (add filters)" },
@@ -57,23 +45,11 @@ const CLEAR_TYPES = new Set(["clear", "clearInner", "clearOuter"]);
 export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editingCtx, setEditingCtx] = useState<{ original: ModelContextInfo | null } | null>(null);
-  const [editingCol, setEditingCol] = useState<{
-    original: ModelContextColumnInfo | null;
-  } | null>(null);
 
   const deleteContext = async (c: ModelContextInfo) => {
     if (!window.confirm(`Delete context '${c.name}'?`)) return;
     try {
       applyOverview(await biModelDeleteContext(connectionId, c.name));
-    } catch (err: unknown) {
-      reportError(err);
-    }
-  };
-
-  const deleteColumn = async (c: ModelContextColumnInfo) => {
-    if (!window.confirm(`Delete context column '${c.name}'?`)) return;
-    try {
-      applyOverview(await biModelDeleteContextColumn(connectionId, c.name));
     } catch (err: unknown) {
       reportError(err);
     }
@@ -124,48 +100,6 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         </div>
       </div>
 
-      {/* Context columns */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={styles.sectionHeader}>
-          <span style={styles.sectionTitle}>Context Columns ({overview.contextColumns.length})</span>
-          <button style={styles.btn} disabled={readOnly} onClick={() => setEditingCol({ original: null })}>
-            New
-          </button>
-        </div>
-        <div style={{ ...styles.card, padding: 4 }}>
-          {overview.contextColumns.length === 0 && (
-            <div style={{ ...styles.muted, padding: 8 }}>
-              No context columns — a groupable column whose per-row value derives from a scalar
-              measure resolved against the query filters.
-            </div>
-          )}
-          {overview.contextColumns.map((c) => (
-            <div
-              key={c.name}
-              style={{ ...styles.listRow, cursor: "default", display: "flex", alignItems: "center", gap: 8 }}
-              title={c.description ?? undefined}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <strong>{c.name}</strong>
-                <span style={styles.muted}>
-                  {" "}
-                  — {c.table} · {c.dataType}
-                </span>
-                <div style={{ ...styles.muted, fontFamily: "Consolas, monospace", fontSize: 11 }}>
-                  {c.expression}
-                </div>
-              </div>
-              <button style={styles.smallBtn} disabled={readOnly} onClick={() => setEditingCol({ original: c })}>
-                Edit
-              </button>
-              <button style={styles.smallBtn} disabled={readOnly} onClick={() => void deleteColumn(c)}>
-                Delete
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {editingCtx && (
         <ContextModal
           connectionId={connectionId}
@@ -175,18 +109,6 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           onSaved={(o) => {
             applyOverview(o);
             setEditingCtx(null);
-          }}
-        />
-      )}
-      {editingCol && (
-        <ContextColumnModal
-          connectionId={connectionId}
-          overview={overview}
-          original={editingCol.original}
-          onClose={() => setEditingCol(null)}
-          onSaved={(o) => {
-            applyOverview(o);
-            setEditingCol(null);
           }}
         />
       )}
@@ -627,108 +549,5 @@ function InPredicateEditor({
         </button>
       </div>
     </div>
-  );
-}
-
-// ============================================================================
-// Context column add/edit modal
-// ============================================================================
-
-function ContextColumnModal({
-  connectionId,
-  overview,
-  original,
-  onClose,
-  onSaved,
-}: {
-  connectionId: string;
-  overview: ModelOverview;
-  original: ModelContextColumnInfo | null;
-  onClose: () => void;
-  onSaved: (overview: ModelOverview) => void;
-}): React.ReactElement {
-  const [name, setName] = useState(original?.name ?? "");
-  const [table, setTable] = useState(original?.table ?? overview.tables[0]?.name ?? "");
-  const [expression, setExpression] = useState(original?.expression ?? "");
-  const [dataType, setDataType] = useState(original?.dataType ?? "String");
-  const [description, setDescription] = useState(original?.description ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const canSave = name.trim() !== "" && table !== "" && expression.trim() !== "";
-
-  const save = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      onSaved(
-        await biModelUpsertContextColumn({
-          connectionId,
-          originalName: original?.name ?? null,
-          name: name.trim(),
-          table,
-          expression: expression.trim(),
-          dataType,
-          description: description.trim() || null,
-        }),
-      );
-    } catch (err: unknown) {
-      setError(String(err));
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal
-      title={original ? `Edit Context Column: ${original.name}` : "New Context Column"}
-      width={620}
-      onClose={onClose}
-      footer={
-        <>
-          <button style={styles.btn} onClick={onClose}>
-            Cancel
-          </button>
-          <button style={styles.primaryBtn} disabled={busy || !canSave} onClick={() => void save()}>
-            {busy ? "Saving…" : "Save"}
-          </button>
-        </>
-      }
-    >
-      <Field label="Name">
-        <input style={styles.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="PaymentStatus" />
-      </Field>
-      <Field label="Table">
-        <select style={styles.input} value={table} onChange={(e) => setTable(e.target.value)}>
-          {overview.tables.map((t) => (
-            <option key={t.name} value={t.name}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field
-        label="Expression"
-        hint='Row-level formula that may reference a scalar [Measure], e.g. IF(Invoice[paid_date] <= [AsOfDate], "Paid", "Open")'
-      >
-        <textarea
-          style={{ ...styles.textarea, minHeight: 70 }}
-          value={expression}
-          onChange={(e) => setExpression(e.target.value)}
-        />
-      </Field>
-      <Field label="Data type">
-        <select style={styles.input} value={dataType} onChange={(e) => setDataType(e.target.value)}>
-          {DATA_TYPES.map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="Description (optional)">
-        <input style={styles.input} value={description} onChange={(e) => setDescription(e.target.value)} />
-      </Field>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
-    </Modal>
   );
 }
