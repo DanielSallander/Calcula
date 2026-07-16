@@ -60,6 +60,10 @@ async function doOpen(connectionId: string | null): Promise<void> {
     minHeight: 520,
     resizable: true,
     center: true,
+    // Tauri's native drag-drop handler swallows ALL HTML5 drag events inside
+    // the WebView on Windows — with it on, dragging measures into folders and
+    // dragging tree/function entries onto the Monaco editor never fire.
+    dragDropEnabled: false,
   });
 
   // The EDITOR_READY signal is authoritative (the editor's listeners are
