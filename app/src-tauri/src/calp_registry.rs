@@ -227,9 +227,9 @@ impl RegistryTransport for HttpRegistry {
         version: &str,
     ) -> Result<Vec<String>, CalpError> {
         // The manifest's checksum map IS the canonical artifact set (it already
-        // excludes the integrity root, its signature, and the submissions
-        // subtree). Integrity then re-fetches + re-hashes each of these, so a
-        // tampered artifact on the server is still caught.
+        // excludes the integrity root, its signature, and the post-publish
+        // submissions/reviews subtrees). Integrity then re-fetches + re-hashes
+        // each of these, so a tampered artifact on the server is still caught.
         let manifest = self.get_version_manifest(package_name, version)?;
         let mut artifacts: Vec<String> = manifest.artifact_checksums.keys().cloned().collect();
         artifacts.sort();
@@ -240,8 +240,10 @@ impl RegistryTransport for HttpRegistry {
         Err(Self::read_only_err("clear version"))
     }
 
-    // -- submissions (writeback). A read-only HTTP registry has no submission
-    //    store; saving errors, and loading yields nothing. --
+    // -- submissions (writeback). A read-only HTTP registry has no event
+    //    store; appending errors, and loading yields nothing. (A future
+    //    writable HTTP registry maps the append-only event log to plain
+    //    POSTs — the friendliest possible shape for a server.) --
 
     fn save_submission(
         &self,
@@ -252,16 +254,24 @@ impl RegistryTransport for HttpRegistry {
         Err(Self::read_only_err("save submission"))
     }
 
-    fn save_model_submission(
+    fn save_review(
         &self,
         _package_name: &str,
         _version: &str,
-        _submission: &WritebackSubmission,
+        _review: &calp::writeback::ReviewEvent,
     ) -> Result<(), CalpError> {
-        Err(Self::read_only_err("save model submission"))
+        Err(Self::read_only_err("save review"))
     }
 
-    fn load_submissions(
+    fn load_review_events(
+        &self,
+        _package_name: &str,
+        _version: &str,
+    ) -> Result<Vec<calp::writeback::ReviewEvent>, CalpError> {
+        Ok(Vec::new())
+    }
+
+    fn load_current_submissions_by(
         &self,
         _package_name: &str,
         _version: &str,
@@ -270,7 +280,7 @@ impl RegistryTransport for HttpRegistry {
         Ok(Vec::new())
     }
 
-    fn load_region_submissions(
+    fn load_current_region_submissions(
         &self,
         _package_name: &str,
         _version: &str,
@@ -279,7 +289,7 @@ impl RegistryTransport for HttpRegistry {
         Ok(Vec::new())
     }
 
-    fn load_all_submissions(
+    fn load_current_submissions(
         &self,
         _package_name: &str,
         _version: &str,
@@ -383,11 +393,30 @@ mod tests {
             .write_artifact("pkg", "1.0.0", "sheets/x.json", b"{}")
             .is_err());
         assert!(reg.clear_version("pkg", "1.0.0").is_err());
+        // Appending review events is a write too.
+        assert!(reg
+            .save_review(
+                "pkg",
+                "1.0.0",
+                &calp::writeback::ReviewEvent {
+                    id: "rev-1".to_string(),
+                    target_submission_id: "sub-1".to_string(),
+                    region_id: "r1".to_string(),
+                    submitter_id: "id-a".to_string(),
+                    new_state: calp::writeback::SubmissionState::Approved,
+                    review_reason: None,
+                    reviewed_by: None,
+                    reviewed_at: "2026-01-01T00:00:00Z".to_string(),
+                    extra: Default::default(),
+                },
+            )
+            .is_err());
         // Loading submissions from a read-only registry yields nothing.
         assert!(reg
-            .load_all_submissions("pkg", "1.0.0")
+            .load_current_submissions("pkg", "1.0.0")
             .unwrap()
             .is_empty());
+        assert!(reg.load_review_events("pkg", "1.0.0").unwrap().is_empty());
     }
 
     #[test]

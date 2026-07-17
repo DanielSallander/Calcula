@@ -2195,9 +2195,10 @@ mod tests {
         let reg = LocalRegistry::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
-        // Subscriber-written submissions land inside the version directory
-        // after publish — they are a separate trust domain and must not
-        // trip the publisher-artifact integrity gate.
+        // Post-publish event files land inside the version directory —
+        // subscriber submissions AND publisher review events. Both are a
+        // separate trust domain and must not trip the publisher-artifact
+        // integrity gate.
         let submission = crate::writeback::WritebackSubmission {
             model_key: None,
             id: "sub-1".to_string(),
@@ -2220,6 +2221,22 @@ mod tests {
             extra: HashMap::new(),
         };
         reg.save_submission("test-pkg", "1.0.0", &submission).unwrap();
+        reg.save_review(
+            "test-pkg",
+            "1.0.0",
+            &crate::writeback::ReviewEvent {
+                id: "rev-1".to_string(),
+                target_submission_id: "sub-1".to_string(),
+                region_id: "r1".to_string(),
+                submitter_id: "id-alice".to_string(),
+                new_state: crate::writeback::SubmissionState::Approved,
+                review_reason: None,
+                reviewed_by: Some("Publisher".to_string()),
+                reviewed_at: "2026-05-18T03:00:00Z".to_string(),
+                extra: HashMap::new(),
+            },
+        )
+        .unwrap();
 
         let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
         assert_eq!(result.sheets.len(), 2);

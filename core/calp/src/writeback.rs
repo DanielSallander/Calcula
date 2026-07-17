@@ -679,50 +679,6 @@ pub fn check_region_compatibility(
 }
 
 // ---------------------------------------------------------------------------
-// Gather cache (pre-fetch for GATHER formula functions)
-// ---------------------------------------------------------------------------
-
-/// Pre-fetched submission data for GATHER formula evaluation.
-/// Built once per evaluation session from registry data.
-#[derive(Debug, Clone, Default)]
-pub struct GatherCache {
-    /// region_id -> list of submissions
-    pub data: HashMap<String, Vec<WritebackSubmission>>,
-}
-
-impl GatherCache {
-    pub fn new() -> Self {
-        Self { data: HashMap::new() }
-    }
-
-    /// Build a cache from the registry for all writeback regions in the manifest.
-    pub fn from_registry(
-        registry: &crate::registry::LocalRegistry,
-        package_name: &str,
-        version: &str,
-        regions: &[WritebackRegionDeclaration],
-    ) -> Self {
-        let mut data = HashMap::new();
-        for region in regions {
-            match registry.load_region_submissions(package_name, version, &region.id) {
-                Ok(subs) => {
-                    data.insert(region.id.clone(), subs);
-                }
-                Err(_) => {
-                    data.insert(region.id.clone(), Vec::new());
-                }
-            }
-        }
-        Self { data }
-    }
-
-    /// Get submissions for a region.
-    pub fn get(&self, region_id: &str) -> &[WritebackSubmission] {
-        self.data.get(region_id).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Submission types (Phase 14)
 // ---------------------------------------------------------------------------
 
@@ -794,6 +750,50 @@ pub struct WritebackSubmission {
     /// `cell_row`/`cell_col` are 0. Absent for grid-region submissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_key: Option<Vec<String>>,
+    /// Forward-compatibility.
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Review events (publisher decisions, append-only)
+// ---------------------------------------------------------------------------
+
+/// A publisher review decision over one submission EVENT, stored as its own
+/// immutable file under the version's `reviews/` subtree — never inside a
+/// submitter's directory. Every registry path has exactly one writer
+/// (submission events: the owning submitter; review events: the publisher)
+/// and no file is ever rewritten, which is what makes shared/synced storage
+/// (SMB, Dropbox) structurally conflict-free: a sync client can only ever see
+/// new files appear, never two versions of one path.
+///
+/// A review targets a specific submission id, not a slot. If the submitter
+/// re-submits after the decision, the review targets a superseded event and no
+/// longer applies — the slot folds back to Submitted ("approve what you saw").
+/// The fold (`crate::fold`) derives ALL review state from these events; the
+/// state stored inside a submission file is ignored, so a hand-edited
+/// submission can never self-approve into an on_approval aggregate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewEvent {
+    /// Unique review event id (UUID v7) — also the filename stem.
+    pub id: String,
+    /// The `WritebackSubmission::id` this decision applies to.
+    pub target_submission_id: String,
+    /// Denormalized from the target submission (analytics + orphan tolerance).
+    pub region_id: String,
+    /// Denormalized: the target submission's submitter id.
+    pub submitter_id: String,
+    /// The decided state: Approved | Rejected | Submitted (re-open).
+    pub new_state: SubmissionState,
+    /// Publisher's reason (the return-leg feedback a contributor sees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_reason: Option<String>,
+    /// Display name of the deciding publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_by: Option<String>,
+    /// ISO 8601 timestamp of the decision.
+    pub reviewed_at: String,
     /// Forward-compatibility.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
@@ -1704,20 +1704,41 @@ mod tests {
         assert!(compat.compatible.is_empty());
     }
 
-    // --- GatherCache tests ---
+    // --- ReviewEvent serde ---
 
     #[test]
-    fn gather_cache_empty() {
-        let cache = GatherCache::new();
-        assert!(cache.get("nonexistent").is_empty());
-    }
+    fn review_event_serde_roundtrip_preserves_extras() {
+        let json = serde_json::json!({
+            "id": "rev-1",
+            "targetSubmissionId": "sub-1",
+            "regionId": "r1",
+            "submitterId": "id-alice",
+            "newState": "approved",
+            "reviewReason": "looks right",
+            "reviewedBy": "Publisher",
+            "reviewedAt": "2026-01-02T00:00:00Z",
+            "futureField": {"nested": true}
+        });
+        let review: ReviewEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(review.new_state, SubmissionState::Approved);
+        assert_eq!(review.target_submission_id, "sub-1");
+        assert!(review.extra.contains_key("futureField"));
 
-    #[test]
-    fn gather_cache_stores_and_retrieves() {
-        let mut cache = GatherCache::new();
-        let sub = make_submission("r1", 0, 0, 42.0, "alice");
-        cache.data.insert("r1".to_string(), vec![sub]);
-        assert_eq!(cache.get("r1").len(), 1);
-        assert!(cache.get("r2").is_empty());
+        let re_json = serde_json::to_value(&review).unwrap();
+        assert_eq!(re_json["newState"], "approved");
+        assert_eq!(re_json["futureField"]["nested"], true);
+
+        // Optional fields absent stay absent.
+        let minimal = serde_json::json!({
+            "id": "rev-2",
+            "targetSubmissionId": "sub-2",
+            "regionId": "r1",
+            "submitterId": "id-bob",
+            "newState": "rejected",
+            "reviewedAt": "2026-01-02T00:00:00Z"
+        });
+        let review: ReviewEvent = serde_json::from_value(minimal).unwrap();
+        assert!(review.review_reason.is_none());
+        assert!(review.reviewed_by.is_none());
     }
 }

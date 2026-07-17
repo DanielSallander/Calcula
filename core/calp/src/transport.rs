@@ -15,13 +15,13 @@
 //! maps that to its own storage (a path join for local; a URL for HTTP). The
 //! checksummable artifact set returned by `list_artifacts` MUST exclude the
 //! integrity root (`version-manifest.json`), its detached signature
-//! (`version-manifest.sig`), and the subscriber-written `submissions/` subtree —
-//! the same exclusion the integrity walk has always applied.
+//! (`version-manifest.sig`), and the post-publish `submissions/` + `reviews/`
+//! event subtrees — the same exclusion the integrity walk has always applied.
 
 use crate::error::CalpError;
 use crate::manifest::{PackageManifest, VersionManifest};
 use crate::version::{SemVer, VersionPin};
-use crate::writeback::WritebackSubmission;
+use crate::writeback::{ReviewEvent, WritebackSubmission};
 
 /// Abstraction over a `.calp` registry. `LocalRegistry` is the only
 /// implementation today; an HTTP registry is a future effort (out of scope).
@@ -146,9 +146,18 @@ pub trait RegistryTransport {
     }
 
     // -----------------------------------------------------------------------
-    // Submissions (writeback) — a separate trust domain from publisher artifacts
+    // Submissions (writeback) — a separate trust domain from publisher
+    // artifacts, stored as an APPEND-ONLY event log: submission events under
+    // `submissions/{submitter}/`, publisher review events under `reviews/`.
+    // No event path is ever written twice and no locking is ever used on
+    // these paths (single-writer-per-path keeps shared/synced registries
+    // conflict-free). The `load_current_*` methods return the deterministic
+    // fold of those events (`calp::fold::fold_submissions`), which is the
+    // ONLY current-state view readers should consume.
     // -----------------------------------------------------------------------
 
+    /// Append a submission event. Every save — including a re-submit of the
+    /// same cell — is a new immutable file keyed by the submission id.
     fn save_submission(
         &self,
         package_name: &str,
@@ -156,31 +165,41 @@ pub trait RegistryTransport {
         submission: &WritebackSubmission,
     ) -> Result<(), CalpError>;
 
-    /// Save a MODEL-KEYED submission (writeback COLUMN entry): append-only —
-    /// every save gets its own file so the full submission history is
-    /// preserved. See `LocalRegistry::save_model_submission`.
-    fn save_model_submission(
+    /// Append a publisher review event (`reviews/{id}.json`), targeting one
+    /// submission event by id.
+    fn save_review(
         &self,
         package_name: &str,
         version: &str,
-        submission: &WritebackSubmission,
+        review: &ReviewEvent,
     ) -> Result<(), CalpError>;
 
-    fn load_submissions(
+    /// Raw review events for a version (hygiene filtered, never an error for
+    /// a bad file).
+    fn load_review_events(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<ReviewEvent>, CalpError>;
+
+    /// Current (folded) submissions by one submitter.
+    fn load_current_submissions_by(
         &self,
         package_name: &str,
         version: &str,
         submitter_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError>;
 
-    fn load_region_submissions(
+    /// Current (folded) submissions for one region across all submitters.
+    fn load_current_region_submissions(
         &self,
         package_name: &str,
         version: &str,
         region_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError>;
 
-    fn load_all_submissions(
+    /// Current (folded) submissions for a whole version in one tree scan.
+    fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
@@ -294,36 +313,43 @@ impl RegistryTransport for Box<dyn RegistryTransport> {
     ) -> Result<(), CalpError> {
         (**self).save_submission(package_name, version, submission)
     }
-    fn save_model_submission(
+    fn save_review(
         &self,
         package_name: &str,
         version: &str,
-        submission: &WritebackSubmission,
+        review: &ReviewEvent,
     ) -> Result<(), CalpError> {
-        (**self).save_model_submission(package_name, version, submission)
+        (**self).save_review(package_name, version, review)
     }
-    fn load_submissions(
+    fn load_review_events(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<ReviewEvent>, CalpError> {
+        (**self).load_review_events(package_name, version)
+    }
+    fn load_current_submissions_by(
         &self,
         package_name: &str,
         version: &str,
         submitter_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_submissions(package_name, version, submitter_id)
+        (**self).load_current_submissions_by(package_name, version, submitter_id)
     }
-    fn load_region_submissions(
+    fn load_current_region_submissions(
         &self,
         package_name: &str,
         version: &str,
         region_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_region_submissions(package_name, version, region_id)
+        (**self).load_current_region_submissions(package_name, version, region_id)
     }
-    fn load_all_submissions(
+    fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        (**self).load_all_submissions(package_name, version)
+        (**self).load_current_submissions(package_name, version)
     }
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
         (**self).lock()

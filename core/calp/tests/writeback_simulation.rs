@@ -214,8 +214,10 @@ fn commit(
     reg.save_submission(PKG, version, &sub).expect("save_submission failed");
 }
 
-/// Publisher decision: load the submission for a (submitter, cell) slot, set its
-/// state, re-save. Mirrors `calp_set_submission_state` (approve/reject).
+/// Publisher decision: resolve the CURRENT submission event for a
+/// (submitter, cell) slot and append a ReviewEvent targeting it. Mirrors
+/// `calp_set_submission_state` (approve/reject) — the submission file itself
+/// is never touched; the decision is its own immutable file under `reviews/`.
 fn decide(
     reg: &LocalRegistry,
     version: &str,
@@ -223,16 +225,27 @@ fn decide(
     row: u32,
     new_state: SubmissionState,
 ) {
+    static REVIEW_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let subs = reg
-        .load_submissions(PKG, version, submitter_id)
-        .expect("load_submissions failed");
-    let mut s = subs
+        .load_current_submissions_by(PKG, version, submitter_id)
+        .expect("load_current_submissions_by failed");
+    let s = subs
         .into_iter()
         .find(|s| s.region_id == REGION && s.cell_row == row && s.cell_col == COL)
         .unwrap_or_else(|| panic!("no submission for {submitter_id} row {row}"));
-    s.state = new_state;
-    s.updated_at = "2026-06-15T05:00:00Z".to_string();
-    reg.save_submission(PKG, version, &s).expect("re-save failed");
+    let seq = REVIEW_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let review = calp::writeback::ReviewEvent {
+        id: format!("rev-{seq}-{submitter_id}-{row}"),
+        target_submission_id: s.id.clone(),
+        region_id: s.region_id.clone(),
+        submitter_id: s.submitter.id.clone(),
+        new_state,
+        review_reason: None,
+        reviewed_by: Some("Finance HQ".to_string()),
+        reviewed_at: "2026-06-15T05:00:00Z".to_string(),
+        extra: HashMap::new(),
+    };
+    reg.save_review(PKG, version, &review).expect("save_review failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -358,12 +371,13 @@ fn writeback_multi_user_simulation() {
     }
     println!("[north/south/west] each committed Q1..Q4 forecasts");
 
-    // 12 slots on disk (3 submitters x 4 cells), one file per slot.
-    assert_eq!(reg.load_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
+    // 12 current records (3 submitters x 4 cells), one event file each.
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
 
     // --- 4a. Supersedence: Alice corrects Q1 (100 -> 105) -----------------
-    // A NEW submission id + NEWER updated_at for the SAME slot. Slot-keyed
-    // storage overwrites in place — exactly one file, the newer value wins.
+    // A NEW submission id + NEWER updated_at for the SAME slot. The event log
+    // APPENDS a new immutable file; the fold collapses the slot to the newest
+    // event, so the newer value wins without anything being overwritten.
     commit(&reg, "1.0.0", &region, &alice, ROW_Q1, SubmissionValue::Number { value: 105.0 }, "2026-06-15T04:00:00Z", "a-1-rev2");
     println!("[north] corrected Q1: 100 -> 105 (supersedence)");
 
@@ -371,9 +385,12 @@ fn writeback_multi_user_simulation() {
     commit(&reg, "1.0.0", &region, &carol, ROW_Q4, SubmissionValue::Empty, "2026-06-15T04:10:00Z", "c-4-clear");
     println!("[west] cleared Q4 (empty submission)");
 
-    // Still 12 files (corrections/clears overwrite slots, never append).
-    let all_v1 = reg.load_region_submissions(PKG, "1.0.0", REGION).unwrap();
-    assert_eq!(all_v1.len(), 12, "supersedence + clear are in-place; no slot duplication");
+    // 14 raw event files now (12 initial + correction + clear) — nothing was
+    // rewritten — but the folded view still collapses to 12 slots, so GATHER
+    // never double-counts.
+    assert_eq!(reg.load_submission_events(PKG, "1.0.0").unwrap().len(), 14);
+    let all_v1 = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    assert_eq!(all_v1.len(), 12, "supersedence + clear fold per slot; no duplication");
     // The correction won.
     let alice_q1 = all_v1
         .iter()
@@ -395,18 +412,19 @@ fn writeback_multi_user_simulation() {
     // Carol Q2/Q3 remain merely Submitted; Q4 is an (empty) submission.
     println!("[publisher] approved North+South; rejected West Q1; West Q2/Q3 still pending");
 
-    // Re-read the authoritative post-decision records (decisions overwrite the
-    // slot files in place; `all_v1` above is the pre-approval snapshot).
-    let after = reg.load_region_submissions(PKG, "1.0.0", REGION).unwrap();
-    assert_eq!(after.len(), 12, "approve/reject overwrite slots in place; no duplication");
+    // Re-read the authoritative post-decision records: decisions are review
+    // EVENTS under reviews/, folded into the derived state at read time
+    // (`all_v1` above is the pre-approval snapshot).
+    let after = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    assert_eq!(after.len(), 12, "review events fold in; still one record per slot");
 
     // RETURN LEG (read-back): each subscriber can now learn the fate of what
     // they submitted by reloading their OWN slots — exactly the data the app's
     // calp_reconcile_writeback adopts into the local layer + grid cell styling.
-    let carol_own = reg.load_submissions(PKG, "1.0.0", &carol.id).unwrap();
+    let carol_own = reg.load_current_submissions_by(PKG, "1.0.0", &carol.id).unwrap();
     let carol_q1 = carol_own.iter().find(|s| s.cell_row == ROW_Q1).unwrap();
     assert_eq!(carol_q1.state, SubmissionState::Rejected, "West sees Q1 was rejected");
-    let alice_own = reg.load_submissions(PKG, "1.0.0", &alice.id).unwrap();
+    let alice_own = reg.load_current_submissions_by(PKG, "1.0.0", &alice.id).unwrap();
     assert!(
         alice_own.iter().all(|s| s.state == SubmissionState::Approved),
         "North sees all four approved"
@@ -500,24 +518,29 @@ fn writeback_multi_user_simulation() {
     println!("[author] published v2.0.0 (schema widened, compatible)");
 
     // v1 submissions remain readable; v2 starts empty.
-    assert_eq!(reg.load_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
-    assert!(reg.load_region_submissions(PKG, "2.0.0", REGION).unwrap().is_empty());
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
+    assert!(reg.load_current_region_submissions(PKG, "2.0.0", REGION).unwrap().is_empty());
 
-    // Lenient carry-forward (the app copies compatible prior-version records
-    // into v2). Carry the current v1 records forward and confirm the v2
-    // governed aggregate matches v1's.
+    // Lenient carry-forward: records live in the version directory they were
+    // submitted against, and the app merges across versions at READ time
+    // (newest per slot through the compatibility gate). Materializing them
+    // into v2 — as done here — must carry BOTH event kinds: the submission
+    // events and the review events that give them their derived state.
     for s in &after {
         reg.save_submission(PKG, "2.0.0", s).unwrap();
     }
+    for r in reg.load_review_events(PKG, "1.0.0").unwrap() {
+        reg.save_review(PKG, "2.0.0", &r).unwrap();
+    }
     let v2_governed = governed_submissions(
-        reg.load_region_submissions(PKG, "2.0.0", REGION).unwrap(),
+        reg.load_current_region_submissions(PKG, "2.0.0", REGION).unwrap(),
         &region_v2,
         None,
     );
     assert_eq!(v2_governed.len(), 8);
     assert_eq!(sum_numbers(&v2_governed), expected_sum);
     // v1's own records are untouched by the carry-forward into v2.
-    assert_eq!(reg.load_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
+    assert_eq!(reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap().len(), 12);
     println!("[publisher] v2.0.0 carried forward v1 forecasts: count=8, SUM(GATHER)={expected_sum}");
     println!("[OK] regional-budget collection simulation complete");
 }
@@ -604,4 +627,96 @@ fn writeback_only_publisher_is_authorized_to_approve() {
             .unwrap(),
         "another publisher's key must not authorize actions on this package"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: the append-only event log under interleaved multi-machine
+// writes. Two LocalRegistry handles over the SAME directory stand in for two
+// machines sharing a network/synced folder. There is no locking anywhere on
+// the submission paths — every write is a NEW immutable file — so any
+// interleaving preserves every event and converges to one folded state.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn writeback_concurrent_interleavings_converge() {
+    let reg_dir = TempDir::new().unwrap();
+    let hq_prof = TempDir::new().unwrap();
+    let reg_a = LocalRegistry::open(reg_dir.path()).unwrap(); // "machine A" (publisher)
+    let reg_b = LocalRegistry::open(reg_dir.path()).unwrap(); // "machine B" (subscriber)
+
+    let wb = make_budget_workbook();
+    let region = make_region(wb.sheets[0].id);
+    publish_version(&reg_a, hq_prof.path(), &wb, SemVer::new(1, 0, 0), vec![region.clone()]);
+
+    let alice = identity("North (Alice)", "id-north-alice");
+
+    // Subscriber (machine B) submits 100.
+    commit(&reg_b, "1.0.0", &region, &alice, ROW_Q1, SubmissionValue::Number { value: 100.0 }, "2026-06-15T03:00:00Z", "race-1");
+
+    // The classic race: the publisher (A) approves what they saw at the same
+    // moment the subscriber (B) re-submits a correction. Under mutable slot
+    // files one of these two writes would silently overwrite the other (SMB)
+    // or fork a "conflicted copy" (Dropbox); here both are new files and
+    // nothing is lost, whatever the order.
+    decide(&reg_a, "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-1
+    commit(&reg_b, "1.0.0", &region, &alice, ROW_Q1, SubmissionValue::Number { value: 105.0 }, "2026-06-15T03:05:00Z", "race-2");
+
+    // Every event survives on disk.
+    assert_eq!(reg_a.load_submission_events(PKG, "1.0.0").unwrap().len(), 2);
+    assert_eq!(reg_a.load_review_events(PKG, "1.0.0").unwrap().len(), 1);
+
+    // BOTH handles fold to the same state: the newest submission wins the
+    // slot, and the approval of the superseded event is inert — the publisher
+    // approved what they saw, not the correction they never reviewed.
+    for reg in [&reg_a, &reg_b] {
+        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].id, "race-2");
+        assert_eq!(
+            current[0].state,
+            SubmissionState::Submitted,
+            "approval targeted the superseded event; the unseen correction needs review"
+        );
+        assert!(matches!(current[0].value, SubmissionValue::Number { value } if value == 105.0));
+    }
+
+    // The publisher reviews the correction they can now see; states converge.
+    decide(&reg_a, "1.0.0", &alice.id, ROW_Q1, SubmissionState::Approved); // targets race-2
+    for reg in [&reg_a, &reg_b] {
+        let current = reg.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+        assert_eq!(current[0].state, SubmissionState::Approved);
+    }
+
+    // Threaded stress: 8 concurrent re-submits to the SAME slot from separate
+    // handles. No lost updates (all 8 events on disk) and one deterministic
+    // folded winner.
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let root = reg_dir.path().to_path_buf();
+            let region = region.clone();
+            let alice = alice.clone();
+            std::thread::spawn(move || {
+                let reg = LocalRegistry::open(&root).unwrap();
+                commit(
+                    &reg,
+                    "1.0.0",
+                    &region,
+                    &alice,
+                    ROW_Q4,
+                    SubmissionValue::Number { value: i as f64 },
+                    &format!("2026-06-15T04:00:0{i}Z"),
+                    &format!("stress-{i}"),
+                );
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let events = reg_a.load_submission_events(PKG, "1.0.0").unwrap();
+    assert_eq!(events.iter().filter(|s| s.cell_row == ROW_Q4).count(), 8, "no write was lost");
+    let current = reg_a.load_current_region_submissions(PKG, "1.0.0", REGION).unwrap();
+    let q4: Vec<_> = current.iter().filter(|s| s.cell_row == ROW_Q4).collect();
+    assert_eq!(q4.len(), 1, "one current record per slot");
+    assert_eq!(q4[0].id, "stress-7", "newest (updated_at, id) wins deterministically");
 }

@@ -5201,7 +5201,7 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
     versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
     versions.into_iter().any(|version| {
         registry
-            .load_submissions(&package_name, &version, &own.id)
+            .load_current_submissions_by(&package_name, &version, &own.id)
             .map(|subs| {
                 subs.iter().any(|s| {
                     s.region_id == region_id
@@ -5487,7 +5487,8 @@ fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
         let mut seen: std::collections::HashSet<(String, u32, u32)> =
             std::collections::HashSet::new();
         for version in &versions {
-            let Ok(subs) = registry.load_submissions(&package_name, version, &own.id) else {
+            let Ok(subs) = registry.load_current_submissions_by(&package_name, version, &own.id)
+            else {
                 continue;
             };
             for s in subs {
@@ -5666,10 +5667,9 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
     }
-    // Refresh the per-version Parquet rollup, if the publisher opted in.
-    if rollup_enabled(&registry, &package_name) {
-        materialize_submissions_parquet(&registry, &package_name, &resolved_version);
-    }
+    // (The Parquet rollup is regenerated PUBLISHER-side only — on review
+    // actions and inbox loads — so subscriber machines never rewrite the
+    // shared `_rollup.parquet` path; see refresh_rollup_if_publisher.)
 
     // All writes succeeded — advance the local drafts.
     {
@@ -5998,7 +5998,7 @@ pub(crate) fn submit_model_writeback(
     let registry =
         crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
     registry
-        .save_model_submission(&package_name, &resolved_version, &submission)
+        .save_submission(&package_name, &resolved_version, &submission)
         .map_err(|e| e.to_string())?;
 
     // Audit + refresh (the gather invalidation also queues the BI feeds).
@@ -6037,20 +6037,25 @@ pub fn calp_list_model_submissions(
     let registry =
         crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
     let mut subs: Vec<calp::writeback::WritebackSubmission> = registry
-        .load_all_submissions(&package_name, &resolved_version)
+        .load_current_submissions(&package_name, &resolved_version)
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|s| s.region_id == writeback_id && s.model_key.is_some())
         .collect();
-    subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
+    subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at).then_with(|| a.id.cmp(&b.id)));
+    // Publisher-side, best-effort rollup freshness: submissions arrive while
+    // the publisher only reads, so the review-pane load keeps the parquet
+    // current without any subscriber ever writing it.
+    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
     Ok(subs)
 }
 
 /// Approve or reject a MODEL writeback submission (publisher action, engine
 /// v21 writeback columns). Same authorization as grid submissions: possession
-/// of the package's signing key. Rewrites the submission's registry file in
-/// place (same id -> same slot filename), so the history record keeps its
-/// identity while its state changes.
+/// of the package's signing key. The decision is an append-only ReviewEvent
+/// under the version's `reviews/` subtree, targeting the submission by id —
+/// the history record itself is immutable, and its state is derived at read
+/// time by the fold.
 #[tauri::command]
 pub fn calp_set_model_submission_state(
     state: State<AppState>,
@@ -6082,8 +6087,8 @@ pub fn calp_set_model_submission_state(
     // this any subscriber could self-approve a masterData value.
     require_publisher(&registry, &package_name, &resolved_version)?;
 
-    let mut submission = registry
-        .load_all_submissions(&package_name, &resolved_version)
+    let submission = registry
+        .load_current_submissions(&package_name, &resolved_version)
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|s| s.id == submission_id && s.region_id == writeback_id && s.model_key.is_some())
@@ -6096,17 +6101,26 @@ pub fn calp_set_model_submission_state(
 
     let now = chrono::Utc::now().to_rfc3339();
     let reviewer = get_subscriber_identity(&state).ok().map(|i| i.display_name);
-    submission.state = target_state;
-    submission.updated_at = now.clone();
-    submission.review_reason = reason
-        .as_ref()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty());
-    submission.reviewed_by = reviewer;
-
+    let review = calp::writeback::ReviewEvent {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7())
+            .to_string()
+            .to_lowercase(),
+        target_submission_id: submission.id.clone(),
+        region_id: writeback_id.clone(),
+        submitter_id: submission.submitter.id.clone(),
+        new_state: target_state,
+        review_reason: reason
+            .as_ref()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty()),
+        reviewed_by: reviewer,
+        reviewed_at: now.clone(),
+        extra: Default::default(),
+    };
     registry
-        .save_model_submission(&package_name, &resolved_version, &submission)
+        .save_review(&package_name, &resolved_version, &review)
         .map_err(|e| e.to_string())?;
+    refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
 
     {
         let user = audit_user(&state);
@@ -6127,8 +6141,15 @@ pub fn calp_set_model_submission_state(
 }
 
 /// Approve or reject a submitted writeback value (publisher action).
-/// Rewrites the submission's registry file with the new state; `on_approval`
-/// regions only aggregate Approved submissions in GATHER.
+///
+/// The decision is an append-only ReviewEvent under the version's `reviews/`
+/// subtree, targeting the CURRENT submission event for the slot by id — the
+/// submission file itself is never rewritten (publisher and submitter never
+/// write the same path, which is what keeps shared/synced registries
+/// conflict-free). If the submitter re-submits after the decision, the review
+/// targets a superseded event and the slot folds back to Submitted ("approve
+/// what you saw"). `on_approval` regions only aggregate Approved submissions
+/// in GATHER.
 #[tauri::command]
 pub fn calp_set_submission_state(
     state: State<AppState>,
@@ -6138,6 +6159,7 @@ pub fn calp_set_submission_state(
     cell_col: u32,
     new_state: String,
     reason: Option<String>,
+    submission_id: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -6165,14 +6187,15 @@ pub fn calp_set_submission_state(
 
     // Search the resolved version first, then older ones: lenient regions
     // carry submissions forward across version bumps, and those records live
-    // in the version directory they were submitted against — they must be
-    // approvable (and rewritten) where they actually are.
+    // in the version directory they were submitted against — the review event
+    // must be appended in the version whose fold holds the record.
     let mut versions = vec![resolved_version.clone()];
     versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
 
     let mut found: Option<(String, calp::writeback::WritebackSubmission)> = None;
     for version in &versions {
-        let Ok(submissions) = registry.load_submissions(&package_name, version, &submitter_id)
+        let Ok(submissions) =
+            registry.load_current_submissions_by(&package_name, version, &submitter_id)
         else {
             continue;
         };
@@ -6183,32 +6206,51 @@ pub fn calp_set_submission_state(
             break;
         }
     }
-    let (version, mut submission) = found.ok_or_else(|| {
+    let (version, submission) = found.ok_or_else(|| {
         format!(
             "No submission found for region '{}' cell ({}, {}) by submitter '{}'",
             region_id, cell_row, cell_col, submitter_id
         )
     })?;
 
+    // EXACT-TARGET REVIEW: when the dashboard passes the submission id it
+    // displayed, refuse to review blind if a newer submission has arrived in
+    // the meantime — the approve-vs-resubmit race made visible instead of
+    // silently deciding on a value the publisher never saw.
+    if let Some(expected) = submission_id.as_deref() {
+        if expected != submission.id {
+            return Err(
+                "This submission was superseded by a newer one — refresh the dashboard and review the current value."
+                    .to_string(),
+            );
+        }
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let reviewer = get_subscriber_identity(&state).ok().map(|i| i.display_name);
-    submission.state = target_state;
-    submission.updated_at = now.clone();
-    // Attach the publisher's reason + identity so the contributor's read-back
-    // can show WHY (not just a bare "rejected"). An empty reason clears it.
-    submission.review_reason = reason
-        .as_ref()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty());
-    submission.reviewed_by = reviewer;
-
+    let review = calp::writeback::ReviewEvent {
+        id: identity::EntityId::from_bytes(identity::generate_uuid_v7())
+            .to_string()
+            .to_lowercase(),
+        target_submission_id: submission.id.clone(),
+        region_id: region_id.clone(),
+        submitter_id: submitter_id.clone(),
+        new_state: target_state,
+        // Attach the publisher's reason + identity so the contributor's
+        // read-back can show WHY (not just a bare "rejected"). An empty
+        // reason clears it.
+        review_reason: reason
+            .as_ref()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty()),
+        reviewed_by: reviewer,
+        reviewed_at: now.clone(),
+        extra: Default::default(),
+    };
     registry
-        .save_submission(&package_name, &version, &submission)
+        .save_review(&package_name, &version, &review)
         .map_err(|e| e.to_string())?;
-    // Refresh the per-version Parquet rollup, if the publisher opted in.
-    if rollup_enabled(&registry, &package_name) {
-        materialize_submissions_parquet(&registry, &package_name, &version);
-    }
+    refresh_rollup_if_publisher(&registry, &package_name, &version);
     invalidate_gather_cache(&state);
 
     // Audit the publisher decision — the provenance of the return leg, so a
@@ -6238,6 +6280,9 @@ pub fn calp_set_submission_state(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionSubmissionInfo {
+    /// The submission EVENT id the row shows — the dashboard passes it back
+    /// on approve/reject so the decision targets exactly what was reviewed.
+    pub submission_id: String,
     pub region_id: String,
     pub cell_row: u32,
     pub cell_col: u32,
@@ -6265,7 +6310,18 @@ pub fn calp_load_region_submissions(
     window: tauri::Window,
 ) -> Result<Vec<RegionSubmissionInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    load_region_submission_infos(&state, &region_id)
+    let infos = load_region_submission_infos(&state, &region_id)?;
+    // Publisher-side, best-effort rollup freshness: submissions arrive while
+    // the publisher only reads, so the inbox load keeps the parquet current
+    // without any subscriber ever writing the shared `_rollup.parquet` path.
+    if let Ok((package_name, resolved_version, registry_path)) =
+        owning_subscription_for_region(&state, &region_id)
+    {
+        if let Ok(registry) = crate::calp_registry::open_registry(&registry_path) {
+            refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
+        }
+    }
+    Ok(infos)
 }
 
 /// The current raw record per (submitter, cell) slot for a region, across the
@@ -6284,11 +6340,13 @@ fn load_region_current_submissions(
     let mut versions = vec![resolved_version.clone()];
     versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
 
-    // Newest version first: keep the current record per (submitter, cell) slot.
+    // Newest version first: keep the current record per (submitter, cell)
+    // slot. Each version's load is already collapsed by the registry fold, so
+    // `or_insert` only arbitrates ACROSS versions.
     let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
         std::collections::HashMap::new();
     for version in &versions {
-        if let Ok(subs) = registry.load_region_submissions(&package_name, version, region_id) {
+        if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, region_id) {
             for s in subs {
                 by_slot
                     .entry((s.submitter.id.clone(), s.cell_row, s.cell_col))
@@ -6338,6 +6396,7 @@ fn load_region_submission_infos(
                 SubmissionValue::Empty => (String::new(), "empty"),
             };
             RegionSubmissionInfo {
+                submission_id: s.id,
                 region_id: s.region_id,
                 cell_row: s.cell_row,
                 cell_col: s.cell_col,
@@ -6433,6 +6492,7 @@ fn encode_submissions_parquet(
     use calp::writeback::SubmissionValue;
     use std::sync::Arc;
 
+    let mut submission_id = StringBuilder::new();
     let mut region_id = StringBuilder::new();
     let mut cell_row = UInt32Builder::new();
     let mut cell_col = UInt32Builder::new();
@@ -6450,6 +6510,7 @@ fn encode_submissions_parquet(
     let mut review_reason = StringBuilder::new();
 
     for s in subs {
+        submission_id.append_value(&s.id);
         region_id.append_value(&s.region_id);
         cell_row.append_value(s.cell_row);
         cell_col.append_value(s.cell_col);
@@ -6490,6 +6551,7 @@ fn encode_submissions_parquet(
     }
 
     let schema = Arc::new(Schema::new(vec![
+        Field::new("submission_id", DataType::Utf8, false),
         Field::new("region_id", DataType::Utf8, false),
         Field::new("cell_row", DataType::UInt32, false),
         Field::new("cell_col", DataType::UInt32, false),
@@ -6508,6 +6570,7 @@ fn encode_submissions_parquet(
     ]));
 
     let columns: Vec<ArrayRef> = vec![
+        Arc::new(submission_id.finish()),
         Arc::new(region_id.finish()),
         Arc::new(cell_row.finish()),
         Arc::new(cell_col.finish()),
@@ -6551,23 +6614,23 @@ pub fn calp_export_region_submissions_parquet(
     encode_submissions_parquet(&subs)
 }
 
-/// Best-effort: (re)materialize the per-version Parquet rollup of ALL submissions
-/// at `{version}/submissions/_rollup.parquet`, so a database can read the whole
-/// collection by pointing at the registry folder — no per-slot JSON parsing, and
-/// no manual export. It lives UNDER `submissions/` (the subscriber-written
-/// subtree excluded from the package integrity walk) so it never trips pull, and
-/// it is a non-`.json` file so it is ignored by submission loading. Called after
-/// any write to a version's submissions; failures are logged, not surfaced — the
-/// JSON slots remain the source of truth and the next write self-heals the rollup.
+/// Best-effort: (re)materialize the per-version Parquet rollup of the CURRENT
+/// (folded) submissions at `{version}/submissions/_rollup.parquet`, so a
+/// database can read the whole collection by pointing at the registry folder —
+/// no per-event JSON parsing, and no manual export. It lives UNDER
+/// `submissions/` (a post-publish subtree excluded from the package integrity
+/// walk) so it never trips pull, and it is a non-`.json` file so it is ignored
+/// by submission loading. Failures are logged, not surfaced — the JSON events
+/// remain the source of truth and the next refresh self-heals the rollup.
 fn materialize_submissions_parquet(
     registry: &dyn calp::RegistryTransport,
     package: &str,
     version: &str,
 ) {
-    let subs = match registry.load_all_submissions(package, version) {
+    let subs = match registry.load_current_submissions(package, version) {
         Ok(s) => s,
         Err(e) => {
-            crate::log_warn!("CALP", "writeback rollup: load_all_submissions failed: {}", e);
+            crate::log_warn!("CALP", "writeback rollup: load_current_submissions failed: {}", e);
             return;
         }
     };
@@ -6580,6 +6643,34 @@ fn materialize_submissions_parquet(
     };
     if let Err(e) = registry.write_artifact(package, version, "submissions/_rollup.parquet", &bytes) {
         crate::log_warn!("CALP", "writeback rollup: write failed: {}", e);
+    }
+}
+
+/// Publisher-gated, best-effort rollup refresh. Only the PUBLISHER's machine
+/// (holder of the package signing key) ever regenerates `_rollup.parquet`, so
+/// exactly one machine owns that path — a sync client can never fork it into
+/// "conflicted copies" the way multi-machine rewrites would. Called from
+/// review actions and publisher inbox/review-pane loads, so the rollup also
+/// picks up submissions (grid AND model/store-table) that arrived while the
+/// publisher was only reading.
+fn refresh_rollup_if_publisher(
+    registry: &dyn calp::RegistryTransport,
+    package: &str,
+    version: &str,
+) {
+    if !rollup_enabled(registry, package) {
+        return;
+    }
+    let is_publisher = registry
+        .get_version_manifest(package, version)
+        .ok()
+        .and_then(|m| {
+            calp::signing::profile_holds_publisher_key(&calcula_profile_dir(), &m.publisher_key)
+                .ok()
+        })
+        .unwrap_or(false);
+    if is_publisher {
+        materialize_submissions_parquet(registry, package, version);
     }
 }
 
@@ -6627,6 +6718,11 @@ pub fn calp_set_writeback_rollup(
         .map_err(|e| e.to_string())?;
     require_publisher(&registry, &package_name, &resolved_version)?;
 
+    // The package-manifest read-modify-write is the ONE mutable-file update on
+    // this path — guard it with the registry's publish lock so a concurrent
+    // publish can't lose the flag (or the flag lose a version-list update).
+    // Submission/review event paths never take any lock, by design.
+    let _manifest_guard = registry.lock().map_err(|e| e.to_string())?;
     let mut manifest = registry
         .get_package_manifest(&package_name)
         .map_err(|e| e.to_string())?;
@@ -6640,6 +6736,7 @@ pub fn calp_set_writeback_rollup(
     registry
         .write_package_manifest(&manifest)
         .map_err(|e| e.to_string())?;
+    drop(_manifest_guard);
 
     if enabled {
         materialize_submissions_parquet(&registry, &package_name, &resolved_version);
@@ -6690,7 +6787,7 @@ pub fn calp_region_response_status(
     versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
     let mut respondents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for version in &versions {
-        if let Ok(subs) = registry.load_region_submissions(&package_name, version, &region_id) {
+        if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, &region_id) {
             for s in subs {
                 if matches!(s.value, calp::writeback::SubmissionValue::Empty) {
                     continue;
@@ -6987,11 +7084,12 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             None => continue,
         };
 
-        // Load the resolved version's submissions in ONE tree scan and bucket
-        // by region — per-region loads would rescan everything R times.
+        // Load the resolved version's current (folded) submissions in ONE tree
+        // scan and bucket by region — per-region loads would rescan everything
+        // R times.
         let mut current_by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
             std::collections::HashMap::new();
-        match registry.load_all_submissions(&sub.package_name, &sub.resolved_version) {
+        match registry.load_current_submissions(&sub.package_name, &sub.resolved_version) {
             Ok(all) => {
                 for s in all {
                     current_by_region.entry(s.region_id.clone()).or_default().push(s);
@@ -7016,7 +7114,7 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                     .ok()?;
                     let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                         std::collections::HashMap::new();
-                    for s in registry.load_all_submissions(&sub.package_name, version).ok()? {
+                    for s in registry.load_current_submissions(&sub.package_name, version).ok()? {
                         by_region.entry(s.region_id.clone()).or_default().push(s);
                     }
                     Some((manifest.writeback_regions.unwrap_or_default(), by_region))
@@ -7711,9 +7809,15 @@ mod writeback_export_tests {
         std::fs::create_dir_all(&root).unwrap();
         let reg = LocalRegistry::open(&root).unwrap();
 
-        // Two submissions (two slots) — one numeric, one text.
+        // Two submissions (two slots) — one numeric, one text — plus a
+        // RESUBMISSION of the first slot (a third event file): the rollup must
+        // hold the folded view, one row per current slot.
         reg.save_submission("pkg", "1.0.0", &sub(1, 1, SubmissionValue::Number { value: 100.0 })).unwrap();
         reg.save_submission("pkg", "1.0.0", &sub(2, 1, SubmissionValue::Text { value: "north".into() })).unwrap();
+        let mut corrected = sub(1, 1, SubmissionValue::Number { value: 105.0 });
+        corrected.id = "s-1-1-rev2".into();
+        corrected.updated_at = "2026-06-15T01:00:00Z".into();
+        reg.save_submission("pkg", "1.0.0", &corrected).unwrap();
 
         super::materialize_submissions_parquet(&reg, "pkg", "1.0.0");
 
@@ -7726,14 +7830,24 @@ mod writeback_export_tests {
         assert!(path.exists(), "rollup file written");
         let file = std::fs::File::open(&path).unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();
-        let total: usize = reader.map(|b| b.unwrap().num_rows()).sum();
-        assert_eq!(total, 2, "one row per current slot");
+        let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+        // The event-id column travels into the rollup (traceability back to
+        // the JSON event files).
+        assert!(
+            batches
+                .iter()
+                .any(|b| b.schema().fields().iter().any(|f| f.name() == "submission_id")),
+            "submission_id column present"
+        );
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 2, "one row per current slot despite three event files");
 
         // Excluded from the integrity walk (never an "unlisted artifact" on pull)...
         let arts = reg.list_artifacts("pkg", "1.0.0").unwrap();
         assert!(!arts.iter().any(|a| a.contains("_rollup")), "rollup excluded from artifacts");
-        // ...and ignored by submission loading (still exactly the two JSON slots).
-        assert_eq!(reg.load_all_submissions("pkg", "1.0.0").unwrap().len(), 2);
+        // ...and ignored by submission loading: three raw events, two current.
+        assert_eq!(reg.load_submission_events("pkg", "1.0.0").unwrap().len(), 3);
+        assert_eq!(reg.load_current_submissions("pkg", "1.0.0").unwrap().len(), 2);
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -185,10 +185,11 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
             WritebackAudience::Subscriber
         };
 
-        // One tree scan for the resolved version, bucketed by region.
+        // One tree scan for the resolved version (current/folded view),
+        // bucketed by region.
         let mut current_by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
             HashMap::new();
-        match registry.load_all_submissions(&sub.package_name, &sub.resolved_version) {
+        match registry.load_current_submissions(&sub.package_name, &sub.resolved_version) {
             Ok(all) => {
                 for s in all {
                     current_by_region
@@ -219,7 +220,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                 let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                     HashMap::new();
                 for s in registry
-                    .load_all_submissions(&sub.package_name, version)
+                    .load_current_submissions(&sub.package_name, version)
                     .ok()?
                 {
                     by_region.entry(s.region_id.clone()).or_default().push(s);

@@ -355,15 +355,23 @@ pub(crate) fn collect_distributed_writeback_entries(
             continue;
         };
 
-        // Registry submissions for this version, bucketed by writeback id.
+        // Registry submissions for this version (current/folded view — review
+        // state is derived from review events), bucketed by writeback id. The
+        // fold's output order is already deterministic; the extra sort below
+        // pins the ENGINE FEED order so `latest_per_key`'s feed-order
+        // tie-break resolves identically on every machine.
         let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
             HashMap::new();
-        if let Ok(all) = registry.load_all_submissions(&sub.package_name, &sub.resolved_version) {
+        if let Ok(all) = registry.load_current_submissions(&sub.package_name, &sub.resolved_version)
+        {
             for s in all {
                 if s.model_key.is_some() {
                     by_region.entry(s.region_id.clone()).or_default().push(s);
                 }
             }
+        }
+        for subs in by_region.values_mut() {
+            subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at).then_with(|| a.id.cmp(&b.id)));
         }
 
         // Publisher baselines are keyed by data source; load each once.

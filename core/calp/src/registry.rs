@@ -318,187 +318,272 @@ impl LocalRegistry {
     }
 
     // -----------------------------------------------------------------------
-    // Submission storage (Phase 14)
+    // Submission storage — append-only event log
+    //
+    // Every submission and every publisher review decision is its own
+    // immutable file; nothing under `submissions/` or `reviews/` is ever
+    // rewritten or deleted in normal operation, and each path has exactly ONE
+    // writer (a submission event: the owning submitter; a review event: the
+    // publisher). Shared/synced storage (SMB, Dropbox) therefore can never
+    // lose an update or produce a meaningful "conflicted copy" — a sync
+    // client only ever sees new files appear. Current state is derived by the
+    // deterministic fold (`crate::fold::fold_submissions`); there is
+    // deliberately NO locking anywhere on these paths (locks are what break
+    // sync clients).
     // -----------------------------------------------------------------------
 
-    /// Save a submission to the registry (creates submitter directory if needed).
+    /// Charset gate for id-like filename fragments that originate from
+    /// third-party content (region ids, submission/review ids).
+    fn path_safe_fragment(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    /// Append a submission EVENT (creates the submitter directory if needed).
     ///
-    /// The filename is the logical submission SLOT — (region, cell) within the
-    /// submitter's directory — not the per-save submission id. Re-submitting a
-    /// cell therefore REPLACES the prior file instead of accumulating
-    /// duplicates that would double-count in GATHER aggregation.
+    /// The filename embeds the submission id, so every save — including a
+    /// re-submit of the same cell — is a NEW file. Grid events are named
+    /// `{region}_{row}_{col}_{id}.json`; model-keyed events (writeback
+    /// COLUMNS, engine v21) are named `{region}_{key-hash16}_{id}.json` so a
+    /// row's history sorts together on disk (cosmetic; loaders re-derive
+    /// grouping from `model_key`). The fold collapses grid slots to the
+    /// newest event; model events all remain records.
     pub fn save_submission(
         &self,
         package_name: &str,
         version: &str,
         submission: &crate::writeback::WritebackSubmission,
     ) -> Result<(), CalpError> {
-        // The region id is joined raw into the slot filename and originates
-        // from third-party package manifests — reject anything that could
-        // escape the submissions directory. (Package/submitter path
-        // components get the same treatment under the D7 boundary work.)
-        if submission.region_id.is_empty()
-            || !submission
-                .region_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        // Both filename fragments originate from third-party content — reject
+        // anything that could escape the submissions directory. (Package /
+        // version / submitter components get the same treatment under the D7
+        // boundary work, via `submissions_dir`.)
+        if !Self::path_safe_fragment(&submission.region_id) {
             return Err(CalpError::Registry(format!(
                 "Invalid writeback region id '{}': only alphanumerics, '-' and '_' are allowed",
                 submission.region_id
             )));
         }
-
-        let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
-        let path = sub_dir.join(format!(
-            "{}_{}_{}.json",
-            submission.region_id, submission.cell_row, submission.cell_col
-        ));
-        let content = serde_json::to_string_pretty(submission)?;
-        // Atomic + slot-keyed: re-submitting a cell replaces its file without a
-        // torn-write window (D7).
-        atomic_write(&path, content.as_bytes())
-    }
-
-    /// Save a MODEL-KEYED submission (a writeback COLUMN entry, engine v21).
-    ///
-    /// Unlike grid slots, model submissions are APPEND-ONLY history: every
-    /// save gets its own file (`{region}_{key-hash16}_{submission-id}.json`),
-    /// so re-entering a value for the same row preserves the prior records —
-    /// the whole submission history stays reportable. The loaders pick these
-    /// up unchanged (they read every `.json` in a submitter's directory).
-    pub fn save_model_submission(
-        &self,
-        package_name: &str,
-        version: &str,
-        submission: &crate::writeback::WritebackSubmission,
-    ) -> Result<(), CalpError> {
-        // Filename components originate from third-party content — apply the
-        // same charset gate as grid slots to the two that are joined raw.
-        let path_safe = |s: &str| {
-            !s.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        };
-        if !path_safe(&submission.region_id) {
-            return Err(CalpError::Registry(format!(
-                "Invalid writeback region id '{}': only alphanumerics, '-' and '_' are allowed",
-                submission.region_id
-            )));
-        }
-        if !path_safe(&submission.id) {
+        if !Self::path_safe_fragment(&submission.id) {
             return Err(CalpError::Registry(format!(
                 "Invalid submission id '{}': only alphanumerics, '-' and '_' are allowed",
                 submission.id
             )));
         }
-        let key = submission.model_key.as_deref().ok_or_else(|| {
-            CalpError::Registry("a model submission must carry model_key".to_string())
-        })?;
 
-        // Stable 16-hex digest of the canonical key tuple, so one row's
-        // history sorts/groups together on disk (cosmetic; loaders re-derive
-        // grouping from model_key).
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for part in key {
-            part.hash(&mut hasher);
-            0x1fu8.hash(&mut hasher); // unit separator: ["ab","c"] != ["a","bc"]
-        }
-        let key_hash = hasher.finish();
+        let file_name = match submission.model_key.as_deref() {
+            None => format!(
+                "{}_{}_{}_{}.json",
+                submission.region_id, submission.cell_row, submission.cell_col, submission.id
+            ),
+            Some(key) => {
+                // Stable 16-hex digest of the canonical key tuple.
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for part in key {
+                    part.hash(&mut hasher);
+                    0x1fu8.hash(&mut hasher); // unit separator: ["ab","c"] != ["a","bc"]
+                }
+                format!(
+                    "{}_{:016x}_{}.json",
+                    submission.region_id,
+                    hasher.finish(),
+                    submission.id
+                )
+            }
+        };
 
         let sub_dir = self.submissions_dir(package_name, version, &submission.submitter.id)?;
-        let path = sub_dir.join(format!(
-            "{}_{:016x}_{}.json",
-            submission.region_id, key_hash, submission.id
-        ));
         let content = serde_json::to_string_pretty(submission)?;
-        atomic_write(&path, content.as_bytes())
+        atomic_write(&sub_dir.join(file_name), content.as_bytes())
     }
 
-    /// Load EVERY submission for a package version across all submitters and
-    /// regions in a single tree scan. Callers that need several regions
-    /// should use this and bucket by region_id — calling
-    /// load_region_submissions per region rescans the whole tree each time.
-    pub fn load_all_submissions(
+    /// Append a publisher REVIEW event: `reviews/{id}.json` under the version
+    /// directory — the publisher-written subtree, never a submitter's. The
+    /// decision applies to exactly one submission event (by id); the fold
+    /// ignores reviews whose target has been superseded by a re-submit.
+    pub fn save_review(
         &self,
         package_name: &str,
         version: &str,
-    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
-        let base = self.version_dir(package_name, version)?.join("submissions");
-        if !base.exists() {
-            return Ok(Vec::new());
+        review: &crate::writeback::ReviewEvent,
+    ) -> Result<(), CalpError> {
+        if !Self::path_safe_fragment(&review.id) {
+            return Err(CalpError::Registry(format!(
+                "Invalid review id '{}': only alphanumerics, '-' and '_' are allowed",
+                review.id
+            )));
         }
-
-        let mut all = Vec::new();
-        for entry in fs::read_dir(&base)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let submitter_id = entry.file_name().to_string_lossy().to_string();
-                // The submitter-id directory name is untrusted input read off
-                // disk — skip any that wouldn't pass the boundary validator.
-                if validate_component(&submitter_id, "submitter id").is_err() {
-                    continue;
-                }
-                all.extend(self.load_submissions(package_name, version, &submitter_id)?);
-            }
-        }
-        Ok(all)
+        let path = self
+            .version_dir(package_name, version)?
+            .join("reviews")
+            .join(format!("{}.json", review.id));
+        let content = serde_json::to_string_pretty(review)?;
+        atomic_write(&path, content.as_bytes())
     }
 
-    /// Load all submissions by a specific submitter for a package version.
-    pub fn load_submissions(
+    /// Load the RAW submission events written by one submitter, hygiene
+    /// filtered. Acceptance is strict and everything else is SKIPPED, never an
+    /// error — a single torn write, sync-client "conflicted copy" rename,
+    /// `.tmp` debris file, or legacy/foreign file must never take down the
+    /// publisher inbox, GATHER, or a BI feed:
+    /// - the filename must end `.json` and not start with `.`
+    /// - the content must parse as a `WritebackSubmission`
+    /// - the filename stem must end `_{content.id}` (a renamed duplicate —
+    ///   e.g. "x (conflicted copy).json" — no longer matches its content)
+    /// - the content's `submitter.id` must equal the directory name (a file
+    ///   cannot claim another submitter's identity)
+    pub fn load_submission_events_by(
         &self,
         package_name: &str,
         version: &str,
         submitter_id: &str,
-    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
         let sub_dir = self.submissions_dir(package_name, version, submitter_id)?;
+        let mut events = Vec::new();
         if !sub_dir.exists() {
-            return Ok(Vec::new());
+            return Ok(events);
         }
-
-        let mut submissions = Vec::new();
         for entry in fs::read_dir(&sub_dir)? {
-            let entry = entry?;
-            if entry.path().extension().map_or(false, |ext| ext == "json") {
-                let content = fs::read_to_string(entry.path())?;
-                let sub: crate::writeback::WritebackSubmission = serde_json::from_str(&content)?;
-                submissions.push(sub);
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if !path.extension().map_or(false, |ext| ext == "json") {
+                continue;
             }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.starts_with('.') {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(sub) = serde_json::from_str::<WritebackSubmission>(&content) else {
+                continue;
+            };
+            if sub.id.is_empty() || !stem.ends_with(&format!("_{}", sub.id)) {
+                continue;
+            }
+            if sub.submitter.id != submitter_id {
+                continue;
+            }
+            events.push(sub);
         }
-        Ok(submissions)
+        Ok(events)
     }
 
-    /// Load all submissions for a specific region across all submitters.
-    pub fn load_region_submissions(
+    /// Load the RAW submission events for a package version across all
+    /// submitter directories in one tree scan (hygiene filtered; see
+    /// `load_submission_events_by`).
+    pub fn load_submission_events(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        let base = self.version_dir(package_name, version)?.join("submissions");
+        let mut all = Vec::new();
+        if !base.exists() {
+            return Ok(all);
+        }
+        for entry in fs::read_dir(&base)? {
+            let Ok(entry) = entry else { continue };
+            let Ok(file_type) = entry.file_type() else { continue };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let submitter_id = entry.file_name().to_string_lossy().to_string();
+            // The submitter-id directory name is untrusted input read off
+            // disk — skip any that wouldn't pass the boundary validator.
+            if validate_component(&submitter_id, "submitter id").is_err() {
+                continue;
+            }
+            all.extend(self.load_submission_events_by(package_name, version, &submitter_id)?);
+        }
+        Ok(all)
+    }
+
+    /// Load the RAW review events for a package version (hygiene filtered:
+    /// `.json`, non-dot, parseable, filename stem == content id).
+    pub fn load_review_events(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<crate::writeback::ReviewEvent>, CalpError> {
+        let dir = self.version_dir(package_name, version)?.join("reviews");
+        let mut reviews = Vec::new();
+        if !dir.exists() {
+            return Ok(reviews);
+        }
+        for entry in fs::read_dir(&dir)? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if !path.extension().map_or(false, |ext| ext == "json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.starts_with('.') {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(review) = serde_json::from_str::<crate::writeback::ReviewEvent>(&content)
+            else {
+                continue;
+            };
+            if review.id != stem {
+                continue;
+            }
+            reviews.push(review);
+        }
+        Ok(reviews)
+    }
+
+    /// Load the CURRENT submissions for a package version: the raw events
+    /// folded through `crate::fold::fold_submissions` (grid slots collapse to
+    /// the newest event, model events all remain, review state is derived
+    /// from review events — see the fold's doc for the exact rules). Callers
+    /// that need several regions should use this and bucket by region_id —
+    /// the region variant rescans the whole tree each time.
+    pub fn load_current_submissions(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        let events = self.load_submission_events(package_name, version)?;
+        let reviews = self.load_review_events(package_name, version)?;
+        Ok(crate::fold::fold_submissions(events, &reviews))
+    }
+
+    /// Current submissions by one submitter (the fold scoped to their events;
+    /// reviews are loaded version-wide).
+    pub fn load_current_submissions_by(
+        &self,
+        package_name: &str,
+        version: &str,
+        submitter_id: &str,
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        let events = self.load_submission_events_by(package_name, version, submitter_id)?;
+        let reviews = self.load_review_events(package_name, version)?;
+        Ok(crate::fold::fold_submissions(events, &reviews))
+    }
+
+    /// Current submissions for one region across all submitters.
+    pub fn load_current_region_submissions(
         &self,
         package_name: &str,
         version: &str,
         region_id: &str,
-    ) -> Result<Vec<crate::writeback::WritebackSubmission>, CalpError> {
-        let base = self.version_dir(package_name, version)?.join("submissions");
-        if !base.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut all = Vec::new();
-        for entry in fs::read_dir(&base)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let submitter_id = entry.file_name().to_string_lossy().to_string();
-                if validate_component(&submitter_id, "submitter id").is_err() {
-                    continue;
-                }
-                let subs = self.load_submissions(package_name, version, &submitter_id)?;
-                for sub in subs {
-                    if sub.region_id == region_id {
-                        all.push(sub);
-                    }
-                }
-            }
-        }
-        Ok(all)
+    ) -> Result<Vec<WritebackSubmission>, CalpError> {
+        Ok(self
+            .load_current_submissions(package_name, version)?
+            .into_iter()
+            .filter(|s| s.region_id == region_id)
+            .collect())
     }
 
     // -----------------------------------------------------------------------
@@ -636,7 +721,8 @@ impl LocalRegistry {
 
     /// List ALL checksummable artifact rel-paths under a version (forward
     /// slashes), EXCLUDING `version-manifest.json`, `version-manifest.sig`, and
-    /// the `submissions/` subtree — the exact set the integrity walk hashes.
+    /// the post-publish `submissions/` + `reviews/` subtrees — the exact set
+    /// the integrity walk hashes.
     pub fn list_artifacts(
         &self,
         package_name: &str,
@@ -660,8 +746,9 @@ impl LocalRegistry {
                 }
                 out.push(name_str.into_owned());
             } else if file_type.is_dir() {
-                // Subscriber-written submissions are a separate trust domain.
-                if name_str == "submissions" {
+                // Post-publish event subtrees (subscriber submissions,
+                // publisher reviews) are a separate trust domain.
+                if crate::integrity::POST_PUBLISH_DIRS.contains(&name_str.as_ref()) {
                     continue;
                 }
                 Self::list_artifacts_walk(&entry.path(), &base, &mut out)?;
@@ -867,39 +954,47 @@ impl RegistryTransport for LocalRegistry {
         LocalRegistry::save_submission(self, package_name, version, submission)
     }
 
-    fn save_model_submission(
+    fn save_review(
         &self,
         package_name: &str,
         version: &str,
-        submission: &WritebackSubmission,
+        review: &crate::writeback::ReviewEvent,
     ) -> Result<(), CalpError> {
-        LocalRegistry::save_model_submission(self, package_name, version, submission)
+        LocalRegistry::save_review(self, package_name, version, review)
     }
 
-    fn load_submissions(
+    fn load_review_events(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<crate::writeback::ReviewEvent>, CalpError> {
+        LocalRegistry::load_review_events(self, package_name, version)
+    }
+
+    fn load_current_submissions_by(
         &self,
         package_name: &str,
         version: &str,
         submitter_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalRegistry::load_submissions(self, package_name, version, submitter_id)
+        LocalRegistry::load_current_submissions_by(self, package_name, version, submitter_id)
     }
 
-    fn load_region_submissions(
+    fn load_current_region_submissions(
         &self,
         package_name: &str,
         version: &str,
         region_id: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalRegistry::load_region_submissions(self, package_name, version, region_id)
+        LocalRegistry::load_current_region_submissions(self, package_name, version, region_id)
     }
 
-    fn load_all_submissions(
+    fn load_current_submissions(
         &self,
         package_name: &str,
         version: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
-        LocalRegistry::load_all_submissions(self, package_name, version)
+        LocalRegistry::load_current_submissions(self, package_name, version)
     }
 
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
@@ -1109,9 +1204,29 @@ mod tests {
         }
     }
 
-    // Model-keyed submissions are APPEND-ONLY: two saves for the SAME row key
-    // yield two files (grid slots would replace), both load, and a re-save of
-    // an existing submission id replaces in place (the approval path).
+    fn make_test_review(
+        id: &str,
+        target: &str,
+        state: crate::writeback::SubmissionState,
+        reviewed_at: &str,
+    ) -> crate::writeback::ReviewEvent {
+        crate::writeback::ReviewEvent {
+            id: id.to_string(),
+            target_submission_id: target.to_string(),
+            region_id: "r1".to_string(),
+            submitter_id: "id-alice".to_string(),
+            new_state: state,
+            review_reason: Some("reason".to_string()),
+            reviewed_by: Some("Publisher".to_string()),
+            reviewed_at: reviewed_at.to_string(),
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    // Model-keyed submissions are APPEND-ONLY history: two saves for the SAME
+    // row key yield two files, both stay current (never collapsed), and
+    // approval is a separate review EVENT — no submission file is ever
+    // rewritten.
     #[test]
     fn model_submission_append_semantics() {
         let (_dir, reg) = create_test_registry();
@@ -1125,24 +1240,67 @@ mod tests {
         second.model_key = Some(vec!["7".to_string()]); // same row key
         second.value = crate::writeback::SubmissionValue::Number { value: 99.0 };
 
-        reg.save_model_submission("pkg", "1.0.0", &first).unwrap();
-        reg.save_model_submission("pkg", "1.0.0", &second).unwrap();
-        let loaded = reg.load_all_submissions("pkg", "1.0.0").unwrap();
-        assert_eq!(loaded.len(), 2, "same-key saves must both persist");
+        reg.save_submission("pkg", "1.0.0", &first).unwrap();
+        reg.save_submission("pkg", "1.0.0", &second).unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        assert_eq!(loaded.len(), 2, "same-key saves must both stay current");
 
-        // Approval rewrites the SAME id in place — no third file.
-        let mut approved = second.clone();
-        approved.state = crate::writeback::SubmissionState::Approved;
-        reg.save_model_submission("pkg", "1.0.0", &approved).unwrap();
-        let loaded = reg.load_all_submissions("pkg", "1.0.0").unwrap();
+        // Approval = a review event targeting sub-2; the submission files are
+        // untouched, the folded view carries the derived state.
+        reg.save_review(
+            "pkg",
+            "1.0.0",
+            &make_test_review(
+                "rev-1",
+                "sub-2",
+                crate::writeback::SubmissionState::Approved,
+                "2026-01-02T00:00:00Z",
+            ),
+        )
+        .unwrap();
+        let loaded = reg.load_current_submissions("pkg", "1.0.0").unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(loaded.iter().any(|s| s.id == "sub-2"
             && matches!(s.state, crate::writeback::SubmissionState::Approved)));
+        assert!(loaded.iter().any(|s| s.id == "sub-1"
+            && matches!(s.state, crate::writeback::SubmissionState::Submitted)));
+    }
 
-        // A model submission without a key is refused.
-        let mut keyless = make_test_submission("wb-col-1", "bob");
-        keyless.model_key = None;
-        assert!(reg.save_model_submission("pkg", "1.0.0", &keyless).is_err());
+    // Review events live in their own publisher-written subtree and are
+    // hygiene-filtered on load exactly like submission events.
+    #[test]
+    fn review_events_save_load_and_hygiene() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        let review = make_test_review(
+            "rev-1",
+            "sub-1",
+            crate::writeback::SubmissionState::Rejected,
+            "2026-01-02T00:00:00Z",
+        );
+        reg.save_review("pkg", "1.0.0", &review).unwrap();
+
+        // Junk beside it: filename/content id mismatch, torn JSON, dotfile.
+        let reviews_dir = reg.version_dir("pkg", "1.0.0").unwrap().join("reviews");
+        let mut renamed = review.clone();
+        renamed.id = "rev-1".to_string();
+        fs::write(
+            reviews_dir.join("rev-1 (conflicted copy).json"),
+            serde_json::to_string(&renamed).unwrap(),
+        )
+        .unwrap();
+        fs::write(reviews_dir.join("torn.json"), "{\"id\": \"to").unwrap();
+        fs::write(reviews_dir.join(".rev-9.json.tmp"), "{}").unwrap();
+
+        let loaded = reg.load_review_events("pkg", "1.0.0").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], review);
+
+        // A hostile review id cannot escape the reviews directory.
+        let mut evil = review.clone();
+        evil.id = "..\\escape".to_string();
+        assert!(reg.save_review("pkg", "1.0.0", &evil).is_err());
     }
 
     #[test]
@@ -1181,7 +1339,7 @@ mod tests {
         let sub = make_test_submission("region-1", "alice");
         reg.save_submission("pkg", "1.0.0", &sub).unwrap();
 
-        let loaded = reg.load_submissions("pkg", "1.0.0", "id-alice").unwrap();
+        let loaded = reg.load_current_submissions_by("pkg", "1.0.0", "id-alice").unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, sub.id);
         assert_eq!(loaded[0].submitter.display_name, "alice");
@@ -1190,7 +1348,7 @@ mod tests {
     #[test]
     fn load_submissions_empty_when_none() {
         let (_dir, reg) = create_test_registry();
-        let result = reg.load_submissions("pkg", "1.0.0", "nobody").unwrap();
+        let result = reg.load_current_submissions_by("pkg", "1.0.0", "nobody").unwrap();
         assert!(result.is_empty());
     }
 
@@ -1229,15 +1387,15 @@ mod tests {
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
 
-        let r1_subs = reg.load_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        let r1_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1").unwrap();
         assert_eq!(r1_subs.len(), 2);
 
-        let r2_subs = reg.load_region_submissions("pkg", "1.0.0", "r2").unwrap();
+        let r2_subs = reg.load_current_region_submissions("pkg", "1.0.0", "r2").unwrap();
         assert_eq!(r2_subs.len(), 1);
     }
 
     #[test]
-    fn resubmission_replaces_prior_file_no_double_count() {
+    fn resubmission_appends_event_but_folds_to_newest() {
         let (_dir, reg) = create_test_registry();
         create_test_package(&reg, "pkg");
 
@@ -1249,17 +1407,85 @@ mod tests {
 
         let mut second = make_test_submission("r1", "alice");
         second.id = "sub-rev-2".to_string();
+        second.updated_at = "2026-01-02T00:00:00Z".to_string();
         second.value = crate::writeback::SubmissionValue::Number { value: 99.0 };
         reg.save_submission("pkg", "1.0.0", &second).unwrap();
 
-        // The slot-keyed filename means the second submit REPLACED the first.
-        let subs = reg.load_region_submissions("pkg", "1.0.0", "r1").unwrap();
+        // Append-only: BOTH event files exist on disk (nothing is ever
+        // rewritten)...
+        let raw = reg.load_submission_events("pkg", "1.0.0").unwrap();
+        assert_eq!(raw.len(), 2, "every submit is a new immutable event file");
+
+        // ...but the folded view collapses the slot to the newest event, so
+        // GATHER aggregation never double-counts.
+        let subs = reg.load_current_region_submissions("pkg", "1.0.0", "r1").unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].id, "sub-rev-2");
         assert!(matches!(
             subs[0].value,
             crate::writeback::SubmissionValue::Number { value } if value == 99.0
         ));
+    }
+
+    // The hygiene contract: junk beside real events — legacy slot files,
+    // sync-client "conflicted copy" renames, torn JSON, tmp debris, foreign
+    // attribution, byte-duplicated events — is skipped, never an error, and
+    // never double-counts.
+    #[test]
+    fn loaders_skip_junk_and_survive_torn_files() {
+        let (_dir, reg) = create_test_registry();
+        create_test_package(&reg, "pkg");
+
+        let mut real = make_test_submission("r1", "alice");
+        real.id = "sub-real".to_string();
+        reg.save_submission("pkg", "1.0.0", &real).unwrap();
+
+        let alice_dir = reg
+            .version_dir("pkg", "1.0.0")
+            .unwrap()
+            .join("submissions")
+            .join("id-alice");
+
+        // Legacy slot file (pre-event-log naming): content id doesn't match
+        // the filename grammar -> skipped.
+        fs::write(
+            alice_dir.join("r1_0_0.json"),
+            serde_json::to_string(&real).unwrap(),
+        )
+        .unwrap();
+        // Sync-client conflicted-copy rename of the real event -> skipped
+        // (stem no longer ends with the content id).
+        fs::write(
+            alice_dir.join("r1_0_0_sub-real (conflicted copy 2026-07-17).json"),
+            serde_json::to_string(&real).unwrap(),
+        )
+        .unwrap();
+        // Torn/partial write and tmp debris -> skipped.
+        fs::write(alice_dir.join("r1_0_0_sub-torn.json"), "{\"id\": \"sub-t").unwrap();
+        fs::write(alice_dir.join(".r1_0_0_sub-x.json.tmp"), "{}").unwrap();
+        // Non-JSON artifact (the parquet rollup lives under submissions/) is
+        // invisible to submission loading.
+        fs::write(alice_dir.join("_rollup.parquet"), b"PAR1").unwrap();
+        // A file claiming another submitter's identity inside alice's dir ->
+        // skipped (attribution must match the directory).
+        let mut foreign = make_test_submission("r1", "mallory");
+        foreign.id = "sub-forged".to_string();
+        fs::write(
+            alice_dir.join("r1_0_0_sub-forged.json"),
+            serde_json::to_string(&foreign).unwrap(),
+        )
+        .unwrap();
+        // A byte-identical duplicate of the real event under a second VALID
+        // name (same id embedded) -> deduped by event id in the fold.
+        fs::write(
+            alice_dir.join("r1_9_9_sub-real.json"),
+            serde_json::to_string(&real).unwrap(),
+        )
+        .unwrap();
+
+        let current = reg.load_current_submissions("pkg", "1.0.0").unwrap();
+        assert_eq!(current.len(), 1, "exactly the one real event survives");
+        assert_eq!(current[0].id, "sub-real");
     }
 
     #[test]
@@ -1272,6 +1498,11 @@ mod tests {
 
         let slashy = make_test_submission("a/b", "alice");
         assert!(reg.save_submission("pkg", "1.0.0", &slashy).is_err());
+
+        // The submission id is a filename fragment now — same gate.
+        let mut evil_id = make_test_submission("r1", "alice");
+        evil_id.id = "..\\escape".to_string();
+        assert!(reg.save_submission("pkg", "1.0.0", &evil_id).is_err());
     }
 
     #[test]
@@ -1283,7 +1514,7 @@ mod tests {
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r2", "alice")).unwrap();
         reg.save_submission("pkg", "1.0.0", &make_test_submission("r1", "bob")).unwrap();
 
-        let all = reg.load_all_submissions("pkg", "1.0.0").unwrap();
+        let all = reg.load_current_submissions("pkg", "1.0.0").unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all.iter().filter(|s| s.region_id == "r1").count(), 2);
         assert_eq!(all.iter().filter(|s| s.region_id == "r2").count(), 1);
@@ -1360,12 +1591,14 @@ mod tests {
             None
         );
 
-        // The integrity root, its signature, and the submissions subtree are
-        // all present on disk but excluded from list_artifacts.
+        // The integrity root, its signature, and the post-publish event
+        // subtrees (submissions + reviews) are all present on disk but
+        // excluded from list_artifacts.
         t.write_artifact("pkg", "1.0.0", VERSION_MANIFEST_FILE, b"{}").unwrap();
         t.write_artifact("pkg", "1.0.0", VERSION_MANIFEST_SIG_FILE, b"deadbeef").unwrap();
         t.write_artifact("pkg", "1.0.0", "named_ranges.json", b"[]").unwrap();
-        t.write_artifact("pkg", "1.0.0", "submissions/user-1/r1_0_0.json", b"{}").unwrap();
+        t.write_artifact("pkg", "1.0.0", "submissions/user-1/r1_0_0_s1.json", b"{}").unwrap();
+        t.write_artifact("pkg", "1.0.0", "reviews/rev-1.json", b"{}").unwrap();
 
         let listed = t.list_artifacts("pkg", "1.0.0").unwrap();
         assert_eq!(listed, vec!["named_ranges.json", "sheets/abc/data.json"]);

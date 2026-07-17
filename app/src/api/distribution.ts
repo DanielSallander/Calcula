@@ -774,7 +774,10 @@ export function exportPackageHtml(
   });
 }
 
-/** Approve, reject, or reset a submitted writeback value (publisher action). */
+/** Approve, reject, or reset a submitted writeback value (publisher action).
+ * Pass the `submissionId` shown in the dashboard so the decision targets
+ * exactly the reviewed submission — if a newer one arrived in the meantime the
+ * backend refuses with a "superseded" error instead of deciding blind. */
 export function setSubmissionState(
   regionId: string,
   submitterId: string,
@@ -782,6 +785,7 @@ export function setSubmissionState(
   cellCol: number,
   newState: "approved" | "rejected" | "submitted",
   reason?: string | null,
+  submissionId?: string | null,
 ): Promise<void> {
   return invokeBackend("calp_set_submission_state", {
     regionId,
@@ -790,11 +794,14 @@ export function setSubmissionState(
     cellCol,
     newState,
     reason: reason ?? null,
+    submissionId: submissionId ?? null,
   });
 }
 
 /** One submission row for the publisher data-collection dashboard (D5). */
 export interface RegionSubmission {
+  /** The submission event id this row shows — pass back on approve/reject. */
+  submissionId: string;
   regionId: string;
   cellRow: number;
   cellCol: number;

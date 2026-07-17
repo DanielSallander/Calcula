@@ -270,25 +270,25 @@ fn lifecycle_writeback_submit_and_load_across_submitters() {
     reg.save_submission("budget", "1.0.0", &alice).unwrap();
     reg.save_submission("budget", "1.0.0", &bob).unwrap();
 
-    // load_all_submissions returns BOTH submitters' contributions.
-    let all = reg.load_all_submissions("budget", "1.0.0").unwrap();
+    // load_current_submissions returns BOTH submitters' contributions.
+    let all = reg.load_current_submissions("budget", "1.0.0").unwrap();
     assert_eq!(all.len(), 2);
 
-    // load_submissions(submitter) is scoped to exactly that submitter.
-    let alice_only = reg.load_submissions("budget", "1.0.0", "id-alice").unwrap();
+    // load_current_submissions_by(submitter) is scoped to exactly that submitter.
+    let alice_only = reg.load_current_submissions_by("budget", "1.0.0", "id-alice").unwrap();
     assert_eq!(alice_only.len(), 1);
     assert_eq!(alice_only[0].submitter.id, "id-alice");
     assert_eq!(alice_only[0].submitter.display_name, "Alice");
     assert_eq!(alice_only[0].state, SubmissionState::Submitted);
     assert!(matches!(alice_only[0].value, SubmissionValue::Number { value } if value == 100.0));
 
-    let bob_only = reg.load_submissions("budget", "1.0.0", "id-bob").unwrap();
+    let bob_only = reg.load_current_submissions_by("budget", "1.0.0", "id-bob").unwrap();
     assert_eq!(bob_only.len(), 1);
     assert_eq!(bob_only[0].submitter.id, "id-bob");
     assert!(matches!(bob_only[0].value, SubmissionValue::Number { value } if value == 250.0));
 
-    // load_region_submissions buckets across submitters for a single region.
-    let region_subs = reg.load_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    // load_current_region_submissions buckets across submitters for a single region.
+    let region_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
     assert_eq!(region_subs.len(), 2);
     let sum: f64 = region_subs
         .iter()
@@ -335,14 +335,17 @@ fn lifecycle_supersedence_same_slot_newest_wins_no_double_count() {
     reg.save_submission("budget", "1.0.0", &first).unwrap();
     reg.save_submission("budget", "1.0.0", &second).unwrap();
 
-    // STORAGE BEHAVIOR OBSERVED: save_submission keys the on-disk filename by
-    // the logical SLOT — "{region}_{row}_{col}.json" within the submitter's
-    // directory — NOT by the per-save submission id. So a re-submit OVERWRITES
-    // the prior file in place; the registry stores exactly one file per slot.
-    // Loading therefore already yields a single current value — supersedence is
-    // structural, not something the caller must dedupe.
-    let loaded = reg.load_region_submissions("budget", "1.0.0", "budget-input").unwrap();
-    assert_eq!(loaded.len(), 1, "slot-keyed storage keeps exactly one file per slot");
+    // STORAGE BEHAVIOR OBSERVED: save_submission APPENDS — the filename embeds
+    // the per-save submission id ("{region}_{row}_{col}_{id}.json"), so the
+    // re-submit is a second immutable file and nothing is ever overwritten
+    // (that is what keeps shared/synced registries conflict-free). The
+    // current-state loaders fold the slot to the newest (updated_at, id)
+    // event, so callers still see exactly one current value — supersedence is
+    // structural, enforced by the fold rather than by file replacement.
+    let raw = reg.load_submission_events("budget", "1.0.0").unwrap();
+    assert_eq!(raw.len(), 2, "append-only: both event files remain on disk");
+    let loaded = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    assert_eq!(loaded.len(), 1, "the fold keeps exactly one current record per slot");
     assert_eq!(loaded[0].id, "sub-alice-rev-2", "the newer submission won");
     assert!(matches!(loaded[0].value, SubmissionValue::Number { value } if value == 175.0));
 
@@ -454,22 +457,22 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
     // when compatible). At the registry primitive level what must hold is that
     // the v1 submissions remain READABLE after v2 exists, and that v2 starts
     // with its own (here empty) submission set — the app reads both and merges.
-    let v1_subs = reg.load_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let v1_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
     assert_eq!(v1_subs.len(), 1, "v1 submissions survive a later version publish");
     assert_eq!(v1_subs[0].id, "sub-v1");
 
-    let v2_subs = reg.load_region_submissions("budget", "2.0.0", "budget-input").unwrap();
+    let v2_subs = reg.load_current_region_submissions("budget", "2.0.0", "budget-input").unwrap();
     assert!(v2_subs.is_empty(), "v2 starts with its own (empty) submission set");
 
     // Simulate the app's carry-forward: copy the compatible v1 submission into
     // v2 (the app would re-stamp version provenance; the registry just stores).
     reg.save_submission("budget", "2.0.0", &v1_sub).unwrap();
-    let v2_after = reg.load_region_submissions("budget", "2.0.0", "budget-input").unwrap();
+    let v2_after = reg.load_current_region_submissions("budget", "2.0.0", "budget-input").unwrap();
     assert_eq!(v2_after.len(), 1);
     assert!(matches!(v2_after[0].value, SubmissionValue::Number { value } if value == 100.0));
 
     // And v1's own record is untouched by the carry-forward into v2.
-    let v1_again = reg.load_region_submissions("budget", "1.0.0", "budget-input").unwrap();
+    let v1_again = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
     assert_eq!(v1_again.len(), 1);
 }
 

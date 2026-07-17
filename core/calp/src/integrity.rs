@@ -47,10 +47,11 @@ pub const VERSION_MANIFEST_FILE: &str = "version-manifest.json";
 /// the same reason the manifest is.
 pub const VERSION_MANIFEST_SIG_FILE: &str = "version-manifest.sig";
 
-/// Top-level directories inside a version dir that are written by
-/// SUBSCRIBERS after publish (separate trust domain) and therefore excluded
-/// from the publisher's checksum map.
-const SUBSCRIBER_DIRS: &[&str] = &["submissions"];
+/// Top-level directories inside a version dir that are written AFTER publish
+/// as append-only event logs — `submissions/` by subscribers, `reviews/` by
+/// the publisher's review actions — and therefore excluded from the signed
+/// checksum map (a separate trust domain from published artifacts).
+pub const POST_PUBLISH_DIRS: &[&str] = &["submissions", "reviews"];
 
 /// Lowercase hex SHA-256 of a byte slice.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -67,7 +68,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Keys are version-dir-relative paths with forward slashes (the manifest
 /// convention, e.g. "sheets/{sheet_id}/data.json"). Excluded:
 /// - `version-manifest.json` at the root (the integrity root itself)
-/// - top-level subscriber-written directories (`submissions/`)
+/// - top-level post-publish event directories (`submissions/`, `reviews/`)
 pub fn compute_artifact_checksums(
     version_dir: &Path,
 ) -> Result<BTreeMap<String, String>, CalpError> {
@@ -89,7 +90,7 @@ pub fn compute_artifact_checksums(
             let bytes = fs::read(entry.path())?;
             map.insert(name_str.into_owned(), sha256_hex(&bytes));
         } else if file_type.is_dir() {
-            if SUBSCRIBER_DIRS.contains(&name_str.as_ref()) {
+            if POST_PUBLISH_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
             walk_dir(&entry.path(), version_dir, &mut map)?;
@@ -481,12 +482,16 @@ mod tests {
         fs::create_dir_all(ver.join("sheets").join("abc")).unwrap();
         fs::write(ver.join("sheets").join("abc").join("data.json"), "data").unwrap();
         fs::write(ver.join("named_ranges.json"), "[]").unwrap();
+        // Post-publish event subtrees: subscriber submissions AND publisher
+        // review events are both outside the signed artifact set.
         fs::create_dir_all(ver.join("submissions").join("user-1")).unwrap();
         fs::write(
-            ver.join("submissions").join("user-1").join("r1_0_0.json"),
+            ver.join("submissions").join("user-1").join("r1_0_0_s1.json"),
             "{}",
         )
         .unwrap();
+        fs::create_dir_all(ver.join("reviews")).unwrap();
+        fs::write(ver.join("reviews").join("rev-1.json"), "{}").unwrap();
 
         let map = compute_artifact_checksums(ver).unwrap();
         let keys: Vec<&String> = map.keys().collect();

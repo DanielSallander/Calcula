@@ -107,10 +107,24 @@ export function PublisherDashboardPane(): React.ReactElement {
       setBusy(`${s.submitterId}:${s.cellRow}:${s.cellCol}`);
       setError(null);
       try {
-        await setSubmissionState(s.regionId, s.submitterId, s.cellRow, s.cellCol, newState, reason);
+        // Pass the displayed submission id: if the contributor re-submitted
+        // since this list loaded, the backend refuses ("superseded") instead
+        // of approving a value the publisher never saw.
+        await setSubmissionState(
+          s.regionId,
+          s.submitterId,
+          s.cellRow,
+          s.cellCol,
+          newState,
+          reason,
+          s.submissionId,
+        );
         if (selected) await loadSubs(selected);
       } catch (e: unknown) {
         setError(String(e));
+        // A superseded decision means the list is stale — reload so the
+        // publisher reviews the current value.
+        if (String(e).includes("superseded") && selected) await loadSubs(selected);
       } finally {
         setBusy(null);
       }
@@ -228,7 +242,7 @@ export function PublisherDashboardPane(): React.ReactElement {
             onChange={(e) => toggleRollup(e.target.checked)}
             style={{ marginRight: 6 }}
           />
-          Auto-export submissions to Parquet (refresh <code>submissions/_rollup.parquet</code> on every submit/approve)
+          Auto-export submissions to Parquet (this machine refreshes <code>submissions/_rollup.parquet</code> on review actions and dashboard loads)
         </label>
       )}
 
