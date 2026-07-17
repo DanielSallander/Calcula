@@ -323,8 +323,12 @@ function validateFieldExists(
   const lowerName = name.toLowerCase();
 
   if (table && column) {
+    // The parser's table/column split is provisional (first dot) — the joined
+    // key equals the full name, so this matches any "Table.Column" regardless
+    // of where the dot split fell (table names may contain dots). A flat
+    // source field whose name happens to contain dots is also accepted.
     const biKey = `${table}.${column}`.toLowerCase();
-    if (!biFieldNames.has(biKey)) {
+    if (!biFieldNames.has(biKey) && !fieldNames.has(lowerName)) {
       errors.push(dslError(`Unknown field: "${name}"`, location));
     }
     return;

@@ -95,6 +95,7 @@ import type { DataRangeRef } from "./types";
 import { QuickAccessPopup } from "./components/QuickAccessPopup";
 import { DataPointFormatDialog } from "./components/DataPointFormatDialog";
 import { AxisContextMenu } from "./components/AxisContextMenu";
+import { ChartContextMenu } from "./components/ChartContextMenu";
 import { FormatAxisDialog } from "./components/FormatAxisDialog";
 import {
   renderChart,
@@ -104,6 +105,7 @@ import {
   handleChartMouseMove,
   handleChartMouseLeave,
   getChartLocalCoords,
+  findChartAtCanvasPos,
   getCachedChartData,
   isHoveringFilterButton,
   isHoveringDataElement,
@@ -347,6 +349,15 @@ function activate(context: ExtensionContext): void {
     layer: "dropdown",
   });
   cleanupFunctions.push(() => context.ui.overlays.unregister(AXIS_CONTEXT_MENU_ID));
+
+  // Register general chart context menu overlay (any non-axis right-click)
+  const CHART_CONTEXT_MENU_ID = "chart:contextMenu";
+  context.ui.overlays.register({
+    id: CHART_CONTEXT_MENU_ID,
+    component: ChartContextMenu,
+    layer: "dropdown",
+  });
+  cleanupFunctions.push(() => context.ui.overlays.unregister(CHART_CONTEXT_MENU_ID));
 
   // Register Format Axis dialog
   const FORMAT_AXIS_DIALOG_ID = "chart:formatAxisDialog";
@@ -1043,11 +1054,23 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   const handleContextMenu = (e: MouseEvent) => {
+    // Resolve the chart under the cursor by BOUNDS, not hover state — hover
+    // only tracks data elements and axes, but a right-click anywhere on a
+    // chart (title, legend, plot background, frame) is a click on the OBJECT
+    // and must never fall through to the grid's cell context menu.
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    let boundsChartId: string | null = null;
+    if (gridContainer) {
+      const rect = gridContainer.getBoundingClientRect();
+      boundsChartId = findChartAtCanvasPos(e.clientX - rect.left, e.clientY - rect.top);
+    }
+
     const hover = getHoverState();
-    if (!hover) return;
 
     // Axis-specific context menu
-    if (hover.hitResult.type === "axis") {
+    if (hover && hover.hitResult.type === "axis") {
       e.preventDefault();
       e.stopPropagation();
 
@@ -1062,35 +1085,20 @@ function activate(context: ExtensionContext): void {
       return;
     }
 
-    // General chart context menu (body, title, legend, etc.)
-    if ((hover.hitResult.type as string) === "body" || hover.hitResult.type === "title" || hover.hitResult.type === "legend") {
-      e.preventDefault();
-      e.stopPropagation();
+    const targetId = boundsChartId ?? hover?.chartId ?? null;
+    if (targetId == null) return;
 
-      // Create a simple DOM context menu with "Edit Script..." option
-      const menu = document.createElement("div");
-      menu.style.cssText = `position:fixed;z-index:10000;background:#fff;border:1px solid #d0d0d0;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.15);padding:4px 0;min-width:180px;font-family:"Segoe UI",sans-serif;font-size:12px;`;
-      const item = document.createElement("div");
-      item.textContent = "Edit Script...";
-      item.style.cssText = `padding:6px 16px;cursor:pointer;`;
-      item.addEventListener("mouseenter", () => { item.style.background = "#e8f0fe"; });
-      item.addEventListener("mouseleave", () => { item.style.background = "transparent"; });
-      item.addEventListener("click", () => {
-        menu.remove();
-        const chart = getChartById(hover.chartId);
-        emitAppEvent("scriptable-objects:edit-script", {
-          objectType: "chart",
-          instanceId: String(hover.chartId),
-          objectName: chart?.spec?.title ?? `Chart ${hover.chartId}`,
-        });
-      });
-      menu.appendChild(item);
-      document.body.appendChild(menu);
-      menu.style.left = `${Math.min(e.clientX, window.innerWidth - 200)}px`;
-      menu.style.top = `${Math.min(e.clientY, window.innerHeight - 40)}px`;
-      const close = () => { menu.remove(); document.removeEventListener("mousedown", close); };
-      setTimeout(() => document.addEventListener("mousedown", close), 0);
+    // Right-click selects the chart (like left-click), then shows the object menu.
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isChartSelected(targetId)) {
+      selectChart(targetId);
+      void emitChartSelectionEvent();
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
+    showOverlay(CHART_CONTEXT_MENU_ID, {
+      data: { chartId: targetId, screenX: e.clientX, screenY: e.clientY },
+    });
   };
   window.addEventListener("contextmenu", handleContextMenu, true);
   cleanupFunctions.push(() => {
@@ -1573,8 +1581,18 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
-  // Delete Key: delete selected chart
+  // Delete: Delete key on selected chart + delete requests from the context menu
   // -----------------------------------------------------------------------
+
+  const performChartDelete = (chartId: string) => {
+    deselectChart();
+    void emitChartSelectionEvent();
+    deleteChart(chartId);
+    removeChartFromCache(chartId);
+    syncChartRegions();
+    window.dispatchEvent(new CustomEvent(ChartEvents.CHART_DELETED));
+    context.events.emit(AppEvents.GRID_REFRESH);
+  };
 
   const handleDeleteKey = (e: KeyboardEvent) => {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -1592,18 +1610,19 @@ function activate(context: ExtensionContext): void {
 
     e.preventDefault();
     e.stopPropagation();
-
-    // Delete the chart
-    deselectChart();
-    emitChartSelectionEvent();
-    deleteChart(chartId);
-    removeChartFromCache(chartId);
-    syncChartRegions();
-    window.dispatchEvent(new CustomEvent(ChartEvents.CHART_DELETED));
-    context.events.emit(AppEvents.GRID_REFRESH);
+    performChartDelete(chartId);
   };
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
+
+  const handleDeleteRequest = (e: Event) => {
+    const chartId = (e as CustomEvent).detail?.chartId as string | undefined;
+    if (chartId != null && getChartById(chartId)) performChartDelete(chartId);
+  };
+  window.addEventListener(ChartEvents.CHART_DELETE_REQUEST, handleDeleteRequest);
+  cleanupFunctions.push(() =>
+    window.removeEventListener(ChartEvents.CHART_DELETE_REQUEST, handleDeleteRequest),
+  );
 
   // Expose lifecycle functions for E2E invariant testing
   (window as any).__CALCULA_CHARTS__ = {

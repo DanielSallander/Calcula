@@ -84,6 +84,9 @@ export function DesignQueryEditor({
           quickSuggestions: true,
           acceptSuggestionOnCommitCharacter: true,
           tabSize: 2,
+          // Render suggest/hover widgets position:fixed so they escape the
+          // editor box and the host dialog instead of being clipped by them.
+          fixedOverflowWidgets: true,
         }}
       />
     </div>

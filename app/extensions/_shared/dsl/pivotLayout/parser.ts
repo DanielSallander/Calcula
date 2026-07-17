@@ -594,25 +594,40 @@ class Parser {
 
   // --- Field name parsing (shared) ---
 
-  /** Parse a field name: Identifier, DottedIdentifier, or StringLiteral. */
+  /** Parse a field name: Identifier, DottedIdentifier, BracketIdentifier, or StringLiteral. */
   private parseFieldName(): { name: string; table?: string; column?: string } | null {
     const tok = this.peek();
 
-    if (tok.type === TokenType.DottedIdentifier) {
+    // [Bracketed Name] — quoting form for names with dots/spaces. Dotted
+    // content is a "Table.Column" reference (table names may contain dots).
+    if (tok.type === TokenType.BracketIdentifier) {
       this.advance();
-      const dotIdx = tok.value.indexOf('.');
-      return {
-        name: tok.value,
-        table: tok.value.substring(0, dotIdx),
-        column: tok.value.substring(dotIdx + 1),
-      };
+      return fieldNameResult(tok.value);
     }
 
-    if (tok.type === TokenType.Identifier) {
+    if (tok.type === TokenType.DottedIdentifier || tok.type === TokenType.Identifier) {
       this.advance();
-      return { name: tok.value };
+      let name = tok.value;
+      // The lexer joins at most two segments into a DottedIdentifier; any
+      // further ".segment" arrives as Dot + Identifier. Table names can
+      // themselves contain dots (schema-qualified "BI.dim_customer", giving
+      // keys like "BI.dim_customer.fullname"), so keep consuming segments —
+      // but stop before ".group(" / ".bin(", which are grouping calls.
+      while (this.check(TokenType.Dot)) {
+        const seg = this.tokens[this.pos + 1];
+        if (!seg || !isAnyIdentLike(seg)) break;
+        const after = this.tokens[this.pos + 2];
+        const segLower = seg.value.toLowerCase();
+        if ((segLower === 'group' || segLower === 'bin') && after?.type === TokenType.LeftParen) break;
+        this.advance(); // consume .
+        this.advance(); // consume segment
+        name += '.' + seg.value;
+      }
+      return fieldNameResult(name);
     }
 
+    // Quoted names stay literal (the escape hatch for flat field names that
+    // happen to contain dots) — never split into table/column.
     if (tok.type === TokenType.StringLiteral) {
       this.advance();
       return { name: tok.value };
@@ -802,6 +817,23 @@ function isClauseStart(type: TokenType): boolean {
     type === TokenType.Calc || type === TokenType.CalcGroup ||
     type === TokenType.Top ||
     type === TokenType.Bottom || type === TokenType.Save;
+}
+
+/**
+ * Build a parseFieldName result. Dotted names get a provisional first-dot
+ * table/column split — the split point is NOT semantic (table names may
+ * contain dots): the validator and compiler re-join it and resolve the full
+ * key against the model, and the design-query/pivot request builders re-split
+ * via splitBiFieldKey with the model's table names.
+ */
+function fieldNameResult(name: string): { name: string; table?: string; column?: string } {
+  const dotIdx = name.indexOf('.');
+  if (dotIdx === -1) return { name };
+  return {
+    name,
+    table: name.substring(0, dotIdx),
+    column: name.substring(dotIdx + 1),
+  };
 }
 
 /** Check if a token looks like an identifier (including keywords that could be field names). */

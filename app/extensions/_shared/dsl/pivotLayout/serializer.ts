@@ -269,8 +269,10 @@ function serializeLayout(layout: LayoutConfig): string {
 /** Quote a field name if it contains special characters. */
 function quoteIfNeeded(name: string): string {
   if (SPECIAL_CHARS.test(name)) {
-    // Don't re-quote dotted BI names (Table.Column) — those are valid unquoted
-    if (/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    // Don't re-quote dotted BI names — those are valid unquoted. Table names
+    // can contain dots ("BI.dim_customer.fullname"), so allow any number of
+    // identifier segments, not just Table.Column.
+    if (/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(name)) {
       return name;
     }
     return `"${escapeString(name)}"`;

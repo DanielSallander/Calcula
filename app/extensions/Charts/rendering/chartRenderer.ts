@@ -220,6 +220,34 @@ export function getChartLocalCoords(
   };
 }
 
+/**
+ * Find the topmost chart whose bounds contain the given canvas position
+ * (active-sheet charts only — regions are synced per sheet). Independent of
+ * hover state, so it works for any spot on the chart (title, plot background,
+ * data marks), not just the hover-tracked element types.
+ */
+export function findChartAtCanvasPos(canvasX: number, canvasY: number): string | null {
+  const regions = getGridRegions().filter((r) => r.type === "chart");
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const region = regions[i];
+    if (!region.floating) continue;
+    const chartId = region.data?.chartId as string | undefined;
+    if (chartId == null) continue;
+
+    const x = cachedRowHeaderWidth + region.floating.x - cachedScrollX;
+    const y = cachedColHeaderHeight + region.floating.y - cachedScrollY;
+    if (
+      canvasX >= x &&
+      canvasX <= x + region.floating.width &&
+      canvasY >= y &&
+      canvasY <= y + region.floating.height
+    ) {
+      return chartId;
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // Hover State
 // ============================================================================

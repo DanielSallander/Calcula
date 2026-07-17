@@ -40,6 +40,7 @@ import { calculateFreezePaneLayout } from "../../lib/gridRenderer/layout/viewpor
 import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dimensions";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { AppEvents, emitAppEvent } from "../../lib/events";
+import { findFloatingRegionAt } from "../../hooks/useMouseSelection/layout/overlayMoveHandlers";
 import {
   gridCommands,
   isClickWithinSelection,
@@ -876,6 +877,15 @@ function SpreadsheetContent({
             dimensions,
           } as GridMenuContext,
         });
+        return;
+      }
+
+      // Right-click on a floating object (chart, slicer, control, …): the
+      // grid CELL context menu must not open — the object's extension owns
+      // the context menu for its object (usually shown from a capture-phase
+      // listener, caught by the defaultPrevented check above). Cell options
+      // on an object right-click are always wrong.
+      if (findFloatingRegionAt(mouseX, mouseY, config, viewport)) {
         return;
       }
 

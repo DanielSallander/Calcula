@@ -9,4 +9,8 @@ export const ChartEvents = {
   CHART_UPDATED: "chart:updated",
   /** Emitted after a chart is deleted. Detail: { chartId: string } */
   CHART_DELETED: "chart:deleted",
+  /** Request to delete a chart (from UI like the context menu); handled in
+   *  index.ts so deletion runs the same sequence as the Delete key.
+   *  Detail: { chartId: string } */
+  CHART_DELETE_REQUEST: "chart:delete-request",
 } as const;

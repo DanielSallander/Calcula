@@ -63,24 +63,41 @@ describe('Parser coverage', () => {
     });
 
     it('parses .group() date grouping', () => {
-      // "OrderDate" is plain identifier, then .group(...) triggers grouping parse
+      // The lexer backtracks ".group(" out of the dotted-identifier join, so
+      // grouping fires on a plain identifier field.
       const r = p('ROWS: OrderDate.group(years, quarters)');
-      // The lexer sees "OrderDate.group" as a DottedIdentifier, so grouping won't parse.
-      // Grouping syntax requires a plain identifier followed by ".group(...)".
-      // Let's test with a field that doesn't form a dotted ident:
-      // Actually the lexer always forms a DottedIdentifier for "X.Y" -- so let's test
-      // that the parser at least doesn't crash, and the field is captured.
+      expect(r.errors).toHaveLength(0);
       expect(r.ast.rows).toHaveLength(1);
+      expect(r.ast.rows[0].name).toBe('OrderDate');
+      expect(r.ast.rows[0].grouping).toEqual(
+        expect.objectContaining({ type: 'date', levels: ['years', 'quarters'] }),
+      );
     });
 
-    it('parses .bin() number grouping via separate dot token', () => {
-      // Grouping only triggers when the parser sees a Dot token after a field.
-      // With "Price.bin(...)" the lexer produces DottedIdentifier "Price.bin",
-      // so grouping doesn't fire. This is a known limitation of the DSL.
-      // We can still test the grouping path by constructing tokens manually
-      // or using a field name that won't form a dotted ident.
-      const r = p('ROWS: Price');
+    it('parses .group() date grouping on a Table.Column field', () => {
+      const r = p('ROWS: Orders.OrderDate.group(years)');
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.rows[0].name).toBe('Orders.OrderDate');
+      expect(r.ast.rows[0].grouping).toEqual(
+        expect.objectContaining({ type: 'date', levels: ['years'] }),
+      );
+    });
+
+    it('parses .bin() number grouping', () => {
+      const r = p('ROWS: Price.bin(0, 10, 100)');
+      expect(r.errors).toHaveLength(0);
       expect(r.ast.rows).toHaveLength(1);
+      expect(r.ast.rows[0].name).toBe('Price');
+      expect(r.ast.rows[0].grouping).toEqual(
+        expect.objectContaining({ type: 'number', params: [0, 10, 100] }),
+      );
+    });
+
+    it('keeps a column literally named "group" as part of the field name when no call follows', () => {
+      const r = p('ROWS: Orders.group');
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.rows[0].name).toBe('Orders.group');
+      expect(r.ast.rows[0].grouping).toBeUndefined();
     });
 
     it('reports error when grouping function is not identifier', () => {

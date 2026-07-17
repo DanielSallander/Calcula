@@ -84,6 +84,35 @@ function getFloatingCanvasBounds(
   };
 }
 
+/**
+ * Find the topmost floating overlay region containing the given mouse
+ * position (zoom-corrected canvas coordinates — the same basis
+ * checkOverlayBody uses). Plain bounds test only; extended hitTest areas
+ * (e.g. quick-access buttons outside the rect) are not consulted.
+ */
+export function findFloatingRegionAt(
+  mouseX: number,
+  mouseY: number,
+  config: GridConfig,
+  viewport: Viewport,
+): GridRegion | null {
+  const regions = getGridRegions();
+  // Reverse so topmost floating overlays are tested first
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const bounds = getFloatingCanvasBounds(regions[i], config, viewport);
+    if (!bounds) continue;
+    if (
+      mouseX >= bounds.x &&
+      mouseX <= bounds.x + bounds.width &&
+      mouseY >= bounds.y &&
+      mouseY <= bounds.y + bounds.height
+    ) {
+      return regions[i];
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // Factory
 // ============================================================================

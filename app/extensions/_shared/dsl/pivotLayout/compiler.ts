@@ -78,8 +78,8 @@ class Compiler {
 
   /** Map from lowercase field name to SourceField for fast lookup. */
   private fieldMap: Map<string, SourceField>;
-  /** For BI: set of valid "table.column" keys (lowercase) for validation. */
-  private biFieldKeys: Set<string>;
+  /** For BI: lowercase "table.column" key → canonical model-cased key + numeric flag. */
+  private biKeyInfo: Map<string, { name: string; isNumeric: boolean }>;
   /** For BI: map from column name (lowercase) to table.column for unqualified lookups. */
   private biColumnToKey: Map<string, string>;
   /** For BI: map from column name (lowercase) to isNumeric. */
@@ -96,18 +96,18 @@ class Compiler {
       this.fieldMap.set(f.name.toLowerCase(), f);
     }
 
-    this.biFieldKeys = new Set();
+    this.biKeyInfo = new Map();
     this.biColumnToKey = new Map();
     this.biColumnNumeric = new Map();
     if (ctx.biModel) {
       for (const table of ctx.biModel.tables) {
         for (const col of table.columns) {
-          const key = `${table.name}.${col.name}`.toLowerCase();
-          this.biFieldKeys.add(key);
+          const canonical = `${table.name}.${col.name}`;
+          this.biKeyInfo.set(canonical.toLowerCase(), { name: canonical, isNumeric: col.isNumeric });
           // Only store unqualified lookup if column name is unique across tables
           const colLower = col.name.toLowerCase();
           if (!this.biColumnToKey.has(colLower)) {
-            this.biColumnToKey.set(colLower, `${table.name}.${col.name}`);
+            this.biColumnToKey.set(colLower, canonical);
             this.biColumnNumeric.set(colLower, col.isNumeric);
           } else {
             // Ambiguous — remove so unqualified use produces an error
@@ -407,16 +407,27 @@ class Compiler {
   ): ZoneField | null {
     // --- BI pivot path ---
     if (this.isBi) {
-      // Dotted name: "Table.Column"
+      // Dotted name: "Table.Column". The parser's table/column split is
+      // provisional (first dot; table names may contain dots) — the joined
+      // key equals the full name, so resolve on that and emit the model's
+      // canonical casing (downstream splitBiFieldKey matching is case-aware).
       if (table && column) {
         const key = `${table}.${column}`.toLowerCase();
-        if (this.biFieldKeys.has(key)) {
-          const numericKey = column.toLowerCase();
-          const isNumeric = this.biColumnNumeric.get(numericKey) ?? false;
+        const info = this.biKeyInfo.get(key);
+        if (info) {
           return {
             sourceIndex: -1,
-            name: `${table}.${column}`,
-            isNumeric,
+            name: info.name,
+            isNumeric: info.isNumeric,
+          };
+        }
+        // A flat source field whose name contains dots (non-model field list)
+        const sf = this.fieldMap.get(name.toLowerCase());
+        if (sf) {
+          return {
+            sourceIndex: sf.index === -1 ? -1 : sf.index,
+            name: sf.name,
+            isNumeric: sf.isNumeric,
           };
         }
         this.errors.push(dslError(`Unknown field: "${name}"`, location));

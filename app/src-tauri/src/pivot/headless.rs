@@ -187,11 +187,20 @@ pub(crate) async fn compute_design_query_view(
     }
     {
         // One-time refresh of any in-memory table never refreshed this session.
+        // Non-fatal, matching update_bi_pivot_fields: not all tables are
+        // in-memory (source-bound tables answer via query pushdown), so a
+        // TableNotInMemory here is expected — the query below is the real
+        // arbiter of whether data is reachable.
         let mut engine = engine_arc.lock().await;
         for table_name in &referenced_tables {
             if engine.needs_refresh(table_name, Duration::from_secs(0)) {
                 if let Err(e) = engine.refresh_table(table_name).await {
-                    return Err(format!("Failed to load table '{}': {}", table_name, e));
+                    crate::log_info!(
+                        "PIVOT",
+                        "design query: refresh_table('{}') skipped: {}",
+                        table_name,
+                        e
+                    );
                 }
             }
         }

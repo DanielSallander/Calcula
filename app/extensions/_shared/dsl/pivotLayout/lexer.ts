@@ -181,15 +181,23 @@ export function lex(input: string): LexResult {
       if (pos < input.length && peek() === '.') {
         const savedPos = pos;
         const savedCol = col;
-        const savedLine = line;
-        const dotCh = advance(); // consume .
+        advance(); // consume .
         if (pos < input.length && isIdentStart(peek())) {
           let afterDot = '';
           while (pos < input.length && isIdentChar(peek())) {
             afterDot += advance();
           }
-          tokens.push(makeToken(TokenType.DottedIdentifier, ident + '.' + afterDot, startCol, startLine));
-          continue;
+          // ".group(" / ".bin(" is a grouping call on the preceding field, not
+          // part of the name — backtrack so the parser sees Dot + Identifier + "(".
+          const lower = afterDot.toLowerCase();
+          if ((lower === 'group' || lower === 'bin') && peek() === '(') {
+            pos = savedPos;
+            col = savedCol;
+            // line can't change: dots and identifier chars are never newlines
+          } else {
+            tokens.push(makeToken(TokenType.DottedIdentifier, ident + '.' + afterDot, startCol, startLine));
+            continue;
+          }
         } else {
           // Not a dotted identifier -- backtrack the dot
           pos = savedPos;
