@@ -198,6 +198,15 @@ impl FieldCache {
         self.sort_dirty = true;
         id
     }
+
+    /// Read-only lookup of an interned value's id (never interns).
+    /// `CacheValue::Empty` maps to `VALUE_ID_EMPTY`, mirroring `intern`.
+    pub fn find_id(&self, value: &CacheValue) -> Option<ValueId> {
+        if let CacheValue::Empty = value {
+            return Some(VALUE_ID_EMPTY);
+        }
+        self.value_to_id.get(value).copied()
+    }
     
     /// Gets the value for a given ID.
     pub fn get_value(&self, id: ValueId) -> Option<&CacheValue> {
@@ -630,6 +639,36 @@ pub struct PivotCache {
 
     /// Statistics for optimization decisions.
     pub stats: CacheStats,
+
+    /// Engine-evaluated totals installed by the host for BI-backed pivots.
+    /// Applied (accumulator-slot overwrite) at the end of
+    /// `compute_aggregates`; only valid for the unfiltered record set.
+    /// See [`TotalOverride`].
+    #[serde(default)]
+    pub total_overrides: Vec<TotalOverride>,
+}
+
+/// One engine-evaluated total cell for a BI-backed pivot.
+///
+/// BI pivot caches hold PRE-AGGREGATED rows (one per leaf group combination),
+/// so the additive roll-up in `compute_aggregates` is only an identity for
+/// leaf cells. Subtotal / grand-total cells of non-additive measures (ratios,
+/// averages, distinct counts) must instead be evaluated by the BI engine in
+/// each total's own filter context. The host queries every total grain and
+/// installs the results via `set_total_overrides`; `compute_aggregates`
+/// overwrites the corresponding accumulator slots after rolling up, so every
+/// read path (data cells, show-values-as, visual calcs) sees them unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotalOverride {
+    /// Full-length row key over the effective row fields; positions beyond the
+    /// grain's depth are VALUE_ID_EMPTY (matching subtotal/grand-total keys).
+    pub row_key: Vec<ValueId>,
+    /// Full-length column key over the effective column fields, padded the
+    /// same way (empty when there are no column fields).
+    pub col_key: Vec<ValueId>,
+    /// One entry per value field, in definition order. `None` keeps the
+    /// rolled-up value for that field.
+    pub values: Vec<Option<f64>>,
 }
 
 /// Statistics about the cache for optimization.
@@ -659,6 +698,7 @@ impl PivotCache {
             virtual_fields: Vec::new(),
             virtual_records: Vec::new(),
             stats: CacheStats::default(),
+            total_overrides: Vec::new(),
         }
     }
     
@@ -962,7 +1002,29 @@ impl PivotCache {
     pub fn col_layout(&self) -> &ColumnLayout {
         &self.col_layout
     }
-    
+
+    /// Read-only value→id lookup on field `field_index` (`None` when the value
+    /// was never interned there). Used by the host to translate engine query
+    /// results into cache keys without mutating the interning tables.
+    pub fn find_value_id(&self, field_index: FieldIndex, value: &CacheValue) -> Option<ValueId> {
+        self.fields.get(field_index).and_then(|f| f.find_id(value))
+    }
+
+    /// Installs engine-evaluated totals (see [`TotalOverride`]) and marks
+    /// aggregates dirty so the next computation splices them in.
+    pub fn set_total_overrides(&mut self, overrides: Vec<TotalOverride>) {
+        self.total_overrides = overrides;
+        self.aggregates_dirty = true;
+    }
+
+    /// Removes any installed engine-evaluated totals.
+    pub fn clear_total_overrides(&mut self) {
+        if !self.total_overrides.is_empty() {
+            self.total_overrides.clear();
+            self.aggregates_dirty = true;
+        }
+    }
+
     /// Computes all aggregates using a two-level row/column split.
     ///
     /// Row keys stay in a HashMap (high cardinality). Column combinations
@@ -1125,8 +1187,57 @@ impl PivotCache {
             }
         }
 
+        // BI pivots: splice engine-evaluated totals over the rolled-up
+        // subtotal/grand-total slots. Rolled-up totals are only correct for
+        // additive measures; pre-aggregated BI measures (ratios, averages,
+        // distinct counts) need per-grain evaluation by the BI engine.
+        self.apply_total_overrides(row_count, col_count, value_count, slot_len);
+
         self.stats.aggregate_groups = self.aggregates.len();
         self.aggregates_dirty = false;
+    }
+
+    /// Overwrites aggregate slots with engine-evaluated totals (see
+    /// [`TotalOverride`]). No-op when no overrides are installed, when any
+    /// record is filtered out (overrides describe the UNFILTERED set — active
+    /// local filters fall back to rolled-up totals until cleared), or — per
+    /// entry — when an override's key shape doesn't match the current axis
+    /// layout (stale entry from an older field configuration).
+    fn apply_total_overrides(
+        &mut self,
+        row_count: usize,
+        col_count: usize,
+        value_count: usize,
+        slot_len: usize,
+    ) {
+        if self.total_overrides.is_empty() {
+            return;
+        }
+        if self.filter_mask.iter().any(|&included| !included) {
+            return;
+        }
+
+        let overrides = std::mem::take(&mut self.total_overrides);
+        for ov in &overrides {
+            if ov.row_key.len() != row_count || ov.col_key.len() != col_count {
+                continue;
+            }
+            let base = self.col_layout.col_index(&ov.col_key) * value_count;
+            let slot = self
+                .aggregates
+                .entry(GroupKey::from_slice(&ov.row_key))
+                .or_insert_with(|| vec![AggregateAccumulator::new(); slot_len]);
+            for (vi, value) in ov.values.iter().enumerate().take(value_count) {
+                if let Some(n) = value {
+                    if let Some(acc) = slot.get_mut(base + vi) {
+                        let mut replacement = AggregateAccumulator::new();
+                        replacement.add_number(*n);
+                        *acc = replacement;
+                    }
+                }
+            }
+        }
+        self.total_overrides = overrides;
     }
     
     /// Updates aggregates for a single group key.
@@ -1454,4 +1565,250 @@ fn try_parse_dmy(s: &str, sep: char) -> Option<ParsedDate> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod total_override_tests {
+    use super::*;
+    use crate::definition::{
+        AggregationType, PivotDefinition, PivotField, PivotId, ValueField,
+    };
+    use crate::engine::calculate_pivot;
+    use crate::view::{PivotCellValue, PivotRowType, PivotView};
+    use engine::CellValue;
+
+    fn test_pivot_id() -> PivotId {
+        PivotId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+    }
+
+    /// A BI-style cache: one PRE-AGGREGATED row per group with a summable
+    /// measure (Revenue) and a non-additive ratio measure (Pct). The pct
+    /// values are chosen so their float roll-up (0.1 + 0.2) differs from the
+    /// exact engine-evaluated total (0.3).
+    fn bi_style_cache() -> PivotCache {
+        let mut cache = PivotCache::new(test_pivot_id(), 3);
+        cache.set_field_name(0, "Region".to_string());
+        cache.set_field_name(1, "Revenue".to_string());
+        cache.set_field_name(2, "Pct".to_string());
+        cache.add_record(0, &[
+            CellValue::Text("North".to_string()),
+            CellValue::Number(100.0),
+            CellValue::Number(0.1),
+        ]);
+        cache.add_record(1, &[
+            CellValue::Text("South".to_string()),
+            CellValue::Number(200.0),
+            CellValue::Number(0.2),
+        ]);
+        cache
+    }
+
+    fn bi_style_definition() -> PivotDefinition {
+        let mut def = PivotDefinition::new(test_pivot_id(), (0, 0), (2, 2));
+        def.row_fields.push(PivotField::new(0, "Region".to_string()));
+        def.value_fields.push(ValueField::new(1, "[Revenue]".to_string(), AggregationType::Sum));
+        def.value_fields.push(ValueField::new(2, "[Pct]".to_string(), AggregationType::Sum));
+        def
+    }
+
+    /// Finds the numeric value of the data cell for `value_field_index` in the
+    /// grand-total row of the view.
+    fn grand_total_value(view: &PivotView, value_field_index: usize) -> Option<f64> {
+        let gt_row = view
+            .rows
+            .iter()
+            .position(|r| matches!(r.row_type, PivotRowType::GrandTotal))?;
+        view.cells[gt_row].iter().find_map(|c| {
+            if c.value_field_index == Some(value_field_index) {
+                match c.value {
+                    PivotCellValue::Number(n) => Some(n),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn grand_total_uses_engine_override() {
+        let mut cache = bi_style_cache();
+        let definition = bi_style_definition();
+
+        // Without overrides the grand total is the float roll-up of the
+        // pre-aggregated rows: 0.1 + 0.2 != 0.3 exactly.
+        let view = calculate_pivot(&definition, &mut cache);
+        let rolled_up = grand_total_value(&view, 1).expect("pct grand total cell");
+        assert_eq!(rolled_up, 0.1 + 0.2);
+        assert_ne!(rolled_up, 0.3);
+
+        // Install the engine-evaluated total for the grand-total grain.
+        // `None` for Revenue keeps its rolled-up value.
+        cache.set_total_overrides(vec![TotalOverride {
+            row_key: vec![VALUE_ID_EMPTY],
+            col_key: vec![],
+            values: vec![None, Some(0.3)],
+        }]);
+        let view = calculate_pivot(&definition, &mut cache);
+        assert_eq!(grand_total_value(&view, 1), Some(0.3));
+        assert_eq!(grand_total_value(&view, 0), Some(300.0));
+
+        // Leaf rows are untouched.
+        let north_row = view
+            .rows
+            .iter()
+            .position(|r| matches!(r.row_type, PivotRowType::Data))
+            .expect("data row");
+        let north_pct = view.cells[north_row]
+            .iter()
+            .find_map(|c| {
+                if c.value_field_index == Some(1) {
+                    match c.value {
+                        PivotCellValue::Number(n) => Some(n),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("north pct cell");
+        assert_eq!(north_pct, 0.1);
+    }
+
+    #[test]
+    fn subtotal_level_override_with_two_row_fields() {
+        let mut cache = PivotCache::new(test_pivot_id(), 3);
+        cache.set_field_name(0, "Region".to_string());
+        cache.set_field_name(1, "City".to_string());
+        cache.set_field_name(2, "Pct".to_string());
+        cache.add_record(0, &[
+            CellValue::Text("A".to_string()),
+            CellValue::Text("X".to_string()),
+            CellValue::Number(0.1),
+        ]);
+        cache.add_record(1, &[
+            CellValue::Text("A".to_string()),
+            CellValue::Text("Y".to_string()),
+            CellValue::Number(0.2),
+        ]);
+        cache.add_record(2, &[
+            CellValue::Text("B".to_string()),
+            CellValue::Text("Z".to_string()),
+            CellValue::Number(0.4),
+        ]);
+
+        let id_a = cache
+            .find_value_id(0, &CacheValue::from(&CellValue::Text("A".to_string())))
+            .expect("id for A");
+
+        cache.set_total_overrides(vec![
+            TotalOverride {
+                row_key: vec![id_a, VALUE_ID_EMPTY],
+                col_key: vec![],
+                values: vec![Some(0.3)],
+            },
+            TotalOverride {
+                row_key: vec![VALUE_ID_EMPTY, VALUE_ID_EMPTY],
+                col_key: vec![],
+                values: vec![Some(0.7)],
+            },
+        ]);
+
+        let row_fields = [0usize, 1usize];
+        let value_fields = [2usize];
+
+        // Subtotal (A, *) gets the engine value, not 0.1 + 0.2.
+        let sub = cache
+            .get_aggregate(
+                &GroupKey::new(vec![id_a, VALUE_ID_EMPTY]),
+                &row_fields,
+                &[],
+                &value_fields,
+            )
+            .expect("subtotal slot")[0]
+            .compute(AggregationType::Sum);
+        assert_eq!(sub, 0.3);
+
+        // Grand total gets the engine value, not 0.1 + 0.2 + 0.4.
+        let gt = cache
+            .get_aggregate(
+                &GroupKey::grand_total(2),
+                &row_fields,
+                &[],
+                &value_fields,
+            )
+            .expect("grand total slot")[0]
+            .compute(AggregationType::Sum);
+        assert_eq!(gt, 0.7);
+
+        // Leaf (A, X) keeps its own value.
+        let id_x = cache
+            .find_value_id(1, &CacheValue::from(&CellValue::Text("X".to_string())))
+            .expect("id for X");
+        let leaf = cache
+            .get_aggregate(
+                &GroupKey::new(vec![id_a, id_x]),
+                &row_fields,
+                &[],
+                &value_fields,
+            )
+            .expect("leaf slot")[0]
+            .compute(AggregationType::Sum);
+        assert_eq!(leaf, 0.1);
+    }
+
+    #[test]
+    fn overrides_skipped_while_filtered_and_reapplied_after() {
+        let mut cache = bi_style_cache();
+        cache.set_total_overrides(vec![TotalOverride {
+            row_key: vec![VALUE_ID_EMPTY],
+            col_key: vec![],
+            values: vec![None, Some(0.3)],
+        }]);
+
+        let id_south = cache
+            .find_value_id(0, &CacheValue::from(&CellValue::Text("South".to_string())))
+            .expect("id for South");
+
+        let row_fields = [0usize];
+        let value_fields = [1usize, 2usize];
+
+        // With a local filter active, overrides describe a different (wider)
+        // record set — the grand total must stay the roll-up of VISIBLE rows.
+        cache.apply_filters(&[(0, vec![id_south])]);
+        let gt_pct = cache
+            .get_aggregate(&GroupKey::grand_total(1), &row_fields, &[], &value_fields)
+            .expect("grand total slot")[1]
+            .compute(AggregationType::Sum);
+        assert_eq!(gt_pct, 0.1);
+
+        // Clearing the filter restores the unfiltered set the overrides were
+        // computed for, so they apply again.
+        cache.apply_filters(&[]);
+        let gt_pct = cache
+            .get_aggregate(&GroupKey::grand_total(1), &row_fields, &[], &value_fields)
+            .expect("grand total slot")[1]
+            .compute(AggregationType::Sum);
+        assert_eq!(gt_pct, 0.3);
+    }
+
+    #[test]
+    fn stale_override_key_shapes_are_ignored() {
+        let mut cache = bi_style_cache();
+        // Key shaped for a two-row-field layout, but the pivot has one row
+        // field — the entry must be skipped, leaving the roll-up in place.
+        cache.set_total_overrides(vec![TotalOverride {
+            row_key: vec![VALUE_ID_EMPTY, VALUE_ID_EMPTY],
+            col_key: vec![],
+            values: vec![None, Some(99.0)],
+        }]);
+
+        let row_fields = [0usize];
+        let value_fields = [1usize, 2usize];
+        let gt_pct = cache
+            .get_aggregate(&GroupKey::grand_total(1), &row_fields, &[], &value_fields)
+            .expect("grand total slot")[1]
+            .compute(AggregationType::Sum);
+        assert_eq!(gt_pct, 0.1 + 0.2);
+    }
 }

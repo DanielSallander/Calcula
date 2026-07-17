@@ -209,7 +209,7 @@ pub(crate) fn build_cache_from_arrow_batches(
 }
 
 /// Convert an Arrow array cell to a CellValue for the PivotCache.
-fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
+pub(crate) fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
     if array.is_null(idx) {
         return CellValue::Empty;
     }

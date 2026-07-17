@@ -254,12 +254,8 @@ pub(crate) async fn compute_design_query_view(
     def.column_fields = request.column_fields.iter().map(field_pf).collect();
 
     // Value fields: map each measure to its engine-reported cache column.
-    let value_col_idx: HashMap<(String, Option<String>), usize> = result_columns
-        .iter()
-        .enumerate()
-        .filter(|(_, rc)| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
-        .filter_map(|(i, rc)| rc.measure.clone().map(|m| ((m, rc.calculation_item.clone()), i)))
-        .collect();
+    // No synthetic dimension on this path, so the cache offset is 0.
+    let value_col_idx = crate::pivot::totals::measure_value_col_idx(&result_columns, 0);
     def.value_fields =
         expand_bi_value_fields(&request.value_fields, &[], measure_start, &value_col_idx);
 

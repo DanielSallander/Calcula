@@ -5,6 +5,9 @@
 use crate::bi::types::BiState;
 use crate::bi::commands::{auto_connect_bi_connection, auto_bind_tables_on_connection, bi_tables_cache_warm};
 use crate::pivot::operations::*;
+use crate::pivot::totals::{
+    measure_value_col_idx, query_bi_total_overrides, BiTotalsPlan, GrainField,
+};
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, log_perf, AppState};
@@ -5761,6 +5764,86 @@ pub async fn update_bi_pivot_fields(
         cache_idx += 1;
     }
 
+    // ---- Engine-evaluated totals ------------------------------------------
+    // The cache rows are pre-aggregated leaf groups, so the pivot engine's
+    // additive roll-up is only correct for additive measures: a "% of total"
+    // measure rolls up to 0.9999999…, AVERAGE/DISTINCTCOUNT measures roll up
+    // plainly wrong. Query each total grain in its own filter context and
+    // install the results as overrides the pivot engine splices over the
+    // rolled-up subtotal/grand-total slots.
+    //
+    // Skipped for calculation groups (their totals are force-hidden below)
+    // and when local filters are active — overrides describe the UNFILTERED
+    // set, and the pivot engine only applies them while the filter mask is
+    // all-visible.
+    if synthetic_measure.is_none() && !use_synthetic_dim && calc_item_names.is_empty() {
+        let request_filters_active = request
+            .row_fields
+            .iter()
+            .chain(request.column_fields.iter())
+            .chain(request.filter_fields.iter())
+            .chain(request.slicer_fields.iter())
+            .any(|f| !f.hidden_items.is_empty());
+        // Page-filter/slicer hidden items survive the definition rebuild
+        // below (preserved from the old definition), so consult it too.
+        let preserved_filters_active = {
+            let pivot_tables = pivot_state.pivot_tables.lock()
+                .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+            pivot_tables.get(&pivot_id).is_some_and(|(def, _)| {
+                (!request.filter_fields.is_empty()
+                    && def.filter_fields.iter().any(|pf| !pf.field.hidden_items.is_empty()))
+                    || (!request.slicer_fields.is_empty()
+                        && def.slicer_filters.iter().any(|sf| !sf.hidden_items.is_empty()))
+            })
+        };
+        if !request_filters_active && !preserved_filters_active {
+            let grain_field = |f: &&BiFieldRef| GrainField {
+                table: f.table.clone(),
+                column: f.column.clone(),
+                cache_idx: *field_to_cache_idx
+                    .get(&(f.table.clone(), f.column.clone()))
+                    .unwrap_or(&0),
+            };
+            let plan = BiTotalsPlan {
+                row_fields: row_group_fields
+                    .iter()
+                    .chain(hierarchy_row_refs.iter())
+                    .map(grain_field)
+                    .collect(),
+                col_fields: col_group_fields
+                    .iter()
+                    .chain(hierarchy_col_refs.iter())
+                    .map(grain_field)
+                    .collect(),
+                measures: query_measures.clone(),
+                vf_keys: request
+                    .value_fields
+                    .iter()
+                    .map(|v| (v.measure_name.clone(), None))
+                    .collect(),
+            };
+            // Filter/slicer dims are part of the main query's GROUP BY, so
+            // even the pivot's leaf cells are roll-ups when they exist —
+            // override the leaf grain too in that case.
+            let include_leaf =
+                !filter_group_fields.is_empty() || !slicer_group_fields.is_empty();
+            let t_totals = Instant::now();
+            let overrides = {
+                let mut engine = engine_arc.lock().await;
+                query_bi_total_overrides(&mut engine, &plan, include_leaf, &cache).await
+            };
+            if !overrides.is_empty() {
+                log_info!(
+                    "PIVOT",
+                    "BI totals: {} engine-evaluated total cells in {:.1}ms",
+                    overrides.len(),
+                    t_totals.elapsed().as_secs_f64() * 1000.0
+                );
+                cache.set_total_overrides(overrides);
+            }
+        }
+    }
+
     // Build sort-by resolution map: (table, column) -> cache_index_of_sort_by_column.
     // Used to set sort_by_field_index on PivotField for BI columns with sort_by_column.
     let sort_by_resolution: std::collections::HashMap<(String, String), usize> = {
@@ -5914,13 +5997,7 @@ pub async fn update_bi_pivot_fields(
         // per-column metadata (base measure + applied calculation item), so the
         // value-field mapping follows the engine's actual column identity rather
         // than positional arithmetic. Empty/absent metadata -> positional fallback.
-        let value_col_idx: std::collections::HashMap<(String, Option<String>), usize> =
-            result_columns
-                .iter()
-                .enumerate()
-                .filter(|(_, rc)| matches!(rc.kind, bi_engine::ResultColumnKind::Measure))
-                .filter_map(|(i, rc)| rc.measure.clone().map(|m| ((m, rc.calculation_item.clone()), i)))
-                .collect();
+        let value_col_idx = measure_value_col_idx(&result_columns, dim_offset);
         definition.value_fields = expand_bi_value_fields(
             &request.value_fields,
             &calc_item_names,

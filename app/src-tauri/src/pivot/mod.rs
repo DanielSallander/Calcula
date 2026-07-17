@@ -5,6 +5,7 @@ pub mod operations;
 pub mod commands;
 pub mod layout_commands;
 pub mod headless;
+pub mod totals;
 
 // Re-export commands so they are easy to access from main.rs
 pub use commands::*;
