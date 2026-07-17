@@ -7,6 +7,7 @@
 //   instead of a stored pivot.
 
 import { processDsl } from './index';
+import { splitBiFieldKey } from '../../lib/biFieldKey';
 import type { CompileContext } from './compiler';
 import type { DslError } from './errors';
 import type {
@@ -50,11 +51,11 @@ export interface CompiledDesignQuery {
   warnings: DslError[];
 }
 
-/** Split a "Table.Column" name into a field ref (bare names get an empty table). */
-function splitRef(name: string, isLookup?: boolean): DesignQueryFieldRef {
-  const dot = name.indexOf('.');
-  if (dot === -1) return { table: '', column: name, isLookup };
-  return { table: name.substring(0, dot), column: name.substring(dot + 1), isLookup };
+/** Split a "Table.Column" name into a field ref (bare names get an empty table).
+ *  Table names can contain dots, so resolve against the model's table names. */
+function splitRef(name: string, tableNames: string[], isLookup?: boolean): DesignQueryFieldRef {
+  const { table, column } = splitBiFieldKey(name, tableNames);
+  return { table, column, isLookup };
 }
 
 /** Strip the [brackets] from a measure name. */
@@ -85,14 +86,15 @@ export function compileDesignQuery(
     return { request: null, errors, warnings };
   }
 
+  const biTableNames = biModel.tables.map((t) => t.name);
   const request: DesignQueryRequest = {
     connectionId,
-    rowFields: result.rows.filter(isBiField).map((f) => splitRef(f.name, f.isLookup)),
-    columnFields: result.columns.filter(isBiField).map((f) => splitRef(f.name, f.isLookup)),
+    rowFields: result.rows.filter(isBiField).map((f) => splitRef(f.name, biTableNames, f.isLookup)),
+    columnFields: result.columns.filter(isBiField).map((f) => splitRef(f.name, biTableNames, f.isLookup)),
     valueFields: result.values.map((f) => valueRef(f.name, f.customName)),
     filterFields: result.filters
       .filter(isBiField)
-      .map((f) => ({ ...splitRef(f.name, f.isLookup), hiddenItems: f.hiddenItems ?? [] })),
+      .map((f) => ({ ...splitRef(f.name, biTableNames, f.isLookup), hiddenItems: f.hiddenItems ?? [] })),
     calculatedFields: result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
     valueColumnOrder: result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
     layout: result.layout,

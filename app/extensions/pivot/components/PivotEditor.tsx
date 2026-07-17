@@ -35,6 +35,7 @@ import type {
   DragField,
 } from './types';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 
 type EditorTab = 'fields' | 'design';
 
@@ -157,11 +158,11 @@ function toHierarchyFieldRef(name: string): BiHierarchyFieldRef {
   return { table: parts[0], hierarchy: parts[1], expanded: [] };
 }
 
-/** Parse a BI field key "Table.Column" into a BiFieldRef, optionally marking as lookup */
-function toBiFieldRef(name: string, isLookup?: boolean): BiFieldRef {
-  const dotIndex = name.indexOf('.');
-  if (dotIndex === -1) return { table: '', column: name, isLookup };
-  return { table: name.substring(0, dotIndex), column: name.substring(dotIndex + 1), isLookup };
+/** Parse a BI field key "Table.Column" into a BiFieldRef, optionally marking as lookup.
+ *  Table names can contain dots, so resolve against the model's table names. */
+function toBiFieldRef(name: string, tableNames: string[], isLookup?: boolean): BiFieldRef {
+  const { table, column } = splitBiFieldKey(name, tableNames);
+  return { table, column, isLookup };
 }
 
 /** Parse a BI measure field key "[MeasureName]" into a BiValueFieldRef */
@@ -188,6 +189,12 @@ export function PivotEditor({
   onViewUpdate,
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
+
+  // Model table names for field-key parsing (table names can contain dots).
+  const biTableNames = useMemo(
+    () => (biModel ? biModel.tables.map((t) => t.name) : []),
+    [biModel],
+  );
 
   // Track whether we've seen at least one successful update (or user-initiated change).
   // Suppresses the connect prompt on the initial auto-triggered mount update.
@@ -310,7 +317,7 @@ export function PivotEditor({
     if (isBiPivot) {
       const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
       const toBiRef = (f: { name: string }) =>
-        toBiFieldRef(f.name, lookupColumns.has(f.name));
+        toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
       const biFilterFields = (request.filterFields ?? [])
         .filter(isRealBiField)
         .map(f => ({ ...toBiRef(f), hiddenItems: f.hiddenItems }));
@@ -391,7 +398,7 @@ export function PivotEditor({
       }
       }
     }
-  }, [isBiPivot, lookupColumns, appliedCalcGroup, onViewUpdate]);
+  }, [isBiPivot, biTableNames, lookupColumns, appliedCalcGroup, onViewUpdate]);
 
   const {
     usedFields,
@@ -522,7 +529,7 @@ export function PivotEditor({
         if (isFieldInZone) {
           const sameTableGroupFields = allZoneFields.filter((f) => {
             if (!f.name.includes('.')) return false;
-            const fieldTable = f.name.substring(0, f.name.indexOf('.'));
+            const fieldTable = splitBiFieldKey(f.name, biTableNames).table;
             const fieldKey = f.name;
             return fieldTable === table && fieldKey !== colKey && !lookupColumns.has(fieldKey);
           });
@@ -545,7 +552,7 @@ export function PivotEditor({
         return next;
       });
     },
-    [lookupColumns, rows, columns, filters]
+    [lookupColumns, biTableNames, rows, columns, filters]
   );
 
   // Auto-lookup on add: a writeback column is typed per LEAF row, which
@@ -557,19 +564,16 @@ export function PivotEditor({
   const autoLookupWritebackColumn = useCallback(
     (fieldName: string) => {
       if (!biModel) return;
-      const dotIndex = fieldName.indexOf('.');
-      if (dotIndex === -1) return;
-      const table = fieldName.substring(0, dotIndex);
-      const column = fieldName.substring(dotIndex + 1);
+      if (!fieldName.includes('.')) return;
+      const { table, column } = splitBiFieldKey(fieldName, biTableNames);
       const colMeta = biModel.tables
         .find((t) => t.name === table)
         ?.columns.find((c) => c.name === column);
       if (!colMeta?.isWritebackColumn || lookupColumnsRef.current.has(fieldName)) return;
       const hasSameTableGroup = [...rows, ...columns, ...filters].some((f) => {
-        const d = f.name.indexOf('.');
         return (
-          d !== -1 &&
-          f.name.substring(0, d) === table &&
+          f.name.includes('.') &&
+          splitBiFieldKey(f.name, biTableNames).table === table &&
           f.name !== fieldName &&
           !lookupColumnsRef.current.has(f.name)
         );
@@ -580,7 +584,7 @@ export function PivotEditor({
       lookupColumnsRef.current = next;
       setLookupColumns(next);
     },
-    [biModel, rows, columns, filters]
+    [biModel, biTableNames, rows, columns, filters]
   );
 
   // BI column toggle: add/remove dimension field
@@ -716,7 +720,7 @@ export function PivotEditor({
     // Build and send the update request directly (same as handleUpdate logic)
     const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
     const toBiRef = (f: { name: string }) =>
-      toBiFieldRef(f.name, lookupColumns.has(f.name));
+      toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
     const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const biRequest: UpdateBiPivotFieldsRequest = {
@@ -735,7 +739,7 @@ export function PivotEditor({
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, appliedCalcGroup, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
+  }, [lookupColumns, appliedCalcGroup, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
 
   // Apply (or clear) a calculation group + its selected items, then re-run the
   // BI query so the value axis re-expands. items: [] means ALL items of the group.
@@ -743,7 +747,7 @@ export function PivotEditor({
     setAppliedCalcGroup(next);
     if (!isBiPivot) return;
     const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
-    const toBiRef = (f: { name: string }) => toBiFieldRef(f.name, lookupColumns.has(f.name));
+    const toBiRef = (f: { name: string }) => toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
     const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const biRequest: UpdateBiPivotFieldsRequest = {
@@ -762,7 +766,7 @@ export function PivotEditor({
     }).catch((err) => {
       console.error('Failed to apply calculation group:', err);
     });
-  }, [isBiPivot, pivotId, rows, columns, values, filters, lookupColumns, onViewUpdate]);
+  }, [isBiPivot, biTableNames, pivotId, rows, columns, values, filters, lookupColumns, onViewUpdate]);
 
   // Select/clear the calculation group (defaults to all items).
   const handleCalcGroupChange = useCallback((groupName: string | null) => {

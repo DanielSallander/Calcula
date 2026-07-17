@@ -1299,6 +1299,32 @@ pub fn get_pivot_source_data(
     })
 }
 
+/// Split a "Table.Column" field key into (table, column). Table names can
+/// contain dots (schema-qualified sources like "BI.dim_customer"), so the
+/// longest known table name that prefixes the key wins; a key matching no
+/// known table falls back to a first-dot split (correct for dot-free tables).
+pub(crate) fn split_bi_field_key<'a, I>(name: &str, table_names: I) -> (String, String)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut best: Option<&str> = None;
+    for t in table_names {
+        if name.len() > t.len() + 1
+            && name.as_bytes()[t.len()] == b'.'
+            && name.starts_with(t)
+            && best.is_none_or(|b| t.len() > b.len())
+        {
+            best = Some(t);
+        }
+    }
+    if let Some(t) = best {
+        return (t.to_string(), name[t.len() + 1..].to_string());
+    }
+    name.split_once('.')
+        .map(|(t, c)| (t.to_string(), c.to_string()))
+        .unwrap_or_else(|| (String::new(), name.to_string()))
+}
+
 /// Refreshes the pivot cache from current grid data
 #[tauri::command]
 pub async fn refresh_pivot_cache(
@@ -1334,11 +1360,12 @@ pub async fn refresh_pivot_cache(
             let meta = bi_meta.get(&pivot_id)
                 .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
 
-            // Parse "Table.Column" field names back into BiFieldRef
+            // Parse "Table.Column" field names back into BiFieldRef. Table
+            // names can contain dots, so resolve against the model's tables.
+            let table_names: Vec<&str> =
+                meta.model_tables.iter().map(|t| t.name.as_str()).collect();
             let parse_field = |name: &str, is_lookup: bool| -> super::types::BiFieldRef {
-                let (table, column) = name.split_once('.')
-                    .map(|(t, c)| (t.to_string(), c.to_string()))
-                    .unwrap_or_else(|| (String::new(), name.to_string()));
+                let (table, column) = split_bi_field_key(name, table_names.iter().copied());
                 super::types::BiFieldRef { table, column, is_lookup, hidden_items: Vec::new() }
             };
 
@@ -1384,16 +1411,16 @@ pub async fn refresh_pivot_cache(
                     cache.field_name(sf.source_index).and_then(|name| {
                         // Field names are "Table.Column" in the definition or
                         // bare "Column" from the Arrow schema.
-                        let (table, column) = name.split_once('.')
-                            .map(|(t, c)| (t.to_string(), c.to_string()))
-                            .unwrap_or_else(|| {
-                                // Bare column name — look up table from BI metadata
-                                let table_name = meta.model_tables.iter()
-                                    .find(|t| t.columns.iter().any(|c| c.name == name))
-                                    .map(|t| t.name.clone())
-                                    .unwrap_or_default();
-                                (table_name, name)
-                            });
+                        let (table, column) = if name.contains('.') {
+                            split_bi_field_key(&name, table_names.iter().copied())
+                        } else {
+                            // Bare column name — look up table from BI metadata
+                            let table_name = meta.model_tables.iter()
+                                .find(|t| t.columns.iter().any(|c| c.name == name))
+                                .map(|t| t.name.clone())
+                                .unwrap_or_default();
+                            (table_name, name)
+                        };
                         if table.is_empty() {
                             None
                         } else {
@@ -4474,6 +4501,43 @@ pub(crate) fn expand_bi_value_fields(
         }
     }
     vfs
+}
+
+#[cfg(test)]
+mod split_bi_field_key_tests {
+    use super::split_bi_field_key;
+
+    #[test]
+    fn dotted_table_names_resolve_by_longest_prefix() {
+        let tables = ["BI.dim_customer", "BI.fact_sales", "dim_date"];
+        // Schema-qualified table: the longest matching table name wins,
+        // not the first-dot split (which would yield table "BI").
+        assert_eq!(
+            split_bi_field_key("BI.dim_customer.fullname", tables.iter().copied()),
+            ("BI.dim_customer".to_string(), "fullname".to_string())
+        );
+        // Plain table name still resolves.
+        assert_eq!(
+            split_bi_field_key("dim_date.year", tables.iter().copied()),
+            ("dim_date".to_string(), "year".to_string())
+        );
+        // Unknown dotted key falls back to the first-dot split.
+        assert_eq!(
+            split_bi_field_key("Orders.Amount", tables.iter().copied()),
+            ("Orders".to_string(), "Amount".to_string())
+        );
+        // Bare column name: no table.
+        assert_eq!(
+            split_bi_field_key("Amount", tables.iter().copied()),
+            (String::new(), "Amount".to_string())
+        );
+        // A key that IS a table name exactly (no column part) must not match
+        // the prefix rule; falls back to the first-dot split.
+        assert_eq!(
+            split_bi_field_key("BI.fact_sales", tables.iter().copied()),
+            ("BI".to_string(), "fact_sales".to_string())
+        );
+    }
 }
 
 #[cfg(test)]

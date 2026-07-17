@@ -29,6 +29,7 @@ import { requestOverlayRedraw } from "@api/gridOverlays";
 import { emitAppEvent, AppEvents } from "@api";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { BiHierarchyMeta } from "@api/backend";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 
 /**
  * Pipeline stages (total = 4):
@@ -1377,10 +1378,10 @@ export async function applyPivotDsl(
 
   if (info.biModel) {
     // BI pivot: convert to BI-specific request
+    const biTableNames = info.biModel.tables.map((t) => t.name);
     const toBiRef = (name: string, isLookup?: boolean): BiFieldRef => {
-      const dotIndex = name.indexOf('.');
-      if (dotIndex === -1) return { table: '', column: name, isLookup };
-      return { table: name.substring(0, dotIndex), column: name.substring(dotIndex + 1), isLookup };
+      const { table, column } = splitBiFieldKey(name, biTableNames);
+      return { table, column, isLookup };
     };
     const toBiValueRef = (name: string, customName?: string): BiValueFieldRef => {
       const measureName = name.startsWith('[') && name.endsWith(']')

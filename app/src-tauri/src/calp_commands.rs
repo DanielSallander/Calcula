@@ -9044,10 +9044,12 @@ fn validate_dimension_field(
         return;
     }
 
-    let (table_name, column_name) = name.split_once('.').unwrap();
+    // Table names can contain dots — resolve against the model's table names.
+    let (table_name, column_name) =
+        crate::pivot::commands::split_bi_field_key(name, tables.keys().map(|k| k.as_str()));
 
-    if let Some(columns) = tables.get(table_name) {
-        if !columns.iter().any(|c| c == column_name) {
+    if let Some(columns) = tables.get(&table_name) {
+        if !columns.iter().any(|c| *c == column_name) {
             errors.push(format!(
                 "BI pivot \"{}\": {} field \"{}\" references column \"{}\" which does not exist in table \"{}\". Available columns: {}",
                 pivot_name, area, name, column_name, table_name,

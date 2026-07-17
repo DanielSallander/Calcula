@@ -24,6 +24,7 @@ import {
 } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
+import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 
 // ---------------------------------------------------------------------------
 // Module-level state (owned by the pivot extension, not by the shell)
@@ -396,8 +397,9 @@ async function checkPivotAtSelection(
           // Find the table from the first level field
           const firstField = fields[hc.fieldStart];
           if (firstField) {
-            const dotIdx = firstField.name.indexOf('.');
-            const table = dotIdx >= 0 ? firstField.name.substring(0, dotIdx) : '';
+            const table = firstField.name.includes('.')
+              ? splitBiFieldKey(firstField.name, pivotInfo.biModel?.tables.map((t) => t.name)).table
+              : '';
             result.push({
               sourceIndex: -3,
               name: `${table}.__hierarchy__.${hc.name}`,
