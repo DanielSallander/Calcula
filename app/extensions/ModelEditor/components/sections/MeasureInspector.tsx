@@ -165,7 +165,6 @@ export function MeasureInspector({
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Measure</span>
         {measure.isHidden && <Badge tone="warn">hidden</Badge>}
-        <span style={{ ...styles.muted, fontSize: 11 }}>{measure.table}</span>
       </div>
 
       <label style={label}>Name</label>

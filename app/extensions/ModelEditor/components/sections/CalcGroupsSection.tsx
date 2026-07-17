@@ -46,6 +46,28 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
   } | null>(null);
   /** In-flight queued ops; the modal mounts only when this is 0. */
   const [pending, setPending] = useState(0);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    group: string;
+    /** null = the menu was opened on the group node. */
+    item: string | null;
+  } | null>(null);
+
+  // Close the context menu on any outside click or Escape.
+  useEffect(() => {
+    if (!menu) return;
+    const close = (): void => setMenu(null);
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   // Latest known-good groups: synced from the overview, updated optimistically
   // after each queued save so follow-up ops build on what was submitted.
@@ -239,6 +261,18 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
     );
   };
 
+  const editItemFormula = (groupName: string, itemName: string, formula: string): void => {
+    const next = formula.trim();
+    enqueueGroupOp(groupName, (g) => {
+      const item = g.items.find((i) => i.name === itemName);
+      if (!item || item.formula === next) return null;
+      return {
+        name: g.name,
+        items: g.items.map((i) => (i.name === itemName ? { ...i, formula: next } : i)),
+      };
+    });
+  };
+
   const openModal = (groupName: string | null, itemName?: string | null): void => {
     if (readOnly) return;
     // The item is addressed by INDEX (stable across renames); resolved from
@@ -325,6 +359,12 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                   }}
                   onClick={() => setSelected({ group: g.name, item: null })}
                   onDoubleClick={() => openModal(g.name, null)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (readOnly) return;
+                    setSelected({ group: g.name, item: null });
+                    setMenu({ x: e.clientX, y: e.clientY, group: g.name, item: null });
+                  }}
                   title={`${g.items.length} item${g.items.length === 1 ? "" : "s"}`}
                 >
                   <span
@@ -343,7 +383,30 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {g.name}
                   </span>
-                  <span style={{ ...styles.muted, marginLeft: "auto", fontSize: 11 }}>
+                  <button
+                    style={{
+                      marginLeft: "auto",
+                      border: "1px solid transparent",
+                      background: "transparent",
+                      color: "#666",
+                      cursor: "pointer",
+                      fontSize: 13,
+                      lineHeight: 1,
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                      flexShrink: 0,
+                    }}
+                    title="Add item"
+                    disabled={readOnly}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      addItem(g.name);
+                    }}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                  >
+                    +
+                  </button>
+                  <span style={{ ...styles.muted, fontSize: 11, flexShrink: 0 }}>
                     {g.items.length}
                   </span>
                 </div>
@@ -362,6 +425,12 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                         }}
                         onClick={() => setSelected({ group: g.name, item: it.name })}
                         onDoubleClick={() => openModal(g.name, it.name)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          if (readOnly) return;
+                          setSelected({ group: g.name, item: it.name });
+                          setMenu({ x: e.clientX, y: e.clientY, group: g.name, item: it.name });
+                        }}
                         title={blank ? "(blank — evaluates to BLANK())" : it.formula}
                       >
                         <span style={{ color: ACCENT, flexShrink: 0, fontSize: 11 }}>ƒ</span>
@@ -402,9 +471,33 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
             onDeleteItem={(item) => deleteItem(selectedGroup.name, item)}
             onAddItem={() => addItem(selectedGroup.name)}
             onEditFormula={(item) => openModal(selectedGroup.name, item)}
+            onEditFormulaText={(item, f) => editItemFormula(selectedGroup.name, item, f)}
           />
         )}
       </div>
+
+      {menu && (
+        <CalcGroupContextMenu
+          menu={menu}
+          lastItem={
+            menu.item !== null &&
+            (groups.find((g) => g.name === menu.group)?.items.length ?? 0) <= 1
+          }
+          onAddItem={() => {
+            addItem(menu.group);
+            setMenu(null);
+          }}
+          onEditInEditor={() => {
+            openModal(menu.group, menu.item);
+            setMenu(null);
+          }}
+          onDelete={() => {
+            if (menu.item !== null) deleteItem(menu.group, menu.item);
+            else handleDeleteGroup(menu.group);
+            setMenu(null);
+          }}
+        />
+      )}
 
       {editing && (!editing.groupName || modalOriginal) && pending === 0 && (
         <CalcGroupModal
@@ -416,6 +509,83 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
           onSaved={handleModalSaved}
         />
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Context menu — right-click on a group node or an item row
+// ============================================================================
+
+function CalcGroupContextMenu({
+  menu,
+  lastItem,
+  onAddItem,
+  onEditInEditor,
+  onDelete,
+}: {
+  menu: { x: number; y: number; group: string; item: string | null };
+  /** True when the menu targets a group's only item (cannot be deleted). */
+  lastItem: boolean;
+  onAddItem: () => void;
+  onEditInEditor: () => void;
+  onDelete: () => void;
+}): React.ReactElement {
+  const isItem = menu.item !== null;
+  const itemStyle: React.CSSProperties = {
+    display: "block",
+    width: "100%",
+    textAlign: "left",
+    padding: "5px 12px",
+    border: "none",
+    background: "transparent",
+    color: "#222",
+    fontSize: 12,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    fontFamily: "inherit",
+  };
+  return (
+    <div
+      // Fixed at the pointer so the tree's own overflow never clips it; the
+      // window click listener closes it.
+      style={{
+        position: "fixed",
+        top: menu.y,
+        left: menu.x,
+        zIndex: 1000,
+        minWidth: 180,
+        background: "#fff",
+        border: "1px solid #ccc",
+        borderRadius: 4,
+        boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+        padding: "4px 0",
+      }}
+    >
+      {!isItem && (
+        <button style={itemStyle} onClick={onAddItem}>
+          Add item
+        </button>
+      )}
+      <button style={itemStyle} onClick={onEditInEditor}>
+        {isItem ? "Edit formula…" : "Open in editor…"}
+      </button>
+      <button
+        style={{
+          ...itemStyle,
+          color: "#a4262c",
+          opacity: isItem && lastItem ? 0.5 : 1,
+        }}
+        disabled={isItem && lastItem}
+        title={
+          isItem && lastItem
+            ? "A calculation group needs at least one item — delete the group instead"
+            : undefined
+        }
+        onClick={onDelete}
+      >
+        {isItem ? "Delete item" : "Delete group"}
+      </button>
     </div>
   );
 }
@@ -433,6 +603,7 @@ function CalcGroupInspector({
   onDeleteItem,
   onAddItem,
   onEditFormula,
+  onEditFormulaText,
 }: {
   group: ModelCalcGroupInfo;
   /** null = the group node itself is selected. */
@@ -442,11 +613,26 @@ function CalcGroupInspector({
   onRenameItem: (itemName: string, newName: string) => void;
   onDeleteItem: (itemName: string) => void;
   onAddItem: () => void;
+  /** Open the workspace modal on this item (null = the group). */
   onEditFormula: (itemName: string | null) => void;
+  /** Commit a formula typed directly in the pane (blank = BLANK()). */
+  onEditFormulaText: (itemName: string, formula: string) => void;
 }): React.ReactElement {
   const [name, setName] = useState(item ? item.name : group.name);
   const currentName = item ? item.name : group.name;
-  const blank = item ? item.formula.trim() === "" : false;
+
+  // The formula is editable in place. The pane remounts when the SELECTED
+  // node changes (keyed by name), but the formula can also change under the
+  // same key (the workspace modal saved) — adopt the external value only when
+  // the draft was un-diverged, per the measures-inspector pattern. A commit
+  // that fails to parse keeps the draft so the user can fix it (the error
+  // shows in the window banner).
+  const [formula, setFormula] = useState(item?.formula ?? "");
+  const [formulaSeed, setFormulaSeed] = useState(item?.formula ?? "");
+  if (item && item.formula !== formulaSeed) {
+    if (formula === formulaSeed) setFormula(item.formula);
+    setFormulaSeed(item.formula);
+  }
 
   const commitOnEnter = (e: React.KeyboardEvent<HTMLElement>): void => {
     if (e.key === "Enter") (e.target as HTMLElement).blur();
@@ -496,26 +682,19 @@ function CalcGroupInspector({
       {item ? (
         <>
           <label style={label}>Formula</label>
-          <div
-            style={{
-              fontFamily: "Consolas, 'Cascadia Code', monospace",
-              fontSize: 11,
-              background: "#f7f8fa",
-              border: "1px solid #e5e5e5",
-              borderRadius: 3,
-              padding: "6px 8px",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              maxHeight: 160,
-              overflowY: "auto",
-              color: blank ? "#999" : "#222",
+          <textarea
+            style={{ ...styles.textarea, fontSize: 11, minHeight: 96 }}
+            value={formula}
+            placeholder="(blank — evaluates to BLANK())"
+            disabled={readOnly}
+            onChange={(e) => setFormula(e.target.value)}
+            onBlur={() => {
+              if (formula.trim() !== item.formula) onEditFormulaText(item.name, formula);
             }}
-          >
-            {blank ? "(blank — evaluates to BLANK())" : item.formula}
-          </div>
+          />
           <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <button style={styles.btn} disabled={readOnly} onClick={() => onEditFormula(item.name)}>
-              Edit formula…
+              Edit in editor…
             </button>
             <button
               style={{ ...styles.btn, color: "#a4262c" }}
