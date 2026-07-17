@@ -51,6 +51,7 @@ import { TestingGroundSection } from "./sections/TestingGroundSection";
 import { LineageSection } from "./sections/LineageSection";
 import { NewModelDialog } from "./NewModelDialog";
 import { CommandPanel } from "./CommandPanel";
+import { CliReferencePane } from "./CliReferencePane";
 
 // ============================================================================
 // Navigation
@@ -180,10 +181,20 @@ export function ModelEditorApp(): React.ReactElement {
   const [showCli, setShowCli] = useState(
     () => localStorage.getItem("calcula.modelEditor.cli.open") === "1",
   );
+  const [showCliRef, setShowCliRef] = useState(
+    () => localStorage.getItem("calcula.modelEditor.cliRef.open") === "1",
+  );
 
   const toggleCli = useCallback(() => {
     setShowCli((prev) => {
       localStorage.setItem("calcula.modelEditor.cli.open", prev ? "0" : "1");
+      return !prev;
+    });
+  }, []);
+
+  const toggleCliRef = useCallback(() => {
+    setShowCliRef((prev) => {
+      localStorage.setItem("calcula.modelEditor.cliRef.open", prev ? "0" : "1");
       return !prev;
     });
   }, []);
@@ -578,6 +589,7 @@ export function ModelEditorApp(): React.ReactElement {
           ))}
         </nav>
         <main style={contentStyle}>{renderSection()}</main>
+        {showCliRef && <CliReferencePane onClose={toggleCliRef} />}
       </div>
 
       {showCli && (
@@ -587,6 +599,8 @@ export function ModelEditorApp(): React.ReactElement {
           readOnly={readOnly}
           onApplyOverview={applyOverview}
           onClose={toggleCli}
+          referenceOpen={showCliRef}
+          onToggleReference={toggleCliRef}
         />
       )}
 

@@ -92,6 +92,10 @@ export interface CommandPanelProps {
   /** Install a fresh overview in the app after a run changed the model. */
   onApplyOverview: (o: ModelOverview) => void;
   onClose: () => void;
+  /** Whether the reference-guide side pane is currently open. */
+  referenceOpen: boolean;
+  /** Toggle the reference-guide side pane (lives beside the sections). */
+  onToggleReference: () => void;
 }
 
 const MIN_HEIGHT = 120;
@@ -103,6 +107,8 @@ export function CommandPanel({
   readOnly,
   onApplyOverview,
   onClose,
+  referenceOpen,
+  onToggleReference,
 }: CommandPanelProps): React.ReactElement {
   const [height, setHeight] = useState<number>(() =>
     Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, loadJson(HEIGHT_KEY, 220))),
@@ -430,6 +436,13 @@ export function CommandPanel({
         {readOnly && <span style={{ fontSize: 11, color: "#7a5b00" }}>read-only model — edits disabled</span>}
         <div style={{ flex: 1 }} />
         {busy && <span style={{ fontSize: 11, color: "#6b7280" }}>Running…</span>}
+        <button
+          style={{ ...styles.btn, ...(referenceOpen ? { background: "#0b5cad", color: "#fff" } : {}) }}
+          onClick={onToggleReference}
+          title="Open the full command reference guide in a side pane"
+        >
+          Reference
+        </button>
         <button style={styles.btn} onClick={() => setEntries([])} title="Clear the output log">
           Clear
         </button>

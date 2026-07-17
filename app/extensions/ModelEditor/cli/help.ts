@@ -34,7 +34,8 @@ Notes:
   and roll back entirely if any step fails.
   Full-line comments start with # or //.
 
-'help <kind>' or 'help <verb>' shows details, e.g. 'help measure'.`;
+'help <kind>' or 'help <verb>' shows details, e.g. 'help measure'.
+The Reference button in the panel header opens the full guide as a side pane.`;
 
 const TOPICS: Record<string, string> = {
   measure: `Measures:
