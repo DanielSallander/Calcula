@@ -50,6 +50,7 @@ import { SettingsSection } from "./sections/SettingsSection";
 import { TestingGroundSection } from "./sections/TestingGroundSection";
 import { LineageSection } from "./sections/LineageSection";
 import { NewModelDialog } from "./NewModelDialog";
+import { CommandPanel } from "./CommandPanel";
 
 // ============================================================================
 // Navigation
@@ -176,6 +177,28 @@ export function ModelEditorApp(): React.ReactElement {
   const [active, setActive] = useState<SectionId>("overview");
   const [undoState, setUndoState] = useState<ModelUndoState>({ canUndo: false, canRedo: false });
   const [showNewModel, setShowNewModel] = useState(false);
+  const [showCli, setShowCli] = useState(
+    () => localStorage.getItem("calcula.modelEditor.cli.open") === "1",
+  );
+
+  const toggleCli = useCallback(() => {
+    setShowCli((prev) => {
+      localStorage.setItem("calcula.modelEditor.cli.open", prev ? "0" : "1");
+      return !prev;
+    });
+  }, []);
+
+  // VSCode-style Ctrl+` toggles the command panel.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "Backquote") {
+        e.preventDefault();
+        toggleCli();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleCli]);
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
@@ -514,6 +537,16 @@ export function ModelEditorApp(): React.ReactElement {
         >
           Redo
         </button>
+        <button
+          style={{
+            ...styles.btn,
+            ...(showCli ? { background: ACCENT, color: "#fff" } : {}),
+          }}
+          title="Toggle the command line panel (Ctrl+`)"
+          onClick={toggleCli}
+        >
+          Command Line
+        </button>
         <div style={{ flex: 1 }} />
         {loading && <span style={{ ...styles.muted, fontSize: 12 }}>Loading&hellip;</span>}
         {/* Models have no separate file: edits live in this workbook and are
@@ -546,6 +579,16 @@ export function ModelEditorApp(): React.ReactElement {
         </nav>
         <main style={contentStyle}>{renderSection()}</main>
       </div>
+
+      {showCli && (
+        <CommandPanel
+          connectionId={connectionId}
+          overview={overview}
+          readOnly={readOnly}
+          onApplyOverview={applyOverview}
+          onClose={toggleCli}
+        />
+      )}
 
       {showNewModel && (
         <NewModelDialog

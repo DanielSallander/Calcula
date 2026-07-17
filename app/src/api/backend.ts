@@ -4552,6 +4552,26 @@ export async function biModelRedo(connectionId: string): Promise<ModelOverview> 
   return invoke<ModelOverview>("bi_model_redo", { connectionId });
 }
 
+// --- Atomic edit batches (Model Editor command line) ---
+// Bracket a run of ordinary bi_model_* edits so they undo as ONE step.
+// Always pair begin with end (success) or cancel (rollback) in a try/finally.
+
+/** Open an atomic batch on the connection's model (errors if one is open). */
+export async function biModelBatchBegin(connectionId: string): Promise<void> {
+  return invoke<void>("bi_model_batch_begin", { connectionId });
+}
+
+/** Close the open batch, keeping its edits as one undo step. Pass
+ *  `hadEdits` false when nothing actually ran, so Undo isn't a no-op. */
+export async function biModelBatchEnd(connectionId: string, hadEdits: boolean): Promise<void> {
+  return invoke<void>("bi_model_batch_end", { connectionId, hadEdits });
+}
+
+/** Abort the open batch: roll back to the pre-batch model state. */
+export async function biModelBatchCancel(connectionId: string): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_batch_cancel", { connectionId });
+}
+
 export async function biModelSetMetadata(params: {
   connectionId: string;
   name?: string | null;

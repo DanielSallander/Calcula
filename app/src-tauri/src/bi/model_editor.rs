@@ -368,6 +368,10 @@ pub(super) fn editable_base(
 struct ModelUndoStacks {
     undo: Vec<bi_engine::DataModel>,
     redo: Vec<bi_engine::DataModel>,
+    /// True while an atomic batch is open (`bi_model_batch_begin`): the batch
+    /// recorded ONE pre-batch snapshot up front, so per-edit snapshots are
+    /// suppressed until `bi_model_batch_end` / `bi_model_batch_cancel`.
+    in_batch: bool,
 }
 
 /// Cap the snapshot depth (each entry is a full model clone).
@@ -379,10 +383,14 @@ fn model_undo_store() -> &'static Mutex<HashMap<Option<ModelKey>, ModelUndoStack
 }
 
 /// Record a pre-edit snapshot for a model_key and clear its redo stack (a new
-/// edit invalidates the redo branch).
+/// edit invalidates the redo branch). No-op inside an open batch — the batch
+/// begin already snapshotted, so the whole batch undoes as one step.
 fn record_model_undo(model_key: &Option<ModelKey>, pre_edit: bi_engine::DataModel) {
     if let Ok(mut store) = model_undo_store().lock() {
         let stacks = store.entry(model_key.clone()).or_default();
+        if stacks.in_batch {
+            return;
+        }
         stacks.undo.push(pre_edit);
         if stacks.undo.len() > MAX_MODEL_UNDO {
             stacks.undo.remove(0);
@@ -4677,6 +4685,120 @@ pub async fn bi_model_redo(
     emit_model_changed(&bi_state, &model_key, &current_base, &next, "redo", None);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
     Ok(build_overview(&next, &bindings, true, None))
+}
+
+// ---------------------------------------------------------------------------
+// Atomic edit batches (Model Editor command line)
+// ---------------------------------------------------------------------------
+//
+// A batch groups any number of ordinary model-edit commands into ONE undo
+// step: begin records a single pre-batch snapshot and suppresses the per-edit
+// snapshots `apply_model_edit` would otherwise record; end lifts the
+// suppression; cancel additionally reinstalls the pre-batch snapshot
+// (all-or-nothing rollback). The frontend brackets script runs / wildcard
+// expansions with begin + end|cancel in a try/finally.
+
+/// Open an atomic batch on the connection's model. Errors if one is already
+/// open for that model.
+#[tauri::command]
+pub fn bi_model_batch_begin(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (model_key, current_base) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.model_key.clone(),
+            conn.base_model
+                .clone()
+                .ok_or("This connection has no editable base model")?,
+        )
+    };
+    let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
+    let stacks = store.entry(model_key).or_default();
+    if stacks.in_batch {
+        return Err("A model edit batch is already in progress".to_string());
+    }
+    stacks.undo.push(current_base);
+    if stacks.undo.len() > MAX_MODEL_UNDO {
+        stacks.undo.remove(0);
+    }
+    stacks.redo.clear();
+    stacks.in_batch = true;
+    Ok(())
+}
+
+/// Close the open batch, keeping its edits as one undo step. When no edit
+/// actually ran (`had_edits` false) the redundant pre-batch snapshot is
+/// dropped so Undo isn't a visible no-op.
+#[tauri::command]
+pub fn bi_model_batch_end(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    had_edits: bool,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let model_key = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns
+            .get(&connection_id)
+            .ok_or("Connection not found")?
+            .model_key
+            .clone()
+    };
+    let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
+    let stacks = store.entry(model_key).or_default();
+    if !stacks.in_batch {
+        return Err("No model edit batch is in progress".to_string());
+    }
+    stacks.in_batch = false;
+    if !had_edits {
+        stacks.undo.pop();
+    }
+    Ok(())
+}
+
+/// Abort the open batch: reinstall the pre-batch snapshot (rolling back every
+/// edit made inside the batch) and return the restored overview.
+#[tauri::command]
+pub async fn bi_model_batch_cancel(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (model_key, current_base, bindings) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.model_key.clone(),
+            conn.base_model
+                .clone()
+                .ok_or("This connection has no editable base model")?,
+            conn.bindings.clone(),
+        )
+    };
+    let prev = {
+        let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
+        let stacks = store.entry(model_key.clone()).or_default();
+        if !stacks.in_batch {
+            return Err("No model edit batch is in progress".to_string());
+        }
+        stacks.in_batch = false;
+        stacks
+            .undo
+            .pop()
+            .ok_or("Batch snapshot missing from the undo stack")?
+    };
+    install_base_model(&bi_state, &connection_id, &prev).await?;
+    emit_model_changed(&bi_state, &model_key, &current_base, &prev, "undo", None);
+    *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    Ok(build_overview(&prev, &bindings, true, None))
 }
 
 // ---------------------------------------------------------------------------
