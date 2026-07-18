@@ -424,6 +424,8 @@ async function checkPivotAtSelection(
         return result;
       };
 
+      // hiddenItems ride along on row/column chips too (a placed calculation
+      // group's item subset lives there like a field filter).
       const initialRows: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
         ? reconstitute(config.rowFields, true)
         : config.rowFields.map((f) => ({
@@ -432,6 +434,7 @@ async function checkPivotAtSelection(
             isNumeric: f.isNumeric,
             customName: isBiPivot ? f.name : undefined,
             isLookup: f.isLookup || false,
+            hiddenItems: f.hiddenItems,
           }));
 
       const initialColumns: ZoneField[] = isBiPivot && hierarchyConfigs.length > 0
@@ -442,6 +445,7 @@ async function checkPivotAtSelection(
             isNumeric: f.isNumeric,
             customName: isBiPivot ? f.name : undefined,
             isLookup: f.isLookup || false,
+            hiddenItems: f.hiddenItems,
           }));
 
       const initialValues: ZoneField[] = config.valueFields.map((f) => ({

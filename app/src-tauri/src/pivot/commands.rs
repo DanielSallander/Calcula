@@ -1365,23 +1365,41 @@ pub async fn refresh_pivot_cache(
 
             // Parse "Table.Column" field names back into BiFieldRef. Table
             // names can contain dots, so resolve against the model's tables.
+            // A placed calculation-group field is named after the GROUP (no
+            // table part) — reconstruct it as its pseudo ref, carrying its
+            // hidden-item subset, so update_bi_pivot_fields re-places it.
             let table_names: Vec<&str> =
                 meta.model_tables.iter().map(|t| t.name.as_str()).collect();
+            let calc_group_names: std::collections::HashSet<&str> =
+                meta.calculation_groups.iter().map(|g| g.name.as_str()).collect();
             let parse_field = |name: &str, is_lookup: bool| -> super::types::BiFieldRef {
+                if calc_group_names.contains(name) {
+                    return super::types::BiFieldRef {
+                        table: super::types::CALC_GROUP_TABLE.to_string(),
+                        column: name.to_string(),
+                        is_lookup: false,
+                        hidden_items: Vec::new(),
+                    };
+                }
                 let (table, column) = split_bi_field_key(name, table_names.iter().copied());
                 super::types::BiFieldRef { table, column, is_lookup, hidden_items: Vec::new() }
             };
 
+            let parse_dim_field = |f: &pivot_engine::PivotField| -> super::types::BiFieldRef {
+                let mut r = parse_field(&f.name, f.is_attribute);
+                if r.is_calc_group() {
+                    r.hidden_items = f.hidden_items.clone();
+                }
+                r
+            };
             let row_fields: Vec<super::types::BiFieldRef> = definition.row_fields.iter()
-                .map(|f| parse_field(&f.name, f.is_attribute))
+                .map(parse_dim_field)
                 .collect();
             let column_fields: Vec<super::types::BiFieldRef> = definition.column_fields.iter()
-                .map(|f| parse_field(&f.name, f.is_attribute))
+                .map(parse_dim_field)
                 .collect();
-            // Collapse any calculation-group expansion back to the base measures
-            // (one BiValueFieldRef per base measure) and strip the "[...]" display
-            // wrapper to recover the clean measure name; update_bi_pivot_fields
-            // re-applies the calculation group from meta.applied_calc_group.
+            // Strip the "[...]" display wrapper to recover the clean measure
+            // name (value fields are one per base measure).
             let value_fields: Vec<super::types::BiValueFieldRef> = {
                 let mut seen_calc: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
@@ -1472,7 +1490,6 @@ pub async fn refresh_pivot_cache(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 calculated_fields: calc_fields,
                 value_column_order,
-                calculation_group: meta.applied_calc_group.clone(),
             }
         };
 
@@ -1711,7 +1728,9 @@ pub fn get_pivot_at_cell(
         })
         .collect();
     
-    // Build current field configuration from definition
+    // Build current field configuration from definition. Row/column fields
+    // carry their hidden_items too so a placed calculation group's item
+    // subset survives an editor reopen.
     let row_fields: Vec<ZoneFieldInfo> = definition.row_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.source_index);
         ZoneFieldInfo {
@@ -1720,7 +1739,7 @@ pub fn get_pivot_at_cell(
             is_numeric,
             aggregation: None,
             is_lookup: f.is_attribute,
-            hidden_items: None,
+            hidden_items: if f.hidden_items.is_empty() { None } else { Some(f.hidden_items.clone()) },
             custom_name: None,
         }
     }).collect();
@@ -1733,7 +1752,7 @@ pub fn get_pivot_at_cell(
             is_numeric,
             aggregation: None,
             is_lookup: f.is_attribute,
-            hidden_items: None,
+            hidden_items: if f.hidden_items.is_empty() { None } else { Some(f.hidden_items.clone()) },
             custom_name: None,
         }
     }).collect();
@@ -1865,7 +1884,6 @@ pub fn get_pivot_at_cell(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
-                applied_calculation_group: meta.applied_calc_group.clone(),
                 data_as_of: meta.data_as_of.clone(),
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
@@ -2514,7 +2532,6 @@ pub fn get_pivot_hierarchies(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 hierarchies: meta.hierarchies.clone(),
                 calculation_groups: meta.calculation_groups.clone(),
-                applied_calculation_group: meta.applied_calc_group.clone(),
                 data_as_of: meta.data_as_of.clone(),
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
@@ -5052,7 +5069,6 @@ pub async fn create_pivot_from_bi_model(
         measures,
         hierarchies,
         calculation_groups: calc_groups,
-        applied_calc_group: None,
         data_as_of: None,
         last_query: None,
         lookup_columns: std::collections::HashSet::new(),
@@ -5075,6 +5091,27 @@ pub async fn create_pivot_from_bi_model(
     );
 
     Ok(response)
+}
+
+/// Which zone a placed calculation group occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalcGroupAxis {
+    Rows,
+    Columns,
+    Filters,
+}
+
+/// A calculation group placed on a pivot as a dimension (Power BI-style):
+/// stripped out of the request's field lists before the engine query and
+/// spliced back into the definition as a real field over the reshaped cache.
+#[derive(Debug, Clone)]
+struct CalcGroupPlacement {
+    group: String,
+    axis: CalcGroupAxis,
+    /// Index within its zone's field list (chip order).
+    position: usize,
+    /// Items hidden from the view (subset selection), like any field filter.
+    hidden_items: Vec<String>,
 }
 
 /// Updates field assignments on a BI-backed pivot, re-querying the BI engine.
@@ -5100,6 +5137,42 @@ pub async fn update_bi_pivot_fields(
             return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
         }
     }
+
+    // ---- Calculation-group placement (Power BI-style dimension) ----
+    // A calculation group arrives as a pseudo field ref (table = CALC_GROUP_TABLE)
+    // inside the row/column/filter lists. Strip it out here: the engine query
+    // must not GROUP BY it — the engine cross-applies the group's items to the
+    // measures instead — and the wide result is reshaped below so the group
+    // becomes a REAL cache dimension whose members are the calculation items.
+    let mut request = request;
+    let mut placement: Option<CalcGroupPlacement> = None;
+    {
+        let mut take = |fields: &mut Vec<BiFieldRef>, axis: CalcGroupAxis| -> Result<(), String> {
+            while let Some(pos) = fields.iter().position(|f| f.is_calc_group()) {
+                let f = fields.remove(pos);
+                if placement.is_some() {
+                    return Err(
+                        "Only one calculation group can be placed on a pivot at a time."
+                            .to_string(),
+                    );
+                }
+                placement = Some(CalcGroupPlacement {
+                    group: f.column,
+                    axis,
+                    position: pos,
+                    hidden_items: f.hidden_items,
+                });
+            }
+            Ok(())
+        };
+        take(&mut request.row_fields, CalcGroupAxis::Rows)?;
+        take(&mut request.column_fields, CalcGroupAxis::Columns)?;
+        take(&mut request.filter_fields, CalcGroupAxis::Filters)?;
+    }
+    if request.slicer_fields.iter().any(|f| f.is_calc_group()) {
+        return Err("A calculation group can't be used as a slicer field yet.".to_string());
+    }
+    let request = request; // placement stripped; immutable from here
 
     // Save previous state for revert-on-cancel
     {
@@ -5158,13 +5231,20 @@ pub async fn update_bi_pivot_fields(
     }
 
     let has_values = !request.value_fields.is_empty();
+    // A calculation group placed on rows/columns IS a dimension (its items are
+    // the field's members), even though it was stripped from the field lists.
+    let group_on_axis = matches!(
+        placement.as_ref().map(|p| p.axis),
+        Some(CalcGroupAxis::Rows) | Some(CalcGroupAxis::Columns)
+    );
     let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty()
-        || !request.row_hierarchies.is_empty() || !request.column_hierarchies.is_empty();
+        || !request.row_hierarchies.is_empty() || !request.column_hierarchies.is_empty()
+        || group_on_axis;
     let has_filters = !request.filter_fields.is_empty();
     let has_slicer_fields = !request.slicer_fields.is_empty();
 
     // If no fields at all, clear to empty pivot
-    if !has_values && !has_dimensions && !has_filters && !has_slicer_fields {
+    if !has_values && !has_dimensions && !has_filters && !has_slicer_fields && placement.is_none() {
         log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
         let mut pivot_tables = pivot_state.pivot_tables.lock()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
@@ -5521,17 +5601,19 @@ pub async fn update_bi_pivot_fields(
         })
         .collect();
 
-    // ---- Calculation group resolution (Slice 2) ----
-    // Resolve request.calculation_group into an engine application + the ordered
-    // list of item names actually applied (empty selection = all items, in
-    // declaration order). The item list drives the M*K value-field expansion and
-    // the cache index math below. Skipped when there are no real value fields
-    // (a synthetic dimensions-only pivot has no measure to multiply).
+    // ---- Calculation-group resolution ----
+    // Resolve the placed group against the LIVE engine model — the pivot's
+    // stored metadata is a creation-time snapshot, so a group added or edited
+    // in the Model Editor since then wouldn't be in it (the query runs against
+    // the live model anyway). Refresh the snapshot while at it. The engine is
+    // asked for ALL items in declaration order — item subsetting happens
+    // pivot-side via the group field's hidden_items, so the filter dropdown
+    // can always offer every item.
     let (calc_group_app, calc_item_names): (
         Option<bi_engine::CalculationGroupApplication>,
         Vec<String>,
-    ) = match request.calculation_group.as_ref().filter(|_| synthetic_measure.is_none()) {
-        Some(cg) => {
+    ) = match placement.as_ref() {
+        Some(p) => {
             // v1: calculation groups cannot combine with lookup columns (the
             // engine allows it but the combination is unvalidated; fail closed).
             if !query_lookups.is_empty() {
@@ -5541,14 +5623,6 @@ pub async fn update_bi_pivot_fields(
                         .to_string(),
                 );
             }
-            // Resolve the group's declared item list to validate the selection
-            // and expand an empty selection to all items in declaration order.
-            // Resolve against the LIVE engine model, not the pivot's stored
-            // metadata: that copy is a snapshot from pivot creation, so a group
-            // added or edited in the Model Editor since then wouldn't be found
-            // (the query below runs against the live model anyway). Refresh the
-            // snapshot while at it so persistence + later reads carry the
-            // current groups.
             let all_items: Vec<String> = {
                 let engine_arc = {
                     let connections = bi_state.connections.lock()
@@ -5562,7 +5636,7 @@ pub async fn update_bi_pivot_fields(
                     extract_calc_groups(&engine)
                 };
                 let items: Option<Vec<String>> = live_groups.iter()
-                    .find(|g| g.name == cg.group)
+                    .find(|g| g.name == p.group)
                     .map(|g| g.items.iter().map(|i| i.name.clone()).collect());
                 {
                     let mut bi_meta = pivot_state.bi_metadata.lock()
@@ -5572,31 +5646,19 @@ pub async fn update_bi_pivot_fields(
                     }
                 }
                 items.ok_or_else(|| format!(
-                    "Calculation group '{}' not found in this model.", cg.group
+                    "Calculation group '{}' not found in this model.", p.group
                 ))?
             };
-            let resolved: Vec<String> = if cg.items.is_empty() {
-                all_items
-            } else {
-                for it in &cg.items {
-                    if !all_items.iter().any(|a| a == it) {
-                        return Err(format!(
-                            "Calculation item '{}' not found in group '{}'.", it, cg.group
-                        ));
-                    }
-                }
-                // Preserve declaration order, restricted to the selected items.
-                all_items.into_iter().filter(|a| cg.items.contains(a)).collect()
-            };
-            if resolved.is_empty() {
-                return Err(format!("Calculation group '{}' has no items.", cg.group));
+            if all_items.is_empty() {
+                return Err(format!("Calculation group '{}' has no items.", p.group));
             }
             (
+                // Empty item list = ALL items in declaration order (engine contract).
                 Some(bi_engine::CalculationGroupApplication::new(
-                    cg.group.clone(),
-                    resolved.clone(),
+                    p.group.clone(),
+                    Vec::new(),
                 )),
-                resolved,
+                all_items,
             )
         }
         None => (None, Vec::new()),
@@ -5734,38 +5796,56 @@ pub async fn update_bi_pivot_fields(
         query_ms
     );
 
-    // Build PivotCache from Arrow results
-    let t_cache = Instant::now();
-    let mut cache = build_cache_from_arrow_batches(pivot_id, &batches)?;
-
-    // Handle synthetic dimension for values-only case
-    let use_synthetic_dim = has_values && !has_dimensions;
-    if use_synthetic_dim {
-        log_info!("PIVOT", "Values-only: injecting synthetic 'Total' dimension");
-        // Rebuild cache with synthetic "Total" column prepended
-        cache = build_cache_with_synthetic_dim(pivot_id, &batches)?;
-    }
-    let cache_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
-
-    // Build PivotDefinition field mappings
+    // Build PivotCache from Arrow results.
     //
-    // Cache layout (BI engine result column order):
-    // [group_by columns (row groups, col groups, filter groups, slicer groups)] [measure columns] [lookup columns]
-    // If synthetic dim: [synthetic at 0] [everything shifted by 1]
+    // With a placed calculation group the engine result is WIDE — [group_by
+    // dims][M*K measure cols] (measures-outer/items-inner) — and is reshaped
+    // LONG so the group becomes a REAL cache dimension: each wide row becomes
+    // K rows of [dims][item name][M base measures]. From there the group
+    // behaves like any pivot field (rows/columns/filters, item hiding).
+    let t_cache = Instant::now();
+    let use_synthetic_dim = has_values && !has_dimensions;
     let num_group_by = row_group_fields.len() + hierarchy_row_refs.len()
         + col_group_fields.len() + hierarchy_col_refs.len()
         + filter_group_fields.len() + slicer_group_fields.len()
         + sort_by_extra_fields.len();
+    let mut cache = if let Some(p) = &placement {
+        // Engine-reported (measure, item) -> wide result column, so the
+        // reshape follows the engine's own column identity (positional
+        // fallback per the measures-outer/items-inner contract).
+        let wide_idx = measure_value_col_idx(&result_columns, 0);
+        build_cache_calc_group_long(
+            pivot_id,
+            &batches,
+            num_group_by,
+            &p.group,
+            &calc_item_names,
+            &query_measures,
+            &wide_idx,
+            use_synthetic_dim,
+        )?
+    } else if use_synthetic_dim {
+        log_info!("PIVOT", "Values-only: injecting synthetic 'Total' dimension");
+        build_cache_with_synthetic_dim(pivot_id, &batches)?
+    } else {
+        build_cache_from_arrow_batches(pivot_id, &batches)?
+    };
+    let cache_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
+
+    // Build PivotDefinition field mappings
+    //
+    // Cache layout:
+    // [synthetic "Total"?] [group_by columns (row groups, col groups, filter
+    // groups, slicer groups, hidden sort-by cols)] [calc-group item column?]
+    // [measure columns] [lookup columns]
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
+    // The reshaped cache inserts the calculation-group item column between the
+    // dims and the measure block (and collapses M*K wide cols to M).
+    let calc_extra: usize = usize::from(placement.is_some());
 
     // Build a mapping from (table, column) -> cache column index.
-    // BI engine result column order: [GROUP BY cols] [Measure cols] [Lookup cols]
     // num_measures reflects actual query columns (includes synthetic if present)
     let num_measures = if synthetic_measure.is_some() { 1 } else { request.value_fields.len() };
-    // With a calculation group, the engine multiplies the measure block: each
-    // base measure expands into one synthetic column per applied item, so the
-    // value block is num_measures * num_items wide (measures-outer/items-inner).
-    let num_items = if calc_item_names.is_empty() { 1 } else { calc_item_names.len() };
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
@@ -5783,10 +5863,11 @@ pub async fn update_bi_pivot_fields(
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
-    // Measures come next (after group_by, before lookups)
-    let measure_start = num_group_by + dim_offset;
-    // Lookup cols come last (after the expanded measure block)
-    let lookup_start = num_group_by + num_measures * num_items + dim_offset;
+    // Measures come next (after group_by + the item column, before lookups)
+    let measure_start = num_group_by + dim_offset + calc_extra;
+    // Lookup cols come last (rejected together with a calculation group, so
+    // the M-wide measure block is always correct here)
+    let lookup_start = measure_start + num_measures;
     cache_idx = lookup_start;
     for f in row_lookup_fields.iter().chain(col_lookup_fields.iter()) {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
@@ -5932,6 +6013,18 @@ pub async fn update_bi_pivot_fields(
             .cloned()
     };
 
+    // The placed calculation group as a real pivot dimension over the reshaped
+    // cache's item column. DataSourceOrder keeps the items in declaration
+    // order (the reshape emits them that way — never alphabetically, matching
+    // Power BI's ordinal semantics); hidden_items = the item subset selection.
+    let calc_group_item_idx = num_group_by + dim_offset;
+    let make_calc_group_field = |p: &CalcGroupPlacement| -> PivotField {
+        let mut pf = PivotField::new(calc_group_item_idx, p.group.clone());
+        pf.sort_order = pivot_engine::SortOrder::DataSourceOrder;
+        pf.hidden_items = p.hidden_items.clone();
+        pf
+    };
+
     // Row fields (preserving collapse state for fields that remain)
     // Lookup fields share the same hierarchy depth as the preceding GROUP field
     // from the same table (they are attributes, not new grouping levels).
@@ -5960,6 +6053,12 @@ pub async fn update_bi_pivot_fields(
                 pf
             })
             .collect();
+        // Splice a rows-placed calculation group in at its chip position
+        // (before hierarchy levels, so hierarchy_configs offsets stay right).
+        if let Some(p) = placement.as_ref().filter(|p| p.axis == CalcGroupAxis::Rows) {
+            let pos = p.position.min(row_fields_vec.len());
+            row_fields_vec.insert(pos, make_calc_group_field(p));
+        }
         // Append hierarchy level fields as row dimensions.
         // All levels start collapsed so the user expands via toggle_pivot_group.
         hierarchy_row_start = row_fields_vec.len();
@@ -5997,6 +6096,11 @@ pub async fn update_bi_pivot_fields(
             pf
         })
         .collect();
+    // Splice a columns-placed calculation group in at its chip position.
+    if let Some(p) = placement.as_ref().filter(|p| p.axis == CalcGroupAxis::Columns) {
+        let pos = p.position.min(col_fields_vec.len());
+        col_fields_vec.insert(pos, make_calc_group_field(p));
+    }
     // Append hierarchy level fields as column dimensions.
     let hierarchy_col_start = col_fields_vec.len();
     for f in hierarchy_col_fields.iter() {
@@ -6023,21 +6127,26 @@ pub async fn update_bi_pivot_fields(
         definition.value_fields = Vec::new();
     } else {
         // Map each measure value column to its cache index from the engine's
-        // per-column metadata (base measure + applied calculation item), so the
-        // value-field mapping follows the engine's actual column identity rather
-        // than positional arithmetic. Empty/absent metadata -> positional fallback.
-        let value_col_idx = measure_value_col_idx(&result_columns, dim_offset);
+        // per-column metadata, so the value-field mapping follows the engine's
+        // actual column identity rather than positional arithmetic.
+        // Empty/absent metadata -> positional fallback. With a placed
+        // calculation group the metadata describes the WIDE result while the
+        // reshaped cache is positional [dims][item][measures] — use positions.
+        let value_col_idx = if placement.is_some() {
+            std::collections::HashMap::new()
+        } else {
+            measure_value_col_idx(&result_columns, dim_offset)
+        };
         definition.value_fields = expand_bi_value_fields(
             &request.value_fields,
-            &calc_item_names,
+            &[],
             measure_start,
             &value_col_idx,
         );
 
         // Adopt each measure's model number format (from query_with_meta) so BI
         // value cells render with the model-defined format (currency, %, etc.)
-        // rather than raw numbers. Keyed by (base measure, calculation item);
-        // for a calc-group column the format is carried from the base measure.
+        // rather than raw numbers. Keyed by (base measure, calculation item).
         let format_by_key: std::collections::HashMap<(String, Option<String>), String> =
             result_columns
                 .iter()
@@ -6051,7 +6160,17 @@ pub async fn update_bi_pivot_fields(
         if !format_by_key.is_empty() {
             for vf in definition.value_fields.iter_mut() {
                 let measure = vf.name.trim_start_matches('[').trim_end_matches(']').to_string();
-                if let Some(fmt) = format_by_key.get(&(measure, vf.calc_item.clone())) {
+                let fmt = format_by_key
+                    .get(&(measure.clone(), vf.calc_item.clone()))
+                    .or_else(|| {
+                        // Placed calc group: the wide metadata carries item
+                        // attribution; adopt the base measure's format from
+                        // its first item column.
+                        calc_item_names.first().and_then(|it| {
+                            format_by_key.get(&(measure.clone(), Some(it.clone())))
+                        })
+                    });
+                if let Some(fmt) = fmt {
                     vf.number_format = Some(fmt.clone());
                 }
             }
@@ -6090,6 +6209,20 @@ pub async fn update_bi_pivot_fields(
             filter
         })
         .collect();
+    // Splice a filters-placed calculation group in at its chip position. Its
+    // hidden_items subset the items exactly like a normal page filter — with
+    // one item visible, every measure shows that item's transformation
+    // (Power BI slicer semantics).
+    if let Some(p) = placement.as_ref().filter(|p| p.axis == CalcGroupAxis::Filters) {
+        let pos = p.position.min(definition.filter_fields.len());
+        definition.filter_fields.insert(
+            pos,
+            pivot_engine::PivotFilter {
+                field: make_calc_group_field(p),
+                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+            },
+        );
+    }
 
     // Slicer fields — map to slicer_filters (no visible filter row).
     // When slicer_fields are provided, create new slicer_filters entries.
@@ -6264,11 +6397,9 @@ pub async fn update_bi_pivot_fields(
                 group_by: group_fields,
                 lookups: lookup_fields,
             });
-            // Remember the applied calculation group (the user's selection) so
-            // refresh re-applies it and the editor reflects it. None when no
-            // group was effectively applied.
-            meta.applied_calc_group =
-                request.calculation_group.clone().filter(|_| !calc_item_names.is_empty());
+            // A placed calculation group needs no extra metadata: it lives in
+            // the definition's row/column/filter fields like any dimension,
+            // so refresh reconstruction picks it up from the field names.
             // Record the data snapshot time only when we actually went to the
             // database (online). When served purely from cache (all_warm, e.g.
             // offline), keep the existing timestamp so "Data as of …" reflects

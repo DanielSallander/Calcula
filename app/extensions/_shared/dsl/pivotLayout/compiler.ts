@@ -17,7 +17,7 @@ import type {
   SourceField, ZoneField, AggregationType,
 } from '../../components/types';
 import { getDefaultAggregation, getValueFieldDisplayName } from '../../components/types';
-import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef, AppliedCalcGroup } from '../../components/types';
+import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from '../../components/types';
 
 /** The compiled output of a DSL definition. */
 export interface CompileResult {
@@ -34,8 +34,6 @@ export interface CompileResult {
   valueColumnOrder: ValueColumnRefDef[];
   /** Save-as name if SAVE AS clause was present. */
   saveAs?: string;
-  /** Applied calculation group from a CALCGROUP clause (validated against the model). */
-  appliedCalcGroup?: AppliedCalcGroup;
   errors: DslError[];
 }
 
@@ -84,6 +82,9 @@ class Compiler {
   private biColumnToKey: Map<string, string>;
   /** For BI: map from column name (lowercase) to isNumeric. */
   private biColumnNumeric: Map<string, boolean>;
+  /** For BI: lowercase calculation-group name → canonical model-cased name.
+   *  Calc groups place as DIMENSION fields (Power BI-style). */
+  private biCalcGroups: Map<string, string>;
 
   constructor(ast: PivotLayoutAST, ctx: CompileContext) {
     this.ast = ast;
@@ -99,7 +100,11 @@ class Compiler {
     this.biKeyInfo = new Map();
     this.biColumnToKey = new Map();
     this.biColumnNumeric = new Map();
+    this.biCalcGroups = new Map();
     if (ctx.biModel) {
+      for (const g of ctx.biModel.calculationGroups ?? []) {
+        this.biCalcGroups.set(g.name.toLowerCase(), g.name);
+      }
       for (const table of ctx.biModel.tables) {
         for (const col of table.columns) {
           const canonical = `${table.name}.${col.name}`;
@@ -156,8 +161,6 @@ class Compiler {
       }
     }
 
-    const appliedCalcGroup = this.compileCalcGroup();
-
     return {
       rows,
       columns,
@@ -168,39 +171,8 @@ class Compiler {
       calculatedFields,
       valueColumnOrder,
       saveAs: this.ast.saveAs,
-      appliedCalcGroup,
       errors: this.errors,
     };
-  }
-
-  /** Validate and compile the CALCGROUP clause against the BI model. */
-  private compileCalcGroup(): AppliedCalcGroup | undefined {
-    const node = this.ast.calcGroup;
-    if (!node) return undefined;
-    if (!this.ctx.biModel) {
-      this.errors.push(dslError('CALCGROUP is only supported for BI model pivots', node.location));
-      return undefined;
-    }
-    const group = this.ctx.biModel.calculationGroups?.find(
-      g => g.name.toLowerCase() === node.name.toLowerCase(),
-    );
-    if (!group) {
-      this.errors.push(dslError(`Unknown calculation group: "${node.name}"`, node.location));
-      return undefined;
-    }
-    // Validate + canonicalize selected items against the group's declared items.
-    const items: string[] = [];
-    for (const item of node.items) {
-      const match = group.items.find(i => i.name.toLowerCase() === item.toLowerCase());
-      if (!match) {
-        this.errors.push(dslError(
-          `Unknown calculation item "${item}" in group "${group.name}"`, node.location,
-        ));
-        continue;
-      }
-      items.push(match.name);
-    }
-    return { group: group.name, items };
   }
 
   // --- Field nodes (ROWS / COLUMNS) ---
@@ -212,6 +184,9 @@ class Compiler {
       if (!resolved) continue;
 
       resolved.isLookup = node.isLookup || undefined;
+      if (node.hiddenItems && node.hiddenItems.length > 0) {
+        resolved.hiddenItems = node.hiddenItems;
+      }
       result.push(resolved);
     }
     return result;
@@ -407,6 +382,25 @@ class Compiler {
   ): ZoneField | null {
     // --- BI pivot path ---
     if (this.isBi) {
+      // Calculation group placed as a dimension (Power BI-style): the zone
+      // chip carries the plain group name. Matched on the FULL name first so
+      // a group name containing dots still resolves.
+      const cgName = this.biCalcGroups.get(name.toLowerCase());
+      if (cgName !== undefined) {
+        if (isValueField) {
+          this.errors.push(dslError(
+            `Calculation group "${cgName}" is a dimension — place it in ROWS, COLUMNS, or FILTERS, not VALUES`,
+            location,
+          ));
+          return null;
+        }
+        return {
+          sourceIndex: -1,
+          name: cgName,
+          isNumeric: false,
+        };
+      }
+
       // Dotted name: "Table.Column". The parser's table/column split is
       // provisional (first dot; table names may contain dots) — the joined
       // key equals the full name, so resolve on that and emit the model's

@@ -30,6 +30,7 @@ import { emitAppEvent, AppEvents } from "@api";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { BiHierarchyMeta } from "@api/backend";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
+import { CALC_GROUP_TABLE } from "@api/pivotTypes";
 
 /**
  * Pipeline stages (total = 4):
@@ -1377,33 +1378,38 @@ export async function applyPivotDsl(
   let view: PivotViewResponse;
 
   if (info.biModel) {
-    // BI pivot: convert to BI-specific request
+    // BI pivot: convert to BI-specific request. Calculation groups place as
+    // dimension entries carrying the plain group name — they map to the
+    // CALC_GROUP_TABLE pseudo ref.
     const biTableNames = info.biModel.tables.map((t) => t.name);
-    const toBiRef = (name: string, isLookup?: boolean): BiFieldRef => {
+    const calcGroupNames = new Set(
+      (info.biModel.calculationGroups ?? []).map((g) => g.name),
+    );
+    const toBiRef = (name: string, isLookup?: boolean, hiddenItems?: string[]): BiFieldRef => {
+      if (calcGroupNames.has(name)) {
+        return { table: CALC_GROUP_TABLE, column: name, hiddenItems };
+      }
       const { table, column } = splitBiFieldKey(name, biTableNames);
-      return { table, column, isLookup };
+      return { table, column, isLookup, hiddenItems };
     };
     const toBiValueRef = (name: string, customName?: string): BiValueFieldRef => {
       const measureName = name.startsWith('[') && name.endsWith(']')
         ? name.substring(1, name.length - 1) : name;
       return { measureName, customName };
     };
-    const isRealBiField = (f: { name: string }) => f.name.includes('.');
+    const isRealBiField = (f: { name: string }) =>
+      f.name.includes('.') || calcGroupNames.has(f.name);
 
     const biRequest: UpdateBiPivotFieldsRequest = {
       pivotId,
-      rowFields: rowFields.filter(isRealBiField).map(f => toBiRef(f.name, result.rows.find(r => r.name === f.name)?.isLookup)),
-      columnFields: columnFields.filter(isRealBiField).map(f => toBiRef(f.name, result.columns.find(c => c.name === f.name)?.isLookup)),
+      rowFields: rowFields.filter(isRealBiField).map(f => toBiRef(f.name, result.rows.find(r => r.name === f.name)?.isLookup, f.hiddenItems)),
+      columnFields: columnFields.filter(isRealBiField).map(f => toBiRef(f.name, result.columns.find(c => c.name === f.name)?.isLookup, f.hiddenItems)),
       valueFields: regularValues.map(f => toBiValueRef(f.name, f.customName)),
-      filterFields: filterFields.filter(isRealBiField).map(f => ({
-        ...toBiRef(f.name),
-        hiddenItems: f.hiddenItems,
-      })),
+      filterFields: filterFields.filter(isRealBiField).map(f => toBiRef(f.name, undefined, f.hiddenItems)),
       layout: result.layout,
       lookupColumns: result.lookupColumns,
       calculatedFields: calcFields.length > 0 ? calcFields : undefined,
       valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
-      calculationGroup: result.appliedCalcGroup,
     };
     view = await updateBiFields(biRequest);
   } else {
@@ -1472,7 +1478,6 @@ import type {
   BiValueFieldRef,
   CreatePivotFromBiModelRequest,
   UpdateBiPivotFieldsRequest,
-  AppliedCalcGroup,
   PivotRegionInfo,
   PivotRegionData,
   GetPivotDataFormulaResult,
@@ -1582,7 +1587,6 @@ export type {
   BiValueFieldRef,
   CreatePivotFromBiModelRequest,
   UpdateBiPivotFieldsRequest,
-  AppliedCalcGroup,
   PivotRegionInfo,
   PivotRegionData,
   GetPivotDataFormulaResult,

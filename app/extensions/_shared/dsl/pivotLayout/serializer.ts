@@ -15,8 +15,6 @@ export interface SerializeOptions {
   saveAs?: string;
   /** Calculated fields to serialize as CALC clauses. */
   calculatedFields?: CalculatedFieldDef[];
-  /** Applied calculation group to serialize as a CALCGROUP clause. */
-  appliedCalcGroup?: { group: string; items: string[] };
   /**
    * Map from filter field name/sourceIndex to all unique values for that field.
    * When available, the serializer uses whichever of = (inclusion) or NOT IN
@@ -93,17 +91,6 @@ export function serialize(
     lines.push(`LAYOUT:  ${layoutStr}`);
   }
 
-  if (options.appliedCalcGroup) {
-    const { group, items } = options.appliedCalcGroup;
-    const groupStr = quoteIfNeeded(group);
-    if (items.length > 0) {
-      const itemsStr = items.map(quoteIfNeeded).join(', ');
-      lines.push(`CALCGROUP: ${groupStr} (${itemsStr})`);
-    } else {
-      lines.push(`CALCGROUP: ${groupStr}`);
-    }
-  }
-
   if (options.saveAs) {
     lines.push(`SAVE AS "${options.saveAs}"`);
   }
@@ -126,6 +113,13 @@ function serializeFieldRef(field: ZoneField, options: SerializeOptions): string 
   }
 
   result += quoteIfNeeded(field.name);
+
+  // Hidden items ride on ROWS/COLUMNS refs as NOT IN — persists e.g. a placed
+  // calculation group's item subset through DSL round-trips.
+  if (field.hiddenItems && field.hiddenItems.length > 0) {
+    const vals = field.hiddenItems.map(v => `"${escapeString(v)}"`).join(', ');
+    result += ` NOT IN (${vals})`;
+  }
 
   return result;
 }

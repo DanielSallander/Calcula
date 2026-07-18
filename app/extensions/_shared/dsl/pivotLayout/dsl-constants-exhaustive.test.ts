@@ -184,7 +184,7 @@ describe("TokenType enum completeness", () => {
   it("all keyword tokens are in KEYWORDS map", () => {
     const keywordTokenTypes = new Set([
       TokenType.Rows, TokenType.Columns, TokenType.Values, TokenType.Filters,
-      TokenType.Sort, TokenType.Layout, TokenType.Calc, TokenType.CalcGroup, TokenType.Top,
+      TokenType.Sort, TokenType.Layout, TokenType.Calc, TokenType.Top,
       TokenType.Bottom, TokenType.By, TokenType.As, TokenType.Save,
       TokenType.Lookup, TokenType.Via, TokenType.Not, TokenType.In,
       TokenType.Asc, TokenType.Desc,

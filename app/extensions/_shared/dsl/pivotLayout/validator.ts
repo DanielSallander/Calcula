@@ -27,6 +27,7 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
   const fieldNames = new Set(ctx.sourceFields.map(f => f.name.toLowerCase()));
   const biFieldNames = new Set<string>();
   const biMeasureNames = new Set<string>();
+  const calcGroupNames = new Set<string>();
 
   if (ctx.biModel) {
     for (const table of ctx.biModel.tables) {
@@ -38,6 +39,13 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
     }
     for (const m of ctx.biModel.measures) {
       biMeasureNames.add(m.name.toLowerCase());
+    }
+    // Calculation groups place as DIMENSION fields (Power BI-style): their
+    // plain names are valid ROWS/COLUMNS/FILTERS entries.
+    for (const g of ctx.biModel.calculationGroups ?? []) {
+      calcGroupNames.add(g.name.toLowerCase());
+      fieldNames.add(g.name.toLowerCase());
+      biFieldNames.add(g.name.toLowerCase());
     }
   }
 
@@ -93,6 +101,11 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
       } else if (!biMeasureNames.has(node.fieldName.toLowerCase())) {
         errors.push(dslError(`Unknown measure: [${node.fieldName}]`, node.location));
       }
+    } else if (calcGroupNames.has(node.fieldName.toLowerCase())) {
+      errors.push(dslError(
+        `Calculation group "${node.fieldName}" is a dimension — place it in ROWS, COLUMNS, or FILTERS, not VALUES`,
+        node.location,
+      ));
     } else {
       validateFieldExists(node.fieldName, node.table, node.column, fieldNames, biFieldNames, node.location, errors, isBi);
 
@@ -141,29 +154,6 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
         `Unknown layout directive: "${d.key}". Valid options: ${[...LAYOUT_DIRECTIVES].join(', ')}`,
         d.location,
       ));
-    }
-  }
-
-  // --- Validate CALCGROUP ---
-  if (ast.calcGroup) {
-    if (!isBi) {
-      errors.push(dslError('CALCGROUP is only supported for BI model pivots', ast.calcGroup.location));
-    } else if (ctx.biModel) {
-      const group = ctx.biModel.calculationGroups?.find(
-        g => g.name.toLowerCase() === ast.calcGroup!.name.toLowerCase(),
-      );
-      if (!group) {
-        errors.push(dslError(`Unknown calculation group: "${ast.calcGroup.name}"`, ast.calcGroup.location));
-      } else {
-        const itemNames = new Set(group.items.map(i => i.name.toLowerCase()));
-        for (const item of ast.calcGroup.items) {
-          if (!itemNames.has(item.toLowerCase())) {
-            errors.push(dslError(
-              `Unknown calculation item "${item}" in group "${group.name}"`, ast.calcGroup.location,
-            ));
-          }
-        }
-      }
     }
   }
 

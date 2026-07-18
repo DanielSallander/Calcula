@@ -14,7 +14,6 @@ import type {
   LayoutConfig,
   CalculatedFieldDef,
   ValueColumnRefDef,
-  AppliedCalcGroup,
 } from '../../_shared/components/types';
 
 // Re-export shared types used by both Pivot and Tablix
@@ -52,11 +51,11 @@ export type {
   BiModelColumn,
   BiCalcGroup,
   BiCalcGroupItem,
-  AppliedCalcGroup,
   BiHierarchyMeta,
   BiHierarchyLevel,
   BiRaggedBehavior,
 } from '../../_shared/components/types';
+export { CALC_GROUP_TABLE } from '../../_shared/components/types';
 
 // --- Pivot-specific types below ---
 
@@ -161,6 +160,4 @@ export interface UpdateBiPivotFieldsRequest {
   calculatedFields?: CalculatedFieldDef[];
   /** Unified column ordering for interleaving values and calculated fields. */
   valueColumnOrder?: ValueColumnRefDef[];
-  /** Applied calculation group (multiplies value fields on the Values axis). */
-  calculationGroup?: AppliedCalcGroup;
 }

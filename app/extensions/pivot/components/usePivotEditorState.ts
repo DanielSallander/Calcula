@@ -119,14 +119,18 @@ export function usePivotEditorState({
   // The values array may contain interleaved regular value fields and calculated
   // fields (isCalculated=true). We separate them and build the unified ordering.
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
+    // Row/column fields carry hiddenItems too (a placed calculation group's
+    // item subset rides on its chip like a field filter).
     const rowFields: PivotFieldConfig[] = rows.map((f) => ({
       sourceIndex: f.sourceIndex,
       name: f.name,
+      hiddenItems: f.hiddenItems,
     }));
 
     const columnFields: PivotFieldConfig[] = columns.map((f) => ({
       sourceIndex: f.sourceIndex,
       name: f.name,
+      hiddenItems: f.hiddenItems,
     }));
 
     // Separate regular values from calculated fields and build ordering
@@ -329,6 +333,25 @@ export function usePivotEditorState({
       scheduleUpdate();
     },
     [getZoneSetter, scheduleUpdate]
+  );
+
+  // Set the hidden-items subset on a zone field wherever it is placed
+  // (rows/columns/filters). Used by the calculation-group item checkboxes;
+  // works for any name-matched field.
+  const setZoneFieldHiddenItems = useCallback(
+    (name: string, hiddenItems: string[] | undefined) => {
+      const apply = (prev: ZoneField[]) =>
+        prev.map((f) =>
+          f.name === name
+            ? { ...f, hiddenItems: hiddenItems && hiddenItems.length > 0 ? hiddenItems : undefined }
+            : f
+        );
+      setRows(apply);
+      setColumns(apply);
+      setFilters(apply);
+      scheduleUpdate();
+    },
+    [scheduleUpdate]
   );
 
   // Keep a stable ref to handleRemove for the drag-out removal callback
@@ -655,6 +678,7 @@ export function usePivotEditorState({
     handleDragStart,
     handleDragEnd,
     buildUpdateRequest,
+    setZoneFieldHiddenItems,
     setAllZones,
     filterUniqueValues: filterUniqueValuesRef,
     calculatedFields: calculatedFieldsRef,

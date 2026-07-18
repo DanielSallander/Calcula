@@ -16,8 +16,6 @@ export interface PivotLayoutAST {
   calculatedFields: CalcFieldNode[];
   topN?: TopNNode;
   saveAs?: string;
-  /** Applied calculation group from the CALCGROUP clause. */
-  calcGroup?: CalcGroupNode;
 }
 
 /** A field reference in ROWS, COLUMNS, or as part of other clauses. */
@@ -36,6 +34,9 @@ export interface FieldNode {
   grouping?: GroupingNode;
   /** VIA relationship disambiguation (BI). */
   via?: ViaNode;
+  /** Items hidden from this field via `NOT IN ("a", "b")` (e.g. a placed
+   *  calculation group's item subset). */
+  hiddenItems?: string[];
   location: SourceLocation;
 }
 
@@ -122,15 +123,6 @@ export interface GroupingNode {
 export interface ViaNode {
   /** e.g., "Orders.OrderDate" */
   path: string;
-  location: SourceLocation;
-}
-
-/** A calculation group applied via the CALCGROUP clause. */
-export interface CalcGroupNode {
-  /** The calculation group name from the BI model. */
-  name: string;
-  /** Specific items to apply (empty = all items, declaration order). */
-  items: string[];
   location: SourceLocation;
 }
 

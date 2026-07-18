@@ -32,10 +32,10 @@ import type {
   MeasureField,
   PivotId,
   CalculatedFieldDef,
-  AppliedCalcGroup,
   DropZoneType,
   DragField,
 } from './types';
+import { CALC_GROUP_TABLE } from './types';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
 
@@ -237,12 +237,6 @@ export function PivotEditor({
   // update doesn't fire a second BI query.
   const lookupColumnsRef = React.useRef(lookupColumns);
 
-  // Applied calculation group: the group whose items multiply the value fields
-  // on the Values axis. v1 applies all items of the selected group (null = none).
-  const [appliedCalcGroup, setAppliedCalcGroup] = useState<AppliedCalcGroup | null>(
-    () => biModel?.appliedCalculationGroup ?? null,
-  );
-
   // Perspective picker: which model perspective filters the field-list
   // DISPLAY (null = all fields). Persisted per pivot via set_pivot_perspective.
   const [selectedPerspective, setSelectedPerspective] = useState<string | null>(
@@ -313,6 +307,15 @@ export function PivotEditor({
         liveModelMeta.calculationGroups ?? biModel.calculationGroups,
     };
   }, [biModel, liveModelMeta]);
+  // Calculation groups are placed as DIMENSION fields (Power BI-style). Their
+  // zone chips carry the plain group name; on the wire they become pseudo
+  // refs { table: CALC_GROUP_TABLE, column: <group> }.
+  const calcGroupNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const g of fieldListModel?.calculationGroups ?? []) set.add(g.name);
+    return set;
+  }, [fieldListModel?.calculationGroups]);
+
   // The active UI locale for culture (translation) resolution. Read once —
   // there is no app-wide locale service yet; null shows raw names.
   const uiLocale = useMemo<string | null>(() => {
@@ -339,12 +342,18 @@ export function PivotEditor({
     // Build BI request upfront (if applicable) so it's accessible in catch block for retry
     let biRequest: UpdateBiPivotFieldsRequest | undefined;
     if (isBiPivot) {
-      const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
-      const toBiRef = (f: { name: string }) =>
-        toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
+      const isCalcGroupField = (f: { name: string }) => calcGroupNames.has(f.name);
+      const isRealBiField = (f: { name: string }) =>
+        (f.name.includes('.') && !isHierarchyField(f.name)) || isCalcGroupField(f);
+      // A calculation-group chip becomes its pseudo ref; hiddenItems carry the
+      // item subset for every zone (the backend reads them off the placement).
+      const toBiRef = (f: { name: string; hiddenItems?: string[] }) =>
+        isCalcGroupField(f)
+          ? { table: CALC_GROUP_TABLE, column: f.name, hiddenItems: f.hiddenItems }
+          : { ...toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name)), hiddenItems: f.hiddenItems };
       const biFilterFields = (request.filterFields ?? [])
         .filter(isRealBiField)
-        .map(f => ({ ...toBiRef(f), hiddenItems: f.hiddenItems }));
+        .map(toBiRef);
 
       // Extract hierarchy fields from rows/columns
       const rowHierarchies = (request.rowFields ?? [])
@@ -358,7 +367,9 @@ export function PivotEditor({
         pivotId: request.pivotId,
         rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
         columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
-        valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name, f.customName)),
+        valueFields: (request.valueFields ?? [])
+          .filter((f) => !isCalcGroupField(f))
+          .map((f) => toBiValueFieldRef(f.name, f.customName)),
         filterFields: biFilterFields,
         rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
         columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
@@ -366,7 +377,6 @@ export function PivotEditor({
         lookupColumns: [...lookupColumns],
         calculatedFields: request.calculatedFields,
         valueColumnOrder: request.valueColumnOrder,
-        calculationGroup: appliedCalcGroup ?? undefined,
       };
     }
 
@@ -422,7 +432,7 @@ export function PivotEditor({
       }
       }
     }
-  }, [isBiPivot, biTableNames, lookupColumns, appliedCalcGroup, onViewUpdate]);
+  }, [isBiPivot, biTableNames, lookupColumns, calcGroupNames, onViewUpdate]);
 
   const {
     usedFields,
@@ -445,6 +455,7 @@ export function PivotEditor({
     handleNumberFormatChange,
     handleDragStart,
     handleDragEnd,
+    setZoneFieldHiddenItems,
     setAllZones,
     filterUniqueValues,
     calculatedFields,
@@ -635,12 +646,16 @@ export function PivotEditor({
   // default to LOOKUP (zone-to-zone moves keep the user's chosen mode).
   const handleDropWithAutoLookup = useCallback(
     (zone: DropZoneType, dragField: DragField, insertIndex?: number) => {
+      // A calculation-group chip is a dimension — it can never enter VALUES.
+      if (isBiPivot && zone === 'values' && calcGroupNames.has(dragField.name)) {
+        return;
+      }
       if (isBiPivot && zone === 'rows' && dragField.sourceIndex === -1 && !dragField.fromZone) {
         autoLookupWritebackColumn(dragField.name);
       }
       handleDrop(zone, dragField, insertIndex);
     },
-    [isBiPivot, autoLookupWritebackColumn, handleDrop]
+    [isBiPivot, calcGroupNames, autoLookupWritebackColumn, handleDrop]
   );
 
   // BI measure toggle: add/remove measure to Values zone
@@ -742,98 +757,111 @@ export function PivotEditor({
     }
 
     // Build and send the update request directly (same as handleUpdate logic)
-    const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
-    const toBiRef = (f: { name: string }) =>
-      toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
+    const isCalcGroupField = (f: { name: string }) => calcGroupNames.has(f.name);
+    const isRealBiField = (f: { name: string }) =>
+      (f.name.includes('.') && !isHierarchyField(f.name)) || isCalcGroupField(f);
+    const toBiRef = (f: { name: string; hiddenItems?: string[] }) =>
+      isCalcGroupField(f)
+        ? { table: CALC_GROUP_TABLE, column: f.name, hiddenItems: f.hiddenItems }
+        : { ...toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name)), hiddenItems: f.hiddenItems };
     const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
     const biRequest: UpdateBiPivotFieldsRequest = {
       pivotId,
       rowFields: rows.filter(isRealBiField).map(toBiRef),
       columnFields: columns.filter(isRealBiField).map(toBiRef),
-      valueFields: values.map((f) => toBiValueFieldRef(f.name, f.customName)),
+      valueFields: values
+        .filter((f) => !isCalcGroupField(f))
+        .map((f) => toBiValueFieldRef(f.name, f.customName)),
       filterFields: filters.filter(isRealBiField).map(toBiRef),
       rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
       columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
       lookupColumns: [...lookupColumns],
-      calculationGroup: appliedCalcGroup ?? undefined,
     };
     pivot.updateBiFields(biRequest).then(() => {
       if (onViewUpdate) onViewUpdate();
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, appliedCalcGroup, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
+  }, [lookupColumns, calcGroupNames, isBiPivot, biTableNames, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
 
-  // Apply (or clear) a calculation group + its selected items, then re-run the
-  // BI query so the value axis re-expands. items: [] means ALL items of the group.
-  const applyCalcGroup = useCallback((next: AppliedCalcGroup | null) => {
-    setAppliedCalcGroup(next);
-    if (!isBiPivot) return;
-    const isRealBiField = (f: { name: string }) => f.name.includes('.') && !isHierarchyField(f.name);
-    const toBiRef = (f: { name: string }) => toBiFieldRef(f.name, biTableNames, lookupColumns.has(f.name));
-    const rowHierarchies = rows.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
-    const columnHierarchies = columns.filter(f => isHierarchyField(f.name)).map(f => toHierarchyFieldRef(f.name));
-    const biRequest: UpdateBiPivotFieldsRequest = {
-      pivotId,
-      rowFields: rows.filter(isRealBiField).map(toBiRef),
-      columnFields: columns.filter(isRealBiField).map(toBiRef),
-      valueFields: values.map((f) => toBiValueFieldRef(f.name, f.customName)),
-      filterFields: filters.filter(isRealBiField).map(toBiRef),
-      rowHierarchies: rowHierarchies.length > 0 ? rowHierarchies : undefined,
-      columnHierarchies: columnHierarchies.length > 0 ? columnHierarchies : undefined,
-      lookupColumns: [...lookupColumns],
-      calculationGroup: next ?? undefined,
-    };
-    pivot.updateBiFields(biRequest).then(() => {
-      if (onViewUpdate) onViewUpdate();
-    }).catch((err) => {
-      console.error('Failed to apply calculation group:', err);
-    });
-  }, [isBiPivot, biTableNames, pivotId, rows, columns, values, filters, lookupColumns, onViewUpdate]);
+  // The calculation group currently PLACED on this pivot: the zone chip named
+  // after a model calculation group, wherever it sits (rows/columns/filters).
+  // Its hiddenItems carry the item-subset selection.
+  const placedCalcGroup = useMemo(() => {
+    for (const f of [...rows, ...columns, ...filters]) {
+      if (calcGroupNames.has(f.name)) {
+        return { group: f.name, hiddenItems: f.hiddenItems ?? [] };
+      }
+    }
+    return null;
+  }, [rows, columns, filters, calcGroupNames]);
 
-  // Select/clear the calculation group (defaults to all items).
-  const handleCalcGroupChange = useCallback((groupName: string | null) => {
-    applyCalcGroup(groupName ? { group: groupName, items: [] } : null);
-  }, [applyCalcGroup]);
-
-  // Toggle one calculation item. Empty items === all, so unchecking from "all"
-  // materializes the full list minus that item; re-selecting every item collapses
-  // back to the canonical [] (all). Never allows zero items.
-  const handleCalcItemToggle = useCallback(
-    (itemName: string, allItemNames: string[], checked: boolean) => {
-      if (!appliedCalcGroup) return;
-      const current = appliedCalcGroup.items.length > 0 ? appliedCalcGroup.items : allItemNames;
-      const draft = checked ? [...current, itemName] : current.filter((i) => i !== itemName);
-      // Restrict to known items, dedup, and preserve model declaration order.
-      const nextItems = allItemNames.filter((i) => draft.includes(i));
-      if (nextItems.length === 0) return; // keep at least one item
-      const items = nextItems.length === allItemNames.length ? [] : nextItems;
-      applyCalcGroup({ group: appliedCalcGroup.group, items });
+  // Place/remove a calculation group as a dimension chip. handleFieldToggle
+  // adds non-numeric fields to ROWS by default (drag the chip to Columns or
+  // Filters afterwards); unchecking removes it from every zone by name.
+  const placeCalcGroup = useCallback(
+    (groupName: string, place: boolean) => {
+      handleFieldToggle({ index: -1, name: groupName, isNumeric: false }, place);
     },
-    [appliedCalcGroup, applyCalcGroup],
+    [handleFieldToggle],
   );
 
-  // Field-list adapters (Power BI-style selection): the group node's checkbox
-  // applies/clears the group with all items; an item checkbox on a non-applied
-  // group applies the group with just that item (switching groups if another
-  // one was applied — only one group can be active at a time).
+  // Field-list adapters (Power BI-style): the group node's checkbox places the
+  // group as a dimension; only one group can be placed at a time, so checking
+  // a second group swaps the first out. Item checkboxes edit the chip's
+  // hidden-items subset; checking an item of a non-placed group places the
+  // group with only that item visible; unchecking the last item removes it.
   const handleFieldListCalcGroupToggle = useCallback(
     (group: BiCalcGroup, checked: boolean) => {
-      handleCalcGroupChange(checked ? group.name : null);
+      if (checked && placedCalcGroup && placedCalcGroup.group !== group.name) {
+        placeCalcGroup(placedCalcGroup.group, false);
+      }
+      placeCalcGroup(group.name, checked);
     },
-    [handleCalcGroupChange],
+    [placedCalcGroup, placeCalcGroup],
   );
   const handleFieldListCalcItemToggle = useCallback(
     (group: BiCalcGroup, itemName: string, checked: boolean) => {
-      if (appliedCalcGroup?.group === group.name) {
-        handleCalcItemToggle(itemName, group.items.map((i) => i.name), checked);
-      } else if (checked) {
-        applyCalcGroup({ group: group.name, items: [itemName] });
+      const all = group.items.map((i) => i.name);
+      if (!placedCalcGroup || placedCalcGroup.group !== group.name) {
+        if (!checked) return;
+        if (placedCalcGroup) placeCalcGroup(placedCalcGroup.group, false);
+        placeCalcGroup(group.name, true);
+        setZoneFieldHiddenItems(group.name, all.filter((n) => n !== itemName));
+        return;
+      }
+      const hidden = new Set(placedCalcGroup.hiddenItems);
+      if (checked) {
+        hidden.delete(itemName);
+      } else {
+        hidden.add(itemName);
+      }
+      const visible = all.filter((n) => !hidden.has(n));
+      if (visible.length === 0) {
+        // Last visible item unchecked — remove the group entirely.
+        placeCalcGroup(group.name, false);
+      } else {
+        setZoneFieldHiddenItems(group.name, all.filter((n) => hidden.has(n)));
       }
     },
-    [appliedCalcGroup, handleCalcItemToggle, applyCalcGroup],
+    [placedCalcGroup, placeCalcGroup, setZoneFieldHiddenItems],
   );
+
+  // Field-list display state: items = the VISIBLE subset ([] = all items).
+  const fieldListCalcGroupState = useMemo(() => {
+    if (!placedCalcGroup) return null;
+    if (placedCalcGroup.hiddenItems.length === 0) {
+      return { group: placedCalcGroup.group, items: [] as string[] };
+    }
+    const def = fieldListModel?.calculationGroups?.find(
+      (g) => g.name === placedCalcGroup.group,
+    );
+    const visible = (def?.items ?? [])
+      .map((i) => i.name)
+      .filter((n) => !placedCalcGroup.hiddenItems.includes(n));
+    return { group: placedCalcGroup.group, items: visible };
+  }, [placedCalcGroup, fieldListModel?.calculationGroups]);
 
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
@@ -928,12 +956,12 @@ export function PivotEditor({
             onMeasureToggle={handleBiMeasureToggle}
             onHierarchyToggle={handleBiHierarchyToggle}
             onLookupToggle={handleLookupToggle}
-            appliedCalcGroup={appliedCalcGroup}
+            appliedCalcGroup={fieldListCalcGroupState}
             onCalcGroupToggle={handleFieldListCalcGroupToggle}
             onCalcItemToggle={handleFieldListCalcItemToggle}
             calcGroupsDisabledReason={
-              lookupColumns.size > 0 && !appliedCalcGroup
-                ? 'Remove lookup columns to apply a calculation group.'
+              lookupColumns.size > 0 && !placedCalcGroup
+                ? 'Remove lookup columns to place a calculation group.'
                 : null
             }
             selectedPerspective={selectedPerspective}

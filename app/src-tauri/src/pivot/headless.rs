@@ -64,7 +64,6 @@ pub async fn get_connection_bi_model(
         lookup_columns: Vec::new(),
         hierarchies,
         calculation_groups,
-        applied_calculation_group: None,
         data_as_of: None,
         perspectives,
         // Connection-level metadata has no pivot, hence no selection.
@@ -127,6 +126,19 @@ pub(crate) async fn compute_design_query_view(
     }
     if request.row_fields.is_empty() && request.column_fields.is_empty() {
         return Err("A design query needs at least one dimension (ROWS or COLUMNS).".to_string());
+    }
+    if request
+        .row_fields
+        .iter()
+        .chain(request.column_fields.iter())
+        .chain(request.filter_fields.iter())
+        .any(|f| f.is_calc_group())
+    {
+        return Err(
+            "Calculation groups aren't supported in design queries yet. \
+             Remove the calculation group from the query."
+                .to_string(),
+        );
     }
     if request
         .row_fields

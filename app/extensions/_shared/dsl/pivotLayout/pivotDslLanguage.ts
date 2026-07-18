@@ -104,7 +104,7 @@ function findCurrentClause(
   model: monaco.editor.ITextModel,
   position: monaco.Position,
 ): string | null {
-  const clausePattern = /^\s*(ROWS|COLUMNS|VALUES|FILTERS|SORT|LAYOUT|CALCGROUP|CALC|TOP|BOTTOM|SAVE)\s*[:]/i;
+  const clausePattern = /^\s*(ROWS|COLUMNS|VALUES|FILTERS|SORT|LAYOUT|CALC|TOP|BOTTOM|SAVE)\s*[:]/i;
 
   for (let line = position.lineNumber; line >= 1; line--) {
     const lineText = model.getLineContent(line);
@@ -123,6 +123,20 @@ function addFieldSuggestions(
   numericOnly: boolean,
 ): void {
   if (currentBiModel) {
+    // Calculation groups place as dimension fields (Power BI-style) — suggest
+    // them alongside columns in ROWS/COLUMNS/FILTERS.
+    if (!numericOnly) {
+      for (const g of currentBiModel.calculationGroups ?? []) {
+        suggestions.push({
+          label: { label: g.name, description: 'Calculation group' },
+          kind: monaco.languages.CompletionItemKind.Class,
+          insertText: g.name,
+          detail: `${g.items.length} item${g.items.length === 1 ? '' : 's'}`,
+          sortText: `00_calcgroup_${g.name}`,
+          range,
+        });
+      }
+    }
     let tableIdx = 0;
     for (const table of currentBiModel.tables) {
       const prefix = String(tableIdx).padStart(2, '0');
@@ -164,7 +178,7 @@ function addClauseKeywords(
   suggestions: monaco.languages.CompletionItem[],
   range: monaco.IRange,
 ): void {
-  const keywords = ['ROWS:', 'COLUMNS:', 'VALUES:', 'FILTERS:', 'SORT:', 'LAYOUT:', 'CALC:', 'CALCGROUP:', 'TOP', 'SAVE AS'];
+  const keywords = ['ROWS:', 'COLUMNS:', 'VALUES:', 'FILTERS:', 'SORT:', 'LAYOUT:', 'CALC:', 'TOP', 'SAVE AS'];
   for (const kw of keywords) {
     suggestions.push({
       label: kw,
@@ -236,7 +250,7 @@ export function registerPivotDslLanguage(): void {
           [/"[^"]*"/, 'string'],
           [/\[[^\]]*\]/, 'string.special'],
           [/\b\d+(\.\d+)?\b/, 'number'],
-          [/\b(ROWS|COLUMNS|VALUES|FILTERS|SORT|LAYOUT|CALCGROUP|CALC)\b/i, 'keyword'],
+          [/\b(ROWS|COLUMNS|VALUES|FILTERS|SORT|LAYOUT|CALC)\b/i, 'keyword'],
           [/\b(TOP|BOTTOM|SAVE)\b/i, 'keyword'],
           [/\b(AS|BY|VIA|LOOKUP|NOT|IN)\b/i, 'keyword.modifier'],
           [/\b(ASC|DESC)\b/i, 'keyword.sort'],
@@ -534,38 +548,6 @@ export function registerPivotDslLanguage(): void {
             });
           }
           return { suggestions };
-
-        case 'CALCGROUP': {
-          // Suggest group names; once a group name + "(" is typed, suggest its items.
-          const groups = currentBiModel?.calculationGroups ?? [];
-          const lineText = model.getLineContent(position.lineNumber);
-          const afterParen = /\(/.test(lineText.substring(0, position.column - 1));
-          if (afterParen) {
-            const groupMatch = /CALCGROUP\s*:\s*("[^"]+"|[^\s(]+)/i.exec(lineText);
-            const typedGroup = groupMatch ? groupMatch[1].replace(/"/g, '') : '';
-            const group = groups.find(g => g.name.toLowerCase() === typedGroup.toLowerCase());
-            for (const item of group?.items ?? []) {
-              suggestions.push({
-                label: item.name,
-                kind: monaco.languages.CompletionItemKind.EnumMember,
-                insertText: item.name,
-                detail: item.source ?? 'calculation item',
-                range,
-              });
-            }
-          } else {
-            for (const g of groups) {
-              suggestions.push({
-                label: g.name,
-                kind: monaco.languages.CompletionItemKind.Class,
-                insertText: g.name,
-                detail: `${g.items.length} item${g.items.length === 1 ? '' : 's'}`,
-                range,
-              });
-            }
-          }
-          return { suggestions };
-        }
 
         default:
           addClauseKeywords(suggestions, range);

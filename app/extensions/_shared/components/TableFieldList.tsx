@@ -929,10 +929,11 @@ export function TableFieldList({
               </FolderNode>
             )}
 
-            {/* Calculation groups — Power BI-style selectable fields. Checking
-                the group applies it to the Values axis (each measure shown once
-                per calculation item, like PBI's calc-group column on a visual);
-                item checkboxes narrow the applied subset. */}
+            {/* Calculation groups — Power BI-style dimension fields. Checking
+                the group places it as a zone chip (Rows by default; drag it to
+                Columns or Filters): its items become the field's members and
+                every measure is evaluated under the item governing each cell.
+                Item checkboxes narrow the visible subset. */}
             {filteredCalcGroups.map((g) => {
               const interactive = !!onCalcGroupToggle;
               const isApplied = appliedCalcGroup?.group === g.name;
@@ -945,8 +946,9 @@ export function TableFieldList({
               const disabled = !!calcGroupsDisabledReason && !isApplied;
               const groupTooltip = disabled
                 ? calcGroupsDisabledReason!
-                : 'Apply this calculation group: each value field is shown once per ' +
-                  'calculation item (e.g. Current, YTD, PY). Totals are off while applied.';
+                : 'Place this calculation group as a field (Rows by default — drag its ' +
+                  'chip to Columns or Filters): each measure is shown once per ' +
+                  'calculation item (e.g. Current, YTD, PY). Totals are off while placed.';
               return (
                 <FolderNode
                   key={`calcgroup:${g.name}`}
@@ -991,7 +993,7 @@ export function TableFieldList({
                   ))}
                   {isApplied && (
                     <div style={{ padding: '2px 8px 4px 12px', fontSize: '11px', color: '#6639ba' }}>
-                      Applied to values — totals off while applied
+                      Placed as a field — totals off while placed
                     </div>
                   )}
                 </FolderNode>

@@ -307,6 +307,89 @@ pub(crate) fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
 /// Builds a PivotCache from Arrow RecordBatches with a synthetic "Total"
 /// dimension column prepended. Used when a BI pivot has measures but no
 /// group-by dimensions.
+/// Build a LONG-format cache for a pivot with a PLACED calculation group
+/// (Power BI-style dimension).
+///
+/// The engine returns the cross-applied WIDE result — `[dims][M*K measure
+/// cols]`, measures-outer/items-inner — but the pivot needs the group as a
+/// real dimension. Each wide row becomes K rows:
+/// `[("Total")?][dims][item name][M base measures]`, emitted in item
+/// DECLARATION order so `SortOrder::DataSourceOrder` on the group field
+/// renders items in that order (Power BI ordinal semantics, never
+/// alphabetical).
+///
+/// `wide_measure_idx` maps (base measure, item) -> wide result column from the
+/// engine's own per-column metadata; positions fall back to the
+/// measures-outer/items-inner contract when metadata is absent (e.g. empty
+/// result sets).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_cache_calc_group_long(
+    pivot_id: PivotId,
+    batches: &[RecordBatch],
+    num_dims: usize,
+    group_name: &str,
+    item_names: &[String],
+    measure_names: &[String],
+    wide_measure_idx: &std::collections::HashMap<(String, Option<String>), usize>,
+    synthetic_dim: bool,
+) -> Result<PivotCache, String> {
+    let m = measure_names.len();
+    let k = item_names.len();
+    let syn = usize::from(synthetic_dim);
+    let total_fields = syn + num_dims + 1 + m;
+
+    let mut cache = PivotCache::new(pivot_id, total_fields);
+    if synthetic_dim {
+        cache.set_field_name(0, "Total".to_string());
+    }
+    if let Some(first) = batches.first() {
+        let schema = first.schema();
+        for i in 0..num_dims.min(schema.fields().len()) {
+            cache.set_field_name(syn + i, schema.field(i).name().clone());
+        }
+    }
+    // The item column is named after the GROUP: it IS the group's field.
+    cache.set_field_name(syn + num_dims, group_name.to_string());
+    for (mi, name) in measure_names.iter().enumerate() {
+        cache.set_field_name(syn + num_dims + 1 + mi, name.clone());
+    }
+
+    let wide_col = |mi: usize, ki: usize| -> usize {
+        wide_measure_idx
+            .get(&(measure_names[mi].clone(), Some(item_names[ki].clone())))
+            .copied()
+            .unwrap_or(num_dims + mi * k + ki)
+    };
+
+    let mut source_row: u32 = 0;
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            for (ki, item) in item_names.iter().enumerate() {
+                let mut values: Vec<CellValue> = Vec::with_capacity(total_fields);
+                if synthetic_dim {
+                    values.push(CellValue::Text("Total".to_string()));
+                }
+                for d in 0..num_dims {
+                    values.push(arrow_cell_to_value(batch.column(d).as_ref(), row_idx));
+                }
+                values.push(CellValue::Text(item.clone()));
+                for mi in 0..m {
+                    let col = wide_col(mi, ki);
+                    if col < batch.num_columns() {
+                        values.push(arrow_cell_to_value(batch.column(col).as_ref(), row_idx));
+                    } else {
+                        values.push(CellValue::Empty);
+                    }
+                }
+                cache.add_record(source_row, &values);
+                source_row += 1;
+            }
+        }
+    }
+
+    Ok(cache)
+}
+
 pub(crate) fn build_cache_with_synthetic_dim(
     pivot_id: PivotId,
     batches: &[RecordBatch],

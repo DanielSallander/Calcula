@@ -1483,12 +1483,15 @@ pub struct UpdateBiPivotFieldsRequest {
     /// Unified column ordering for interleaving values and calculated fields.
     #[serde(default)]
     pub value_column_order: Option<Vec<ValueColumnRefDef>>,
-    /// Applied calculation group (None = none). When set, the value fields
-    /// (base measures) are multiplied by the group's selected items on the
-    /// Values axis. Not supported together with lookup columns in v1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calculation_group: Option<AppliedCalcGroup>,
 }
+
+/// Pseudo table name marking a calculation-group field reference in a
+/// row/column/filter list. A calculation group is placed as a DIMENSION
+/// (Power BI-style): its items become the field's members, and every measure
+/// is evaluated under the item governing each cell. The frontend/DSL send
+/// `{ table: CALC_GROUP_TABLE, column: <group name> }`; the backend reshapes
+/// the engine's cross-applied result into a real cache dimension.
+pub const CALC_GROUP_TABLE: &str = "__calcgroup__";
 
 /// Reference to a table column (for BI pivot row/column/filter fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1503,6 +1506,13 @@ pub struct BiFieldRef {
     /// Items to hide from the filter. Only relevant for filter fields.
     #[serde(default)]
     pub hidden_items: Vec<String>,
+}
+
+impl BiFieldRef {
+    /// True when this ref is a calculation-group placement (pseudo table).
+    pub fn is_calc_group(&self) -> bool {
+        self.table == CALC_GROUP_TABLE
+    }
 }
 
 /// Reference to a model measure (for BI pivot value fields).
@@ -1606,13 +1616,11 @@ pub struct SavedBiPivotMetadata {
     pub lookup_columns: Vec<String>,
     #[serde(default)]
     pub hierarchies: Vec<BiHierarchyMeta>,
-    /// Calculation groups defined in the BI model (read-only field-list metadata).
+    /// Calculation groups defined in the BI model (field-list metadata). A
+    /// PLACED group needs no extra state here: it lives in the definition's
+    /// row/column/filter fields like any dimension.
     #[serde(default)]
     pub calculation_groups: Vec<BiCalcGroupMeta>,
-    /// The calculation group currently APPLIED to this pivot (None = none).
-    /// Travels in .calp so a subscriber's pivot renders the same expansion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_calc_group: Option<AppliedCalcGroup>,
     /// ISO-8601 timestamp of when this pivot's data was last fetched from the
     /// database. Surfaced as "Data as of …" so a reader (esp. offline, after a
     /// cross-machine open) knows the snapshot's age. None until first fetched.
@@ -1651,10 +1659,9 @@ pub struct BiPivotMetadata {
     pub measures: Vec<MeasureFieldInfo>,
     /// Hierarchies defined in the BI model
     pub hierarchies: Vec<BiHierarchyMeta>,
-    /// Calculation groups defined in the BI model (read-only field-list metadata).
+    /// Calculation groups defined in the BI model (field-list metadata). A
+    /// PLACED group lives in the definition's row/column/filter fields.
     pub calculation_groups: Vec<BiCalcGroupMeta>,
-    /// The calculation group currently APPLIED to this pivot (None = none).
-    pub applied_calc_group: Option<AppliedCalcGroup>,
     /// ISO-8601 timestamp of when this pivot's data was last fetched from the
     /// database (surfaced as "Data as of …"; preserved across save/reload so an
     /// offline reader sees the snapshot age). None until first fetched.
@@ -1795,19 +1802,6 @@ pub struct BiCalcGroupItemMeta {
     pub source: Option<String>,
 }
 
-/// A calculation group applied to a BI pivot: the group name + the selected
-/// item names (empty = ALL items, in declaration order). When applied, the
-/// pivot's selected measures are multiplied on the Values axis (each measure x
-/// each selected item), expanded by the engine into synthetic measures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppliedCalcGroup {
-    pub group: String,
-    /// Selected item names. Empty means all items in the group.
-    #[serde(default)]
-    pub items: Vec<String>,
-}
-
 /// Stored query for BI pivot refresh.
 #[derive(Debug, Clone)]
 pub struct BiPivotQuery {
@@ -1831,14 +1825,10 @@ pub struct BiPivotModelInfo {
     /// Hierarchies defined in the BI model (drill-down paths).
     #[serde(default)]
     pub hierarchies: Vec<BiHierarchyMeta>,
-    /// Calculation groups defined in the BI model (Studio-authored). Items are
-    /// measure templates applied on the Values axis, not groupable dimensions.
+    /// Calculation groups defined in the BI model. Placed as DIMENSIONS
+    /// (Power BI-style): the group is a field whose members are its items.
     #[serde(default)]
     pub calculation_groups: Vec<BiCalcGroupMeta>,
-    /// The calculation group currently APPLIED to this pivot (None = none), so
-    /// the editor control reflects the active selection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_calculation_group: Option<AppliedCalcGroup>,
     /// Perspectives defined in the BI model (field-list display subsets).
     #[serde(default)]
     pub perspectives: Vec<BiPerspectiveMeta>,

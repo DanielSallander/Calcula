@@ -439,11 +439,10 @@ export interface BiPivotModelInfo {
   lookupColumns?: string[];
   /** Hierarchies defined in the BI model (drill-down paths). */
   hierarchies?: BiHierarchyMeta[];
-  /** Calculation groups defined in the BI model. Items are measure templates
-   *  applied on the Values axis, not groupable dimensions. */
+  /** Calculation groups defined in the BI model. Placed as DIMENSIONS
+   *  (Power BI-style): a zone field named after the group whose members are
+   *  its calculation items. */
   calculationGroups?: BiCalcGroup[];
-  /** The calculation group currently applied to this pivot (None = none). */
-  appliedCalculationGroup?: AppliedCalcGroup;
   /** ISO-8601 time this pivot's data was last fetched ("Data as of …"). */
   dataAsOf?: string;
   /** Perspectives defined in the BI model (field-list display subsets). */
@@ -536,6 +535,9 @@ export interface BiFieldRef {
   column: string;
   /** When true, this field is a lookup column (resolved post-aggregation). */
   isLookup?: boolean;
+  /** Items to hide from the field (filter subset / a placed calculation
+   *  group's item subset). */
+  hiddenItems?: string[];
 }
 
 /** BI value field reference (measure name) */
@@ -569,16 +571,12 @@ export interface UpdateBiPivotFieldsRequest {
   calculatedFields?: CalculatedFieldDef[];
   /** Unified column ordering for interleaving values and calculated fields */
   valueColumnOrder?: ValueColumnRefDef[];
-  /** Applied calculation group (multiplies value fields on the Values axis). */
-  calculationGroup?: AppliedCalcGroup;
 }
 
-/** A calculation group applied to a pivot: group name + selected items
- *  (empty = all items, declaration order). */
-export interface AppliedCalcGroup {
-  group: string;
-  items: string[];
-}
+/** Pseudo table name marking a calculation-group field reference on the wire
+ *  (mirrors Rust CALC_GROUP_TABLE). Zone chips carry the plain group name;
+ *  requests send `{ table: CALC_GROUP_TABLE, column: <group name> }`. */
+export const CALC_GROUP_TABLE = '__calcgroup__';
 
 /** Pivot region info returned when checking if a cell is in a pivot */
 export interface PivotRegionInfo {
