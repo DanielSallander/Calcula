@@ -5192,7 +5192,13 @@ pub async fn update_bi_pivot_fields(
         let mut pivot_tables = pivot_state.pivot_tables.lock()
             .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
         if let Some((definition, stored_cache)) = pivot_tables.get_mut(&pivot_id) {
-            let cosmetic_only = is_bi_cosmetic_only_change(definition, &request);
+            // A placed calculation group was STRIPPED from the request's field
+            // lists above, so the comparison can't see it — a "group only"
+            // request would look identical to an empty pivot and wrongly
+            // short-circuit against the stale cache. Never take the fast path
+            // while a group is placed.
+            let cosmetic_only =
+                placement.is_none() && is_bi_cosmetic_only_change(definition, &request);
             if cosmetic_only {
                 log_info!("PIVOT", "update_bi_pivot_fields: cosmetic-only change, skipping BI query");
                 // Update custom names on existing value fields
@@ -5664,6 +5670,15 @@ pub async fn update_bi_pivot_fields(
         None => (None, Vec::new()),
     };
 
+    // Group-only pivot: a calculation group placed with no measures and no
+    // other dimensions anywhere. The items ARE the rows — nothing to
+    // aggregate, so skip the engine query entirely and render the item
+    // column straight from the resolved metadata (works offline too).
+    let group_only = placement.is_some()
+        && !has_values
+        && query_group_by.is_empty()
+        && query_lookups.is_empty();
+
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
@@ -5691,6 +5706,10 @@ pub async fn update_bi_pivot_fields(
         conn.engine.clone().ok_or("No BI model loaded.")?
     };
 
+    let (batches, result_columns) = if group_only {
+        // Group-only: no query — the reshape builder emits one row per item.
+        (Vec::new(), Vec::new())
+    } else {
     // Auto-refresh in-memory tables that haven't been cached yet.
     // Multi-table queries go through LocalAggregation which reads from the
     // in-memory cache — tables must be refreshed at least once before querying.
@@ -5735,7 +5754,7 @@ pub async fn update_bi_pivot_fields(
         // engine's own column identity rather than fragile positional arithmetic.
         engine.query_with_meta(query_request).await
     };
-    let (batches, result_columns) = match query_result {
+    match query_result {
         Ok((b, m)) => (b, m),
         Err(e) => {
             // If the query failed and we were using a synthetic measure,
@@ -5767,6 +5786,28 @@ pub async fn update_bi_pivot_fields(
                         }
                     })
                     .collect();
+                // Keep a placed calculation group in the definition so its
+                // chip and refresh reconstruction survive the failed query.
+                if let Some(p) = &placement {
+                    let mut pf = PivotField::new(0, p.group.clone());
+                    pf.sort_order = pivot_engine::SortOrder::DataSourceOrder;
+                    pf.hidden_items = p.hidden_items.clone();
+                    match p.axis {
+                        CalcGroupAxis::Rows => definition
+                            .row_fields
+                            .insert(p.position.min(definition.row_fields.len()), pf),
+                        CalcGroupAxis::Columns => definition
+                            .column_fields
+                            .insert(p.position.min(definition.column_fields.len()), pf),
+                        CalcGroupAxis::Filters => definition.filter_fields.insert(
+                            p.position.min(definition.filter_fields.len()),
+                            pivot_engine::PivotFilter {
+                                field: pf,
+                                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+                            },
+                        ),
+                    }
+                }
                 if let Some(ref layout_config) = request.layout {
                     apply_layout_config(&mut definition.layout, layout_config);
                 }
@@ -5786,6 +5827,7 @@ pub async fn update_bi_pivot_fields(
             }
             return Err(crate::bi::commands::friendly_bi_query_error("BI query failed", &e));
         }
+    }
     };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
 

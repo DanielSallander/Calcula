@@ -387,6 +387,25 @@ pub(crate) fn build_cache_calc_group_long(
         }
     }
 
+    // Group-only pivot (no measures, no other dimensions): there is no engine
+    // result at all, but the group's items ARE the rows — emit one row per
+    // item (blank measure cells) so the members still render, like a
+    // dimensions-only pivot shows its distinct values.
+    if source_row == 0 && num_dims == 0 && batches.is_empty() {
+        for item in item_names {
+            let mut values: Vec<CellValue> = Vec::with_capacity(total_fields);
+            if synthetic_dim {
+                values.push(CellValue::Text("Total".to_string()));
+            }
+            values.push(CellValue::Text(item.clone()));
+            for _ in 0..m {
+                values.push(CellValue::Empty);
+            }
+            cache.add_record(source_row, &values);
+            source_row += 1;
+        }
+    }
+
     Ok(cache)
 }
 

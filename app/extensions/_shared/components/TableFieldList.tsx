@@ -596,6 +596,7 @@ function FolderNode({
   onExpandAll,
   onCollapseAll,
   headerCheckbox,
+  dragData,
   children,
 }: {
   name: string;
@@ -608,9 +609,23 @@ function FolderNode({
   /** Optional checkbox rendered in the header (calculation groups). Clicks on
    *  it must not toggle expansion. */
   headerCheckbox?: React.ReactNode;
+  /** When set, the header row is draggable into the drop zones with this
+   *  payload (calculation groups — the whole node IS the field). */
+  dragData?: DragField;
   children: React.ReactNode;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // The hook must run unconditionally — fall back to inert data when the
+  // folder isn't draggable; the handlers only attach when dragData is set.
+  // Memoized by value so re-renders during a drag keep the same identity
+  // (the drag state matches its payload by reference).
+  const effectiveDrag = useMemo<DragField>(
+    () => dragData ?? { sourceIndex: -999, name, isNumeric: false },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dragData?.sourceIndex, dragData?.name, dragData?.isNumeric, name],
+  );
+  const { isDragging, dragHandleProps } = useDraggable(effectiveDrag, name);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -621,6 +636,11 @@ function FolderNode({
     <div>
       <div
         className={treeStyles.folderHeader}
+        {...(dragData ? dragHandleProps : {})}
+        style={{
+          ...(dragData ? dragHandleProps.style : undefined),
+          ...(dragData && isDragging ? { opacity: 0.4 } : undefined),
+        }}
         onClick={onToggleExpand}
         onContextMenu={handleContextMenu}
       >
@@ -969,6 +989,11 @@ export function TableFieldList({
                         onChange={(checked) => onCalcGroupToggle!(g, checked)}
                       />
                     ) : undefined
+                  }
+                  dragData={
+                    interactive && !disabled
+                      ? { sourceIndex: -1, name: g.name, isNumeric: false }
+                      : undefined
                   }
                 >
                   {g.items.map((it) => (
