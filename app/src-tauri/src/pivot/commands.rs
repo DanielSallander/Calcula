@@ -1446,7 +1446,15 @@ pub async fn refresh_pivot_cache(
                 }
                 r
             };
+            // Skip the synthetic values-only "Total" row field — it is not a
+            // model column (update_bi_pivot_fields re-injects it as needed);
+            // reconstructing it would send a bogus {"", "Total"} group-by that
+            // fails the query and blanks the pivot.
+            let is_synthetic_total = |f: &pivot_engine::PivotField| -> bool {
+                f.name == "Total" && !calc_group_names.contains("Total")
+            };
             let row_fields: Vec<super::types::BiFieldRef> = definition.row_fields.iter()
+                .filter(|f| !is_synthetic_total(f))
                 .map(parse_dim_field)
                 .collect();
             let column_fields: Vec<super::types::BiFieldRef> = definition.column_fields.iter()

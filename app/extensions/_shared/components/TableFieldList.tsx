@@ -89,10 +89,9 @@ interface TableFieldListProps {
    *  ALL items. Enables the Power BI-style checkboxes on calculation-group
    *  nodes; when the callbacks below are absent, groups render read-only. */
   appliedCalcGroup?: { group: string; items: string[] } | null;
-  /** Check/uncheck a whole calculation group (checked = apply, all items). */
+  /** Check/uncheck a whole calculation group (checked = place, all items).
+   *  Item subsetting happens through the pivot's own filter/item dropdowns. */
   onCalcGroupToggle?: (group: BiCalcGroup, checked: boolean) => void;
-  /** Toggle a single calculation item of a group. */
-  onCalcItemToggle?: (group: BiCalcGroup, itemName: string, checked: boolean) => void;
   /** When set, calc-group checkboxes on NON-applied groups are disabled and
    *  this text explains why (e.g. the lookup-column conflict). */
   calcGroupsDisabledReason?: string | null;
@@ -744,7 +743,6 @@ export function TableFieldList({
   onLookupToggle,
   appliedCalcGroup,
   onCalcGroupToggle,
-  onCalcItemToggle,
   calcGroupsDisabledReason,
   selectedPerspective,
   onPerspectiveChange,
@@ -951,23 +949,20 @@ export function TableFieldList({
 
             {/* Calculation groups — Power BI-style dimension fields. Checking
                 the group places it as a zone chip (Rows by default; drag it to
-                Columns or Filters): its items become the field's members and
-                every measure is evaluated under the item governing each cell.
-                Item checkboxes narrow the visible subset. */}
+                Columns or Filters): its ITEMS become the field's members —
+                selected via the pivot's filter/item dropdowns like any
+                dimension's values, so they are not listed here. */}
             {filteredCalcGroups.map((g) => {
               const interactive = !!onCalcGroupToggle;
               const isApplied = appliedCalcGroup?.group === g.name;
               const appliedAll = isApplied && appliedCalcGroup.items.length === 0;
-              const isItemOn = (name: string) =>
-                isApplied &&
-                (appliedCalcGroup.items.length === 0 || appliedCalcGroup.items.includes(name));
-              // A conflict (e.g. active lookup columns) disables applying; an
-              // already-applied group stays enabled so it can be switched off.
+              // A conflict (e.g. active lookup columns) disables placing; an
+              // already-placed group stays enabled so it can be switched off.
               const disabled = !!calcGroupsDisabledReason && !isApplied;
               const groupTooltip = disabled
                 ? calcGroupsDisabledReason!
-                : 'Place this calculation group as a field (Rows by default — drag its ' +
-                  'chip to Columns or Filters): each measure is shown once per ' +
+                : 'Place this calculation group as a field (Rows by default — drag it ' +
+                  'to Columns or Filters): each measure is shown once per ' +
                   'calculation item (e.g. Current, YTD, PY). Totals are off while placed.';
               return (
                 <FolderNode
@@ -975,7 +970,7 @@ export function TableFieldList({
                   name={g.name}
                   icon={<CalcGroupGlyph />}
                   childCount={g.items.length}
-                  isExpanded={!!query || expandedFolders.has(`__calcgroup__:${g.name}`)}
+                  isExpanded={isApplied && expandedFolders.has(`__calcgroup__:${g.name}`)}
                   onToggleExpand={() => toggleFolder(`__calcgroup__:${g.name}`)}
                   onExpandAll={expandAll}
                   onCollapseAll={collapseAll}
@@ -996,26 +991,6 @@ export function TableFieldList({
                       : undefined
                   }
                 >
-                  {g.items.map((it) => (
-                    <div
-                      key={`calcitem:${g.name}.${it.name}`}
-                      className={treeStyles.fieldItem}
-                      style={{ cursor: 'default' }}
-                      title={it.source ? `${it.name} = ${it.source}` : it.name}
-                    >
-                      {interactive && onCalcItemToggle && (
-                        <input
-                          type="checkbox"
-                          className={treeStyles.fieldCheckbox}
-                          checked={isItemOn(it.name)}
-                          disabled={disabled}
-                          onChange={(e) => onCalcItemToggle(g, it.name, e.target.checked)}
-                        />
-                      )}
-                      <span className={treeStyles.fieldName}>{it.name}</span>
-                      <span className={treeStyles.fieldTypeIcon}>{'ƒ'}</span>
-                    </div>
-                  ))}
                   {isApplied && (
                     <div style={{ padding: '2px 8px 4px 12px', fontSize: '11px', color: '#6639ba' }}>
                       Placed as a field — totals off while placed

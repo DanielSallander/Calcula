@@ -821,33 +821,6 @@ export function PivotEditor({
     },
     [placedCalcGroup, placeCalcGroup],
   );
-  const handleFieldListCalcItemToggle = useCallback(
-    (group: BiCalcGroup, itemName: string, checked: boolean) => {
-      const all = group.items.map((i) => i.name);
-      if (!placedCalcGroup || placedCalcGroup.group !== group.name) {
-        if (!checked) return;
-        if (placedCalcGroup) placeCalcGroup(placedCalcGroup.group, false);
-        placeCalcGroup(group.name, true);
-        setZoneFieldHiddenItems(group.name, all.filter((n) => n !== itemName));
-        return;
-      }
-      const hidden = new Set(placedCalcGroup.hiddenItems);
-      if (checked) {
-        hidden.delete(itemName);
-      } else {
-        hidden.add(itemName);
-      }
-      const visible = all.filter((n) => !hidden.has(n));
-      if (visible.length === 0) {
-        // Last visible item unchecked — remove the group entirely.
-        placeCalcGroup(group.name, false);
-      } else {
-        setZoneFieldHiddenItems(group.name, all.filter((n) => hidden.has(n)));
-      }
-    },
-    [placedCalcGroup, placeCalcGroup, setZoneFieldHiddenItems],
-  );
-
   // Field-list display state: items = the VISIBLE subset ([] = all items).
   const fieldListCalcGroupState = useMemo(() => {
     if (!placedCalcGroup) return null;
@@ -958,7 +931,6 @@ export function PivotEditor({
             onLookupToggle={handleLookupToggle}
             appliedCalcGroup={fieldListCalcGroupState}
             onCalcGroupToggle={handleFieldListCalcGroupToggle}
-            onCalcItemToggle={handleFieldListCalcItemToggle}
             calcGroupsDisabledReason={
               lookupColumns.size > 0 && !placedCalcGroup
                 ? 'Remove lookup columns to place a calculation group.'

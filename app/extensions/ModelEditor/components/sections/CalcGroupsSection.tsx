@@ -41,8 +41,13 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const groups = overview.calculationGroups;
 
-  /** item = null selects the group node itself. */
-  const [selected, setSelected] = useState<{ group: string; item: string | null } | null>(null);
+  /** item = null selects the group node itself; pseudo selects one of the
+   *  two selection-state expressions instead. */
+  const [selected, setSelected] = useState<{
+    group: string;
+    item: string | null;
+    pseudo?: "moe" | "nosel";
+  } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<{
     /** null = creating a new group. Resolved to the LIVE group at mount. */
@@ -108,11 +113,22 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
   };
 
   /** Run a full-payload group upsert against the FRESH group state. `op`
-   *  returns the new {name, items} (or null to skip, e.g. a guard failed). */
+   *  returns the new {name, items} (or null to skip, e.g. a guard failed).
+   *  Selection-state fields default to the fresh group's current values
+   *  (an upsert REPLACES the whole group); `undefined` keeps them, an
+   *  explicit value (incl. null = clear) overrides. */
+  type GroupOpPayload = {
+    name: string;
+    items: CalcGroupItemDto[];
+    multipleOrEmptySelection?: string | null;
+    multipleOrEmptySelectionFormat?: string | null;
+    noSelection?: string | null;
+    noSelectionFormat?: string | null;
+  };
   const enqueueGroupOp = (
     groupName: string,
-    op: (g: ModelCalcGroupInfo) => { name: string; items: CalcGroupItemDto[] } | null,
-    after?: (g: ModelCalcGroupInfo, saved: { name: string; items: CalcGroupItemDto[] }) => void,
+    op: (g: ModelCalcGroupInfo) => GroupOpPayload | null,
+    after?: (g: ModelCalcGroupInfo, saved: GroupOpPayload) => void,
   ): void => {
     enqueue(async () => {
       const target = resolveGroupName(groupName);
@@ -123,22 +139,39 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
       }
       const payload = op(g);
       if (!payload) return;
+      const pick = <T,>(override: T | undefined, current: T): T =>
+        override !== undefined ? override : current;
+      const moe = pick(payload.multipleOrEmptySelection, g.multipleOrEmptySelection ?? null);
+      const moeFmt = pick(
+        payload.multipleOrEmptySelectionFormat,
+        g.multipleOrEmptySelectionFormat ?? null,
+      );
+      const nosel = pick(payload.noSelection, g.noSelection ?? null);
+      const noselFmt = pick(payload.noSelectionFormat, g.noSelectionFormat ?? null);
       try {
         const o = await biModelUpsertCalcGroup({
           connectionId,
           originalName: g.name,
           name: payload.name,
           items: payload.items,
-          // An upsert replaces the whole group — carry the selection-state
-          // expressions forward or they would be wiped by every item edit.
-          multipleOrEmptySelection: g.multipleOrEmptySelection ?? null,
-          multipleOrEmptySelectionFormat: g.multipleOrEmptySelectionFormat ?? null,
-          noSelection: g.noSelection ?? null,
-          noSelectionFormat: g.noSelectionFormat ?? null,
+          multipleOrEmptySelection: moe,
+          multipleOrEmptySelectionFormat: moeFmt,
+          noSelection: nosel,
+          noSelectionFormat: noselFmt,
         });
         if (payload.name !== g.name) aliasRef.current.set(g.name, payload.name);
         latestGroupsRef.current = latestGroupsRef.current.map((x) =>
-          x.name === g.name ? { ...x, name: payload.name, items: payload.items } : x,
+          x.name === g.name
+            ? {
+                ...x,
+                name: payload.name,
+                items: payload.items,
+                multipleOrEmptySelection: moe ?? undefined,
+                multipleOrEmptySelectionFormat: moeFmt ?? undefined,
+                noSelection: nosel ?? undefined,
+                noSelectionFormat: noselFmt ?? undefined,
+              }
+            : x,
         );
         applyOverview(o);
         after?.(g, payload);
@@ -286,6 +319,53 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
     });
   };
 
+  /** Move an item one step up/down. Declaration order IS the pivot render
+   *  order (DataSourceOrder), so this is the item sort-order control. */
+  const moveItem = (groupName: string, itemName: string, delta: -1 | 1): void => {
+    enqueueGroupOp(groupName, (g) => {
+      const idx = g.items.findIndex((i) => i.name === itemName);
+      const to = idx + delta;
+      if (idx < 0 || to < 0 || to >= g.items.length) return null;
+      const items = [...g.items];
+      const [moved] = items.splice(idx, 1);
+      items.splice(to, 0, moved);
+      return { name: g.name, items };
+    });
+  };
+
+  /** Commit a selection-state expression typed in the pane (blank = clear:
+   *  the default — no item applied — takes over for that state). */
+  const editSelectionExpr = (groupName: string, which: "moe" | "nosel", formula: string): void => {
+    const next = formula.trim() || null;
+    enqueueGroupOp(groupName, (g) => {
+      const cur = (which === "moe" ? g.multipleOrEmptySelection : g.noSelection) ?? null;
+      if (cur === next) return null;
+      return {
+        name: g.name,
+        items: g.items,
+        ...(which === "moe"
+          ? { multipleOrEmptySelection: next, ...(next ? {} : { multipleOrEmptySelectionFormat: null }) }
+          : { noSelection: next, ...(next ? {} : { noSelectionFormat: null }) }),
+      };
+    });
+  };
+
+  const editSelectionFormat = (groupName: string, which: "moe" | "nosel", format: string): void => {
+    const next = format.trim() || null;
+    enqueueGroupOp(groupName, (g) => {
+      const cur =
+        (which === "moe" ? g.multipleOrEmptySelectionFormat : g.noSelectionFormat) ?? null;
+      if (cur === next) return null;
+      return {
+        name: g.name,
+        items: g.items,
+        ...(which === "moe"
+          ? { multipleOrEmptySelectionFormat: next }
+          : { noSelectionFormat: next }),
+      };
+    });
+  };
+
   const openModal = (groupName: string | null, itemName?: string | null): void => {
     if (readOnly) return;
     // The item is addressed by INDEX (stable across renames); resolved from
@@ -429,10 +509,68 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                     {g.items.length}
                   </span>
                 </div>
+                {/* AS-style selection-state expressions as editable
+                    pseudo-items, FIRST in the list (click for the properties
+                    pane; double-click for the workspace dialog). */}
+                {isOpen &&
+                  (
+                    [
+                      ["moe", "Multiple/empty selection", g.multipleOrEmptySelection],
+                      ["nosel", "No selection", g.noSelection],
+                    ] as const
+                  ).map(([key, label, expr]) => {
+                    const pseudoSelected =
+                      selected?.group === g.name && selected.pseudo === key;
+                    return (
+                      <div
+                        key={key}
+                        style={{
+                          ...treeStyles.leafRow,
+                          paddingLeft: 24,
+                          opacity: expr ? 1 : 0.55,
+                          background: pseudoSelected ? SELECTION_BG : undefined,
+                        }}
+                        onClick={() => setSelected({ group: g.name, item: null, pseudo: key })}
+                        onDoubleClick={() => {
+                          if (!readOnly) setEditing({ groupName: g.name, initialSel: key });
+                        }}
+                        title={
+                          expr ??
+                          "Not set — click to edit. Default: no item is applied " +
+                            "(measures show base values)."
+                        }
+                      >
+                        <span style={{ color: ACCENT, flexShrink: 0, fontSize: 11 }}>{"◈"}</span>
+                        <span
+                          style={{
+                            fontStyle: "italic",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {label}
+                        </span>
+                        <span
+                          style={{
+                            ...styles.muted,
+                            fontSize: 12,
+                            fontFamily: "Consolas, 'Cascadia Code', monospace",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            flexShrink: 1,
+                          }}
+                        >
+                          {expr ?? "(not set)"}
+                        </span>
+                      </div>
+                    );
+                  })}
                 {isOpen &&
                   g.items.map((it) => {
                     const itemSelected =
-                      selected?.group === g.name && selected.item === it.name;
+                      selected?.group === g.name && selected.item === it.name && !selected.pseudo;
                     const blank = it.formula.trim() === "";
                     return (
                       <div
@@ -474,57 +612,6 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                       </div>
                     );
                   })}
-                {/* AS-style selection-state expressions as editable
-                    pseudo-items (double-click to edit in the group dialog). */}
-                {isOpen &&
-                  (
-                    [
-                      ["moe", "Multiple/empty selection", g.multipleOrEmptySelection],
-                      ["nosel", "No selection", g.noSelection],
-                    ] as const
-                  ).map(([key, label, expr]) => (
-                    <div
-                      key={key}
-                      style={{
-                        ...treeStyles.leafRow,
-                        paddingLeft: 24,
-                        opacity: expr ? 1 : 0.55,
-                      }}
-                      onDoubleClick={() => {
-                        if (!readOnly) setEditing({ groupName: g.name, initialSel: key });
-                      }}
-                      title={
-                        expr ??
-                        "Not set — double-click to define. Default: no item is applied " +
-                          "(measures show base values)."
-                      }
-                    >
-                      <span style={{ color: ACCENT, flexShrink: 0, fontSize: 11 }}>{"◈"}</span>
-                      <span
-                        style={{
-                          fontStyle: "italic",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {label}
-                      </span>
-                      <span
-                        style={{
-                          ...styles.muted,
-                          fontSize: 12,
-                          fontFamily: "Consolas, 'Cascadia Code', monospace",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          flexShrink: 1,
-                        }}
-                      >
-                        {expr ?? "(not set)"}
-                      </span>
-                    </div>
-                  ))}
               </div>
             );
           })}
@@ -532,16 +619,23 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
 
         {selectedGroup && (
           <CalcGroupInspector
-            key={`${selectedGroup.name}::${selectedItem?.name ?? ""}`}
+            key={`${selectedGroup.name}::${selected?.pseudo ?? ""}::${selectedItem?.name ?? ""}`}
             group={selectedGroup}
             item={selectedItem ?? null}
+            pseudo={selected?.pseudo ?? null}
             readOnly={readOnly}
             onRenameGroup={(n) => renameGroup(selectedGroup.name, n)}
             onRenameItem={(item, n) => renameItem(selectedGroup.name, item, n)}
             onDeleteItem={(item) => deleteItem(selectedGroup.name, item)}
             onAddItem={() => addItem(selectedGroup.name)}
+            onMoveItem={(item, d) => moveItem(selectedGroup.name, item, d)}
             onEditFormula={(item) => openModal(selectedGroup.name, item)}
             onEditFormulaText={(item, f) => editItemFormula(selectedGroup.name, item, f)}
+            onEditSelection={(which) =>
+              setEditing({ groupName: selectedGroup.name, initialSel: which })
+            }
+            onEditSelectionText={(which, f) => editSelectionExpr(selectedGroup.name, which, f)}
+            onEditSelectionFormat={(which, f) => editSelectionFormat(selectedGroup.name, which, f)}
           />
         )}
       </div>
@@ -668,29 +762,58 @@ function CalcGroupContextMenu({
 function CalcGroupInspector({
   group,
   item,
+  pseudo,
   readOnly,
   onRenameGroup,
   onRenameItem,
   onDeleteItem,
   onAddItem,
+  onMoveItem,
   onEditFormula,
   onEditFormulaText,
+  onEditSelection,
+  onEditSelectionText,
+  onEditSelectionFormat,
 }: {
   group: ModelCalcGroupInfo;
   /** null = the group node itself is selected. */
   item: CalcGroupItemDto | null;
+  /** Selected selection-state expression (overrides item selection). */
+  pseudo: "moe" | "nosel" | null;
   readOnly: boolean;
   onRenameGroup: (newName: string) => void;
   onRenameItem: (itemName: string, newName: string) => void;
   onDeleteItem: (itemName: string) => void;
   onAddItem: () => void;
+  /** Move an item one step up/down (declaration order = pivot order). */
+  onMoveItem: (itemName: string, delta: -1 | 1) => void;
   /** Open the workspace modal on this item (null = the group). */
   onEditFormula: (itemName: string | null) => void;
   /** Commit a formula typed directly in the pane (blank = BLANK()). */
   onEditFormulaText: (itemName: string, formula: string) => void;
+  /** Open the workspace modal on a selection-state expression. */
+  onEditSelection: (which: "moe" | "nosel") => void;
+  /** Commit a selection expression typed in the pane (blank = clear). */
+  onEditSelectionText: (which: "moe" | "nosel", formula: string) => void;
+  onEditSelectionFormat: (which: "moe" | "nosel", format: string) => void;
 }): React.ReactElement {
   const [name, setName] = useState(item ? item.name : group.name);
   const currentName = item ? item.name : group.name;
+
+  const pseudoLabel =
+    pseudo === "moe" ? "Multiple/empty selection" : pseudo === "nosel" ? "No selection" : null;
+  const pseudoExpr =
+    pseudo === "moe"
+      ? (group.multipleOrEmptySelection ?? "")
+      : pseudo === "nosel"
+        ? (group.noSelection ?? "")
+        : "";
+  const pseudoFormat =
+    pseudo === "moe"
+      ? (group.multipleOrEmptySelectionFormat ?? "")
+      : pseudo === "nosel"
+        ? (group.noSelectionFormat ?? "")
+        : "";
 
   // The formula is editable in place. The pane remounts when the SELECTED
   // node changes (keyed by name), but the formula can also change under the
@@ -698,11 +821,18 @@ function CalcGroupInspector({
   // the draft was un-diverged, per the measures-inspector pattern. A commit
   // that fails to parse keeps the draft so the user can fix it (the error
   // shows in the window banner).
-  const [formula, setFormula] = useState(item?.formula ?? "");
-  const [formulaSeed, setFormulaSeed] = useState(item?.formula ?? "");
-  if (item && item.formula !== formulaSeed) {
-    if (formula === formulaSeed) setFormula(item.formula);
-    setFormulaSeed(item.formula);
+  const externalFormula = pseudo ? pseudoExpr : (item?.formula ?? "");
+  const [formula, setFormula] = useState(externalFormula);
+  const [formulaSeed, setFormulaSeed] = useState(externalFormula);
+  if (externalFormula !== formulaSeed) {
+    if (formula === formulaSeed) setFormula(externalFormula);
+    setFormulaSeed(externalFormula);
+  }
+  const [format, setFormat] = useState(pseudoFormat);
+  const [formatSeed, setFormatSeed] = useState(pseudoFormat);
+  if (pseudoFormat !== formatSeed) {
+    if (format === formatSeed) setFormat(pseudoFormat);
+    setFormatSeed(pseudoFormat);
   }
 
   const commitOnEnter = (e: React.KeyboardEvent<HTMLElement>): void => {
@@ -720,6 +850,70 @@ function CalcGroupInspector({
   };
 
   const label: React.CSSProperties = { ...styles.label, marginTop: 8 };
+
+  if (pseudo && pseudoLabel) {
+    return (
+      <div
+        style={{
+          ...styles.card,
+          width: 300,
+          flexShrink: 0,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          padding: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+          <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>Selection expression</span>
+          <span style={{ ...styles.muted, fontSize: 11 }}>{group.name}</span>
+        </div>
+
+        <label style={label}>State</label>
+        <input style={styles.input} value={pseudoLabel} disabled />
+
+        <label style={label}>Expression</label>
+        <textarea
+          style={{ ...styles.textarea, fontSize: 11, minHeight: 96 }}
+          value={formula}
+          placeholder="(not set — no item is applied; measures show base values)"
+          disabled={readOnly}
+          onChange={(e) => setFormula(e.target.value)}
+          onBlur={() => {
+            if (formula.trim() !== pseudoExpr.trim()) onEditSelectionText(pseudo, formula);
+          }}
+        />
+
+        <label style={label}>Format</label>
+        <input
+          style={styles.input}
+          value={format}
+          placeholder="e.g. #,##0.00 or 0.0% (blank = measure format)"
+          disabled={readOnly || pseudoExpr.trim() === ""}
+          onChange={(e) => setFormat(e.target.value)}
+          onKeyDown={commitOnEnter}
+          onBlur={() => {
+            if (format.trim() !== pseudoFormat.trim()) onEditSelectionFormat(pseudo, format);
+          }}
+        />
+
+        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+          <button style={styles.btn} disabled={readOnly} onClick={() => onEditSelection(pseudo)}>
+            Edit in editor…
+          </button>
+        </div>
+        <div style={{ ...styles.hint, marginTop: 10 }}>
+          {pseudo === "moe"
+            ? "Applied when SEVERAL items (or none) are selected on this group's filter. " +
+              "SELECTEDMEASURE() references the measure in play. Blank = default: no item " +
+              "applied, measures show base values."
+            : "Applied when the group is placed as a filter but NOTHING is filtered. " +
+              "SELECTEDMEASURE() references the measure in play. Blank = default: no item " +
+              "applied, measures show base values."}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -780,9 +974,29 @@ function CalcGroupInspector({
               Delete item
             </button>
           </div>
+          {/* Declaration order IS the pivot render order — move to reorder. */}
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button
+              style={styles.btn}
+              disabled={readOnly || group.items.findIndex((i) => i.name === item.name) <= 0}
+              onClick={() => onMoveItem(item.name, -1)}
+            >
+              ↑ Move up
+            </button>
+            <button
+              style={styles.btn}
+              disabled={
+                readOnly ||
+                group.items.findIndex((i) => i.name === item.name) >= group.items.length - 1
+              }
+              onClick={() => onMoveItem(item.name, 1)}
+            >
+              ↓ Move down
+            </button>
+          </div>
           <div style={{ ...styles.hint, marginTop: 10 }}>
             Inside an item formula, SELECTEDMEASURE() references whichever measure is in play when
-            the item is applied.
+            the item is applied. Items render in this declared order in pivots.
           </div>
         </>
       ) : (
