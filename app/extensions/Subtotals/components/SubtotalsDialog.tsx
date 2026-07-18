@@ -3,6 +3,7 @@
 // CONTEXT: User selects: group-by column, function, and target columns for subtotaling.
 
 import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   indexToCol,
@@ -135,6 +136,9 @@ interface SubtotalsDialogContext {
 }
 
 export function SubtotalsDialog({ onClose, data }: DialogProps) {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 300, minHeight: 280 });
+
   const ctx = data as SubtotalsDialogContext | undefined;
 
   // Default to a reasonable range if no context
@@ -222,9 +226,9 @@ export function SubtotalsDialog({ onClose, data }: DialogProps) {
 
   return (
     <div style={styles.backdrop} onKeyDown={handleKeyDown}>
-      <div style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Subtotals</span>
           <button
             style={styles.closeBtn}
@@ -308,6 +312,7 @@ export function SubtotalsDialog({ onClose, data }: DialogProps) {
             {isApplying ? "Applying..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

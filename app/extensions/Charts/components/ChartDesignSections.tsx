@@ -15,7 +15,7 @@ import { emitAppEvent, onAppEvent, AppEvents, showDialog } from "@api";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
 import { ControlRow, ActionRow, Input } from "@api/layout";
 
-import type { ChartType, ChartSpec, ChartFilters, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, SeriesOrientation } from "../types";
+import type { ChartType, ChartSpec, ChartFilters, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, DataLabelPosition, LineInterpolation, SeriesOrientation } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
 import { ChartFilterDropdown } from "./ChartFilterDropdown";
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
@@ -24,7 +24,7 @@ import { invalidateChartCache, getCachedChartData } from "../rendering/chartRend
 import { getCurrentChartId, getSubSelection } from "../handlers/selectionHandler";
 import { toAuthoringIndices } from "../lib/dataPointOverrides";
 import { ChartEvents } from "../lib/chartEvents";
-import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
+import { PALETTES, PALETTE_NAMES, getSeriesColor } from "../rendering/chartTheme";
 import { CHART_DESIGN_TAB_ID, CHART_DIALOG_ID } from "../manifest";
 import { exportChartAsImage } from "../lib/chartExport";
 import { autoDetectSeriesForOrientation } from "../lib/chartDataReader";
@@ -105,6 +105,16 @@ const s = {
       cursor: pointer;
       margin: 0;
     }
+  `,
+
+  // -- Small numeric option inputs (Bars/Line/Axis sections) --
+  numInput: css`
+    font-size: 11px;
+    padding: 1px 3px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background: #fff;
+    color: #333;
   `,
 
   // -- Colors group: palette swatches --
@@ -890,6 +900,315 @@ export function JsonSection(_props: PanelSectionProps): React.ReactElement | nul
 }
 
 // ============================================================================
+// Small labeled numeric inputs (shared by the option sections below)
+// ============================================================================
+
+function NumField(props: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  width?: number;
+  title?: string;
+}): React.ReactElement {
+  return (
+    <label className={s.checkLabel} title={props.title}>
+      {props.label}
+      <input
+        type="number"
+        className={s.numInput}
+        value={props.value}
+        min={props.min}
+        max={props.max}
+        step={props.step}
+        style={{ width: props.width ?? 52 }}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (!Number.isNaN(v)) props.onChange(v);
+        }}
+      />
+    </label>
+  );
+}
+
+/** Number input that treats blank as "auto" (null). */
+function NumBlankField(props: {
+  label: string;
+  value: number | null;
+  onChange: (v: number | null) => void;
+  width?: number;
+  title?: string;
+}): React.ReactElement {
+  return (
+    <label className={s.checkLabel} title={props.title}>
+      {props.label}
+      <input
+        type="number"
+        className={s.numInput}
+        value={props.value ?? ""}
+        placeholder="auto"
+        style={{ width: props.width ?? 56 }}
+        onChange={(e) => {
+          const t = e.target.value;
+          if (t === "") {
+            props.onChange(null);
+          } else {
+            const v = Number(t);
+            if (!Number.isNaN(v)) props.onChange(v);
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+/** input[type=color] only accepts #rrggbb — fall back for anything else. */
+function toHex6(color: string): string {
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color : "#4E79A7";
+}
+
+// ============================================================================
+// Series Colors Section: per-series color override (name-keyed, all sources)
+// ============================================================================
+
+export function SeriesColorsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  const [seriesIdx, setSeriesIdx] = useState(0);
+  if (!chartId || !spec) return null;
+  if (!isCartesianChart(spec.mark)) return null;
+
+  const seriesList = getCachedChartData(chartId)?.data?.series ?? [];
+  if (seriesList.length === 0) return null;
+  const idx = Math.min(seriesIdx, seriesList.length - 1);
+  const name = seriesList[idx].name;
+  const override = spec.seriesColors?.[name];
+  const effective = override ?? getSeriesColor(spec.palette, idx, seriesList[idx].color ?? null);
+
+  return (
+    <ControlRow gap={6}>
+      <select
+        className={s.select}
+        value={idx}
+        onChange={(e) => setSeriesIdx(Number(e.target.value))}
+        title="Series"
+        style={{ maxWidth: 120 }}
+      >
+        {seriesList.map((sr, i) => (
+          <option key={i} value={i}>{sr.name}</option>
+        ))}
+      </select>
+      <input
+        type="color"
+        value={toHex6(effective)}
+        onChange={(e) =>
+          updateSpec({ seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value } })
+        }
+        title="Series color"
+        style={{ width: 26, height: 20, padding: 0, border: "1px solid #ccc", borderRadius: 3, cursor: "pointer" }}
+      />
+      <button
+        className={s.actionBtn}
+        disabled={!override}
+        onClick={() => {
+          if (!spec.seriesColors) return;
+          const next = { ...spec.seriesColors };
+          delete next[name];
+          updateSpec({ seriesColors: next });
+        }}
+        title="Reset this series to its palette color"
+      >
+        Auto
+      </button>
+    </ControlRow>
+  );
+}
+
+// ============================================================================
+// Bar Options Section: gap width / series overlap / corner radius (bar only)
+// ============================================================================
+
+export function BarOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  if (!chartId || !spec) return null;
+  if (spec.mark !== "bar") return null;
+
+  const opts = (spec.markOptions ?? {}) as BarMarkOptions;
+  const setOpt = (patch: Partial<BarMarkOptions>) =>
+    updateSpec({ markOptions: { ...opts, ...patch } });
+
+  return (
+    <ControlRow gap={8}>
+      <NumField
+        label="Gap %"
+        value={opts.gapWidth ?? 150}
+        min={0} max={500} step={10}
+        onChange={(v) => setOpt({ gapWidth: v })}
+        title="Gap between category groups, as % of bar width (Excel: Gap Width)"
+      />
+      <NumField
+        label="Overlap %"
+        value={opts.seriesOverlap ?? 0}
+        min={-100} max={100} step={5}
+        onChange={(v) => setOpt({ seriesOverlap: v })}
+        title="Overlap between series bars; negative adds a gap (Excel: Series Overlap)"
+      />
+      <NumField
+        label="Radius"
+        value={opts.borderRadius ?? 2}
+        min={0} max={20} step={1}
+        onChange={(v) => setOpt({ borderRadius: v })}
+        title="Bar corner radius (px)"
+      />
+    </ControlRow>
+  );
+}
+
+// ============================================================================
+// Line/Area Options Section: width, interpolation, markers, area opacity
+// ============================================================================
+
+export function LineOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  if (!chartId || !spec) return null;
+  if (spec.mark !== "line" && spec.mark !== "area") return null;
+
+  const isArea = spec.mark === "area";
+  const opts = (spec.markOptions ?? {}) as LineMarkOptions & AreaMarkOptions;
+  const setOpt = (patch: Partial<LineMarkOptions & AreaMarkOptions>) =>
+    updateSpec({ markOptions: { ...opts, ...patch } });
+  const showMarkers = opts.showMarkers ?? !isArea;
+
+  return (
+    <ControlRow gap={8}>
+      <NumField
+        label="Width"
+        value={opts.lineWidth ?? 2}
+        min={1} max={10} step={0.5}
+        onChange={(v) => setOpt({ lineWidth: v })}
+        title="Line width (px)"
+      />
+      <select
+        className={s.select}
+        value={opts.interpolation ?? "linear"}
+        onChange={(e) => setOpt({ interpolation: e.target.value as LineInterpolation })}
+        title="Line interpolation"
+      >
+        <option value="linear">Straight</option>
+        <option value="smooth">Smooth</option>
+        <option value="step">Stepped</option>
+      </select>
+      <label className={s.checkLabel}>
+        <input
+          type="checkbox"
+          checked={showMarkers}
+          onChange={(e) => setOpt({ showMarkers: e.target.checked })}
+        />
+        Markers
+      </label>
+      {showMarkers && (
+        <NumField
+          label="Size"
+          value={opts.markerRadius ?? 4}
+          min={1} max={12} step={1}
+          onChange={(v) => setOpt({ markerRadius: v })}
+          title="Marker radius (px)"
+        />
+      )}
+      {isArea && (
+        <NumField
+          label="Fill %"
+          value={Math.round((opts.fillOpacity ?? 0.3) * 100)}
+          min={0} max={100} step={5}
+          onChange={(v) => setOpt({ fillOpacity: v / 100 })}
+          title="Area fill opacity"
+        />
+      )}
+    </ControlRow>
+  );
+}
+
+// ============================================================================
+// Axis Options Section: axis titles + Y min/max (cartesian)
+// ============================================================================
+
+export function AxisOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  if (!chartId || !spec) return null;
+  if (!isCartesianChart(spec.mark)) return null;
+
+  return (
+    <ControlRow gap={6}>
+      <Input
+        type="text"
+        width={86}
+        value={spec.xAxis.title ?? ""}
+        placeholder="X title"
+        onChange={(e) => updateSpec({ xAxis: { ...spec.xAxis, title: e.target.value || null } })}
+      />
+      <Input
+        type="text"
+        width={86}
+        value={spec.yAxis.title ?? ""}
+        placeholder="Y title"
+        onChange={(e) => updateSpec({ yAxis: { ...spec.yAxis, title: e.target.value || null } })}
+      />
+      <NumBlankField
+        label="Min"
+        value={spec.yAxis.min}
+        onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, min: v } })}
+        title="Y axis minimum (blank = auto)"
+      />
+      <NumBlankField
+        label="Max"
+        value={spec.yAxis.max}
+        onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, max: v } })}
+        title="Y axis maximum (blank = auto)"
+      />
+    </ControlRow>
+  );
+}
+
+// ============================================================================
+// Data Label Options Section: position + font size (when labels are on)
+// ============================================================================
+
+export function DataLabelOptionsSection(_props: PanelSectionProps): React.ReactElement | null {
+  const { chartId, spec, updateSpec } = useChartDesignState();
+  if (!chartId || !spec) return null;
+  const dl = spec.dataLabels;
+  if (!dl?.enabled) return null;
+
+  const setDl = (patch: Partial<DataLabelSpec>) => updateSpec({ dataLabels: { ...dl, ...patch } });
+
+  return (
+    <ControlRow gap={6}>
+      <select
+        className={s.select}
+        value={dl.position ?? "auto"}
+        onChange={(e) => setDl({ position: e.target.value as DataLabelPosition })}
+        title="Label position"
+      >
+        <option value="auto">Auto</option>
+        <option value="above">Above</option>
+        <option value="below">Below</option>
+        <option value="center">Center</option>
+        <option value="inside">Inside</option>
+        <option value="outside">Outside</option>
+      </select>
+      <NumField
+        label="Size"
+        value={dl.fontSize ?? 10}
+        min={7} max={20} step={1}
+        onChange={(v) => setDl({ fontSize: v })}
+        title="Label font size (px)"
+      />
+    </ControlRow>
+  );
+}
+
+// ============================================================================
 // Section list builder
 // ============================================================================
 
@@ -948,6 +1267,34 @@ export function buildChartDesignSections(): PanelSection[] {
     });
   }
 
+  if (spec?.mark === "bar") {
+    sections.push({
+      id: `${CHART_DESIGN_TAB_ID}.barOptions`,
+      label: "Bars",
+      component: BarOptionsSection,
+      ribbonPresentation: "auto",
+      collapsePriority: 2,
+    });
+  }
+  if (spec?.mark === "line" || spec?.mark === "area") {
+    sections.push({
+      id: `${CHART_DESIGN_TAB_ID}.lineOptions`,
+      label: spec.mark === "area" ? "Area" : "Line",
+      component: LineOptionsSection,
+      ribbonPresentation: "auto",
+      collapsePriority: 2,
+    });
+  }
+  if (spec?.dataLabels?.enabled) {
+    sections.push({
+      id: `${CHART_DESIGN_TAB_ID}.dataLabelOptions`,
+      label: "Data Labels",
+      component: DataLabelOptionsSection,
+      ribbonPresentation: "auto",
+      collapsePriority: 1,
+    });
+  }
+
   if (supportsTrendline) {
     sections.push({
       id: `${CHART_DESIGN_TAB_ID}.trendline`,
@@ -966,6 +1313,28 @@ export function buildChartDesignSections(): PanelSection[] {
       ribbonPresentation: "inline",
       collapsePriority: 4,
     },
+  );
+
+  if (cartesian) {
+    sections.push(
+      {
+        id: `${CHART_DESIGN_TAB_ID}.seriesColors`,
+        label: "Series",
+        component: SeriesColorsSection,
+        ribbonPresentation: "auto",
+        collapsePriority: 3,
+      },
+      {
+        id: `${CHART_DESIGN_TAB_ID}.axisOptions`,
+        label: "Axis",
+        component: AxisOptionsSection,
+        ribbonPresentation: "auto",
+        collapsePriority: 2,
+      },
+    );
+  }
+
+  sections.push(
     {
       id: `${CHART_DESIGN_TAB_ID}.legend`,
       label: "Legend",

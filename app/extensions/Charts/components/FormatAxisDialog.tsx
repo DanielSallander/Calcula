@@ -7,6 +7,7 @@
 import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type {
@@ -155,6 +156,9 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
   const chartId = data?.chartId as string | undefined;
   const axisType = data?.axisType as "x" | "y" | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 320 });
+
   const chart = chartId != null ? getChartById(chartId) : undefined;
   const spec = chart?.spec;
   const isValueAxis = axisType === "y";
@@ -244,8 +248,13 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
 
   return (
     <div className={s.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className={s.dialog} onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") handleApply(); }}>
-        <div className={s.header}>
+      <div
+        ref={win.ref}
+        className={s.dialog}
+        style={{ position: "relative", ...win.style }}
+        onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") handleApply(); }}
+      >
+        <div className={s.header} onMouseDown={win.onHeaderMouseDown}>
           Format Axis - {axisLabel}
           <button className={s.close} onClick={onClose}>X</button>
         </div>
@@ -453,6 +462,7 @@ export function FormatAxisDialog({ onClose, data }: DialogProps): React.ReactEle
           <button className={s.btn} onClick={onClose}>Cancel</button>
           <button className={s.btnPrimary} onClick={handleApply}>Apply</button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

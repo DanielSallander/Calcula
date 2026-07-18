@@ -3,8 +3,9 @@
 // CONTEXT: Opens via Ctrl+1 or Format > Format Cells menu.
 // Loads the active cell's style, allows editing across tabs, and applies on OK.
 
-import React, { useEffect, useCallback, useRef } from "react";
+import React, { useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   useGridState,
   cellEvents,
@@ -114,7 +115,9 @@ function buildFillParam(store: {
 
 export function FormatCellsDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 420, minHeight: 340 });
 
   const gridState = useGridState();
   const selection = gridState.selection!;
@@ -285,12 +288,13 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
   return (
     <S.Backdrop onClick={handleCancel}>
       <S.DialogContainer
-        ref={dialogRef}
+        ref={win.ref}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        {/* Header */}
-        <S.Header>
+        {/* Header — drag handle */}
+        <S.Header onMouseDown={win.onHeaderMouseDown}>
           <S.Title>Format Cells</S.Title>
           <S.CloseButton onClick={handleCancel} title="Close (Esc)">
             X
@@ -322,6 +326,7 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
             OK
           </S.Button>
         </S.Footer>
+        {win.resizeHandles}
       </S.DialogContainer>
     </S.Backdrop>
   );

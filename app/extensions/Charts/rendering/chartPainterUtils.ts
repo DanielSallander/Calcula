@@ -322,7 +322,31 @@ export function drawCartesianAxes(
     const angle = spec.xAxis.labelAngle ?? 0;
     const angleRad = (angle * Math.PI) / 180;
 
+    // Auto-thinning (Excel's "interval between labels"): when there are more
+    // categories than the axis can fit, each band is a few pixels wide —
+    // truncating every label to its band produced unreadable one-char stubs
+    // (visually "no labels at all"). Instead draw every Nth label and let the
+    // drawn ones use the freed slots.
+    const pitch = xScale.domain.length > 1
+      ? xScale.scaleIndex(1) - xScale.scaleIndex(0)
+      : plotArea.width;
+    let skip = 1;
+    let maxWidth = xScale.bandwidth - 4;
+    if (angle === 0) {
+      const desired = Math.min(widestLabelWidth(ctx, xScale.domain), 90) + 8;
+      if (pitch < desired) {
+        skip = Math.ceil(desired / Math.max(pitch, 1));
+        maxWidth = skip * pitch - 6;
+      }
+    } else {
+      // Rotated labels stack along the axis — they need roughly a font-height
+      // of horizontal clearance each.
+      const needed = theme.labelFontSize + 4;
+      if (pitch < needed) skip = Math.ceil(needed / Math.max(pitch, 1));
+    }
+
     for (let ci = 0; ci < xScale.domain.length; ci++) {
+      if (ci % skip !== 0) continue;
       const category = xScale.domain[ci];
       const x = xScale.scaleIndex(ci) + xScale.bandwidth / 2;
       const y = xAxisY + 4;
@@ -331,7 +355,6 @@ export function drawCartesianAxes(
       if (angle === 0) {
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
-        const maxWidth = xScale.bandwidth - 4;
         const label = truncateText(ctx, category, maxWidth);
         ctx.fillText(label, x, y);
       } else {
@@ -554,7 +577,16 @@ export function drawHorizontalAxes(
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
+    // Auto-thinning: with many categories the bands are shorter than a text
+    // line — draw every Nth label instead of overlapping all of them.
+    const pitch = yScale.domain.length > 1
+      ? yScale.scaleIndex(1) - yScale.scaleIndex(0)
+      : plotArea.height;
+    const needed = theme.labelFontSize + 2;
+    const skip = pitch < needed ? Math.ceil(needed / Math.max(pitch, 1)) : 1;
+
     for (let ci = 0; ci < yScale.domain.length; ci++) {
+      if (ci % skip !== 0) continue;
       const category = yScale.domain[ci];
       const y = yScale.scaleIndex(ci) + yScale.bandwidth / 2;
       const label = truncateText(ctx, category, plotArea.x - 10);
@@ -805,6 +837,24 @@ export function truncateText(
   return truncated + "...";
 }
 
+/**
+ * Width of the widest label in the list (current ctx font). Samples at most
+ * ~50 entries so huge category domains don't pay a full measure pass.
+ */
+export function widestLabelWidth(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  labels: string[],
+): number {
+  if (labels.length === 0) return 0;
+  const sampleStep = Math.max(1, Math.floor(labels.length / 50));
+  let widest = 0;
+  for (let i = 0; i < labels.length; i += sampleStep) {
+    const w = ctx.measureText(labels[i]).width;
+    if (w > widest) widest = w;
+  }
+  return widest;
+}
+
 export function formatTickValue(value: number): string {
   if (Math.abs(value) >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
   if (Math.abs(value) >= 1_000) return (value / 1_000).toFixed(1) + "K";
@@ -876,6 +926,28 @@ export function resolveScatterXAxis(
   }
 
   const point = createPointScale(data.categories, range);
-  const ticks = data.categories.map((c, i) => ({ x: point.scaleIndex(i), label: c }));
+  // Auto-thinning: one tick per category overlaps into an unreadable smear
+  // once categories outnumber the pixels — keep every Nth tick so the drawn
+  // labels get room. Width is estimated (~6.5px/char at the 11px axis font,
+  // capped) since no canvas context is available here; rotated labels only
+  // need about a font-height of clearance along the axis.
+  const n = data.categories.length;
+  const pitch = n > 1 ? Math.abs(point.scaleIndex(1) - point.scaleIndex(0)) : hi - lo;
+  const angle = spec.xAxis.labelAngle ?? 0;
+  let desired: number;
+  if (angle === 0) {
+    let maxChars = 0;
+    const sampleStep = Math.max(1, Math.floor(n / 50));
+    for (let i = 0; i < n; i += sampleStep) {
+      if (data.categories[i].length > maxChars) maxChars = data.categories[i].length;
+    }
+    desired = Math.min(maxChars * 6.5, 90) + 8;
+  } else {
+    desired = 16;
+  }
+  const skip = pitch > 0 && pitch < desired ? Math.ceil(desired / pitch) : 1;
+  const ticks = data.categories
+    .map((c, i) => ({ x: point.scaleIndex(i), label: c }))
+    .filter((_, i) => i % skip === 0);
   return { xOf: (ci) => point.scaleIndex(ci), ticks, numeric: false };
 }

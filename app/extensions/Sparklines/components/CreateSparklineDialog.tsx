@@ -10,6 +10,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useGridState, indexToCol, letterToColumn, ExtensionRegistry } from "@api";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { emitAppEvent, AppEvents, restoreFocusToGrid } from "@api/events";
 import { createSparklineGroup, getGroupById, updateSparklineGroup } from "../store";
 import { ensureDesignTabRegistered } from "../handlers/selectionHandler";
@@ -109,7 +110,11 @@ type ActiveField = "dataRange" | "location" | null;
 export function CreateSparklineDialog({ onClose, data }: DialogProps) {
   const gridState = useGridState();
   const sel = gridState.selection;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the "inside the dialog?" ref for focus logic below.
+  const win = useDialogWindow({ minWidth: 300, minHeight: 260 });
+  const dialogRef = win.ref;
 
   // Edit mode: when editGroupId is provided, we're editing an existing group
   const editGroupId = data?.editGroupId as number | undefined;
@@ -141,54 +146,13 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
   const setLocationTextRef = useRef(setLocationText);
   setLocationTextRef.current = setLocationText;
 
-  // ============================================================================
-  // Drag State (mouse-event based, works in Tauri WebView2)
-  // ============================================================================
-
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
-  const isDragging = useRef(false);
-  const dragOffset = useRef({ x: 0, y: 0 });
-
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    // Only drag from left mouse button, not from input fields or buttons
-    if (e.button !== 0) return;
-    const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "BUTTON") return;
-
-    isDragging.current = true;
-
-    const el = dialogRef.current;
-    if (el) {
-      const rect = el.getBoundingClientRect();
-      dragOffset.current = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      };
-    }
-
-    e.preventDefault();
-  }, []);
-
+  // Collapsed bar and full dialog have different natural sizes/placements —
+  // forget any user drag/resize when switching modes so the materialized rect
+  // of one doesn't distort the other.
+  const isSelecting = activeField !== null;
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging.current) return;
-      setPosition({
-        x: e.clientX - dragOffset.current.x,
-        y: e.clientY - dragOffset.current.y,
-      });
-    };
-
-    const handleMouseUp = () => {
-      isDragging.current = false;
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, []);
+    win.reset();
+  }, [isSelecting, win.reset]);
 
   // Initialize from existing group (edit mode) or current selection (create mode)
   useEffect(() => {
@@ -358,13 +322,6 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
       ? "Win/Loss"
       : sparklineType.charAt(0).toUpperCase() + sparklineType.slice(1);
 
-  const isSelecting = activeField !== null;
-
-  // Position style: absolute positioning if dragged, otherwise centered
-  const positionStyle: React.CSSProperties = position
-    ? { position: "fixed", left: position.x, top: position.y }
-    : {};
-
   // ============================================================================
   // Collapsed Bar (shown during range selection)
   // ============================================================================
@@ -386,10 +343,10 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
           style={{
             pointerEvents: "auto",
             position: "fixed",
-            ...(position
-              ? { left: position.x, top: position.y }
-              : { left: "50%", top: 60, transform: "translateX(-50%)" }
-            ),
+            left: "50%",
+            top: 60,
+            transform: "translateX(-50%)",
+            ...win.style,
           }}
         >
           <CollapsedFields>
@@ -397,7 +354,7 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
               $active={activeField === "dataRange"}
               onMouseDown={(e) => {
                 if (activeField === "dataRange") {
-                  handleDragStart(e);
+                  win.onHeaderMouseDown(e);
                 } else {
                   setActiveField("dataRange");
                   setTimeout(() => collapsedDataRef.current?.focus(), 0);
@@ -419,7 +376,7 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
               $active={activeField === "location"}
               onMouseDown={(e) => {
                 if (activeField === "location") {
-                  handleDragStart(e);
+                  win.onHeaderMouseDown(e);
                 } else {
                   setActiveField("location");
                   setTimeout(() => collapsedLocationRef.current?.focus(), 0);
@@ -460,7 +417,7 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
         inset: 0,
         zIndex: 1050,
         background: "rgba(0, 0, 0, 0.45)",
-        display: position ? "block" : "flex",
+        display: "flex",
         alignItems: "center",
         justifyContent: "center",
         transition: "background 0.15s ease",
@@ -472,9 +429,9 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
       <DialogContainer
         ref={dialogRef}
         onKeyDown={handleKeyDown}
-        style={{ pointerEvents: "auto", ...positionStyle }}
+        style={{ pointerEvents: "auto", position: "relative", ...win.style }}
       >
-        <Header onMouseDown={handleDragStart}>
+        <Header onMouseDown={win.onHeaderMouseDown}>
           <Title>{isEditMode ? "Edit" : "Create"} Sparklines ({typeLabel})</Title>
           <CloseButton onClick={() => { setActiveField(null); onClose(); }}>X</CloseButton>
         </Header>
@@ -537,6 +494,7 @@ export function CreateSparklineDialog({ onClose, data }: DialogProps) {
           <Button onClick={() => { setActiveField(null); onClose(); }}>Cancel</Button>
           <Button $primary onClick={handleOk}>OK</Button>
         </Footer>
+        {win.resizeHandles}
       </DialogContainer>
     </div>
   );

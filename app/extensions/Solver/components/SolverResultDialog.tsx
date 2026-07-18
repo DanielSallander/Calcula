@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/Solver/components/SolverResultDialog.tsx
 // PURPOSE: Solver Result dialog - shows solution status with Accept/Revert options.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   solverRevert,
   columnToLetter,
@@ -133,7 +134,9 @@ function formatNumber(n: number): string {
 
 export function SolverResultDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 260 });
 
   const resultData = (data as Record<string, unknown>)?.result as SolverResultData | undefined;
   const sheetIndex = ((data as Record<string, unknown>)?.sheetIndex as number) ?? 0;
@@ -174,8 +177,8 @@ export function SolverResultDialog(props: DialogProps): React.ReactElement | nul
 
   return (
     <div style={styles.backdrop}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Solver Results</span>
         </div>
 
@@ -226,6 +229,7 @@ export function SolverResultDialog(props: DialogProps): React.ReactElement | nul
             Keep Solver Solution
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

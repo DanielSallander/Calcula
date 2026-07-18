@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/ScenarioManager/components/ScenarioSummaryDialog.tsx
 // PURPOSE: Scenario Summary dialog - shows comparison table of all scenarios.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   scenarioSummary,
   columnToLetter,
@@ -189,7 +190,9 @@ function parseCellRange(rangeStr: string): { row: number; col: number }[] {
 
 export function ScenarioSummaryDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 260 });
 
   const [resultCellsRef, setResultCellsRef] = useState("");
   const [summaryRows, setSummaryRows] = useState<ScenarioSummaryRow[] | null>(null);
@@ -241,8 +244,8 @@ export function ScenarioSummaryDialog(props: DialogProps): React.ReactElement | 
 
   return (
     <div style={styles.backdrop}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Scenario Summary</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -358,6 +361,7 @@ export function ScenarioSummaryDialog(props: DialogProps): React.ReactElement | 
             </button>
           )}
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

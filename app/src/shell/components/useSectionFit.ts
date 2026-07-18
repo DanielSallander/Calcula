@@ -86,9 +86,12 @@ export interface SectionFit {
 }
 
 /**
- * Height-fit decision for one ribbon section.
+ * Fit decision for one ribbon section.
  * - "launcher": always demoted, never probed.
- * - "inline": never demoted (the band's overflow clip is the backstop).
+ * - "inline": never height-demoted (the band's overflow clip is the height
+ *   backstop), but still width-probed — the renderer's width-overflow collapse
+ *   sums real widths across the whole strip and may demote the section under
+ *   width pressure through its own `widthDemoted` channel.
  * - "auto": measured via ResizeObserver on the sizer; demotes when the natural
  *   height exceeds DEMOTE_HEIGHT, live (covers content that grows at runtime).
  *
@@ -127,15 +130,23 @@ export function useSectionFit(
     (el: HTMLElement | null) => {
       observerRef.current?.disconnect();
       observerRef.current = null;
-      if (!el || declared !== null) return;
+      // "launcher" never mounts inline content, so there is nothing to probe.
+      if (!el || declared === true) return;
       if (typeof ResizeObserver === "undefined") return;
 
       const observer = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const height = entry.contentRect.height;
           const width = entry.contentRect.width;
+          // EVERY inline-rendered section ("inline" and "auto") reports its
+          // natural width: the width-overflow collapse sums real widths across
+          // the whole strip. Skipping declared-inline sections here made the
+          // renderer under-count them at launcher width, so strips dominated
+          // by wide inline sections (Chart Design) overflowed instead of
+          // folding.
           onNaturalWidthRef.current?.(width);
-          if (shouldDemoteForHeight(height)) {
+          // Height demotion stays "auto"-only; "inline" trusts the author.
+          if (declared === null && shouldDemoteForHeight(height)) {
             sectionFitCache.set(cacheKey, true);
             setMeasuredDemoted(true);
           }

@@ -8,6 +8,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getPivotBiMetadata,
   getPivotDrillBehavior,
@@ -161,6 +162,10 @@ function DrillThroughBehaviorDialog({
   data,
 }: DrillThroughBehaviorDialogProps): React.ReactElement | null {
   const pivotId = (data?.pivotId as string) ?? "";
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 280 });
+
   const [loading, setLoading] = useState(false);
   const [isBi, setIsBi] = useState(true);
   const [mode, setMode] = useState<DrillThroughKind>("builtin");
@@ -269,8 +274,13 @@ function DrillThroughBehaviorDialog({
 
   return (
     <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.header}>
+      <div
+        ref={win.ref}
+        className={styles.modal}
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: "relative", ...win.style }}
+      >
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span className={styles.title}>Drill-through behavior</span>
           <button className={styles.closeBtn} onClick={onClose} aria-label="Close">
             X
@@ -380,6 +390,7 @@ function DrillThroughBehaviorDialog({
             {saving ? "Saving..." : "Save"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

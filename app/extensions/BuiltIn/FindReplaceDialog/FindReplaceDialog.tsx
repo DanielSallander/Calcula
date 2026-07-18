@@ -21,6 +21,7 @@ import {
   columnToLetter,
 } from "@api";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 // Extension-local state management
 import { useFindStore } from "../../_shared/lib/useFindStore";
 import * as S from "./FindReplaceDialog.styles";
@@ -49,7 +50,9 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
   const [isSearching, setIsSearching] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 400, minHeight: 200 });
 
   // Track the current search value in a ref for use in cell event listener
   const searchValueRef = useRef(searchValue);
@@ -304,10 +307,10 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
     : "";
 
   return (
-    <S.Overlay ref={dialogRef} onKeyDown={handleKeyDown}>
-      <S.DialogContainer>
-        {/* Header */}
-        <S.Header>
+    <S.Overlay onKeyDown={handleKeyDown}>
+      <S.DialogContainer ref={win.ref} style={{ position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <S.Header onMouseDown={win.onHeaderMouseDown}>
           <S.Title>{showReplace ? "Find and Replace" : "Find"}</S.Title>
           <S.CloseButton onClick={handleClose} title="Close (Esc)">
             X
@@ -402,6 +405,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
             <span>Enter search text</span>
           )}
         </S.StatusRow>
+        {win.resizeHandles}
       </S.DialogContainer>
     </S.Overlay>
   );

@@ -2,8 +2,9 @@
 // PURPOSE: Main Sort dialog component with multi-level sort configuration.
 // CONTEXT: Opens via Data > Custom Sort menu. Allows hierarchical sort criteria.
 
-import React, { useEffect, useCallback, useRef, useState } from "react";
+import React, { useEffect, useCallback, useState } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import { useGridState } from "@api";
 import { sortRange } from "@api/lib";
 import type { SortField } from "@api/lib";
@@ -25,7 +26,9 @@ import * as S from "./SortDialog.styles";
 
 export function SortDialog(props: DialogProps): React.ReactElement | null {
   const { onClose } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 430, minHeight: 300 });
 
   const gridState = useGridState();
   const selection = gridState.selection;
@@ -260,8 +263,8 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
   if (isLoading) {
     return (
       <S.Backdrop>
-        <S.DialogContainer ref={dialogRef}>
-          <S.Header>
+        <S.DialogContainer ref={win.ref} style={{ position: "relative", ...win.style }}>
+          <S.Header onMouseDown={win.onHeaderMouseDown}>
             <S.Title>Sort</S.Title>
           </S.Header>
           <div style={{ padding: "24px 16px", textAlign: "center" }}>
@@ -274,9 +277,9 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <S.Backdrop onClick={handleBackdropClick}>
-      <S.DialogContainer ref={dialogRef} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <S.Header>
+      <S.DialogContainer ref={win.ref} onClick={(e) => e.stopPropagation()} style={{ position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <S.Header onMouseDown={win.onHeaderMouseDown}>
           <S.Title>Sort</S.Title>
           <S.CloseButton onClick={onClose} title="Close">
             x
@@ -360,6 +363,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
             onClose={() => setShowOptions(false)}
           />
         )}
+        {win.resizeHandles}
       </S.DialogContainer>
     </S.Backdrop>
   );

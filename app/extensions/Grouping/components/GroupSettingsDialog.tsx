@@ -2,7 +2,8 @@
 // PURPOSE: Dialog for configuring outline/grouping settings.
 // CONTEXT: Allows users to set summary row/column direction (below/right vs above/left).
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import { getOutlineSettings } from "@api";
 import type { OutlineSettings, SummaryPosition } from "@api";
@@ -119,7 +120,11 @@ const styles = {
 
 export function GroupSettingsDialog(props: DialogProps): React.ReactElement | null {
   const { onClose } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 280, minHeight: 200 });
+  const dialogRef = win.ref;
 
   const [summaryRowBelow, setSummaryRowBelow] = useState(true);
   const [summaryColRight, setSummaryColRight] = useState(true);
@@ -175,9 +180,9 @@ export function GroupSettingsDialog(props: DialogProps): React.ReactElement | nu
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Group Settings</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -218,6 +223,7 @@ export function GroupSettingsDialog(props: DialogProps): React.ReactElement | nu
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

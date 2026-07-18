@@ -7,10 +7,12 @@
 import React, { useEffect, useRef } from "react";
 import { css } from "@emotion/css";
 import type { OverlayProps } from "@api/uiTypes";
-import { emitAppEvent } from "@api";
+import { emitAppEvent, showDialog } from "@api";
 
 import { getChartById } from "../lib/chartStore";
 import { ChartEvents } from "../lib/chartEvents";
+import { CHART_DIALOG_ID } from "../manifest";
+import { isPivotDataSource } from "../types";
 
 // ============================================================================
 // Styles (matches AxisContextMenu)
@@ -96,6 +98,17 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
 
   const chartLabel = chart.spec?.title ?? chart.name ?? "Chart";
 
+  const editChart = () => {
+    onClose();
+    // Re-open the chart dialog in edit mode (Data / Design / Spec tabs) —
+    // same entry point as the ribbon's "Edit Chart" action.
+    if (isPivotDataSource(chart.spec.data)) {
+      showDialog(CHART_DIALOG_ID, { pivotId: chart.spec.data.pivotId, editChartId: chartId });
+    } else {
+      showDialog(CHART_DIALOG_ID, { editChartId: chartId });
+    }
+  };
+
   const editScript = () => {
     onClose();
     emitAppEvent("scriptable-objects:edit-script", {
@@ -124,6 +137,10 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
       }}
     >
       <div className={styles.header}>{chartLabel}</div>
+
+      <div className={styles.item} onClick={editChart}>
+        Edit Chart...
+      </div>
 
       <div className={styles.item} onClick={editScript}>
         Edit Script...

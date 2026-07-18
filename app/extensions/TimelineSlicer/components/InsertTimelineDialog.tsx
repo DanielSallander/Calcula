@@ -5,6 +5,7 @@
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { getSheets } from "@api";
 import { getAllPivotTables } from "@api/backend";
 import { getPivotDateFields } from "../lib/timeline-slicer-api";
@@ -149,6 +150,9 @@ export function InsertTimelineDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 280 });
+
   const [sources, setSources] = useState<PivotSource[]>([]);
   const [selectedSourceIndex, setSelectedSourceIndex] = useState<number>(-1);
   const [checkedFields, setCheckedFields] = useState<Set<string>>(new Set());
@@ -264,8 +268,13 @@ export function InsertTimelineDialog({
 
   return (
     <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.header}>Insert Timeline</div>
+      <div
+        ref={win.ref}
+        className={styles.dialog}
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: "relative", ...win.style }}
+      >
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>Insert Timeline</div>
 
         <div className={styles.body}>
           {isLoadingSources ? (
@@ -333,6 +342,7 @@ export function InsertTimelineDialog({
             {isLoading ? "Inserting..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

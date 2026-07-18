@@ -3,7 +3,8 @@
 // CONTEXT: Displays the formula with underlined next-to-evaluate sub-expression.
 //          Buttons: Evaluate, Step In, Step Out, Restart, Close.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   evalFormulaInit,
@@ -191,7 +192,11 @@ const styles = {
 
 export function EvaluateFormulaDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 380, minHeight: 300 });
+  const dialogRef = win.ref;
 
   const [evalState, setEvalState] = useState<EvalStepState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -341,9 +346,9 @@ export function EvaluateFormulaDialog(props: DialogProps): React.ReactElement | 
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Evaluate Formula</span>
           <button style={styles.closeBtn} onClick={handleClose}>
             X
@@ -438,6 +443,7 @@ export function EvaluateFormulaDialog(props: DialogProps): React.ReactElement | 
             </button>
           </div>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

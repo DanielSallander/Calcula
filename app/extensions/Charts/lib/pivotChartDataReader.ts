@@ -161,6 +161,23 @@ export function extractChartData(
 }
 
 /**
+ * Display text for a pivot cell. The backend only fills `formattedValue` for
+ * custom-formatted numbers (view_to_response trims the rest of the payload) —
+ * plain text/number cells carry their content in `value`, exactly like the
+ * pivot grid renderer derives its display. Charts must do the same, otherwise
+ * every row/column header reads as "" (invisible axis labels, "Value 1"
+ * series names).
+ */
+function cellDisplayText(cell: PivotCellData): string {
+  if (cell.formattedValue) return cell.formattedValue;
+  const v = cell.value;
+  if (typeof v === "string") return v;
+  if (typeof v === "number") return String(v);
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  return "";
+}
+
+/**
  * Extract column/series names from the column header rows of the pivot view.
  * For single-level column headers, this is straightforward.
  * For multi-level headers, labels are joined with " - ".
@@ -189,7 +206,8 @@ function extractColumnNames(view: PivotViewResponse): string[] {
       if (headerRows.length > 0) {
         const lastHeader = headerRows[headerRows.length - 1];
         const cell = lastHeader.cells[col.viewCol];
-        if (cell && cell.formattedValue) return cell.formattedValue;
+        const text = cell ? cellDisplayText(cell) : "";
+        if (text) return text;
       }
       return `Value ${i + 1}`;
     });
@@ -201,8 +219,9 @@ function extractColumnNames(view: PivotViewResponse): string[] {
     const parts: string[] = [];
     for (const headerRow of headerRows) {
       const cell = headerRow.cells[col.viewCol];
-      if (cell && cell.formattedValue && cell.cellType === "ColumnHeader") {
-        parts.push(cell.formattedValue);
+      if (cell && cell.cellType === "ColumnHeader") {
+        const text = cellDisplayText(cell);
+        if (text) parts.push(text);
       }
     }
     names.push(parts.length > 0 ? parts.join(" - ") : `Value ${names.length + 1}`);
@@ -219,19 +238,19 @@ function extractRowLabel(row: PivotRowData, rowLabelColCount: number): string {
   const parts: string[] = [];
   for (let col = 0; col < Math.min(rowLabelColCount, row.cells.length); col++) {
     const cell = row.cells[col];
-    if (cell && cell.formattedValue && cell.cellType === "RowHeader") {
-      parts.push(cell.formattedValue);
+    if (cell && cell.cellType === "RowHeader") {
+      const text = cellDisplayText(cell);
+      if (text) parts.push(text);
     }
   }
 
   if (parts.length === 0) {
     // Subtotal/GrandTotal rows may not have a RowHeader cell type
-    // Fall back to any non-empty formattedValue in the row label area
+    // Fall back to any non-empty display text in the row label area
     for (let col = 0; col < Math.min(rowLabelColCount, row.cells.length); col++) {
       const cell = row.cells[col];
-      if (cell && cell.formattedValue) {
-        parts.push(cell.formattedValue);
-      }
+      const text = cell ? cellDisplayText(cell) : "";
+      if (text) parts.push(text);
     }
   }
 

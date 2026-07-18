@@ -2,7 +2,8 @@
 // PURPOSE: Insert/Edit Hyperlink dialog component.
 // CONTEXT: Supports URL, Cell Reference, and Email hyperlink types.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   addHyperlink,
@@ -179,7 +180,11 @@ const styles = {
 
 export function InsertHyperlinkDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 340, minHeight: 260 });
+  const dialogRef = win.ref;
 
   // Cell coordinates from the opener
   const row = (data?.row as number) ?? 0;
@@ -566,9 +571,9 @@ export function InsertHyperlinkDialog(props: DialogProps): React.ReactElement | 
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>{isEdit ? "Edit Hyperlink" : "Insert Hyperlink"}</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -627,6 +632,7 @@ export function InsertHyperlinkDialog(props: DialogProps): React.ReactElement | 
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

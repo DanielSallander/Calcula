@@ -3,6 +3,7 @@
 // CONTEXT: Opened from Name Manager "New Function..." button or Formulas menu.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import type { DialogProps } from "@api/uiTypes";
@@ -214,7 +215,11 @@ function isValidParamName(name: string): boolean {
 
 export function NewFunctionDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 420, minHeight: 340 });
+  const dialogRef = win.ref;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
 
   const mode = (data?.mode as string) ?? "new";
@@ -468,8 +473,8 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>{title}</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -638,6 +643,7 @@ export function NewFunctionDialog(props: DialogProps): React.ReactElement | null
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

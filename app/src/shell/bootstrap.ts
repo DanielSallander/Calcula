@@ -73,9 +73,11 @@ import { useGridState } from "../api/state";
  * the RibbonContext from the grid state hook.
  *
  * Synthesized sections are band-native legacy DOM: rendered "inline" in the
- * ribbon (they were designed for the band — never probe/demote them) and
- * flagged legacyRibbonDom so the sidebar renderer scopes its transposition
- * CSS to exactly these until each tab migrates to @api/layout primitives.
+ * ribbon (designed for the band — never height-probed/demoted; the
+ * width-overflow collapse still measures them and may fold them to launchers
+ * when the window is too narrow) and flagged legacyRibbonDom so the sidebar
+ * renderer scopes its transposition CSS to exactly these until each tab
+ * migrates to @api/layout primitives.
  */
 function wrapRibbonGroupAsSection(group: RibbonGroupDefinition): ShellPanelSection {
   const GroupComponent = group.component;

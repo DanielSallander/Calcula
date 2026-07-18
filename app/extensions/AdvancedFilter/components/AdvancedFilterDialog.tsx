@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { AdvancedFilterDialogData, AdvancedFilterAction } from "../types";
 import {
   executeAdvancedFilter,
@@ -37,6 +38,9 @@ import {
 export function AdvancedFilterDialog(props: DialogProps) {
   const { isOpen, onClose, data } = props;
   const dialogData = data as unknown as AdvancedFilterDialogData | undefined;
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
 
   // Form state
   const [listRange, setListRange] = useState("");
@@ -151,9 +155,14 @@ export function AdvancedFilterDialog(props: DialogProps) {
 
   return (
     <div style={overlayStyle} onClick={handleBackdropClick}>
-      <div style={dialogStyle} role="dialog" onKeyDown={handleKeyDown}>
-        {/* Header */}
-        <div style={headerStyle}>
+      <div
+        ref={win.ref}
+        style={{ ...dialogStyle, position: "relative", ...win.style }}
+        role="dialog"
+        onKeyDown={handleKeyDown}
+      >
+        {/* Header — drag handle */}
+        <div style={headerStyle} onMouseDown={win.onHeaderMouseDown}>
           <span>Advanced Filter</span>
           <button style={closeButtonStyle} onClick={onClose} title="Close">
             X
@@ -251,6 +260,7 @@ export function AdvancedFilterDialog(props: DialogProps) {
             Cancel
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

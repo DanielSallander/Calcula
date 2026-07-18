@@ -141,10 +141,27 @@ export const FieldGroup = styled.div`
 
 export const Label = styled.label`
   display: block;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
   color: ${v("--text-secondary")};
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid ${v("--border-default")};
+`;
+
+/**
+ * Two-column responsive layout for the Design tab: option groups flow into
+ * columns instead of one long stacked list; collapses to a single column when
+ * the dialog is narrow.
+ */
+export const DesignGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  column-gap: 28px;
+  row-gap: 2px;
+  align-items: start;
 `;
 
 export const Input = styled.input`

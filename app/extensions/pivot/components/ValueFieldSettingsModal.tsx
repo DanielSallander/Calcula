@@ -5,6 +5,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   type AggregationType,
   type ShowValuesAs,
@@ -239,8 +240,10 @@ export function ValueFieldSettingsModal({
   onSave,
   onCancel,
 }: ValueFieldSettingsModalProps): React.ReactElement | null {
-  const modalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 320 });
 
   const defaultName = getValueFieldDisplayName(
     field.name,
@@ -344,12 +347,13 @@ export function ValueFieldSettingsModal({
   return createPortal(
     <div className={modalStyles.overlay} onClick={onCancel}>
       <div
-        ref={modalRef}
+        ref={win.ref}
         className={modalStyles.modal}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        <div className={modalStyles.header}>
+        <div className={modalStyles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 className={modalStyles.title}>Value Field Settings</h2>
           <button className={modalStyles.closeButton} onClick={onCancel}>
             &times;
@@ -481,6 +485,7 @@ export function ValueFieldSettingsModal({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
 
       {/* Number Format Modal (nested) */}

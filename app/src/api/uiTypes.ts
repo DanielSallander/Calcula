@@ -302,8 +302,11 @@ export interface PanelSectionProps {
  * - "auto" (default): the Shell measures the rendered section; if it exceeds
  *   the ~80px usable band height it demotes to a launcher button whose flyout
  *   hosts the full content vertically.
- * - "inline": trusted to fit; never measured or height-demoted (the band's
- *   overflow clip is the only backstop). Declare on known-compact sections.
+ * - "inline": trusted to fit the band's height; never height-demoted (the
+ *   band's overflow clip is the only height backstop). Declare on known-compact
+ *   sections. Width is still measured: when the band is too narrow, the
+ *   width-overflow collapse demotes it in collapsePriority order like any
+ *   other section.
  * - "launcher": never rendered inline in the band; always the launcher button.
  *   Declare on known-tall/heavy sections (lists, editors, trees) so they skip
  *   the probe render entirely.

@@ -5,8 +5,9 @@
 //          flow (Enter = next, Shift+Enter = prev, Ctrl+Home/End), reverting
 //          edits, and an Excel-style Criteria search mode (AND across fields).
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getCell,
   updateCellsBatch,
@@ -203,7 +204,11 @@ type Mode = "form" | "criteria";
 
 export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
+  const dialogRef = win.ref;
 
   // Region bounds from dialog data
   const region = data as unknown as RegionData | undefined;
@@ -567,8 +572,8 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
   if (isLoading) {
     return (
       <div style={styles.backdrop}>
-        <div ref={dialogRef} style={styles.dialog}>
-          <div style={styles.header}>
+        <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+          <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
             <span style={styles.title}>Data Form</span>
           </div>
           <div style={styles.body}>
@@ -585,9 +590,9 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>
             Data Form{isCriteria ? " — Criteria" : ""}
           </span>
@@ -742,6 +747,7 @@ export function DataFormDialog(props: DialogProps): React.ReactElement | null {
             </button>
           </div>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

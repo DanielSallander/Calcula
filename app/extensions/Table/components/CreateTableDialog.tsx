@@ -11,6 +11,7 @@ import {
   getSheets,
 } from "@api";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { emitAppEvent } from "@api/events";
 import { createTableAsync } from "../lib/tableStore";
 import { TableEvents } from "../lib/tableEvents";
@@ -102,6 +103,9 @@ export function CreateTableDialog({
   data,
 }: DialogProps): React.ReactElement | null {
   const gridState = useGridState();
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 260 });
 
   // Form state
   const [sourceRange, setSourceRange] = useState("");
@@ -244,12 +248,13 @@ export function CreateTableDialog({
   return (
     <div style={styles.overlay} onClick={handleClose}>
       <div
-        style={styles.dialog}
+        ref={win.ref}
+        style={{ ...styles.dialog, position: "relative", ...win.style }}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {/* Header */}
-        <div style={styles.header}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 style={styles.title}>Create Table</h2>
           <button
             style={styles.closeButton}
@@ -319,6 +324,7 @@ export function CreateTableDialog({
             {isLoading ? "Creating..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

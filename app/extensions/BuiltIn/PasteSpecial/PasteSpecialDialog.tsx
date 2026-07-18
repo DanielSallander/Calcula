@@ -6,6 +6,7 @@
 
 import React, { useState, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import { useGridState } from "@api";
 import { getInternalClipboard } from "@api/lib";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
@@ -44,6 +45,9 @@ const OPERATIONS: { value: PasteOperation; label: string }[] = [
 
 export function PasteSpecialDialog(props: DialogProps): React.ReactElement | null {
   const { onClose } = props;
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 360, minHeight: 280 });
 
   const gridState = useGridState();
   const selection = gridState.selection;
@@ -140,11 +144,13 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
   return (
     <S.Backdrop onClick={handleCancel}>
       <S.DialogContainer
+        ref={win.ref}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        {/* Header */}
-        <S.Header>
+        {/* Header — drag handle */}
+        <S.Header onMouseDown={win.onHeaderMouseDown}>
           <S.Title>Paste Special</S.Title>
           <S.CloseButton onClick={handleCancel} title="Close (Esc)">
             X
@@ -239,6 +245,7 @@ export function PasteSpecialDialog(props: DialogProps): React.ReactElement | nul
             </S.Button>
           </S.FooterRight>
         </S.Footer>
+        {win.resizeHandles}
       </S.DialogContainer>
     </S.Backdrop>
   );

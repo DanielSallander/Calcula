@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getPivotTableInfo,
   updatePivotProperties,
@@ -232,6 +233,9 @@ export function PivotOptionsDialog({
 }: PivotOptionsDialogProps): React.ReactElement | null {
   const pivotId = data?.pivotId as string | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 360, minHeight: 320 });
+
   const [activeTab, setActiveTab] = useState<TabId>("totals");
   const [loading, setLoading] = useState(false);
 
@@ -331,12 +335,14 @@ export function PivotOptionsDialog({
   return (
     <div className={styles.overlay} onClick={onClose}>
       <div
+        ref={win.ref}
         className={styles.modal}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        {/* Header */}
-        <div className={styles.header}>
+        {/* Header — drag handle */}
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h3 className={styles.title}>PivotTable Options</h3>
           <button className={styles.closeButton} onClick={onClose}>
             x
@@ -546,6 +552,7 @@ export function PivotOptionsDialog({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

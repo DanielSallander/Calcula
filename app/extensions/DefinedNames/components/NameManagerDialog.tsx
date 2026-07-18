@@ -3,6 +3,7 @@
 // CONTEXT: Opened from Formulas > Name Manager menu item.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   getAllNamedRanges,
@@ -301,7 +302,11 @@ export function NameManagerDialog(
   props: DialogProps
 ): React.ReactElement | null {
   const { isOpen, onClose } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 480, minHeight: 360 });
+  const dialogRef = win.ref;
   const tableContainerRef = useRef<HTMLDivElement>(null);
 
   const [names, setNames] = useState<NamedRange[]>([]);
@@ -699,8 +704,8 @@ export function NameManagerDialog(
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Name Manager</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -890,6 +895,7 @@ export function NameManagerDialog(
             Close
           </button>
         </div>
+        {win.resizeHandles}
       </div>
 
       {/* Floating drag preview */}

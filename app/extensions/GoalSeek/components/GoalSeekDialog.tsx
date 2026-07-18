@@ -2,7 +2,8 @@
 // PURPOSE: Goal Seek dialog - single-variable solver UI.
 // CONTEXT: Two-phase dialog: input form, then result/status display.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   getCell,
@@ -195,7 +196,12 @@ function formatCellRef(row: number, col: number): string {
 
 export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook; input dialog only —
+  // the status dialog keeps its own natural placement).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 280, minHeight: 200 });
+  const dialogRef = win.ref;
 
   // Input phase state
   const [setCellRef, setSetCellRef] = useState("");
@@ -377,7 +383,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
 
     return (
       <div style={styles.backdrop}>
-        <div ref={dialogRef} style={styles.statusDialog}>
+        <div style={styles.statusDialog}>
           <div style={styles.header}>
             <span style={styles.title}>Goal Seek Status</span>
           </div>
@@ -415,9 +421,9 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Goal Seek</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -490,6 +496,7 @@ export function GoalSeekDialog(props: DialogProps): React.ReactElement | null {
             {isLoading ? "Seeking..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

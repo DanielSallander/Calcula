@@ -3,6 +3,7 @@
 // CONTEXT: Opened from Name Manager or Formulas > Define Name menu item.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   createNamedRange,
@@ -151,7 +152,11 @@ const styles = {
 
 export function NewNameDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 320, minHeight: 260 });
+  const dialogRef = win.ref;
   const refersToRef = useRef<HTMLInputElement>(null);
   const gridState = useGridState();
 
@@ -344,8 +349,8 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>{title}</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -481,6 +486,7 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

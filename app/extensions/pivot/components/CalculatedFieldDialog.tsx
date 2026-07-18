@@ -5,6 +5,7 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 
 export interface CalculatedFieldDialogProps {
   isOpen: boolean;
@@ -186,6 +187,9 @@ export function CalculatedFieldDialog({
   const nameRef = useRef<HTMLInputElement>(null);
   const formulaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 380, minHeight: 320 });
+
   const [name, setName] = useState(initialName);
   const [formula, setFormula] = useState(initialFormula);
   const [error, setError] = useState("");
@@ -248,11 +252,13 @@ export function CalculatedFieldDialog({
   return createPortal(
     <div className={styles.overlay} onClick={onCancel}>
       <div
+        ref={win.ref}
         className={styles.modal}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        <div className={styles.header}>
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 className={styles.title}>{title}</h2>
           <button className={styles.closeButton} onClick={onCancel}>
             &times;
@@ -319,6 +325,7 @@ export function CalculatedFieldDialog({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>,
     document.body

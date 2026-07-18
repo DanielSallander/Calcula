@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getPivotFieldInfo,
   updatePivotFields,
@@ -216,6 +217,9 @@ export function FieldSettingsDialog({
 
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 280 });
+
   const [customName, setCustomName] = useState("");
   const [sourceName, setSourceName] = useState("");
   const [subtotalMode, setSubtotalMode] = useState<SubtotalMode>("automatic");
@@ -323,12 +327,14 @@ export function FieldSettingsDialog({
   return (
     <div className={styles.overlay} onClick={onClose}>
       <div
+        ref={win.ref}
         className={styles.modal}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        {/* Header */}
-        <div className={styles.header}>
+        {/* Header — drag handle */}
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h3 className={styles.title}>Field Settings</h3>
           <button className={styles.closeButton} onClick={onClose}>
             x
@@ -427,6 +433,7 @@ export function FieldSettingsDialog({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

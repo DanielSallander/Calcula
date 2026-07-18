@@ -3,6 +3,7 @@
 // CONTEXT: Opened from the "Pivot Table" (analyze) ribbon tab.
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useDialogWindow } from '@api/dialogWindow';
 import { changePivotDataSource, getPivotTableInfo } from '../lib/pivot-api';
 import type { PivotId } from './types';
 
@@ -27,6 +28,9 @@ export function ChangeDataSourceDialog({
   pivotId,
   onChanged,
 }: ChangeDataSourceDialogProps): React.ReactElement | null {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 220 });
+
   const [sourceRange, setSourceRange] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -98,12 +102,13 @@ export function ChangeDataSourceDialog({
   return (
     <div style={styles.overlay} onClick={onClose}>
       <div
-        style={styles.dialog}
+        ref={win.ref}
+        style={{ ...styles.dialog, position: 'relative', ...win.style }}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {/* Header */}
-        <div style={styles.header}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 style={styles.title}>Change PivotTable Data Source</h2>
           <button
             style={styles.closeButton}
@@ -179,6 +184,7 @@ export function ChangeDataSourceDialog({
             {isLoading ? 'Applying...' : 'OK'}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

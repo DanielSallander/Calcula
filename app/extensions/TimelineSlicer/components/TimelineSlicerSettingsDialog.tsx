@@ -4,6 +4,7 @@
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getTimelineById,
   updateTimelineAsync,
@@ -128,6 +129,9 @@ export function TimelineSlicerSettingsDialog({
 }: DialogProps): React.ReactElement | null {
   const timelineId = data?.timelineId as number | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 280 });
+
   const [name, setName] = useState("");
   const [headerText, setHeaderText] = useState("");
   const [showHeader, setShowHeader] = useState(true);
@@ -169,8 +173,13 @@ export function TimelineSlicerSettingsDialog({
 
   return (
     <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.header}>Timeline Settings</div>
+      <div
+        ref={win.ref}
+        className={styles.dialog}
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: "relative", ...win.style }}
+      >
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>Timeline Settings</div>
 
         <div className={styles.body}>
           <div className={styles.fieldRow}>
@@ -237,6 +246,7 @@ export function TimelineSlicerSettingsDialog({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

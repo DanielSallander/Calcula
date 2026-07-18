@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/pivot/components/CreatePivotDialog.tsx
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useDialogWindow } from '@api/dialogWindow';
 import { pivot } from '@api/pivot';
 import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '@api';
 import { emitAppEvent, AppEvents } from '@api/events';
@@ -163,6 +164,9 @@ export function CreatePivotDialog({
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Read current grid selection (active cell) for auto-detection
   const gridState = useGridState();
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
 
   // Form state
   const [pivotName, setPivotName] = useState('');
@@ -505,12 +509,13 @@ export function CreatePivotDialog({
   return (
     <div style={styles.overlay} onClick={handleClose}>
       <div
-        style={styles.dialog}
+        ref={win.ref}
+        style={{ ...styles.dialog, position: 'relative', ...win.style }}
         onClick={e => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {/* Header */}
-        <div style={styles.header}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 style={styles.title}>Create PivotTable</h2>
           <button 
             style={styles.closeButton} 
@@ -658,6 +663,7 @@ export function CreatePivotDialog({
             {isLoading ? 'Creating...' : 'OK'}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

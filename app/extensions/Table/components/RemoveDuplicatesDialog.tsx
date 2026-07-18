@@ -5,6 +5,7 @@
 import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { removeDuplicates } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
 import { refreshCache } from "../lib/tableStore";
@@ -165,6 +166,9 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
   const { isOpen, onClose, data } = props;
   const table = data?.table as Table | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 300, minHeight: 240 });
+
   const columns = table?.columns ?? [];
   const [selected, setSelected] = useState<boolean[]>(() => columns.map(() => true));
   const [running, setRunning] = useState(false);
@@ -230,8 +234,13 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
 
   return (
     <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.header}>Remove Duplicates</div>
+      <div
+        ref={win.ref}
+        className={styles.dialog}
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: "relative", ...win.style }}
+      >
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>Remove Duplicates</div>
         <div className={styles.body}>
           {result ? (
             <div className={styles.resultMessage}>
@@ -285,6 +294,7 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
             </>
           )}
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

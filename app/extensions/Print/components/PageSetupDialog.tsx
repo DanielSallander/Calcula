@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   getPageSetup,
   setPageSetup,
@@ -224,6 +225,9 @@ const styles = {
 // ============================================================================
 
 export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 360, minHeight: 320 });
+
   const [setup, setSetupState] = useState<PageSetup | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -306,13 +310,14 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
   return (
     <div style={styles.backdrop} onClick={onClose} onKeyDown={handleKeyDown}>
       <div
-        style={styles.dialog}
+        ref={win.ref}
+        style={{ ...styles.dialog, position: "relative", ...win.style }}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-label="Page Setup"
       >
-        {/* Header */}
-        <div style={styles.header}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Page Setup</span>
           <button style={styles.closeBtn} onClick={onClose} title="Close">
             X
@@ -552,6 +557,7 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

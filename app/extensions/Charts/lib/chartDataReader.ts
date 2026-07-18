@@ -137,6 +137,8 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     const pivotKeep = selectionFilterCategories(resolvedSpec, selection);
     if (pivotKeep) parsedData = applySelectionKeep(parsedData, pivotKeep);
 
+    applySeriesColorOverrides(parsedData, resolvedSpec.seriesColors);
+
     const pivotData = withCategoryField(parsedData);
     return {
       spec: resolvedSpec,
@@ -223,6 +225,8 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     ? await partitionByFacet(grid, numRows, numCols, hasHeaders, seriesOrientation, lowered.facet.field, lowered, lookupData, params)
     : undefined;
 
+  applySeriesColorOverrides(parsedData, lowered.seriesColors);
+
   let finalData = withCategoryField(parsedData);
   if (facets) finalData = { ...finalData, facets };
   if (selection) finalData = { ...finalData, selection };
@@ -233,6 +237,24 @@ export async function readChartDataResolved(spec: ChartSpec, depth = 0, chartId?
     diagnostics,
     params,
   };
+}
+
+/**
+ * Apply the spec's name-keyed series color overrides to freshly parsed data.
+ * Name-keyed (not index-keyed) so overrides survive filters/transforms and
+ * apply to pivot/design-query series that have no spec.series entries. An
+ * override wins over a spec.series[].color; series without an override keep
+ * whatever color they already carry.
+ */
+function applySeriesColorOverrides(
+  data: ParsedChartData,
+  seriesColors: Record<string, string> | undefined,
+): void {
+  if (!seriesColors) return;
+  for (const s of data.series) {
+    const override = seriesColors[s.name];
+    if (override) s.color = override;
+  }
 }
 
 /**

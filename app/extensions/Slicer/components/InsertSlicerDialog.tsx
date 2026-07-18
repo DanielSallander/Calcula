@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { getSheets } from "@api";
 import {
   type Table,
@@ -190,6 +191,9 @@ export function InsertSlicerDialog({
   onClose,
   data,
 }: DialogProps): React.ReactElement | null {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 300 });
+
   // State
   const [sources, setSources] = useState<DataSource[]>([]);
   const [selectedSourceIndex, setSelectedSourceIndex] = useState<number>(-1);
@@ -519,12 +523,13 @@ export function InsertSlicerDialog({
   return (
     <div style={styles.overlay} onClick={handleClose}>
       <div
-        style={styles.dialog}
+        ref={win.ref}
+        style={{ ...styles.dialog, position: "relative", ...win.style }}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {/* Header */}
-        <div style={styles.header}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 style={styles.title}>Insert Slicers</h2>
           <button
             style={styles.closeButton}
@@ -608,6 +613,7 @@ export function InsertSlicerDialog({
             {isLoading ? "Creating..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

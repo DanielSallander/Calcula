@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/DataTables/components/DataTableDialog.tsx
 // PURPOSE: Data Table dialog - one-variable and two-variable What-If data tables.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   dataTableOneVar,
@@ -149,7 +150,11 @@ function formatCellRef(row: number, col: number): string {
 
 export function DataTableDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 300, minHeight: 220 });
+  const dialogRef = win.ref;
 
   const [rowInputRef, setRowInputRef] = useState("");
   const [colInputRef, setColInputRef] = useState("");
@@ -282,8 +287,8 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Data Table</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -348,6 +353,7 @@ export function DataTableDialog(props: DialogProps): React.ReactElement | null {
             {isLoading ? "Calculating..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

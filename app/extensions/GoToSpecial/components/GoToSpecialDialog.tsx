@@ -2,6 +2,7 @@
 // PURPOSE: Go To Special dialog - select cells by type (blanks, formulas, etc.)
 
 import React, { useState, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   goToSpecial,
@@ -120,6 +121,9 @@ const styles = {
 };
 
 export function GoToSpecialDialog({ isOpen, onClose }: DialogProps): React.ReactElement | null {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 300, minHeight: 260 });
+
   const [selectedCriteria, setSelectedCriteria] = useState<GoToSpecialCriteria>("blanks");
   const [statusMessage, setStatusMessage] = useState<string>("");
   const [isSearching, setIsSearching] = useState(false);
@@ -197,8 +201,12 @@ export function GoToSpecialDialog({ isOpen, onClose }: DialogProps): React.React
 
   return (
     <div style={styles.backdrop} onClick={onClose}>
-      <div style={styles.dialog} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.header}>
+      <div
+        ref={win.ref}
+        style={{ ...styles.dialog, position: "relative", ...win.style }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Go To Special</span>
           <button style={styles.closeBtn} onClick={onClose} title="Close">x</button>
         </div>
@@ -233,6 +241,7 @@ export function GoToSpecialDialog({ isOpen, onClose }: DialogProps): React.React
             {isSearching ? "Searching..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

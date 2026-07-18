@@ -41,5 +41,7 @@ export function DesignQueryEditor({
     };
   }, [connectionId]);
 
-  return <SharedDesignQueryEditor value={value} onChange={onChange} biModel={biModel} />;
+  return (
+    <SharedDesignQueryEditor value={value} onChange={onChange} biModel={biModel} height="220px" />
+  );
 }

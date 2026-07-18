@@ -5,7 +5,7 @@ import React from "react";
 import type { ChartSpec, ChartType, ChartMark, DataLabelSpec, DataTableOptions, ErrorBarOptions, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
 import { isCartesianChart } from "../../types";
 import { listChartMarks, getChartMarkMeta } from "@api/chartMarks";
-import { PALETTES, PALETTE_NAMES } from "../../rendering/chartTheme";
+import { PALETTES, PALETTE_NAMES, getSeriesColor } from "../../rendering/chartTheme";
 import {
   FieldGroup,
   Label,
@@ -14,11 +14,15 @@ import {
   CheckboxLabel,
   PalettePreview,
   PaletteSwatch,
+  DesignGrid,
 } from "../CreateChartDialog.styles";
 
 interface DesignTabProps {
   spec: ChartSpec;
   onSpecChange: (updates: Partial<ChartSpec>) => void;
+  /** Series names from the live preview data — drives the per-series color
+   *  pickers (works for range, pivot, and design-query sources alike). */
+  previewSeriesNames?: string[];
 }
 
 /** Built-in chart types with display names (the canonical, always-present list). */
@@ -55,11 +59,11 @@ function chartTypeOptions(): Array<{ value: string; label: string }> {
   return [...CHART_TYPES, ...custom];
 }
 
-export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
+export function DesignTab({ spec, onSpecChange, previewSeriesNames }: DesignTabProps): React.ReactElement {
   const cartesian = isCartesianChart(spec.mark);
 
   return (
-    <>
+    <DesignGrid>
       {/* Chart Type */}
       <FieldGroup>
         <Label>Chart Type</Label>
@@ -124,6 +128,18 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
               </Select>
             </div>
           )}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Title:</span>
+            <Input
+              type="text"
+              value={spec.xAxis.title ?? ""}
+              placeholder="auto"
+              onChange={(e) =>
+                onSpecChange({ xAxis: { ...spec.xAxis, title: e.target.value || null } })
+              }
+              style={{ width: "160px" }}
+            />
+          </div>
         </FieldGroup>
       )}
 
@@ -155,6 +171,44 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
             />
             Show grid lines
           </CheckboxLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Title:</span>
+            <Input
+              type="text"
+              value={spec.yAxis.title ?? ""}
+              placeholder="auto"
+              onChange={(e) =>
+                onSpecChange({ yAxis: { ...spec.yAxis, title: e.target.value || null } })
+              }
+              style={{ width: "160px" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Min:</span>
+            <Input
+              type="number"
+              value={spec.yAxis.min ?? ""}
+              placeholder="auto"
+              onChange={(e) =>
+                onSpecChange({
+                  yAxis: { ...spec.yAxis, min: e.target.value === "" ? null : Number(e.target.value) },
+                })
+              }
+              style={{ width: "70px" }}
+            />
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Max:</span>
+            <Input
+              type="number"
+              value={spec.yAxis.max ?? ""}
+              placeholder="auto"
+              onChange={(e) =>
+                onSpecChange({
+                  yAxis: { ...spec.yAxis, max: e.target.value === "" ? null : Number(e.target.value) },
+                })
+              }
+              style={{ width: "70px" }}
+            />
+          </div>
         </FieldGroup>
       )}
 
@@ -260,7 +314,80 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
           ))}
         </PalettePreview>
       </FieldGroup>
-    </>
+
+      {/* Per-series color overrides (cartesian charts, needs preview data) */}
+      {cartesian && previewSeriesNames && previewSeriesNames.length > 0 && (
+        <FieldGroup>
+          <Label>Series Colors</Label>
+          {previewSeriesNames.slice(0, 16).map((name, i) => {
+            const override = spec.seriesColors?.[name];
+            const effective = override ?? getSeriesColor(spec.palette, i, null);
+            return (
+              <div
+                key={name}
+                style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}
+              >
+                <input
+                  type="color"
+                  value={/^#[0-9A-Fa-f]{6}$/.test(effective) ? effective : "#4E79A7"}
+                  onChange={(e) =>
+                    onSpecChange({
+                      seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value },
+                    })
+                  }
+                  title={`Color for "${name}"`}
+                  style={{
+                    width: 24,
+                    height: 18,
+                    padding: 0,
+                    border: "1px solid var(--border-default)",
+                    borderRadius: 3,
+                    cursor: "pointer",
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: "12px",
+                    flex: 1,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {name}
+                </span>
+                {override && (
+                  <button
+                    onClick={() => {
+                      const next = { ...(spec.seriesColors ?? {}) };
+                      delete next[name];
+                      onSpecChange({ seriesColors: next });
+                    }}
+                    style={{
+                      fontSize: "11px",
+                      padding: "1px 8px",
+                      cursor: "pointer",
+                      background: "transparent",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: 3,
+                      color: "var(--text-secondary)",
+                    }}
+                    title="Reset to palette color"
+                  >
+                    Auto
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {previewSeriesNames.length > 16 && (
+            <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+              Showing the first 16 of {previewSeriesNames.length} series.
+            </div>
+          )}
+        </FieldGroup>
+      )}
+    </DesignGrid>
   );
 }
 
@@ -276,6 +403,59 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
   };
 
   switch (spec.mark) {
+    case "bar":
+      return (
+        <FieldGroup>
+          <Label>Bar Options</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Gap width %:</span>
+            <Input
+              type="number"
+              min={0}
+              max={500}
+              step={10}
+              value={(opts as any).gapWidth ?? 150}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                updateMarkOptions({ gapWidth: Number.isNaN(v) ? 150 : v });
+              }}
+              style={{ width: "60px" }}
+              title="Gap between category groups, as % of bar width (Excel: Gap Width)"
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Series overlap %:</span>
+            <Input
+              type="number"
+              min={-100}
+              max={100}
+              step={5}
+              value={(opts as any).seriesOverlap ?? 0}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                updateMarkOptions({ seriesOverlap: Number.isNaN(v) ? 0 : v });
+              }}
+              style={{ width: "60px" }}
+              title="Overlap between series bars; negative adds a gap (Excel: Series Overlap)"
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Corner radius:</span>
+            <Input
+              type="number"
+              min={0}
+              max={20}
+              value={(opts as any).borderRadius ?? 2}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                updateMarkOptions({ borderRadius: Number.isNaN(v) ? 2 : v });
+              }}
+              style={{ width: "60px" }}
+            />
+          </div>
+        </FieldGroup>
+      );
+
     case "line":
       return (
         <FieldGroup>

@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/Solver/components/SolverDialog.tsx
 // PURPOSE: Solver dialog - configure objective, variables, constraints, and method.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   solverSolve,
   columnToLetter,
@@ -258,7 +259,10 @@ function formatConstraint(c: ConstraintEntry): string {
 
 export function SolverDialog(props: DialogProps): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook; main dialog only —
+  // the Add Constraint sub-form keeps its own natural placement)
+  const win = useDialogWindow({ minWidth: 380, minHeight: 340 });
 
   // Form state
   const [objectiveCellRef, setObjectiveCellRef] = useState("");
@@ -435,7 +439,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
   if (showAddConstraint) {
     return (
       <div style={styles.backdrop}>
-        <div ref={dialogRef} style={{ ...styles.dialog, width: 420 }}>
+        <div style={{ ...styles.dialog, width: 420 }}>
           <div style={styles.header}>
             <span style={styles.title}>Add Constraint</span>
           </div>
@@ -498,8 +502,8 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
 
   return (
     <div style={styles.backdrop}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Solver Parameters</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -642,6 +646,7 @@ export function SolverDialog(props: DialogProps): React.ReactElement | null {
             {isLoading ? "Solving..." : "Solve"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

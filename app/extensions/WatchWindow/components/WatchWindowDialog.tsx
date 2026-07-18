@@ -2,7 +2,8 @@
 // PURPOSE: Watch Window dialog - monitors specific cell values across sheets.
 // CONTEXT: Opened from Formulas menu or right-click "Add Watch".
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   onAppEvent,
@@ -169,7 +170,11 @@ const styles = {
 
 export function WatchWindowDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 420, minHeight: 280 });
+  const dialogRef = win.ref;
 
   const [watches, setWatches] = useState<readonly WatchItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -282,8 +287,8 @@ export function WatchWindowDialog(props: DialogProps): React.ReactElement | null
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Watch Window</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -366,6 +371,7 @@ export function WatchWindowDialog(props: DialogProps): React.ReactElement | null
             Close
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

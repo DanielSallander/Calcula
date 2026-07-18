@@ -3,6 +3,7 @@
 // CONTEXT: Two-section dialog: configuration form, then execution.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import {
   getSheets,
@@ -311,7 +312,11 @@ export function ConsolidateDialog(
   props: DialogProps,
 ): React.ReactElement | null {
   const { onClose, data } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 340, minHeight: 300 });
+  const dialogRef = win.ref;
   const refInputRef = useRef<HTMLInputElement>(null);
 
   // State
@@ -492,9 +497,9 @@ export function ConsolidateDialog(
 
   return (
     <div style={styles.backdrop} onMouseDown={handleBackdropClick}>
-      <div ref={dialogRef} style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={dialogRef} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Consolidate</span>
           <button style={styles.closeBtn} onClick={onClose}>
             X
@@ -648,6 +653,7 @@ export function ConsolidateDialog(
             {isLoading ? "Consolidating..." : "OK"}
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

@@ -3,6 +3,7 @@
 // CONTEXT: Shows built-in lists (read-only) and user-defined lists (editable).
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps } from "@api/uiTypes";
 import { FillListRegistry, type FillList } from "@api";
 
@@ -182,6 +183,9 @@ const styles = {
 // ============================================================================
 
 export const CustomFillListsDialog: React.FC<DialogProps> = ({ onClose }) => {
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 380, minHeight: 280 });
+
   const [allLists, setAllLists] = useState<FillList[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -276,9 +280,9 @@ export const CustomFillListsDialog: React.FC<DialogProps> = ({ onClose }) => {
 
   return (
     <div style={styles.backdrop} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={styles.dialog}>
-        {/* Header */}
-        <div style={styles.header}>
+      <div ref={win.ref} style={{ ...styles.dialog, position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Custom Lists</span>
           <button style={styles.closeBtn} onClick={onClose} title="Close">X</button>
         </div>
@@ -355,6 +359,7 @@ export const CustomFillListsDialog: React.FC<DialogProps> = ({ onClose }) => {
           )}
           <button style={styles.btn} onClick={onClose}>Close</button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

@@ -2,9 +2,10 @@
 // PURPOSE: Dialog for customizing which items appear in the Home ribbon tab.
 // CONTEXT: Opened via the cog wheel icon in the Home tab.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api/uiTypes";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   loadLayout,
   saveLayout,
@@ -298,7 +299,9 @@ const selectGroup = css`
 
 export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement | null {
   const { onClose } = props;
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 400, minHeight: 320 });
 
   const [layout, setLayout] = useState<HomeTabLayout>(() => loadLayout());
   const [newGroupName, setNewGroupName] = useState("");
@@ -429,9 +432,9 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
 
   return (
     <div className={backdrop} onMouseDown={handleBackdropClick}>
-      <div className={dialog} ref={dialogRef}>
-        {/* Header */}
-        <div className={header}>
+      <div className={dialog} ref={win.ref} style={{ position: "relative", ...win.style }}>
+        {/* Header — drag handle */}
+        <div className={header} onMouseDown={win.onHeaderMouseDown}>
           <span className={title}>Customize Home Tab</span>
           <button className={closeBtn} onClick={onClose}>X</button>
         </div>
@@ -599,6 +602,7 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
             </button>
           </div>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

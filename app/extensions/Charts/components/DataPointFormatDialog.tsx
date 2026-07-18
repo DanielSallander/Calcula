@@ -6,6 +6,7 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { css } from "@emotion/css";
 import type { DialogProps } from "@api";
+import { useDialogWindow } from "@api/dialogWindow";
 import { emitAppEvent, AppEvents } from "@api/events";
 
 import type { ChartSpec, DataPointOverride } from "../types";
@@ -122,6 +123,9 @@ export function DataPointFormatDialog({ onClose, data }: DialogProps): React.Rea
   const categoryIndex = data?.categoryIndex as number | undefined;
   const isPieOrDonut = data?.isPieOrDonut as boolean | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 300, minHeight: 260 });
+
   const chart = chartId != null ? getChartById(chartId) : undefined;
   const spec = chart?.spec;
 
@@ -228,8 +232,13 @@ export function DataPointFormatDialog({ onClose, data }: DialogProps): React.Rea
       style={{ position: "fixed", inset: 0, zIndex: 1050, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className={s.container} onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") handleApply(); }}>
-        <div className={s.header}>
+      <div
+        ref={win.ref}
+        className={s.container}
+        style={{ position: "relative", ...win.style }}
+        onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") handleApply(); }}
+      >
+        <div className={s.header} onMouseDown={win.onHeaderMouseDown}>
           Format Data Point
           <button className={s.close} onClick={onClose}>X</button>
         </div>
@@ -314,6 +323,7 @@ export function DataPointFormatDialog({ onClose, data }: DialogProps): React.Rea
           <button className={s.btn} onClick={onClose}>Cancel</button>
           <button className={s.btnPrimary} onClick={handleApply}>Apply</button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ import {
 } from "@api";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
+import { useDialogWindow } from "@api/dialogWindow";
 
 import type {
   ChartSpec,
@@ -242,10 +243,8 @@ export function CreateChartDialog({
   const [hasAutoDetected, setHasAutoDetected] = useState(false);
   const [specFullView, setSpecFullView] = useState(false);
 
-  // Drag state for movable dialog
-  const [dialogPos, setDialogPos] = useState<{ x: number; y: number } | null>(null);
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 520, minHeight: 380 });
 
   // Derive available axes from the parsed range
   const [availableAxes, setAvailableAxes] = useState<Array<{ index: number; label: string }>>([]);
@@ -351,7 +350,7 @@ export function CreateChartDialog({
       setSpecFullView(false);
       setSpecOverlay({});
       setSourceMode("range");
-      setDialogPos(null); // Reset to centered
+      win.reset(); // Reset to centered, natural size
       loadSheets();
 
       // Load BI connections for the design-query source picker (non-fatal).
@@ -707,62 +706,19 @@ export function CreateChartDialog({
     }
   };
 
-  // Drag-to-move: mousedown on header starts drag
-  const handleHeaderMouseDown = useCallback((e: React.MouseEvent) => {
-    // Don't drag when clicking the close button
-    if ((e.target as HTMLElement).closest("button")) return;
-    e.preventDefault();
-
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-
-    const rect = dialog.getBoundingClientRect();
-    const startPos = dialogPos ?? {
-      x: rect.left,
-      y: rect.top,
-    };
-
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      origX: startPos.x,
-      origY: startPos.y,
-    };
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      if (!dragRef.current) return;
-      const dx = moveEvent.clientX - dragRef.current.startX;
-      const dy = moveEvent.clientY - dragRef.current.startY;
-      setDialogPos({
-        x: dragRef.current.origX + dx,
-        y: dragRef.current.origY + dy,
-      });
-    };
-
-    const handleMouseUp = () => {
-      dragRef.current = null;
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-
-    document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-  }, [dialogPos]);
-
   if (!isOpen) {
     return null;
   }
 
   const isSpecFullView = activeTab === "spec" && specFullView;
 
-  // Compute dialog positioning style
-  const positionStyle: React.CSSProperties = dialogPos
-    ? { left: dialogPos.x, top: dialogPos.y }
-    : { left: "50%", top: "50%", transform: "translate(-50%, -50%)" };
+  // Default centering — replaced by the window hook's style once the user
+  // drags or resizes.
+  const positionStyle: React.CSSProperties = {
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+  };
 
   const fullViewStyle: React.CSSProperties = isSpecFullView
     ? { width: "90vw", maxWidth: "1200px", height: "90vh", maxHeight: "90vh" }
@@ -771,12 +727,12 @@ export function CreateChartDialog({
   return (
     <Backdrop>
       <DialogContainer
-        ref={dialogRef}
+        ref={win.ref}
         onKeyDown={handleKeyDown}
-        style={{ ...positionStyle, ...fullViewStyle }}
+        style={{ ...positionStyle, ...fullViewStyle, ...win.style }}
       >
         {/* Header — drag handle */}
-        <Header onMouseDown={handleHeaderMouseDown}>
+        <Header onMouseDown={win.onHeaderMouseDown}>
           <Title>{isPivotMode ? "Insert PivotChart" : isEditMode ? "Edit Chart" : "Insert Chart"}</Title>
           <CloseButton onClick={handleClose} aria-label="Close">
             x
@@ -837,6 +793,7 @@ export function CreateChartDialog({
             <DesignTab
               spec={currentSpec}
               onSpecChange={handleSpecChange}
+              previewSeriesNames={previewData?.series.map((sr) => sr.name)}
             />
           )}
           {activeTab === "spec" && currentSpec && (
@@ -873,6 +830,7 @@ export function CreateChartDialog({
             {isLoading ? "Saving..." : isEditMode ? "Update Chart" : "Insert Chart"}
           </Button>
         </Footer>
+        {win.resizeHandles}
       </DialogContainer>
     </Backdrop>
   );

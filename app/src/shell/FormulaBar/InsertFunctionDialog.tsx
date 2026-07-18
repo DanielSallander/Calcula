@@ -3,6 +3,7 @@
 // CONTEXT: Opened by clicking the fx button in the formula bar
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useDialogWindow } from "../../api/dialogWindow";
 import { getAllFunctions, getFunctionTemplate } from "../../core/lib/tauri-api";
 import type { FunctionInfo } from "../../core/types";
 import * as S from './InsertFunctionDialog.styles';
@@ -33,7 +34,11 @@ export function InsertFunctionDialog({
   const [selectedFunction, setSelectedFunction] = useState<FunctionInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Movable + resizable dialog window (shared hook).
+  // win.ref doubles as the click-outside detection ref.
+  const win = useDialogWindow({ minWidth: 380, minHeight: 380 });
+  const dialogRef = win.ref;
 
   useEffect(() => {
     getAllFunctions()
@@ -136,8 +141,12 @@ export function InsertFunctionDialog({
 
   return (
     <S.Overlay>
-      <S.DialogContainer ref={dialogRef} onKeyDown={handleKeyDown}>
-        <S.Header>
+      <S.DialogContainer
+        ref={dialogRef}
+        onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
+      >
+        <S.Header onMouseDown={win.onHeaderMouseDown}>
           <S.Title>Insert Function</S.Title>
           <S.CloseButton onClick={onClose}>x</S.CloseButton>
         </S.Header>
@@ -201,6 +210,7 @@ export function InsertFunctionDialog({
             Insert
           </S.InsertButton>
         </S.Footer>
+        {win.resizeHandles}
       </S.DialogContainer>
     </S.Overlay>
   );

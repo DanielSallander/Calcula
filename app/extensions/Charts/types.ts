@@ -1262,6 +1262,14 @@ export interface ChartSpec {
   legend: LegendSpec;
   /** Color palette name. */
   palette: string;
+  /**
+   * Per-series color overrides keyed by SERIES NAME (hex strings). Name-keyed
+   * so they work for every data source — pivot/design-query series have no
+   * `series` entries and indices shift under filters. Applied when data is
+   * resolved (readChartDataResolved); painters read `data.series[i].color`.
+   * Wins over `series[].color`.
+   */
+  seriesColors?: Record<string, string>;
   /** Mark-specific options (type depends on `mark`). */
   markOptions?: MarkOptions;
   /** Additional layers overlaid on the primary chart (annotations, overlays). */

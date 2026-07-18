@@ -2,9 +2,10 @@
 // PURPOSE: Modal dialog for selecting number format for value fields
 // CONTEXT: Provides preset formats for currency, percentage, and general numbers
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 
 export interface NumberFormatOption {
   value: string;
@@ -189,7 +190,9 @@ export function NumberFormatModal({
   onSave,
   onCancel,
 }: NumberFormatModalProps): React.ReactElement | null {
-  const modalRef = useRef<HTMLDivElement>(null);
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 320, minHeight: 300 });
+
   const [selectedFormat, setSelectedFormat] = useState(currentFormat);
   const [customFormat, setCustomFormat] = useState("");
   const [isCustom, setIsCustom] = useState(false);
@@ -252,12 +255,13 @@ export function NumberFormatModal({
   return createPortal(
     <div className={modalStyles.overlay} onClick={onCancel}>
       <div
-        ref={modalRef}
+        ref={win.ref}
         className={modalStyles.modal}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
+        style={{ position: "relative", ...win.style }}
       >
-        <div className={modalStyles.header}>
+        <div className={modalStyles.header} onMouseDown={win.onHeaderMouseDown}>
           <h2 className={modalStyles.title}>Number Format</h2>
           <button className={modalStyles.closeButton} onClick={onCancel}>
             &times;
@@ -312,6 +316,7 @@ export function NumberFormatModal({
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>,
     document.body

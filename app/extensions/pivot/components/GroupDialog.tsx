@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { css } from "@emotion/css";
+import { useDialogWindow } from "@api/dialogWindow";
 import {
   groupPivotField,
   getPivotFieldUniqueValues,
@@ -203,6 +204,9 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
   const pivotId = data?.pivotId as string | undefined;
   const fieldIndex = data?.fieldIndex as number | undefined;
 
+  // Movable + resizable dialog window (shared @api hook)
+  const win = useDialogWindow({ minWidth: 300, minHeight: 260 });
+
   const [mode, setMode] = useState<GroupMode>("date");
   const [fieldName, setFieldName] = useState("");
 
@@ -305,9 +309,14 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
 
   return (
     <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className={styles.header}>
+      <div
+        ref={win.ref}
+        className={styles.modal}
+        onClick={(e) => e.stopPropagation()}
+        style={{ position: "relative", ...win.style }}
+      >
+        {/* Header — drag handle */}
+        <div className={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <h3 className={styles.title}>
             Grouping{fieldName ? ` - ${fieldName}` : ""}
           </h3>
@@ -400,6 +409,7 @@ export function GroupDialog({ isOpen, onClose, data }: GroupDialogProps): React.
             OK
           </button>
         </div>
+        {win.resizeHandles}
       </div>
     </div>
   );
