@@ -14,6 +14,9 @@ export interface SectionChromeProps {
   label?: string;
   isFirst: boolean;
   isLast: boolean;
+  /** Ref to the cell's root element — the ribbon renderer's real rendered-width
+   *  probe attaches here (measures the actual cell, launcher or inline). */
+  measureRef?: (el: HTMLDivElement | null) => void;
   children: React.ReactNode;
 }
 
@@ -21,10 +24,13 @@ export function SectionChrome({
   label,
   isFirst,
   isLast,
+  measureRef,
   children,
 }: SectionChromeProps): React.ReactElement {
   return (
     <div
+      ref={measureRef}
+      data-section-cell=""
       style={{
         display: "flex",
         flexDirection: "column",

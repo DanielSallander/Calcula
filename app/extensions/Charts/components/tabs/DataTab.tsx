@@ -12,6 +12,7 @@ import {
   Label,
   Input,
   Select,
+  Button,
   CheckboxLabel,
   RadioGroup,
   RadioLabel,
@@ -50,6 +51,10 @@ interface DataTabProps {
   availableAxes: Array<{ index: number; label: string }>;
   /** Palette name for color previews. */
   palette: string;
+  /** Opens the floating "inspect data" grid for the current query result. */
+  onInspectData?: () => void;
+  /** Disable the inspect button (no preview data yet / query broken). */
+  inspectDisabled?: boolean;
 }
 
 export function DataTab({
@@ -73,6 +78,8 @@ export function DataTab({
   onSeriesChange,
   availableAxes,
   palette,
+  onInspectData,
+  inspectDisabled,
 }: DataTabProps): React.ReactElement {
   const handleSeriesToggle = (sourceIndex: number, checked: boolean) => {
     if (checked) {
@@ -163,6 +170,21 @@ export function DataTab({
             <span style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
               Ctrl+Space suggests fields and measures. The query runs against the connection's model — the data lives in the chart, no pivot table needed.
             </span>
+            {onInspectData && (
+              <div style={{ marginTop: "8px" }}>
+                <Button
+                  onClick={onInspectData}
+                  disabled={inspectDisabled}
+                  title={
+                    inspectDisabled
+                      ? "Run a valid query first"
+                      : "Show the query result as a data grid in a floating window"
+                  }
+                >
+                  Inspect data...
+                </Button>
+              </div>
+            )}
           </FieldGroup>
         </>
       ) : (

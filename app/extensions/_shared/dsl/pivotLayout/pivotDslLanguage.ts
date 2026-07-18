@@ -391,6 +391,26 @@ export function registerPivotDslLanguage(): void {
               range,
             });
           }
+          if (clause !== 'FILTERS' && currentBiModel) {
+            // VIA Table.Column — relationship path for ambiguous joins
+            suggestions.push({
+              label: 'VIA',
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: 'VIA ',
+              detail: 'Resolve an ambiguous relationship path: Field VIA Orders.OrderDate',
+              range,
+            });
+          }
+          if (clause === 'FILTERS') {
+            suggestions.push({
+              label: 'NOT IN',
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: 'NOT IN ("$0")',
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              detail: 'Exclude values: Field NOT IN ("A", "B")',
+              range,
+            });
+          }
           return { suggestions };
 
         case 'VALUES':
@@ -413,7 +433,16 @@ export function registerPivotDslLanguage(): void {
             }
             return { suggestions };
           }
-          // Default: aggregation functions + BI measures
+          // Default: CALC keyword + aggregation functions + BI measures
+          suggestions.push({
+            label: 'CALC',
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: 'CALC ${1:Name} = $0',
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            detail: 'Inline calculated field: CALC Name = IF([Measure] > 0, ...)',
+            sortText: '0_calc',
+            range,
+          });
           for (const agg of AGGREGATION_NAMES) {
             const capLabel = agg.charAt(0).toUpperCase() + agg.slice(1);
             suggestions.push({

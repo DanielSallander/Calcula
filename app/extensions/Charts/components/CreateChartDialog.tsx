@@ -47,6 +47,7 @@ import { DataTab } from "./tabs/DataTab";
 import { DesignTab } from "./tabs/DesignTab";
 import { SpecTab } from "./tabs/SpecTab";
 import { ChartPreview } from "./ChartPreview";
+import { DataInspectorWindow } from "./DataInspectorWindow";
 
 import {
   Backdrop,
@@ -237,6 +238,8 @@ export function CreateChartDialog({
   // typing). Shown under the preview; committing a design-query chart is
   // blocked while set — a chart with a broken query can only render an error.
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // Floating "inspect data" grid window (opened from the Data tab).
+  const [showDataInspector, setShowDataInspector] = useState(false);
   // Non-fatal transform issues from the preview pipeline, shown in the Spec tab.
   const [diagnostics, setDiagnostics] = useState<TransformDiagnostic[]>([]);
 
@@ -355,6 +358,7 @@ export function CreateChartDialog({
       setSpecFullView(false);
       setSpecOverlay({});
       setSourceMode("range");
+      setShowDataInspector(false);
       win.reset(); // Reset to centered, natural size
       loadSheets();
 
@@ -805,6 +809,8 @@ export function CreateChartDialog({
               onSeriesChange={setSeries}
               availableAxes={availableAxes}
               palette={palette}
+              onInspectData={() => setShowDataInspector(true)}
+              inspectDisabled={!previewData || previewData.series.length === 0}
             />
           )}
           {activeTab === "design" && currentSpec && (
@@ -858,6 +864,9 @@ export function CreateChartDialog({
         </Footer>
         {win.resizeHandles}
       </DialogContainer>
+      {showDataInspector && (
+        <DataInspectorWindow data={previewData} onClose={() => setShowDataInspector(false)} />
+      )}
     </Backdrop>
   );
 }

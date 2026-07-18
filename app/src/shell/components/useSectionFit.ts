@@ -38,6 +38,15 @@ export interface WidthDemotionInput {
   id: string;
   /** Measured natural inline width (content + chrome), px. */
   width: number;
+  /**
+   * Measured rendered width of this section's LAUNCHER cell (chrome included).
+   * Real launchers are usually much wider than the 64px token (min-width 56 +
+   * padding + a label up to 110px + cell chrome) — modeling them at 64 made
+   * the collapse stop several hundred px too early on section-heavy tabs
+   * (Chart Design), leaving a permanently overflowing strip. Unmeasured
+   * launchers fall back to LAUNCHER_BAND_WIDTH until their probe reports.
+   */
+  launcherWidth?: number;
   /** Lower collapses first. */
   collapsePriority: number;
   /** Already height-demoted or declared launcher — occupies launcher width. */
@@ -48,28 +57,41 @@ export interface WidthDemotionInput {
  * Given measured section widths and the band width, decide which sections
  * demote to launchers to make the strip fit. Deterministic: demote in
  * ascending collapsePriority until the total fits (or all are launchers).
+ *
+ * `extraDemotions` demotes that many candidates BEYOND the model's fit point —
+ * the renderer's DOM-truth backstop uses it when the strip's real scrollWidth
+ * still overflows after the modeled demotions (constant drift, lost probe).
+ *
+ * Sections whose inline form is no wider than their launcher are never
+ * demoted for width: swapping them would grow the strip, not shrink it.
  */
 export function computeWidthDemotions(
   sections: WidthDemotionInput[],
   containerWidth: number,
+  extraDemotions = 0,
 ): Set<string> {
   const demoted = new Set<string>();
   if (containerWidth <= 0) return demoted;
 
+  const launcherWidthOf = (s: WidthDemotionInput): number =>
+    s.launcherWidth ?? LAUNCHER_BAND_WIDTH;
   const widthOf = (s: WidthDemotionInput): number =>
-    s.alreadyLauncher || demoted.has(s.id) ? LAUNCHER_BAND_WIDTH : s.width;
+    s.alreadyLauncher || demoted.has(s.id) ? launcherWidthOf(s) : s.width;
 
   let total = sections.reduce((sum, s) => sum + widthOf(s), 0);
-  if (total <= containerWidth) return demoted;
 
   const candidates = sections
-    .filter((s) => !s.alreadyLauncher)
+    .filter((s) => !s.alreadyLauncher && s.width > launcherWidthOf(s))
     .sort((a, b) => a.collapsePriority - b.collapsePriority);
 
+  let forced = extraDemotions;
   for (const s of candidates) {
-    if (total <= containerWidth) break;
+    if (total <= containerWidth) {
+      if (forced <= 0) break;
+      forced -= 1;
+    }
     demoted.add(s.id);
-    total -= s.width - LAUNCHER_BAND_WIDTH;
+    total -= s.width - launcherWidthOf(s);
   }
   return demoted;
 }

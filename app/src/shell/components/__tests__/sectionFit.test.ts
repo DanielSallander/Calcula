@@ -75,4 +75,46 @@ describe("computeWidthDemotions", () => {
     const result = computeWidthDemotions([s("a", 300, 1), s("b", 300, 2)], 10);
     expect(result.size).toBe(2);
   });
+
+  it("counts measured launcher widths instead of the 64px token (root-cause regression)", () => {
+    // At the token, demoting b "fits": 300 + 64 = 364 <= 400. With b's REAL
+    // launcher measuring 220, 300 + 220 = 520 > 400 — a must demote too.
+    const inputs: WidthDemotionInput[] = [
+      { id: "a", width: 300, collapsePriority: 2, alreadyLauncher: false },
+      { id: "b", width: 300, launcherWidth: 220, collapsePriority: 1, alreadyLauncher: false },
+    ];
+    const result = computeWidthDemotions(inputs, 400);
+    expect(result.has("b")).toBe(true);
+    expect(result.has("a")).toBe(true);
+  });
+
+  it("counts a measured launcher width for already-launcher sections", () => {
+    // b is a real launcher measuring 200 (not the 64 token): 250 + 200 = 450
+    // overflows 400, so a must demote even though the token math said it fit.
+    const inputs: WidthDemotionInput[] = [
+      { id: "a", width: 250, collapsePriority: 1, alreadyLauncher: false },
+      { id: "b", width: 300, launcherWidth: 200, collapsePriority: 2, alreadyLauncher: true },
+    ];
+    const result = computeWidthDemotions(inputs, 400);
+    expect(result.has("a")).toBe(true);
+    expect(result.has("b")).toBe(false);
+  });
+
+  it("never demotes a section narrower than its launcher (no savings)", () => {
+    // Demoting the 40px section would GROW the strip to a 64px launcher.
+    const result = computeWidthDemotions([s("tiny", 40, 1), s("big", 300, 2)], 100);
+    expect(result.has("big")).toBe(true);
+    expect(result.has("tiny")).toBe(false);
+  });
+
+  it("extraDemotions forces candidates beyond the model's fit point", () => {
+    // 200 + 200 = 400 fits exactly; one forced demotion folds b (priority 1).
+    const sections = [s("a", 200, 2), s("b", 200, 1)];
+    expect(computeWidthDemotions(sections, 400, 0).size).toBe(0);
+    const forcedOne = computeWidthDemotions(sections, 400, 1);
+    expect(forcedOne.has("b")).toBe(true);
+    expect(forcedOne.has("a")).toBe(false);
+    // Forcing more than there are candidates saturates without error.
+    expect(computeWidthDemotions(sections, 400, 99).size).toBe(2);
+  });
 });

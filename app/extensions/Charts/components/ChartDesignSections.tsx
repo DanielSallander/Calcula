@@ -117,6 +117,19 @@ const s = {
     color: #333;
   `,
 
+  // -- Compact vertical stack for option sections (ribbon-style: use the
+  //    band's height instead of spreading one wide row) --
+  optionColumn: css`
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+
+    > label {
+      justify-content: space-between;
+      width: 100%;
+    }
+  `,
+
   // -- Colors group: palette swatches --
   paletteGallery: css`
     display: flex;
@@ -987,41 +1000,43 @@ export function SeriesColorsSection(_props: PanelSectionProps): React.ReactEleme
   const effective = override ?? getSeriesColor(spec.palette, idx, seriesList[idx].color ?? null);
 
   return (
-    <ControlRow gap={6}>
+    <div className={s.optionColumn} style={{ width: 150 }}>
       <select
         className={s.select}
         value={idx}
         onChange={(e) => setSeriesIdx(Number(e.target.value))}
         title="Series"
-        style={{ maxWidth: 120 }}
+        style={{ width: "100%" }}
       >
         {seriesList.map((sr, i) => (
           <option key={i} value={i}>{sr.name}</option>
         ))}
       </select>
-      <input
-        type="color"
-        value={toHex6(effective)}
-        onChange={(e) =>
-          updateSpec({ seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value } })
-        }
-        title="Series color"
-        style={{ width: 26, height: 20, padding: 0, border: "1px solid #ccc", borderRadius: 3, cursor: "pointer" }}
-      />
-      <button
-        className={s.actionBtn}
-        disabled={!override}
-        onClick={() => {
-          if (!spec.seriesColors) return;
-          const next = { ...spec.seriesColors };
-          delete next[name];
-          updateSpec({ seriesColors: next });
-        }}
-        title="Reset this series to its palette color"
-      >
-        Auto
-      </button>
-    </ControlRow>
+      <ControlRow gap={6}>
+        <input
+          type="color"
+          value={toHex6(effective)}
+          onChange={(e) =>
+            updateSpec({ seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value } })
+          }
+          title="Series color"
+          style={{ width: 26, height: 20, padding: 0, border: "1px solid #ccc", borderRadius: 3, cursor: "pointer" }}
+        />
+        <button
+          className={s.actionBtn}
+          disabled={!override}
+          onClick={() => {
+            if (!spec.seriesColors) return;
+            const next = { ...spec.seriesColors };
+            delete next[name];
+            updateSpec({ seriesColors: next });
+          }}
+          title="Reset this series to its palette color"
+        >
+          Auto
+        </button>
+      </ControlRow>
+    </div>
   );
 }
 
@@ -1039,7 +1054,7 @@ export function BarOptionsSection(_props: PanelSectionProps): React.ReactElement
     updateSpec({ markOptions: { ...opts, ...patch } });
 
   return (
-    <ControlRow gap={8}>
+    <div className={s.optionColumn} style={{ width: 150 }}>
       <NumField
         label="Gap %"
         value={opts.gapWidth ?? 150}
@@ -1061,7 +1076,7 @@ export function BarOptionsSection(_props: PanelSectionProps): React.ReactElement
         onChange={(v) => setOpt({ borderRadius: v })}
         title="Bar corner radius (px)"
       />
-    </ControlRow>
+    </div>
   );
 }
 
@@ -1081,41 +1096,45 @@ export function LineOptionsSection(_props: PanelSectionProps): React.ReactElemen
   const showMarkers = opts.showMarkers ?? !isArea;
 
   return (
-    <ControlRow gap={8}>
-      <NumField
-        label="Width"
-        value={opts.lineWidth ?? 2}
-        min={1} max={10} step={0.5}
-        onChange={(v) => setOpt({ lineWidth: v })}
-        title="Line width (px)"
-      />
-      <select
-        className={s.select}
-        value={opts.interpolation ?? "linear"}
-        onChange={(e) => setOpt({ interpolation: e.target.value as LineInterpolation })}
-        title="Line interpolation"
-      >
-        <option value="linear">Straight</option>
-        <option value="smooth">Smooth</option>
-        <option value="step">Stepped</option>
-      </select>
-      <label className={s.checkLabel}>
-        <input
-          type="checkbox"
-          checked={showMarkers}
-          onChange={(e) => setOpt({ showMarkers: e.target.checked })}
-        />
-        Markers
-      </label>
-      {showMarkers && (
+    <div className={s.optionColumn} style={{ width: 170 }}>
+      <ControlRow gap={6}>
         <NumField
-          label="Size"
-          value={opts.markerRadius ?? 4}
-          min={1} max={12} step={1}
-          onChange={(v) => setOpt({ markerRadius: v })}
-          title="Marker radius (px)"
+          label="Width"
+          value={opts.lineWidth ?? 2}
+          min={1} max={10} step={0.5}
+          onChange={(v) => setOpt({ lineWidth: v })}
+          title="Line width (px)"
         />
-      )}
+        <select
+          className={s.select}
+          value={opts.interpolation ?? "linear"}
+          onChange={(e) => setOpt({ interpolation: e.target.value as LineInterpolation })}
+          title="Line interpolation"
+        >
+          <option value="linear">Straight</option>
+          <option value="smooth">Smooth</option>
+          <option value="step">Stepped</option>
+        </select>
+      </ControlRow>
+      <ControlRow gap={6}>
+        <label className={s.checkLabel}>
+          <input
+            type="checkbox"
+            checked={showMarkers}
+            onChange={(e) => setOpt({ showMarkers: e.target.checked })}
+          />
+          Markers
+        </label>
+        {showMarkers && (
+          <NumField
+            label="Size"
+            value={opts.markerRadius ?? 4}
+            min={1} max={12} step={1}
+            onChange={(v) => setOpt({ markerRadius: v })}
+            title="Marker radius (px)"
+          />
+        )}
+      </ControlRow>
       {isArea && (
         <NumField
           label="Fill %"
@@ -1125,7 +1144,7 @@ export function LineOptionsSection(_props: PanelSectionProps): React.ReactElemen
           title="Area fill opacity"
         />
       )}
-    </ControlRow>
+    </div>
   );
 }
 
@@ -1139,34 +1158,38 @@ export function AxisOptionsSection(_props: PanelSectionProps): React.ReactElemen
   if (!isCartesianChart(spec.mark)) return null;
 
   return (
-    <ControlRow gap={6}>
-      <Input
-        type="text"
-        width={86}
-        value={spec.xAxis.title ?? ""}
-        placeholder="X title"
-        onChange={(e) => updateSpec({ xAxis: { ...spec.xAxis, title: e.target.value || null } })}
-      />
-      <Input
-        type="text"
-        width={86}
-        value={spec.yAxis.title ?? ""}
-        placeholder="Y title"
-        onChange={(e) => updateSpec({ yAxis: { ...spec.yAxis, title: e.target.value || null } })}
-      />
-      <NumBlankField
-        label="Min"
-        value={spec.yAxis.min}
-        onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, min: v } })}
-        title="Y axis minimum (blank = auto)"
-      />
-      <NumBlankField
-        label="Max"
-        value={spec.yAxis.max}
-        onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, max: v } })}
-        title="Y axis maximum (blank = auto)"
-      />
-    </ControlRow>
+    <div className={s.optionColumn} style={{ width: 180 }}>
+      <ControlRow gap={4}>
+        <Input
+          type="text"
+          width={86}
+          value={spec.xAxis.title ?? ""}
+          placeholder="X title"
+          onChange={(e) => updateSpec({ xAxis: { ...spec.xAxis, title: e.target.value || null } })}
+        />
+        <Input
+          type="text"
+          width={86}
+          value={spec.yAxis.title ?? ""}
+          placeholder="Y title"
+          onChange={(e) => updateSpec({ yAxis: { ...spec.yAxis, title: e.target.value || null } })}
+        />
+      </ControlRow>
+      <ControlRow gap={4}>
+        <NumBlankField
+          label="Min"
+          value={spec.yAxis.min}
+          onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, min: v } })}
+          title="Y axis minimum (blank = auto)"
+        />
+        <NumBlankField
+          label="Max"
+          value={spec.yAxis.max}
+          onChange={(v) => updateSpec({ yAxis: { ...spec.yAxis, max: v } })}
+          title="Y axis maximum (blank = auto)"
+        />
+      </ControlRow>
+    </div>
   );
 }
 
