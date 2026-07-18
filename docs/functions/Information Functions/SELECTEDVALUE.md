@@ -74,6 +74,6 @@ RETURN IF(SelectedYear = 0, SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal
 ## See also
 
 - [HASONEVALUE](HASONEVALUE.md) — tests whether a column has one value (boolean)
-- [IF](IF.md) — conditional branching
-- [BLANK](BLANK.md) — NULL value
-- [MIN](MIN.md) — returns the minimum value
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
+- [BLANK](../Conditional%20Functions/BLANK.md) — NULL value
+- [MIN](../Aggregation%20Functions/MIN.md) — returns the minimum value

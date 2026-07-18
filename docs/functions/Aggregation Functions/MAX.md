@@ -14,7 +14,7 @@ MAX(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to evaluate. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 

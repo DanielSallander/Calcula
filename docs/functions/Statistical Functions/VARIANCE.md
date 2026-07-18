@@ -14,7 +14,7 @@ VARIANCE(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | A column reference containing numeric values. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -43,4 +43,4 @@ DEFINE Bikes Variance = VARIANCE(fact_sales[linetotal], KEEP(dim_product, dim_pr
 
 - [VARIANCEP](VARIANCEP.md) — population variance (N denominator)
 - [STDEV](STDEV.md) — sample standard deviation
-- [AVG](AVG.md) — arithmetic mean
+- [AVG](../Aggregation%20Functions/AVG.md) — arithmetic mean

@@ -21,7 +21,7 @@ STRING_AGG(table[column], delimiter)
 |-----------|------------|
 | `table[column]` | The column whose values to concatenate. Values are cast to text before concatenation. |
 | `delimiter` | A string literal used to separate the concatenated values (e.g., `", "`). |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -80,6 +80,6 @@ Returns a comma-separated list of colors available for bikes, regardless of any 
 
 ## See also
 
-- [CONCATENATE](CONCATENATE.md) -- concatenates two strings
-- [COMBINEVALUES](COMBINEVALUES.md) -- combines values with a delimiter
+- [CONCATENATE](../Text%20Functions/CONCATENATE.md) -- concatenates two strings
+- [COMBINEVALUES](../Text%20Functions/COMBINEVALUES.md) -- combines values with a delimiter
 - [COUNT](COUNT.md) -- counts non-null values

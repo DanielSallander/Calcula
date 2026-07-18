@@ -1,4 +1,5 @@
-//! Build script that generates a function catalog from `docs/functions/*.md`.
+//! Build script that generates a function catalog from `docs/functions/**/*.md`
+//! (one category subfolder per function group).
 //!
 //! Each markdown file must follow this structure:
 //!
@@ -34,41 +35,18 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let out_file = out_dir.join("function_catalog_generated.rs");
 
-    let entries = match fs::read_dir(&docs_dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            eprintln!(
-                "Warning: could not read function docs at {}: {e}",
-                docs_dir.display()
-            );
-            // Write an empty catalog so the build doesn't fail
-            fs::write(&out_file, "static CATALOG: &[FunctionInfo] = &[];").unwrap();
-            return;
-        }
-    };
+    if let Err(e) = fs::read_dir(&docs_dir) {
+        eprintln!(
+            "Warning: could not read function docs at {}: {e}",
+            docs_dir.display()
+        );
+        // Write an empty catalog so the build doesn't fail
+        fs::write(&out_file, "static CATALOG: &[FunctionInfo] = &[];").unwrap();
+        return;
+    }
 
     let mut functions: Vec<(String, String, String)> = Vec::new();
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-        // Skip non-md files and README.md
-        if !name.ends_with(".md") || name == "README.md" {
-            continue;
-        }
-
-        // Re-run if this specific file changes
-        println!("cargo:rerun-if-changed={}", path.display());
-
-        if let Some(info) = parse_function_doc(&path) {
-            functions.push(info);
-        }
-    }
+    collect_function_docs(&docs_dir, &mut functions);
 
     // Sort alphabetically for deterministic output
     functions.sort_by(|a, b| a.0.cmp(&b.0));
@@ -88,6 +66,45 @@ fn main() {
     code.push_str("];\n");
 
     fs::write(&out_file, code).unwrap();
+}
+
+/// Recursively parse every function doc under `dir`. The docs live in one
+/// category subfolder per function group; README.md files are indexes, not
+/// function docs.
+fn collect_function_docs(dir: &Path, functions: &mut Vec<(String, String, String)>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Watch the subfolder so added/removed docs retrigger the build.
+            println!("cargo:rerun-if-changed={}", path.display());
+            collect_function_docs(&path, functions);
+            continue;
+        }
+
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Skip non-md files and README.md
+        if !name.ends_with(".md") || name == "README.md" {
+            continue;
+        }
+
+        // Re-run if this specific file changes
+        println!("cargo:rerun-if-changed={}", path.display());
+
+        if let Some(info) = parse_function_doc(&path) {
+            functions.push(info);
+        }
+    }
 }
 
 /// Parse a function doc markdown file, returning (name, description, signature).

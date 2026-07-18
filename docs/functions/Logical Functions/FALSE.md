@@ -44,5 +44,5 @@ DEFINE HasRevenue = IF(SUM(fact_sales[linetotal]) > 0, TRUE, FALSE)
 ## See also
 
 - [TRUE](TRUE.md) — returns the boolean value TRUE
-- [IF](IF.md) — conditional branching
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
 - [AND](AND.md), [OR](OR.md), [NOT](NOT.md) — logical operators

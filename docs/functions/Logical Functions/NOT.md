@@ -58,5 +58,5 @@ DEFINE Filtered = IF(
 - [AND](AND.md) — returns TRUE if both arguments are TRUE
 - [OR](OR.md) — returns TRUE if either argument is TRUE
 - [XOR](XOR.md) — exclusive OR
-- [IF](IF.md) — conditional branching
-- [ISBLANK](ISBLANK.md) — test for NULL values
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
+- [ISBLANK](../Conditional%20Functions/ISBLANK.md) — test for NULL values

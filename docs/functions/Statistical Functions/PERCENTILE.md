@@ -15,7 +15,7 @@ PERCENTILE(table[column], k, context_op1, context_op2, ...)
 |-----------|------------|
 | `table[column]` | A column reference containing numeric values. |
 | `k` | A decimal number between 0.0 and 1.0 (inclusive) representing the desired percentile. For example, 0.5 is the 50th percentile (median), 0.95 is the 95th percentile. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -57,5 +57,5 @@ DEFINE P90 Bikes = PERCENTILE(fact_sales[linetotal], 0.90, KEEP(dim_product, dim
 ## See also
 
 - [MEDIAN](MEDIAN.md) — 50th percentile (shorthand)
-- [MIN](MIN.md) — minimum value (0th percentile)
-- [MAX](MAX.md) — maximum value (100th percentile)
+- [MIN](../Aggregation%20Functions/MIN.md) — minimum value (0th percentile)
+- [MAX](../Aggregation%20Functions/MAX.md) — maximum value (100th percentile)

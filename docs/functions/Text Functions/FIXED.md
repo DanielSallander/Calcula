@@ -47,7 +47,7 @@ DEFINE RoundedHundreds = FIXED(SUM(fact_sales[linetotal]), -2)
 
 ## See also
 
-- [ROUND](ROUND.md) -- round a number (returns a number, not text)
+- [ROUND](../Math%20Functions/ROUND.md) -- round a number (returns a number, not text)
 - [VALUE](VALUE.md) -- convert text to a number
 - [CONCATENATE](CONCATENATE.md) -- join text strings
-- [INT](INT.md) -- truncate to integer
+- [INT](../Math%20Functions/INT.md) -- truncate to integer

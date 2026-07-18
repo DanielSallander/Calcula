@@ -14,7 +14,7 @@ SUM(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to be summed. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -75,7 +75,7 @@ Calculate revenue for a specific year only.
 DEFINE Revenue 2014 = SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] = 2014))
 ```
 
-This uses the [KEEP](KEEP.md) function to filter the evaluation context to year 2014 only, regardless of any other year filter applied by the query.
+This uses the [KEEP](../Context%20Functions/KEEP.md) function to filter the evaluation context to year 2014 only, regardless of any other year filter applied by the query.
 
 ## See also
 
@@ -83,4 +83,4 @@ This uses the [KEEP](KEEP.md) function to filter the evaluation context to year 
 - [AVG](AVG.md)
 - [MIN](MIN.md)
 - [MAX](MAX.md)
-- [KEEP](KEEP.md)
+- [KEEP](../Context%20Functions/KEEP.md)

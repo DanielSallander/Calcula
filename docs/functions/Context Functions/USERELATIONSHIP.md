@@ -144,4 +144,4 @@ This joins each sale to the period it falls within. Because this is a many-to-ma
 - [KEEP](KEEP.md) — add filter conditions to the evaluation context
 - [CLEAR](CLEAR.md) — remove specific filters from the evaluation context
 - [RESET](RESET.md) — remove all filters from the evaluation context
-- [SUM](SUM.md), [COUNT](COUNT.md), [AVG](AVG.md) — aggregation functions that accept USERELATIONSHIP
+- [SUM](../Aggregation%20Functions/SUM.md), [COUNT](../Aggregation%20Functions/COUNT.md), [AVG](../Aggregation%20Functions/AVG.md) — aggregation functions that accept USERELATIONSHIP

@@ -55,7 +55,7 @@ DEFINE QuarterLabel = FORMAT(dim_date[order_date], "YYYY-Q")
 
 ## See also
 
-- [YEAR](YEAR.md) — extract year as a number
-- [MONTH](MONTH.md) — extract month as a number
-- [QUARTER](QUARTER.md) — extract quarter as a number
+- [YEAR](../Date%20and%20Time%20Functions/YEAR.md) — extract year as a number
+- [MONTH](../Date%20and%20Time%20Functions/MONTH.md) — extract month as a number
+- [QUARTER](../Date%20and%20Time%20Functions/QUARTER.md) — extract quarter as a number
 - [CONCATENATE](CONCATENATE.md) — join text values

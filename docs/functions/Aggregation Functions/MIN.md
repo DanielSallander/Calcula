@@ -14,7 +14,7 @@ MIN(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column that contains the values to evaluate. Must be a numeric column (Int32, Int64, Float64, or Decimal). |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -64,7 +64,7 @@ Find the lowest unit price across all years, ignoring any year filter.
 DEFINE Lowest Price Ever = MIN(fact_sales[unitprice], RESET())
 ```
 
-This uses [RESET](RESET.md) to remove all filters from the evaluation context, returning the absolute minimum price regardless of any filters applied by the query.
+This uses [RESET](../Context%20Functions/RESET.md) to remove all filters from the evaluation context, returning the absolute minimum price regardless of any filters applied by the query.
 
 ## See also
 

@@ -60,5 +60,5 @@ DEFINE Criteria = IF(
 - [AND](AND.md) — returns TRUE if both arguments are TRUE
 - [NOT](NOT.md) — negates a logical value
 - [XOR](XOR.md) — exclusive OR
-- [IF](IF.md) — conditional branching
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
 - [TRUE](TRUE.md) / [FALSE](FALSE.md) — boolean literals

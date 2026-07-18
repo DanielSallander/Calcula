@@ -42,4 +42,4 @@ Returns 1 if revenue exceeds 50M, -1 if below, 0 if exactly 50M.
 ## See also
 
 - [ABS](ABS.md) — absolute value
-- [IF](IF.md) — conditional branching (more flexible alternative)
+- [IF](../Conditional%20Functions/IF.md) — conditional branching (more flexible alternative)

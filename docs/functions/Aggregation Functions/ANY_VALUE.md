@@ -14,7 +14,7 @@ ANY_VALUE(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column from which to return a value. Can be any data type. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -76,4 +76,4 @@ Returns "Bikes" regardless of the current filter context, since KEEP forces the 
 
 - [MIN](MIN.md) -- returns the smallest value
 - [MAX](MAX.md) -- returns the largest value
-- [SELECTEDVALUE](SELECTEDVALUE.md) -- returns the value when there is exactly one distinct value
+- [SELECTEDVALUE](../Information%20Functions/SELECTEDVALUE.md) -- returns the value when there is exactly one distinct value

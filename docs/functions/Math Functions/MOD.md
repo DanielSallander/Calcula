@@ -40,5 +40,5 @@ DEFINE IsEvenQty = IF(MOD(SUM(fact_sales[orderqty]), 2) = 0, "Even", "Odd")
 ## See also
 
 - [INT](INT.md) — truncate to integer
-- [DIVIDE](DIVIDE.md) — safe division
+- [DIVIDE](../Conditional%20Functions/DIVIDE.md) — safe division
 - [POWER](POWER.md) — exponentiation

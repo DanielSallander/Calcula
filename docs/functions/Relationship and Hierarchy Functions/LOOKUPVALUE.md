@@ -41,4 +41,4 @@ Each `Sales` row gets the rate whose `pid` equals its `prod_id`; sales without a
 ## See also
 
 - [RELATED](RELATED.md) — relationship-based row dereference
-- [KEEP](KEEP.md) — filter-context navigation in measures
+- [KEEP](../Context%20Functions/KEEP.md) — filter-context navigation in measures

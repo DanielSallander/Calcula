@@ -45,6 +45,6 @@ DEFINE ComputedTotal = VALUE(fact_sales[unitprice_text]) * fact_sales[orderqty]
 ## See also
 
 - [FIXED](FIXED.md) -- convert a number to text with formatting
-- [INT](INT.md) -- truncate a number to an integer
-- [ROUND](ROUND.md) -- round a number to specified decimal places
+- [INT](../Math%20Functions/INT.md) -- truncate a number to an integer
+- [ROUND](../Math%20Functions/ROUND.md) -- round a number to specified decimal places
 - [TRIM](TRIM.md) -- remove leading and trailing spaces before conversion

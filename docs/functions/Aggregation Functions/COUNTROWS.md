@@ -14,7 +14,7 @@ COUNTROWS(table, context_op)
 | Parameter | Definition |
 |-----------|------------|
 | `table` | The name of the table whose rows are to be counted. |
-| `context_op` | Optional. A context operation ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modifies the evaluation context. |
+| `context_op` | Optional. A context operation ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modifies the evaluation context. |
 
 ## Return value
 
@@ -25,7 +25,7 @@ A whole number — the total number of rows in the table.
 - COUNTROWS counts **all rows**, including rows where specific columns may be NULL. This differs from COUNT, which only counts non-null values in a specific column.
 - The argument is a **table name**, not a column reference. Use `COUNTROWS(fact_sales)` not `COUNTROWS(fact_sales[id])`.
 - COUNTROWS is treated as a simple aggregate and can be pushed down to the data source when used alone.
-- COUNTROWS can be used as a denominator in [DIVIDE](DIVIDE.md) for safe average calculations.
+- COUNTROWS can be used as a denominator in [DIVIDE](../Conditional%20Functions/DIVIDE.md) for safe average calculations.
 - When used with context operations, COUNTROWS is computed locally using DataFusion.
 
 ## Example 1: Total row count
@@ -79,4 +79,4 @@ QUERY: RowCount BY dim_product[categoryname]
 
 - [COUNT](COUNT.md) — count non-null values in a specific column
 - [DISTINCTCOUNT](DISTINCTCOUNT.md) — count distinct values
-- [DIVIDE](DIVIDE.md) — safe division (commonly used with COUNTROWS)
+- [DIVIDE](../Conditional%20Functions/DIVIDE.md) — safe division (commonly used with COUNTROWS)

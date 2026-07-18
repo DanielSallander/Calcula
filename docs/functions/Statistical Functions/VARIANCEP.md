@@ -14,7 +14,7 @@ VARIANCEP(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | A column reference containing numeric values. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -44,4 +44,4 @@ QUERY: Category Variance BY dim_product[categoryname]
 
 - [VARIANCE](VARIANCE.md) — sample variance (N-1 denominator)
 - [STDEVP](STDEVP.md) — population standard deviation
-- [AVG](AVG.md) — arithmetic mean
+- [AVG](../Aggregation%20Functions/AVG.md) — arithmetic mean

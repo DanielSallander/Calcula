@@ -1,7 +1,8 @@
 //! Reference documentation for the expression-language functions.
 //!
 //! The canonical docs live as one Markdown file per function under
-//! `docs/functions/` in this repository (e.g. `SUM.md`, `DIVIDE.md`). They are
+//! `docs/functions/` in this repository, arranged in one category subfolder
+//! per function group (e.g. `Aggregation Functions/SUM.md`). They are
 //! embedded into the library at compile time by this crate's build script
 //! (`build.rs`), so [`function_docs`] never touches the disk: hosts get the
 //! full reference instantly, packaged builds work without the source tree,

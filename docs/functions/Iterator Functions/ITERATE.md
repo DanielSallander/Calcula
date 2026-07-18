@@ -58,7 +58,7 @@ DEFINE Rounded Revenue = SUM(ITERATE(fact_sales, ROUND(DIVIDE(fact_sales[linetot
 
 ## See also
 
-- [SUM](SUM.md) — aggregate sum
-- [AVG](AVG.md) — aggregate average
-- [MIN](MIN.md), [MAX](MAX.md) — aggregate min/max
-- [DIVIDE](DIVIDE.md) — safe division
+- [SUM](../Aggregation%20Functions/SUM.md) — aggregate sum
+- [AVG](../Aggregation%20Functions/AVG.md) — aggregate average
+- [MIN](../Aggregation%20Functions/MIN.md), [MAX](../Aggregation%20Functions/MAX.md) — aggregate min/max
+- [DIVIDE](../Conditional%20Functions/DIVIDE.md) — safe division

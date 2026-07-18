@@ -21,10 +21,10 @@ A boolean — true if the column has exactly one distinct value in the current c
 ## Remarks
 
 - HASONEVALUE generates SQL `COUNT(DISTINCT column) = 1` internally.
-- HASONEVALUE is typically used as the condition in an [IF](IF.md) expression to branch logic based on whether the user has filtered down to a single value.
+- HASONEVALUE is typically used as the condition in an [IF](../Conditional%20Functions/IF.md) expression to branch logic based on whether the user has filtered down to a single value.
 - In a grouped query, each group's filter context determines whether a column has one value. For example, if you group by `Calendar[year]`, then `HASONEVALUE(Calendar[year])` is true for each row (each row has exactly one year).
 - HASONEVALUE always forces local computation when used in a measure expression.
-- For retrieving the actual single value, use [SELECTEDVALUE](SELECTEDVALUE.md) instead of combining HASONEVALUE with [MIN](MIN.md).
+- For retrieving the actual single value, use [SELECTEDVALUE](SELECTEDVALUE.md) instead of combining HASONEVALUE with [MIN](../Aggregation%20Functions/MIN.md).
 
 ## Example 1: Conditional label
 
@@ -48,5 +48,5 @@ When a single category is selected, shows revenue per row. Otherwise, shows tota
 ## See also
 
 - [SELECTEDVALUE](SELECTEDVALUE.md) — returns the single value or an alternate
-- [IF](IF.md) — conditional branching
-- [DISTINCTCOUNT](DISTINCTCOUNT.md) — counts distinct values
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
+- [DISTINCTCOUNT](../Aggregation%20Functions/DISTINCTCOUNT.md) — counts distinct values

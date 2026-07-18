@@ -64,6 +64,6 @@ Returns the name of the employee with the earliest hire date.
 
 ## See also
 
-- [MIN](MIN.md) — returns the smallest value (not order-dependent)
-- [MAX](MAX.md) — returns the largest value
+- [MIN](../Aggregation%20Functions/MIN.md) — returns the smallest value (not order-dependent)
+- [MAX](../Aggregation%20Functions/MAX.md) — returns the largest value
 - [SELECTEDVALUE](SELECTEDVALUE.md) — returns the value when there's exactly one

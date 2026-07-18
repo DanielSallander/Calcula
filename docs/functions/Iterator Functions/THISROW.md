@@ -40,4 +40,4 @@ Each row's `Rank` counts the strictly larger amounts anywhere in the table; each
 ## See also
 
 - [ITERATE](ITERATE.md)
-- [LOOKUPVALUE](LOOKUPVALUE.md)
+- [LOOKUPVALUE](../Relationship%20and%20Hierarchy%20Functions/LOOKUPVALUE.md)

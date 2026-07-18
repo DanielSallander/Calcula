@@ -20,7 +20,7 @@ COUNT_IF(condition)
 | Parameter | Definition |
 |-----------|------------|
 | `condition` | A Boolean expression evaluated for each row. Rows where the condition is true are counted. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -79,4 +79,4 @@ This counts order lines above 1000 that occurred in calendar year 2013, regardle
 
 - [COUNT](COUNT.md) -- counts non-null values in a column
 - [COUNTROWS](COUNTROWS.md) -- counts all rows in a table
-- [IF](IF.md) -- conditional expression
+- [IF](../Conditional%20Functions/IF.md) -- conditional expression

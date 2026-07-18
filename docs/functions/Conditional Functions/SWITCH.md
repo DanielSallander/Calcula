@@ -74,4 +74,4 @@ DEFINE Label = SWITCH(
 
 - [IF](IF.md) — two-way conditional branching
 - [DIVIDE](DIVIDE.md) — safe division
-- [INT](INT.md) — truncate to integer (useful for bucketing in SWITCH)
+- [INT](../Math%20Functions/INT.md) — truncate to integer (useful for bucketing in SWITCH)

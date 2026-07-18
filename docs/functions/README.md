@@ -1,6 +1,24 @@
 # Calcula Engine — Function Reference
 
-This directory contains the complete reference documentation for all functions supported by the Calcula Engine expression language.
+This directory contains the complete reference documentation for all functions supported by the Calcula Engine expression language. Each function lives in a subfolder named after its category (inspired by the Power BI / DAX function categories, adapted to Calcula's own concepts).
+
+| Category | Contents |
+|----------|----------|
+| [Aggregation Functions](Aggregation%20Functions/) | Reduce a column to a single value (SUM, COUNT, …) |
+| [Statistical Functions](Statistical%20Functions/) | Statistical measures over a column (MEDIAN, STDEV, …) |
+| [Logical Functions](Logical%20Functions/) | Boolean logic (AND, OR, NOT, …) |
+| [Conditional Functions](Conditional%20Functions/) | Branching and NULL handling (IF, SWITCH, COALESCE, …) |
+| [Math Functions](Math%20Functions/) | Scalar math (ABS, ROUND, POWER, …) |
+| [Date and Time Functions](Date%20and%20Time%20Functions/) | Date parts and date arithmetic (YEAR, DATEADD, …) |
+| [Text Functions](Text%20Functions/) | String manipulation (LEFT, SUBSTITUTE, FORMAT, …) |
+| [Time Intelligence Functions](Time%20Intelligence%20Functions/) | Shifts and accumulations over the date table (YTD, PRIORYEAR, …) |
+| [Information Functions](Information%20Functions/) | Inspect the current filter context (HASONEVALUE, ISFILTERED, …) |
+| [Context Functions](Context%20Functions/) | Modify the evaluation context (KEEP, CLEAR, RESET, …) |
+| [Relationship and Hierarchy Functions](Relationship%20and%20Hierarchy%20Functions/) | Cross-table lookups and parent-child paths (RELATED, PATH, …) |
+| [Window Functions](Window%20Functions/) | Sliding windows, offsets, and ranking (WINDOW, RANK, …) |
+| [Iterator Functions](Iterator%20Functions/) | Row-context iteration (ITERATE, THISROW) |
+| [Table Functions](Table%20Functions/) | Intermediate table materialization (QUERY) |
+| [Calculation Group Functions](Calculation%20Group%20Functions/) | Functions used inside calculation-item expressions (SELECTEDMEASURE) |
 
 ## How to test functions
 
@@ -16,38 +34,32 @@ Functions that compute a single value from a column of data.
 
 | Function | Description |
 |----------|-------------|
-| [SUM](SUM.md) | Adds all the values in a column |
-| [COUNT](COUNT.md) | Counts the number of non-null values in a column |
-| [AVG](AVG.md) | Returns the arithmetic mean of all values in a column |
-| [MIN](MIN.md) | Returns the smallest value in a column |
-| [MAX](MAX.md) | Returns the largest value in a column |
-| [DISTINCTCOUNT](DISTINCTCOUNT.md) | Counts the number of distinct (unique) values in a column |
-| [COUNTROWS](COUNTROWS.md) | Counts the total number of rows in a table (including NULLs) |
-| [MEDIAN](MEDIAN.md) | Returns the median (50th percentile) of values |
-| [STDEV](STDEV.md) | Returns the sample standard deviation |
-| [STDEVP](STDEVP.md) | Returns the population standard deviation |
-| [VARIANCE](VARIANCE.md) | Returns the sample variance |
-| [VARIANCEP](VARIANCEP.md) | Returns the population variance |
-| [PERCENTILE](PERCENTILE.md) | Returns the k-th percentile of values |
-| [COUNTIF](COUNTIF.md) | Counts rows where a condition is true |
-| [ANY_VALUE](ANY_VALUE.md) | Returns an arbitrary value from the group |
-| [MODE](MODE.md) | Returns the most frequently occurring value |
-| [LISTAGG](LISTAGG.md) | Concatenates values into a delimited string |
-| [MAX_BY](MAX_BY.md) | Returns the value from the row with the maximum of another column |
-| [MIN_BY](MIN_BY.md) | Returns the value from the row with the minimum of another column |
+| [SUM](Aggregation%20Functions/SUM.md) | Adds all the values in a column |
+| [COUNT](Aggregation%20Functions/COUNT.md) | Counts the number of non-null values in a column |
+| [AVG](Aggregation%20Functions/AVG.md) | Returns the arithmetic mean of all values in a column |
+| [MIN](Aggregation%20Functions/MIN.md) | Returns the smallest value in a column |
+| [MAX](Aggregation%20Functions/MAX.md) | Returns the largest value in a column |
+| [DISTINCTCOUNT](Aggregation%20Functions/DISTINCTCOUNT.md) | Counts the number of distinct (unique) values in a column |
+| [COUNTROWS](Aggregation%20Functions/COUNTROWS.md) | Counts the total number of rows in a table (including NULLs) |
+| [COUNTIF](Aggregation%20Functions/COUNTIF.md) | Counts rows where a condition is true |
+| [ANY_VALUE](Aggregation%20Functions/ANY_VALUE.md) | Returns an arbitrary value from the group |
+| [LISTAGG](Aggregation%20Functions/LISTAGG.md) | Concatenates values into a delimited string |
+| [MAX_BY](Aggregation%20Functions/MAX_BY.md) | Returns the value from the row with the maximum of another column |
+| [MIN_BY](Aggregation%20Functions/MIN_BY.md) | Returns the value from the row with the minimum of another column |
 
-## Information Functions
+## Statistical Functions
 
-Functions that inspect the current filter context.
+Statistical measures computed over a column of data.
 
 | Function | Description |
 |----------|-------------|
-| [HASONEVALUE](HASONEVALUE.md) | Tests whether a column has exactly one distinct value in the current filter context |
-| [SELECTEDVALUE](SELECTEDVALUE.md) | Returns the single value of a column if there is exactly one, otherwise returns an alternate |
-| [FIRST](FIRST.md) | Returns the first value of a column ordered by another expression |
-| [ISINSCOPE](ISINSCOPE.md) | Returns TRUE if a column is in the current GROUP BY context |
-| [ISFILTERED](ISFILTERED.md) | Returns TRUE when a column carries a direct filter (axis or slicer) in the current context |
-| [SELECTEDMEASURE](SELECTEDMEASURE.md) | Placeholder for the measure a calculation item is applied to |
+| [MEDIAN](Statistical%20Functions/MEDIAN.md) | Returns the median (50th percentile) of values |
+| [PERCENTILE](Statistical%20Functions/PERCENTILE.md) | Returns the k-th percentile of values |
+| [STDEV](Statistical%20Functions/STDEV.md) | Returns the sample standard deviation |
+| [STDEVP](Statistical%20Functions/STDEVP.md) | Returns the population standard deviation |
+| [VARIANCE](Statistical%20Functions/VARIANCE.md) | Returns the sample variance |
+| [VARIANCEP](Statistical%20Functions/VARIANCEP.md) | Returns the population variance |
+| [MODE](Statistical%20Functions/MODE.md) | Returns the most frequently occurring value |
 
 ## Logical Functions
 
@@ -55,12 +67,12 @@ Functions that return boolean (TRUE/FALSE) values. Available both as functions a
 
 | Function | Description |
 |----------|-------------|
-| [AND](AND.md) | Returns TRUE if both arguments are TRUE. Also available as operator: `a AND b` |
-| [OR](OR.md) | Returns TRUE if either argument is TRUE. Also available as operator: `a OR b` |
-| [NOT](NOT.md) | Negates a logical value. Also available as operator: `NOT a` |
-| [TRUE](TRUE.md) | Returns the boolean value TRUE |
-| [FALSE](FALSE.md) | Returns the boolean value FALSE |
-| [XOR](XOR.md) | Returns TRUE when exactly one argument is TRUE (exclusive OR, Calcula extension) |
+| [AND](Logical%20Functions/AND.md) | Returns TRUE if both arguments are TRUE. Also available as operator: `a AND b` |
+| [OR](Logical%20Functions/OR.md) | Returns TRUE if either argument is TRUE. Also available as operator: `a OR b` |
+| [NOT](Logical%20Functions/NOT.md) | Negates a logical value. Also available as operator: `NOT a` |
+| [TRUE](Logical%20Functions/TRUE.md) | Returns the boolean value TRUE |
+| [FALSE](Logical%20Functions/FALSE.md) | Returns the boolean value FALSE |
+| [XOR](Logical%20Functions/XOR.md) | Returns TRUE when exactly one argument is TRUE (exclusive OR, Calcula extension) |
 
 ## Conditional Functions
 
@@ -68,16 +80,16 @@ Functions for branching logic and handling NULL values.
 
 | Function | Description |
 |----------|-------------|
-| [IF](IF.md) | Evaluates a condition and returns one of two values |
-| [SWITCH](SWITCH.md) | Evaluates an expression against a list of values and returns the matching result |
-| [DIVIDE](DIVIDE.md) | Performs safe division, returning an alternate value on division by zero |
-| [BLANK](BLANK.md) | Returns a blank (NULL) value |
-| [ISBLANK](ISBLANK.md) | Tests whether an expression is BLANK (NULL) |
-| [COALESCE](COALESCE.md) | Returns the first non-BLANK value from a list of expressions |
-| [IFERROR](IFERROR.md) | Returns an alternate value when an expression evaluates to NULL/error |
-| [GREATEST](GREATEST.md) | Returns the largest value from a list of expressions |
-| [LEAST](LEAST.md) | Returns the smallest value from a list of expressions |
-| [NULLIF](NULLIF.md) | Returns NULL if two values are equal, otherwise returns the first value |
+| [IF](Conditional%20Functions/IF.md) | Evaluates a condition and returns one of two values |
+| [SWITCH](Conditional%20Functions/SWITCH.md) | Evaluates an expression against a list of values and returns the matching result |
+| [DIVIDE](Conditional%20Functions/DIVIDE.md) | Performs safe division, returning an alternate value on division by zero |
+| [BLANK](Conditional%20Functions/BLANK.md) | Returns a blank (NULL) value |
+| [ISBLANK](Conditional%20Functions/ISBLANK.md) | Tests whether an expression is BLANK (NULL) |
+| [COALESCE](Conditional%20Functions/COALESCE.md) | Returns the first non-BLANK value from a list of expressions |
+| [IFERROR](Conditional%20Functions/IFERROR.md) | Returns an alternate value when an expression evaluates to NULL/error |
+| [GREATEST](Conditional%20Functions/GREATEST.md) | Returns the largest value from a list of expressions |
+| [LEAST](Conditional%20Functions/LEAST.md) | Returns the smallest value from a list of expressions |
+| [NULLIF](Conditional%20Functions/NULLIF.md) | Returns NULL if two values are equal, otherwise returns the first value |
 
 ## Math Functions
 
@@ -85,48 +97,48 @@ Scalar math functions that operate on numeric values.
 
 | Function | Description |
 |----------|-------------|
-| [ABS](ABS.md) | Returns the absolute value of a number |
-| [ROUND](ROUND.md) | Rounds to a specified number of decimal places |
-| [ROUNDUP](ROUNDUP.md) | Rounds away from zero |
-| [ROUNDDOWN](ROUNDDOWN.md) | Rounds toward zero |
-| [INT](INT.md) | Rounds down to the nearest integer |
-| [TRUNC](TRUNC.md) | Truncates toward zero to specified decimal places |
-| [CEILING](CEILING.md) | Rounds up to the nearest multiple of significance |
-| [FLOOR](FLOOR.md) | Rounds down to the nearest multiple of significance |
-| [MOD](MOD.md) | Returns the remainder after division |
-| [POWER](POWER.md) | Raises a number to a power |
-| [SQRT](SQRT.md) | Returns the square root of a number |
-| [LN](LN.md) | Returns the natural logarithm (base e) |
-| [LOG10](LOG10.md) | Returns the base-10 logarithm |
-| [SIGN](SIGN.md) | Returns the sign of a number (-1, 0, or 1) |
-| [EXP](EXP.md) | Returns e raised to the power of a number |
-| [LOG](LOG.md) | Returns the logarithm of a number to a specified base |
-| [PI](PI.md) | Returns the value of Pi (3.14159...) |
+| [ABS](Math%20Functions/ABS.md) | Returns the absolute value of a number |
+| [ROUND](Math%20Functions/ROUND.md) | Rounds to a specified number of decimal places |
+| [ROUNDUP](Math%20Functions/ROUNDUP.md) | Rounds away from zero |
+| [ROUNDDOWN](Math%20Functions/ROUNDDOWN.md) | Rounds toward zero |
+| [INT](Math%20Functions/INT.md) | Rounds down to the nearest integer |
+| [TRUNC](Math%20Functions/TRUNC.md) | Truncates toward zero to specified decimal places |
+| [CEILING](Math%20Functions/CEILING.md) | Rounds up to the nearest multiple of significance |
+| [FLOOR](Math%20Functions/FLOOR.md) | Rounds down to the nearest multiple of significance |
+| [MOD](Math%20Functions/MOD.md) | Returns the remainder after division |
+| [POWER](Math%20Functions/POWER.md) | Raises a number to a power |
+| [SQRT](Math%20Functions/SQRT.md) | Returns the square root of a number |
+| [LN](Math%20Functions/LN.md) | Returns the natural logarithm (base e) |
+| [LOG10](Math%20Functions/LOG10.md) | Returns the base-10 logarithm |
+| [SIGN](Math%20Functions/SIGN.md) | Returns the sign of a number (-1, 0, or 1) |
+| [EXP](Math%20Functions/EXP.md) | Returns e raised to the power of a number |
+| [LOG](Math%20Functions/LOG.md) | Returns the logarithm of a number to a specified base |
+| [PI](Math%20Functions/PI.md) | Returns the value of Pi (3.14159...) |
 
-## Date/Time Functions
+## Date and Time Functions
 
 Functions that extract parts from dates or perform date arithmetic.
 
 | Function | Description |
 |----------|-------------|
-| [YEAR](YEAR.md) | Extracts the year from a date |
-| [MONTH](MONTH.md) | Extracts the month (1-12) from a date |
-| [DAY](DAY.md) | Extracts the day (1-31) from a date |
-| [QUARTER](QUARTER.md) | Extracts the quarter (1-4) from a date |
-| [DATE](DATE.md) | Constructs a date from year, month, and day parts |
-| [DATEDIFF](DATEDIFF.md) | Returns the difference between two dates in the specified interval |
-| [TODAY](TODAY.md) | Returns the current date |
-| [NOW](NOW.md) | Returns the current date and time |
-| [DATEADD](DATEADD.md) | Adds a specified number of intervals to a date |
-| [DATE_TRUNC](DATE_TRUNC.md) | Truncates a date to the start of a period |
-| [LAST_DAY](LAST_DAY.md) | Returns the last day of the period containing a date |
-| [EOMONTH](EOMONTH.md) | Returns the last day of the month, with optional offset |
-| [DAYOFWEEK](DAYOFWEEK.md) | Returns the day of the week as a number (0-6) |
-| [DAYOFYEAR](DAYOFYEAR.md) | Returns the day of the year (1-366) |
-| [WEEKNUM](WEEKNUM.md) | Returns the ISO week number (1-53) |
-| [DAYNAME](DAYNAME.md) | Returns the name of the day of the week |
-| [MONTHNAME](MONTHNAME.md) | Returns the name of the month |
-| [MONTHS_BETWEEN](MONTHS_BETWEEN.md) | Returns the number of months between two dates |
+| [YEAR](Date%20and%20Time%20Functions/YEAR.md) | Extracts the year from a date |
+| [MONTH](Date%20and%20Time%20Functions/MONTH.md) | Extracts the month (1-12) from a date |
+| [DAY](Date%20and%20Time%20Functions/DAY.md) | Extracts the day (1-31) from a date |
+| [QUARTER](Date%20and%20Time%20Functions/QUARTER.md) | Extracts the quarter (1-4) from a date |
+| [DATE](Date%20and%20Time%20Functions/DATE.md) | Constructs a date from year, month, and day parts |
+| [DATEDIFF](Date%20and%20Time%20Functions/DATEDIFF.md) | Returns the difference between two dates in the specified interval |
+| [TODAY](Date%20and%20Time%20Functions/TODAY.md) | Returns the current date |
+| [NOW](Date%20and%20Time%20Functions/NOW.md) | Returns the current date and time |
+| [DATEADD](Date%20and%20Time%20Functions/DATEADD.md) | Adds a specified number of intervals to a date |
+| [DATE_TRUNC](Date%20and%20Time%20Functions/DATE_TRUNC.md) | Truncates a date to the start of a period |
+| [LAST_DAY](Date%20and%20Time%20Functions/LAST_DAY.md) | Returns the last day of the period containing a date |
+| [EOMONTH](Date%20and%20Time%20Functions/EOMONTH.md) | Returns the last day of the month, with optional offset |
+| [DAYOFWEEK](Date%20and%20Time%20Functions/DAYOFWEEK.md) | Returns the day of the week as a number (0-6) |
+| [DAYOFYEAR](Date%20and%20Time%20Functions/DAYOFYEAR.md) | Returns the day of the year (1-366) |
+| [WEEKNUM](Date%20and%20Time%20Functions/WEEKNUM.md) | Returns the ISO week number (1-53) |
+| [DAYNAME](Date%20and%20Time%20Functions/DAYNAME.md) | Returns the name of the day of the week |
+| [MONTHNAME](Date%20and%20Time%20Functions/MONTHNAME.md) | Returns the name of the month |
+| [MONTHS_BETWEEN](Date%20and%20Time%20Functions/MONTHS_BETWEEN.md) | Returns the number of months between two dates |
 
 ## Text Functions
 
@@ -134,36 +146,36 @@ Functions that manipulate text strings.
 
 | Function | Description |
 |----------|-------------|
-| [CONCATENATE](CONCATENATE.md) | Joins text strings (accepts arbitrary number of arguments) |
-| [COMBINEVALUES](COMBINEVALUES.md) | Joins text strings with a delimiter |
-| [EXACT](EXACT.md) | Compares two text strings (case-sensitive) |
-| [FIND](FIND.md) | Returns the position of text within text (case-sensitive) |
-| [FIXED](FIXED.md) | Rounds a number and returns it as text |
-| [LEFT](LEFT.md) | Returns characters from the start of a text string |
-| [LEN](LEN.md) | Returns the number of characters in a text string |
-| [LOWER](LOWER.md) | Converts text to lowercase |
-| [MID](MID.md) | Returns characters from the middle of a text string |
-| [REPLACE](REPLACE.md) | Replaces part of a text string by position |
-| [REPT](REPT.md) | Repeats text a given number of times |
-| [RIGHT](RIGHT.md) | Returns characters from the end of a text string |
-| [SEARCH](SEARCH.md) | Returns the position of text within text (case-insensitive) |
-| [SUBSTITUTE](SUBSTITUTE.md) | Replaces occurrences of text with new text |
-| [TRIM](TRIM.md) | Removes leading and trailing spaces |
-| [UNICHAR](UNICHAR.md) | Returns the Unicode character for a code point |
-| [UNICODE](UNICODE.md) | Returns the Unicode code point of the first character |
-| [UPPER](UPPER.md) | Converts text to uppercase |
-| [VALUE](VALUE.md) | Converts a text string to a number |
-| [LTRIM](LTRIM.md) | Removes leading characters (Calcula extension) |
-| [RTRIM](RTRIM.md) | Removes trailing characters (Calcula extension) |
-| [LPAD](LPAD.md) | Left-pads a text string to a specified length (Calcula extension) |
-| [RPAD](RPAD.md) | Right-pads a text string to a specified length (Calcula extension) |
-| [REVERSE](REVERSE.md) | Reverses the order of characters in a text string (Calcula extension) |
-| [SPLIT](SPLIT.md) | Splits text by a delimiter and returns a specified part (Calcula extension) |
-| [FORMAT](FORMAT.md) | Formats a value as text using a format pattern |
-| [CONTAINS](CONTAINS.md) | Tests whether text contains a substring (case-insensitive) |
-| [STARTSWITH](STARTSWITH.md) | Tests whether text starts with a prefix |
-| [ENDSWITH](ENDSWITH.md) | Tests whether text ends with a suffix |
-| [INITCAP](INITCAP.md) | Capitalizes the first letter of each word |
+| [CONCATENATE](Text%20Functions/CONCATENATE.md) | Joins text strings (accepts arbitrary number of arguments) |
+| [COMBINEVALUES](Text%20Functions/COMBINEVALUES.md) | Joins text strings with a delimiter |
+| [EXACT](Text%20Functions/EXACT.md) | Compares two text strings (case-sensitive) |
+| [FIND](Text%20Functions/FIND.md) | Returns the position of text within text (case-sensitive) |
+| [FIXED](Text%20Functions/FIXED.md) | Rounds a number and returns it as text |
+| [LEFT](Text%20Functions/LEFT.md) | Returns characters from the start of a text string |
+| [LEN](Text%20Functions/LEN.md) | Returns the number of characters in a text string |
+| [LOWER](Text%20Functions/LOWER.md) | Converts text to lowercase |
+| [MID](Text%20Functions/MID.md) | Returns characters from the middle of a text string |
+| [REPLACE](Text%20Functions/REPLACE.md) | Replaces part of a text string by position |
+| [REPT](Text%20Functions/REPT.md) | Repeats text a given number of times |
+| [RIGHT](Text%20Functions/RIGHT.md) | Returns characters from the end of a text string |
+| [SEARCH](Text%20Functions/SEARCH.md) | Returns the position of text within text (case-insensitive) |
+| [SUBSTITUTE](Text%20Functions/SUBSTITUTE.md) | Replaces occurrences of text with new text |
+| [TRIM](Text%20Functions/TRIM.md) | Removes leading and trailing spaces |
+| [UNICHAR](Text%20Functions/UNICHAR.md) | Returns the Unicode character for a code point |
+| [UNICODE](Text%20Functions/UNICODE.md) | Returns the Unicode code point of the first character |
+| [UPPER](Text%20Functions/UPPER.md) | Converts text to uppercase |
+| [VALUE](Text%20Functions/VALUE.md) | Converts a text string to a number |
+| [LTRIM](Text%20Functions/LTRIM.md) | Removes leading characters (Calcula extension) |
+| [RTRIM](Text%20Functions/RTRIM.md) | Removes trailing characters (Calcula extension) |
+| [LPAD](Text%20Functions/LPAD.md) | Left-pads a text string to a specified length (Calcula extension) |
+| [RPAD](Text%20Functions/RPAD.md) | Right-pads a text string to a specified length (Calcula extension) |
+| [REVERSE](Text%20Functions/REVERSE.md) | Reverses the order of characters in a text string (Calcula extension) |
+| [SPLIT](Text%20Functions/SPLIT.md) | Splits text by a delimiter and returns a specified part (Calcula extension) |
+| [FORMAT](Text%20Functions/FORMAT.md) | Formats a value as text using a format pattern |
+| [CONTAINS](Text%20Functions/CONTAINS.md) | Tests whether text contains a substring (case-insensitive) |
+| [STARTSWITH](Text%20Functions/STARTSWITH.md) | Tests whether text starts with a prefix |
+| [ENDSWITH](Text%20Functions/ENDSWITH.md) | Tests whether text ends with a suffix |
+| [INITCAP](Text%20Functions/INITCAP.md) | Capitalizes the first letter of each word |
 
 ## Time Intelligence Functions
 
@@ -171,29 +183,30 @@ Functions that shift or accumulate a measure over the model's marked date table.
 
 | Function | Description |
 |----------|-------------|
-| [YTD](YTD.md) | Year-to-date running total |
-| [QTD](QTD.md) | Quarter-to-date running total |
-| [MTD](MTD.md) | Month-to-date running total |
-| [WTD](WTD.md) | Week-to-date running total (from Monday of the ISO week) |
-| [PRIORYEAR](PRIORYEAR.md) | Same period, one year earlier |
-| [SAMEPERIODLASTYEAR](SAMEPERIODLASTYEAR.md) | Synonym for PRIORYEAR |
-| [PRIORPERIOD](PRIORPERIOD.md) | Shift back by N years/quarters/months |
-| [PARALLELPERIOD](PARALLELPERIOD.md) | Signed period shift (±N years/quarters/months) |
-| [DATESINPERIOD](DATESINPERIOD.md) | Trailing window of N periods ending at the as-of date |
-| [DATESBETWEEN](DATESBETWEEN.md) | Absolute, inclusive date range on the date table |
-| [CLOSINGBALANCE](CLOSINGBALANCE.md) | Semi-additive balance at the last date in the period |
-| [OPENINGBALANCE](OPENINGBALANCE.md) | Semi-additive balance at the first date in the period |
+| [YTD](Time%20Intelligence%20Functions/YTD.md) | Year-to-date running total |
+| [QTD](Time%20Intelligence%20Functions/QTD.md) | Quarter-to-date running total |
+| [MTD](Time%20Intelligence%20Functions/MTD.md) | Month-to-date running total |
+| [WTD](Time%20Intelligence%20Functions/WTD.md) | Week-to-date running total (from Monday of the ISO week) |
+| [PRIORYEAR](Time%20Intelligence%20Functions/PRIORYEAR.md) | Same period, one year earlier |
+| [SAMEPERIODLASTYEAR](Time%20Intelligence%20Functions/SAMEPERIODLASTYEAR.md) | Synonym for PRIORYEAR |
+| [PRIORPERIOD](Time%20Intelligence%20Functions/PRIORPERIOD.md) | Shift back by N years/quarters/months |
+| [PARALLELPERIOD](Time%20Intelligence%20Functions/PARALLELPERIOD.md) | Signed period shift (±N years/quarters/months) |
+| [DATESINPERIOD](Time%20Intelligence%20Functions/DATESINPERIOD.md) | Trailing window of N periods ending at the as-of date |
+| [DATESBETWEEN](Time%20Intelligence%20Functions/DATESBETWEEN.md) | Absolute, inclusive date range on the date table |
+| [CLOSINGBALANCE](Time%20Intelligence%20Functions/CLOSINGBALANCE.md) | Semi-additive balance at the last date in the period |
+| [OPENINGBALANCE](Time%20Intelligence%20Functions/OPENINGBALANCE.md) | Semi-additive balance at the first date in the period |
 
-## Relationship & Hierarchy Functions
+## Information Functions
+
+Functions that inspect the current filter context.
 
 | Function | Description |
 |----------|-------------|
-| [RELATED](RELATED.md) | Fetches a value from the ONE side of a many-to-one relationship for the current row |
-| [LOOKUPVALUE](LOOKUPVALUE.md) | Returns a value from another table's row matching given search columns (no relationship needed) |
-| [PATH](PATH.md) | Builds a parent-child path string (root→row) as a calculated column |
-| [PATHITEM](PATHITEM.md) | Returns the item at a 1-based position in a path string |
-| [PATHLENGTH](PATHLENGTH.md) | Returns the depth (number of levels) of a path string |
-| [THISROW](THISROW.md) | The anchor row's column value inside a nested ITERATE (Calcula's answer to DAX EARLIER) |
+| [HASONEVALUE](Information%20Functions/HASONEVALUE.md) | Tests whether a column has exactly one distinct value in the current filter context |
+| [SELECTEDVALUE](Information%20Functions/SELECTEDVALUE.md) | Returns the single value of a column if there is exactly one, otherwise returns an alternate |
+| [FIRST](Information%20Functions/FIRST.md) | Returns the first value of a column ordered by another expression |
+| [ISINSCOPE](Information%20Functions/ISINSCOPE.md) | Returns TRUE if a column is in the current GROUP BY context |
+| [ISFILTERED](Information%20Functions/ISFILTERED.md) | Returns TRUE when a column carries a direct filter (axis or slicer) in the current context |
 
 ## Context Functions
 
@@ -201,14 +214,14 @@ Functions that modify the evaluation context — the set of filters applied when
 
 | Function | Description |
 |----------|-------------|
-| [KEEP](KEEP.md) | Adds filter conditions to the evaluation context |
-| [CLEAR](CLEAR.md) | Removes filters (axis + slicers) on a specific table or column |
-| [RESET](RESET.md) | Removes all filters from the evaluation context |
-| [CLEAREXCEPT](CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
-| [ALLSELECTED](ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the inner-clear family) |
-| [TREATAS](TREATAS.md) | Applies one column's values as a virtual filter on another, unrelated table |
-| [USERELATIONSHIP](USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
-| [TRAVERSE](TRAVERSE.md) | Forces cross-table filters along an explicit multi-hop relationship path |
+| [KEEP](Context%20Functions/KEEP.md) | Adds filter conditions to the evaluation context |
+| [CLEAR](Context%20Functions/CLEAR.md) | Removes filters (axis + slicers) on a specific table or column |
+| [RESET](Context%20Functions/RESET.md) | Removes all filters from the evaluation context |
+| [CLEAREXCEPT](Context%20Functions/CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
+| [ALLSELECTED](Context%20Functions/ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the inner-clear family) |
+| [TREATAS](Context%20Functions/TREATAS.md) | Applies one column's values as a virtual filter on another, unrelated table |
+| [USERELATIONSHIP](Context%20Functions/USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
+| [TRAVERSE](Context%20Functions/TRAVERSE.md) | Forces cross-table filters along an explicit multi-hop relationship path |
 
 ### Source-Specific Context Functions
 
@@ -216,34 +229,60 @@ These are advanced variants of CLEAR and RESET that target only one filter sourc
 
 | Function | Clears | Keeps |
 |----------|--------|-------|
-| [CLEAR_INNER](CLEAR_INNER.md) | Group-by filters on specified targets | Query-level filters |
-| [CLEAR_OUTER](CLEAR_OUTER.md) | Query-level filters on specified targets | Group-by filters |
-| [RESET_INNER](RESET_INNER.md) | All group-by filters | Query-level filters |
-| [RESET_OUTER](RESET_OUTER.md) | All query-level filters | Group-by filters |
+| [CLEAR_INNER](Context%20Functions/CLEAR_INNER.md) | Group-by filters on specified targets | Query-level filters |
+| [CLEAR_OUTER](Context%20Functions/CLEAR_OUTER.md) | Query-level filters on specified targets | Group-by filters |
+| [RESET_INNER](Context%20Functions/RESET_INNER.md) | All group-by filters | Query-level filters |
+| [RESET_OUTER](Context%20Functions/RESET_OUTER.md) | All query-level filters | Group-by filters |
 
 > **Note on execution (local / in-memory path).** `CLEAR`/`RESET`/`CLEAREXCEPT`/`CLEAR_INNER` re-aggregate over the surviving group-by partition, so percent-of-total and percent-of-parent compute correctly. Three cases **fail closed** with a typed error rather than return a wrong number: (1) clearing a table that also carries a **report slicer** (slicer removal is not yet wired — use `CLEAR_INNER` for axis-only, or remove the slicer); (2) a **non-additive** aggregate under CLEAR (`AVG`, `DISTINCTCOUNT`, `MEDIAN`, …) — only `SUM`/`COUNT`/`COUNTROWS`/`MIN`/`MAX` recombine; (3) **percent-of-parent** combined with totals, lookups, hierarchies, or context columns.
 
+## Relationship and Hierarchy Functions
+
+Functions that fetch values across relationships or navigate parent-child hierarchies.
+
+| Function | Description |
+|----------|-------------|
+| [RELATED](Relationship%20and%20Hierarchy%20Functions/RELATED.md) | Fetches a value from the ONE side of a many-to-one relationship for the current row |
+| [LOOKUPVALUE](Relationship%20and%20Hierarchy%20Functions/LOOKUPVALUE.md) | Returns a value from another table's row matching given search columns (no relationship needed) |
+| [PATH](Relationship%20and%20Hierarchy%20Functions/PATH.md) | Builds a parent-child path string (root→row) as a calculated column |
+| [PATHITEM](Relationship%20and%20Hierarchy%20Functions/PATHITEM.md) | Returns the item at a 1-based position in a path string |
+| [PATHLENGTH](Relationship%20and%20Hierarchy%20Functions/PATHLENGTH.md) | Returns the depth (number of levels) of a path string |
+
+## Window Functions
+
+Functions that compute over a window of rows relative to the current row, using `ORDERBY`/`PARTITIONBY` syntax — sliding aggregates, positional lookups, and ranking.
+
+| Function | Description |
+|----------|-------------|
+| [WINDOW](Window%20Functions/WINDOW.md) | Aggregates a measure over a sliding window of rows (running totals, moving averages) |
+| [OFFSET](Window%20Functions/OFFSET.md) | Returns a measure's value at a relative position from the current row |
+| [INDEX](Window%20Functions/INDEX.md) | Returns a measure's value at an absolute position within a partition |
+| [ROW_NUMBER](Window%20Functions/ROW_NUMBER.md) | Assigns a unique sequential number to each row |
+| [RANK](Window%20Functions/RANK.md) | Assigns a rank with gaps for tied values |
+| [DENSE_RANK](Window%20Functions/DENSE_RANK.md) | Assigns a rank without gaps for tied values |
+
 ## Iterator Functions
 
-| Function | Description |
-|----------|-------------|
-| [ITERATE](ITERATE.md) | Declares row-context iteration over a table for use with any aggregate (Calcula's composable alternative to DAX X-functions) |
-
-## Window Ranking Functions
-
-Functions that assign ordinal values to rows based on ordering and partitioning. These use the same `ORDERBY`/`PARTITIONBY` syntax as WINDOW, OFFSET, and INDEX.
+Row-context iteration — Calcula's composable alternative to DAX X-functions.
 
 | Function | Description |
 |----------|-------------|
-| [ROW_NUMBER](ROW_NUMBER.md) | Assigns a unique sequential number to each row |
-| [RANK](RANK.md) | Assigns a rank with gaps for tied values |
-| [DENSE_RANK](DENSE_RANK.md) | Assigns a rank without gaps for tied values |
+| [ITERATE](Iterator%20Functions/ITERATE.md) | Declares row-context iteration over a table for use with any aggregate |
+| [THISROW](Iterator%20Functions/THISROW.md) | The anchor row's column value inside a nested ITERATE (Calcula's answer to DAX EARLIER) |
 
-## Two-Stage Aggregation
+## Table Functions
 
 | Function | Description |
 |----------|-------------|
-| [QUERY](QUERY.md) | Materializes an intermediate grouped table for two-stage aggregation (aggregate of aggregates) |
+| [QUERY](Table%20Functions/QUERY.md) | Materializes an intermediate grouped table for two-stage aggregation (aggregate of aggregates) |
+
+## Calculation Group Functions
+
+Functions that are only meaningful inside **calculation-item** expressions of a calculation group.
+
+| Function | Description |
+|----------|-------------|
+| [SELECTEDMEASURE](Calculation%20Group%20Functions/SELECTEDMEASURE.md) | Placeholder for the measure a calculation item is applied to |
 
 ## Table Variables
 
@@ -260,7 +299,7 @@ Variables are composable — a variable can reference another variable as its so
 DEFINE Bike Count = DISTINCTCOUNT(bikes[productid])
 ```
 
-See [KEEP](KEEP.md) for the filter syntax and the [expression language reference](../expression-language.md) for details.
+See [KEEP](Context%20Functions/KEEP.md) for the filter syntax and the [expression language reference](../expression-language.md) for details.
 
 ## Named Contexts
 

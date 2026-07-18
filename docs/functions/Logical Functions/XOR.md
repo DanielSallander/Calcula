@@ -60,4 +60,4 @@ DEFINE Complex = IF(
 - [AND](AND.md) — returns TRUE if both arguments are TRUE
 - [OR](OR.md) — returns TRUE if either argument is TRUE
 - [NOT](NOT.md) — negates a logical value
-- [IF](IF.md) — conditional branching
+- [IF](../Conditional%20Functions/IF.md) — conditional branching

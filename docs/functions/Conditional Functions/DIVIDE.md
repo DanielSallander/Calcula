@@ -25,7 +25,7 @@ A decimal number — the result of the division, or the alternate value if the d
 - DIVIDE is the recommended way to perform division in measures. It avoids division-by-zero errors that would otherwise cause the query to fail.
 - The alternate value is only used when the denominator is **exactly zero**. NULL denominators are not treated as zero.
 - DIVIDE always produces a floating-point result, even when both numerator and denominator are integers. This differs from the `/` operator, which preserves integer types.
-- DIVIDE can be nested inside other functions like [ROUND](ROUND.md), [ABS](ABS.md), and [COALESCE](COALESCE.md).
+- DIVIDE can be nested inside other functions like [ROUND](../Math%20Functions/ROUND.md), [ABS](../Math%20Functions/ABS.md), and [COALESCE](COALESCE.md).
 - When either the numerator or denominator contains aggregation functions, DIVIDE forces local computation (not pushed down to data source).
 
 ## Example 1: Safe average
@@ -79,6 +79,6 @@ DEFINE RoundedAvg = ROUND(DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[sa
 ## See also
 
 - [COALESCE](COALESCE.md) — provide fallback for NULL values
-- [ROUND](ROUND.md) — round the result of a division
-- [COUNTROWS](COUNTROWS.md) — count all rows (useful as denominator)
+- [ROUND](../Math%20Functions/ROUND.md) — round the result of a division
+- [COUNTROWS](../Aggregation%20Functions/COUNTROWS.md) — count all rows (useful as denominator)
 - [BLANK](BLANK.md) — the default alternate value

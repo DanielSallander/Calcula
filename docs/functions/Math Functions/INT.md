@@ -35,7 +35,7 @@ DEFINE IntAvg = INT(
 
 ## Example 2: INT for bucketing
 
-Use INT to create numeric buckets for [SWITCH](SWITCH.md).
+Use INT to create numeric buckets for [SWITCH](../Conditional%20Functions/SWITCH.md).
 
 ```
 DEFINE Tier = SWITCH(

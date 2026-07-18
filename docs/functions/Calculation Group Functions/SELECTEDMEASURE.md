@@ -34,5 +34,5 @@ Applying this group to `Revenue` and `Orders` yields columns `Revenue [Current]`
 
 ## See also
 
-- [PRIORYEAR](PRIORYEAR.md), [YTD](YTD.md) — common transforms used in calculation items
+- [PRIORYEAR](../Time%20Intelligence%20Functions/PRIORYEAR.md), [YTD](../Time%20Intelligence%20Functions/YTD.md) — common transforms used in calculation items
 - The expression-language reference for the full calculation-group definition syntax

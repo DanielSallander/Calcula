@@ -14,7 +14,7 @@ MODE(table[column], context_op1, context_op2, ...)
 | Parameter | Definition |
 |-----------|------------|
 | `table[column]` | The column from which to find the most frequent value. Can be any data type. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -72,6 +72,6 @@ QUERY: Peak Month BY dim_date[calendaryear]
 
 ## See also
 
-- [AVG](AVG.md) -- returns the arithmetic mean
+- [AVG](../Aggregation%20Functions/AVG.md) -- returns the arithmetic mean
 - [MEDIAN](MEDIAN.md) -- returns the middle value
-- [ANY_VALUE](ANY_VALUE.md) -- returns an arbitrary value from the group
+- [ANY_VALUE](../Aggregation%20Functions/ANY_VALUE.md) -- returns an arbitrary value from the group

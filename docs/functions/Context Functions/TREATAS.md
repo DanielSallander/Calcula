@@ -40,4 +40,4 @@ Only sales whose customer city appears in `selection[city]` are summed — no re
 ## See also
 
 - [KEEP](KEEP.md)
-- [LOOKUPVALUE](LOOKUPVALUE.md)
+- [LOOKUPVALUE](../Relationship%20and%20Hierarchy%20Functions/LOOKUPVALUE.md)

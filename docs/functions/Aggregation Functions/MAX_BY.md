@@ -15,7 +15,7 @@ MAX_BY(table[value_column], table[sort_column], context_op1, context_op2, ...)
 |-----------|------------|
 | `table[value_column]` | The column whose value to return. Can be any data type. |
 | `table[sort_column]` | The column used to determine which row to pick. The row with the maximum value in this column is selected. |
-| `context_op` | Optional. One or more context operations ([KEEP](KEEP.md), [CLEAR](CLEAR.md), [RESET](RESET.md)) that modify the evaluation context. |
+| `context_op` | Optional. One or more context operations ([KEEP](../Context%20Functions/KEEP.md), [CLEAR](../Context%20Functions/CLEAR.md), [RESET](../Context%20Functions/RESET.md)) that modify the evaluation context. |
 
 ## Return value
 
@@ -74,4 +74,4 @@ Returns the total revenue for the month that had the most order lines.
 
 - [MIN_BY](MIN_BY.md) -- returns the value from the row with the minimum sort value
 - [MAX](MAX.md) -- returns the largest value in a column
-- [FIRST](FIRST.md) -- returns the first value by a specified ordering
+- [FIRST](../Information%20Functions/FIRST.md) -- returns the first value by a specified ordering

@@ -27,7 +27,7 @@ The smallest value among all arguments. If any argument is NULL (BLANK), returns
 - LEAST generates the SQL `LEAST(a, b, ...)` function.
 - Returns BLANK if any argument is BLANK. To handle NULLs, wrap arguments with [COALESCE](COALESCE.md) before passing them to LEAST.
 - LEAST always forces local computation when any argument contains aggregation functions.
-- LEAST differs from [MIN](MIN.md): MIN aggregates across rows of a single column, while LEAST compares values across multiple expressions within the same row or result.
+- LEAST differs from [MIN](../Aggregation%20Functions/MIN.md): MIN aggregates across rows of a single column, while LEAST compares values across multiple expressions within the same row or result.
 
 ## Example 1: Cap a value at a maximum
 
@@ -59,5 +59,5 @@ DEFINE ConservativeRevenue = LEAST(
 ## See also
 
 - [GREATEST](GREATEST.md) -- returns the largest value from a list of expressions
-- [MIN](MIN.md) -- returns the minimum value across rows of a column
+- [MIN](../Aggregation%20Functions/MIN.md) -- returns the minimum value across rows of a column
 - [IF](IF.md) -- conditional branching

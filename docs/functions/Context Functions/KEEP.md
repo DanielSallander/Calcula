@@ -190,4 +190,4 @@ The engine generates a SQL `WHERE ... IN (SELECT ...)` subquery to filter the fa
 
 - [CLEAR](CLEAR.md) — remove specific filters from the evaluation context
 - [RESET](RESET.md) — remove all filters from the evaluation context
-- [SUM](SUM.md), [COUNT](COUNT.md), [AVG](AVG.md) — aggregation functions that accept KEEP
+- [SUM](../Aggregation%20Functions/SUM.md), [COUNT](../Aggregation%20Functions/COUNT.md), [AVG](../Aggregation%20Functions/AVG.md) — aggregation functions that accept KEEP

@@ -27,7 +27,7 @@ The largest value among all arguments. If any argument is NULL (BLANK), returns 
 - GREATEST generates the SQL `GREATEST(a, b, ...)` function.
 - Returns BLANK if any argument is BLANK. To handle NULLs, wrap arguments with [COALESCE](COALESCE.md) before passing them to GREATEST.
 - GREATEST always forces local computation when any argument contains aggregation functions.
-- GREATEST differs from [MAX](MAX.md): MAX aggregates across rows of a single column, while GREATEST compares values across multiple expressions within the same row or result.
+- GREATEST differs from [MAX](../Aggregation%20Functions/MAX.md): MAX aggregates across rows of a single column, while GREATEST compares values across multiple expressions within the same row or result.
 
 ## Example 1: Floor a value at zero
 
@@ -62,5 +62,5 @@ DEFINE BestResult = GREATEST(
 ## See also
 
 - [LEAST](LEAST.md) -- returns the smallest value from a list of expressions
-- [MAX](MAX.md) -- returns the maximum value across rows of a column
+- [MAX](../Aggregation%20Functions/MAX.md) -- returns the maximum value across rows of a column
 - [IF](IF.md) -- conditional branching

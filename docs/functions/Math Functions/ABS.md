@@ -21,7 +21,7 @@ A non-negative number — the absolute value of the expression.
 ## Remarks
 
 - ABS removes the sign from a number: `ABS(-5)` returns `5`, `ABS(5)` returns `5`.
-- ABS can wrap any numeric expression including aggregations and [DIVIDE](DIVIDE.md).
+- ABS can wrap any numeric expression including aggregations and [DIVIDE](../Conditional%20Functions/DIVIDE.md).
 - ABS always forces local computation when the argument contains aggregation functions.
 
 ## Example 1: Absolute difference

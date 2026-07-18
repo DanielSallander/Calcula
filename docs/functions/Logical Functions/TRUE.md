@@ -54,5 +54,5 @@ DEFINE Flag = SWITCH(TRUE,
 ## See also
 
 - [FALSE](FALSE.md) — returns the boolean value FALSE
-- [IF](IF.md) — conditional branching
+- [IF](../Conditional%20Functions/IF.md) — conditional branching
 - [AND](AND.md), [OR](OR.md), [NOT](NOT.md) — logical operators

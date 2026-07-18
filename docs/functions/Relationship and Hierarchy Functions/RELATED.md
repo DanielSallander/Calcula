@@ -38,5 +38,5 @@ Grouping by this column joins `Invoice -> Customer` along the active relationshi
 ## See also
 
 - [LOOKUPVALUE](LOOKUPVALUE.md) — relationship-less keyed lookup
-- [KEEP](KEEP.md) — filter-context navigation in measures
-- [ISFILTERED](ISFILTERED.md)
+- [KEEP](../Context%20Functions/KEEP.md) — filter-context navigation in measures
+- [ISFILTERED](../Information%20Functions/ISFILTERED.md)

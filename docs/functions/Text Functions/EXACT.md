@@ -24,7 +24,7 @@ A boolean value: TRUE if the two strings are identical (case-sensitive), FALSE o
 - Generates a SQL `(text1 = text2)` expression internally.
 - The comparison is case-sensitive. `EXACT("Apple", "apple")` returns FALSE.
 - If either argument is NULL, the result is NULL (standard SQL NULL propagation).
-- Use EXACT inside an [IF](IF.md) expression to branch on string equality.
+- Use EXACT inside an [IF](../Conditional%20Functions/IF.md) expression to branch on string equality.
 - For case-insensitive comparison, use [LOWER](LOWER.md) or [UPPER](UPPER.md) on both arguments before comparing.
 
 ## Example 1: Check for exact match
@@ -45,7 +45,7 @@ DEFINE SameCountry = IF(EXACT(fact_sales[shipcountry], fact_sales[billcountry]),
 
 ## See also
 
-- [IF](IF.md) -- conditional branching
+- [IF](../Conditional%20Functions/IF.md) -- conditional branching
 - [LOWER](LOWER.md) -- convert text to lowercase for case-insensitive comparison
 - [UPPER](UPPER.md) -- convert text to uppercase
 - [FIND](FIND.md) -- case-sensitive search within text

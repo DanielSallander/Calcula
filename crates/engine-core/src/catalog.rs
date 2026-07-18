@@ -1,4 +1,4 @@
-//! Function catalog generated from `docs/functions/*.md` at build time.
+//! Function catalog generated from `docs/functions/**/*.md` at build time.
 //!
 //! Provides metadata (name, description, signature) for every expression
 //! language function, suitable for driving IDE features like autocomplete,
