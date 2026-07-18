@@ -2007,6 +2007,23 @@ pub fn get_pivot_field_unique_values(
 
     let field_name = field.name.clone();
 
+    // A calculation-group field's dropdown offers the group's DECLARED items
+    // (declaration order, from metadata): the cache column may carry only the
+    // single applied item or the no-item sentinel, so cache uniques would be
+    // wrong (canonical lock order pivot_tables -> bi_metadata).
+    {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        if let Some(meta) = bi_meta.get(&pivot_id) {
+            if let Some(g) = meta.calculation_groups.iter().find(|g| g.name == field_name) {
+                return Ok(FieldUniqueValuesResponse {
+                    field_index,
+                    field_name,
+                    unique_values: g.items.iter().map(|i| i.name.clone()).collect(),
+                });
+            }
+        }
+    }
+
     // Collect unique values as strings
     // Clone sorted_ids to end the mutable borrow before calling get_value
     let sorted_ids = field.sorted_ids().to_vec();
@@ -2990,11 +3007,13 @@ pub fn set_pivot_number_format(
 
 /// Applies a filter to a pivot field.
 #[tauri::command]
-pub fn apply_pivot_filter(
-    state: State<AppState>,
+pub async fn apply_pivot_filter(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     request: ApplyPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3004,105 +3023,157 @@ pub fn apply_pivot_filter(
         request.field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get_mut(&request.pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+    // All lock-holding work happens in this block so no guard can live across
+    // the await below (the Tauri command future must be Send).
+    // `None` = the changed field is a calculation group and needs a BI
+    // re-query; `Some(response)` = handled locally.
+    let local_response: Option<PivotViewResponse> = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    // Find the field in row, column, or filter fields and update hidden_items
-    let mut found = false;
-
-    // Apply manual filter as hidden items
-    if let Some(ref manual) = request.filters.manual_filter {
-        // Get all unique values for this field
-        let all_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(request.field_index) {
-            let sorted_ids = field_cache.sorted_ids().to_vec();
-            sorted_ids.iter()
-                .filter_map(|&id| {
-                    if id == VALUE_ID_EMPTY {
-                        return None;
-                    }
-                    field_cache.get_value(id).map(cache_value_to_string)
+        // A calculation-group field (BI pivots): its item selection decides
+        // whether an item is APPLIED at all (PBI/AS semantics: one visible
+        // item applies it; zero/many apply none), so a selection change needs
+        // a BI re-query — and its "all values" list comes from the group's
+        // declared items, not cache uniques (canonical lock order
+        // pivot_tables -> bi_metadata).
+        let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
+        let calc_group_items: Option<Vec<String>> = {
+            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            bi_meta.get(&request.pivot_id).and_then(|meta| {
+                field_name.as_deref().and_then(|n| {
+                    meta.calculation_groups
+                        .iter()
+                        .find(|g| g.name == n)
+                        .map(|g| g.items.iter().map(|i| i.name.clone()).collect())
                 })
-                .collect()
-        } else {
-            Vec::new()
+            })
         };
 
-        // Hidden items = all items - selected items
-        let hidden_items: Vec<String> = all_values.iter()
-            .filter(|v| !manual.selected_items.contains(v))
-            .cloned()
-            .collect();
+        // Find the field in row, column, or filter fields and update hidden_items
+        let mut found = false;
 
-        // Update row fields
-        for field in &mut definition.row_fields {
-            if field.source_index == request.field_index {
-                field.hidden_items = hidden_items.clone();
-                found = true;
-            }
-        }
-
-        // Update column fields
-        for field in &mut definition.column_fields {
-            if field.source_index == request.field_index {
-                field.hidden_items = hidden_items.clone();
-                found = true;
-            }
-        }
-
-        // Update filter fields
-        for filter in &mut definition.filter_fields {
-            if filter.field.source_index == request.field_index {
-                filter.field.hidden_items = hidden_items.clone();
-                found = true;
-            }
-        }
-
-        if !found {
-            // Field not in any zone — add as slicer filter (external, no UI).
-            // This filters data without adding a visible filter dropdown row.
-            log_debug!("PIVOT", "Field {} not in any zone, adding as slicer filter", request.field_index);
-
-            // Check if a slicer filter for this field already exists
-            if let Some(sf) = definition.slicer_filters.iter_mut()
-                .find(|sf| sf.source_index == request.field_index)
-            {
-                sf.hidden_items = hidden_items;
+        // Apply manual filter as hidden items
+        if let Some(ref manual) = request.filters.manual_filter {
+            // Get all unique values for this field
+            let all_values: Vec<String> = if let Some(items) = &calc_group_items {
+                items.clone()
+            } else if let Some(field_cache) = cache.fields.get_mut(request.field_index) {
+                let sorted_ids = field_cache.sorted_ids().to_vec();
+                sorted_ids.iter()
+                    .filter_map(|&id| {
+                        if id == VALUE_ID_EMPTY {
+                            return None;
+                        }
+                        field_cache.get_value(id).map(cache_value_to_string)
+                    })
+                    .collect()
             } else {
-                definition.slicer_filters.push(pivot_engine::SlicerFilter {
-                    source_index: request.field_index,
-                    hidden_items,
-                });
+                Vec::new()
+            };
+
+            // Hidden items = all items - selected items
+            let hidden_items: Vec<String> = all_values.iter()
+                .filter(|v| !manual.selected_items.contains(v))
+                .cloned()
+                .collect();
+
+            // Update row fields
+            for field in &mut definition.row_fields {
+                if field.source_index == request.field_index {
+                    field.hidden_items = hidden_items.clone();
+                    found = true;
+                }
+            }
+
+            // Update column fields
+            for field in &mut definition.column_fields {
+                if field.source_index == request.field_index {
+                    field.hidden_items = hidden_items.clone();
+                    found = true;
+                }
+            }
+
+            // Update filter fields
+            for filter in &mut definition.filter_fields {
+                if filter.field.source_index == request.field_index {
+                    filter.field.hidden_items = hidden_items.clone();
+                    found = true;
+                }
+            }
+
+            if !found {
+                // Field not in any zone — add as slicer filter (external, no UI).
+                // This filters data without adding a visible filter dropdown row.
+                log_debug!("PIVOT", "Field {} not in any zone, adding as slicer filter", request.field_index);
+
+                // Check if a slicer filter for this field already exists
+                if let Some(sf) = definition.slicer_filters.iter_mut()
+                    .find(|sf| sf.source_index == request.field_index)
+                {
+                    sf.hidden_items = hidden_items;
+                } else {
+                    definition.slicer_filters.push(pivot_engine::SlicerFilter {
+                        source_index: request.field_index,
+                        hidden_items,
+                    });
+                }
             }
         }
+
+        definition.bump_version();
+
+        if calc_group_items.is_some() {
+            // Calc-group selection changed: the local cache carries only the
+            // previously-applied item (or the no-item base rows), so
+            // recalculating from it would be wrong — fall through to the BI
+            // re-query (refresh reconstructs the request from the definition,
+            // including the hidden_items just applied).
+            None
+        } else {
+            let view = safe_calculate_pivot(definition, cache);
+            store_view(&pivot_state, request.pivot_id, &view);
+            let mut response = view_to_response(&view, definition, cache);
+
+            let destination = definition.destination;
+            let pivot_id = definition.id;
+            let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+            drop(pivot_tables);
+
+            response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+
+            Some(response)
+        }
+    };
+
+    if let Some(response) = local_response {
+        return Ok(response);
     }
-
-    definition.bump_version();
-
-    let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
-
-    let destination = definition.destination;
-    let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-
-    drop(pivot_tables);
-
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-
-    Ok(response)
+    refresh_pivot_cache(
+        window,
+        state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        bi_state,
+        request.pivot_id,
+    )
+    .await
 }
 
 /// Clears filters from a pivot field.
 #[tauri::command]
-pub fn clear_pivot_filter(
-    state: State<AppState>,
+pub async fn clear_pivot_filter(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     request: ClearPivotFilterRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -3112,46 +3183,82 @@ pub fn clear_pivot_filter(
         request.field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get_mut(&request.pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+    // All lock-holding work happens in this block so no guard can live across
+    // the await below (the Tauri command future must be Send). `None` = the
+    // cleared field is a calculation group and needs a BI re-query.
+    let local_response: Option<PivotViewResponse> = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&request.pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    // Clear hidden items from all matching fields
-    for field in &mut definition.row_fields {
-        if field.source_index == request.field_index {
-            field.hidden_items.clear();
+        // Calc-group field? Clearing the filter changes the applied-item state
+        // (e.g. one visible item -> all visible = NO item applied), so it
+        // needs a BI re-query, like apply_pivot_filter.
+        let is_calc_group_field = {
+            let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
+            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            bi_meta.get(&request.pivot_id).is_some_and(|meta| {
+                field_name
+                    .as_deref()
+                    .is_some_and(|n| meta.calculation_groups.iter().any(|g| g.name == n))
+            })
+        };
+
+        // Clear hidden items from all matching fields
+        for field in &mut definition.row_fields {
+            if field.source_index == request.field_index {
+                field.hidden_items.clear();
+            }
         }
-    }
-    for field in &mut definition.column_fields {
-        if field.source_index == request.field_index {
-            field.hidden_items.clear();
+        for field in &mut definition.column_fields {
+            if field.source_index == request.field_index {
+                field.hidden_items.clear();
+            }
         }
-    }
-    for filter in &mut definition.filter_fields {
-        if filter.field.source_index == request.field_index {
-            filter.field.hidden_items.clear();
+        for filter in &mut definition.filter_fields {
+            if filter.field.source_index == request.field_index {
+                filter.field.hidden_items.clear();
+            }
         }
+        // Also remove any slicer filters for this field
+        definition.slicer_filters.retain(|sf| sf.source_index != request.field_index);
+
+        definition.bump_version();
+
+        if is_calc_group_field {
+            None
+        } else {
+            let view = safe_calculate_pivot(definition, cache);
+            store_view(&pivot_state, request.pivot_id, &view);
+            let mut response = view_to_response(&view, definition, cache);
+
+            let destination = definition.destination;
+            let pivot_id = definition.id;
+            let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+            drop(pivot_tables);
+
+            response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
+            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
+
+            Some(response)
+        }
+    };
+
+    if let Some(response) = local_response {
+        return Ok(response);
     }
-    // Also remove any slicer filters for this field
-    definition.slicer_filters.retain(|sf| sf.source_index != request.field_index);
-
-    definition.bump_version();
-
-    let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
-    let mut response = view_to_response(&view, definition, cache);
-
-    let destination = definition.destination;
-    let pivot_id = definition.id;
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-
-    drop(pivot_tables);
-
-    response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
-    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view, Some((&*pane_control_state, &*ribbon_filter_state)));
-
-    Ok(response)
+    refresh_pivot_cache(
+        window,
+        state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        bi_state,
+        request.pivot_id,
+    )
+    .await
 }
 
 /// Sorts a pivot field by labels.
@@ -4913,6 +5020,12 @@ pub(crate) fn extract_calc_groups(engine: &bi_engine::Engine) -> Vec<BiCalcGroup
                     source: i.source().map(|s| s.to_string()),
                 })
                 .collect(),
+            multiple_or_empty_selection: g
+                .multiple_or_empty_selection()
+                .map(|t| t.source().unwrap_or("(expression)").to_string()),
+            no_selection: g
+                .no_selection()
+                .map(|t| t.source().unwrap_or("(expression)").to_string()),
         })
         .collect()
 }
@@ -5611,12 +5724,19 @@ pub async fn update_bi_pivot_fields(
     // Resolve the placed group against the LIVE engine model — the pivot's
     // stored metadata is a creation-time snapshot, so a group added or edited
     // in the Model Editor since then wouldn't be in it (the query runs against
-    // the live model anyway). Refresh the snapshot while at it. The engine is
-    // asked for ALL items in declaration order — item subsetting happens
-    // pivot-side via the group field's hidden_items, so the filter dropdown
-    // can always offer every item.
-    let (calc_group_app, calc_item_names): (
+    // the live model anyway). Refresh the snapshot while at it.
+    //
+    // `reshape_items` is what the reshaped cache's item column carries, per
+    // axis (Power BI/AS selection semantics):
+    // - Rows/Columns: EVERY item (the axis shows them) — item subsetting is
+    //   pivot-side via hidden_items.
+    // - Filters: exactly ONE visible item applies it; ZERO or MANY visible
+    //   items apply NO item at all — the measures are their BASE values (a
+    //   multi-selection must never sum transformed item rows), carried on a
+    //   single sentinel-valued row set.
+    let (calc_group_app, calc_item_names, reshape_items): (
         Option<bi_engine::CalculationGroupApplication>,
+        Vec<String>,
         Vec<String>,
     ) = match placement.as_ref() {
         Some(p) => {
@@ -5629,7 +5749,7 @@ pub async fn update_bi_pivot_fields(
                         .to_string(),
                 );
             }
-            let all_items: Vec<String> = {
+            let group_meta: BiCalcGroupMeta = {
                 let engine_arc = {
                     let connections = bi_state.connections.lock()
                         .map_err(|e| format!("connections lock poisoned: {}", e))?;
@@ -5641,9 +5761,7 @@ pub async fn update_bi_pivot_fields(
                     let engine = engine_arc.lock().await;
                     extract_calc_groups(&engine)
                 };
-                let items: Option<Vec<String>> = live_groups.iter()
-                    .find(|g| g.name == p.group)
-                    .map(|g| g.items.iter().map(|i| i.name.clone()).collect());
+                let found = live_groups.iter().find(|g| g.name == p.group).cloned();
                 {
                     let mut bi_meta = pivot_state.bi_metadata.lock()
                         .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
@@ -5651,23 +5769,71 @@ pub async fn update_bi_pivot_fields(
                         meta.calculation_groups = live_groups;
                     }
                 }
-                items.ok_or_else(|| format!(
+                found.ok_or_else(|| format!(
                     "Calculation group '{}' not found in this model.", p.group
                 ))?
             };
+            let all_items: Vec<String> =
+                group_meta.items.iter().map(|i| i.name.clone()).collect();
             if all_items.is_empty() {
                 return Err(format!("Calculation group '{}' has no items.", p.group));
             }
-            (
-                // Empty item list = ALL items in declaration order (engine contract).
-                Some(bi_engine::CalculationGroupApplication::new(
-                    p.group.clone(),
-                    Vec::new(),
-                )),
-                all_items,
-            )
+            match p.axis {
+                CalcGroupAxis::Filters => {
+                    let visible: Vec<String> = all_items
+                        .iter()
+                        .filter(|i| !p.hidden_items.contains(i))
+                        .cloned()
+                        .collect();
+                    if visible.len() == 1 {
+                        (
+                            Some(bi_engine::CalculationGroupApplication::new(
+                                p.group.clone(),
+                                visible.clone(),
+                            )),
+                            all_items,
+                            visible,
+                        )
+                    } else {
+                        // AS selection states: no filter at all = "no
+                        // selection"; an explicit subset (or everything
+                        // hidden) = "multiple or empty". A model-defined
+                        // selection expression overrides the default (which
+                        // is: no item applied, base measures).
+                        let no_filter = p.hidden_items.is_empty();
+                        let app = if no_filter && group_meta.no_selection.is_some() {
+                            Some(bi_engine::CalculationGroupApplication::no_selection(
+                                p.group.clone(),
+                            ))
+                        } else if !no_filter
+                            && group_meta.multiple_or_empty_selection.is_some()
+                        {
+                            Some(bi_engine::CalculationGroupApplication::multiple_or_empty(
+                                p.group.clone(),
+                            ))
+                        } else {
+                            None
+                        };
+                        (
+                            app,
+                            all_items,
+                            vec![super::types::CALC_GROUP_NO_ITEM.to_string()],
+                        )
+                    }
+                }
+                _ => (
+                    // Empty item list = ALL items in declaration order
+                    // (engine contract).
+                    Some(bi_engine::CalculationGroupApplication::new(
+                        p.group.clone(),
+                        Vec::new(),
+                    )),
+                    all_items.clone(),
+                    all_items,
+                ),
+            }
         }
-        None => (None, Vec::new()),
+        None => (None, Vec::new(), Vec::new()),
     };
 
     // Group-only pivot: a calculation group placed with no measures and no
@@ -5861,7 +6027,7 @@ pub async fn update_bi_pivot_fields(
             &batches,
             num_group_by,
             &p.group,
-            &calc_item_names,
+            &reshape_items,
             &query_measures,
             &wide_idx,
             use_synthetic_dim,
@@ -6207,8 +6373,8 @@ pub async fn update_bi_pivot_fields(
                     .or_else(|| {
                         // Placed calc group: the wide metadata carries item
                         // attribution; adopt the base measure's format from
-                        // its first item column.
-                        calc_item_names.first().and_then(|it| {
+                        // its first applied item column.
+                        reshape_items.first().and_then(|it| {
                             format_by_key.get(&(measure.clone(), Some(it.clone())))
                         })
                     });

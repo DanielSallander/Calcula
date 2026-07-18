@@ -1470,6 +1470,14 @@ pub struct CalcGroupItemDto {
 pub struct ModelCalcGroupInfo {
     pub name: String,
     pub items: Vec<CalcGroupItemDto>,
+    /// AS-style `multipleOrEmptySelectionExpression` source (None = default:
+    /// a multiple/empty selection applies no item — base measures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiple_or_empty_selection: Option<String>,
+    /// AS-style `noSelectionExpression` source (None = default: an unfiltered
+    /// group applies no item — base measures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_selection: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2247,19 +2255,25 @@ fn build_overview(
     let calculation_groups = base
         .calculation_groups()
         .iter()
-        .map(|g| ModelCalcGroupInfo {
-            name: g.name().to_string(),
-            items: g
-                .items()
-                .iter()
-                .map(|i| CalcGroupItemDto {
-                    name: i.name().to_string(),
-                    formula: i
-                        .source()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| bi_engine::expression_to_formula(i.expression(), "")),
-                })
-                .collect(),
+        .map(|g| {
+            let tmpl_source = |t: &bi_engine::CalculationItem| {
+                t.source()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| bi_engine::expression_to_formula(t.expression(), ""))
+            };
+            ModelCalcGroupInfo {
+                name: g.name().to_string(),
+                items: g
+                    .items()
+                    .iter()
+                    .map(|i| CalcGroupItemDto {
+                        name: i.name().to_string(),
+                        formula: tmpl_source(i),
+                    })
+                    .collect(),
+                multiple_or_empty_selection: g.multiple_or_empty_selection().map(tmpl_source),
+                no_selection: g.no_selection().map(tmpl_source),
+            }
         })
         .collect();
 
@@ -3479,6 +3493,8 @@ pub async fn bi_model_upsert_calc_group(
     original_name: Option<String>,
     name: String,
     items: Vec<CalcGroupItemDto>,
+    multiple_or_empty_selection: Option<String>,
+    no_selection: Option<String>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -3496,7 +3512,27 @@ pub async fn bi_model_upsert_calc_group(
                     .with_source(item.formula.clone()),
             );
         }
-        let group = bi_engine::CalculationGroup::new(trimmed, built_items);
+        // AS-style selection-state expressions: blank/whitespace = not defined
+        // (the default — no item applied — kicks in for that state).
+        let build_selection = |label: &str, text: &Option<String>| -> Result<Option<bi_engine::CalculationItem>, String> {
+            match text.as_deref().map(str::trim) {
+                Some(t) if !t.is_empty() => {
+                    let expr = bi_engine::parse_measure_expression(t)
+                        .map_err(|e| format!("{}: {}", label, e))?;
+                    Ok(Some(
+                        bi_engine::CalculationItem::new(label.to_string(), expr)
+                            .with_source(t.to_string()),
+                    ))
+                }
+                _ => Ok(None),
+            }
+        };
+        let group = bi_engine::CalculationGroup::new(trimmed, built_items)
+            .with_multiple_or_empty_selection(build_selection(
+                "Multiple or empty selection",
+                &multiple_or_empty_selection,
+            )?)
+            .with_no_selection(build_selection("No selection", &no_selection)?);
 
         let mut groups = base.calculation_groups().to_vec();
         match original_name.as_deref() {
@@ -5224,6 +5260,8 @@ pub async fn script_bi_model(
                         gateway_field(&p, "originalName")?,
                         gateway_field(&p, "name")?,
                         gateway_field(&p, "items")?,
+                        gateway_field(&p, "multipleOrEmptySelection")?,
+                        gateway_field(&p, "noSelection")?,
                         w,
                     )
                     .await?,

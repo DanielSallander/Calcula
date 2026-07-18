@@ -588,7 +588,14 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
       if (group.items.some((i) => i.name === itemName)) fail(`'${group.name}' already has an item '${itemName}'`, cmd.line);
       const items: CalcGroupItemDto[] = [...group.items, { name: itemName, formula }];
       await mutOverview(s, () =>
-        g.upsertCalcGroup({ connectionId: cid, originalName: group.name, name: group.name, items }),
+        g.upsertCalcGroup({
+          connectionId: cid,
+          originalName: group.name,
+          name: group.name,
+          items,
+          multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
+          noSelection: group.noSelection ?? null,
+        }),
       );
       done(`calc item ${group.name}[${itemName}]`);
       return;
@@ -941,7 +948,14 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
       const formula = requireExpr(cmd, "set calcitem Group[Item] = <formula>");
       const items = group.items.map((i) => (i.name === name ? { ...i, formula } : i));
       await mutOverview(s, () =>
-        g.upsertCalcGroup({ connectionId: cid, originalName: group.name, name: group.name, items }),
+        g.upsertCalcGroup({
+          connectionId: cid,
+          originalName: group.name,
+          name: group.name,
+          items,
+          multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
+          noSelection: group.noSelection ?? null,
+        }),
       );
       return;
     }
@@ -1325,7 +1339,14 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
     case "calcgroup": {
       const grp = requireOne(o.calculationGroups, (x) => x.name, oldTok.text, "calculation group", cmd.line);
       await mutOverview(s, () =>
-        g.upsertCalcGroup({ connectionId: cid, originalName: grp.name, name: newName, items: grp.items }),
+        g.upsertCalcGroup({
+          connectionId: cid,
+          originalName: grp.name,
+          name: newName,
+          items: grp.items,
+          multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+          noSelection: grp.noSelection ?? null,
+        }),
       );
       done(grp.name);
       return;
@@ -1336,7 +1357,14 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
       const item = requireOne(grp.items, (i) => i.name, oldTok.column ?? "", "calc item", cmd.line);
       const items = grp.items.map((i) => (i.name === item.name ? { ...i, name: newName } : i));
       await mutOverview(s, () =>
-        g.upsertCalcGroup({ connectionId: cid, originalName: grp.name, name: grp.name, items }),
+        g.upsertCalcGroup({
+          connectionId: cid,
+          originalName: grp.name,
+          name: grp.name,
+          items,
+          multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+          noSelection: grp.noSelection ?? null,
+        }),
       );
       done(`${grp.name}[${item.name}]`);
       return;
@@ -1496,7 +1524,16 @@ async function runDelete(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
         const t0 = cmd.pos[0] as ValueTok & { kind: "colref" };
         const grp = requireOne(s.overview.calculationGroups, (x) => x.name, t0.table ?? "", "calculation group", cmd.line);
         const items = grp.items.filter((i) => i.name !== t.name);
-        await mutOverview(s, () => g.upsertCalcGroup({ connectionId: cid, originalName: grp.name, name: grp.name, items }));
+        await mutOverview(s, () =>
+          g.upsertCalcGroup({
+            connectionId: cid,
+            originalName: grp.name,
+            name: grp.name,
+            items,
+            multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+            noSelection: grp.noSelection ?? null,
+          }),
+        );
         break;
       }
       case "calctable":

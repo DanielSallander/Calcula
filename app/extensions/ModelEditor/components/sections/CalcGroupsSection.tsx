@@ -28,6 +28,9 @@ import { ExpressionWorkspace } from "./ExpressionWorkspace";
 interface SavedGroup {
   name: string;
   items: CalcGroupItemDto[];
+  /** AS-style selection-state expressions (undefined = not defined). */
+  multipleOrEmptySelection?: string;
+  noSelection?: string;
   /** Item renames as [oldName, newName] pairs (edit mode only). */
   renames: [string, string][];
 }
@@ -122,10 +125,14 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
           originalName: g.name,
           name: payload.name,
           items: payload.items,
+          // An upsert replaces the whole group — carry the selection-state
+          // expressions forward or they would be wiped by every item edit.
+          multipleOrEmptySelection: g.multipleOrEmptySelection ?? null,
+          noSelection: g.noSelection ?? null,
         });
         if (payload.name !== g.name) aliasRef.current.set(g.name, payload.name);
         latestGroupsRef.current = latestGroupsRef.current.map((x) =>
-          x.name === g.name ? { name: payload.name, items: payload.items } : x,
+          x.name === g.name ? { ...x, name: payload.name, items: payload.items } : x,
         );
         applyOverview(o);
         after?.(g, payload);
@@ -295,11 +302,15 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
   const handleModalSaved = (o: ModelOverview, saved: SavedGroup): void => {
     const oldName = editing?.groupName ? resolveGroupName(editing.groupName) : null;
     if (oldName && saved.name !== oldName) aliasRef.current.set(oldName, saved.name);
+    const savedInfo = {
+      name: saved.name,
+      items: saved.items,
+      multipleOrEmptySelection: saved.multipleOrEmptySelection,
+      noSelection: saved.noSelection,
+    };
     latestGroupsRef.current = oldName
-      ? latestGroupsRef.current.map((g) =>
-          g.name === oldName ? { name: saved.name, items: saved.items } : g,
-        )
-      : [...latestGroupsRef.current, { name: saved.name, items: saved.items }];
+      ? latestGroupsRef.current.map((g) => (g.name === oldName ? savedInfo : g))
+      : [...latestGroupsRef.current, savedInfo];
     applyOverview(o);
     setSelected((cur) => {
       // A newly created group becomes the selection when nothing else is.
@@ -779,15 +790,20 @@ function CalcGroupModal({
       : [{ id: 0, name: "", formula: "" }],
   );
   const nextId = useRef(original?.items.length || 1);
-  const [sel, setSel] = useState(() =>
+  // Selection: an item index, or one of the two AS-style selection-state
+  // expressions ("moe" = multiple-or-empty, "nosel" = no selection).
+  const [sel, setSel] = useState<number | "moe" | "nosel">(() =>
     initialItem !== undefined && initialItem >= 0 && initialItem < (original?.items.length ?? 0)
       ? initialItem
       : 0,
   );
+  const [moeFormula, setMoeFormula] = useState(original?.multipleOrEmptySelection ?? "");
+  const [noselFormula, setNoselFormula] = useState(original?.noSelection ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const current = items[Math.min(sel, items.length - 1)];
+  const selIndex = typeof sel === "number" ? Math.min(sel, items.length - 1) : null;
+  const current = selIndex !== null ? items[selIndex] : undefined;
 
   const updateItem = (index: number, patch: Partial<ItemDraft>) => {
     setItems((is) => is.map((it, i) => (i === index ? { ...it, ...patch } : it)));
@@ -800,7 +816,9 @@ function CalcGroupModal({
 
   const removeItem = (index: number) => {
     setItems((is) => is.filter((_, j) => j !== index));
-    setSel((s) => Math.max(0, s > index ? s - 1 : Math.min(s, items.length - 2)));
+    setSel((s) =>
+      typeof s === "number" ? Math.max(0, s > index ? s - 1 : Math.min(s, items.length - 2)) : s,
+    );
   };
 
   // A blank FORMULA is legal (it evaluates to BLANK()); item names identify
@@ -831,11 +849,15 @@ function CalcGroupModal({
     }
     setBusy(true);
     try {
+      const moe = moeFormula.trim();
+      const nosel = noselFormula.trim();
       const o = await biModelUpsertCalcGroup({
         connectionId,
         originalName: original?.name ?? null,
         name: trimmedName,
         items: finalItems,
+        multipleOrEmptySelection: moe || null,
+        noSelection: nosel || null,
       });
       const renames: [string, string][] = original
         ? items
@@ -847,7 +869,13 @@ function CalcGroupModal({
             })
             .filter((r): r is [string, string] => r !== null)
         : [];
-      onSaved(o, { name: trimmedName, items: finalItems, renames });
+      onSaved(o, {
+        name: trimmedName,
+        items: finalItems,
+        multipleOrEmptySelection: moe || undefined,
+        noSelection: nosel || undefined,
+        renames,
+      });
     } catch (err: unknown) {
       setError(String(err));
       setBusy(false);
@@ -906,8 +934,11 @@ function CalcGroupModal({
           <input
             style={styles.input}
             value={current?.name ?? ""}
-            onChange={(e) => updateItem(sel, { name: e.target.value })}
-            placeholder="e.g. YTD"
+            disabled={selIndex === null}
+            onChange={(e) => {
+              if (selIndex !== null) updateItem(selIndex, { name: e.target.value });
+            }}
+            placeholder={selIndex === null ? "(selection expression)" : "e.g. YTD"}
           />
         </Field>
       </div>
@@ -945,19 +976,60 @@ function CalcGroupModal({
         <button style={styles.smallBtn} onClick={addItem}>
           + Add item
         </button>
+        {/* AS-style selection-state expressions: applied when the group is
+            filtered to several items / none (multiple-or-empty) or not
+            filtered at all (no selection). Blank = default: base measures. */}
+        <span style={{ width: 1, alignSelf: "stretch", background: "#ddd", margin: "0 4px" }} />
+        <span
+          style={chipStyle(sel === "moe")}
+          onClick={() => setSel("moe")}
+          title={
+            "Applied when several items (or none) are selected on a filter/slicer. " +
+            "Blank = default: no item applied, measures show base values."
+          }
+        >
+          Multiple/empty selection{moeFormula.trim() ? " •" : ""}
+        </span>
+        <span
+          style={chipStyle(sel === "nosel")}
+          onClick={() => setSel("nosel")}
+          title={
+            "Applied when the group is placed as a filter but nothing is filtered. " +
+            "Blank = default: no item applied, measures show base values."
+          }
+        >
+          No selection{noselFormula.trim() ? " •" : ""}
+        </span>
       </div>
 
-      {/* Workspace: the selected item's formula front-and-centre. Keyed by the
-          selected item's IDENTITY so Monaco's undo history doesn't bleed
-          across items (an index key would survive removing the selected item). */}
+      {/* Workspace: the selected item's (or selection expression's) formula
+          front-and-centre. Keyed by the selected item's IDENTITY so Monaco's
+          undo history doesn't bleed across items (an index key would survive
+          removing the selected item). */}
       <ExpressionWorkspace
-        key={current?.id ?? -1}
+        key={sel === "moe" ? "moe" : sel === "nosel" ? "nosel" : (current?.id ?? -1)}
         overview={overview}
-        value={current?.formula ?? ""}
-        onChange={(v) => updateItem(sel, { formula: v })}
-        label={`Formula — ${current?.name.trim() || `(item ${sel + 1})`}`}
-        hint="SELECTEDMEASURE() references whichever measure is in play when this item is applied. Leave empty for BLANK(). Drag from the tree to insert."
-        hintTitle="Example: CALCULATE(SELECTEDMEASURE(), DATESYTD(Calendar[date])). SELECTEDMEASURE() references whichever measure is in play when the item is applied. A blank formula evaluates to BLANK()."
+        value={
+          sel === "moe" ? moeFormula : sel === "nosel" ? noselFormula : (current?.formula ?? "")
+        }
+        onChange={(v) => {
+          if (sel === "moe") setMoeFormula(v);
+          else if (sel === "nosel") setNoselFormula(v);
+          else if (selIndex !== null) updateItem(selIndex, { formula: v });
+        }}
+        label={
+          sel === "moe"
+            ? "Expression — multiple or empty selection"
+            : sel === "nosel"
+              ? "Expression — no selection"
+              : `Formula — ${current?.name.trim() || `(item ${(selIndex ?? 0) + 1})`}`
+        }
+        hint={
+          selIndex === null
+            ? "Applied instead of an item for this selection state. Blank = default: measures show their base values. SELECTEDMEASURE() references the measure in play."
+            : "SELECTEDMEASURE() references whichever measure is in play when this item is applied. Leave empty for BLANK(). Drag from the tree to insert."
+        }
+        hintTitle="Example: CALCULATE(SELECTEDMEASURE(), DATESYTD(Calendar[date])). SELECTEDMEASURE() references whichever measure is in play when the item is applied."
       />
 
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}

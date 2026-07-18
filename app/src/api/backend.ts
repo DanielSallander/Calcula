@@ -3814,6 +3814,12 @@ export interface CalcGroupItemDto {
 export interface ModelCalcGroupInfo {
   name: string;
   items: CalcGroupItemDto[];
+  /** AS-style multipleOrEmptySelectionExpression source (absent = default:
+   *  a multiple/empty selection applies no item — base measures). */
+  multipleOrEmptySelection?: string;
+  /** AS-style noSelectionExpression source (absent = default: an unfiltered
+   *  group applies no item — base measures). */
+  noSelection?: string;
 }
 
 export interface ModelGlobalVariableInfo {
@@ -4233,12 +4239,21 @@ export async function biModelUpsertCalcGroup(params: {
   originalName?: string | null;
   name: string;
   items: CalcGroupItemDto[];
+  /** AS-style multipleOrEmptySelectionExpression (blank/undefined = none).
+   *  NOTE: an upsert REPLACES the whole group — callers must pass the current
+   *  value to preserve it. */
+  multipleOrEmptySelection?: string | null;
+  /** AS-style noSelectionExpression (blank/undefined = none). Same
+   *  replace-semantics note as above. */
+  noSelection?: string | null;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_calc_group", {
     connectionId: params.connectionId,
     originalName: params.originalName ?? null,
     name: params.name,
     items: params.items,
+    multipleOrEmptySelection: params.multipleOrEmptySelection ?? null,
+    noSelection: params.noSelection ?? null,
   });
 }
 

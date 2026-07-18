@@ -397,6 +397,12 @@ pub(crate) fn model_to_info(model: &bi_engine::DataModel) -> BiModelInfo {
                     source: i.source().map(|s| s.to_string()),
                 })
                 .collect(),
+            multiple_or_empty_selection: g
+                .multiple_or_empty_selection()
+                .map(|t| t.source().unwrap_or("(expression)").to_string()),
+            no_selection: g
+                .no_selection()
+                .map(|t| t.source().unwrap_or("(expression)").to_string()),
         })
         .collect();
 
