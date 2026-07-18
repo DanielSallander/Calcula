@@ -3,14 +3,19 @@
 //          model's persisted data-source catalog (engine v14) and see which
 //          tables bind to which source. A model may bind different tables to
 //          different sources (multi-source). Sources are secret-free
-//          descriptors; credentials are supplied only when connecting and are
-//          never stored in the model.
+//          descriptors; credentials are supplied when connecting and never
+//          enter the model — they can optionally be remembered per machine in
+//          the Windows Credential Manager, which also enables the silent
+//          auto-connect attempted when this section opens.
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  biModelAutoConnectSources,
   biModelConnectSource,
   biModelDeleteSource,
+  biModelForgetSourceCredentials,
   biModelSetTableSourceBinding,
+  biModelSourceSavedUser,
   biModelUpsertSource,
 } from "@api";
 import type { ModelSourceInfo, ModelTableInfo } from "@api";
@@ -107,6 +112,11 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
   const [connectFor, setConnectFor] = useState<ModelSourceInfo | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // sourceId -> username of the sign-in saved in Windows Credential Manager.
+  const [savedUsers, setSavedUsers] = useState<Record<string, string>>({});
+  const [autoResult, setAutoResult] = useState<{ connected: string[]; failed: string[] } | null>(
+    null,
+  );
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -118,6 +128,57 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
       setBusy(false);
     }
   };
+
+  const loadSavedUsers = async () => {
+    const out: Record<string, string> = {};
+    await Promise.all(
+      sources
+        .filter((s) => isDbKind(s.kind))
+        .map(async (s) => {
+          try {
+            const user = await biModelSourceSavedUser(connectionId, s.id);
+            if (user) out[s.id] = user;
+          } catch {
+            // Best-effort: treat lookup errors as "no saved sign-in".
+          }
+        }),
+    );
+    setSavedUsers(out);
+  };
+
+  // Silent auto-connect (once per model): wire every database source that has
+  // a saved sign-in, so a restarted app reconnects without re-entering
+  // credentials. Failures (stale password, offline server) are reported
+  // inline, never thrown.
+  const autoTriedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (autoTriedFor.current === connectionId) return;
+    autoTriedFor.current = connectionId;
+    void (async () => {
+      try {
+        const res = await biModelAutoConnectSources(connectionId);
+        if (res.connected.length > 0) applyOverview(res.overview);
+        if (res.connected.length > 0 || res.failed.length > 0) {
+          setAutoResult({ connected: res.connected, failed: res.failed });
+        }
+      } catch {
+        // Best-effort — the section still works with manual Connect.
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
+
+  const dbSourceIds = sources
+    .filter((s) => isDbKind(s.kind))
+    .map((s) => s.id)
+    .join("|");
+  useEffect(() => {
+    void loadSavedUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId, dbSourceIds]);
+
+  const sourceName = (id: string) =>
+    sources.find((s) => s.id === id)?.displayName ?? id;
 
   const deleteSource = (s: ModelSourceInfo) => {
     const n = s.tableCount;
@@ -141,9 +202,34 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
 
       <div style={styles.hint}>
         A model records where its tables come from (secret-free). Add sources, connect them with
-        your credentials (never stored), and bind tables. Different tables can use different
-        sources.
+        your credentials (never stored in the model or workbook file — optionally remembered in
+        Windows Credential Manager), and bind tables. Different tables can use different sources.
       </div>
+
+      {autoResult && (autoResult.connected.length > 0 || autoResult.failed.length > 0) && (
+        <div
+          style={{
+            border: "1px solid #b7d9bc",
+            background: "#f0f9f1",
+            borderRadius: 4,
+            padding: "6px 10px",
+            fontSize: 12,
+          }}
+        >
+          {autoResult.connected.length > 0 && (
+            <>
+              Connected with saved sign-in:{" "}
+              <strong>{autoResult.connected.map(sourceName).join(", ")}</strong>.{" "}
+            </>
+          )}
+          {autoResult.failed.length > 0 && (
+            <span style={{ color: "#a4262c" }}>
+              Saved sign-in failed for {autoResult.failed.map(sourceName).join(", ")} — connect
+              manually (the password may have changed).
+            </span>
+          )}
+        </div>
+      )}
 
       <div style={{ ...styles.card, flex: 1, minHeight: 0, overflowY: "auto" }}>
         {unbound.length > 0 && (
@@ -193,6 +279,9 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                     <Badge tone={bound.length > 0 ? "ok" : "neutral"}>
                       {bound.length} table{bound.length === 1 ? "" : "s"}
                     </Badge>
+                    {savedUsers[s.id] && (
+                      <Badge tone="ok">saved sign-in: {savedUsers[s.id]}</Badge>
+                    )}
                   </div>
                   <div style={{ ...styles.muted, fontSize: 12 }}>
                     {isFileKind(s.kind)
@@ -327,11 +416,21 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
         <ConnectModal
           source={connectFor}
           busy={busy}
+          savedUser={savedUsers[connectFor.id] ?? null}
           onClose={() => setConnectFor(null)}
-          onConnect={(connStr) =>
+          onConnect={(connStr, remember) =>
             void run(async () => {
-              applyOverview(await biModelConnectSource(connectionId, connectFor.id, connStr));
+              applyOverview(
+                await biModelConnectSource(connectionId, connectFor.id, connStr, remember),
+              );
               setConnectFor(null);
+              await loadSavedUsers();
+            })
+          }
+          onForget={() =>
+            void run(async () => {
+              await biModelForgetSourceCredentials(connectionId, connectFor.id);
+              await loadSavedUsers();
             })
           }
         />
@@ -572,7 +671,8 @@ function SourceModal({
       )}
 
       <div style={{ ...styles.muted, fontSize: 12, marginTop: 8 }}>
-        No credentials are stored — you supply them when connecting.
+        Credentials are never stored in the model — you supply them when connecting, and can
+        optionally remember them on this machine (Windows Credential Manager).
       </div>
     </Modal>
   );
@@ -581,19 +681,25 @@ function SourceModal({
 function ConnectModal({
   source,
   busy,
+  savedUser,
   onClose,
   onConnect,
+  onForget,
 }: {
   source: ModelSourceInfo;
   busy: boolean;
+  savedUser: string | null;
   onClose: () => void;
-  onConnect: (connectionString: string) => void;
+  onConnect: (connectionString: string, remember: boolean) => void;
+  onForget: () => void;
 }): React.ReactElement {
   const fileKind = isFileKind(source.kind);
+  const dbKind = isDbKind(source.kind);
   const template = fileKind
     ? ""
     : `host=${source.host || "localhost"} port=${source.port ?? 5432} dbname=${source.database || ""} user= password=`;
   const [connStr, setConnStr] = useState(template);
+  const [remember, setRemember] = useState(true);
 
   return (
     <Modal
@@ -605,7 +711,11 @@ function ConnectModal({
           <button style={styles.btn} onClick={onClose}>
             Cancel
           </button>
-          <button style={styles.primaryBtn} disabled={busy} onClick={() => onConnect(connStr)}>
+          <button
+            style={styles.primaryBtn}
+            disabled={busy}
+            onClick={() => onConnect(connStr, dbKind && remember)}
+          >
             {busy ? "Connecting…" : "Connect"}
           </button>
         </>
@@ -617,17 +727,74 @@ function ConnectModal({
           credentials needed. Click Connect.
         </div>
       ) : (
-        <Field
-          label="Connection string"
-          hint="Credentials are used only to connect and are never saved in the model. The host/database come from the source descriptor."
-        >
-          <textarea
-            style={{ ...styles.textarea, minHeight: 60, fontFamily: "monospace" }}
-            value={connStr}
-            spellCheck={false}
-            onChange={(e) => setConnStr(e.target.value)}
-          />
-        </Field>
+        <>
+          {savedUser && (
+            <div
+              style={{
+                border: "1px solid #b7d9bc",
+                background: "#f0f9f1",
+                borderRadius: 4,
+                padding: "8px 10px",
+                marginBottom: 10,
+                fontSize: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <span style={{ flex: 1 }}>
+                Saved sign-in for user <strong>{savedUser}</strong> on this machine.
+              </span>
+              <button
+                style={styles.primaryBtn}
+                disabled={busy}
+                onClick={() => onConnect("", false)}
+              >
+                {busy ? "Connecting…" : "Connect with saved sign-in"}
+              </button>
+              <button
+                style={styles.smallBtn}
+                disabled={busy}
+                title="Delete the saved sign-in from Windows Credential Manager"
+                onClick={onForget}
+              >
+                Forget
+              </button>
+            </div>
+          )}
+          <Field
+            label={savedUser ? "…or connect with different credentials" : "Connection string"}
+            hint="Credentials are used only to connect and are never saved in the model. The host/database come from the source descriptor."
+          >
+            <textarea
+              style={{ ...styles.textarea, minHeight: 60, fontFamily: "monospace" }}
+              value={connStr}
+              spellCheck={false}
+              onChange={(e) => setConnStr(e.target.value)}
+            />
+          </Field>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
+              fontSize: 12,
+              marginTop: 8,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={remember}
+              style={{ marginTop: 2 }}
+              onChange={(e) => setRemember(e.target.checked)}
+            />
+            <span>
+              Remember on this machine (Windows Credential Manager) and reconnect automatically —
+              never saved in the model or workbook file.
+            </span>
+          </label>
+        </>
       )}
     </Modal>
   );

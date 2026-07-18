@@ -4219,6 +4219,9 @@ pub fn run() {
             bi::model_editor::bi_model_delete_source,
             bi::model_editor::bi_model_set_table_source_binding,
             bi::model_editor::bi_model_connect_source,
+            bi::model_editor::bi_model_source_saved_user,
+            bi::model_editor::bi_model_forget_source_credentials,
+            bi::model_editor::bi_model_auto_connect_sources,
             // Writeback dataset commands (writeback submissions as model tables)
             bi::writeback_source::bi_list_writeback_tables,
             bi::writeback_source::bi_import_writeback_tables,

@@ -4842,17 +4842,57 @@ export async function biModelSetTableSourceBinding(
 }
 
 /** Connect one catalog source with the supplied credentials (wires it live and
- *  binds its tables). In-memory sources cannot be reconnected. */
+ *  binds its tables). In-memory sources cannot be reconnected. An EMPTY
+ *  connection string on a database source means "use the credentials saved in
+ *  the Windows Credential Manager"; `remember` saves the supplied credentials
+ *  there after a successful connect (never in the model or workbook file). */
 export async function biModelConnectSource(
   connectionId: string,
   sourceId: string,
   connectionString: string,
+  remember?: boolean,
 ): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_connect_source", {
     connectionId,
     sourceId,
     connectionString,
+    remember: remember ?? false,
   });
+}
+
+/** Username of the Windows Credential Manager entry saved for a catalog
+ *  source, or null. The password never crosses to the frontend. */
+export async function biModelSourceSavedUser(
+  connectionId: string,
+  sourceId: string,
+): Promise<string | null> {
+  return invoke<string | null>("bi_model_source_saved_user", { connectionId, sourceId });
+}
+
+/** Delete the Windows Credential Manager entries saved for a catalog source. */
+export async function biModelForgetSourceCredentials(
+  connectionId: string,
+  sourceId: string,
+): Promise<void> {
+  return invoke<void>("bi_model_forget_source_credentials", { connectionId, sourceId });
+}
+
+/** Result of a saved-credential auto-connect sweep over a model's sources. */
+export interface AutoConnectSourcesResult {
+  /** Source ids wired in this call using saved credentials. */
+  connected: string[];
+  /** Source ids that had saved credentials but failed to connect. */
+  failed: string[];
+  overview: ModelOverview;
+}
+
+/** Best-effort: wire every not-yet-wired database source that has saved
+ *  credentials. Per-source connect failures never throw — they are listed in
+ *  the result's `failed`. */
+export async function biModelAutoConnectSources(
+  connectionId: string,
+): Promise<AutoConnectSourcesResult> {
+  return invoke<AutoConnectSourcesResult>("bi_model_auto_connect_sources", { connectionId });
 }
 
 /** Create a NEW blank model as a path-less connection (embedded from birth). */

@@ -6191,44 +6191,51 @@ pub async fn bi_model_set_table_source_binding(
     .await
 }
 
-/// Connect ONE catalog source: wire it into the live engine registry using the
-/// supplied credentials (from `connection_string`) and the source's secret-free
-/// persisted target, then bind every table that names it. In-memory sources
-/// cannot be rebuilt from a descriptor and are rejected. Returns the overview.
-#[tauri::command]
-pub async fn bi_model_connect_source(
-    bi_state: State<'_, BiState>,
-    file_state: State<'_, FileState>,
+/// Credential-cache key candidates `(server, database)` for a database-kind
+/// catalog source. Both the `host:port` and bare-`host` forms are produced so
+/// the legacy `bi_connect` auto-connect path — keyed by `connection.server`,
+/// which may or may not carry a `:port` suffix — shares the same Windows
+/// Credential Manager entries. Non-database kinds have nothing to cache.
+fn source_credential_keys(source: &bi_engine::PersistedSource) -> Vec<(String, String)> {
+    if !matches!(
+        source.kind,
+        bi_engine::SourceKind::Postgres | bi_engine::SourceKind::SqlServer
+    ) {
+        return Vec::new();
+    }
+    let host = source.connection.host.trim();
+    let database = source.connection.database.trim();
+    if host.is_empty() || database.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    if let Some(port) = source.connection.port {
+        keys.push((format!("{}:{}", host, port), database.to_string()));
+    }
+    keys.push((host.to_string(), database.to_string()));
+    keys
+}
+
+/// Look up saved credentials for a catalog source in the Windows Credential
+/// Manager (any key form). Returns `(username, password)`.
+fn lookup_source_credentials(source: &bi_engine::PersistedSource) -> Option<(String, String)> {
+    source_credential_keys(source)
+        .iter()
+        .find_map(|(server, db)| super::credential_cache::get_credentials(server, db))
+}
+
+/// Wire ONE catalog source into the live engine registry with the given auth
+/// and mark every model-sharing connection connected. Shared by the manual
+/// Connect dialog and saved-credential auto-connect. Returns the number of
+/// tables the wire bound.
+async fn wire_source_with_auth(
+    bi_state: &BiState,
     connection_id: ConnectionId,
-    source_id: String,
-    connection_string: String,
-    window: tauri::Window,
-) -> Result<ModelOverview, String> {
-    crate::security::window_guard::require_label(
-        &window,
-        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
-    )?;
-    // Older bind dialogs stored the remote table with a doubled schema prefix
-    // (schema "BI" + table "BI.fact_sales"); heal before wiring so the engine
-    // registers the correct remote names. Best-effort: a model with UNRELATED
-    // validation errors (e.g. a dangling measure reference) must not lose the
-    // ability to connect — the heal simply doesn't apply then.
-    if let Err(e) = heal_doubled_schema_bindings(&bi_state, &file_state, connection_id).await {
-        crate::log_warn!("BI", "model editor: binding heal skipped: {}", e);
-    }
-    let (engine_arc, base) = {
-        let conns = bi_state.connections.lock().unwrap();
-        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
-        (
-            conn.engine.clone().ok_or("No model loaded for this connection")?,
-            conn.base_model.clone().ok_or("This connection has no loaded model")?,
-        )
-    };
-    if base.source(&source_id).is_none() {
-        return Err(format!("Data source '{}' is not in the catalog", source_id));
-    }
-    let (_, auth) = super::commands::parse_connection_string(&connection_string);
-    let sid = source_id.clone();
+    engine_arc: &std::sync::Arc<tokio::sync::Mutex<bi_engine::Engine>>,
+    source_id: &str,
+    auth: bi_engine::AuthMethod,
+) -> Result<usize, String> {
+    let sid = source_id.to_string();
     let report = {
         let mut engine = engine_arc.lock().await;
         engine
@@ -6258,7 +6265,7 @@ pub async fn bi_model_connect_source(
     // Connections tab — not only via the legacy main-window connect flow.
     let import_connector = {
         let engine = engine_arc.lock().await;
-        engine.registry().connector_index_by_source_id(&source_id)
+        engine.registry().connector_index_by_source_id(source_id)
     };
     if import_connector.is_none() {
         // Should not happen after a successful wire; without it Import keeps
@@ -6283,11 +6290,88 @@ pub async fn bi_model_connect_source(
             }
         }
     }
+    Ok(report.bound_tables.len())
+}
+
+/// Connect ONE catalog source: wire it into the live engine registry using the
+/// supplied credentials (from `connection_string`) and the source's secret-free
+/// persisted target, then bind every table that names it. In-memory sources
+/// cannot be rebuilt from a descriptor and are rejected. Returns the overview.
+///
+/// An EMPTY `connection_string` on a database-kind source means "use the
+/// credentials saved in the Windows Credential Manager"; `remember: true`
+/// saves the supplied username+password there after a successful connect.
+/// Credentials never enter the model or the workbook file either way.
+#[tauri::command]
+pub async fn bi_model_connect_source(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    source_id: String,
+    connection_string: String,
+    remember: Option<bool>,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    // Older bind dialogs stored the remote table with a doubled schema prefix
+    // (schema "BI" + table "BI.fact_sales"); heal before wiring so the engine
+    // registers the correct remote names. Best-effort: a model with UNRELATED
+    // validation errors (e.g. a dangling measure reference) must not lose the
+    // ability to connect — the heal simply doesn't apply then.
+    if let Err(e) = heal_doubled_schema_bindings(&bi_state, &file_state, connection_id).await {
+        crate::log_warn!("BI", "model editor: binding heal skipped: {}", e);
+    }
+    let (engine_arc, base) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.engine.clone().ok_or("No model loaded for this connection")?,
+            conn.base_model.clone().ok_or("This connection has no loaded model")?,
+        )
+    };
+    let source = base
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| format!("Data source '{}' is not in the catalog", source_id))?;
+    let is_db_kind = matches!(
+        source.kind,
+        bi_engine::SourceKind::Postgres | bi_engine::SourceKind::SqlServer
+    );
+    let auth = if is_db_kind && connection_string.trim().is_empty() {
+        let (username, password) = lookup_source_credentials(&source).ok_or_else(|| {
+            format!(
+                "No saved credentials for '{}' on this machine — enter a connection string with user/password.",
+                source_id
+            )
+        })?;
+        crate::log_info!(
+            "BI",
+            "model editor: connecting source '{}' with saved credentials (user '{}')",
+            source_id,
+            username
+        );
+        bi_engine::AuthMethod::UsernamePassword { username, password }
+    } else {
+        super::commands::parse_connection_string(&connection_string).1
+    };
+    let bound =
+        wire_source_with_auth(&bi_state, connection_id, &engine_arc, &source_id, auth.clone())
+            .await?;
+    if remember.unwrap_or(false) {
+        if let bi_engine::AuthMethod::UsernamePassword { ref username, ref password } = auth {
+            for (server, db) in source_credential_keys(&source) {
+                super::credential_cache::save_credentials(&server, &db, username, password);
+            }
+        }
+    }
     crate::log_info!(
         "BI",
         "model editor: wired source '{}' ({} tables) on conn {}",
         source_id,
-        report.bound_tables.len(),
+        bound,
         connection_id
     );
     let bindings = {
@@ -6295,6 +6379,159 @@ pub async fn bi_model_connect_source(
         conns.get(&connection_id).map(|c| c.bindings.clone()).unwrap_or_default()
     };
     Ok(build_overview(&base, &bindings, true, None))
+}
+
+/// Username of the Windows Credential Manager entry saved for a catalog
+/// source, if any. Lets the Connect dialog offer "connect with saved
+/// credentials" — the password itself never crosses to the frontend.
+#[tauri::command]
+pub fn bi_model_source_saved_user(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    source_id: String,
+    window: tauri::Window,
+) -> Result<Option<String>, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let conns = bi_state.connections.lock().unwrap();
+    let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+    let base = conn.base_model.as_ref().ok_or("This connection has no loaded model")?;
+    let source = base
+        .source(&source_id)
+        .ok_or_else(|| format!("Data source '{}' is not in the catalog", source_id))?;
+    Ok(lookup_source_credentials(source).map(|(username, _)| username))
+}
+
+/// Delete the Windows Credential Manager entries saved for a catalog source.
+#[tauri::command]
+pub fn bi_model_forget_source_credentials(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    source_id: String,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    let source = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let base = conn.base_model.as_ref().ok_or("This connection has no loaded model")?;
+        base.source(&source_id)
+            .cloned()
+            .ok_or_else(|| format!("Data source '{}' is not in the catalog", source_id))?
+    };
+    for (server, db) in source_credential_keys(&source) {
+        super::credential_cache::delete_credentials(&server, &db);
+    }
+    Ok(())
+}
+
+/// Result of a saved-credential auto-connect sweep over a model's sources.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoConnectSourcesResult {
+    /// Source ids wired in this call using saved credentials.
+    pub connected: Vec<String>,
+    /// Source ids that had saved credentials but failed to connect.
+    pub failed: Vec<String>,
+    pub overview: ModelOverview,
+}
+
+/// Best-effort auto-connect: wire every not-yet-wired database source that has
+/// credentials saved in the Windows Credential Manager. Never errors on a
+/// per-source connect failure (a stale password or an offline server must not
+/// break opening the Connections tab) — failures are reported in the result.
+/// Also valid for package-subscribed (read-only) models: connecting wires the
+/// live engine, it does not edit the model.
+#[tauri::command]
+pub async fn bi_model_auto_connect_sources(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<AutoConnectSourcesResult, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+    if let Err(e) = heal_doubled_schema_bindings(&bi_state, &file_state, connection_id).await {
+        crate::log_warn!("BI", "model editor: binding heal skipped: {}", e);
+    }
+    let (engine_arc, base) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        (
+            conn.engine.clone().ok_or("No model loaded for this connection")?,
+            conn.base_model.clone().ok_or("This connection has no loaded model")?,
+        )
+    };
+    let mut connected = Vec::new();
+    let mut failed = Vec::new();
+    for source in base.sources() {
+        if !matches!(
+            source.kind,
+            bi_engine::SourceKind::Postgres | bi_engine::SourceKind::SqlServer
+        ) {
+            continue;
+        }
+        let already_wired = {
+            let engine = engine_arc.lock().await;
+            engine.registry().connector_index_by_source_id(&source.id).is_some()
+        };
+        if already_wired {
+            continue;
+        }
+        let Some((username, password)) = lookup_source_credentials(source) else {
+            continue;
+        };
+        let auth = bi_engine::AuthMethod::UsernamePassword { username, password };
+        match wire_source_with_auth(&bi_state, connection_id, &engine_arc, &source.id, auth).await {
+            Ok(bound) => {
+                crate::log_info!(
+                    "BI",
+                    "model editor: auto-connected source '{}' ({} tables) with saved credentials",
+                    source.id,
+                    bound
+                );
+                connected.push(source.id.clone());
+            }
+            Err(e) => {
+                crate::log_warn!(
+                    "BI",
+                    "model editor: auto-connect of source '{}' failed: {}",
+                    source.id,
+                    e
+                );
+                failed.push(source.id.clone());
+            }
+        }
+    }
+    let (bindings, editable, reason) = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let (editable, reason) = if conn.package_data_source_id.is_some() {
+            (
+                false,
+                Some(
+                    "Package-subscribed models are read-only — edit the model in the publishing \
+                     workbook and republish."
+                        .to_string(),
+                ),
+            )
+        } else {
+            (true, None)
+        };
+        (conn.bindings.clone(), editable, reason)
+    };
+    Ok(AutoConnectSourcesResult {
+        connected,
+        failed,
+        overview: build_overview(&base, &bindings, editable, reason),
+    })
 }
 
 /// Create a NEW blank model as a path-less connection (the model lives
