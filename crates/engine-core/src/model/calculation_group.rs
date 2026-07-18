@@ -46,6 +46,10 @@ pub struct CalculationItem {
     /// Original expression source text, when the item was created from text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    /// Format string applied to measures transformed by this item (e.g.
+    /// `"0.0%"`). None = keep the base measure's own format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CalculationItem {
@@ -59,12 +63,15 @@ impl<'de> Deserialize<'de> for CalculationItem {
             expression: Expression,
             #[serde(default)]
             source: Option<String>,
+            #[serde(default)]
+            format_string: Option<String>,
         }
         let f = Fields::deserialize(deserializer)?;
         Ok(CalculationItem {
             name: f.name,
             expression: f.expression,
             source: f.source,
+            format_string: f.format_string,
         })
     }
 }
@@ -81,6 +88,7 @@ impl CalculationItem {
             name: name.into(),
             expression,
             source: None,
+            format_string: None,
         }
     }
 
@@ -101,12 +109,21 @@ impl CalculationItem {
             name: name.into(),
             expression,
             source: Some(text),
+            format_string: None,
         })
     }
 
     /// Attach (or replace) the original expression source text.
     pub fn with_source(mut self, text: impl Into<String>) -> Self {
         self.source = Some(text.into());
+        self
+    }
+
+    /// Set (or clear) the format string applied to measures transformed by
+    /// this item (None = keep the base measure's own format).
+    #[must_use]
+    pub fn with_format_string(mut self, format: Option<String>) -> Self {
+        self.format_string = format;
         self
     }
 
@@ -124,6 +141,11 @@ impl CalculationItem {
     /// from text.
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
+    }
+
+    /// Returns the item's format string, if any.
+    pub fn format_string(&self) -> Option<&str> {
+        self.format_string.as_deref()
     }
 }
 
@@ -353,7 +375,13 @@ pub fn expand_calculation_group(
                      an existing model measure"
                 )));
             }
-            synthetic.push(Measure::new(name.clone(), expression));
+            let mut synthetic_measure = Measure::new(name.clone(), expression);
+            // The item's format string wins (e.g. a YOY% item formatting any
+            // measure as a percentage); otherwise keep the base measure's.
+            if let Some(fmt) = item.format_string().or(measure.format_string()) {
+                synthetic_measure = synthetic_measure.with_format_string(fmt);
+            }
+            synthetic.push(synthetic_measure);
             names.push(name);
         }
     }
@@ -416,7 +444,12 @@ pub fn expand_calculation_selection(
                  an existing model measure"
             )));
         }
-        synthetic.push(Measure::new(name.clone(), expression));
+        let mut synthetic_measure = Measure::new(name.clone(), expression);
+        // The template's format string wins; otherwise keep the base measure's.
+        if let Some(fmt) = template.format_string().or(measure.format_string()) {
+            synthetic_measure = synthetic_measure.with_format_string(fmt);
+        }
+        synthetic.push(synthetic_measure);
         names.push(name);
     }
     Ok((synthetic, names))

@@ -947,9 +947,30 @@ fn build_result_metadata(
                 let mut c = ResultColumn::bare(name, ResultColumnKind::Measure);
                 c.data_type = data_type;
                 c.measure = Some(base.clone());
+                // Format precedence: the calculation item's (or selection
+                // template's) own format string, then the base measure's —
+                // mirroring the expansion's synthetic-measure format.
+                let template_fmt = request.calculation_group.as_ref().and_then(|app| {
+                    let group = model.calculation_group(&app.group).ok()?;
+                    match &item {
+                        Some(item_name) => group.item(item_name)?.format_string(),
+                        None => match app.selection {
+                            CalcGroupSelection::MultipleOrEmpty => {
+                                group.multiple_or_empty_selection()?.format_string()
+                            }
+                            CalcGroupSelection::NoSelection => {
+                                group.no_selection()?.format_string()
+                            }
+                            CalcGroupSelection::SelectedItems => None,
+                        },
+                    }
+                });
                 c.calculation_item = item;
+                c.format_string = template_fmt.map(str::to_string);
                 if let Ok(m) = model.measure(&base) {
-                    c.format_string = m.format_string().map(str::to_string);
+                    if c.format_string.is_none() {
+                        c.format_string = m.format_string().map(str::to_string);
+                    }
                     c.description = m.description().map(str::to_string);
                     c.is_hidden = m.is_hidden();
                 }
