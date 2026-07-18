@@ -777,24 +777,23 @@ async function renderChartAsync(
     // Paint an error placeholder so the chart object stays VISIBLE — a blank
     // region reads as "the chart disappeared". The object remains selectable,
     // movable, and right-clickable (context menu → edit/delete), so the user
-    // can fix the underlying problem. Only paint if this render is still the
-    // current version (a newer render is otherwise about to replace it).
+    // can fix the underlying problem. The card is cached at the CURRENT
+    // version (not this render's): if an invalidation landed mid-flight the
+    // card still shows, and the newer render simply overwrites it when done.
     try {
-      if ((chartVersions.get(chartId) ?? 0) === version) {
-        const offscreen = new OffscreenCanvas(pxWidth, pxHeight);
-        const offCtx = offscreen.getContext("2d");
-        if (offCtx) {
-          offCtx.scale(dpr, dpr);
-          drawChartErrorPlaceholder(offCtx, logicalWidth, logicalHeight, err);
-          chartCanvasCache.set(chartId, {
-            canvas: offscreen,
-            version,
-            width: pxWidth,
-            height: pxHeight,
-          });
-          requestOverlayRedraw();
-          window.dispatchEvent(new Event("app:grid-refresh"));
-        }
+      const offscreen = new OffscreenCanvas(pxWidth, pxHeight);
+      const offCtx = offscreen.getContext("2d");
+      if (offCtx) {
+        offCtx.scale(dpr, dpr);
+        drawChartErrorPlaceholder(offCtx, logicalWidth, logicalHeight, err);
+        chartCanvasCache.set(chartId, {
+          canvas: offscreen,
+          version: chartVersions.get(chartId) ?? 0,
+          width: pxWidth,
+          height: pxHeight,
+        });
+        requestOverlayRedraw();
+        window.dispatchEvent(new Event("app:grid-refresh"));
       }
     } catch {
       // The placeholder paint must never mask the original failure.

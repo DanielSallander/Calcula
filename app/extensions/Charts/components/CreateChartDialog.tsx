@@ -29,6 +29,7 @@ import type {
 import { isPivotDataSource, isDesignQueryDataSource } from "../types";
 import { chartsBackend } from "../lib/chartsBackend";
 import { createChart, getChartById, replaceChartSpec, syncChartRegions } from "../lib/chartStore";
+import { invalidateChartCache } from "../rendering/chartRenderer";
 import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { autoDetectPivotSeries } from "../lib/pivotChartDataReader";
@@ -232,6 +233,10 @@ export function CreateChartDialog({
   // Preview data and resolved spec (with cell references like "=A1" resolved)
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
   const [resolvedSpec, setResolvedSpec] = useState<ChartSpec | null>(null);
+  // Why the live preview failed (design-query compile/query errors while
+  // typing). Shown under the preview; committing a design-query chart is
+  // blocked while set — a chart with a broken query can only render an error.
+  const [previewError, setPreviewError] = useState<string | null>(null);
   // Non-fatal transform issues from the preview pipeline, shown in the Spec tab.
   const [diagnostics, setDiagnostics] = useState<TransformDiagnostic[]>([]);
 
@@ -537,6 +542,7 @@ export function CreateChartDialog({
       setPreviewData(null);
       setResolvedSpec(null);
       setDiagnostics([]);
+      setPreviewError(null);
       return;
     }
 
@@ -545,12 +551,14 @@ export function CreateChartDialog({
         setResolvedSpec(result.spec);
         setPreviewData(result.data);
         setDiagnostics(result.diagnostics);
+        setPreviewError(null);
       })
       .catch((err) => {
         console.error("[CreateChartDialog] Preview data fetch failed:", err);
         setPreviewData(null);
         setResolvedSpec(null);
         setDiagnostics([]);
+        setPreviewError(err instanceof Error ? err.message : String(err));
       });
   }, [currentSpec]);
 
@@ -670,6 +678,9 @@ export function CreateChartDialog({
         // Replace the existing chart's spec wholesale — the dialog holds the
         // complete spec, so advanced fields deleted in the Spec tab must go too.
         replaceChartSpec(editChartId, currentSpec);
+        // Bump the render version — without this the grid keeps compositing
+        // the stale cached canvas and the edit never shows.
+        invalidateChartCache(editChartId);
         syncChartRegions();
         emitAppEvent(ChartEvents.CHART_UPDATED, { chartId: editChartId });
         emitAppEvent(AppEvents.GRID_REFRESH);
@@ -711,6 +722,13 @@ export function CreateChartDialog({
   }
 
   const isSpecFullView = activeTab === "spec" && specFullView;
+
+  // A design-query chart with a failing query can only ever render an error —
+  // block Insert/Update until the query compiles and runs. (Range sources keep
+  // their permissive behavior: transient preview issues shouldn't lock the
+  // button.)
+  const blockCommit =
+    previewError != null && currentSpec != null && isDesignQueryDataSource(currentSpec.data);
 
   // Default centering — replaced by the window hook's style once the user
   // drags or resizes.
@@ -819,6 +837,9 @@ export function CreateChartDialog({
 
           {/* Error */}
           {error && <ErrorMessage>{error}</ErrorMessage>}
+          {!error && previewError && (
+            <ErrorMessage style={{ whiteSpace: "pre-wrap" }}>{previewError}</ErrorMessage>
+          )}
         </TabContent>
 
         {/* Footer */}
@@ -826,7 +847,12 @@ export function CreateChartDialog({
           <Button onClick={handleClose} disabled={isLoading}>
             Cancel
           </Button>
-          <Button $primary onClick={handleCreate} disabled={isLoading}>
+          <Button
+            $primary
+            onClick={handleCreate}
+            disabled={isLoading || blockCommit}
+            title={blockCommit ? "Fix the design query errors first" : undefined}
+          >
             {isLoading ? "Saving..." : isEditMode ? "Update Chart" : "Insert Chart"}
           </Button>
         </Footer>

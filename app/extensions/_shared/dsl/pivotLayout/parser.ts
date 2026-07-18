@@ -184,16 +184,19 @@ class Parser {
 
   private parseValueFieldList(): ValueFieldNode[] {
     const fields: ValueFieldNode[] = [];
+    // An entry can fail with recovery landing AT a top-level comma (e.g. a
+    // function call that only CALC supports) — keep parsing the next entry
+    // then, so one bad entry costs one error, not the rest of the list.
     const first = this.tryParseValueField();
     if (first) fields.push(first);
-    else return fields;
+    else if (!this.check(TokenType.Comma)) return fields;
 
     while (this.match(TokenType.Comma)) {
       this.skipNewlines();
       const field = this.tryParseValueField();
       if (field) {
         fields.push(field);
-      } else {
+      } else if (!this.check(TokenType.Comma)) {
         break;
       }
     }
@@ -258,6 +261,20 @@ class Parser {
     // Bare field name (default aggregation will be assigned by compiler)
     const nameResult = this.parseFieldName();
     if (!nameResult) return null;
+
+    // A function call in VALUES (IF(...), ROUND(...), RUNNINGSUM(...)) — only
+    // CALC evaluates expressions; aggregations (Sum(...) etc.) were consumed
+    // above. Emit ONE targeted hint instead of the misleading cascade of
+    // "unknown field" / "unexpected token" errors the raw grammar produces.
+    if (this.check(TokenType.LeftParen)) {
+      this.errors.push(dslError(
+        `"${nameResult.name}(...)" can't be used directly in VALUES. Wrap it in a calculated field: ` +
+          `CALC Result = ${nameResult.name}(...)`,
+        tok.location,
+      ));
+      this.skipBalancedToCommaOrNewline();
+      return null;
+    }
 
     const node: ValueFieldNode = {
       fieldName: nameResult.name,
@@ -802,6 +819,19 @@ class Parser {
   /** Skip tokens until comma or newline. */
   private skipToCommaOrNewline(): void {
     while (!this.isAtEnd() && !this.check(TokenType.Comma) && !this.check(TokenType.Newline)) {
+      this.advance();
+    }
+  }
+
+  /** Skip until a TOP-LEVEL comma or a newline — commas inside parentheses
+   *  (function arguments) are skipped over, so one bad list entry produces
+   *  one error instead of a cascade. */
+  private skipBalancedToCommaOrNewline(): void {
+    let depth = 0;
+    while (!this.isAtEnd() && !this.check(TokenType.Newline)) {
+      if (this.check(TokenType.LeftParen)) depth++;
+      else if (this.check(TokenType.RightParen)) depth = Math.max(0, depth - 1);
+      else if (depth === 0 && this.check(TokenType.Comma)) return;
       this.advance();
     }
   }

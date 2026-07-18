@@ -444,4 +444,37 @@ SAVE AS "Q4 Report"
       expect(r.ast.saveAs).toBe('Q4 Report');
     });
   });
+
+  // ---------------------------------------------------------------
+  // Function expressions in VALUES (must go through CALC)
+  // ---------------------------------------------------------------
+  describe('functions in VALUES', () => {
+    it('rejects a bare function call with a single CALC hint and recovers', () => {
+      const r = p('ROWS: Region\nVALUES: IF([Revenue] > 0, 1000, [Revenue])\nSORT: Region DESC');
+      const hints = r.errors.filter((e) => e.message.includes('CALC Result ='));
+      expect(hints).toHaveLength(1);
+      // ONE error, not the old unknown-field/unexpected-token cascade...
+      expect(r.errors).toHaveLength(1);
+      // ...and error recovery continues: the following clause still parses.
+      expect(r.ast.sort).toHaveLength(1);
+      expect(r.ast.values).toHaveLength(0);
+    });
+
+    it('recovers to the next entry after a function call mid-list', () => {
+      const r = p('VALUES: IF([A] > 0, 1, 2), Sum(Sales)');
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0].message).toContain("can't be used directly in VALUES");
+      expect(r.ast.values.map((v) => v.fieldName)).toEqual(['Sales']);
+    });
+
+    it('parses the supported form: inline CALC with a function expression', () => {
+      const r = p('VALUES: [Revenue], CALC Adjusted = IF([Revenue] > 0, 1000, [Revenue])');
+      expect(r.errors).toHaveLength(0);
+      expect(r.ast.values).toHaveLength(2);
+      expect(r.ast.calculatedFields).toHaveLength(1);
+      expect(r.ast.calculatedFields[0].name).toBe('Adjusted');
+      expect(r.ast.calculatedFields[0].expression).toContain('IF');
+      expect(r.ast.calculatedFields[0].expression).toContain('[Revenue]');
+    });
+  });
 });
