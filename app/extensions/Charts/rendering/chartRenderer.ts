@@ -774,12 +774,92 @@ async function renderChartAsync(
     window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
     console.error(`[Charts] Failed to render chart ${chartId}:`, err, (err as Error)?.stack);
+    // Paint an error placeholder so the chart object stays VISIBLE — a blank
+    // region reads as "the chart disappeared". The object remains selectable,
+    // movable, and right-clickable (context menu → edit/delete), so the user
+    // can fix the underlying problem. Only paint if this render is still the
+    // current version (a newer render is otherwise about to replace it).
+    try {
+      if ((chartVersions.get(chartId) ?? 0) === version) {
+        const offscreen = new OffscreenCanvas(pxWidth, pxHeight);
+        const offCtx = offscreen.getContext("2d");
+        if (offCtx) {
+          offCtx.scale(dpr, dpr);
+          drawChartErrorPlaceholder(offCtx, logicalWidth, logicalHeight, err);
+          chartCanvasCache.set(chartId, {
+            canvas: offscreen,
+            version,
+            width: pxWidth,
+            height: pxHeight,
+          });
+          requestOverlayRedraw();
+          window.dispatchEvent(new Event("app:grid-refresh"));
+        }
+      }
+    } catch {
+      // The placeholder paint must never mask the original failure.
+    }
   } finally {
     pendingRenders.delete(chartId);
     // Superseded mid-flight: re-request a redraw now that pendingRenders is clear
     // so the sync render path re-enters and schedules the latest version. It only
     // schedules when the cache is stale/missing, so this terminates (no busy-loop).
     if (superseded) requestOverlayRedraw();
+  }
+}
+
+/**
+ * Paint a visible error state for a chart whose data read or paint failed:
+ * white card, warning icon, and the first lines of the error message wrapped
+ * to the chart width.
+ */
+function drawChartErrorPlaceholder(
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  err: unknown,
+): void {
+  // Card background + border (matches the default chart frame look)
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "#d0d0d0";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+  const message = err instanceof Error ? err.message : String(err);
+  const padding = 16;
+  const maxTextWidth = Math.max(40, width - padding * 2);
+
+  ctx.fillStyle = "#a33";
+  ctx.font = "600 12px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  ctx.fillText("⚠ Chart data error", padding, padding, maxTextWidth);
+
+  // Wrap the message (split on newlines first, then by width), max 6 lines.
+  ctx.fillStyle = "#555";
+  ctx.font = "11px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
+  const lineHeight = 15;
+  let y = padding + 22;
+  const maxY = height - padding - lineHeight;
+  let linesLeft = 6;
+  outer: for (const rawLine of message.split("\n")) {
+    let line = "";
+    for (const word of rawLine.split(/\s+/)) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && ctx.measureText(candidate).width > maxTextWidth) {
+        ctx.fillText(line, padding, y, maxTextWidth);
+        y += lineHeight;
+        if (--linesLeft <= 0 || y > maxY) break outer;
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) {
+      ctx.fillText(line, padding, y, maxTextWidth);
+      y += lineHeight;
+      if (--linesLeft <= 0 || y > maxY) break;
+    }
   }
 }
 

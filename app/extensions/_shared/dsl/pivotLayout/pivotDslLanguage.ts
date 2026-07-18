@@ -279,6 +279,23 @@ export function registerPivotDslLanguage(): void {
         endColumn: word.endColumn,
       };
 
+      // Replace-range for field/measure suggestions. Monaco's default word
+      // breaks at '.' and '[', so accepting a full-key insert mid-token would
+      // corrupt the text ("BI." + "BI.dim_customer.title", or "[[Revenue]").
+      // Span the whole in-progress token instead: an unclosed [measure token
+      // or a dotted identifier chain (table names can contain dots). Monaco
+      // then also filters against the full typed token, so "BI.dim_customer."
+      // narrows the list to that table's fields.
+      const tokenMatch = lineText.match(/(\[[^\]]*|[A-Za-z_][\w.]*)$/);
+      const fieldRange: monaco.IRange = tokenMatch
+        ? {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: position.column - tokenMatch[1].length,
+            endColumn: position.column,
+          }
+        : range;
+
       const suggestions: monaco.languages.CompletionItem[] = [];
       const lineTrimmed = lineText.trim().toUpperCase();
 
@@ -343,13 +360,13 @@ export function registerPivotDslLanguage(): void {
             });
           }
           // Also suggest field names for field-level reset
-          addFieldSuggestions(suggestions, range, false);
+          addFieldSuggestions(suggestions, fieldRange, false);
           return { suggestions };
         }
         // 1st argument (or aggregation function) → suggest fields + measures
-        addFieldSuggestions(suggestions, range, funcParenCtx.isAggregation);
+        addFieldSuggestions(suggestions, fieldRange, funcParenCtx.isAggregation);
         if (currentBiModel) {
-          addMeasureSuggestions(suggestions, range);
+          addMeasureSuggestions(suggestions, fieldRange);
         }
         return { suggestions };
       }
@@ -365,7 +382,7 @@ export function registerPivotDslLanguage(): void {
         case 'ROWS':
         case 'COLUMNS':
         case 'FILTERS':
-          addFieldSuggestions(suggestions, range, false);
+          addFieldSuggestions(suggestions, fieldRange, false);
           if (currentBiModel) {
             suggestions.push({
               label: 'LOOKUP',
@@ -408,12 +425,12 @@ export function registerPivotDslLanguage(): void {
             });
           }
           if (currentBiModel) {
-            addMeasureSuggestions(suggestions, range);
+            addMeasureSuggestions(suggestions, fieldRange);
           }
           return { suggestions };
 
         case 'SORT':
-          addFieldSuggestions(suggestions, range, false);
+          addFieldSuggestions(suggestions, fieldRange, false);
           suggestions.push(
             { label: 'ASC', kind: monaco.languages.CompletionItemKind.Keyword, insertText: 'ASC', range },
             { label: 'DESC', kind: monaco.languages.CompletionItemKind.Keyword, insertText: 'DESC', range },
@@ -433,9 +450,9 @@ export function registerPivotDslLanguage(): void {
 
         case 'CALC':
           // CALC expressions can reference dimensions, measures, and visual calc functions
-          addFieldSuggestions(suggestions, range, false);
+          addFieldSuggestions(suggestions, fieldRange, false);
           if (currentBiModel) {
-            addMeasureSuggestions(suggestions, range);
+            addMeasureSuggestions(suggestions, fieldRange);
           }
           // Transformation functions (IF/SWITCH/math/text) — post-aggregation.
           for (const [fn, desc] of TRANSFORM_FUNCTIONS) {

@@ -6,7 +6,7 @@
 //   the model itself (that needs an extension-scoped backend channel) — the
 //   parent passes `biModel` (e.g. from get_connection_bi_model).
 
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useRef } from "react";
 import Editor, { type OnChange } from "@monaco-editor/react";
 import {
   LANGUAGE_ID,
@@ -38,6 +38,31 @@ export function DesignQueryEditor({
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
     registerPivotDslLanguage();
+  }, []);
+
+  // Host node for Monaco's overflow widgets (suggest list, hover), attached
+  // directly to document.body. Dialogs center themselves with a CSS transform,
+  // and a transformed ancestor re-bases position:fixed descendants — Monaco's
+  // viewport coordinates would land offset (bottom-right of the screen).
+  // Rendering the widgets from an untransformed body child keeps fixed
+  // coordinates true viewport coordinates. The "monaco-editor" class scopes
+  // Monaco's widget CSS; z-index sits above dialogs (1051).
+  const overflowNodeRef = useRef<HTMLDivElement | null>(null);
+  if (overflowNodeRef.current === null) {
+    const node = document.createElement("div");
+    node.className = "monaco-editor";
+    node.style.zIndex = "10000";
+    node.style.position = "fixed";
+    node.style.top = "0";
+    node.style.left = "0";
+    overflowNodeRef.current = node;
+  }
+  useEffect(() => {
+    const node = overflowNodeRef.current;
+    if (node) document.body.appendChild(node);
+    return () => {
+      node?.remove();
+    };
   }, []);
 
   // The DSL editor context is module-global (shared with the pivot Design view);
@@ -87,6 +112,7 @@ export function DesignQueryEditor({
           // Render suggest/hover widgets position:fixed so they escape the
           // editor box and the host dialog instead of being clipped by them.
           fixedOverflowWidgets: true,
+          overflowWidgetsDomNode: overflowNodeRef.current ?? undefined,
         }}
       />
     </div>
