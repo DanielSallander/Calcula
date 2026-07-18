@@ -700,6 +700,27 @@ The shared model file is a **trust boundary**. Beyond the per-feature notes abov
 
 These do not change the host API surface but **do** change behavior: a model that previously produced wrong numbers or relied on lax types now produces correct numbers or a clear error.
 
+## Context-operation execution — CLEAR / RESET now compute (no API change, no `MODEL_FORMAT_VERSION` change)
+
+`CLEAR` / `RESET` / `CLEAREXCEPT` / `CLEAR_INNER` were **silently ignored on the local (in-memory / non-PostgreSQL) execution path** — a percent-of-total measure returned `1.0` for every row. They now **re-aggregate over the surviving group-by partition**, so these compute correct numbers on every path:
+
+- **Percent of total** — `DIVIDE(SUM(x), SUM(x, RESET()))` (or `CLEAR` of every axis dimension): each row's share of the grand total.
+- **Percent of parent** — `DIVIDE(SUM(x), SUM(x, CLEAREXCEPT(dim, dim[keepcol])))`: each row's share of its parent group.
+- **Share of visible total** — `CLEAR_INNER` (drops the group-by axis, keeps slicers).
+
+**Chosen semantics** (matches DAX `ALL` / `REMOVEFILTERS`): `CLEAR`/`RESET` remove **both** the group-by axis and report slicers; `CLEAR_INNER`/`RESET_INNER` remove only the axis (keep slicers); `CLEAR_OUTER`/`RESET_OUTER` remove only slicers.
+
+**New fail-closed conditions** (a host sees `QueryError::InvalidQuery` with an explanatory message — never a silently wrong number):
+
+1. **Slicer removal is not yet wired.** A `CLEAR`/`RESET`/`CLEAREXCEPT`/`CLEAR_OUTER` that would need to strip a **report slicer** on the cleared table fails closed (both the pushed and local paths, so the two agree). Use `CLEAR_INNER` for axis-only clearing, or remove the slicer at the request layer.
+2. **Non-additive aggregate under CLEAR.** Only `SUM`/`COUNT`/`COUNTROWS`/`MIN`/`MAX` recombine over the cleared partition; `AVG`/`DISTINCTCOUNT`/`MEDIAN`/`STDEV`/… fail closed.
+3. **Percent-of-parent shape.** The partitioned form (a `CLEAREXCEPT` that keeps a surviving group-by column) is supported only in a **plain grouped query** — combined with `TotalsMode::Rollup`, lookups, hierarchies, or context columns it fails closed. Grand-total clearing (empty partition) has no such restriction.
+
+Also in this cycle:
+
+- **`DATEDIFF` sub-day intervals rejected at parse.** `DATEDIFF(a, b, HOUR | MINUTE | SECOND)` previously parsed but **silently returned days** (the renderer had no sub-day arm). The interval allow-list is now `DAY` / `MONTH` / `YEAR` / `QUARTER` only, matching the documented contract; an unsupported interval is a parse error. (`DATEADD` / `DATE_TRUNC` still accept sub-day intervals — they render correctly.)
+- **Scalar filter on a filter-only dimension now restricts the fact.** A `QueryRequest.filters` condition whose column is owned only by a dimension that is neither grouped nor measured (e.g. slice `region = "East"` while grouping by product) was **silently dropped**; it now pulls that table into the fetch set and rides the two-phase propagation, restricting the fact — matching how `in_filters` already behaved.
+
 ## Performance (transparent — no API change)
 
 - **Sargable integer filters.** A scalar filter or `OR`-slicer condition on a column the model declares as an **integer** type now renders to the source as an uncast, unquoted comparison (`col = 5`), so a source index on that column is usable — previously every filter was text-cast (`col::text = $1`), forcing a sequential scan. This closes the asymmetry with the IN-list path, which was already sargable by the same model-type rule. (Date/decimal sargability remains future work; those still text-cast.) **Contract:** a model's declared column type must match the source's physical type. The optimization keys off the *declared* type, so a column declared integer but physically `VARCHAR` at the source now renders `col = 5` — on PostgreSQL this is a loud error (operator type mismatch); on SQL Server it compares numerically rather than as text, which can differ for non-canonical strings (`'05'`). This only affects models that misdeclare their own column types; a faithful model is unaffected. (Same caveat already applied to the IN-list slicer path.)

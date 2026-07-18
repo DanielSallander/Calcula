@@ -46,6 +46,8 @@ Functions that inspect the current filter context.
 | [SELECTEDVALUE](SELECTEDVALUE.md) | Returns the single value of a column if there is exactly one, otherwise returns an alternate |
 | [FIRST](FIRST.md) | Returns the first value of a column ordered by another expression |
 | [ISINSCOPE](ISINSCOPE.md) | Returns TRUE if a column is in the current GROUP BY context |
+| [ISFILTERED](ISFILTERED.md) | Returns TRUE when a column carries a direct filter (axis or slicer) in the current context |
+| [SELECTEDMEASURE](SELECTEDMEASURE.md) | Placeholder for the measure a calculation item is applied to |
 
 ## Logical Functions
 
@@ -163,6 +165,36 @@ Functions that manipulate text strings.
 | [ENDSWITH](ENDSWITH.md) | Tests whether text ends with a suffix |
 | [INITCAP](INITCAP.md) | Capitalizes the first letter of each word |
 
+## Time Intelligence Functions
+
+Functions that shift or accumulate a measure over the model's marked date table. They work either with date-role columns on the group-by axis (running totals / positional shifts) or purely from the date filter context (cards, non-date pivots).
+
+| Function | Description |
+|----------|-------------|
+| [YTD](YTD.md) | Year-to-date running total |
+| [QTD](QTD.md) | Quarter-to-date running total |
+| [MTD](MTD.md) | Month-to-date running total |
+| [WTD](WTD.md) | Week-to-date running total (from Monday of the ISO week) |
+| [PRIORYEAR](PRIORYEAR.md) | Same period, one year earlier |
+| [SAMEPERIODLASTYEAR](SAMEPERIODLASTYEAR.md) | Synonym for PRIORYEAR |
+| [PRIORPERIOD](PRIORPERIOD.md) | Shift back by N years/quarters/months |
+| [PARALLELPERIOD](PARALLELPERIOD.md) | Signed period shift (±N years/quarters/months) |
+| [DATESINPERIOD](DATESINPERIOD.md) | Trailing window of N periods ending at the as-of date |
+| [DATESBETWEEN](DATESBETWEEN.md) | Absolute, inclusive date range on the date table |
+| [CLOSINGBALANCE](CLOSINGBALANCE.md) | Semi-additive balance at the last date in the period |
+| [OPENINGBALANCE](OPENINGBALANCE.md) | Semi-additive balance at the first date in the period |
+
+## Relationship & Hierarchy Functions
+
+| Function | Description |
+|----------|-------------|
+| [RELATED](RELATED.md) | Fetches a value from the ONE side of a many-to-one relationship for the current row |
+| [LOOKUPVALUE](LOOKUPVALUE.md) | Returns a value from another table's row matching given search columns (no relationship needed) |
+| [PATH](PATH.md) | Builds a parent-child path string (root→row) as a calculated column |
+| [PATHITEM](PATHITEM.md) | Returns the item at a 1-based position in a path string |
+| [PATHLENGTH](PATHLENGTH.md) | Returns the depth (number of levels) of a path string |
+| [THISROW](THISROW.md) | The anchor row's column value inside a nested ITERATE (Calcula's answer to DAX EARLIER) |
+
 ## Context Functions
 
 Functions that modify the evaluation context — the set of filters applied when computing a measure. Context functions are used as the second argument to an aggregation function.
@@ -170,10 +202,13 @@ Functions that modify the evaluation context — the set of filters applied when
 | Function | Description |
 |----------|-------------|
 | [KEEP](KEEP.md) | Adds filter conditions to the evaluation context |
-| [CLEAR](CLEAR.md) | Removes filters on a specific table or column |
+| [CLEAR](CLEAR.md) | Removes filters (axis + slicers) on a specific table or column |
 | [RESET](RESET.md) | Removes all filters from the evaluation context |
-| [USERELATIONSHIP](USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
 | [CLEAREXCEPT](CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
+| [ALLSELECTED](ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the inner-clear family) |
+| [TREATAS](TREATAS.md) | Applies one column's values as a virtual filter on another, unrelated table |
+| [USERELATIONSHIP](USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
+| [TRAVERSE](TRAVERSE.md) | Forces cross-table filters along an explicit multi-hop relationship path |
 
 ### Source-Specific Context Functions
 
@@ -185,6 +220,8 @@ These are advanced variants of CLEAR and RESET that target only one filter sourc
 | [CLEAR_OUTER](CLEAR_OUTER.md) | Query-level filters on specified targets | Group-by filters |
 | [RESET_INNER](RESET_INNER.md) | All group-by filters | Query-level filters |
 | [RESET_OUTER](RESET_OUTER.md) | All query-level filters | Group-by filters |
+
+> **Note on execution (local / in-memory path).** `CLEAR`/`RESET`/`CLEAREXCEPT`/`CLEAR_INNER` re-aggregate over the surviving group-by partition, so percent-of-total and percent-of-parent compute correctly. Three cases **fail closed** with a typed error rather than return a wrong number: (1) clearing a table that also carries a **report slicer** (slicer removal is not yet wired — use `CLEAR_INNER` for axis-only, or remove the slicer); (2) a **non-additive** aggregate under CLEAR (`AVG`, `DISTINCTCOUNT`, `MEDIAN`, …) — only `SUM`/`COUNT`/`COUNTROWS`/`MIN`/`MAX` recombine; (3) **percent-of-parent** combined with totals, lookups, hierarchies, or context columns.
 
 ## Iterator Functions
 

@@ -677,6 +677,28 @@ let grand_total = expr::agg(
 );
 ```
 
+### CLEAR / RESET: semantics and execution
+
+**What is removed.** `clear()` and `reset()` remove filters from **both** sources — the group-by axis *and* query-level slicers — matching DAX `ALL` / `REMOVEFILTERS`. The source-specific variants split this: `clear_inner()` / `reset_inner()` remove only the axis (keeping slicers, the "share of visible total" case), and `clear_outer()` / `reset_outer()` remove only slicers.
+
+**How it computes.** A cleared aggregate re-aggregates over the *surviving* group-by partition, so percentage measures compute correctly:
+
+```
+// Percent of grand total — denominator ignores the whole axis
+PctOfTotal    = sum(Sales.Amount) / sum(reset(Sales.Amount))
+
+// Percent of parent — denominator keeps the Category grouping
+PctOfCategory = sum(Sales.Amount) / sum(clear_except(Sales.Amount, Products.Category))
+```
+
+The grand-total case (`reset()`, or `clear()` of every axis dimension) is rendered as a scalar subquery; the partitioned case (percent-of-parent) as a two-level query with a `PARTITION BY` window. Both produce the same numbers on the local (in-memory) and pushed (PostgreSQL) paths.
+
+**When it refuses (fails closed with a typed `QueryError`, never a wrong number):**
+
+- **Slicer removal is not yet wired.** If `clear()`/`reset()`/`clear_except()`/`clear_outer()` would need to strip a **report slicer** on the cleared table, the query is refused. Use `clear_inner()` for axis-only clearing, or drop the slicer at the request layer. (This guard runs on both execution paths, so they always agree.)
+- **Non-additive aggregate.** Only `SUM` / `COUNT` / `COUNTROWS` / `MIN` / `MAX` recombine over a cleared partition. `AVG` / `DISTINCTCOUNT` / `MEDIAN` / `STDEV` / … under `clear()` fail closed.
+- **Percent-of-parent shape.** The partitioned form (a `clear_except()` that keeps a surviving group-by column) is supported only in a plain grouped query — combined with rollup totals, lookups, hierarchies, or context columns it fails closed. Grand-total clearing has no such restriction.
+
 ### traverse()
 
 **Force explicit relationship traversal.**
@@ -1255,9 +1277,9 @@ When a measure is evaluated in a query context (with group-by and filters):
    - `traverse()` → set explicit relationship path
    - `using()` → expand and apply named context operations
 3. **Resolve relationships** — cross-table filters resolved via model propagation settings (or explicit `traverse()`)
-4. **Aggregate** — compute the aggregation over the resulting filtered rows
+4. **Aggregate** — compute the aggregation over the resulting rows. When the context *cleared* part of the group-by axis (`clear`/`reset`/`clear_except`/`clear_inner`), the measure re-aggregates over the surviving partition (a `PARTITION BY` window, or a scalar subquery for a full grand total) so it can show a total or denominator that ignores the current row's axis position.
 
-This is deterministic and explicit: reading the expression from inside-out tells you exactly what happens at each step.
+This is deterministic and explicit: reading the expression from inside-out tells you exactly what happens at each step. Unsupported combinations (see [CLEAR / RESET: semantics and execution](#clear--reset-semantics-and-execution)) fail closed with a typed `QueryError` rather than return a wrong number.
 
 ---
 
@@ -1269,10 +1291,10 @@ The query planner considers context operations when deciding execution strategy:
 |---------|-----------|
 | Simple `AGG(column)` or `COUNTROWS(table)` on single table | Pushed to data source |
 | Conditional/math wrapping aggregates (`DIVIDE`, `IF`, `ROUND`, etc.) | Computed locally |
-| Any measure with context ops (`keep`, `clear`, `reset`, `keep_in`, `clear_inner`, `clear_outer`, `reset_inner`, `reset_outer`, `traverse`, `using`, `block`) | Computed locally |
+| Any measure with context ops (`keep`, `clear`, `reset`, `keep_in`, `clear_inner`, `clear_outer`, `reset_inner`, `reset_outer`, `traverse`, `using`, `block`) | Computed locally (a bare `clear`/`clear_except` may instead render as a pushed window on PostgreSQL) |
 | Multi-table queries | Fetched from sources, joined and aggregated locally |
 
-Measures with context operations, conditional logic, or math functions always force local aggregation to ensure correct evaluation.
+Measures with context operations, conditional logic, or math functions are evaluated with local aggregation (or a specially-rendered pushed form). Either way the result is the same on every source, and any combination the engine cannot compute correctly fails closed with a typed error — it is never silently approximated or dropped.
 
 ---
 
