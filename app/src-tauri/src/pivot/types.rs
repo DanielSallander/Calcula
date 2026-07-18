@@ -1493,13 +1493,6 @@ pub struct UpdateBiPivotFieldsRequest {
 /// the engine's cross-applied result into a real cache dimension.
 pub const CALC_GROUP_TABLE: &str = "__calcgroup__";
 
-/// Item-column value used when a FILTERS-placed calculation group applies NO
-/// item — the Power BI/AS default for an empty or multiple-item selection:
-/// measures show their BASE values (never a sum of transformed item rows).
-/// The sentinel never matches an item name in hidden_items, so the base rows
-/// are never filtered out; the filter dropdown lists the group's declared
-/// items from metadata, so it never surfaces.
-pub const CALC_GROUP_NO_ITEM: &str = "(All)";
 
 /// Reference to a table column (for BI pivot row/column/filter fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]

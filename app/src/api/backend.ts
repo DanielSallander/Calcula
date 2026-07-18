@@ -3809,6 +3809,9 @@ export interface ModelCultureInfo {
 export interface CalcGroupItemDto {
   name: string;
   formula: string;
+  /** Format string applied to measures transformed by this item (e.g.
+   *  "0.0%"). Absent = keep the base measure's own format. */
+  formatString?: string;
 }
 
 export interface ModelCalcGroupInfo {
@@ -3817,9 +3820,13 @@ export interface ModelCalcGroupInfo {
   /** AS-style multipleOrEmptySelectionExpression source (absent = default:
    *  a multiple/empty selection applies no item — base measures). */
   multipleOrEmptySelection?: string;
+  /** Format string of the multiple-or-empty selection expression. */
+  multipleOrEmptySelectionFormat?: string;
   /** AS-style noSelectionExpression source (absent = default: an unfiltered
    *  group applies no item — base measures). */
   noSelection?: string;
+  /** Format string of the no-selection expression. */
+  noSelectionFormat?: string;
 }
 
 export interface ModelGlobalVariableInfo {
@@ -4243,9 +4250,13 @@ export async function biModelUpsertCalcGroup(params: {
    *  NOTE: an upsert REPLACES the whole group — callers must pass the current
    *  value to preserve it. */
   multipleOrEmptySelection?: string | null;
+  /** Format string of the multiple-or-empty selection expression. */
+  multipleOrEmptySelectionFormat?: string | null;
   /** AS-style noSelectionExpression (blank/undefined = none). Same
    *  replace-semantics note as above. */
   noSelection?: string | null;
+  /** Format string of the no-selection expression. */
+  noSelectionFormat?: string | null;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_calc_group", {
     connectionId: params.connectionId,
@@ -4253,7 +4264,9 @@ export async function biModelUpsertCalcGroup(params: {
     name: params.name,
     items: params.items,
     multipleOrEmptySelection: params.multipleOrEmptySelection ?? null,
+    multipleOrEmptySelectionFormat: params.multipleOrEmptySelectionFormat ?? null,
     noSelection: params.noSelection ?? null,
+    noSelectionFormat: params.noSelectionFormat ?? null,
   });
 }
 

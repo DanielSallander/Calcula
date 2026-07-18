@@ -540,6 +540,7 @@ pub async fn update_pivot_fields(
     pivot_state: State<'_, PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_fields pivot_id={}", request.pivot_id);
@@ -547,6 +548,59 @@ pub async fn update_pivot_fields(
     let t_total = Instant::now();
 
     let pivot_id = request.pivot_id;
+
+    // A BI pivot's calculation-group filter can't recalc locally (this is the
+    // grid filter-dropdown apply path): the number of VISIBLE items decides
+    // whether an item is applied at all (PBI/AS semantics), and the cache
+    // only holds the current selection's data. Apply the new hidden_items to
+    // the matching definition field(s) and delegate to the BI re-query,
+    // leaving the other filter fields untouched.
+    if let Some(ref filter_configs) = request.filter_fields {
+        let calc_group_touched = {
+            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            bi_meta.get(&pivot_id).is_some_and(|meta| {
+                filter_configs
+                    .iter()
+                    .any(|fc| meta.calculation_groups.iter().any(|g| g.name == fc.name))
+            })
+        };
+        if calc_group_touched {
+            {
+                let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                let (definition, _) = pivot_tables
+                    .get_mut(&pivot_id)
+                    .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+                for fc in filter_configs {
+                    let hidden = fc.hidden_items.clone().unwrap_or_default();
+                    for pf in definition.filter_fields.iter_mut() {
+                        if pf.field.name == fc.name {
+                            pf.field.hidden_items = hidden.clone();
+                        }
+                    }
+                    for f in definition
+                        .row_fields
+                        .iter_mut()
+                        .chain(definition.column_fields.iter_mut())
+                    {
+                        if f.name == fc.name {
+                            f.hidden_items = hidden.clone();
+                        }
+                    }
+                }
+                definition.bump_version();
+            }
+            return refresh_pivot_cache(
+                window,
+                state,
+                pivot_state,
+                pane_control_state,
+                ribbon_filter_state,
+                bi_state,
+                pivot_id,
+            )
+            .await;
+        }
+    }
 
     // Create cancellation token
     let token = CancellationToken::new();
@@ -5731,13 +5785,13 @@ pub async fn update_bi_pivot_fields(
     // - Rows/Columns: EVERY item (the axis shows them) — item subsetting is
     //   pivot-side via hidden_items.
     // - Filters: exactly ONE visible item applies it; ZERO or MANY visible
-    //   items apply NO item at all — the measures are their BASE values (a
-    //   multi-selection must never sum transformed item rows), carried on a
-    //   single sentinel-valued row set.
+    //   items apply NO item (`None` = an EMPTY item cell) — the measures are
+    //   their base values or the group's selection expression (a
+    //   multi-selection must never sum transformed item rows).
     let (calc_group_app, calc_item_names, reshape_items): (
         Option<bi_engine::CalculationGroupApplication>,
         Vec<String>,
-        Vec<String>,
+        Vec<Option<String>>,
     ) = match placement.as_ref() {
         Some(p) => {
             // v1: calculation groups cannot combine with lookup columns (the
@@ -5792,7 +5846,7 @@ pub async fn update_bi_pivot_fields(
                                 visible.clone(),
                             )),
                             all_items,
-                            visible,
+                            visible.into_iter().map(Some).collect(),
                         )
                     } else {
                         // AS selection states: no filter at all = "no
@@ -5814,11 +5868,7 @@ pub async fn update_bi_pivot_fields(
                         } else {
                             None
                         };
-                        (
-                            app,
-                            all_items,
-                            vec![super::types::CALC_GROUP_NO_ITEM.to_string()],
-                        )
+                        (app, all_items, vec![None])
                     }
                 }
                 _ => (
@@ -5829,7 +5879,7 @@ pub async fn update_bi_pivot_fields(
                         Vec::new(),
                     )),
                     all_items.clone(),
-                    all_items,
+                    all_items.into_iter().map(Some).collect(),
                 ),
             }
         }
@@ -6012,7 +6062,12 @@ pub async fn update_bi_pivot_fields(
     // K rows of [dims][item name][M base measures]. From there the group
     // behaves like any pivot field (rows/columns/filters, item hiding).
     let t_cache = Instant::now();
-    let use_synthetic_dim = has_values && !has_dimensions;
+    // A filters-placed group with nothing else still needs a visible pivot
+    // (the filter row + an empty synthetic "Total" row), like a values-only
+    // pivot does.
+    let filters_only_group = group_only
+        && matches!(placement.as_ref().map(|p| p.axis), Some(CalcGroupAxis::Filters));
+    let use_synthetic_dim = (has_values || filters_only_group) && !has_dimensions;
     let num_group_by = row_group_fields.len() + hierarchy_row_refs.len()
         + col_group_fields.len() + hierarchy_col_refs.len()
         + filter_group_fields.len() + slicer_group_fields.len()
@@ -6028,6 +6083,7 @@ pub async fn update_bi_pivot_fields(
             num_group_by,
             &p.group,
             &reshape_items,
+            &calc_item_names,
             &query_measures,
             &wide_idx,
             use_synthetic_dim,
@@ -6372,10 +6428,10 @@ pub async fn update_bi_pivot_fields(
                     .get(&(measure.clone(), vf.calc_item.clone()))
                     .or_else(|| {
                         // Placed calc group: the wide metadata carries item
-                        // attribution; adopt the base measure's format from
-                        // its first applied item column.
+                        // attribution; adopt the measure's format from its
+                        // first applied item column.
                         reshape_items.first().and_then(|it| {
-                            format_by_key.get(&(measure.clone(), Some(it.clone())))
+                            format_by_key.get(&(measure.clone(), it.clone()))
                         })
                     });
                 if let Some(fmt) = fmt {

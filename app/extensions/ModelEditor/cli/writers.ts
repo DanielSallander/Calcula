@@ -594,7 +594,9 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
           name: group.name,
           items,
           multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
+          multipleOrEmptySelectionFormat: group.multipleOrEmptySelectionFormat ?? null,
           noSelection: group.noSelection ?? null,
+          noSelectionFormat: group.noSelectionFormat ?? null,
         }),
       );
       done(`calc item ${group.name}[${itemName}]`);
@@ -954,7 +956,9 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           name: group.name,
           items,
           multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
+          multipleOrEmptySelectionFormat: group.multipleOrEmptySelectionFormat ?? null,
           noSelection: group.noSelection ?? null,
+          noSelectionFormat: group.noSelectionFormat ?? null,
         }),
       );
       return;
@@ -1345,7 +1349,9 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
           name: newName,
           items: grp.items,
           multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+          multipleOrEmptySelectionFormat: grp.multipleOrEmptySelectionFormat ?? null,
           noSelection: grp.noSelection ?? null,
+          noSelectionFormat: grp.noSelectionFormat ?? null,
         }),
       );
       done(grp.name);
@@ -1363,7 +1369,9 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
           name: grp.name,
           items,
           multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+          multipleOrEmptySelectionFormat: grp.multipleOrEmptySelectionFormat ?? null,
           noSelection: grp.noSelection ?? null,
+          noSelectionFormat: grp.noSelectionFormat ?? null,
         }),
       );
       done(`${grp.name}[${item.name}]`);

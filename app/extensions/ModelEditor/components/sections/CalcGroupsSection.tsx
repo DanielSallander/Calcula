@@ -30,7 +30,9 @@ interface SavedGroup {
   items: CalcGroupItemDto[];
   /** AS-style selection-state expressions (undefined = not defined). */
   multipleOrEmptySelection?: string;
+  multipleOrEmptySelectionFormat?: string;
   noSelection?: string;
+  noSelectionFormat?: string;
   /** Item renames as [oldName, newName] pairs (edit mode only). */
   renames: [string, string][];
 }
@@ -46,6 +48,8 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
     /** null = creating a new group. Resolved to the LIVE group at mount. */
     groupName: string | null;
     initialItem?: number;
+    /** Preselect a selection-state expression instead of an item. */
+    initialSel?: "moe" | "nosel";
   } | null>(null);
   /** In-flight queued ops; the modal mounts only when this is 0. */
   const [pending, setPending] = useState(0);
@@ -128,7 +132,9 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
           // An upsert replaces the whole group — carry the selection-state
           // expressions forward or they would be wiped by every item edit.
           multipleOrEmptySelection: g.multipleOrEmptySelection ?? null,
+          multipleOrEmptySelectionFormat: g.multipleOrEmptySelectionFormat ?? null,
           noSelection: g.noSelection ?? null,
+          noSelectionFormat: g.noSelectionFormat ?? null,
         });
         if (payload.name !== g.name) aliasRef.current.set(g.name, payload.name);
         latestGroupsRef.current = latestGroupsRef.current.map((x) =>
@@ -306,7 +312,9 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
       name: saved.name,
       items: saved.items,
       multipleOrEmptySelection: saved.multipleOrEmptySelection,
+      multipleOrEmptySelectionFormat: saved.multipleOrEmptySelectionFormat,
       noSelection: saved.noSelection,
+      noSelectionFormat: saved.noSelectionFormat,
     };
     latestGroupsRef.current = oldName
       ? latestGroupsRef.current.map((g) => (g.name === oldName ? savedInfo : g))
@@ -466,6 +474,57 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                       </div>
                     );
                   })}
+                {/* AS-style selection-state expressions as editable
+                    pseudo-items (double-click to edit in the group dialog). */}
+                {isOpen &&
+                  (
+                    [
+                      ["moe", "Multiple/empty selection", g.multipleOrEmptySelection],
+                      ["nosel", "No selection", g.noSelection],
+                    ] as const
+                  ).map(([key, label, expr]) => (
+                    <div
+                      key={key}
+                      style={{
+                        ...treeStyles.leafRow,
+                        paddingLeft: 24,
+                        opacity: expr ? 1 : 0.55,
+                      }}
+                      onDoubleClick={() => {
+                        if (!readOnly) setEditing({ groupName: g.name, initialSel: key });
+                      }}
+                      title={
+                        expr ??
+                        "Not set — double-click to define. Default: no item is applied " +
+                          "(measures show base values)."
+                      }
+                    >
+                      <span style={{ color: ACCENT, flexShrink: 0, fontSize: 11 }}>{"◈"}</span>
+                      <span
+                        style={{
+                          fontStyle: "italic",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {label}
+                      </span>
+                      <span
+                        style={{
+                          ...styles.muted,
+                          fontSize: 12,
+                          fontFamily: "Consolas, 'Cascadia Code', monospace",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flexShrink: 1,
+                        }}
+                      >
+                        {expr ?? "(not set)"}
+                      </span>
+                    </div>
+                  ))}
               </div>
             );
           })}
@@ -516,6 +575,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
           overview={overview}
           original={modalOriginal}
           initialItem={editing.initialItem}
+          initialSel={editing.initialSel}
           onClose={() => setEditing(null)}
           onSaved={handleModalSaved}
         />
@@ -765,6 +825,9 @@ interface ItemDraft {
   id: number;
   name: string;
   formula: string;
+  /** Format string applied to measures transformed by this item ("" = keep
+   *  the base measure's format). */
+  formatString?: string;
 }
 
 function CalcGroupModal({
@@ -772,6 +835,7 @@ function CalcGroupModal({
   overview,
   original,
   initialItem,
+  initialSel,
   onClose,
   onSaved,
 }: {
@@ -780,6 +844,8 @@ function CalcGroupModal({
   original: ModelCalcGroupInfo | null;
   /** Index of the item to preselect (e.g. "Edit formula…" from the pane). */
   initialItem?: number;
+  /** Preselect a selection-state expression instead of an item. */
+  initialSel?: "moe" | "nosel";
   onClose: () => void;
   onSaved: (overview: ModelOverview, saved: SavedGroup) => void;
 }): React.ReactElement {
@@ -792,13 +858,18 @@ function CalcGroupModal({
   const nextId = useRef(original?.items.length || 1);
   // Selection: an item index, or one of the two AS-style selection-state
   // expressions ("moe" = multiple-or-empty, "nosel" = no selection).
-  const [sel, setSel] = useState<number | "moe" | "nosel">(() =>
-    initialItem !== undefined && initialItem >= 0 && initialItem < (original?.items.length ?? 0)
+  const [sel, setSel] = useState<number | "moe" | "nosel">(() => {
+    if (initialSel) return initialSel;
+    return initialItem !== undefined &&
+      initialItem >= 0 &&
+      initialItem < (original?.items.length ?? 0)
       ? initialItem
-      : 0,
-  );
+      : 0;
+  });
   const [moeFormula, setMoeFormula] = useState(original?.multipleOrEmptySelection ?? "");
+  const [moeFormat, setMoeFormat] = useState(original?.multipleOrEmptySelectionFormat ?? "");
   const [noselFormula, setNoselFormula] = useState(original?.noSelection ?? "");
+  const [noselFormat, setNoselFormat] = useState(original?.noSelectionFormat ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -840,7 +911,11 @@ function CalcGroupModal({
       setError(`A calculation group named '${trimmedName}' already exists.`);
       return;
     }
-    const finalItems = items.map((i) => ({ name: i.name.trim(), formula: i.formula.trim() }));
+    const finalItems = items.map((i) => ({
+      name: i.name.trim(),
+      formula: i.formula.trim(),
+      formatString: i.formatString?.trim() || undefined,
+    }));
     const lower = finalItems.map((i) => i.name.toLowerCase());
     const dupe = lower.find((n, i) => lower.indexOf(n) !== i);
     if (dupe) {
@@ -857,7 +932,9 @@ function CalcGroupModal({
         name: trimmedName,
         items: finalItems,
         multipleOrEmptySelection: moe || null,
+        multipleOrEmptySelectionFormat: (moe && moeFormat.trim()) || null,
         noSelection: nosel || null,
+        noSelectionFormat: (nosel && noselFormat.trim()) || null,
       });
       const renames: [string, string][] = original
         ? items
@@ -873,7 +950,9 @@ function CalcGroupModal({
         name: trimmedName,
         items: finalItems,
         multipleOrEmptySelection: moe || undefined,
+        multipleOrEmptySelectionFormat: (moe && moeFormat.trim()) || undefined,
         noSelection: nosel || undefined,
+        noSelectionFormat: (nosel && noselFormat.trim()) || undefined,
         renames,
       });
     } catch (err: unknown) {
@@ -939,6 +1018,28 @@ function CalcGroupModal({
               if (selIndex !== null) updateItem(selIndex, { name: e.target.value });
             }}
             placeholder={selIndex === null ? "(selection expression)" : "e.g. YTD"}
+          />
+        </Field>
+        {/* Format string of the SELECTED item / selection expression. Applied
+            to any measure it transforms; blank keeps the measure's format. */}
+        <Field label="Format" flex={1}>
+          <input
+            style={styles.input}
+            value={
+              sel === "moe"
+                ? moeFormat
+                : sel === "nosel"
+                  ? noselFormat
+                  : (current?.formatString ?? "")
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (sel === "moe") setMoeFormat(v);
+              else if (sel === "nosel") setNoselFormat(v);
+              else if (selIndex !== null) updateItem(selIndex, { formatString: v });
+            }}
+            placeholder="e.g. #,##0.00 or 0.0% (blank = measure format)"
+            title="Number format applied to measures transformed by this item (e.g. a YOY% item formatting any measure as a percentage). Blank keeps each measure's own format."
           />
         </Field>
       </div>

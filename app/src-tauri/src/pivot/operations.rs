@@ -310,16 +310,22 @@ pub(crate) fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
 /// Build a LONG-format cache for a pivot with a PLACED calculation group
 /// (Power BI-style dimension).
 ///
-/// The engine returns the cross-applied WIDE result — `[dims][M*K measure
-/// cols]`, measures-outer/items-inner — but the pivot needs the group as a
-/// real dimension. Each wide row becomes K rows:
-/// `[("Total")?][dims][item name][M base measures]`, emitted in item
-/// DECLARATION order so `SortOrder::DataSourceOrder` on the group field
-/// renders items in that order (Power BI ordinal semantics, never
-/// alphabetical).
+/// The engine result is `[dims][measure cols]` — cross-applied WIDE
+/// (measures-outer/items-inner) for an item application, or plain/selection
+/// columns otherwise. Each source row becomes one row per `row_items` entry:
+/// `[("Total")?][dims][item][M measures]`, in declaration order so
+/// `SortOrder::DataSourceOrder` on the group field renders items in that
+/// order (Power BI ordinal semantics, never alphabetical). A `None` entry
+/// emits an EMPTY item cell — the "no item applied" state of a
+/// filters-placed group (never listed in dropdowns, never hidden by
+/// hidden_items).
 ///
-/// `wide_measure_idx` maps (base measure, item) -> wide result column from the
-/// engine's own per-column metadata; positions fall back to the
+/// `all_items` (the group's declared items) are pre-interned into the item
+/// column's dictionary so filter dropdowns and filter-row summaries always
+/// offer every item, regardless of which rows exist.
+///
+/// `wide_measure_idx` maps (base measure, item-or-None) -> wide result column
+/// from the engine's own per-column metadata; positions fall back to the
 /// measures-outer/items-inner contract when metadata is absent (e.g. empty
 /// result sets).
 #[allow(clippy::too_many_arguments)]
@@ -328,14 +334,16 @@ pub(crate) fn build_cache_calc_group_long(
     batches: &[RecordBatch],
     num_dims: usize,
     group_name: &str,
-    item_names: &[String],
+    row_items: &[Option<String>],
+    all_items: &[String],
     measure_names: &[String],
     wide_measure_idx: &std::collections::HashMap<(String, Option<String>), usize>,
     synthetic_dim: bool,
 ) -> Result<PivotCache, String> {
     let m = measure_names.len();
-    let k = item_names.len();
+    let k = row_items.len();
     let syn = usize::from(synthetic_dim);
+    let item_field = syn + num_dims;
     let total_fields = syn + num_dims + 1 + m;
 
     let mut cache = PivotCache::new(pivot_id, total_fields);
@@ -349,14 +357,23 @@ pub(crate) fn build_cache_calc_group_long(
         }
     }
     // The item column is named after the GROUP: it IS the group's field.
-    cache.set_field_name(syn + num_dims, group_name.to_string());
+    cache.set_field_name(item_field, group_name.to_string());
     for (mi, name) in measure_names.iter().enumerate() {
-        cache.set_field_name(syn + num_dims + 1 + mi, name.clone());
+        cache.set_field_name(item_field + 1 + mi, name.clone());
+    }
+
+    // Register every declared item as a known value of the group field (in
+    // declaration order), so dropdowns list them all even when the current
+    // rows carry only one item — or none.
+    if let Some(field_cache) = cache.fields.get_mut(item_field) {
+        for item in all_items {
+            field_cache.intern(pivot_engine::CacheValue::from(&CellValue::Text(item.clone())));
+        }
     }
 
     let wide_col = |mi: usize, ki: usize| -> usize {
         wide_measure_idx
-            .get(&(measure_names[mi].clone(), Some(item_names[ki].clone())))
+            .get(&(measure_names[mi].clone(), row_items[ki].clone()))
             .copied()
             .unwrap_or(num_dims + mi * k + ki)
     };
@@ -364,7 +381,7 @@ pub(crate) fn build_cache_calc_group_long(
     let mut source_row: u32 = 0;
     for batch in batches {
         for row_idx in 0..batch.num_rows() {
-            for (ki, item) in item_names.iter().enumerate() {
+            for (ki, item) in row_items.iter().enumerate() {
                 let mut values: Vec<CellValue> = Vec::with_capacity(total_fields);
                 if synthetic_dim {
                     values.push(CellValue::Text("Total".to_string()));
@@ -372,7 +389,10 @@ pub(crate) fn build_cache_calc_group_long(
                 for d in 0..num_dims {
                     values.push(arrow_cell_to_value(batch.column(d).as_ref(), row_idx));
                 }
-                values.push(CellValue::Text(item.clone()));
+                values.push(match item {
+                    Some(name) => CellValue::Text(name.clone()),
+                    None => CellValue::Empty,
+                });
                 for mi in 0..m {
                     let col = wide_col(mi, ki);
                     if col < batch.num_columns() {
@@ -388,16 +408,19 @@ pub(crate) fn build_cache_calc_group_long(
     }
 
     // Group-only pivot (no measures, no other dimensions): there is no engine
-    // result at all, but the group's items ARE the rows — emit one row per
-    // item (blank measure cells) so the members still render, like a
-    // dimensions-only pivot shows its distinct values.
+    // result at all, but the group's rows still render — one per `row_items`
+    // entry (blank measure cells), like a dimensions-only pivot shows its
+    // distinct values.
     if source_row == 0 && num_dims == 0 && batches.is_empty() {
-        for item in item_names {
+        for item in row_items {
             let mut values: Vec<CellValue> = Vec::with_capacity(total_fields);
             if synthetic_dim {
                 values.push(CellValue::Text("Total".to_string()));
             }
-            values.push(CellValue::Text(item.clone()));
+            values.push(match item {
+                Some(name) => CellValue::Text(name.clone()),
+                None => CellValue::Empty,
+            });
             for _ in 0..m {
                 values.push(CellValue::Empty);
             }
