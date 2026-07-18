@@ -132,10 +132,33 @@ impl CalculationItem {
 /// See the [module documentation](self) for the semantics. A group must have
 /// at least one item, and item names must be unique within the group
 /// (enforced by [`DataModelBuilder::build`](crate::model::DataModelBuilder)).
+///
+/// # Selection expressions
+///
+/// Mirroring Analysis Services' calculation-group properties
+/// (`multipleOrEmptySelectionExpression` / `noSelectionExpression`), a group
+/// may carry two optional selection-state templates — each a
+/// `SELECTEDMEASURE()` transform exactly like an item:
+///
+/// - [`multiple_or_empty_selection`](Self::multiple_or_empty_selection):
+///   evaluated when the group's column is filtered to **several items or none**.
+/// - [`no_selection`](Self::no_selection): evaluated when the group's column
+///   is **not filtered at all**.
+///
+/// When a selection expression is absent, the default applies: **no item** —
+/// measures evaluate as their plain selves.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationGroup {
     name: String,
     items: Vec<CalculationItem>,
+    /// Template applied on a multiple-item or empty selection (AS
+    /// `multipleOrEmptySelectionExpression`). None = base measures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    multiple_or_empty_selection: Option<CalculationItem>,
+    /// Template applied when the group's column is not filtered at all (AS
+    /// `noSelectionExpression`). None = base measures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    no_selection: Option<CalculationItem>,
 }
 
 impl CalculationGroup {
@@ -144,6 +167,8 @@ impl CalculationGroup {
         Self {
             name: name.into(),
             items,
+            multiple_or_empty_selection: None,
+            no_selection: None,
         }
     }
 
@@ -151,6 +176,22 @@ impl CalculationGroup {
     #[must_use]
     pub fn with_item(mut self, item: CalculationItem) -> Self {
         self.items.push(item);
+        self
+    }
+
+    /// Set (or clear) the multiple-or-empty selection expression
+    /// (builder-style). The item's name is display-only.
+    #[must_use]
+    pub fn with_multiple_or_empty_selection(mut self, expr: Option<CalculationItem>) -> Self {
+        self.multiple_or_empty_selection = expr;
+        self
+    }
+
+    /// Set (or clear) the no-selection expression (builder-style). The item's
+    /// name is display-only.
+    #[must_use]
+    pub fn with_no_selection(mut self, expr: Option<CalculationItem>) -> Self {
+        self.no_selection = expr;
         self
     }
 
@@ -167,6 +208,16 @@ impl CalculationGroup {
     /// Look up an item by name (exact match).
     pub fn item(&self, name: &str) -> Option<&CalculationItem> {
         self.items.iter().find(|i| i.name() == name)
+    }
+
+    /// The template applied on a multiple-item or empty selection, if any.
+    pub fn multiple_or_empty_selection(&self) -> Option<&CalculationItem> {
+        self.multiple_or_empty_selection.as_ref()
+    }
+
+    /// The template applied when the group's column is unfiltered, if any.
+    pub fn no_selection(&self) -> Option<&CalculationItem> {
+        self.no_selection.as_ref()
     }
 }
 
@@ -307,6 +358,67 @@ pub fn expand_calculation_group(
         }
     }
 
+    Ok((synthetic, names))
+}
+
+/// Which selection-state expression of a group to expand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionExpressionKind {
+    /// Several items or none selected (AS `multipleOrEmptySelectionExpression`).
+    MultipleOrEmpty,
+    /// The group's column is not filtered at all (AS `noSelectionExpression`).
+    NoSelection,
+}
+
+/// Expand a group's selection-state expression into synthetic measures — one
+/// per requested measure (no item multiplication), named
+/// [`synthetic_measure_name`]`(M, group)` = `"M [group]"`.
+///
+/// # Errors
+///
+/// - [`EngineError::CalculationGroupNotFound`] when `group` is not in the model.
+/// - [`EngineError::InvalidData`] when the group has no expression for `kind`,
+///   when a requested measure does not exist, or when a synthetic name would
+///   collide with a measure already in the model.
+pub fn expand_calculation_selection(
+    model: &DataModel,
+    measures: &[String],
+    group: &str,
+    kind: SelectionExpressionKind,
+) -> EngineResult<(Vec<Measure>, Vec<String>)> {
+    let group = model.calculation_group(group)?;
+    let template = match kind {
+        SelectionExpressionKind::MultipleOrEmpty => group.multiple_or_empty_selection(),
+        SelectionExpressionKind::NoSelection => group.no_selection(),
+    }
+    .ok_or_else(|| {
+        EngineError::InvalidData(format!(
+            "calculation group '{}' has no {} expression",
+            group.name(),
+            match kind {
+                SelectionExpressionKind::MultipleOrEmpty => "multiple-or-empty selection",
+                SelectionExpressionKind::NoSelection => "no-selection",
+            }
+        ))
+    })?;
+
+    let mut synthetic = Vec::with_capacity(measures.len());
+    let mut names = Vec::with_capacity(measures.len());
+    for measure_name in measures {
+        let measure = model.measure(measure_name)?;
+        let expression = template
+            .expression()
+            .substitute_selected_measure(measure.expression());
+        let name = synthetic_measure_name(measure_name, group.name());
+        if model.measure(&name).is_ok() {
+            return Err(EngineError::InvalidData(format!(
+                "calculation-group synthetic measure name '{name}' collides with \
+                 an existing model measure"
+            )));
+        }
+        synthetic.push(Measure::new(name.clone(), expression));
+        names.push(name);
+    }
     Ok((synthetic, names))
 }
 

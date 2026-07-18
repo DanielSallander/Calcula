@@ -131,7 +131,10 @@ fn gvar_model() -> DataModel {
         ))
         .add_calculation_group(CalculationGroup::new(
             "Time",
-            vec![CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap()],
+            vec![
+                CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+                CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+            ],
         ))
         .add_security_role(SecurityRole::new("BikesOnly").with_filter(
             "Sales",
@@ -488,24 +491,40 @@ fn accept_var_referencing_gvar_at_build() {
 }
 
 #[tokio::test]
-async fn gvar_with_calculation_group_fails_closed() {
+async fn gvar_composes_with_calculation_group() {
+    // GVARs resolve BEFORE the calculation-group expansion, so the synthetic
+    // item measures inline the literal-substituted expression: `grand` stays
+    // the once-per-query outer-context total (190) regardless of the item
+    // transforming each cell, and the item transform applies on top.
+    // Regression: this combination used to fail closed.
     let engine = gvar_engine();
-    let err = engine
+    let batches = engine
         .query(QueryRequest {
             measures: vec!["PctOfTotal".into()],
             group_by: vec![ColumnRef::new("Product", "name")],
-            calculation_group: Some(CalculationGroupApplication::new(
-                "Time",
-                vec!["Current".into()],
-            )),
+            calculation_group: Some(CalculationGroupApplication::new("Time", vec![])),
             ..Default::default()
         })
         .await
-        .unwrap_err();
-    let QueryError::InvalidQuery(msg) = &err else {
-        panic!("expected InvalidQuery, got {err:?}");
-    };
-    assert!(msg.contains("calculation group"), "got: {msg}");
+        .unwrap();
+    let current = grouped(&batches, "PctOfTotal [Current]");
+    assert!(
+        (current["Bikes"] - 130.0 / 190.0).abs() < 1e-9,
+        "got {current:?}"
+    );
+    assert!(
+        (current["Helmets"] - 60.0 / 190.0).abs() < 1e-9,
+        "got {current:?}"
+    );
+    let doubled = grouped(&batches, "PctOfTotal [Doubled]");
+    assert!(
+        (doubled["Bikes"] - 2.0 * 130.0 / 190.0).abs() < 1e-9,
+        "got {doubled:?}"
+    );
+    assert!(
+        (doubled["Helmets"] - 2.0 * 60.0 / 190.0).abs() < 1e-9,
+        "got {doubled:?}"
+    );
 }
 
 // --- Regression tests for review-confirmed defects ---

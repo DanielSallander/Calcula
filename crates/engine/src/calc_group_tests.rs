@@ -62,12 +62,27 @@ fn calc_group_model() -> DataModel {
         ))
         .add_measure(sum_measure("Revenue", "Sales", "amount"))
         .add_measure(sum_measure("Cost", "Sales", "cost"))
+        .add_calculation_group(
+            CalculationGroup::new(
+                "Time",
+                vec![
+                    CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+                    CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+                ],
+            )
+            // AS-style selection-state expressions (multipleOrEmptySelection /
+            // noSelection): templates over SELECTEDMEASURE(), like items.
+            .with_multiple_or_empty_selection(Some(
+                CalculationItem::from_text("MoE", "SELECTEDMEASURE() * 10").unwrap(),
+            ))
+            .with_no_selection(Some(
+                CalculationItem::from_text("NoSel", "SELECTEDMEASURE() + 1").unwrap(),
+            )),
+        )
+        // A group WITHOUT selection expressions, to test the typed error.
         .add_calculation_group(CalculationGroup::new(
-            "Time",
-            vec![
-                CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
-                CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
-            ],
+            "Bare",
+            vec![CalculationItem::from_text("Only", "SELECTEDMEASURE()").unwrap()],
         ))
         .build()
         .unwrap()
@@ -217,6 +232,60 @@ async fn empty_items_means_all_items_in_declaration_order() {
     // Both Current and Doubled columns are present.
     assert!(b.schema().index_of("Revenue [Current]").is_ok());
     assert!(b.schema().index_of("Revenue [Doubled]").is_ok());
+}
+
+#[tokio::test]
+async fn selection_expression_multiple_or_empty() {
+    // A multiple-or-empty selection applies the group's
+    // multipleOrEmptySelectionExpression to every measure — ONE column per
+    // measure, named "{measure} [{group}]" (no item multiplication).
+    let engine = calc_group_engine();
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            group_by: vec![ColumnRef::new("Product", "name")],
+            calculation_group: Some(CalculationGroupApplication::multiple_or_empty("Time")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let r = grouped(&batches, "name", "Revenue [Time]");
+    assert!((r["Bikes"] - 1300.0).abs() < 1e-9, "got {r:?}");
+    assert!((r["Helmets"] - 600.0).abs() < 1e-9, "got {r:?}");
+}
+
+#[tokio::test]
+async fn selection_expression_no_selection() {
+    let engine = calc_group_engine();
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            calculation_group: Some(CalculationGroupApplication::no_selection("Time")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!((scalar(&batches, "Revenue [Time]") - 191.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn selection_expression_missing_is_typed_error() {
+    // A group without the requested selection expression fails with a typed
+    // error — callers fall back to plain base measures (no application).
+    let engine = calc_group_engine();
+    let err = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into()],
+            calculation_group: Some(CalculationGroupApplication::multiple_or_empty("Bare")),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("has no multiple-or-empty selection expression"),
+        "got: {msg}"
+    );
 }
 
 #[tokio::test]

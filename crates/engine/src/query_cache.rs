@@ -374,6 +374,14 @@ pub(crate) fn query_cache_key(
 
 fn hash_calculation_group_application(app: &CalculationGroupApplication, hasher: &mut impl Hasher) {
     app.group.hash(hasher);
+    // The selection state changes the result columns entirely (item columns
+    // vs one selection-expression column set) — it must key separately.
+    (match app.selection {
+        crate::CalcGroupSelection::SelectedItems => 0u8,
+        crate::CalcGroupSelection::MultipleOrEmpty => 1u8,
+        crate::CalcGroupSelection::NoSelection => 2u8,
+    })
+    .hash(hasher);
     app.items.len().hash(hasher);
     for item in &app.items {
         item.hash(hasher);

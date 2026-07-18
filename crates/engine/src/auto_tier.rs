@@ -430,7 +430,7 @@ impl Engine {
         // (synthetic measure names). Without this, a calc-group request on the
         // auto-tier path would be silently ignored and return only the base
         // measures.
-        let overlay = self.resolve_calculation_group(&request)?;
+        let overlay = self.resolve_calculation_group(&request, &self.model)?;
         let (model, effective_request) = match &overlay {
             Some((overlay_model, expanded)) => (overlay_model, expanded),
             None => (&self.model, &request),

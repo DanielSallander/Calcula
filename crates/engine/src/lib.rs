@@ -208,9 +208,9 @@ pub use engine_query::in_memory_connector::InMemoryConnector;
 pub use engine_query::parquet_connector::ParquetConnector;
 pub use engine_query::registry::{AnyConnector, SemiJoinConfig, SourceBinding, SourceRegistry};
 pub use engine_query::request::{
-    CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
-    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy, ResultColumn,
-    ResultColumnKind, TopN, TotalsMode, GROUPING_ID_COLUMN,
+    CalcGroupSelection, CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy,
+    InFilter, LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy,
+    ResultColumn, ResultColumnKind, TopN, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
@@ -871,21 +871,35 @@ fn build_result_metadata(
 
     // Pre-compute the calculation-group synthetic name → (base measure, item)
     // mapping when a group is applied, so those value columns attribute back.
-    let mut calc_map: std::collections::HashMap<String, (String, String)> =
+    // A selection-state application ("{m} [{group}]" columns, no item
+    // multiplication) attributes to the base measure with no item.
+    let mut calc_map: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
     if let Some(app) = &request.calculation_group {
         if let Ok(group) = model.calculation_group(&app.group) {
-            for measure in &request.measures {
-                for item in group.items() {
-                    if app.items.is_empty()
-                        || app
-                            .items
-                            .iter()
-                            .any(|i| i.eq_ignore_ascii_case(item.name()))
-                    {
+            match app.selection {
+                CalcGroupSelection::SelectedItems => {
+                    for measure in &request.measures {
+                        for item in group.items() {
+                            if app.items.is_empty()
+                                || app
+                                    .items
+                                    .iter()
+                                    .any(|i| i.eq_ignore_ascii_case(item.name()))
+                            {
+                                calc_map.insert(
+                                    synthetic_measure_name(measure, item.name()),
+                                    (measure.clone(), Some(item.name().to_string())),
+                                );
+                            }
+                        }
+                    }
+                }
+                CalcGroupSelection::MultipleOrEmpty | CalcGroupSelection::NoSelection => {
+                    for measure in &request.measures {
                         calc_map.insert(
-                            synthetic_measure_name(measure, item.name()),
-                            (measure.clone(), item.name().to_string()),
+                            synthetic_measure_name(measure, group.name()),
+                            (measure.clone(), None),
                         );
                     }
                 }
@@ -933,7 +947,7 @@ fn build_result_metadata(
                 let mut c = ResultColumn::bare(name, ResultColumnKind::Measure);
                 c.data_type = data_type;
                 c.measure = Some(base.clone());
-                c.calculation_item = Some(item);
+                c.calculation_item = item;
                 if let Ok(m) = model.measure(&base) {
                     c.format_string = m.format_string().map(str::to_string);
                     c.description = m.description().map(str::to_string);
@@ -1873,30 +1887,57 @@ impl Engine {
     /// Wraps [`EngineError`] in [`QueryError::Engine`] for an unknown group,
     /// unknown item, unknown measure, or a synthetic-name collision with an
     /// existing model measure.
+    /// `model` is the model to expand against — usually `self.model`, but the
+    /// query paths pass their pre-resolved base (ISFILTERED-folded and/or
+    /// GVAR-resolved overlay) so the inlined synthetic expressions carry those
+    /// resolutions.
     fn resolve_calculation_group(
         &self,
         request: &QueryRequest,
+        model: &DataModel,
     ) -> QueryResult<Option<(DataModel, QueryRequest)>> {
         let Some(application) = &request.calculation_group else {
             return Ok(None);
         };
 
-        // Expand the application into synthetic measures + their ordered names
-        // (measures-outer / items-inner). Errors (unknown group/item/measure,
-        // name collision) are surfaced as typed engine errors.
-        let (synthetic, names) = engine_core::model::calculation_group::expand_calculation_group(
-            &self.model,
-            &request.measures,
-            &application.group,
-            &application.items,
-        )
+        // Expand the application into synthetic measures + their ordered names.
+        // SelectedItems cross-applies the items (measures-outer / items-inner);
+        // the selection states apply the group's model-defined selection
+        // expression instead (one column per measure). Errors (unknown
+        // group/item/measure, missing selection expression, name collision)
+        // are surfaced as typed engine errors.
+        let (synthetic, names) = match application.selection {
+            CalcGroupSelection::SelectedItems => {
+                engine_core::model::calculation_group::expand_calculation_group(
+                    model,
+                    &request.measures,
+                    &application.group,
+                    &application.items,
+                )
+            }
+            CalcGroupSelection::MultipleOrEmpty => {
+                engine_core::model::calculation_group::expand_calculation_selection(
+                    model,
+                    &request.measures,
+                    &application.group,
+                    engine_core::model::calculation_group::SelectionExpressionKind::MultipleOrEmpty,
+                )
+            }
+            CalcGroupSelection::NoSelection => {
+                engine_core::model::calculation_group::expand_calculation_selection(
+                    model,
+                    &request.measures,
+                    &application.group,
+                    engine_core::model::calculation_group::SelectionExpressionKind::NoSelection,
+                )
+            }
+        }
         .map_err(QueryError::Engine)?;
 
         // Cheap overlay: clone the model and append the synthetic measures
         // (they are derived from already-validated parts, so no full
         // re-validation — only a name-collision check).
-        let overlay = self
-            .model
+        let overlay = model
             .with_overlay_measures(synthetic)
             .map_err(QueryError::Engine)?;
 
@@ -2573,18 +2614,6 @@ impl Engine {
             request
         };
 
-        // Resolve any calculation-group application up front (a typed error
-        // for an unknown group/item/measure or a synthetic-name collision).
-        // When present this yields an overlay model (self.model + ephemeral
-        // synthetic measures) and an expanded request asking for those
-        // synthetic measures by name; otherwise planning uses self.model and
-        // the original request unchanged.
-        let overlay = self.resolve_calculation_group(&request)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (&self.model, &request),
-        };
-
         // Check the query cache first. The guard is dropped before any
         // await: key computation and lookup are synchronous. The active role
         // is part of the key — a result computed under one role must never be
@@ -2607,40 +2636,55 @@ impl Engine {
             return Ok(cached);
         }
 
+        let role_filters = self.active_role_filters()?;
+
         // ISFILTERED literal fold. Any model measure carrying an
         // `ISFILTERED(table[column])` marker is overlaid with the marker
         // replaced by its literal answer for THIS request (on the group-by
         // axis, or named by a query filter / IN slicer / OR slicer) — before
         // planning, so every downstream path (pushed and local) plans on a
-        // plain boolean. `None` when no measure carries a marker.
-        let isfiltered_model = Self::resolve_is_filtered_markers(effective_request, model);
-        let model: &DataModel = isfiltered_model.as_ref().unwrap_or(model);
-
-        let role_filters = self.active_role_filters()?;
+        // plain boolean. `None` when no measure carries a marker. The fold's
+        // request context (group-by axis / filters / slicers) is identical
+        // between the original and a calculation-group-expanded request, so
+        // it runs on the original.
+        let isfiltered_model = Self::resolve_is_filtered_markers(&request, &self.model);
+        let base_model: &DataModel = isfiltered_model.as_ref().unwrap_or(&self.model);
 
         // Query-scoped (GVAR) resolution. For each requested — or transitively
         // referenced — measure whose top-level block declares `GVAR` bindings,
         // evaluate each `GVAR` ONCE (under the outer filter/slicer context and
         // active role, with NO group-by axis) and overlay the measure with the
         // resulting scalar literals substituted in. Runs only on a cache miss;
-        // fails closed in combination with a calculation group. `None` when the
-        // query touches no GVAR measure — the common case, no extra work.
+        // `None` when the query touches no GVAR measure — the common case.
+        //
+        // Runs BEFORE calculation-group expansion: the expansion inlines each
+        // base measure's expression into the item templates, which would bury
+        // a GVAR block non-top-level. Resolving first means the inlined
+        // expressions already carry the literals — matching the GVAR contract
+        // (evaluated once per query under the OUTER filter context, regardless
+        // of the item transforming each cell).
         let gvar_model = self
-            .resolve_query_scoped_bindings(
-                effective_request,
-                model,
-                overlay.is_some(),
-                &role_filters,
-                &token,
-            )
+            .resolve_query_scoped_bindings(&request, base_model, &role_filters, &token)
             .await?;
-        let plan_model: &DataModel = gvar_model.as_ref().unwrap_or(model);
+        let base_model: &DataModel = gvar_model.as_ref().unwrap_or(base_model);
+
+        // Resolve any calculation-group application (a typed error for an
+        // unknown group/item/measure or a synthetic-name collision). When
+        // present this yields an overlay model (base model + ephemeral
+        // synthetic measures) and an expanded request asking for those
+        // synthetic measures by name; otherwise planning uses the base model
+        // and the original request unchanged.
+        let overlay = self.resolve_calculation_group(&request, base_model)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (base_model, &request),
+        };
 
         let batches = self
             .plan_and_execute(
                 &request,
                 effective_request,
-                plan_model,
+                model,
                 &role_filters,
                 &token,
             )
@@ -2714,12 +2758,13 @@ impl Engine {
     /// (`filters` + `in_filters` + `or_filters`) and `role_filters`, with **no**
     /// group-by axis, so its value is a pure function of the filter context —
     /// which is already part of the query-cache key, so no new cache key field
-    /// is needed. Fails closed together with a calculation group (`v1`).
+    /// is needed. Composes with calculation groups because it runs BEFORE the
+    /// group's expansion: the synthetic measures inline the already-resolved
+    /// expressions.
     async fn resolve_query_scoped_bindings(
         &self,
         request: &QueryRequest,
         model: &DataModel,
-        calc_group_active: bool,
         role_filters: &[FilterPredicate],
         token: &CancellationToken,
     ) -> QueryResult<Option<DataModel>> {
@@ -2738,13 +2783,6 @@ impl Engine {
         let gvar_measures = self.query_scoped_measures_in_closure(request, model);
         if gvar_measures.is_empty() {
             return Ok(None);
-        }
-        if calc_group_active {
-            return Err(QueryError::InvalidQuery(
-                "GVAR (query-scoped variables) is not supported together with a calculation \
-                 group; evaluate them in separate requests"
-                    .to_string(),
-            ));
         }
         // v1: GVAR does not compose with MULTIPLE active RLS roles. The
         // multi-role union injects role restrictions as `or_filters` and plans
@@ -3691,7 +3729,7 @@ impl Engine {
 
         // Resolve any calculation-group application (overlay model + expanded
         // request); plan against the original model/request otherwise.
-        let overlay = self.resolve_calculation_group(&request)?;
+        let overlay = self.resolve_calculation_group(&request, &self.model)?;
         let (model, effective_request) = match &overlay {
             Some((overlay_model, expanded)) => (overlay_model, expanded),
             None => (&self.model, &request),
@@ -3751,34 +3789,29 @@ impl Engine {
 
         let start = Instant::now();
 
-        // Resolve any calculation-group application (overlay model + expanded
-        // request); plan against the original model/request otherwise.
-        let overlay = self.resolve_calculation_group(&request)?;
-        let (model, effective_request) = match &overlay {
-            Some((overlay_model, expanded)) => (overlay_model, expanded),
-            None => (&self.model, &request),
-        };
-
         let role_filters = self.active_role_filters()?;
         let token = CancellationToken::new();
 
         // Mirror the `query` path's pre-planning overlays so the explain output
         // reports the same plan the query would actually run: fold ISFILTERED
-        // markers to literals, then resolve query-scoped (GVAR) bindings —
-        // without the latter a GVAR measure would reach the executor unresolved
-        // and fail its internal guard.
-        let isfiltered_model = Self::resolve_is_filtered_markers(effective_request, model);
-        let model: &DataModel = isfiltered_model.as_ref().unwrap_or(model);
+        // markers to literals, resolve query-scoped (GVAR) bindings, THEN
+        // expand any calculation group — the expansion inlines the resolved
+        // expressions (without GVAR resolution a GVAR measure would reach the
+        // executor unresolved and fail its internal guard).
+        let isfiltered_model = Self::resolve_is_filtered_markers(&request, &self.model);
+        let base_model: &DataModel = isfiltered_model.as_ref().unwrap_or(&self.model);
         let gvar_model = self
-            .resolve_query_scoped_bindings(
-                effective_request,
-                model,
-                overlay.is_some(),
-                &role_filters,
-                &token,
-            )
+            .resolve_query_scoped_bindings(&request, base_model, &role_filters, &token)
             .await?;
-        let model: &DataModel = gvar_model.as_ref().unwrap_or(model);
+        let base_model: &DataModel = gvar_model.as_ref().unwrap_or(base_model);
+
+        // Resolve any calculation-group application (overlay model + expanded
+        // request); plan against the base model/original request otherwise.
+        let overlay = self.resolve_calculation_group(&request, base_model)?;
+        let (model, effective_request) = match &overlay {
+            Some((overlay_model, expanded)) => (overlay_model, expanded),
+            None => (base_model, &request),
+        };
 
         // Resolve pushable context-column CASEs (host-only, over `self.model`).
         let context_column_cases = self

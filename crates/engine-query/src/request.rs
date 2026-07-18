@@ -586,8 +586,32 @@ pub struct CalculationGroupApplication {
     pub group: String,
     /// Names of the calculation items to apply, in the order their columns
     /// should appear (items-inner). An **empty** list applies *all* items in
-    /// the group, in declaration order.
+    /// the group, in declaration order. Ignored unless
+    /// [`selection`](Self::selection) is [`CalcGroupSelection::SelectedItems`].
     pub items: Vec<String>,
+    /// Which selection state to apply (see [`CalcGroupSelection`]). The
+    /// default, `SelectedItems`, cross-applies `items` as documented above.
+    /// The other states apply the group's model-defined selection-state
+    /// expression instead — producing exactly `measures.len()` columns, each
+    /// named `"{measure} [{group}]"` (no item multiplication).
+    pub selection: CalcGroupSelection,
+}
+
+/// Which selection state a [`CalculationGroupApplication`] represents,
+/// mirroring Analysis Services' calculation-group selection semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CalcGroupSelection {
+    /// Cross-apply the listed items (the normal case).
+    #[default]
+    SelectedItems,
+    /// Several items or none are selected: apply the group's
+    /// `multipleOrEmptySelectionExpression`. The query fails with a typed
+    /// error when the group defines none — callers should fall back to plain
+    /// base measures (no application) instead.
+    MultipleOrEmpty,
+    /// The group's column is not filtered at all: apply the group's
+    /// `noSelectionExpression`. Same fallback contract as `MultipleOrEmpty`.
+    NoSelection,
 }
 
 impl CalculationGroupApplication {
@@ -597,6 +621,25 @@ impl CalculationGroupApplication {
         Self {
             group: group.into(),
             items,
+            selection: CalcGroupSelection::SelectedItems,
+        }
+    }
+
+    /// Apply the group's multiple-or-empty selection expression.
+    pub fn multiple_or_empty(group: impl Into<String>) -> Self {
+        Self {
+            group: group.into(),
+            items: Vec::new(),
+            selection: CalcGroupSelection::MultipleOrEmpty,
+        }
+    }
+
+    /// Apply the group's no-selection expression.
+    pub fn no_selection(group: impl Into<String>) -> Self {
+        Self {
+            group: group.into(),
+            items: Vec::new(),
+            selection: CalcGroupSelection::NoSelection,
         }
     }
 }

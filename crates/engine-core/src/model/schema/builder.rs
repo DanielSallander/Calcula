@@ -2161,6 +2161,50 @@ impl DataModelBuilder {
                         }
                     }
                 }
+                // The selection-state expressions (multiple-or-empty /
+                // no-selection) are templates exactly like items — validate
+                // them the same way (minus the duplicate-name check).
+                for (label, tmpl) in [
+                    ("multiple-or-empty selection", group.multiple_or_empty_selection()),
+                    ("no-selection", group.no_selection()),
+                ] {
+                    let Some(tmpl) = tmpl else { continue };
+                    tmpl.expression().validate_calc_item()?;
+                    if tmpl.expression().has_query_scoped_bindings() {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "the {label} expression of group '{}' uses a query-scoped \
+                             (GVAR) variable, which is not supported in calculation items",
+                            group.name()
+                        )));
+                    }
+                    for measure_name in
+                        crate::model::calculation_group::measure_ref_names(tmpl.expression())
+                    {
+                        if self.measures.iter().all(|m| m.name() != measure_name) {
+                            return Err(EngineError::InvalidData(format!(
+                                "the {label} expression of group '{}' references unknown \
+                                 measure '{measure_name}'",
+                                group.name()
+                            )));
+                        }
+                    }
+                    for (table_name, column_name) in
+                        crate::model::calculation_group::qualified_column_refs(tmpl.expression())
+                    {
+                        let column_ok = self
+                            .tables
+                            .iter()
+                            .find(|t| t.name() == table_name)
+                            .is_some_and(|t| t.column(&column_name).is_ok());
+                        if !column_ok {
+                            return Err(EngineError::InvalidData(format!(
+                                "the {label} expression of group '{}' references unknown \
+                                 column '{table_name}[{column_name}]'",
+                                group.name()
+                            )));
+                        }
+                    }
+                }
             }
         }
 
