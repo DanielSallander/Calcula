@@ -29,6 +29,28 @@ export function FolderIcon({ size = 14 }: { size?: number }): React.ReactElement
   );
 }
 
+/** A "group of items" glyph: 2x2 grid of rounded tiles. Used for calculation
+ *  groups — a named group of calculation items — so they read as a grouping,
+ *  not a plain folder. Stroke-only like FolderIcon; inherits the text color
+ *  via currentColor. */
+export function CalcGroupIcon({ size = 14 }: { size?: number }): React.ReactElement {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      style={{ flexShrink: 0, display: "block" }}
+      aria-hidden
+    >
+      <rect x="2" y="2" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="9" y="2" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="2" y="9" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="9" y="9" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
 /** Fixed-width expand/collapse chevron, so rows with and without one align. */
 export function Chevron({ open }: { open: boolean }): React.ReactElement {
   return (

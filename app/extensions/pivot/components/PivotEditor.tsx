@@ -12,6 +12,7 @@ import { usePivotEditorState } from './usePivotEditorState';
 import { buildSourceSignature } from '../lib/namedConfigs';
 import { pivot, savePivotLayout } from '@api/pivot';
 import { openTaskPane, getBiConnectionService } from '@api';
+import { onAppEvent } from '@api/events';
 import type { SavePivotLayoutRequest } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import { getConnectionBiModel, setPivotPerspective } from '../lib/pivot-api';
@@ -27,6 +28,7 @@ import type {
   BiHierarchyFieldRef,
   BiPerspectiveInfo,
   BiCultureInfo,
+  BiCalcGroup,
   MeasureField,
   PivotId,
   CalculatedFieldDef,
@@ -257,12 +259,15 @@ export function PivotEditor({
       setSelectedPerspective(biModel?.selectedPerspective ?? null);
     }
   }, [pivotId, biModel?.selectedPerspective]);
-  // The perspectives/cultures stored in pivot metadata are a snapshot from
-  // pivot creation; overlay the model's CURRENT lists when the connection is
-  // live (offline falls back to the snapshot, so the picker still works).
+  // The perspectives/cultures/calculation groups stored in pivot metadata are
+  // a snapshot from pivot creation; overlay the model's CURRENT lists when the
+  // connection is live (offline falls back to the snapshot, so the picker
+  // still works). Re-fetched on "bi:model-changed" so Model Editor edits
+  // (e.g. a newly added calculation group) appear without reopening the pivot.
   const [liveModelMeta, setLiveModelMeta] = useState<{
     perspectives?: BiPerspectiveInfo[];
     cultures?: BiCultureInfo[];
+    calculationGroups?: BiCalcGroup[];
   } | null>(null);
   useEffect(() => {
     // Drop any previous connection's overlay so a failed fetch can never show
@@ -270,15 +275,32 @@ export function PivotEditor({
     setLiveModelMeta(null);
     if (!biModel?.connectionId) return;
     let cancelled = false;
-    getConnectionBiModel(biModel.connectionId)
-      .then((m) => {
-        if (!cancelled && m) {
-          setLiveModelMeta({ perspectives: m.perspectives, cultures: m.cultures });
+    const connectionId = biModel.connectionId;
+    const fetchLiveMeta = () => {
+      getConnectionBiModel(connectionId)
+        .then((m) => {
+          if (!cancelled && m) {
+            setLiveModelMeta({
+              perspectives: m.perspectives,
+              cultures: m.cultures,
+              calculationGroups: m.calculationGroups,
+            });
+          }
+        })
+        .catch(() => {});
+    };
+    fetchLiveMeta();
+    const offModelChanged = onAppEvent<{ connectionId?: string }>(
+      'bi:model-changed',
+      (detail) => {
+        if (!detail?.connectionId || detail.connectionId === connectionId) {
+          fetchLiveMeta();
         }
-      })
-      .catch(() => {});
+      },
+    );
     return () => {
       cancelled = true;
+      offModelChanged();
     };
   }, [biModel?.connectionId]);
   const fieldListModel = useMemo(() => {
@@ -287,6 +309,8 @@ export function PivotEditor({
       ...biModel,
       perspectives: liveModelMeta.perspectives ?? biModel.perspectives,
       cultures: liveModelMeta.cultures ?? biModel.cultures,
+      calculationGroups:
+        liveModelMeta.calculationGroups ?? biModel.calculationGroups,
     };
   }, [biModel, liveModelMeta]);
   // The active UI locale for culture (translation) resolution. Read once —
@@ -913,7 +937,7 @@ export function PivotEditor({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
-        {isBiPivot && biModel?.calculationGroups && biModel.calculationGroups.length > 0 && (() => {
+        {isBiPivot && fieldListModel?.calculationGroups && fieldListModel.calculationGroups.length > 0 && (() => {
           // Calc groups can't combine with lookup columns (the backend rejects
           // it). Disable the control while any lookup column is active, unless a
           // group is already applied (so the user can still switch it off).
@@ -938,7 +962,7 @@ export function PivotEditor({
                 }
               >
                 <option value="">None</option>
-                {biModel.calculationGroups.map((g) => (
+                {fieldListModel.calculationGroups.map((g) => (
                   <option key={g.name} value={g.name}>
                     {g.name}
                   </option>
@@ -946,7 +970,7 @@ export function PivotEditor({
               </select>
             </label>
             {appliedCalcGroup && (() => {
-              const group = biModel.calculationGroups?.find(g => g.name === appliedCalcGroup.group);
+              const group = fieldListModel.calculationGroups?.find(g => g.name === appliedCalcGroup.group);
               const allItems = group?.items.map(i => i.name) ?? [];
               const isItemOn = (name: string) =>
                 appliedCalcGroup.items.length === 0 || appliedCalcGroup.items.includes(name);

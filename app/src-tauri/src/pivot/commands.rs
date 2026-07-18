@@ -4835,24 +4835,10 @@ pub(crate) fn extract_bi_model_metadata(
         })
         .collect();
 
-    // Calculation groups: Studio-authored measure templates. Surfaced read-only
-    // in the field list; applying one (multiplying the Values axis) is a later
-    // slice. They are model-global (no per-table binding in the engine model).
-    let calculation_groups: Vec<BiCalcGroupMeta> = model
-        .calculation_groups()
-        .iter()
-        .map(|g| BiCalcGroupMeta {
-            name: g.name().to_string(),
-            items: g
-                .items()
-                .iter()
-                .map(|i| BiCalcGroupItemMeta {
-                    name: i.name().to_string(),
-                    source: i.source().map(|s| s.to_string()),
-                })
-                .collect(),
-        })
-        .collect();
+    // Calculation groups: measure templates applied on the Values axis. They
+    // are model-global (no per-table binding in the engine model), so no OLS
+    // filtering applies.
+    let calculation_groups: Vec<BiCalcGroupMeta> = extract_calc_groups(engine);
 
     // Perspectives: named presentation subsets for the field list. Display
     // metadata only -- selecting one filters what the field list SHOWS.
@@ -4889,6 +4875,29 @@ pub(crate) fn extract_bi_model_metadata(
         .collect();
 
     (tables, measures, hierarchies, calculation_groups, perspectives, cultures)
+}
+
+/// Extract just the model's calculation groups. Model-global (no per-table
+/// binding), so no OLS filtering applies. Also used to re-read the CURRENT
+/// groups when a pivot's creation-time metadata snapshot has gone stale
+/// (groups added/edited in the Model Editor after the pivot was created).
+pub(crate) fn extract_calc_groups(engine: &bi_engine::Engine) -> Vec<BiCalcGroupMeta> {
+    engine
+        .model()
+        .calculation_groups()
+        .iter()
+        .map(|g| BiCalcGroupMeta {
+            name: g.name().to_string(),
+            items: g
+                .items()
+                .iter()
+                .map(|i| BiCalcGroupItemMeta {
+                    name: i.name().to_string(),
+                    source: i.source().map(|s| s.to_string()),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Creates an empty BI pivot from the full model (all tables + measures).
@@ -5534,17 +5543,37 @@ pub async fn update_bi_pivot_fields(
             }
             // Resolve the group's declared item list to validate the selection
             // and expand an empty selection to all items in declaration order.
+            // Resolve against the LIVE engine model, not the pivot's stored
+            // metadata: that copy is a snapshot from pivot creation, so a group
+            // added or edited in the Model Editor since then wouldn't be found
+            // (the query below runs against the live model anyway). Refresh the
+            // snapshot while at it so persistence + later reads carry the
+            // current groups.
             let all_items: Vec<String> = {
-                let bi_meta = pivot_state.bi_metadata.lock()
-                    .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
-                let meta = bi_meta.get(&pivot_id)
-                    .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
-                let group = meta.calculation_groups.iter()
+                let engine_arc = {
+                    let connections = bi_state.connections.lock()
+                        .map_err(|e| format!("connections lock poisoned: {}", e))?;
+                    let conn = connections.get(&connection_id)
+                        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+                    conn.engine.clone().ok_or("No BI model loaded.")?
+                };
+                let live_groups = {
+                    let engine = engine_arc.lock().await;
+                    extract_calc_groups(&engine)
+                };
+                let items: Option<Vec<String>> = live_groups.iter()
                     .find(|g| g.name == cg.group)
-                    .ok_or_else(|| format!(
-                        "Calculation group '{}' not found in this model.", cg.group
-                    ))?;
-                group.items.iter().map(|i| i.name.clone()).collect()
+                    .map(|g| g.items.iter().map(|i| i.name.clone()).collect());
+                {
+                    let mut bi_meta = pivot_state.bi_metadata.lock()
+                        .map_err(|e| format!("bi_metadata lock poisoned: {}", e))?;
+                    if let Some(meta) = bi_meta.get_mut(&pivot_id) {
+                        meta.calculation_groups = live_groups;
+                    }
+                }
+                items.ok_or_else(|| format!(
+                    "Calculation group '{}' not found in this model.", cg.group
+                ))?
             };
             let resolved: Vec<String> = if cg.items.is_empty() {
                 all_items

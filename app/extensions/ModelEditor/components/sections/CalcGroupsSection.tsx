@@ -21,7 +21,7 @@ import { biModelDeleteCalcGroup, biModelUpsertCalcGroup } from "@api";
 import type { CalcGroupItemDto, ModelCalcGroupInfo, ModelOverview } from "@api";
 import { ACCENT, Badge, Field, Modal, SELECTION_BG, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
-import { Chevron, FolderIcon, treeStyles } from "../treeKit";
+import { CalcGroupIcon, Chevron, treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
 
 /** What a modal save actually installed — for selection/alias reconciliation. */
@@ -378,7 +378,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                     <Chevron open={isOpen} />
                   </span>
                   <span style={{ color: "#666", display: "flex", alignItems: "center" }}>
-                    <FolderIcon />
+                    <CalcGroupIcon />
                   </span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {g.name}
