@@ -85,6 +85,17 @@ interface TableFieldListProps {
   onHierarchyToggle?: (table: string, hierarchyName: string, checked: boolean) => void;
   /** Called when user toggles a column between GROUP and LOOKUP mode */
   onLookupToggle?: (table: string, column: string) => void;
+  /** The calculation group currently applied (null = none). `items: []` means
+   *  ALL items. Enables the Power BI-style checkboxes on calculation-group
+   *  nodes; when the callbacks below are absent, groups render read-only. */
+  appliedCalcGroup?: { group: string; items: string[] } | null;
+  /** Check/uncheck a whole calculation group (checked = apply, all items). */
+  onCalcGroupToggle?: (group: BiCalcGroup, checked: boolean) => void;
+  /** Toggle a single calculation item of a group. */
+  onCalcItemToggle?: (group: BiCalcGroup, itemName: string, checked: boolean) => void;
+  /** When set, calc-group checkboxes on NON-applied groups are disabled and
+   *  this text explains why (e.g. the lookup-column conflict). */
+  calcGroupsDisabledReason?: string | null;
   onDragStart?: (field: DragField) => void;
   onDragEnd?: () => void;
   /** The perspective currently filtering the list (null = all fields). */
@@ -523,6 +534,58 @@ function HierarchyFieldItem({
   );
 }
 
+/** "Group of items" glyph (2x2 tile grid) for calculation groups — mirrors the
+ *  Model Editor's calc-group tree icon so the object reads the same everywhere. */
+function CalcGroupGlyph(): React.ReactElement {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 16 16"
+      fill="none"
+      style={{ display: 'inline-block', verticalAlign: '-2px' }}
+      aria-hidden
+    >
+      <rect x="2" y="2" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="9" y="2" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="2" y="9" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="9" y="9" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** A checkbox that can render the indeterminate (tri-state) look — used on a
+ *  calculation-group header when only a subset of its items is applied. */
+function TriStateCheckbox({
+  checked,
+  indeterminate,
+  disabled,
+  title,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  disabled?: boolean;
+  title?: string;
+  onChange: (checked: boolean) => void;
+}) {
+  const ref = React.useRef<HTMLInputElement>(null);
+  React.useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      className={treeStyles.fieldCheckbox}
+      checked={checked}
+      disabled={disabled}
+      title={title}
+      onChange={(e) => onChange(e.target.checked)}
+    />
+  );
+}
+
 /** A collapsible folder node (table or measures). */
 function FolderNode({
   name,
@@ -532,15 +595,19 @@ function FolderNode({
   onToggleExpand,
   onExpandAll,
   onCollapseAll,
+  headerCheckbox,
   children,
 }: {
   name: string;
-  icon: string;
+  icon: React.ReactNode;
   childCount: number;
   isExpanded: boolean;
   onToggleExpand: () => void;
   onExpandAll: () => void;
   onCollapseAll: () => void;
+  /** Optional checkbox rendered in the header (calculation groups). Clicks on
+   *  it must not toggle expansion. */
+  headerCheckbox?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -562,6 +629,14 @@ function FolderNode({
         >
           &#9660;
         </span>
+        {headerCheckbox && (
+          <span
+            style={{ display: 'flex', alignItems: 'center' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {headerCheckbox}
+          </span>
+        )}
         <span className={treeStyles.folderIcon}>{icon}</span>
         <span className={treeStyles.folderName}>{name}</span>
         <span className={treeStyles.folderCount}>{childCount}</span>
@@ -647,6 +722,10 @@ export function TableFieldList({
   onMeasureToggle,
   onHierarchyToggle,
   onLookupToggle,
+  appliedCalcGroup,
+  onCalcGroupToggle,
+  onCalcItemToggle,
+  calcGroupsDisabledReason,
   selectedPerspective,
   onPerspectiveChange,
   cultures,
@@ -850,34 +929,74 @@ export function TableFieldList({
               </FolderNode>
             )}
 
-            {/* Calculation group folders (read-only in v1). Items are measure
-                templates applied on the Values axis, not draggable dimensions. */}
-            {filteredCalcGroups.map((g) => (
-              <FolderNode
-                key={`calcgroup:${g.name}`}
-                name={g.name}
-                icon={'ƒ'}
-                childCount={g.items.length}
-                isExpanded={!!query || expandedFolders.has(`__calcgroup__:${g.name}`)}
-                onToggleExpand={() => toggleFolder(`__calcgroup__:${g.name}`)}
-                onExpandAll={expandAll}
-                onCollapseAll={collapseAll}
-              >
-                {g.items.map((it) => (
-                  <div
-                    key={`calcitem:${g.name}.${it.name}`}
-                    className={treeStyles.fieldItem}
-                    style={{ cursor: 'default', paddingLeft: '26px' }}
-                    title={
-                      it.source ? `${it.name} = ${it.source}` : it.name
-                    }
-                  >
-                    <span className={treeStyles.fieldName}>{it.name}</span>
-                    <span className={treeStyles.fieldTypeIcon}>{'ƒ'}</span>
-                  </div>
-                ))}
-              </FolderNode>
-            ))}
+            {/* Calculation groups — Power BI-style selectable fields. Checking
+                the group applies it to the Values axis (each measure shown once
+                per calculation item, like PBI's calc-group column on a visual);
+                item checkboxes narrow the applied subset. */}
+            {filteredCalcGroups.map((g) => {
+              const interactive = !!onCalcGroupToggle;
+              const isApplied = appliedCalcGroup?.group === g.name;
+              const appliedAll = isApplied && appliedCalcGroup.items.length === 0;
+              const isItemOn = (name: string) =>
+                isApplied &&
+                (appliedCalcGroup.items.length === 0 || appliedCalcGroup.items.includes(name));
+              // A conflict (e.g. active lookup columns) disables applying; an
+              // already-applied group stays enabled so it can be switched off.
+              const disabled = !!calcGroupsDisabledReason && !isApplied;
+              const groupTooltip = disabled
+                ? calcGroupsDisabledReason!
+                : 'Apply this calculation group: each value field is shown once per ' +
+                  'calculation item (e.g. Current, YTD, PY). Totals are off while applied.';
+              return (
+                <FolderNode
+                  key={`calcgroup:${g.name}`}
+                  name={g.name}
+                  icon={<CalcGroupGlyph />}
+                  childCount={g.items.length}
+                  isExpanded={!!query || expandedFolders.has(`__calcgroup__:${g.name}`)}
+                  onToggleExpand={() => toggleFolder(`__calcgroup__:${g.name}`)}
+                  onExpandAll={expandAll}
+                  onCollapseAll={collapseAll}
+                  headerCheckbox={
+                    interactive ? (
+                      <TriStateCheckbox
+                        checked={appliedAll}
+                        indeterminate={isApplied && !appliedAll}
+                        disabled={disabled}
+                        title={groupTooltip}
+                        onChange={(checked) => onCalcGroupToggle!(g, checked)}
+                      />
+                    ) : undefined
+                  }
+                >
+                  {g.items.map((it) => (
+                    <div
+                      key={`calcitem:${g.name}.${it.name}`}
+                      className={treeStyles.fieldItem}
+                      style={{ cursor: 'default' }}
+                      title={it.source ? `${it.name} = ${it.source}` : it.name}
+                    >
+                      {interactive && onCalcItemToggle && (
+                        <input
+                          type="checkbox"
+                          className={treeStyles.fieldCheckbox}
+                          checked={isItemOn(it.name)}
+                          disabled={disabled}
+                          onChange={(e) => onCalcItemToggle(g, it.name, e.target.checked)}
+                        />
+                      )}
+                      <span className={treeStyles.fieldName}>{it.name}</span>
+                      <span className={treeStyles.fieldTypeIcon}>{'ƒ'}</span>
+                    </div>
+                  ))}
+                  {isApplied && (
+                    <div style={{ padding: '2px 8px 4px 12px', fontSize: '11px', color: '#6639ba' }}>
+                      Applied to values — totals off while applied
+                    </div>
+                  )}
+                </FolderNode>
+              );
+            })}
 
             {/* Table folders */}
             {filteredTables.map((table) => {

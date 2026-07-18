@@ -814,6 +814,27 @@ export function PivotEditor({
     [appliedCalcGroup, applyCalcGroup],
   );
 
+  // Field-list adapters (Power BI-style selection): the group node's checkbox
+  // applies/clears the group with all items; an item checkbox on a non-applied
+  // group applies the group with just that item (switching groups if another
+  // one was applied — only one group can be active at a time).
+  const handleFieldListCalcGroupToggle = useCallback(
+    (group: BiCalcGroup, checked: boolean) => {
+      handleCalcGroupChange(checked ? group.name : null);
+    },
+    [handleCalcGroupChange],
+  );
+  const handleFieldListCalcItemToggle = useCallback(
+    (group: BiCalcGroup, itemName: string, checked: boolean) => {
+      if (appliedCalcGroup?.group === group.name) {
+        handleCalcItemToggle(itemName, group.items.map((i) => i.name), checked);
+      } else if (checked) {
+        applyCalcGroup({ group: group.name, items: [itemName] });
+      }
+    },
+    [appliedCalcGroup, handleCalcItemToggle, applyCalcGroup],
+  );
+
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
     window.dispatchEvent(
@@ -907,6 +928,14 @@ export function PivotEditor({
             onMeasureToggle={handleBiMeasureToggle}
             onHierarchyToggle={handleBiHierarchyToggle}
             onLookupToggle={handleLookupToggle}
+            appliedCalcGroup={appliedCalcGroup}
+            onCalcGroupToggle={handleFieldListCalcGroupToggle}
+            onCalcItemToggle={handleFieldListCalcItemToggle}
+            calcGroupsDisabledReason={
+              lookupColumns.size > 0 && !appliedCalcGroup
+                ? 'Remove lookup columns to apply a calculation group.'
+                : null
+            }
             selectedPerspective={selectedPerspective}
             onPerspectiveChange={handlePerspectiveChange}
             cultures={fieldListModel?.cultures}
@@ -937,69 +966,6 @@ export function PivotEditor({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
-        {isBiPivot && fieldListModel?.calculationGroups && fieldListModel.calculationGroups.length > 0 && (() => {
-          // Calc groups can't combine with lookup columns (the backend rejects
-          // it). Disable the control while any lookup column is active, unless a
-          // group is already applied (so the user can still switch it off).
-          const hasLookups = lookupColumns.size > 0;
-          const disabled = hasLookups && !appliedCalcGroup;
-          return (
-          <div style={{ padding: '8px', borderTop: '1px solid #eaeef2', fontSize: '12px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', opacity: disabled ? 0.5 : 1 }}>
-              <span style={{ fontWeight: 600 }}>Calculation group:</span>
-              <select
-                value={appliedCalcGroup?.group ?? ''}
-                onChange={(e) =>
-                  handleCalcGroupChange(e.target.value === '' ? null : e.target.value)
-                }
-                disabled={disabled}
-                style={{ fontSize: '12px', flex: 1 }}
-                title={
-                  disabled
-                    ? 'Remove lookup columns to apply a calculation group.'
-                    : 'Apply a calculation group: each value field is shown once per ' +
-                      'calculation item (e.g. Current, YTD, PY).'
-                }
-              >
-                <option value="">None</option>
-                {fieldListModel.calculationGroups.map((g) => (
-                  <option key={g.name} value={g.name}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {appliedCalcGroup && (() => {
-              const group = fieldListModel.calculationGroups?.find(g => g.name === appliedCalcGroup.group);
-              const allItems = group?.items.map(i => i.name) ?? [];
-              const isItemOn = (name: string) =>
-                appliedCalcGroup.items.length === 0 || appliedCalcGroup.items.includes(name);
-              return (
-                <div style={{ marginTop: '6px' }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }}>
-                    {allItems.map((name) => (
-                      <label
-                        key={name}
-                        style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '11px' }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isItemOn(name)}
-                          onChange={(e) => handleCalcItemToggle(name, allItems, e.target.checked)}
-                        />
-                        {name}
-                      </label>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: '3px', color: '#6639ba', fontSize: '11px' }}>
-                    Applied to {values.length} measure{values.length === 1 ? '' : 's'} - totals off while applied
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
-          );
-        })()}
       </div>
 
       {/* Design tab content */}
