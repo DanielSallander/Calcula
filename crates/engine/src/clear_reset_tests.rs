@@ -87,8 +87,7 @@ fn clear_model() -> DataModel {
         // ISFILTERED marker: folded to a literal per request at the facade.
         .add_measure(expression_measure(
             "NameFilteredFlag",
-            parse_measure("IF(ISFILTERED(Product[name]), SUM(Sales[amount]), 0.0 - 1.0)")
-                .unwrap(),
+            parse_measure("IF(ISFILTERED(Product[name]), SUM(Sales[amount]), 0.0 - 1.0)").unwrap(),
         ))
         // DYNAMIC format string: evaluated once per query under the outer
         // filter context; overrides the static format in result metadata.

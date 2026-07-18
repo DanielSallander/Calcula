@@ -258,9 +258,7 @@ fn materialized_cycle_rejected() {
     )
     .with_dynamic(false);
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
         .add_global_variable(a)
         .add_global_variable(b)
         .build()
@@ -274,7 +272,10 @@ fn materialized_cycle_rejected() {
 #[tokio::test]
 async fn materialize_and_query_derived_table() {
     let mut engine = star_engine(star_model(prod_sales_gv(false)));
-    engine.materialize_calculated_table("prod_sales").await.unwrap();
+    engine
+        .materialize_calculated_table("prod_sales")
+        .await
+        .unwrap();
     assert!(engine.cache.contains("prod_sales"));
 
     // Group by the derived table's own column.
@@ -342,9 +343,7 @@ fn distinct_gv(dynamic: bool) -> GlobalVariable {
 #[test]
 fn distinct_synthesizes_by_columns_only() {
     let model = DataModel::builder()
-        .add_table(
-            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
-        )
+        .add_table(Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap())
         .add_global_variable(distinct_gv(false))
         .build()
         .unwrap();
@@ -356,9 +355,7 @@ fn distinct_synthesizes_by_columns_only() {
 #[test]
 fn dynamic_distinct_rejected_at_build() {
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
-        )
+        .add_table(Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap())
         .add_global_variable(
             GlobalVariable::new(
                 "product_names",
@@ -375,9 +372,7 @@ fn dynamic_distinct_rejected_at_build() {
 #[test]
 fn distinct_query_rejected_inside_measures() {
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap(),
-        )
+        .add_table(Table::new("Product", vec![Column::new("name", DataType::String)]).unwrap())
         .add_measure(measure_from(
             "Bad",
             "VAR names = QUERY(DISTINCT Product[name]) RETURN COUNTROWS(names)",
@@ -427,7 +422,10 @@ async fn distinct_materializes_unique_rows() {
         .build()
         .unwrap();
     let mut engine = star_engine(model);
-    engine.materialize_calculated_table("product_names").await.unwrap();
+    engine
+        .materialize_calculated_table("product_names")
+        .await
+        .unwrap();
 
     let batches = engine
         .query(QueryRequest {
@@ -569,7 +567,9 @@ async fn snapshot_restore_populates_calculated_table() {
 
     // Snapshots only restore calculated tables.
     let bad = RecordBatch::new_empty(Arc::new(Schema::empty()));
-    assert!(engine.store_calculated_table_snapshot("Sales", bad).is_err());
+    assert!(engine
+        .store_calculated_table_snapshot("Sales", bad)
+        .is_err());
 }
 
 #[tokio::test]

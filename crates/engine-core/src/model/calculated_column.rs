@@ -36,6 +36,10 @@ pub struct CalculatedColumn {
     /// editor listings, and never user-deletable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generated_by: Option<String>,
+    /// Optional host-facing description, surfaced in editor listings and
+    /// result-column metadata (mirrors `ContextColumn::description`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 /// The id/parent columns of a `PATH(...)` calculated column. Both must be
@@ -66,6 +70,7 @@ impl CalculatedColumn {
             data_type,
             path: None,
             generated_by: None,
+            description: None,
         }
     }
 
@@ -87,7 +92,19 @@ impl CalculatedColumn {
                 parent_column: parent_column.into(),
             }),
             generated_by: None,
+            description: None,
         }
+    }
+
+    /// Attach a host-facing description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Returns the host-facing description, when set.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     /// Mark this column as machinery generated from another model entity

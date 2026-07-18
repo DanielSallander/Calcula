@@ -483,7 +483,8 @@ impl Engine {
                 .global_variable(&name)
                 .map(engine_core::model::global_variable::calculated_table_dependencies)
                 .unwrap_or_default();
-            let needs = !self.cache.contains(&name) || deps.iter().any(|d| refreshed_set.contains(d));
+            let needs =
+                !self.cache.contains(&name) || deps.iter().any(|d| refreshed_set.contains(d));
             if !needs {
                 continue;
             }

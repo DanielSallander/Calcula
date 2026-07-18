@@ -36,7 +36,11 @@ pub enum WritebackSlot {
 impl Engine {
     /// Resolve a writeback column id + slot to the synthesized store table's
     /// model name, verifying the column exists and the table is a store.
-    fn writeback_slot_table(&self, writeback_id: &str, slot: WritebackSlot) -> EngineResult<String> {
+    fn writeback_slot_table(
+        &self,
+        writeback_id: &str,
+        slot: WritebackSlot,
+    ) -> EngineResult<String> {
         let wb = self
             .model
             .writeback_columns()
@@ -109,7 +113,11 @@ impl Engine {
                  {declared:?} — build the batch against Engine::writeback_slot_schema"
             )));
         }
-        let batches = if batch.num_rows() == 0 { Vec::new() } else { vec![batch] };
+        let batches = if batch.num_rows() == 0 {
+            Vec::new()
+        } else {
+            vec![batch]
+        };
         self.store_refreshed_table(&name, batches).map(|_| ())
     }
 
@@ -300,10 +308,12 @@ impl Engine {
         cur_name: &str,
         text: &str,
     ) -> EngineResult<()> {
-        let fail = |reason: String| EngineError::InvalidData(format!(
-            "writeback column '{}' expression projection: {reason}",
-            wb.name()
-        ));
+        let fail = |reason: String| {
+            EngineError::InvalidData(format!(
+                "writeback column '{}' expression projection: {reason}",
+                wb.name()
+            ))
+        };
 
         // The designer references the history table as `history[...]`;
         // rewrite (case-insensitive) to the synthesized name before parsing.
@@ -378,10 +388,12 @@ fn rewrite_history_refs(text: &str, hist_name: &str) -> String {
         if lower[i..].starts_with(needle) {
             // A word boundary on both sides makes it the history identifier.
             let before_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'[');
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b'[');
             let end = i + needle.len();
-            let after_ok = end >= text.len()
-                || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+            let after_ok =
+                end >= text.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
             if before_ok && after_ok {
                 out.push_str(hist_name);
                 i = end;

@@ -465,6 +465,31 @@ impl DataModelBuilder {
                 )?;
             }
         }
+        // Calculated and context columns carry descriptions too — same cap,
+        // same reason: model files are shared, so metadata must not become an
+        // unbounded payload channel.
+        for cc in &self.calculated_columns {
+            if let Some(description) = cc.description() {
+                validate_metadata_text(
+                    &format!("calculated column '{}.{}'", cc.table(), cc.name()),
+                    "description",
+                    description,
+                    MAX_METADATA_DESCRIPTION_CHARS,
+                    false,
+                )?;
+            }
+        }
+        for cc in &self.context_columns {
+            if let Some(description) = cc.description() {
+                validate_metadata_text(
+                    &format!("context column '{}.{}'", cc.table(), cc.name()),
+                    "description",
+                    description,
+                    MAX_METADATA_DESCRIPTION_CHARS,
+                    false,
+                )?;
+            }
+        }
 
         // 0b. Expression AST validation. Measures, calculated columns, and
         // global variables can be deserialized straight from model JSON,

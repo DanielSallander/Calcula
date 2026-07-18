@@ -66,7 +66,11 @@ fn engine_with_hosts(projection: WritebackProjection) -> Engine {
     // The planner resolves fetch targets from bindings for physical tables
     // (the executor then serves the cached batch); same dummy binding as the
     // other engine test fixtures. Store tables need no binding by design.
-    engine.bind_table("dim_customer", 0, SourceBinding::new("public", "dim_customer"));
+    engine.bind_table(
+        "dim_customer",
+        0,
+        SourceBinding::new("public", "dim_customer"),
+    );
     engine
         .cache
         .store(
@@ -368,7 +372,11 @@ async fn feed_schema_gate() {
 
     // Wrong columns for the slot.
     let wrong = RecordBatch::try_new(
-        Arc::new(Schema::new(vec![Field::new("bogus", ArrowType::Int64, true)])),
+        Arc::new(Schema::new(vec![Field::new(
+            "bogus",
+            ArrowType::Int64,
+            true,
+        )])),
         vec![Arc::new(Int64Array::from(vec![1]))],
     )
     .unwrap();

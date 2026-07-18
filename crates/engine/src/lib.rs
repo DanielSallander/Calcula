@@ -92,25 +92,25 @@ mod writeback;
 #[cfg(test)]
 mod calc_group_tests;
 #[cfg(test)]
+mod calculated_column_tests;
+#[cfg(test)]
 mod clear_reset_tests;
 #[cfg(test)]
 mod context_column_tests;
 #[cfg(test)]
 mod detail_tests;
 #[cfg(test)]
-mod dotted_name_tests;
-#[cfg(test)]
 mod disk_cache_tests;
 #[cfg(test)]
+mod dotted_name_tests;
+#[cfg(test)]
 mod gvar_tests;
-#[cfg(test)]
-mod calculated_column_tests;
-#[cfg(test)]
-mod materialize_tests;
 #[cfg(test)]
 mod having_tests;
 #[cfg(test)]
 mod in_filter_tests;
+#[cfg(test)]
+mod materialize_tests;
 #[cfg(test)]
 mod meta_tests;
 #[cfg(test)]
@@ -174,14 +174,13 @@ pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,
-    Culture, NameTranslation,
-    ContextColumn, ContextDefinition, ContextOp, DataModel, DataModelBuilder, DateRole,
+    ContextColumn, ContextDefinition, ContextOp, Culture, DataModel, DataModelBuilder, DateRole,
     FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
-    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, PathSpec, Perspective, PersistedAuthKind,
-    PersistedConnection,
-    PersistedSource, RaggedBehavior, RefreshStrategy, Relationship, SecurityRole, SourceKind,
-    StatusBand, StorageMode, Table, TableSourceBinding, TableVariable, WritebackColumn,
-    WritebackColumnKind, WritebackConstraints, WritebackProjection, WRITEBACK_RESERVED_COLUMNS,
+    JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, NameTranslation, PathSpec,
+    PersistedAuthKind, PersistedConnection, PersistedSource, Perspective, RaggedBehavior,
+    RefreshStrategy, Relationship, SecurityRole, SourceKind, StatusBand, StorageMode, Table,
+    TableSourceBinding, TableVariable, WritebackColumn, WritebackColumnKind, WritebackConstraints,
+    WritebackProjection, WRITEBACK_RESERVED_COLUMNS,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
@@ -1946,7 +1945,9 @@ impl Engine {
                 // Builder-validated shape: `Table[column]`.
                 let r = r.trim();
                 let Some(open) = r.find('[') else { continue };
-                let Some(body) = r.strip_suffix(']') else { continue };
+                let Some(body) = r.strip_suffix(']') else {
+                    continue;
+                };
                 denied_cols.push((
                     body[..open].trim().to_string(),
                     body[open + 1..].trim().to_string(),
@@ -1957,8 +1958,7 @@ impl Engine {
             return Ok(());
         }
 
-        let table_denied =
-            |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
+        let table_denied = |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
         let col_denied = |t: &str, c: &str| {
             table_denied(t)
                 || denied_cols
@@ -2043,9 +2043,7 @@ impl Engine {
             );
             for (t, c) in &deps.columns {
                 if col_denied(t, c) {
-                    return deny(format!(
-                        "{t}[{c}] (referenced by measure '{measure_name}')"
-                    ));
+                    return deny(format!("{t}[{c}] (referenced by measure '{measure_name}')"));
                 }
             }
         }
@@ -2096,7 +2094,9 @@ impl Engine {
             for r in role.denied_columns() {
                 let r = r.trim();
                 let Some(open) = r.find('[') else { continue };
-                let Some(body) = r.strip_suffix(']') else { continue };
+                let Some(body) = r.strip_suffix(']') else {
+                    continue;
+                };
                 denied_cols.push((
                     body[..open].trim().to_string(),
                     body[open + 1..].trim().to_string(),
@@ -2106,8 +2106,7 @@ impl Engine {
         if denied_tables.is_empty() && denied_cols.is_empty() {
             return Ok(());
         }
-        let table_denied =
-            |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
+        let table_denied = |t: &str| denied_tables.iter().any(|d| d.eq_ignore_ascii_case(t));
         let col_denied = |t: &str, c: &str| {
             table_denied(t)
                 || denied_cols
@@ -2436,8 +2435,7 @@ impl Engine {
                 .format_string_expression()
                 .expect("filtered to measures with a dynamic format")
                 .to_string();
-            let fmt_expr =
-                parse_measure_expression(&fmt_src).map_err(QueryError::Engine)?;
+            let fmt_expr = parse_measure_expression(&fmt_src).map_err(QueryError::Engine)?;
             // One scalar evaluation under the OUTER context only (mirrors
             // GVAR): the request's filters/slicers, no group-by axis.
             let synth_name = format!("__dynfmt__{name}");
@@ -2453,7 +2451,13 @@ impl Engine {
                 ..Default::default()
             };
             let batches = self
-                .plan_and_execute(&inner, &inner, &overlay, &role_filters, &CancellationToken::new())
+                .plan_and_execute(
+                    &inner,
+                    &inner,
+                    &overlay,
+                    &role_filters,
+                    &CancellationToken::new(),
+                )
                 .await?;
             if let Some(batch) = batches.first() {
                 if batch.num_rows() > 0 {
@@ -3756,9 +3760,27 @@ impl Engine {
         };
 
         let role_filters = self.active_role_filters()?;
-        // Mirror the `query` path: resolve pushable context-column CASEs so the
-        // explain output reports the same plan the query would actually run.
         let token = CancellationToken::new();
+
+        // Mirror the `query` path's pre-planning overlays so the explain output
+        // reports the same plan the query would actually run: fold ISFILTERED
+        // markers to literals, then resolve query-scoped (GVAR) bindings —
+        // without the latter a GVAR measure would reach the executor unresolved
+        // and fail its internal guard.
+        let isfiltered_model = Self::resolve_is_filtered_markers(effective_request, model);
+        let model: &DataModel = isfiltered_model.as_ref().unwrap_or(model);
+        let gvar_model = self
+            .resolve_query_scoped_bindings(
+                effective_request,
+                model,
+                overlay.is_some(),
+                &role_filters,
+                &token,
+            )
+            .await?;
+        let model: &DataModel = gvar_model.as_ref().unwrap_or(model);
+
+        // Resolve pushable context-column CASEs (host-only, over `self.model`).
         let context_column_cases = self
             .resolve_pushable_context_columns(&request, &token)
             .await?;

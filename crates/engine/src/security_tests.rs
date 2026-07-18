@@ -1884,12 +1884,8 @@ async fn ols_denied_table_refuses_drillthrough() {
 fn ols_denials_validated_at_build() {
     // Unknown denied table: rejected.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
-        .add_security_role(
-            SecurityRole::new("R").with_denied_tables(vec!["Phantom".to_string()]),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
+        .add_security_role(SecurityRole::new("R").with_denied_tables(vec!["Phantom".to_string()]))
         .build()
         .unwrap_err()
         .to_string();
@@ -1897,9 +1893,7 @@ fn ols_denials_validated_at_build() {
 
     // Malformed denied column ref: rejected.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
         .add_security_role(
             SecurityRole::new("R").with_denied_columns(vec!["not_qualified".to_string()]),
         )

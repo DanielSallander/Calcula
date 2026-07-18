@@ -39,7 +39,9 @@ impl Engine {
     /// not a calculated table or is dynamic (dynamic calculated tables are
     /// evaluated per query and never materialized).
     pub async fn materialize_calculated_table(&mut self, name: &str) -> EngineResult<()> {
-        self.materialize_calculated_table_inner(name).await.map(|_| ())
+        self.materialize_calculated_table_inner(name)
+            .await
+            .map(|_| ())
     }
 
     /// Materialize every materialized calculated table, in dependency order
@@ -178,13 +180,12 @@ impl Engine {
             ));
         }
         let measure_names: Vec<String> = synthetic.iter().map(|m| m.name().to_string()).collect();
-        let overlay = self
-            .model
-            .with_overlay_measures(synthetic)
-            .map_err(|e| EngineError::MaterializationFailed {
+        let overlay = self.model.with_overlay_measures(synthetic).map_err(|e| {
+            EngineError::MaterializationFailed {
                 name: name.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         let request = QueryRequest {
             measures: measure_names,
@@ -227,16 +228,17 @@ impl Engine {
                         ),
                     }
                 })?;
-                let cast = arrow::compute::cast(batch.column(index), field.data_type()).map_err(
-                    |e| EngineError::MaterializationFailed {
-                        name: name.to_string(),
-                        reason: format!(
-                            "cannot cast result column '{result_name}' to declared type \
+                let cast =
+                    arrow::compute::cast(batch.column(index), field.data_type()).map_err(|e| {
+                        EngineError::MaterializationFailed {
+                            name: name.to_string(),
+                            reason: format!(
+                                "cannot cast result column '{result_name}' to declared type \
                              {:?}: {e}",
-                            field.data_type()
-                        ),
-                    },
-                )?;
+                                field.data_type()
+                            ),
+                        }
+                    })?;
                 columns.push(cast);
             }
             conformed.push(

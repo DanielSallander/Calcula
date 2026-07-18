@@ -288,12 +288,8 @@ async fn lookupvalue_calculated_column_dedups_and_preserves_rows() {
 async fn cross_table_validation_fails_closed() {
     // Cross-table ref without any relationship: rejected at build.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("A", vec![Column::new("x", DataType::Int64)]).unwrap(),
-        )
-        .add_table(
-            Table::new("B", vec![Column::new("y", DataType::Int64)]).unwrap(),
-        )
+        .add_table(Table::new("A", vec![Column::new("x", DataType::Int64)]).unwrap())
+        .add_table(Table::new("B", vec![Column::new("y", DataType::Int64)]).unwrap())
         .add_calculated_column(CalculatedColumn::new(
             "bad",
             "A",
@@ -307,9 +303,7 @@ async fn cross_table_validation_fails_closed() {
 
     // LOOKUPVALUE in a measure: rejected with guidance.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("A", vec![Column::new("x", DataType::Int64)]).unwrap(),
-        )
+        .add_table(Table::new("A", vec![Column::new("x", DataType::Int64)]).unwrap())
         .add_measure(Measure::new(
             "Bad",
             parse_measure_expression("SUM(A[x]) + LOOKUPVALUE(A[x], A[x], 1)").unwrap(),
@@ -478,9 +472,7 @@ async fn pathlength_and_pathitem_over_path_column() {
 async fn path_validation_fails_closed() {
     // Unknown parent column: rejected at build.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Emp", vec![Column::new("id", DataType::Int64)]).unwrap(),
-        )
+        .add_table(Table::new("Emp", vec![Column::new("id", DataType::Int64)]).unwrap())
         .add_calculated_column(CalculatedColumn::new_path("Path", "Emp", "id", "boss"))
         .build()
         .unwrap_err()
@@ -607,9 +599,7 @@ async fn thisrow_group_share_sums_to_group_count() {
 async fn thisrow_validation_fails_closed() {
     // THISROW in a measure: rejected at build.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
         .add_measure(Measure::new(
             "Bad",
             parse_measure_expression(
@@ -624,9 +614,7 @@ async fn thisrow_validation_fails_closed() {
 
     // A bare aggregate (not over ITERATE) in a calculated column: still rejected.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
         .add_calculated_column(CalculatedColumn::new(
             "Bad",
             "Sales",
@@ -640,9 +628,7 @@ async fn thisrow_validation_fails_closed() {
 
     // THISROW outside ITERATE in a calculated column: rejected.
     let err = DataModel::builder()
-        .add_table(
-            Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap(),
-        )
+        .add_table(Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap())
         .add_calculated_column(CalculatedColumn::new(
             "Bad",
             "Sales",

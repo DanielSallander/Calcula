@@ -127,8 +127,7 @@ fn gvar_model() -> DataModel {
         .add_global_variable(GlobalVariable::new(
             "gv_total",
             "Sales",
-            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])")
-                .unwrap(),
+            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])").unwrap(),
         ))
         .add_calculation_group(CalculationGroup::new(
             "Time",
@@ -251,6 +250,19 @@ async fn gvar_computed_once_per_query() {
     );
     assert!((r["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", r);
     assert!((r["Helmets"] - 60.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+}
+
+#[tokio::test]
+async fn gvar_resolves_on_explained_query_path() {
+    // `query_explained` must run the same facade GVAR resolution as `query`.
+    // Regression: the explain path skipped it, so a GVAR measure reached the
+    // executor unresolved and tripped its internal guard.
+    let engine = gvar_engine();
+    let (batches, plan) = engine.query_explained(request("PctOfTotal")).await.unwrap();
+    let r = grouped(&batches, "PctOfTotal");
+    assert!((r["Bikes"] - 130.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+    assert!((r["Helmets"] - 60.0 / 190.0).abs() < 1e-9, "got {:?}", r);
+    assert!(!plan.summary.is_empty());
 }
 
 #[tokio::test]
@@ -450,8 +462,7 @@ fn reject_gvar_colliding_with_model_global_variable() {
         .add_global_variable(GlobalVariable::new(
             "grand",
             "Sales",
-            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])")
-                .unwrap(),
+            parse_measure_expression("QUERY(SUM(Sales[amount]) AS Amt BY Sales[prod_id])").unwrap(),
         ))
         .add_measure(measure_from(
             "M",
@@ -628,10 +639,7 @@ async fn validate_measure_text_rejects_gvar_violations() {
     let err = engine
         .validate_measure_text("Bad3", "GVAR gv_total = SUM(Sales[amount]) RETURN gv_total")
         .unwrap_err();
-    assert!(
-        err.to_string().contains("calculated table"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("calculated table"), "got: {err}");
 
     // A valid GVAR measure still validates.
     engine
