@@ -57,10 +57,15 @@ fn model_format_version_is_current() {
     // v21 added writeback columns (model writeback_columns, Table
     // is_writeback_store, CalculatedColumn generated_by);
     // v22 added open model metadata (model extension_data — namespaced
-    // opaque JSON for host applications and their extensions).
+    // opaque JSON for host applications and their extensions);
+    // v23 added the calc-group introspection family (IsSelectedMeasure /
+    // SelectedMeasureName / SelectedMeasureFormatString variants), the
+    // calculation-item format_string_expression, NOT IN / QUERY TOP /
+    // CROSSFILTER / PREVIOUSDAY-NEXTDAY / FIRSTNONBLANK-LASTNONBLANK
+    // expression forms, and Day granularity.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 22);
+    assert_eq!(MODEL_FORMAT_VERSION, 23);
 }
 
 #[test]

@@ -39,8 +39,7 @@ use super::order_limit::{
 };
 use super::sql::{
     axis_clear_partition, build_condition_sql_with_conditions, build_override_alias_map,
-    collect_qualified_tables, render_in_filter_conditions,
-    resolve_compound_sql, wrap_axis_clear,
+    collect_qualified_tables, render_in_filter_conditions, resolve_compound_sql, wrap_axis_clear,
     GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
@@ -908,10 +907,7 @@ impl QueryExecutor {
                 let expr_sql = rewritten
                     .to_qualified_sql(&host_lower)
                     .map_err(crate::error::QueryError::Engine)?;
-                select_parts.push(format!(
-                    "{expr_sql} AS {}",
-                    quote_ident_double(cc.name())
-                ));
+                select_parts.push(format!("{expr_sql} AS {}", quote_ident_double(cc.name())));
             }
 
             for spec in &lookup_specs {
@@ -919,9 +915,7 @@ impl QueryExecutor {
                 let key_cols: Vec<String> = spec
                     .search
                     .iter()
-                    .map(|(c, _)| {
-                        quote_ident_double(c)
-                    })
+                    .map(|(c, _)| quote_ident_double(c))
                     .collect();
                 let subquery = format!(
                     "SELECT {keys}, MIN({result}) AS {result} FROM {target_lower} GROUP BY {keys}",
@@ -1603,7 +1597,8 @@ impl QueryExecutor {
                 // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
                 // present, else the plain aggregate.
                 let inner_sql = if has_case {
-                    let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
+                    let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty()
+                    {
                         build_condition_sql_with_conditions(
                             &effective,
                             &eval_ctx.conditions,

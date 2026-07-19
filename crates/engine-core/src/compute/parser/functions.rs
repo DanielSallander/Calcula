@@ -37,6 +37,63 @@ impl Parser {
         Ok(Expression::SelectedMeasure)
     }
 
+    /// Parse a zero-argument calc-group introspection call —
+    /// `SELECTEDMEASURENAME()` / `SELECTEDMEASUREFORMATSTRING()`. Mirrors
+    /// [`Parser::parse_selectedmeasure_call`].
+    pub(super) fn parse_zero_arg_calc_group_call(
+        &mut self,
+        name: &str,
+        make: impl FnOnce() -> Expression,
+    ) -> EngineResult<Expression> {
+        if self.peek() != Some(&Token::RParen) {
+            return Err(self.parse_err(format!("{name}() takes no arguments")));
+        }
+        self.advance()?; // consume RParen
+        Ok(make())
+    }
+
+    /// Parse `ISSELECTEDMEASURE([Measure1], [Measure2], ...)` — one or more
+    /// bracketed measure references, folded to TRUE/FALSE when the calculation
+    /// group is applied.
+    ///
+    /// Each argument must be a plain `[Measure]` reference (arbitrary
+    /// expressions are rejected — the comparison is by measure identity, not
+    /// value). The referenced measures are validated against the model at
+    /// build time.
+    pub(super) fn parse_isselectedmeasure_call(&mut self) -> EngineResult<Expression> {
+        let mut measures = Vec::new();
+        if self.peek() == Some(&Token::RParen) {
+            return Err(
+                self.parse_err("ISSELECTEDMEASURE requires at least one [Measure] argument")
+            );
+        }
+        loop {
+            match self.parse_expression()? {
+                Expression::MeasureRef(name) => measures.push(name),
+                _ => {
+                    return Err(self.parse_err(
+                        "ISSELECTEDMEASURE arguments must be measure references like [Revenue]",
+                    ));
+                }
+            }
+            match self.peek() {
+                Some(&Token::Comma) => {
+                    self.advance()?; // consume comma, continue with next ref
+                }
+                Some(&Token::RParen) => {
+                    self.advance()?; // consume RParen
+                    break;
+                }
+                _ => {
+                    return Err(
+                        self.parse_err("expected ',' or ')' in ISSELECTEDMEASURE argument list")
+                    );
+                }
+            }
+        }
+        Ok(Expression::IsSelectedMeasure { measures })
+    }
+
     /// Parse `FIRST(table[column], ORDER BY table[sort_col])`.
     ///
     /// Simplified from DAX: no axis, no reset, no blanks parameter.
@@ -361,6 +418,62 @@ mod tests {
                 assert!(position > 0);
             }
             other => panic!("expected a ParseError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_isselectedmeasure_measure_ref_list() {
+        let expr = parse_measure_expression("ISSELECTEDMEASURE([Revenue], [Total Cost])").unwrap();
+        match expr {
+            Expression::IsSelectedMeasure { measures } => {
+                assert_eq!(measures, vec!["Revenue", "Total Cost"]);
+            }
+            other => panic!("expected IsSelectedMeasure, got {other:?}"),
+        }
+        // Case-insensitive function name; single ref.
+        let expr = parse_measure_expression("isselectedmeasure([M])").unwrap();
+        assert!(matches!(expr, Expression::IsSelectedMeasure { measures } if measures == ["M"]));
+    }
+
+    #[test]
+    fn parse_isselectedmeasure_rejects_non_measure_args_and_empty_list() {
+        let err = parse_measure_expression("ISSELECTEDMEASURE(1)").unwrap_err();
+        assert!(err.to_string().contains("measure references"), "got: {err}");
+        let err = parse_measure_expression("ISSELECTEDMEASURE(Sales[amount])").unwrap_err();
+        assert!(err.to_string().contains("measure references"), "got: {err}");
+        let err = parse_measure_expression("ISSELECTEDMEASURE()").unwrap_err();
+        assert!(err.to_string().contains("at least one"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_selectedmeasurename_and_formatstring_zero_args() {
+        let expr = parse_measure_expression("SELECTEDMEASURENAME()").unwrap();
+        assert!(matches!(expr, Expression::SelectedMeasureName));
+        let expr = parse_measure_expression("selectedmeasureformatstring()").unwrap();
+        assert!(matches!(expr, Expression::SelectedMeasureFormatString));
+        let err = parse_measure_expression("SELECTEDMEASURENAME(1)").unwrap_err();
+        assert!(err.to_string().contains("no arguments"), "got: {err}");
+        let err = parse_measure_expression("SELECTEDMEASUREFORMATSTRING([X])").unwrap_err();
+        assert!(err.to_string().contains("no arguments"), "got: {err}");
+    }
+
+    #[test]
+    fn calc_group_introspection_round_trips_through_formula() {
+        // Parse → formula text → parse again: the round-trip must be stable
+        // (the Model Editor re-parses formula text).
+        for src in [
+            "IF(ISSELECTEDMEASURE([Revenue], [Cost]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())",
+            "SELECTEDMEASURENAME()",
+            "SELECTEDMEASUREFORMATSTRING()",
+        ] {
+            let expr = parse_measure_expression(src).unwrap();
+            let text = crate::compute::expression::expression_to_formula(&expr, "");
+            let reparsed = parse_measure_expression(&text).unwrap();
+            assert_eq!(
+                format!("{expr:?}"),
+                format!("{reparsed:?}"),
+                "formula round-trip changed the AST for {src}: {text}"
+            );
         }
     }
 

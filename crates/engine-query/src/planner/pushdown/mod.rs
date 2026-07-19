@@ -1320,10 +1320,8 @@ impl PushdownPlanner {
         // never names them.
         let mut calc_col_extra_tables: Vec<String> = Vec::new();
         {
-            let mut seen: std::collections::HashSet<String> = all_tables
-                .iter()
-                .map(|t| t.to_lowercase())
-                .collect();
+            let mut seen: std::collections::HashSet<String> =
+                all_tables.iter().map(|t| t.to_lowercase()).collect();
             for table_name in &all_tables {
                 let Some(model_table) = model
                     .tables()
@@ -1405,8 +1403,7 @@ impl PushdownPlanner {
                 continue;
             }
             if seen_tables.insert(*table_name) {
-                let (fetch_schema, fetch_table) =
-                    fetch_target_for(registry, model, table_name)?;
+                let (fetch_schema, fetch_table) = fetch_target_for(registry, model, table_name)?;
 
                 // Push filters that apply to this table.
                 let mut table_filters: Vec<FilterCondition> = request

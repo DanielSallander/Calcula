@@ -139,11 +139,11 @@ impl<'a> MeasureEngine<'a> {
         // Register all needed tables (with calculated columns materialized).
         for table_name in &tables_needed {
             let batch = self.get_table_batch(table_name).await?;
-            let df_name = df_table_name(&table_name);
+            let df_name = df_table_name(table_name);
             ctx.register_batch(&df_name, batch)?;
         }
 
-        let fact_lower = df_table_name(&fact_table);
+        let fact_lower = df_table_name(fact_table);
 
         // Classify dimension tables by join safety.
         let mut unsafe_group_by: Vec<&TableColumn> = Vec::new();
@@ -179,7 +179,7 @@ impl<'a> MeasureEngine<'a> {
                         format!("__d.{} {op} {val}", quote_ident_double(&f.column))
                     })
                     .collect();
-                let dim_lower = df_table_name(&table_name);
+                let dim_lower = df_table_name(table_name);
                 if let Some(boundary) =
                     rel.build_boundary_clause(&fact_lower, &dim_lower, fact_is_from, &dim_filters)
                 {
@@ -238,7 +238,7 @@ impl<'a> MeasureEngine<'a> {
         joined.extend(exists_tables.iter().cloned());
 
         for table_name in &tables_needed {
-            let dim_lower = df_table_name(&table_name);
+            let dim_lower = df_table_name(table_name);
             if joined.contains(&dim_lower) {
                 continue;
             }
@@ -315,7 +315,7 @@ impl<'a> MeasureEngine<'a> {
         eval_ctx: &EvaluationContext,
         ctx: &SessionContext,
     ) -> EngineResult<RecordBatch> {
-        let fact_lower = df_table_name(&fact_table);
+        let fact_lower = df_table_name(fact_table);
 
         // Identify the unsafe dim and its relationship.
         let mut unsafe_dim: Option<(&str, &crate::model::relationship::Relationship)> = None;
@@ -335,7 +335,7 @@ impl<'a> MeasureEngine<'a> {
                 "Expected unsafe dimension for pre-aggregate".into(),
             )
         })?;
-        let dim_lower = df_table_name(&unsafe_dim_name);
+        let dim_lower = df_table_name(unsafe_dim_name);
         let fact_is_from = rel.from_table() == fact_table;
 
         // --- Step 1: Compute boundary values per GROUP BY group ---
@@ -455,7 +455,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         for table_name in &tables_to_join {
-            let tbl = df_table_name(&table_name);
+            let tbl = df_table_name(table_name);
             if main_joined.contains(&tbl) {
                 continue;
             }

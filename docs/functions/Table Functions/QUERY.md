@@ -131,3 +131,28 @@ RETURN AVG(monthly[revenue])
 - Context operations on the inner aggregate (e.g., `SUM(t[col], ctx_bikes)`) filter source data before grouping
 - KEEP on the RETURN aggregate (e.g., `AVG(m[rev], KEEP(m, m[quarter] = 1))`) filters the intermediate table after grouping
 - Mixing QUERY-derived and fact-table aggregates in the same RETURN expression is not supported; use separate measures instead
+
+## TOP n BY alias — tie-inclusive top-N intermediates
+
+```
+VAR top3 = QUERY(SUM(Sales[amount]) AS a BY Product[category] TOP 3 BY a)
+RETURN SUM(top3[a])
+```
+
+An optional `TOP <n> BY <output column> [ASC|DESC]` tail keeps only the rows
+ranking in the first `n` positions of the materialized intermediate:
+
+- **Tie-inclusive** — every row tied with the boundary value is kept (like
+  DAX `TOPN` and the request-level `top_n`), so more than `n` rows are
+  possible. `ASC` ranks ascending (bottom-N); the default is descending.
+- The ranked column must be one of the QUERY's own outputs (an aggregate
+  alias or a BY column — parse error otherwise) and must be numeric.
+- When the QUERY is re-evaluated per outer group (outer group-by columns are
+  injected into its BY clause), the TOP-N applies **within each outer
+  group** — DAX-style context propagation.
+- Also valid on a **calculated table**'s QUERY: the materialized snapshot
+  keeps only the top-ranked rows (one global partition at refresh time).
+- NULL ranked values sort last (kept only when the boundary itself is NULL).
+
+The pattern above is the "revenue of the top-N categories" measure: rank the
+grouped intermediate, keep the top rows, aggregate over what survived.

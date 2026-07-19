@@ -133,6 +133,7 @@ async fn evaluate_query_in_var_avg_of_monthly_sums() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -189,6 +190,7 @@ async fn evaluate_query_in_var_max_of_monthly_sums() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -263,6 +265,7 @@ async fn evaluate_query_in_var_with_cross_table_group_by() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Products".to_string(), "category".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -320,6 +323,7 @@ async fn evaluate_query_in_var_grouped_output() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -379,6 +383,7 @@ async fn evaluate_query_in_var_count_of_groups() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -438,6 +443,7 @@ async fn evaluate_query_in_var_keep_on_intermediate_table() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -506,6 +512,7 @@ async fn evaluate_query_in_var_keep_multiple_filters() {
                             ("Orders".to_string(), "month".to_string()),
                             ("Orders".to_string(), "product_id".to_string()),
                         ],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -570,6 +577,7 @@ async fn evaluate_query_in_var_keep_grouped() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(
@@ -638,6 +646,7 @@ async fn evaluate_query_in_var_keep_scalar_sum() {
                             "revenue".to_string(),
                         )],
                         group_by: vec![("Orders".to_string(), "month".to_string())],
+                        top: None,
                     },
                 )],
                 result: Box::new(expr::agg(

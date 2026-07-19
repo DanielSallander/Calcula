@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::compute::expression::{child_expressions, Expression};
+use crate::compute::expression::{child_expressions, Expression, SelectedMeasureInfo};
 use crate::compute::measure::Measure;
 use crate::compute::parser::parse_measure_expression;
 use crate::error::{EngineError, EngineResult};
@@ -50,6 +50,16 @@ pub struct CalculationItem {
     /// `"0.0%"`). None = keep the base measure's own format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     format_string: Option<String>,
+    /// Dynamic format string: an expression (source text) evaluated once per
+    /// query per transformed measure — the calc-item analog of
+    /// [`Measure::format_string_expression`](crate::compute::measure::Measure).
+    /// May use `SELECTEDMEASUREFORMATSTRING()` / `SELECTEDMEASURENAME()` /
+    /// `ISSELECTEDMEASURE(...)` (substituted per applied measure) as well as
+    /// `SELECTEDMEASURE()` itself (the measure's value under the outer
+    /// context). When it yields a non-NULL string, it wins over
+    /// [`format_string`](Self::format_string) and the base measure's format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string_expression: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CalculationItem {
@@ -65,6 +75,8 @@ impl<'de> Deserialize<'de> for CalculationItem {
             source: Option<String>,
             #[serde(default)]
             format_string: Option<String>,
+            #[serde(default)]
+            format_string_expression: Option<String>,
         }
         let f = Fields::deserialize(deserializer)?;
         Ok(CalculationItem {
@@ -72,6 +84,7 @@ impl<'de> Deserialize<'de> for CalculationItem {
             expression: f.expression,
             source: f.source,
             format_string: f.format_string,
+            format_string_expression: f.format_string_expression,
         })
     }
 }
@@ -89,6 +102,7 @@ impl CalculationItem {
             expression,
             source: None,
             format_string: None,
+            format_string_expression: None,
         }
     }
 
@@ -110,6 +124,7 @@ impl CalculationItem {
             expression,
             source: Some(text),
             format_string: None,
+            format_string_expression: None,
         })
     }
 
@@ -124,6 +139,15 @@ impl CalculationItem {
     #[must_use]
     pub fn with_format_string(mut self, format: Option<String>) -> Self {
         self.format_string = format;
+        self
+    }
+
+    /// Set (or clear) the dynamic format string expression (source text),
+    /// evaluated once per query per transformed measure. See
+    /// [`format_string_expression`](Self::format_string_expression).
+    #[must_use]
+    pub fn with_format_string_expression(mut self, expression: Option<String>) -> Self {
+        self.format_string_expression = expression;
         self
     }
 
@@ -146,6 +170,14 @@ impl CalculationItem {
     /// Returns the item's format string, if any.
     pub fn format_string(&self) -> Option<&str> {
         self.format_string.as_deref()
+    }
+
+    /// Returns the item's dynamic format string expression (source text), if
+    /// any. Evaluated once per query per transformed measure; a non-NULL
+    /// string result wins over [`format_string`](Self::format_string) and the
+    /// base measure's format.
+    pub fn format_string_expression(&self) -> Option<&str> {
+        self.format_string_expression.as_deref()
     }
 }
 
@@ -266,6 +298,9 @@ fn collect_measure_ref_names(expr: &Expression, names: &mut Vec<String>) {
     // serialize-free traversal isn't available, so match the common cases.
     match expr {
         Expression::MeasureRef(name) => names.push(name.clone()),
+        // ISSELECTEDMEASURE's arguments are measure references by name —
+        // include them so build-time existence validation covers them.
+        Expression::IsSelectedMeasure { measures } => names.extend(measures.iter().cloned()),
         _ => {
             for child in child_expressions(expr) {
                 collect_measure_ref_names(child, names);
@@ -362,10 +397,13 @@ pub fn expand_calculation_group(
     // Measures-outer, items-inner.
     for measure_name in measures {
         let measure = model.measure(measure_name)?;
+        let info = SelectedMeasureInfo {
+            expression: measure.expression(),
+            name: measure_name,
+            format_string: measure.format_string(),
+        };
         for item in &selected {
-            let expression = item
-                .expression()
-                .substitute_selected_measure(measure.expression());
+            let expression = item.expression().substitute_selected_measure(&info);
             let name = synthetic_measure_name(measure_name, item.name());
             // A synthetic name must not collide with an existing model
             // measure — that would shadow it ambiguously in the overlay.
@@ -434,9 +472,12 @@ pub fn expand_calculation_selection(
     let mut names = Vec::with_capacity(measures.len());
     for measure_name in measures {
         let measure = model.measure(measure_name)?;
-        let expression = template
-            .expression()
-            .substitute_selected_measure(measure.expression());
+        let info = SelectedMeasureInfo {
+            expression: measure.expression(),
+            name: measure_name,
+            format_string: measure.format_string(),
+        };
+        let expression = template.expression().substitute_selected_measure(&info);
         let name = synthetic_measure_name(measure_name, group.name());
         if model.measure(&name).is_ok() {
             return Err(EngineError::InvalidData(format!(
@@ -569,6 +610,108 @@ mod tests {
         let (_, names) =
             expand_calculation_group(&model, &["Revenue".to_string()], "Time", &[]).unwrap();
         assert_eq!(names, vec!["Revenue [Current]", "Revenue [Doubled]"]);
+    }
+
+    #[test]
+    fn expand_folds_isselectedmeasure_per_measure() {
+        // An item that doubles Revenue but passes every other measure through:
+        // IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())
+        let table = Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap();
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(Measure::new(
+                "Revenue",
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")),
+            ))
+            .add_measure(Measure::new(
+                "Orders",
+                expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "amount")),
+            ))
+            .add_calculation_group(CalculationGroup::new(
+                "Adj",
+                vec![CalculationItem::from_text(
+                    "Boost",
+                    "IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())",
+                )
+                .unwrap()],
+            ))
+            .build()
+            .unwrap();
+
+        let (synthetic, _) = expand_calculation_group(
+            &model,
+            &["Revenue".to_string(), "Orders".to_string()],
+            "Adj",
+            &[],
+        )
+        .unwrap();
+
+        // Revenue [Boost]: condition folded TRUE → IF(TRUE, SUM*2, SUM).
+        let revenue_sql = synthetic[0].expression().to_sql_string().unwrap();
+        assert!(
+            revenue_sql.contains("TRUE") && revenue_sql.contains("* 2"),
+            "expected folded TRUE branch, got: {revenue_sql}"
+        );
+        // Orders [Boost]: condition folded FALSE.
+        let orders_sql = synthetic[1].expression().to_sql_string().unwrap();
+        assert!(
+            orders_sql.contains("FALSE"),
+            "expected folded FALSE condition, got: {orders_sql}"
+        );
+        // Nothing unsubstituted survives in either tree.
+        for m in &synthetic {
+            let dbg = format!("{:?}", m.expression());
+            assert!(!dbg.contains("SelectedMeasure"), "unsubstituted: {dbg}");
+        }
+    }
+
+    #[test]
+    fn expand_folds_selectedmeasurename_and_format_string() {
+        let table = Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap();
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(
+                Measure::new(
+                    "Revenue",
+                    expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")),
+                )
+                .with_format_string("#,0"),
+            )
+            .add_calculation_group(CalculationGroup::new(
+                "Labels",
+                vec![CalculationItem::from_text(
+                    "Tag",
+                    "IF(SELECTEDMEASURENAME() = \"Revenue\", SELECTEDMEASURE(), BLANK())",
+                )
+                .unwrap()],
+            ))
+            .build()
+            .unwrap();
+
+        let (synthetic, _) =
+            expand_calculation_group(&model, &["Revenue".to_string()], "Labels", &[]).unwrap();
+        let sql = synthetic[0].expression().to_sql_string().unwrap();
+        // SELECTEDMEASURENAME() folded to the literal 'Revenue'.
+        assert!(sql.contains("'Revenue'"), "got: {sql}");
+    }
+
+    #[test]
+    fn item_format_string_expression_round_trips_serde() {
+        let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+            .unwrap()
+            .with_format_string_expression(Some(
+                "CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")".to_string(),
+            ));
+        let json = serde_json::to_string(&item).unwrap();
+        let restored: CalculationItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.format_string_expression(),
+            Some("CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")")
+        );
+        // A pre-v23 item JSON (no field) loads with None.
+        let legacy = r#"{"name":"Old","expression":"SelectedMeasure"}"#;
+        let restored: CalculationItem = serde_json::from_str(legacy).unwrap();
+        assert!(restored.format_string_expression().is_none());
     }
 
     #[test]

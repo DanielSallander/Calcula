@@ -440,3 +440,117 @@ async fn cache_serves_same_application_and_distinguishes_different_ones() {
         .index_of("Revenue [Current]")
         .is_ok());
 }
+
+// ISSELECTEDMEASURE folds per applied measure: an item that doubles only
+// Revenue passes Cost through unchanged, in one application.
+#[tokio::test]
+async fn isselectedmeasure_branches_per_measure() {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                    Column::new("cost", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_measure(sum_measure("Cost", "Sales", "cost"))
+        .add_calculation_group(CalculationGroup::new(
+            "Adj",
+            vec![CalculationItem::from_text(
+                "Boost",
+                "IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())",
+            )
+            .unwrap()],
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+
+    let batches = engine
+        .query(QueryRequest {
+            measures: vec!["Revenue".into(), "Cost".into()],
+            calculation_group: Some(CalculationGroupApplication::new("Adj", vec![])),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Revenue (190) is in the list → doubled; Cost (110) is not → unchanged.
+    assert!((scalar(&batches, "Revenue [Boost]") - 380.0).abs() < 1e-9);
+    assert!((scalar(&batches, "Cost [Boost]") - 110.0).abs() < 1e-9);
+}
+
+// An item-level dynamic format string (format_string_expression with
+// SELECTEDMEASUREFORMATSTRING()) is evaluated per calc column and wins over
+// the static chain in query_with_meta metadata.
+#[tokio::test]
+async fn item_dynamic_format_string_reported_in_meta() {
+    let model = DataModel::builder()
+        .add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("prod_id", DataType::Int64),
+                    Column::new("amount", DataType::Float64),
+                    Column::new("cost", DataType::Float64),
+                ],
+            )
+            .unwrap()
+            .with_storage_mode(StorageMode::InMemory),
+        )
+        .add_measure(sum_measure("Revenue", "Sales", "amount").with_format_string("#,0"))
+        .add_measure(sum_measure("Cost", "Sales", "cost"))
+        .add_calculation_group(CalculationGroup::new(
+            "Scale",
+            vec![
+                CalculationItem::from_text("K", "SELECTEDMEASURE() / 1000")
+                    .unwrap()
+                    .with_format_string_expression(Some(
+                        "IF(ISBLANK(SELECTEDMEASUREFORMATSTRING()), \"0.0\", \
+                         CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\"))"
+                            .to_string(),
+                    )),
+                CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+            ],
+        ))
+        .build()
+        .unwrap();
+    let mut engine = Engine::new(model);
+    engine.bind_table("Sales", 0, SourceBinding::new("public", "sales"));
+    engine.cache.store("Sales", sales_batch()).unwrap();
+
+    let (_batches, meta) = engine
+        .query_with_meta(QueryRequest {
+            measures: vec!["Revenue".into(), "Cost".into()],
+            calculation_group: Some(CalculationGroupApplication::new(
+                "Scale",
+                vec!["K".into(), "Current".into()],
+            )),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let fmt = |name: &str| -> Option<String> {
+        meta.iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("column '{name}' missing from meta"))
+            .format_string
+            .clone()
+    };
+    // Revenue has "#,0" → the K item appends " K".
+    assert_eq!(fmt("Revenue [K]"), Some("#,0 K".to_string()));
+    // Cost has no format → the expression's ISBLANK branch yields "0.0".
+    assert_eq!(fmt("Cost [K]"), Some("0.0".to_string()));
+    // The pass-through item keeps the static chain (base measure's format).
+    assert_eq!(fmt("Revenue [Current]"), Some("#,0".to_string()));
+    assert_eq!(fmt("Cost [Current]"), None);
+}

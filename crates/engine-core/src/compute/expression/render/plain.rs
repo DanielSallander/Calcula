@@ -38,6 +38,17 @@ impl<D: Dialect> SqlRenderer<'_, D> {
                         .to_string(),
                 ));
             }
+            Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString => {
+                return Err(EngineError::InvalidExpression(
+                    "calc-group introspection (ISSELECTEDMEASURE / SELECTEDMEASURENAME / \
+                     SELECTEDMEASUREFORMATSTRING) must be folded away when the calculation \
+                     group is applied; an unsubstituted node reached the renderer \
+                     (internal error)"
+                        .to_string(),
+                ));
+            }
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
             // Date32 day count → a date-typed literal. The spelling is
@@ -293,13 +304,18 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             Expression::RankWindow { .. } => self
                 .dialect
                 .materialized_placeholder("/* RANK_WINDOW: must be materialized */", expr)?,
-            Expression::InList { expr, values } => {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => {
                 let expr_sql = self.render_plain(expr)?;
                 let vals = values
                     .iter()
                     .map(|v| self.render_plain(v))
                     .collect::<EngineResult<Vec<String>>>()?;
-                format!("{expr_sql} IN ({})", vals.join(", "))
+                let keyword = if *negated { "NOT IN" } else { "IN" };
+                format!("{expr_sql} {keyword} ({})", vals.join(", "))
             }
             Expression::Greatest(args) => {
                 let a = args

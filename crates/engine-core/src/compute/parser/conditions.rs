@@ -26,7 +26,19 @@ impl Parser {
         if matches!(self.peek().cloned(), Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("IN"))
         {
             self.advance()?; // consume IN
-            return self.parse_in_rhs(left);
+            return self.parse_in_rhs(left, false);
+        }
+        // `NOT IN` — anti-membership. A postfix `NOT` here can only start
+        // `NOT IN` (prefix NOT(...) is a function call parsed earlier).
+        if matches!(self.peek().cloned(), Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("NOT"))
+        {
+            self.advance()?; // consume NOT
+            if !matches!(self.peek().cloned(), Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("IN"))
+            {
+                return Err(self.parse_err("expected IN after NOT in a condition"));
+            }
+            self.advance()?; // consume IN
+            return self.parse_in_rhs(left, true);
         }
 
         // Check for comparison operator.
@@ -68,12 +80,12 @@ impl Parser {
         }
     }
 
-    /// Parse the right-hand side of an IN expression.
+    /// Parse the right-hand side of an IN / NOT IN expression.
     ///
     /// Two forms:
     /// - `{val1, val2, ...}` → InList expression (literal value set)
     /// - `var[col]` → InPredicate (membership in table variable)
-    fn parse_in_rhs(&mut self, left: Expression) -> EngineResult<Expression> {
+    fn parse_in_rhs(&mut self, left: Expression, negated: bool) -> EngineResult<Expression> {
         if self.peek() == Some(&Token::LBrace) {
             // Literal value list: {val1, val2, ...}
             self.advance()?; // consume {
@@ -96,6 +108,7 @@ impl Parser {
             Ok(Expression::InList {
                 expr: Box::new(left),
                 values,
+                negated,
             })
         } else {
             // Variable reference: var[col]
@@ -136,7 +149,9 @@ impl Parser {
             // Return a special marker that parse_keep_call will collect.
             Ok(Expression::KeepIn {
                 expr: Box::new(expr::lit_int(0)), // placeholder
-                predicates: vec![InPredicate::new(table, column, var_name, var_column)],
+                predicates: vec![
+                    InPredicate::new(table, column, var_name, var_column).with_negated(negated)
+                ],
             })
         }
     }
@@ -308,6 +323,7 @@ mod tests {
             if let Expression::InList {
                 expr: inner,
                 values,
+                ..
             } = &conditions[0]
             {
                 assert!(matches!(**inner, Expression::QualifiedColumnRef { .. }));
@@ -375,6 +391,93 @@ mod tests {
         }
     }
 
+    // --- NOT IN (anti-membership) tests ---
+
+    #[test]
+    fn parse_keep_not_in_literal_list() {
+        let expr = parse_measure_expression(
+            "SUM(fact[amount], KEEP(dim, dim[color] NOT IN {\"Blue\", \"Red\"}))",
+        )
+        .unwrap();
+        if let Expression::Keep { conditions, .. } = &expr {
+            assert_eq!(conditions.len(), 1);
+            match &conditions[0] {
+                Expression::InList {
+                    values, negated, ..
+                } => {
+                    assert!(*negated, "NOT IN must set negated");
+                    assert_eq!(values.len(), 2);
+                }
+                other => panic!("expected InList, got {other:?}"),
+            }
+        } else {
+            panic!("expected Keep, got {expr:?}");
+        }
+    }
+
+    #[test]
+    fn parse_keep_not_in_variable() {
+        let expr = parse_measure_expression(
+            "SUM(fact[amount], KEEP(dim, fact[product_id] NOT IN premium[id]))",
+        )
+        .unwrap();
+        if let Expression::Keep { in_predicates, .. } = &expr {
+            assert_eq!(in_predicates.len(), 1);
+            assert!(in_predicates[0].negated, "NOT IN must set negated");
+            assert_eq!(in_predicates[0].var_name, "premium");
+        } else {
+            panic!("expected Keep with in_predicates, got {expr:?}");
+        }
+    }
+
+    #[test]
+    fn parse_not_without_in_is_error() {
+        let err =
+            parse_measure_expression("SUM(fact[x], KEEP(d, d[color] NOT {\"Blue\"}))").unwrap_err();
+        assert!(
+            err.to_string().contains("expected IN after NOT"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn not_in_list_sql_rendering() {
+        let inlist = Expression::InList {
+            expr: Box::new(expr::qualified_col("dim", "color")),
+            values: vec![
+                Expression::LiteralString("Blue".into()),
+                Expression::LiteralString("Red".into()),
+            ],
+            negated: true,
+        };
+        assert_eq!(
+            inlist.to_sql_string().unwrap(),
+            "\"color\" NOT IN ('Blue', 'Red')"
+        );
+    }
+
+    #[test]
+    fn not_in_renders_in_formula_text() {
+        // (The KEEP display uses the KEEP-outer form, which predates this
+        // feature and does not re-parse for aggregate-wrapped shapes — so
+        // assert the rendered predicate spelling rather than a full
+        // round-trip.)
+        let expr = parse_measure_expression(
+            "SUM(fact[amount], KEEP(dim, fact[product_id] NOT IN premium[id]))",
+        )
+        .unwrap();
+        let text = crate::compute::expression::expression_to_formula(&expr, "");
+        assert!(
+            text.contains("fact[product_id] NOT IN premium[id]"),
+            "got: {text}"
+        );
+        let expr =
+            parse_measure_expression("SUM(fact[amount], KEEP(dim, dim[color] NOT IN {\"Blue\"}))")
+                .unwrap();
+        let text = crate::compute::expression::expression_to_formula(&expr, "");
+        assert!(text.contains("NOT IN {\"Blue\"}"), "got: {text}");
+    }
+
     #[test]
     fn parse_keep_in_list_sql_rendering() {
         let inlist = Expression::InList {
@@ -383,6 +486,7 @@ mod tests {
                 Expression::LiteralString("Blue".into()),
                 Expression::LiteralString("Red".into()),
             ],
+            negated: false,
         };
         assert_eq!(
             inlist.to_sql_string().unwrap(),

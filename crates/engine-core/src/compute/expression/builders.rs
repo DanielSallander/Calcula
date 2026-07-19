@@ -229,6 +229,21 @@ pub fn query_expr(
     Expression::Query {
         aggregates,
         group_by,
+        top: None,
+    }
+}
+
+/// Create a QUERY expression with an optional tie-inclusive `TOP n BY alias`
+/// clause (see [`QueryTop`]).
+pub fn query_expr_with_top(
+    aggregates: Vec<(Expression, String)>,
+    group_by: Vec<(String, String)>,
+    top: Option<QueryTop>,
+) -> Expression {
+    Expression::Query {
+        aggregates,
+        group_by,
+        top,
     }
 }
 
@@ -475,6 +490,8 @@ pub fn closing_balance(expr: Expression) -> Expression {
     Expression::SemiAdditiveBalance {
         expr: Box::new(expr),
         opening: false,
+        shift_days: 0,
+        non_blank: false,
     }
 }
 
@@ -484,6 +501,52 @@ pub fn opening_balance(expr: Expression) -> Expression {
     Expression::SemiAdditiveBalance {
         expr: Box::new(expr),
         opening: true,
+        shift_days: 0,
+        non_blank: false,
+    }
+}
+
+/// Create a `PREVIOUSDAY` expression (the inner measure at the single day
+/// **before the first** date of the current context).
+pub fn previous_day(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: true,
+        shift_days: -1,
+        non_blank: false,
+    }
+}
+
+/// Create a `NEXTDAY` expression (the inner measure at the single day
+/// **after the last** date of the current context).
+pub fn next_day(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: false,
+        shift_days: 1,
+        non_blank: false,
+    }
+}
+
+/// Create a `FIRSTNONBLANK` expression (the inner measure at the first
+/// context date with fact data).
+pub fn first_non_blank(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: true,
+        shift_days: 0,
+        non_blank: true,
+    }
+}
+
+/// Create a `LASTNONBLANK` expression (the inner measure at the last context
+/// date with fact data).
+pub fn last_non_blank(expr: Expression) -> Expression {
+    Expression::SemiAdditiveBalance {
+        expr: Box::new(expr),
+        opening: false,
+        shift_days: 0,
+        non_blank: true,
     }
 }
 

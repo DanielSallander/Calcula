@@ -505,6 +505,15 @@ impl<'a> ProjectionCollector<'a> {
                 // here cannot be attributed statically.
                 self.set_global_fallback("unsubstituted SELECTEDMEASURE() placeholder".to_string());
             }
+            Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString => {
+                // Folded away when the calculation group is applied; one
+                // surviving here cannot be attributed statically.
+                self.set_global_fallback(
+                    "unsubstituted calc-group introspection placeholder".to_string(),
+                );
+            }
             Expression::BinaryOp { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::And(left, right)
@@ -651,6 +660,7 @@ impl<'a> ProjectionCollector<'a> {
             Expression::Query {
                 aggregates,
                 group_by,
+                ..
             } => {
                 for (agg_expr, alias) in aggregates {
                     self.intermediate_columns.insert(alias.to_lowercase());
@@ -725,7 +735,11 @@ impl<'a> ProjectionCollector<'a> {
             // table's result/search columns — are added by
             // `add_calculated_inputs`. Walk the search expressions for host
             // columns as defense in depth.
-            Expression::LookupValue { table, result_column, search } => {
+            Expression::LookupValue {
+                table,
+                result_column,
+                search,
+            } => {
                 self.add(table, result_column);
                 for (col, e) in search {
                     self.add(table, col);
@@ -767,6 +781,7 @@ impl<'a> ProjectionCollector<'a> {
             Expression::InList {
                 expr: inner,
                 values,
+                ..
             } => {
                 self.walk(inner);
                 for v in values {

@@ -325,14 +325,19 @@ pub(super) async fn render_in_filter_conditions(
         } else {
             inf.table.to_lowercase()
         };
-        out.push(if values.is_empty() {
-            "FALSE".to_string()
-        } else {
-            format!(
-                "{target}.{} IN ({})",
+        // NOT IN complements the membership: an empty set matches every row
+        // (NULL set members are already skipped above, so the SQL NOT-IN
+        // NULL trap cannot occur). A BLANK fact value satisfies neither
+        // form — SQL `<>` semantics.
+        out.push(match (values.is_empty(), inf.negated) {
+            (true, false) => "FALSE".to_string(),
+            (true, true) => "TRUE".to_string(),
+            (false, negated) => format!(
+                "{target}.{} {} ({})",
                 quote_ident_double(&inf.column),
+                if negated { "NOT IN" } else { "IN" },
                 values.join(", ")
-            )
+            ),
         });
     }
     Ok(out)

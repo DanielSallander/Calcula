@@ -92,7 +92,10 @@ fn collect_query_global_refs(
         | Expression::Blank
         | Expression::TableRef(_)
         | Expression::MeasureRef(_)
-        | Expression::SelectedMeasure => {}
+        | Expression::SelectedMeasure
+        | Expression::IsSelectedMeasure { .. }
+        | Expression::SelectedMeasureName
+        | Expression::SelectedMeasureFormatString => {}
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
@@ -223,7 +226,7 @@ fn collect_query_global_refs(
         | Expression::Index { inner, .. } => {
             collect_query_global_refs(inner, model, found);
         }
-        Expression::InList { expr, values } => {
+        Expression::InList { expr, values, .. } => {
             collect_query_global_refs(expr, model, found);
             for v in values {
                 collect_query_global_refs(v, model, found);
@@ -264,7 +267,6 @@ fn collect_query_global_refs(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -311,6 +313,7 @@ mod tests {
                     "Amount".into(),
                 )],
                 group_by: vec![("dim_customer".into(), "city".into())],
+                top: None,
             },
         );
 

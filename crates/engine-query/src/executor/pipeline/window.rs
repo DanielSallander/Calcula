@@ -9,6 +9,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 
 use engine_connectors::FilterCondition;
+use engine_core::compute::aggregate::AggregateOp;
 use engine_core::compute::context::ContextResolver;
 use engine_core::compute::expression::{DateGranularity, Expression};
 use engine_core::compute::measure::{expression_measure, Measure};
@@ -643,32 +644,126 @@ impl QueryExecutor {
             return Ok(Vec::new());
         };
 
-        // FAIL CLOSED: a filter-context PERIOD SHIFT (PRIORYEAR/PRIORPERIOD/
-        // PARALLELPERIOD/DATEADD) moves the WHOLE current window back by calendar
-        // periods and installs a contiguous shifted DateKey range. If the current
-        // context has an internal hole (e.g. a slicer selects Jan and Mar but not
-        // Feb), the shifted range still spans the hole and would silently include
-        // a period the context excludes — an over-count. The axis path enforces the
-        // analogous guard (`check_period_shift_axis_contiguous`); restore it here.
-        // ToDate/DATESINPERIOD build their range purely from the as-of date (a hole
-        // simply contributes nothing) and single-day balances are a single day, so
-        // only `PeriodShift` is checked. (Fiscal PeriodShift was already rejected.)
-        if matches!(stripped_expr, Expression::PeriodShift { .. }) {
-            Self::check_filter_context_window_contiguous(
+        // FIRSTNONBLANK / LASTNONBLANK: the boundary is the first/last context
+        // date WITH FACT DATA, not the first/last calendar date — re-probe it
+        // from the fact (joined to the date table under the date context,
+        // restricted to rows where the inner aggregate's operand is non-NULL)
+        // and feed the fact-backed days into the standard boundary lowering.
+        // No qualifying fact row in context → blank result.
+        let (as_of_days, min_days) = if let Expression::SemiAdditiveBalance {
+            expr: inner,
+            non_blank: true,
+            ..
+        } = stripped_expr
+        {
+            let qualified_where =
+                Self::date_context_where_sql_qualified(plan_info, date_filters, eval_ctx, model);
+            match Self::probe_non_blank_boundary(
                 ctx,
                 plan_info,
-                &where_sql,
-                &plan_info.function,
+                model,
+                fact_table,
+                inner,
+                &qualified_where,
             )
-            .await?;
+            .await?
+            {
+                Some(pair) => pair,
+                None => return Ok(Vec::new()),
+            }
+        } else {
+            (as_of_days, min_days)
+        };
+
+        // A filter-context PERIOD SHIFT (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD)
+        // moves the WHOLE current window back by calendar periods and installs a
+        // contiguous shifted DateKey range. When the current context has an
+        // internal hole (e.g. a slicer selects Jan and Mar but not Feb), that
+        // range would span the hole and silently over-count — so a gapped
+        // context routes to the VALUE-BASED lowering instead: every distinct
+        // context date is shifted individually (DAX DATEADD semantics, with the
+        // end-of-month snap) and the lowered filter keeps exactly the shifted
+        // set. A contiguous context keeps the cheaper algebraic range (byte-
+        // identical to the pre-value-based behavior). ToDate/DATESINPERIOD
+        // build their range purely from the as-of date (a hole contributes
+        // nothing) and boundary balances are a single day, so only
+        // `PeriodShift` routes. (Fiscal PeriodShift was already rejected.)
+        let mut value_shifted_days: Option<Vec<i32>> = None;
+        if let Expression::PeriodShift {
+            offset,
+            granularity,
+            ..
+        } = stripped_expr
+        {
+            let contiguous =
+                Self::filter_context_window_is_contiguous(ctx, plan_info, &where_sql).await?;
+            if !contiguous {
+                let keys = Self::probe_distinct_context_dates(
+                    ctx,
+                    plan_info,
+                    &where_sql,
+                    &plan_info.function,
+                )
+                .await?;
+                let mut shifted: Vec<i32> = Vec::with_capacity(keys.len());
+                for days in &keys {
+                    let s = engine_core::compute::time_intelligence::shift_date32_value(
+                        *days,
+                        *offset,
+                        *granularity,
+                    )
+                    .ok_or_else(|| {
+                        QueryError::Engine(EngineError::TimeIntelligence {
+                            function: plan_info.function.clone(),
+                            reason: format!(
+                                "shifting a context date by {offset} {granularity}(s) \
+                                 overflowed the calendar"
+                            ),
+                        })
+                    })?;
+                    shifted.push(s);
+                }
+                shifted.sort_unstable();
+                shifted.dedup();
+                value_shifted_days = Some(shifted);
+            }
         }
 
         // Lower to Keep(Clear(inner, date cols), [DateKey >= start, < end]).
-        // Gregorian: algebraic boundaries. Fiscal: a ToDate's period start is
-        // probed from the role columns; a SemiAdditiveBalance is boundary-day only
-        // (the standard lowering uses as-of/min days, not period math, so it is
+        // Gregorian: algebraic boundaries (or the value-based date set for a
+        // gapped shift context). Fiscal: a ToDate's period start is probed from
+        // the role columns; a SemiAdditiveBalance is boundary-day only (the
+        // standard lowering uses as-of/min days, not period math, so it is
         // calendar-agnostic).
-        let (lowered_expr, description) = if is_gregorian {
+        let (lowered_expr, description) = if let Some(shifted) = &value_shifted_days {
+            let Expression::PeriodShift {
+                expr: inner,
+                offset,
+                granularity,
+            } = stripped_expr
+            else {
+                unreachable!("value_shifted_days is only computed for PeriodShift");
+            };
+            let desc = format!(
+                "{} (filter context, value-based over a non-contiguous context) — {} distinct \
+                 date(s) shifted by {} {}(s) on {}.{}",
+                plan_info.function,
+                shifted.len(),
+                offset,
+                granularity,
+                plan_info.date_table,
+                plan_info.date_key_column
+            );
+            engine_core::compute::time_intelligence::lower_period_shift_value_based(
+                inner,
+                model,
+                &plan_info.date_table,
+                &plan_info.date_key_column,
+                shifted,
+                desc,
+            )
+            .map_err(QueryError::Engine)?
+        } else if is_gregorian {
             lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?
         } else if let Expression::ToDate {
             expr: inner,
@@ -941,6 +1036,14 @@ impl QueryExecutor {
             DateGranularity::Quarter => vec![role_col(DateRole::Year), role_col(DateRole::Quarter)],
             DateGranularity::Month => vec![role_col(DateRole::Year), role_col(DateRole::Month)],
             DateGranularity::Week => vec![role_col(DateRole::Year), role_col(DateRole::Week)],
+            // A day-to-date is the day itself; the parser never produces it
+            // and no fiscal probe is meaningful.
+            DateGranularity::Day => {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: plan_info.function.clone(),
+                    reason: "Day granularity has no to-date form".to_string(),
+                }));
+            }
         }
         .into_iter()
         .collect();
@@ -987,36 +1090,32 @@ impl QueryExecutor {
         }
     }
 
-    /// Fail closed when the date context of a filter-context PERIOD SHIFT is not
-    /// contiguous — i.e. the context filter excludes one or more date-table rows
-    /// that fall *inside the context's own `[min, max]` span*.
+    /// Is the date context of a filter-context PERIOD SHIFT contiguous — i.e.
+    /// does the context filter keep every date-table row inside its own
+    /// `[min, max]` span?
     ///
-    /// A filter-context shift (PRIORYEAR / PRIORPERIOD / PARALLELPERIOD / DATEADD)
-    /// moves the whole current window `[min_ctx, as_of]` back by a whole number of
-    /// calendar periods and installs the shifted half-open `DateKey` *range*. That
-    /// contiguous range faithfully represents "the same window, shifted" only when
-    /// the context is itself the full set of date rows in its span: a hole (e.g. a
-    /// slicer that selects Jan and Mar but not Feb) is still spanned by the shifted
-    /// range, so the shifted aggregate silently includes a period the current
-    /// context excludes — an over-count with no error. This mirrors the axis path's
-    /// `check_period_shift_axis_contiguous` guard.
+    /// A contiguous context takes the cheap algebraic whole-window shift (the
+    /// shifted half-open `DateKey` range faithfully represents "the same
+    /// window, shifted"). A context with an internal hole (e.g. a slicer that
+    /// selects Jan and Mar but not Feb) routes to the VALUE-BASED lowering
+    /// instead — every distinct context date shifted individually — because
+    /// the algebraic range would span the hole and silently over-count.
     ///
     /// The comparison is against the *date table's* rows in the span (not raw
-    /// calendar days), so a coarse calendar — e.g. one row per month — is accepted
-    /// as long as no in-span row is filtered out. The reference therefore matches
-    /// the granularity the calendar is modelled at.
+    /// calendar days), so a coarse calendar — e.g. one row per month — is
+    /// contiguous as long as no in-span row is filtered out. The reference
+    /// therefore matches the granularity the calendar is modelled at.
     ///
-    /// Residual assumption (documented, not checked): the calendar must be uniform
-    /// across the shifted span — e.g. a monthly calendar must carry the same months
-    /// in the current and the prior period. A calendar gapped *differently* across
-    /// periods is malformed for time intelligence (the same assumption the module
-    /// docs already state).
-    async fn check_filter_context_window_contiguous(
+    /// Residual assumption (documented, not checked): the calendar must be
+    /// uniform across the shifted span — e.g. a monthly calendar must carry
+    /// the same months in the current and the prior period. A calendar gapped
+    /// *differently* across periods is malformed for time intelligence (the
+    /// same assumption the module docs already state).
+    async fn filter_context_window_is_contiguous(
         ctx: &SessionContext,
         plan_info: &FilterContextPlan,
         where_sql: &str,
-        function_label: &str,
-    ) -> QueryResult<()> {
+    ) -> QueryResult<bool> {
         let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
         let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
         let ctx_where = if where_sql.is_empty() {
@@ -1025,9 +1124,9 @@ impl QueryExecutor {
             format!(" WHERE {where_sql}")
         };
 
-        let gap_error = |reason: String| -> QueryError {
+        let probe_error = |reason: String| -> QueryError {
             EngineError::TimeIntelligence {
-                function: function_label.to_string(),
+                function: plan_info.function.clone(),
                 reason,
             }
             .into()
@@ -1045,7 +1144,7 @@ impl QueryExecutor {
         let ctx_days = read_count(
             &ctx.sql(&ctx_sql)
                 .await
-                .map_err(|e| gap_error(format!("could not count the date context rows: {e}")))?
+                .map_err(|e| probe_error(format!("could not count the date context rows: {e}")))?
                 .collect()
                 .await?,
         );
@@ -1061,23 +1160,228 @@ impl QueryExecutor {
         let span_days = read_count(
             &ctx.sql(&span_sql)
                 .await
-                .map_err(|e| gap_error(format!("could not count the date span rows: {e}")))?
+                .map_err(|e| probe_error(format!("could not count the date span rows: {e}")))?
                 .collect()
                 .await?,
         );
 
-        if span_days > ctx_days {
-            return Err(gap_error(format!(
-                "the date context is not contiguous: the filter keeps {ctx_days} date row(s) but \
-                 its date range spans {span_days} row(s), so {} period(s) inside its own range are \
-                 excluded. A filter-context period shift moves the whole window by calendar periods \
-                 and would include the excluded period(s) in the shifted range (a wrong number). \
-                 Remove the internal date gap from the filter, or put a date column on the \
-                 group-by axis (the axis path shifts each period positionally)",
-                span_days - ctx_days
-            )));
+        Ok(span_days <= ctx_days)
+    }
+
+    /// Distinct `DateKey` values in the current date context, ascending, as
+    /// `Date32` day counts — the input to the value-based period shift.
+    /// Capped so the generated `IN` set stays bounded.
+    async fn probe_distinct_context_dates(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+        function_label: &str,
+    ) -> QueryResult<Vec<i32>> {
+        const MAX_CONTEXT_DATES: usize = 20_000;
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+        let sql = format!("SELECT DISTINCT {dk} AS __d FROM {table}{ctx_where} ORDER BY __d");
+        let batches = ctx.sql(&sql).await?.collect().await?;
+
+        let mut out: Vec<i32> = Vec::new();
+        for batch in &batches {
+            let idx = batch.schema().index_of("__d").map_err(|e| {
+                QueryError::InvalidQuery(format!("date-set probe is missing its column: {e}"))
+            })?;
+            let array = batch.column(idx);
+            match array.data_type() {
+                ArrowDataType::Date32 => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Date32Array>()
+                        .ok_or_else(|| {
+                            QueryError::InvalidQuery("date-set probe: bad Date32 array".into())
+                        })?;
+                    out.extend(arr.iter().flatten());
+                }
+                ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .ok_or_else(|| {
+                            QueryError::InvalidQuery("date-set probe: bad Timestamp array".into())
+                        })?;
+                    for micros in arr.iter().flatten() {
+                        let days = micros.div_euclid(MICROS_PER_DAY);
+                        out.push(i32::try_from(days).map_err(|_| {
+                            QueryError::InvalidQuery(
+                                "date-set probe: timestamp out of Date32 range".into(),
+                            )
+                        })?);
+                    }
+                }
+                other => {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "date-set probe: unsupported date key type {other:?}"
+                    )));
+                }
+            }
+            if out.len() > MAX_CONTEXT_DATES {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: function_label.to_string(),
+                    reason: format!(
+                        "the non-contiguous date context has more than {MAX_CONTEXT_DATES} \
+                         distinct dates; narrow the date filter, or put a date column on the \
+                         group-by axis"
+                    ),
+                }));
+            }
         }
-        Ok(())
+        Ok(out)
+    }
+
+    /// Like [`Self::date_context_where_sql`] but with every column reference
+    /// qualified by the (lowercased) date table name — for probes that JOIN
+    /// the date table to the fact, where an unqualified date column could be
+    /// ambiguous against a fact column of the same name.
+    fn date_context_where_sql_qualified(
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> String {
+        let date_lower = plan_info.date_table.to_lowercase();
+        let mut parts: Vec<String> = Vec::new();
+        for f in date_filters {
+            let val = engine_core::compute::context::format_filter_value(
+                &plan_info.date_table,
+                &f.column,
+                &f.value,
+                model,
+            );
+            parts.push(format!(
+                "{date_lower}.{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+        for f in eval_ctx
+            .filters
+            .iter()
+            .filter(|f| f.table.eq_ignore_ascii_case(&plan_info.date_table))
+        {
+            let val = engine_core::compute::context::format_filter_value(
+                &f.table, &f.column, &f.value, model,
+            );
+            parts.push(format!(
+                "{date_lower}.{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+        parts.join(" AND ")
+    }
+
+    /// The first/last context date **with fact data** — `MIN`/`MAX` of the
+    /// date key over fact rows joined to the date table under the date
+    /// context, restricted to rows where the inner aggregate's operand is
+    /// non-NULL. Powers `FIRSTNONBLANK` / `LASTNONBLANK`.
+    ///
+    /// The boundary is probed **once per query** over the whole context — not
+    /// per group-by cell (documented divergence from DAX, which evaluates the
+    /// non-blank boundary per cell). Returns `(max_days, min_days)` like the
+    /// calendar probe, or `None` when no qualifying fact row exists.
+    async fn probe_non_blank_boundary(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+        fact_table: &str,
+        inner: &Expression,
+        qualified_where_sql: &str,
+    ) -> QueryResult<Option<(i32, i32)>> {
+        let function = &plan_info.function;
+        // The inner must be a single simple aggregate so "non-blank" has a
+        // concrete operand column to test. COUNTROWS counts any row (no
+        // operand filter).
+        let operand_column: Option<(String, String)> = match inner {
+            Expression::Aggregate { operation, operand } => {
+                if *operation == AggregateOp::CountRows {
+                    None
+                } else {
+                    match operand.as_ref() {
+                        Expression::QualifiedColumnRef {
+                            table_or_var,
+                            column,
+                        } => Some((table_or_var.clone(), column.clone())),
+                        Expression::ColumnRef(column) => {
+                            Some((fact_table.to_string(), column.clone()))
+                        }
+                        _ => {
+                            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                                function: function.clone(),
+                                reason: "FIRSTNONBLANK/LASTNONBLANK need a simple aggregate \
+                                         over a single column (e.g. SUM(fact[amount])) so the \
+                                         non-blank boundary has a concrete column to probe"
+                                    .to_string(),
+                            }));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: function.clone(),
+                    reason: "FIRSTNONBLANK/LASTNONBLANK need a simple aggregate inner \
+                             expression (e.g. SUM(fact[amount]) or COUNTROWS(fact))"
+                        .to_string(),
+                }));
+            }
+        };
+
+        let fact_lower = fact_table.to_lowercase();
+        let date_lower = plan_info.date_table.to_lowercase();
+        let rel = model
+            .find_relationship(fact_table, &plan_info.date_table)
+            .map_err(QueryError::Engine)?;
+        let left_is_from = rel.from_table() == fact_table;
+        let on_clause = rel.build_on_clause(&fact_lower, &date_lower, left_is_from);
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+
+        let mut where_parts: Vec<String> = Vec::new();
+        if !qualified_where_sql.is_empty() {
+            where_parts.push(qualified_where_sql.to_string());
+        }
+        if let Some((tbl, col)) = operand_column {
+            let t = if tbl.eq_ignore_ascii_case(fact_table) {
+                fact_lower.clone()
+            } else {
+                tbl.to_lowercase()
+            };
+            where_parts.push(format!(
+                "{t}.{} IS NOT NULL",
+                quote_ident_double(&col.to_lowercase())
+            ));
+        }
+        let mut sql = format!(
+            "SELECT MAX({date_lower}.{dk}) AS __max, MIN({date_lower}.{dk}) AS __min \
+             FROM {fact_lower} JOIN {date_lower} ON {on_clause}"
+        );
+        if !where_parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_parts.join(" AND "));
+        }
+
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        let combined = match batches.first() {
+            Some(b) if b.num_rows() > 0 => b,
+            _ => return Ok(None),
+        };
+        let max_days = match read_date_as_days(combined, "__max")? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let min_days = read_date_as_days(combined, "__min")?.unwrap_or(max_days);
+        Ok(Some((max_days, min_days)))
     }
 
     /// Build the WHERE clause (without the `WHERE` keyword) selecting the

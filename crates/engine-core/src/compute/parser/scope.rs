@@ -156,9 +156,9 @@ impl Parser {
             }
         }
         if search.is_empty() {
-            return Err(self.parse_err(
-                "LOOKUPVALUE requires at least one search column / value pair",
-            ));
+            return Err(
+                self.parse_err("LOOKUPVALUE requires at least one search column / value pair")
+            );
         }
         Ok(Expression::LookupValue {
             table,
@@ -173,7 +173,9 @@ impl Parser {
         let table = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(self.parse_err_prev(format!("{func}: expected table name, got {tok:?}")));
+                return Err(
+                    self.parse_err_prev(format!("{func}: expected table name, got {tok:?}"))
+                );
             }
         };
         self.expect(&Token::LBracket)?;

@@ -122,7 +122,7 @@ pub fn days_from_civil(mut year: i64, month: u32, day: u32) -> i64 {
         year -= 1;
     }
     let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = (year - era * 400) as i64; // [0, 399]
+    let yoe = year - era * 400; // [0, 399]
     let mp = ((month + 9) % 12) as i64;
     let doy = (153 * mp + 2) / 5 + day as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
@@ -219,6 +219,7 @@ impl GlobalVariable {
             expression: Expression::Query {
                 aggregates: Vec::new(),
                 group_by: Vec::new(),
+                top: None,
             },
             dynamic: false,
             calendar: Some(spec),
@@ -292,6 +293,7 @@ pub fn infer_calculated_table_columns(
     let Expression::Query {
         aggregates,
         group_by,
+        ..
     } = gv.expression()
     else {
         return Err(EngineError::InvalidGlobalVariable {
@@ -358,6 +360,7 @@ pub fn calculated_table_dependencies(gv: &GlobalVariable) -> std::collections::H
     let Expression::Query {
         aggregates,
         group_by,
+        ..
     } = gv.expression()
     else {
         return deps;
@@ -478,6 +481,7 @@ mod tests {
                 "Amount".into(),
             )],
             group_by: vec![("dim_customer".into(), "city".into())],
+            top: None,
         };
         let gv = GlobalVariable::new("city_sales", "fact_sales", expr);
 
@@ -510,6 +514,7 @@ mod tests {
                 "Amt".into(),
             )],
             group_by: vec![("dim".into(), "city".into())],
+            top: None,
         };
         let gv = GlobalVariable::new("rev", "sales", expr);
 

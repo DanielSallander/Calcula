@@ -230,6 +230,15 @@ impl Parser {
             // or first (opening) date of the current context.
             "CLOSINGBALANCE" => self.parse_balance_call(false),
             "OPENINGBALANCE" => self.parse_balance_call(true),
+            // Boundary-adjacent single days: the day before the context's
+            // first date / after its last date (DAX PREVIOUSDAY/NEXTDAY).
+            "PREVIOUSDAY" => self.parse_adjacent_day_call(false),
+            "NEXTDAY" => self.parse_adjacent_day_call(true),
+            // Non-blank balances: the measure pinned to the first/last
+            // context date WITH fact data (DAX FIRSTNONBLANKVALUE/
+            // LASTNONBLANKVALUE over the date key).
+            "FIRSTNONBLANK" => self.parse_non_blank_balance_call(true),
+            "LASTNONBLANK" => self.parse_non_blank_balance_call(false),
             // Ranking window functions
             "ROW_NUMBER" | "ROWNUMBER" => {
                 self.parse_rank_window_call(expr::RankFunction::RowNumber)
@@ -242,6 +251,17 @@ impl Parser {
             "HASONEVALUE" => self.parse_hasonevalue_call(),
             "SELECTEDVALUE" => self.parse_selectedvalue_call(),
             "SELECTEDMEASURE" => self.parse_selectedmeasure_call(),
+            // Calc-group introspection: fold away when the group is applied
+            // (see Expression::substitute_selected_measure).
+            "ISSELECTEDMEASURE" => self.parse_isselectedmeasure_call(),
+            "SELECTEDMEASURENAME" => self
+                .parse_zero_arg_calc_group_call("SELECTEDMEASURENAME", || {
+                    Expression::SelectedMeasureName
+                }),
+            "SELECTEDMEASUREFORMATSTRING" => self
+                .parse_zero_arg_calc_group_call("SELECTEDMEASUREFORMATSTRING", || {
+                    Expression::SelectedMeasureFormatString
+                }),
             "FIRST" => self.parse_first_call(),
             // Scalar math functions
             "ABS" => self.parse_scalar_call(ScalarFunction::Abs, 1),

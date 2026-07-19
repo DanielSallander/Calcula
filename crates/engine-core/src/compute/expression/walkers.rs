@@ -24,6 +24,9 @@ impl Expression {
             Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -79,6 +82,7 @@ impl Expression {
                     if let Expression::Query {
                         aggregates,
                         group_by,
+                        ..
                     } = binding_expr
                     {
                         for (_, alias) in aggregates {
@@ -210,7 +214,7 @@ impl Expression {
                 // contributes column refs.
                 expr.collect_column_refs(refs);
             }
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.collect_column_refs(refs);
                 for v in values {
                     v.collect_column_refs(refs);
@@ -267,6 +271,9 @@ impl Expression {
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -406,6 +413,7 @@ impl Expression {
             Expression::Query {
                 aggregates,
                 group_by,
+                ..
             } => {
                 for (expr, _) in aggregates {
                     expr.collect_context_filter_tables(tables);
@@ -460,7 +468,7 @@ impl Expression {
                 // lowering time; no structural table references live here.
                 expr.collect_context_filter_tables(tables);
             }
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.collect_context_filter_tables(tables);
                 for v in values {
                     v.collect_context_filter_tables(tables);
@@ -529,6 +537,13 @@ impl Expression {
     fn collect_measure_refs<'a>(&'a self, names: &mut Vec<&'a str>) {
         match self {
             Expression::MeasureRef(name) => names.push(name),
+            // ISSELECTEDMEASURE compares against concrete measures — report
+            // them as dependencies so renames/deletes surface stale calc items.
+            Expression::IsSelectedMeasure { measures } => {
+                for m in measures {
+                    names.push(m);
+                }
+            }
             Expression::LookupValue { search, .. } => {
                 for (_, e) in search {
                     e.collect_measure_refs(names);
@@ -538,6 +553,8 @@ impl Expression {
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
             | Expression::SelectedMeasure
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -676,7 +693,7 @@ impl Expression {
             | Expression::DatesInPeriod { expr, .. }
             | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_measure_refs(names),
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.collect_measure_refs(names);
                 for v in values {
                     v.collect_measure_refs(names);
@@ -788,6 +805,9 @@ impl Expression {
             | Expression::MeasureRef(_)
             | Expression::TableRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -931,7 +951,7 @@ impl Expression {
             | Expression::SemiAdditiveBalance { expr, .. } => {
                 expr.collect_qualified_column_refs(refs)
             }
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.collect_qualified_column_refs(refs);
                 for v in values {
                     v.collect_qualified_column_refs(refs);
@@ -985,6 +1005,9 @@ impl Expression {
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -1122,7 +1145,7 @@ impl Expression {
             | Expression::DatesInPeriod { expr, .. }
             | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.collect_call_names(names),
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.collect_call_names(names);
                 for v in values {
                     v.collect_call_names(names);
@@ -1170,6 +1193,9 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::TableRef(_)
         | Expression::MeasureRef(_)
         | Expression::SelectedMeasure
+        | Expression::IsSelectedMeasure { .. }
+        | Expression::SelectedMeasureName
+        | Expression::SelectedMeasureFormatString
         | Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
         | Expression::LiteralDate(_)
@@ -1177,8 +1203,8 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::LiteralBool(_)
         | Expression::Blank
         | Expression::IsInScope { .. }
-            | Expression::IsFiltered { .. }
-            | Expression::ThisRow { .. }
+        | Expression::IsFiltered { .. }
+        | Expression::ThisRow { .. }
         | Expression::RankWindow { .. } => {}
         Expression::Query { aggregates, .. } => {
             out.extend(aggregates.iter().map(|(e, _)| e));
@@ -1299,7 +1325,7 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::TextFunc { args, .. }
         | Expression::DateTimeFunc { args, .. }
         | Expression::Call { args, .. } => out.extend(args.iter()),
-        Expression::InList { expr, values } => {
+        Expression::InList { expr, values, .. } => {
             out.push(expr);
             out.extend(values.iter());
         }

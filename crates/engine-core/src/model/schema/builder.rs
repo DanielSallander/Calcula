@@ -8,13 +8,13 @@ use crate::model::calculated_column::CalculatedColumn;
 use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::context_column::ContextColumn;
+use crate::model::culture::Culture;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::{Kpi, KpiTarget};
+use crate::model::perspective::Perspective;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
-use crate::model::culture::Culture;
-use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
@@ -333,8 +333,10 @@ impl DataModelBuilder {
         // FIRST so the derived tables participate in every check below —
         // identifier validation, duplicate detection, relationships,
         // hierarchies, RLS — exactly like hand-authored tables.
-        self.tables =
-            super::reconcile_calculated_tables(std::mem::take(&mut self.tables), &self.global_variables)?;
+        self.tables = super::reconcile_calculated_tables(
+            std::mem::take(&mut self.tables),
+            &self.global_variables,
+        )?;
 
         // 0-wb. Synthesize the writeback store tables + generated lookup
         // columns of writeback columns (same idempotent-reconcile contract as
@@ -532,8 +534,8 @@ impl DataModelBuilder {
             // (evaluated once per query under the outer filter context) —
             // fail at build, not at first render.
             if let Some(fmt_src) = measure.format_string_expression() {
-                let fmt_expr = crate::compute::parser::parse_measure_expression(fmt_src)
-                    .map_err(|e| {
+                let fmt_expr =
+                    crate::compute::parser::parse_measure_expression(fmt_src).map_err(|e| {
                         EngineError::InvalidExpression(format!(
                             "measure '{}': dynamic format string does not parse: {e}",
                             measure.name()
@@ -559,7 +561,10 @@ impl DataModelBuilder {
                 for r in refs {
                     let parsed = r.trim().find('[').and_then(|open| {
                         r.trim().strip_suffix(']').map(|body| {
-                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                            (
+                                body[..open].trim().to_string(),
+                                body[open + 1..].trim().to_string(),
+                            )
                         })
                     });
                     let Some((t_name, c_name)) = parsed else {
@@ -631,6 +636,7 @@ impl DataModelBuilder {
                 Expression::Query {
                     aggregates,
                     group_by,
+                    ..
                 } if aggregates.is_empty() => {
                     if gv.is_dynamic() {
                         return Err(EngineError::InvalidGlobalVariable {
@@ -1867,7 +1873,10 @@ impl DataModelBuilder {
                 for r in role.denied_columns() {
                     let parsed = r.trim().find('[').and_then(|open| {
                         r.trim().strip_suffix(']').map(|body| {
-                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                            (
+                                body[..open].trim().to_string(),
+                                body[open + 1..].trim().to_string(),
+                            )
                         })
                     });
                     let Some((t_name, c_name)) = parsed else {
@@ -1926,7 +1935,10 @@ impl DataModelBuilder {
                 for r in p.columns() {
                     let parsed = r.trim().find('[').and_then(|open| {
                         r.trim().strip_suffix(']').map(|body| {
-                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                            (
+                                body[..open].trim().to_string(),
+                                body[open + 1..].trim().to_string(),
+                            )
                         })
                     });
                     let Some((t_name, c_name)) = parsed else {
@@ -1994,7 +2006,10 @@ impl DataModelBuilder {
                     let r = tr.object.trim();
                     let parsed = r.find('[').and_then(|open| {
                         r.strip_suffix(']').map(|body| {
-                            (body[..open].trim().to_string(), body[open + 1..].trim().to_string())
+                            (
+                                body[..open].trim().to_string(),
+                                body[open + 1..].trim().to_string(),
+                            )
                         })
                     });
                     let Some((t_name, c_name)) = parsed else {
@@ -2160,12 +2175,37 @@ impl DataModelBuilder {
                             )));
                         }
                     }
+                    // A dynamic format string expression validates like the
+                    // item expression itself (placeholders permitted; no
+                    // GVAR/QUERY/LOOKUPVALUE) and its measure references —
+                    // including ISSELECTEDMEASURE arguments — must resolve.
+                    if let Some(fmt_src) = item.format_string_expression() {
+                        let entity = format!(
+                            "calculation item '{}' in group '{}'",
+                            item.name(),
+                            group.name()
+                        );
+                        let fmt_expr = validate_calc_format_expression(&entity, fmt_src)?;
+                        for measure_name in
+                            crate::model::calculation_group::measure_ref_names(&fmt_expr)
+                        {
+                            if self.measures.iter().all(|m| m.name() != measure_name) {
+                                return Err(EngineError::InvalidData(format!(
+                                    "{entity}: format string expression references \
+                                     unknown measure '{measure_name}'"
+                                )));
+                            }
+                        }
+                    }
                 }
                 // The selection-state expressions (multiple-or-empty /
                 // no-selection) are templates exactly like items — validate
                 // them the same way (minus the duplicate-name check).
                 for (label, tmpl) in [
-                    ("multiple-or-empty selection", group.multiple_or_empty_selection()),
+                    (
+                        "multiple-or-empty selection",
+                        group.multiple_or_empty_selection(),
+                    ),
                     ("no-selection", group.no_selection()),
                 ] {
                     let Some(tmpl) = tmpl else { continue };
@@ -2202,6 +2242,20 @@ impl DataModelBuilder {
                                  column '{table_name}[{column_name}]'",
                                 group.name()
                             )));
+                        }
+                    }
+                    if let Some(fmt_src) = tmpl.format_string_expression() {
+                        let entity = format!("the {label} expression of group '{}'", group.name());
+                        let fmt_expr = validate_calc_format_expression(&entity, fmt_src)?;
+                        for measure_name in
+                            crate::model::calculation_group::measure_ref_names(&fmt_expr)
+                        {
+                            if self.measures.iter().all(|m| m.name() != measure_name) {
+                                return Err(EngineError::InvalidData(format!(
+                                    "{entity}: format string expression references \
+                                     unknown measure '{measure_name}'"
+                                )));
+                            }
                         }
                     }
                 }
@@ -2312,4 +2366,31 @@ impl DataModelBuilder {
 
         Ok(model)
     }
+}
+
+/// Validate a calculation template's dynamic format string expression (item
+/// or selection template): it must parse, contain no GVAR/QUERY/LOOKUPVALUE
+/// (it is evaluated as a single scalar per query, mirroring the measure-level
+/// dynamic format string), and pass calc-item expression validation — the
+/// calc-group placeholder family (`SELECTEDMEASURE()`,
+/// `SELECTEDMEASUREFORMATSTRING()`, `SELECTEDMEASURENAME()`,
+/// `ISSELECTEDMEASURE(...)`) is permitted. Returns the parsed expression so
+/// the caller can run measure-reference checks against it.
+fn validate_calc_format_expression(entity: &str, fmt_src: &str) -> EngineResult<Expression> {
+    let fmt_expr = crate::compute::parser::parse_measure_expression(fmt_src).map_err(|e| {
+        EngineError::InvalidExpression(format!(
+            "{entity}: format string expression does not parse: {e}"
+        ))
+    })?;
+    if fmt_expr.has_query_scoped_bindings()
+        || fmt_expr.has_lookup_value()
+        || matches!(fmt_expr, Expression::Query { .. })
+    {
+        return Err(EngineError::InvalidExpression(format!(
+            "{entity}: format string expression must be a plain scalar expression \
+             (no GVAR, QUERY, or LOOKUPVALUE)"
+        )));
+    }
+    fmt_expr.validate_calc_item()?;
+    Ok(fmt_expr)
 }

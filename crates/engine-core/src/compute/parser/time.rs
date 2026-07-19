@@ -89,23 +89,57 @@ impl Parser {
                 "QUARTER" => DateGranularity::Quarter,
                 "MONTH" => DateGranularity::Month,
                 "WEEK" => DateGranularity::Week,
+                "DAY" => DateGranularity::Day,
                 _ => {
                     return Err(self.parse_err_prev(format!(
                         "PRIORPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, MONTH, \
-                         or WEEK"
+                         WEEK, or DAY"
                     )));
                 }
             },
             tok => {
                 return Err(self.parse_err_prev(format!(
-                    "PRIORPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, or WEEK), \
-                     got {tok:?}"
+                    "PRIORPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, WEEK, or \
+                     DAY), got {tok:?}"
                 )));
             }
         };
 
         self.expect(&Token::RParen)?;
         Ok(expr::period_shift(inner, offset, granularity))
+    }
+
+    /// Parse `PREVIOUSDAY(expr)` / `NEXTDAY(expr)` — the inner measure pinned
+    /// to the single day ADJACENT to the current date context: the day before
+    /// its first date (PREVIOUSDAY) or the day after its last date (NEXTDAY).
+    /// DAX-faithful boundary semantics (not a whole-window shift), riding the
+    /// semi-additive balance machinery with a ±1-day boundary offset.
+    pub(super) fn parse_adjacent_day_call(&mut self, next: bool) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(if next {
+            expr::next_day(inner)
+        } else {
+            expr::previous_day(inner)
+        })
+    }
+
+    /// Parse `FIRSTNONBLANK(expr)` / `LASTNONBLANK(expr)` — the inner measure
+    /// evaluated at the first/last date of the current context **with fact
+    /// data** (the DAX `FIRSTNONBLANKVALUE`/`LASTNONBLANKVALUE` pattern over
+    /// the date key). The inner must be a simple aggregate; the executor
+    /// probes the boundary from the fact.
+    pub(super) fn parse_non_blank_balance_call(
+        &mut self,
+        opening: bool,
+    ) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(if opening {
+            expr::first_non_blank(inner)
+        } else {
+            expr::last_non_blank(inner)
+        })
     }
 
     /// Parse `DATESINPERIOD(expr, intervals, YEAR|QUARTER|MONTH)`.
@@ -148,17 +182,18 @@ impl Parser {
                 "QUARTER" => DateGranularity::Quarter,
                 "MONTH" => DateGranularity::Month,
                 "WEEK" => DateGranularity::Week,
+                "DAY" => DateGranularity::Day,
                 _ => {
                     return Err(self.parse_err_prev(format!(
                         "DATESINPERIOD: invalid interval '{s}' — expected YEAR, QUARTER, MONTH, \
-                         or WEEK"
+                         WEEK, or DAY"
                     )));
                 }
             },
             tok => {
                 return Err(self.parse_err_prev(format!(
-                    "DATESINPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, or WEEK), \
-                     got {tok:?}"
+                    "DATESINPERIOD: expected interval keyword (YEAR, QUARTER, MONTH, WEEK, or \
+                     DAY), got {tok:?}"
                 )));
             }
         };
@@ -528,10 +563,7 @@ mod tests {
         let EngineError::ParseError { message, .. } = err else {
             panic!("expected ParseError, got {err:?}");
         };
-        assert!(
-            message.contains("quoted ISO start date"),
-            "got: {message}"
-        );
+        assert!(message.contains("quoted ISO start date"), "got: {message}");
     }
 
     #[test]
@@ -544,5 +576,79 @@ mod tests {
         // YTD survives the parse → validate path used by model loading.
         let expr = parse_measure_expression("YTD(SUM(fact_sales[amount]))").unwrap();
         assert!(expr.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_previousday_nextday() {
+        let expr = parse_measure_expression("PREVIOUSDAY(SUM(f[x]))").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::SemiAdditiveBalance {
+                opening: true,
+                shift_days: -1,
+                non_blank: false,
+                ..
+            }
+        ));
+        let expr = parse_measure_expression("NEXTDAY(SUM(f[x]))").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::SemiAdditiveBalance {
+                opening: false,
+                shift_days: 1,
+                non_blank: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_first_last_non_blank() {
+        let expr = parse_measure_expression("FIRSTNONBLANK(SUM(f[x]))").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::SemiAdditiveBalance {
+                opening: true,
+                shift_days: 0,
+                non_blank: true,
+                ..
+            }
+        ));
+        let expr = parse_measure_expression("lastnonblank(SUM(f[x]))").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::SemiAdditiveBalance {
+                opening: false,
+                shift_days: 0,
+                non_blank: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_priorperiod_day_interval() {
+        let expr = parse_measure_expression("PRIORPERIOD(SUM(f[x]), -7, DAY)").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::PeriodShift {
+                offset: -7,
+                granularity: DateGranularity::Day,
+                ..
+            }
+        ));
+        let expr = parse_measure_expression("DATESINPERIOD(SUM(f[x]), -30, \"DAY\")").unwrap();
+        assert!(matches!(
+            expr,
+            Expression::DatesInPeriod {
+                intervals: -30,
+                granularity: DateGranularity::Day,
+                ..
+            }
+        ));
+        // Day is a shift/window interval, not a to-date form: no DTD sugar.
+        assert!(parse_measure_expression("DTD(SUM(f[x]))")
+            .map(|e| matches!(e, Expression::Call { .. }))
+            .unwrap_or(true));
     }
 }

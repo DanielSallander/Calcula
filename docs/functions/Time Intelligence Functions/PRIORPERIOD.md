@@ -14,7 +14,7 @@ PRIORPERIOD(<measure>, <n>, YEAR | QUARTER | MONTH)
 |-----------|-------------|
 | `measure` | Any measure expression (the computed value is shifted) |
 | `n` | Integer shift: negative = earlier periods, positive = later |
-| interval | `YEAR`, `QUARTER`, or `MONTH` (bare or quoted, case-insensitive) |
+| interval | `YEAR`, `QUARTER`, `MONTH`, `WEEK`, or `DAY` (bare or quoted, case-insensitive; `WEEK`/`DAY` are filter-context only) |
 
 ## Requirements
 
@@ -45,3 +45,15 @@ anchor date columns. Always executes locally.
   distinct axis values *present in the result*; periods missing from the
   data shift to the nearest present period rather than producing blank.
 - Cannot be combined with totals (ROLLUP) or hierarchy group-by in v1.
+
+## Gap-tolerant (value-based) contexts
+
+From the **filter context**, a contiguous date context shifts as a whole window
+(the algebraic range). A context with an internal hole — e.g. a slicer keeping
+Jan and Mar but not Feb — previously failed closed; it now routes to the
+**value-based** shift: every distinct context date is shifted individually
+(DAX `DATEADD` semantics, including the end-of-month snap: a month-end date
+maps to the target month's end so a full month maps to a full month), and the
+lowered filter keeps exactly the shifted set. More than 20 000 distinct
+context dates fails closed. The axis (positional) path keeps its own
+contiguity guard.

@@ -45,7 +45,14 @@ fn build_synthesizes_stores_and_generated_column() {
     let hist_cols: Vec<&str> = hist.columns().iter().map(|c| c.name()).collect();
     assert_eq!(
         hist_cols,
-        vec!["ID", "value", "submitter_id", "submitter_name", "submitted_at", "state"]
+        vec![
+            "ID",
+            "value",
+            "submitter_id",
+            "submitter_name",
+            "submitted_at",
+            "state"
+        ]
     );
     let cur = model.table("__wb_wbforecast1").unwrap();
     assert!(cur.is_writeback_store() && cur.is_hidden());
@@ -87,7 +94,10 @@ fn expose_history_unhides_with_display_name() {
 
 #[test]
 fn with_writeback_columns_reconciles_add_and_remove() {
-    let model = DataModel::builder().add_table(host_table()).build().unwrap();
+    let model = DataModel::builder()
+        .add_table(host_table())
+        .build()
+        .unwrap();
 
     let with = model.with_writeback_columns(vec![wb()]).unwrap();
     with.validate().unwrap();
@@ -118,12 +128,9 @@ fn validation_gates() {
         .is_err());
 
     // Host must be InMemory (v1).
-    let dq_host = Table::new(
-        "dim_customer",
-        vec![Column::new("ID", DataType::Int64)],
-    )
-    .unwrap()
-    .with_storage_mode(StorageMode::DirectQuery);
+    let dq_host = Table::new("dim_customer", vec![Column::new("ID", DataType::Int64)])
+        .unwrap()
+        .with_storage_mode(StorageMode::DirectQuery);
     assert!(DataModel::builder()
         .add_table(dq_host)
         .add_writeback_column(wb())

@@ -8380,6 +8380,7 @@ async fn var_ref_in_inlist() {
                         expr::col("threshold"), // This VAR ref must be substituted
                         expr::lit_int(300),
                     ],
+                    negated: false,
                 },
                 expr::lit_int(1),
                 expr::lit_int(0),

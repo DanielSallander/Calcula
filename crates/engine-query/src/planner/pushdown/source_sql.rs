@@ -193,10 +193,14 @@ pub(super) fn has_unpushable_ops(expr: &Expression) -> bool {
         // only in the local DataFusion session, so any expression containing
         // a call must be evaluated locally.
         Expression::Call { .. } => true,
-        // SELECTEDMEASURE() is a calculation-item placeholder. It is always
-        // substituted away before planning, but if one ever reached here it
-        // must never be pushed to a source unexpanded — fail closed to local.
-        Expression::SelectedMeasure => true,
+        // SELECTEDMEASURE() and its introspection family are calculation-item
+        // placeholders. They are always substituted away before planning, but
+        // if one ever reached here it must never be pushed to a source
+        // unexpanded — fail closed to local.
+        Expression::SelectedMeasure
+        | Expression::IsSelectedMeasure { .. }
+        | Expression::SelectedMeasureName
+        | Expression::SelectedMeasureFormatString => true,
         _ => false,
     }
 }

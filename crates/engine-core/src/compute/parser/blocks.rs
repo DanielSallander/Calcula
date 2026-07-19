@@ -74,6 +74,7 @@ impl Parser {
 
         // Parse group-by columns: table[column] pairs.
         let group_by = self.parse_query_by_columns()?;
+        let top = self.parse_query_top_clause(&aggregates, &group_by)?;
 
         self.expect(&Token::RParen)?;
 
@@ -84,7 +85,72 @@ impl Parser {
             return Err(self.parse_err("QUERY requires at least one BY column"));
         }
 
-        Ok(expr::query_expr(aggregates, group_by))
+        Ok(expr::query_expr_with_top(aggregates, group_by, top))
+    }
+
+    /// Parse the optional `TOP n BY alias [ASC|DESC]` tail of a QUERY —
+    /// a tie-inclusive top-N over the materialized rows. `by` must name one
+    /// of the QUERY's aggregate aliases or group-by columns.
+    fn parse_query_top_clause(
+        &mut self,
+        aggregates: &[(Expression, String)],
+        group_by: &[(String, String)],
+    ) -> EngineResult<Option<crate::compute::expression::QueryTop>> {
+        if !matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("TOP")) {
+            return Ok(None);
+        }
+        self.advance()?; // consume TOP
+
+        let limit = match self.advance()?.clone() {
+            Token::Number(v) if v >= 1.0 && v.fract() == 0.0 => v as u32,
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "QUERY TOP: expected a positive integer row count, got {tok:?}"
+                )));
+            }
+        };
+        match self.advance()?.clone() {
+            Token::Ident(ref s) if s.eq_ignore_ascii_case("BY") => {}
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "QUERY TOP: expected BY after the row count, got {tok:?}"
+                )));
+            }
+        }
+        let by = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "QUERY TOP: expected an aggregate alias or BY-column name, got {tok:?}"
+                )));
+            }
+        };
+        // The ranked column must be one of this QUERY's outputs.
+        let is_output = aggregates
+            .iter()
+            .any(|(_, alias)| alias.eq_ignore_ascii_case(&by))
+            || group_by.iter().any(|(_, c)| c.eq_ignore_ascii_case(&by));
+        if !is_output {
+            return Err(self.parse_err_prev(format!(
+                "QUERY TOP: '{by}' is not an aggregate alias or BY column of this QUERY"
+            )));
+        }
+        let ascending = match self.peek().cloned() {
+            Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("ASC") => {
+                self.advance()?;
+                true
+            }
+            Some(Token::Ident(ref s)) if s.eq_ignore_ascii_case("DESC") => {
+                self.advance()?;
+                false
+            }
+            _ => false,
+        };
+        Ok(Some(crate::compute::expression::QueryTop {
+            by,
+            limit,
+            ascending,
+        }))
     }
 
     /// Parse a comma-separated `table[column]` list (the QUERY BY clause and
@@ -481,6 +547,7 @@ mod tests {
             if let Expression::Query {
                 aggregates,
                 group_by,
+                ..
             } = &bindings[0].1
             {
                 assert_eq!(aggregates.len(), 1);
@@ -507,6 +574,7 @@ mod tests {
             if let Expression::Query {
                 aggregates,
                 group_by,
+                ..
             } = &bindings[0].1
             {
                 assert_eq!(aggregates.len(), 2);
@@ -596,5 +664,61 @@ mod tests {
         );
         assert!(q.is_query());
         assert!(!expr::col("x").is_query());
+    }
+
+    #[test]
+    fn parse_query_top_clause_variants() {
+        use crate::compute::expression::QueryTop;
+        let src = "VAR t = QUERY(SUM(f[amt]) AS a BY p[cat] TOP 3 BY a) RETURN SUM(t[a])";
+        let expr = parse_measure_expression(src).unwrap();
+        let Expression::Block { bindings, .. } = &expr else {
+            panic!("expected Block, got {expr:?}");
+        };
+        let Expression::Query { top, .. } = &bindings[0].1 else {
+            panic!("expected Query binding");
+        };
+        assert_eq!(
+            top.as_ref(),
+            Some(&QueryTop {
+                by: "a".into(),
+                limit: 3,
+                ascending: false,
+            })
+        );
+
+        // ASC = bottom-N; ranking by a BY column is allowed too.
+        let src = "VAR t = QUERY(SUM(f[amt]) AS a BY p[cat] TOP 2 BY cat ASC) RETURN SUM(t[a])";
+        let expr = parse_measure_expression(src).unwrap();
+        let Expression::Block { bindings, .. } = &expr else {
+            panic!("expected Block");
+        };
+        let Expression::Query { top, .. } = &bindings[0].1 else {
+            panic!("expected Query binding");
+        };
+        let top = top.as_ref().unwrap();
+        assert!(top.ascending);
+        assert_eq!(top.by, "cat");
+    }
+
+    #[test]
+    fn parse_query_top_rejects_bad_shapes() {
+        // Unknown ranked column.
+        let err = parse_measure_expression(
+            "VAR t = QUERY(SUM(f[amt]) AS a BY p[cat] TOP 3 BY nope) RETURN SUM(t[a])",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not an aggregate alias"),
+            "got: {err}"
+        );
+        // Non-positive / non-integer count.
+        assert!(parse_measure_expression(
+            "VAR t = QUERY(SUM(f[amt]) AS a BY p[cat] TOP 0 BY a) RETURN SUM(t[a])"
+        )
+        .is_err());
+        assert!(parse_measure_expression(
+            "VAR t = QUERY(SUM(f[amt]) AS a BY p[cat] TOP 2.5 BY a) RETURN SUM(t[a])"
+        )
+        .is_err());
     }
 }

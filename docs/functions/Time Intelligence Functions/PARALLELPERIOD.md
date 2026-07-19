@@ -54,3 +54,9 @@ executes locally.
   sorted distinct axis values *present in the result*; periods missing from the
   data shift to the nearest present period rather than producing blank.
 - Cannot be combined with totals (ROLLUP) or hierarchy group-by in v1.
+
+## Gap-tolerant (value-based) contexts
+
+See [PRIORPERIOD](PRIORPERIOD.md#gap-tolerant-value-based-contexts) — a
+non-contiguous filter context now computes a value-based per-date shift
+instead of failing closed.

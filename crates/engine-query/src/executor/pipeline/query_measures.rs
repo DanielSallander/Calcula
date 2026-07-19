@@ -114,9 +114,11 @@ impl QueryExecutor {
                 if let Expression::Query {
                     aggregates,
                     group_by: qgb,
+                    top,
                 } = binding_expr
                 {
                     let mut augmented_gb = qgb.clone();
+                    let mut injected_cols: Vec<String> = Vec::new();
                     for dim in group_by {
                         let already = augmented_gb.iter().any(|(t, c)| {
                             t.eq_ignore_ascii_case(&dim.table)
@@ -124,12 +126,21 @@ impl QueryExecutor {
                         });
                         if !already {
                             augmented_gb.push((dim.table.clone(), dim.column.clone()));
+                            injected_cols.push(dim.column.clone());
                         }
                     }
 
-                    // Build a cache key from binding name + filters + group-by.
-                    let cache_key =
+                    // Build a cache key from binding name + filters + group-by
+                    // (+ the TOP spec — the same name/filters/group-by with a
+                    // different TOP must not share a materialization).
+                    let mut cache_key =
                         build_query_cache_key(binding_name, &source_filters, &augmented_gb);
+                    if let Some(spec) = top {
+                        cache_key.push_str(&format!(
+                            "|TOP[{}:{}:{}]",
+                            spec.limit, spec.by, spec.ascending
+                        ));
+                    }
 
                     if let Some((cached_batch, cached_schema)) = query_cache.get(&cache_key) {
                         // Cache hit: reuse the already-materialized batch.
@@ -161,6 +172,18 @@ impl QueryExecutor {
                             None,
                         )
                         .await?;
+                        // TOP n BY alias: tie-inclusive top-N, partitioned by
+                        // the INJECTED outer group-by columns (per-outer-group
+                        // ranking — DAX-style context propagation).
+                        let batch = match top {
+                            Some(spec) => engine_core::compute::query_top::apply_query_top(
+                                &batch,
+                                spec,
+                                &injected_cols,
+                            )
+                            .map_err(crate::error::QueryError::Engine)?,
+                            None => batch,
+                        };
                         let mat_elapsed = mat_start.elapsed();
                         let schema = batch.schema();
                         let mat_rows = batch.num_rows();
@@ -296,11 +319,33 @@ pub(super) async fn materialize_query_in_pipeline(
         let (stripped, eval_ctx) = resolver.resolve(agg_expr)?;
         let effective = eval_ctx.effective_filters(&[]);
 
-        if effective.is_empty() {
+        // The value-based period-shift lowering carries its shifted date SET
+        // as an `InList` condition of date literals on the date key (a plain
+        // AND-of-range-predicates cannot express a gapped set). Render exactly
+        // that shape into the CASE WHEN condition; any OTHER resolved boolean
+        // condition reaching this materialization is unsupported here — fail
+        // closed rather than silently dropping it.
+        let mut set_conditions: Vec<(String, String)> = Vec::new();
+        for cond in &eval_ctx.conditions {
+            set_conditions.push(render_date_set_condition(cond)?);
+        }
+
+        if effective.is_empty() && set_conditions.is_empty() {
             let sql = stripped.to_sql_string()?;
             select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
         } else {
-            let condition = build_condition_sql(&effective, &fact_lower, fact_table, model)?;
+            let mut condition = if effective.is_empty() {
+                String::new()
+            } else {
+                build_condition_sql(&effective, &fact_lower, fact_table, model)?
+            };
+            for (_, part) in &set_conditions {
+                if condition.is_empty() {
+                    condition = part.clone();
+                } else {
+                    condition = format!("{condition} AND {part}");
+                }
+            }
             let sql = stripped.to_case_when_sql(&condition, &fact_lower)?;
             select_parts.push(format!("{sql} AS {}", quote_ident_double(alias)));
 
@@ -312,6 +357,15 @@ pub(super) async fn materialize_query_in_pipeline(
                         .any(|t| t.eq_ignore_ascii_case(&f.table))
                 {
                     context_dim_tables.push(f.table.clone());
+                }
+            }
+            for (table, _) in &set_conditions {
+                if !table.eq_ignore_ascii_case(fact_table)
+                    && !context_dim_tables
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(table))
+                {
+                    context_dim_tables.push(table.clone());
                 }
             }
         }
@@ -503,4 +557,57 @@ fn build_query_cache_key(
     write!(key, "G[{}]", gb_parts.join(",")).unwrap();
 
     key
+}
+
+/// Render one resolved context condition of the **value-based period-shift**
+/// shape — `date_table[date_key] IN (<date literals>)` — as `(table,
+/// "table.\"col\" IN (CAST(d AS DATE), ...)")` for the materialized CASE WHEN
+/// condition.
+///
+/// Any other condition shape is unsupported on this path and fails closed
+/// (the resolver's boolean conditions are otherwise consumed by the standard
+/// aggregation path, never here).
+fn render_date_set_condition(cond: &Expression) -> QueryResult<(String, String)> {
+    if let Expression::InList {
+        expr,
+        values,
+        negated: false,
+    } = cond
+    {
+        if let Expression::QualifiedColumnRef {
+            table_or_var,
+            column,
+        } = expr.as_ref()
+        {
+            let mut days: Vec<i32> = Vec::with_capacity(values.len());
+            let mut all_dates = true;
+            for v in values {
+                match v {
+                    Expression::LiteralDate(d) => days.push(*d),
+                    _ => {
+                        all_dates = false;
+                        break;
+                    }
+                }
+            }
+            if all_dates && !days.is_empty() {
+                let tbl = table_or_var.to_lowercase();
+                let list: Vec<String> = days.iter().map(|d| format!("CAST({d} AS DATE)")).collect();
+                return Ok((
+                    table_or_var.clone(),
+                    format!(
+                        "{tbl}.{} IN ({})",
+                        quote_ident_double(&column.to_lowercase()),
+                        list.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    Err(crate::error::QueryError::InvalidQuery(
+        "internal: a resolved boolean context condition reached the materialized aggregation \
+         path; only the value-based date-set form (date_key IN (date literals)) is supported \
+         here"
+            .to_string(),
+    ))
 }

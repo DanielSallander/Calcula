@@ -350,7 +350,12 @@ fn substitute_selected_measure_replaces_all_occurrences() {
         None,
     );
     let replacement = agg(AggregateOp::Sum, qualified_col("Sales", "amount"));
-    let substituted = item.substitute_selected_measure(&replacement);
+    let info = SelectedMeasureInfo {
+        expression: &replacement,
+        name: "Revenue",
+        format_string: Some("#,0"),
+    };
+    let substituted = item.substitute_selected_measure(&info);
 
     // No SelectedMeasure node survives anywhere in the tree.
     assert!(!format!("{substituted:?}").contains("SelectedMeasure"));
@@ -360,6 +365,117 @@ fn substitute_selected_measure_replaces_all_occurrences() {
     // validate() now passes (no placeholder left), confirming all three
     // occurrences were substituted.
     assert!(substituted.validate().is_ok());
+}
+
+#[test]
+fn substitute_folds_calc_group_introspection_family() {
+    // IF(ISSELECTEDMEASURE([Revenue], [Cost]),
+    //    SELECTEDMEASURENAME(), SELECTEDMEASUREFORMATSTRING())
+    let item = if_expr(
+        Expression::IsSelectedMeasure {
+            measures: vec!["Revenue".into(), "Cost".into()],
+        },
+        Expression::SelectedMeasureName,
+        Expression::SelectedMeasureFormatString,
+    );
+    let replacement = agg(AggregateOp::Sum, qualified_col("Sales", "amount"));
+
+    // Applied to "Revenue" (in the list, format "#,0"):
+    let info = SelectedMeasureInfo {
+        expression: &replacement,
+        name: "Revenue",
+        format_string: Some("#,0"),
+    };
+    let substituted = item.substitute_selected_measure(&info);
+    match &substituted {
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            assert!(matches!(**condition, Expression::LiteralBool(true)));
+            assert!(
+                matches!(&**then_expr, Expression::LiteralString(s) if s == "Revenue"),
+                "SELECTEDMEASURENAME() must fold to the applied measure's name"
+            );
+            assert!(
+                matches!(&**else_expr, Expression::LiteralString(s) if s == "#,0"),
+                "SELECTEDMEASUREFORMATSTRING() must fold to the measure's format"
+            );
+        }
+        other => panic!("expected If, got {other:?}"),
+    }
+
+    // Applied to "Margin" (NOT in the list, no format string):
+    let info = SelectedMeasureInfo {
+        expression: &replacement,
+        name: "Margin",
+        format_string: None,
+    };
+    let substituted = item.substitute_selected_measure(&info);
+    match &substituted {
+        Expression::If {
+            condition,
+            else_expr,
+            ..
+        } => {
+            assert!(matches!(**condition, Expression::LiteralBool(false)));
+            assert!(
+                matches!(**else_expr, Expression::Blank),
+                "SELECTEDMEASUREFORMATSTRING() folds to BLANK without a format"
+            );
+        }
+        other => panic!("expected If, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_selected_measure_matching_is_exact_case_sensitive() {
+    let item = Expression::IsSelectedMeasure {
+        measures: vec!["Revenue".into()],
+    };
+    let replacement = agg(AggregateOp::Sum, qualified_col("Sales", "amount"));
+    let info = SelectedMeasureInfo {
+        expression: &replacement,
+        name: "REVENUE",
+        format_string: None,
+    };
+    // Measure lookup is exact/case-sensitive throughout the engine; the fold
+    // uses the same matching.
+    assert!(matches!(
+        item.substitute_selected_measure(&info),
+        Expression::LiteralBool(false)
+    ));
+}
+
+#[test]
+fn validate_rejects_introspection_family_in_regular_measure() {
+    for expr in [
+        Expression::IsSelectedMeasure {
+            measures: vec!["Revenue".into()],
+        },
+        Expression::SelectedMeasureName,
+        Expression::SelectedMeasureFormatString,
+    ] {
+        let err = agg(AggregateOp::Sum, qualified_col("Sales", "amount"))
+            .add(expr.clone())
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("calculation item"),
+            "expected calc-item-only error, got: {err}"
+        );
+        assert!(expr.validate_calc_item().is_ok());
+    }
+}
+
+#[test]
+fn measure_references_include_isselectedmeasure_arguments() {
+    let expr = Expression::IsSelectedMeasure {
+        measures: vec!["Revenue".into(), "Cost".into()],
+    };
+    assert_eq!(expr.measure_references(), vec!["Cost", "Revenue"]);
 }
 
 #[test]

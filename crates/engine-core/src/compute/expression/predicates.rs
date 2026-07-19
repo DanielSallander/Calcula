@@ -156,7 +156,8 @@ impl RelationshipPath {
     }
 }
 
-/// An IN-membership predicate: `table.column IN var_name.var_column`.
+/// An IN-membership predicate: `table.column IN var_name.var_column`
+/// (or, [negated](Self::negated), `table.column NOT IN var_name.var_column`).
 ///
 /// Tests whether values in `table.column` are members of the set defined
 /// by `var_column` in the table variable `var_name`.
@@ -170,6 +171,11 @@ pub struct InPredicate {
     pub var_name: String,
     /// Column in the variable defining the set values.
     pub var_column: String,
+    /// `true` = anti-membership (`NOT IN`): keep rows whose value is NOT in
+    /// the set. SQL semantics: a BLANK value satisfies neither `IN` nor
+    /// `NOT IN` (consistent with `<>`); an empty set keeps everything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negated: bool,
 }
 
 impl InPredicate {
@@ -185,7 +191,15 @@ impl InPredicate {
             column: column.into(),
             var_name: var_name.into(),
             var_column: var_column.into(),
+            negated: false,
         }
+    }
+
+    /// Mark this predicate as anti-membership (`NOT IN`).
+    #[must_use]
+    pub fn with_negated(mut self, negated: bool) -> Self {
+        self.negated = negated;
+        self
     }
 
     /// Validate this predicate for safe SQL rendering.

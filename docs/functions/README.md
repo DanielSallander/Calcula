@@ -195,6 +195,10 @@ Functions that shift or accumulate a measure over the model's marked date table.
 | [DATESBETWEEN](Time%20Intelligence%20Functions/DATESBETWEEN.md) | Absolute, inclusive date range on the date table |
 | [CLOSINGBALANCE](Time%20Intelligence%20Functions/CLOSINGBALANCE.md) | Semi-additive balance at the last date in the period |
 | [OPENINGBALANCE](Time%20Intelligence%20Functions/OPENINGBALANCE.md) | Semi-additive balance at the first date in the period |
+| [PREVIOUSDAY](Time%20Intelligence%20Functions/PREVIOUSDAY.md) | The single day before the context's first date |
+| [NEXTDAY](Time%20Intelligence%20Functions/NEXTDAY.md) | The single day after the context's last date |
+| [FIRSTNONBLANK](Time%20Intelligence%20Functions/FIRSTNONBLANK.md) | Value at the first context date with fact data |
+| [LASTNONBLANK](Time%20Intelligence%20Functions/LASTNONBLANK.md) | Value at the last context date with fact data |
 
 ## Information Functions
 
@@ -219,6 +223,7 @@ Functions that modify the evaluation context — the set of filters applied when
 | [RESET](Context%20Functions/RESET.md) | Removes all filters from the evaluation context |
 | [CLEAREXCEPT](Context%20Functions/CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
 | [ALLSELECTED](Context%20Functions/ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the inner-clear family) |
+| [NOT IN](Context%20Functions/NOT_IN.md) | Anti-membership: keep rows whose value is NOT in a literal or variable set |
 | [TREATAS](Context%20Functions/TREATAS.md) | Applies one column's values as a virtual filter on another, unrelated table |
 | [USERELATIONSHIP](Context%20Functions/USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
 | [TRAVERSE](Context%20Functions/TRAVERSE.md) | Forces cross-table filters along an explicit multi-hop relationship path |
@@ -283,6 +288,9 @@ Functions that are only meaningful inside **calculation-item** expressions of a 
 | Function | Description |
 |----------|-------------|
 | [SELECTEDMEASURE](Calculation%20Group%20Functions/SELECTEDMEASURE.md) | Placeholder for the measure a calculation item is applied to |
+| [ISSELECTEDMEASURE](Calculation%20Group%20Functions/ISSELECTEDMEASURE.md) | TRUE when the applied measure is one of the listed measures |
+| [SELECTEDMEASURENAME](Calculation%20Group%20Functions/SELECTEDMEASURENAME.md) | Name of the applied measure, as a string |
+| [SELECTEDMEASUREFORMATSTRING](Calculation%20Group%20Functions/SELECTEDMEASUREFORMATSTRING.md) | Format string of the applied measure (dynamic format strings) |
 
 ## Table Variables
 

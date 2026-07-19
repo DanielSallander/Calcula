@@ -48,7 +48,7 @@ impl<'a> MeasureEngine<'a> {
         let binding_name_set: std::collections::HashSet<String> = bindings
             .iter()
             .filter(|(_, e)| e.is_query())
-            .map(|(name, _)| df_table_name(&name))
+            .map(|(name, _)| df_table_name(name))
             .collect();
         let source_filters: Vec<ResolvedFilter> = outer_filters
             .iter()
@@ -65,14 +65,21 @@ impl<'a> MeasureEngine<'a> {
             if let Expression::Query {
                 aggregates,
                 group_by,
+                top,
             } = binding_expr
             {
                 let batch = self
                     .materialize_query(aggregates, group_by, fact_table, &source_filters, &[])
                     .await?;
+                // TOP n BY alias: tie-inclusive top-N over the materialized
+                // rows (scalar path: no outer axis → one global partition).
+                let batch = match top {
+                    Some(spec) => crate::compute::query_top::apply_query_top(&batch, spec, &[])?,
+                    None => batch,
+                };
                 let schema = batch.schema();
-                ctx.register_batch(&df_table_name(&name), batch)?;
-                binding_schemas.insert(df_table_name(&name), schema);
+                ctx.register_batch(&df_table_name(name), batch)?;
+                binding_schemas.insert(df_table_name(name), schema);
                 query_binding_names.push(name.clone());
             }
         }
@@ -141,7 +148,7 @@ impl<'a> MeasureEngine<'a> {
         let binding_name_set: std::collections::HashSet<String> = bindings
             .iter()
             .filter(|(_, e)| e.is_query())
-            .map(|(name, _)| df_table_name(&name))
+            .map(|(name, _)| df_table_name(name))
             .collect();
         let source_filters: Vec<ResolvedFilter> = outer_filters
             .iter()
@@ -161,24 +168,36 @@ impl<'a> MeasureEngine<'a> {
             if let Expression::Query {
                 aggregates,
                 group_by: qgb,
+                top,
             } = binding_expr
             {
                 let mut augmented_gb = qgb.clone();
+                let mut injected_cols: Vec<String> = Vec::new();
                 for tc in group_by {
                     let already = augmented_gb.iter().any(|(t, c)| {
                         t.eq_ignore_ascii_case(&tc.table) && c.eq_ignore_ascii_case(&tc.column)
                     });
                     if !already {
                         augmented_gb.push((tc.table.clone(), tc.column.clone()));
+                        injected_cols.push(tc.column.clone());
                     }
                 }
 
                 let batch = self
                     .materialize_query(aggregates, &augmented_gb, fact_table, &source_filters, &[])
                     .await?;
+                // TOP n BY alias: tie-inclusive top-N, partitioned by the
+                // INJECTED outer group-by columns so the ranking applies
+                // within each outer group (DAX-style context propagation).
+                let batch = match top {
+                    Some(spec) => {
+                        crate::compute::query_top::apply_query_top(&batch, spec, &injected_cols)?
+                    }
+                    None => batch,
+                };
                 let schema = batch.schema();
-                ctx.register_batch(&df_table_name(&name), batch)?;
-                binding_schemas.insert(df_table_name(&name), schema);
+                ctx.register_batch(&df_table_name(name), batch)?;
+                binding_schemas.insert(df_table_name(name), schema);
                 query_binding_names.push(name.clone());
             }
         }
@@ -251,7 +270,7 @@ impl<'a> MeasureEngine<'a> {
         relationship_overrides: &[String],
     ) -> EngineResult<RecordBatch> {
         let ctx = self.session_context();
-        let fact_lower = df_table_name(&fact_table);
+        let fact_lower = df_table_name(fact_table);
 
         // Register fact table.
         let fact_batch = self.get_table_batch(fact_table).await?;
@@ -268,7 +287,7 @@ impl<'a> MeasureEngine<'a> {
         // Register dimension tables.
         for dim in &dim_tables {
             let dim_batch = self.get_table_batch(dim).await?;
-            ctx.register_batch(&df_table_name(&dim), dim_batch)?;
+            ctx.register_batch(&df_table_name(dim), dim_batch)?;
         }
 
         // Build SELECT: group-by columns + aggregate expressions.
@@ -276,7 +295,7 @@ impl<'a> MeasureEngine<'a> {
         let mut group_parts: Vec<String> = Vec::new();
 
         for (table, column) in group_by {
-            let tbl = df_table_name(&table);
+            let tbl = df_table_name(table);
             let qualified = format!("{tbl}.{}", quote_ident_double(column));
             select_parts.push(qualified.clone());
             group_parts.push(qualified);
@@ -315,7 +334,7 @@ impl<'a> MeasureEngine<'a> {
         // Register any extra dimension tables from context filters.
         for dim in &extra_dim_tables {
             let dim_batch = self.get_table_batch(dim).await?;
-            ctx.register_batch(&df_table_name(&dim), dim_batch)?;
+            ctx.register_batch(&df_table_name(dim), dim_batch)?;
         }
 
         let select_clause = select_parts.join(", ");
@@ -327,7 +346,7 @@ impl<'a> MeasureEngine<'a> {
         joined.insert(fact_lower.clone());
 
         for dim in all_dims {
-            let dim_lower = df_table_name(&dim);
+            let dim_lower = df_table_name(dim);
             if joined.contains(&dim_lower) {
                 continue;
             }

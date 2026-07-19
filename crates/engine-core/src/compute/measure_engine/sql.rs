@@ -135,28 +135,39 @@ impl<'a> MeasureEngine<'a> {
                 quote_ident_double(&inf.var_column)
             );
 
-            if !inf.var_filters.is_empty() {
-                let where_parts: Vec<String> = inf
-                    .var_filters
-                    .iter()
-                    .map(|f| {
-                        let op = f.operator.as_sql();
-                        let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
-                        format!("{var_lower}.{} {op} {val}", quote_ident_double(&f.column))
-                    })
-                    .collect();
+            let mut where_parts: Vec<String> = inf
+                .var_filters
+                .iter()
+                .map(|f| {
+                    let op = f.operator.as_sql();
+                    let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                    format!("{var_lower}.{} {op} {val}", quote_ident_double(&f.column))
+                })
+                .collect();
+            // NOT IN with a NULL in the subquery set is never true in SQL —
+            // one NULL set member would silently empty the whole result.
+            // Excluding NULL set members restores anti-join semantics (they
+            // can never match a fact value anyway).
+            if inf.negated {
+                where_parts.push(format!(
+                    "{var_lower}.{} IS NOT NULL",
+                    quote_ident_double(&inf.var_column)
+                ));
+            }
+            if !where_parts.is_empty() {
                 subquery.push_str(" WHERE ");
                 subquery.push_str(&where_parts.join(" AND "));
             }
 
-            // Build the IN condition referencing the fact table
+            // Build the IN / NOT IN condition referencing the fact table
             let fact_prefix = if fact_table == inf.table {
                 "t".to_string()
             } else {
                 df_table_name(&inf.table)
             };
+            let keyword = if inf.negated { "NOT IN" } else { "IN" };
             conditions.push(format!(
-                "{fact_prefix}.{} IN ({subquery})",
+                "{fact_prefix}.{} {keyword} ({subquery})",
                 quote_ident_double(&inf.column)
             ));
         }

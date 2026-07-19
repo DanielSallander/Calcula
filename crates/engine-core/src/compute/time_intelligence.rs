@@ -154,6 +154,9 @@ fn to_date_name(granularity: DateGranularity) -> &'static str {
         DateGranularity::Quarter => "QTD",
         DateGranularity::Month => "MTD",
         DateGranularity::Week => "WTD",
+        // Not produced by the parser (a day-to-date is the day itself);
+        // reachable only from a hand-built AST.
+        DateGranularity::Day => "TODATE(Day)",
     }
 }
 
@@ -163,6 +166,19 @@ fn period_shift_name(offset: i64, granularity: DateGranularity) -> &'static str 
         "PRIORYEAR"
     } else {
         "PRIORPERIOD"
+    }
+}
+
+/// The display name for a `SemiAdditiveBalance` node in errors and plan
+/// output, covering all four spellings the parser produces.
+pub fn balance_function_name(opening: bool, shift_days: i64, non_blank: bool) -> &'static str {
+    match (opening, shift_days, non_blank) {
+        (_, _, true) if opening => "FIRSTNONBLANK",
+        (_, _, true) => "LASTNONBLANK",
+        (true, -1, _) => "PREVIOUSDAY",
+        (false, 1, _) => "NEXTDAY",
+        (true, _, _) => "OPENINGBALANCE",
+        (false, _, _) => "CLOSINGBALANCE",
     }
 }
 
@@ -178,19 +194,24 @@ fn anchor_roles(granularity: DateGranularity) -> &'static [DateRole] {
         DateGranularity::Quarter => &[DateRole::Year, DateRole::Quarter],
         DateGranularity::Month => &[DateRole::Year, DateRole::Month],
         DateGranularity::Week => &[DateRole::Year, DateRole::Week],
+        // Day has no role anchor (the DateKey itself is the period); the
+        // axis path fails closed before anchors are resolved
+        // (`reject_week_on_axis`).
+        DateGranularity::Day => &[],
     }
 }
 
-/// Fail closed for `Week` granularity on the AXIS path (a date column on the
-/// query axis): ISO weeks cross year boundaries, so the Year-anchored window
-/// partitioning the axis path uses would silently mis-bucket the year-spanning
-/// week. Week time intelligence is filter-context only in v1.
+/// Fail closed for `Week`/`Day` granularity on the AXIS path (a date column
+/// on the query axis): ISO weeks cross year boundaries, so the Year-anchored
+/// window partitioning the axis path uses would silently mis-bucket the
+/// year-spanning week; a Day period has no role anchor at all. Week and Day
+/// time intelligence are filter-context only in v1.
 fn reject_week_on_axis(
     function: &str,
     granularity: DateGranularity,
     group_by: &[(String, String)],
 ) -> EngineResult<()> {
-    if granularity != DateGranularity::Week {
+    if !matches!(granularity, DateGranularity::Week | DateGranularity::Day) {
         return Ok(());
     }
     Err(time_intelligence_error(
@@ -446,6 +467,7 @@ fn finer_roles_list(granularity: DateGranularity) -> &'static str {
         DateGranularity::Quarter => "Month, Week, Day, DateKey",
         DateGranularity::Month => "Week, Day, DateKey",
         DateGranularity::Week => "Day, DateKey",
+        DateGranularity::Day => "DateKey",
     }
 }
 
@@ -878,9 +900,7 @@ pub fn lower_time_intelligence_filtered(
         let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d").map_err(|_| {
             time_intelligence_error(
                 function,
-                format!(
-                    "invalid end date \"{end}\" — expected an ISO calendar date (YYYY-MM-DD)"
-                ),
+                format!("invalid end date \"{end}\" — expected an ISO calendar date (YYYY-MM-DD)"),
             )
         })?;
         if start_date > end_date {
@@ -904,27 +924,41 @@ pub fn lower_time_intelligence_filtered(
         );
     }
 
-    // CLOSINGBALANCE / OPENINGBALANCE: pin the inner measure to a single boundary
-    // day of the context — the LAST day (closing) or the FIRST day (opening) — by
-    // installing a single-day `DateKey = boundary` filter (a [boundary, boundary]
-    // range). The boundary day is supplied by the host's MIN/MAX probe of the
-    // context: `as_of_days` is the last day; `min_context_days` is the first.
+    // CLOSINGBALANCE / OPENINGBALANCE (and the boundary-adjacent PREVIOUSDAY /
+    // NEXTDAY and non-blank FIRSTNONBLANK / LASTNONBLANK forms): pin the inner
+    // measure to a single boundary day of the context — the LAST day (closing)
+    // or the FIRST day (opening), plus the optional day offset — by installing
+    // a single-day `DateKey = boundary` filter (a [boundary, boundary] range).
+    // The boundary day is supplied by the host's MIN/MAX probe of the context:
+    // `as_of_days` is the last day; `min_context_days` is the first. For the
+    // non-blank forms the host probes the fact instead (the first/last date
+    // WITH data) and passes those days here — the lowering is identical.
     if let Expression::SemiAdditiveBalance {
         expr: inner,
         opening,
+        shift_days,
+        non_blank,
     } = expr
     {
-        let function = if *opening {
-            "OPENINGBALANCE"
-        } else {
-            "CLOSINGBALANCE"
-        };
+        let function = balance_function_name(*opening, *shift_days, *non_blank);
         let (date_table, date_key_column) = require_date_key(function, model)?;
-        let boundary_days = if *opening {
+        let base_days = if *opening {
             min_context_days
         } else {
             as_of_days
         };
+        let boundary_days = i64::from(base_days)
+            .checked_add(*shift_days)
+            .and_then(|d| i32::try_from(d).ok())
+            .ok_or_else(|| {
+                time_intelligence_error(
+                    function,
+                    format!(
+                        "shifting the boundary date by {shift_days} day(s) overflowed the \
+                         calendar"
+                    ),
+                )
+            })?;
         let boundary = date32_to_naive(boundary_days).ok_or_else(|| {
             time_intelligence_error(
                 function,
@@ -1024,13 +1058,14 @@ pub fn lower_time_intelligence_filtered(
         (start, end, desc)
     } else {
         // ToDate: [start-of-period(as_of), as_of].
-        let start = start_of_period(as_of, granularity, model.fiscal_year_end_month())
-            .ok_or_else(|| {
+        let start = start_of_period(as_of, granularity, model.fiscal_year_end_month()).ok_or_else(
+            || {
                 time_intelligence_error(
                     function,
                     format!("computing the start of the {granularity} for {as_of} overflowed"),
                 )
-            })?;
+            },
+        )?;
         let desc = format!(
             "{function} (filter context) range [{start}..{as_of}] on \
              {date_table}.{date_key_column}"
@@ -1093,6 +1128,101 @@ fn build_filtered_range_keep(
         ),
     ];
     Ok((expr::keep(cleared, filters), description))
+}
+
+/// Build the **value-based** (gap-tolerant) filter-context period-shift
+/// lowering: `Keep(Clear(inner, <date role columns>), [DateKey >= min,
+/// DateKey < max + 1 day] + condition DateKey IN (<shifted set>))`.
+///
+/// Used when the current date context has an internal hole (e.g. a slicer
+/// keeps Jan and Mar but not Feb): the whole-window algebraic shift would
+/// span the hole, so instead every distinct context date is shifted
+/// **individually** (see [`shift_date_value`], with the DAX `DATEADD`
+/// end-of-month snap) and the lowered filter keeps exactly the shifted set.
+/// The bounding range predicates are emitted alongside the set condition so
+/// the ordinary machinery (date-table join, fetch narrowing) sees a plain
+/// range like the contiguous path's; the set condition then excludes the
+/// hole. `shifted_days` must be sorted, deduplicated, non-empty `Date32` day
+/// counts — the caller (the executor) probes and shifts them.
+pub fn lower_period_shift_value_based(
+    inner: &Expression,
+    model: &DataModel,
+    date_table: &str,
+    date_key_column: &str,
+    shifted_days: &[i32],
+    description: String,
+) -> EngineResult<(Expression, String)> {
+    let (Some(first), Some(last)) = (shifted_days.first(), shifted_days.last()) else {
+        return Err(time_intelligence_error(
+            "PRIORPERIOD",
+            "the value-based shift produced an empty date set (internal error — an empty \
+             context yields a blank result before lowering)"
+                .to_string(),
+        ));
+    };
+    let start = date32_to_naive(*first).ok_or_else(|| {
+        time_intelligence_error(
+            "PRIORPERIOD",
+            format!("shifted date set start is out of range ({first} days)"),
+        )
+    })?;
+    let end_inclusive = date32_to_naive(*last).ok_or_else(|| {
+        time_intelligence_error(
+            "PRIORPERIOD",
+            format!("shifted date set end is out of range ({last} days)"),
+        )
+    })?;
+    let end_exclusive = end_inclusive.succ_opt().ok_or_else(|| {
+        time_intelligence_error(
+            "PRIORPERIOD",
+            "the shifted end date is the maximum representable date".to_string(),
+        )
+    })?;
+
+    let clear_targets: Vec<ClearTarget> = date_role_columns(model, date_table)?
+        .into_iter()
+        .map(|column| ClearTarget::Column {
+            table: date_table.to_string(),
+            column,
+        })
+        .collect();
+    let cleared = expr::clear(inner.clone(), clear_targets);
+
+    let filters = vec![
+        FilterPredicate::new(
+            date_table.to_string(),
+            date_key_column.to_string(),
+            ComparisonOp::GreaterThanOrEqual,
+            naive_to_iso(start),
+        ),
+        FilterPredicate::new(
+            date_table.to_string(),
+            date_key_column.to_string(),
+            ComparisonOp::LessThan,
+            naive_to_iso(end_exclusive),
+        ),
+    ];
+    let set_condition = Expression::InList {
+        expr: Box::new(Expression::QualifiedColumnRef {
+            table_or_var: date_table.to_string(),
+            column: date_key_column.to_string(),
+        }),
+        values: shifted_days
+            .iter()
+            .map(|d| Expression::LiteralDate(*d))
+            .collect(),
+        negated: false,
+    };
+    Ok((
+        Expression::Keep {
+            expr: Box::new(cleared),
+            filters,
+            variables: Vec::new(),
+            conditions: vec![set_condition],
+            in_predicates: Vec::new(),
+        },
+        description,
+    ))
 }
 
 /// Build a filter-context `ToDate` (YTD/QTD/MTD) lowering with an **explicit**
@@ -1188,6 +1318,8 @@ fn start_of_period(
                 date.weekday().num_days_from_monday(),
             )))
         }
+        // A day period starts on the day itself.
+        DateGranularity::Day => Some(date),
     }
 }
 
@@ -1217,36 +1349,144 @@ fn shift_months(date: NaiveDate, months: i64) -> Option<NaiveDate> {
 /// earlier): whole 7-day weeks for `Week`, calendar months (`offset` ×
 /// months-per-period, day clamped via [`shift_months`]) otherwise. Used by
 /// `DATESINPERIOD` window sizing and the filter-context `PeriodShift`.
-fn shift_periods(
+fn shift_periods(date: NaiveDate, offset: i64, granularity: DateGranularity) -> Option<NaiveDate> {
+    match granularity {
+        DateGranularity::Week => {
+            date.checked_add_signed(chrono::Duration::days(offset.checked_mul(7)?))
+        }
+        DateGranularity::Day => date.checked_add_signed(chrono::Duration::days(offset)),
+        _ => shift_months(date, offset.checked_mul(months_per_period(granularity))?),
+    }
+}
+
+/// Shift a single date **value** by `offset` periods — the per-date shift used
+/// by the value-based (gap-tolerant) filter-context period shift.
+///
+/// Differs from the window-boundary [`shift_periods`] in one way: month-based
+/// shifts (Year/Quarter/Month) apply the DAX `DATEADD` **end-of-month snap** —
+/// a date that is the last day of its month shifts to the last day of the
+/// target month (Apr 30 + 1 month → May 31, Feb 28 + 12 months → Feb 29 in a
+/// leap year). Without the snap, a full-month context would map to a
+/// truncated target month (Apr 1..30 + 1 month → May 1..30, silently missing
+/// May 31). Week and Day shifts are exact day arithmetic and need no snap.
+pub fn shift_date_value(
     date: NaiveDate,
     offset: i64,
     granularity: DateGranularity,
 ) -> Option<NaiveDate> {
     match granularity {
-        DateGranularity::Week => {
-            date.checked_add_signed(chrono::Duration::days(offset.checked_mul(7)?))
+        DateGranularity::Week | DateGranularity::Day => shift_periods(date, offset, granularity),
+        _ => {
+            let shifted = shift_months(date, offset.checked_mul(months_per_period(granularity))?)?;
+            let is_input_month_end = date
+                .succ_opt()
+                .is_none_or(|next| next.month() != date.month());
+            if is_input_month_end {
+                last_day_of_month(shifted)
+            } else {
+                Some(shifted)
+            }
         }
-        _ => shift_months(date, offset.checked_mul(months_per_period(granularity))?),
     }
 }
 
+/// Shift a `Date32` day count by `offset` periods via [`shift_date_value`],
+/// returning the shifted `Date32` day count. `None` on calendar overflow.
+pub fn shift_date32_value(days: i32, offset: i64, granularity: DateGranularity) -> Option<i32> {
+    let date = date32_to_naive(days)?;
+    let shifted = shift_date_value(date, offset, granularity)?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+    i32::try_from(shifted.signed_duration_since(epoch).num_days()).ok()
+}
+
+/// The last calendar day of `date`'s month.
+fn last_day_of_month(date: NaiveDate) -> Option<NaiveDate> {
+    let first_of_next = if date.month() == 12 {
+        NaiveDate::from_ymd_opt(date.year().checked_add(1)?, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1)
+    }?;
+    first_of_next.pred_opt()
+}
+
 /// Months per `DateGranularity` period (for month-based period shifts; `Week`
-/// has no whole-month size and is handled by [`shift_periods`] directly).
+/// and `Day` have no whole-month size and are handled by [`shift_periods`]
+/// directly).
 fn months_per_period(granularity: DateGranularity) -> i64 {
     match granularity {
         DateGranularity::Year => 12,
         DateGranularity::Quarter => 3,
         DateGranularity::Month => 1,
-        // Unreachable via shift_periods (Week shifts by days); a bare caller
-        // would treat a week as its containing month, so keep it out of the
-        // month math entirely.
-        DateGranularity::Week => unreachable!("Week periods are day-based, not month-based"),
+        // Unreachable via shift_periods (Week/Day shift by days); a bare
+        // caller would treat a week as its containing month, so keep them out
+        // of the month math entirely.
+        DateGranularity::Week | DateGranularity::Day => {
+            unreachable!("Week/Day periods are day-based, not month-based")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_date_value_applies_end_of_month_snap() {
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        // Month-end input snaps to the target month end (DAX DATEADD).
+        assert_eq!(
+            shift_date_value(d(2024, 4, 30), 1, DateGranularity::Month),
+            Some(d(2024, 5, 31))
+        );
+        assert_eq!(
+            shift_date_value(d(2023, 2, 28), 1, DateGranularity::Year),
+            Some(d(2024, 2, 29)),
+            "non-leap Feb end shifts to leap Feb end"
+        );
+        // Non-month-end input shifts plainly (with day clamping).
+        assert_eq!(
+            shift_date_value(d(2024, 3, 15), -1, DateGranularity::Month),
+            Some(d(2024, 2, 15))
+        );
+        assert_eq!(
+            shift_date_value(d(2024, 3, 30), -1, DateGranularity::Month),
+            Some(d(2024, 2, 29)),
+            "day clamps to the target month length"
+        );
+        // Week/Day shifts are exact day arithmetic — no snap.
+        assert_eq!(
+            shift_date_value(d(2024, 1, 31), 1, DateGranularity::Week),
+            Some(d(2024, 2, 7))
+        );
+        assert_eq!(
+            shift_date_value(d(2024, 3, 1), -1, DateGranularity::Day),
+            Some(d(2024, 2, 29))
+        );
+    }
+
+    #[test]
+    fn shift_date32_value_round_trips_day_counts() {
+        // 2024-02-10 is day 19763; -1 day = 19762.
+        let base = 19763;
+        assert_eq!(
+            shift_date32_value(base, -1, DateGranularity::Day),
+            Some(base - 1)
+        );
+        assert_eq!(
+            shift_date32_value(base, 1, DateGranularity::Week),
+            Some(base + 7)
+        );
+    }
+
+    #[test]
+    fn balance_function_names_cover_all_spellings() {
+        assert_eq!(balance_function_name(true, 0, false), "OPENINGBALANCE");
+        assert_eq!(balance_function_name(false, 0, false), "CLOSINGBALANCE");
+        assert_eq!(balance_function_name(true, -1, false), "PREVIOUSDAY");
+        assert_eq!(balance_function_name(false, 1, false), "NEXTDAY");
+        assert_eq!(balance_function_name(true, 0, true), "FIRSTNONBLANK");
+        assert_eq!(balance_function_name(false, 0, true), "LASTNONBLANK");
+    }
     use crate::model::{Column, Table};
 
     /// fact_sales + dim_date model with the standard date roles; `dim_date`
@@ -1968,10 +2208,7 @@ mod tests {
         );
         // A Monday is its own week start.
         let d = NaiveDate::from_ymd_opt(2024, 7, 8).unwrap();
-        assert_eq!(
-            start_of_period(d, DateGranularity::Week, None).unwrap(),
-            d
-        );
+        assert_eq!(start_of_period(d, DateGranularity::Week, None).unwrap(), d);
         // A Sunday belongs to the week that started six days earlier — even
         // across a month boundary (2024-06-30 → Monday 2024-06-24).
         let d = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
@@ -2043,8 +2280,7 @@ mod tests {
         assert_eq!(filters[1].value, "2024-08-16");
 
         // The calendar model differs: start = 2024-01-01.
-        let (calendar, _) =
-            lower_time_intelligence_filtered(&ytd, &model(), as_of, as_of).unwrap();
+        let (calendar, _) = lower_time_intelligence_filtered(&ytd, &model(), as_of, as_of).unwrap();
         let Expression::Keep { filters, .. } = &calendar else {
             panic!("expected Keep");
         };
@@ -2089,8 +2325,8 @@ mod tests {
         let db = expr::dates_between(sum_amount(), "2024-02-01", "2024-06-15");
 
         // No date column on the axis → filter-context plan, no min probe.
-        let route = time_intelligence_route(&db, &model, &pairs(&[("fact_sales", "region")]))
-            .unwrap();
+        let route =
+            time_intelligence_route(&db, &model, &pairs(&[("fact_sales", "region")])).unwrap();
         let Some(TimeIntelligenceRoute::FilterContext(plan)) = route else {
             panic!("expected FilterContext, got {route:?}");
         };
@@ -2098,8 +2334,8 @@ mod tests {
         assert!(!plan.needs_min_context_date, "the range is absolute");
 
         // A date column on the axis fails closed with a typed error.
-        let err = time_intelligence_route(&db, &model, &pairs(&[("dim_date", "year")]))
-            .unwrap_err();
+        let err =
+            time_intelligence_route(&db, &model, &pairs(&[("dim_date", "year")])).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("DATESBETWEEN"), "got: {msg}");
         assert!(msg.contains("query axis"), "got: {msg}");

@@ -306,7 +306,7 @@ impl Measure {
     /// `false`) if this measure does not reference `old` or the rewritten text
     /// fails to reparse.
     pub(crate) fn rename_measure_reference(&mut self, old: &str, new: &str) -> bool {
-        if old == new || !self.referenced_measures().iter().any(|r| *r == old) {
+        if old == new || !self.referenced_measures().contains(&old) {
             return false;
         }
         let had_source = self.source.is_some();

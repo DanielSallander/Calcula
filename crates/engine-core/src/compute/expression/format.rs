@@ -370,9 +370,14 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 parts.push(format_expr(cond, table, Precedence::Lowest));
             }
             for pred in in_predicates {
+                // Bracket form — the spelling the parser accepts back.
                 parts.push(format!(
-                    "{}.{} IN {}.{}",
-                    pred.table, pred.column, pred.var_name, pred.var_column
+                    "{}[{}] {} {}[{}]",
+                    pred.table,
+                    pred.column,
+                    if pred.negated { "NOT IN" } else { "IN" },
+                    pred.var_name,
+                    pred.var_column
                 ));
             }
             if parts.is_empty() {
@@ -534,13 +539,15 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         Expression::InList {
             expr: inner,
             values,
+            negated,
         } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
             let vals: Vec<String> = values
                 .iter()
                 .map(|v| format_expr(v, table, Precedence::Lowest))
                 .collect();
-            format!("{inner_str} IN {{{}}}", vals.join(", "))
+            let keyword = if *negated { "NOT IN" } else { "IN" };
+            format!("{inner_str} {keyword} {{{}}}", vals.join(", "))
         }
 
         // --- Block / GVAR + VAR-RETURN ---
@@ -590,6 +597,7 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         Expression::Query {
             aggregates,
             group_by,
+            top,
         } => {
             let agg_parts: Vec<String> = aggregates
                 .iter()
@@ -602,7 +610,20 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 .iter()
                 .map(|(tbl, col)| format!("{tbl}[{col}]"))
                 .collect();
-            format!("QUERY({} BY {})", agg_parts.join(", "), gb_parts.join(", "))
+            let top_part = match top {
+                Some(t) => format!(
+                    " TOP {} BY {}{}",
+                    t.limit,
+                    t.by,
+                    if t.ascending { " ASC" } else { "" }
+                ),
+                None => String::new(),
+            };
+            format!(
+                "QUERY({} BY {}{top_part})",
+                agg_parts.join(", "),
+                gb_parts.join(", ")
+            )
         }
         // --- Date/time functions ---
         Expression::DateTimeFunc { function, args } => {
@@ -651,7 +672,10 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             let pairs: Vec<String> = search
                 .iter()
                 .map(|(col, e)| {
-                    format!("{tbl}[{col}], {}", format_expr(e, table, Precedence::Lowest))
+                    format!(
+                        "{tbl}[{col}], {}",
+                        format_expr(e, table, Precedence::Lowest)
+                    )
                 })
                 .collect();
             format!("LOOKUPVALUE({tbl}[{result_column}], {})", pairs.join(", "))
@@ -768,6 +792,9 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 DateGranularity::Quarter => "QTD",
                 DateGranularity::Month => "MTD",
                 DateGranularity::Week => "WTD",
+                // Not parser-producible (a day-to-date is the day itself);
+                // display defensively for hand-built ASTs.
+                DateGranularity::Day => "TODATE_DAY",
             };
             format!("{func}({inner_str})")
         }
@@ -785,6 +812,7 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                     DateGranularity::Quarter => "QUARTER",
                     DateGranularity::Month => "MONTH",
                     DateGranularity::Week => "WEEK",
+                    DateGranularity::Day => "DAY",
                 };
                 format!("PRIORPERIOD({inner_str}, {offset}, \"{unit}\")")
             }
@@ -800,6 +828,7 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
                 DateGranularity::Quarter => "QUARTER",
                 DateGranularity::Month => "MONTH",
                 DateGranularity::Week => "WEEK",
+                DateGranularity::Day => "DAY",
             };
             format!("DATESINPERIOD({inner_str}, {intervals}, \"{unit}\")")
         }
@@ -821,20 +850,29 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
             format!("{name}({})", parts.join(", "))
         }
 
-        // --- Calculation-group placeholder ---
+        // --- Calculation-group placeholders ---
         Expression::SelectedMeasure => "SELECTEDMEASURE()".to_string(),
+        Expression::IsSelectedMeasure { measures } => {
+            let refs: Vec<String> = measures.iter().map(|m| format!("[{m}]")).collect();
+            format!("ISSELECTEDMEASURE({})", refs.join(", "))
+        }
+        Expression::SelectedMeasureName => "SELECTEDMEASURENAME()".to_string(),
+        Expression::SelectedMeasureFormatString => "SELECTEDMEASUREFORMATSTRING()".to_string(),
 
-        // --- Semi-additive balances (period-boundary, format version 9) ---
+        // --- Semi-additive balances (period-boundary, format version 9;
+        //     PREVIOUSDAY/NEXTDAY + FIRSTNONBLANK/LASTNONBLANK, version 23) ---
         Expression::SemiAdditiveBalance {
             expr: inner,
             opening,
+            shift_days,
+            non_blank,
         } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
-            let func = if *opening {
-                "OPENINGBALANCE"
-            } else {
-                "CLOSINGBALANCE"
-            };
+            let func = crate::compute::time_intelligence::balance_function_name(
+                *opening,
+                *shift_days,
+                *non_blank,
+            );
             format!("{func}({inner_str})")
         }
 

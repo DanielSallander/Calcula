@@ -228,12 +228,10 @@ pub(super) fn tokenize(input: &str) -> EngineResult<Vec<(Token, usize)>> {
                 let start = i;
                 while i < len {
                     let ch = chars[i];
-                    if ch.is_alphanumeric() || ch == '_' {
-                        i += 1;
-                    } else if ch == '.'
+                    let dot_continues = ch == '.'
                         && i + 1 < len
-                        && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_')
-                    {
+                        && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_');
+                    if ch.is_alphanumeric() || ch == '_' || dot_continues {
                         i += 1;
                     } else {
                         break;

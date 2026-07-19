@@ -276,6 +276,7 @@ fn query_gv(name: &str, table: &str) -> crate::model::global_variable::GlobalVar
                 "Amt".into(),
             )],
             group_by: vec![("Sales".into(), "id".into())],
+            top: None,
         },
     )
 }
@@ -1084,6 +1085,91 @@ fn rejects_selected_measure_in_a_calculated_column() {
         .build();
     let err = result.unwrap_err().to_string();
     assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}
+
+fn amount_sum_measure() -> crate::compute::measure::Measure {
+    crate::compute::measure::Measure::new(
+        "Total",
+        crate::compute::expression::agg(
+            crate::compute::aggregate::AggregateOp::Sum,
+            crate::compute::expression::qualified_col("Sales", "amount"),
+        ),
+    )
+}
+
+#[test]
+fn rejects_calc_group_introspection_in_a_regular_measure() {
+    // The whole introspection family is calc-item-only, like SELECTEDMEASURE().
+    let bad = crate::compute::measure::Measure::new(
+        "Bad",
+        crate::compute::expression::Expression::SelectedMeasureName,
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(bad)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURENAME"), "got: {err}");
+}
+
+#[test]
+fn isselectedmeasure_unknown_measure_rejected_at_build() {
+    use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+    let item = CalculationItem::from_text("Boost", "IF(ISSELECTEDMEASURE([Nope]), 1, 2)").unwrap();
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown measure 'Nope'"),
+        "ISSELECTEDMEASURE args must be existence-checked, got: {err}"
+    );
+}
+
+#[test]
+fn item_format_string_expression_validated_at_build() {
+    use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+    // Unparseable format expression → build error.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some("CONCATENATE(".to_string()));
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("does not parse"), "got: {err}");
+
+    // Unknown measure referenced by ISSELECTEDMEASURE inside the format
+    // expression → build error.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some(
+            "IF(ISSELECTEDMEASURE([Nope]), \"0.0%\", SELECTEDMEASUREFORMATSTRING())".to_string(),
+        ));
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown measure 'Nope'"), "got: {err}");
+
+    // A valid format expression builds fine.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some(
+            "CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")".to_string(),
+        ));
+    assert!(DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build()
+        .is_ok());
 }
 
 #[test]

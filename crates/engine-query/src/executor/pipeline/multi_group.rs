@@ -19,8 +19,7 @@ use crate::request::ColumnRef;
 use super::fetch::register_partitioned_table;
 use super::sql::{
     axis_clear_partition, build_condition_sql_with_conditions, build_override_alias_map,
-    collect_qualified_tables, render_in_filter_conditions,
-    resolve_compound_sql, wrap_axis_clear,
+    collect_qualified_tables, render_in_filter_conditions, resolve_compound_sql, wrap_axis_clear,
     GroupColumn, OverrideJoinEntry,
 };
 use super::QueryExecutor;
@@ -142,18 +141,19 @@ impl QueryExecutor {
                         || !in_conditions.is_empty();
 
                     let inner_sql = if has_case {
-                        let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
-                            build_condition_sql_with_conditions(
-                                &effective,
-                                &eval_ctx.conditions,
-                                fact_table,
-                                fact_model_name,
-                                model,
-                                &alias_map,
-                            )?
-                        } else {
-                            String::new()
-                        };
+                        let mut condition =
+                            if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
+                                build_condition_sql_with_conditions(
+                                    &effective,
+                                    &eval_ctx.conditions,
+                                    fact_table,
+                                    fact_model_name,
+                                    model,
+                                    &alias_map,
+                                )?
+                            } else {
+                                String::new()
+                            };
                         for c in &in_conditions {
                             if condition.is_empty() {
                                 condition = c.clone();

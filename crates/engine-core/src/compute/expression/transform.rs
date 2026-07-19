@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// The concrete measure a calculation item is being applied to, consumed by
+/// [`Expression::substitute_selected_measure`].
+///
+/// Carries everything the calc-group placeholder family folds against:
+/// `SELECTEDMEASURE()` clones [`expression`](Self::expression),
+/// `SELECTEDMEASURENAME()` / `ISSELECTEDMEASURE(...)` compare against
+/// [`name`](Self::name), and `SELECTEDMEASUREFORMATSTRING()` reads
+/// [`format_string`](Self::format_string).
+#[derive(Debug, Clone, Copy)]
+pub struct SelectedMeasureInfo<'a> {
+    /// The applied measure's expression tree.
+    pub expression: &'a Expression,
+    /// The applied measure's name, exactly as registered in the model.
+    pub name: &'a str,
+    /// The applied measure's own format string, if any.
+    pub format_string: Option<&'a str>,
+}
+
 impl Expression {
     /// Substitute variable references (`ColumnRef(name)`) with their bound
     /// expressions. Used by `Block` (VAR/RETURN) to inline bindings before
@@ -172,12 +190,14 @@ impl Expression {
             Expression::Query {
                 aggregates,
                 group_by,
+                top,
             } => Expression::Query {
                 aggregates: aggregates
                     .iter()
                     .map(|(e, alias)| (e.substitute_vars(env), alias.clone()))
                     .collect(),
                 group_by: group_by.clone(),
+                top: top.clone(),
             },
             Expression::HasOneValue { column } => Expression::HasOneValue {
                 column: Box::new(column.substitute_vars(env)),
@@ -252,9 +272,16 @@ impl Expression {
                 start: start.clone(),
                 end: end.clone(),
             },
-            Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
+            Expression::SemiAdditiveBalance {
+                expr,
+                opening,
+                shift_days,
+                non_blank,
+            } => Expression::SemiAdditiveBalance {
                 expr: Box::new(expr.substitute_vars(env)),
                 opening: *opening,
+                shift_days: *shift_days,
+                non_blank: *non_blank,
             },
             // Context operations: recurse into inner expression.
             Expression::Keep {
@@ -310,9 +337,14 @@ impl Expression {
                 expr: Box::new(expr.substitute_vars(env)),
                 predicates: predicates.clone(),
             },
-            Expression::InList { expr, values } => Expression::InList {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => Expression::InList {
                 expr: Box::new(expr.substitute_vars(env)),
                 values: values.iter().map(|v| v.substitute_vars(env)).collect(),
+                negated: *negated,
             },
             Expression::Greatest(args) => {
                 Expression::Greatest(args.iter().map(|a| a.substitute_vars(env)).collect())
@@ -473,12 +505,17 @@ impl Expression {
                 expr: Box::new(expr.substitute_measure_refs(env)),
                 alternate: Box::new(alternate.substitute_measure_refs(env)),
             },
-            Expression::InList { expr, values } => Expression::InList {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => Expression::InList {
                 expr: Box::new(expr.substitute_measure_refs(env)),
                 values: values
                     .iter()
                     .map(|v| v.substitute_measure_refs(env))
                     .collect(),
+                negated: *negated,
             },
             Expression::SafeDivide {
                 numerator,
@@ -603,9 +640,14 @@ impl Expression {
                 expr: Box::new(sub(expr)),
                 alternate: Box::new(sub(alternate)),
             },
-            Expression::InList { expr, values } => Expression::InList {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => Expression::InList {
                 expr: Box::new(sub(expr)),
                 values: values.iter().map(sub).collect(),
+                negated: *negated,
             },
             Expression::SafeDivide {
                 numerator,
@@ -624,22 +666,45 @@ impl Expression {
         }
     }
 
-    /// Replace every [`Expression::SelectedMeasure`] node in this tree with
-    /// `replacement`, returning the rewritten clone.
+    /// Replace every calculation-group placeholder in this tree with the
+    /// applied measure's concrete information, returning the rewritten clone.
     ///
     /// This is how a calculation item is applied to a target measure: the
     /// item's expression (e.g. `YTD(SELECTEDMEASURE())`) is rewritten with
-    /// `replacement` set to the target measure's expression tree. **All**
-    /// occurrences are replaced — an item may reference `SELECTEDMEASURE()`
-    /// multiple times (e.g.
+    /// `replacement` describing the target measure. **All** occurrences are
+    /// replaced — an item may reference `SELECTEDMEASURE()` multiple times
+    /// (e.g.
     /// `DIVIDE(SELECTEDMEASURE() - PRIORYEAR(SELECTEDMEASURE()), PRIORYEAR(SELECTEDMEASURE()))`).
     ///
+    /// The full placeholder family folds here, so none of these nodes survive
+    /// substitution:
+    /// - [`SelectedMeasure`](Expression::SelectedMeasure) → the measure's
+    ///   expression tree.
+    /// - [`IsSelectedMeasure`](Expression::IsSelectedMeasure) → a
+    ///   [`LiteralBool`](Expression::LiteralBool): whether the measure's name
+    ///   is in the listed set (exact, case-sensitive match).
+    /// - [`SelectedMeasureName`](Expression::SelectedMeasureName) → a
+    ///   [`LiteralString`](Expression::LiteralString) of the measure's name.
+    /// - [`SelectedMeasureFormatString`](Expression::SelectedMeasureFormatString)
+    ///   → a [`LiteralString`](Expression::LiteralString) of the measure's
+    ///   format string, or [`Blank`](Expression::Blank) when it has none.
+    ///
     /// Modeled on [`Expression::substitute_vars`]: every compound node is
-    /// rebuilt with its children substituted; leaf nodes other than
-    /// `SelectedMeasure` are returned unchanged.
-    pub fn substitute_selected_measure(&self, replacement: &Expression) -> Expression {
+    /// rebuilt with its children substituted; leaf nodes other than the
+    /// placeholders are returned unchanged.
+    pub fn substitute_selected_measure(&self, replacement: &SelectedMeasureInfo<'_>) -> Expression {
         match self {
-            Expression::SelectedMeasure => replacement.clone(),
+            Expression::SelectedMeasure => replacement.expression.clone(),
+            Expression::IsSelectedMeasure { measures } => {
+                Expression::LiteralBool(measures.iter().any(|m| m == replacement.name))
+            }
+            Expression::SelectedMeasureName => {
+                Expression::LiteralString(replacement.name.to_string())
+            }
+            Expression::SelectedMeasureFormatString => match replacement.format_string {
+                Some(fmt) => Expression::LiteralString(fmt.to_string()),
+                None => Expression::Blank,
+            },
             Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
                 left: Box::new(left.substitute_selected_measure(replacement)),
                 op: *op,
@@ -780,12 +845,14 @@ impl Expression {
             Expression::Query {
                 aggregates,
                 group_by,
+                top,
             } => Expression::Query {
                 aggregates: aggregates
                     .iter()
                     .map(|(e, alias)| (e.substitute_selected_measure(replacement), alias.clone()))
                     .collect(),
                 group_by: group_by.clone(),
+                top: top.clone(),
             },
             Expression::HasOneValue { column } => Expression::HasOneValue {
                 column: Box::new(column.substitute_selected_measure(replacement)),
@@ -862,9 +929,16 @@ impl Expression {
                 start: start.clone(),
                 end: end.clone(),
             },
-            Expression::SemiAdditiveBalance { expr, opening } => Expression::SemiAdditiveBalance {
+            Expression::SemiAdditiveBalance {
+                expr,
+                opening,
+                shift_days,
+                non_blank,
+            } => Expression::SemiAdditiveBalance {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 opening: *opening,
+                shift_days: *shift_days,
+                non_blank: *non_blank,
             },
             Expression::Keep {
                 expr,
@@ -922,12 +996,17 @@ impl Expression {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 predicates: predicates.clone(),
             },
-            Expression::InList { expr, values } => Expression::InList {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => Expression::InList {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 values: values
                     .iter()
                     .map(|v| v.substitute_selected_measure(replacement))
                     .collect(),
+                negated: *negated,
             },
             Expression::Greatest(args) => Expression::Greatest(
                 args.iter()
@@ -1149,23 +1228,37 @@ pub fn extract_lookup_joins(expr: &Expression, specs: &mut Vec<LookupJoinSpec>) 
         }
         Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
             function: *function,
-            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+            args: args
+                .iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
         },
         Expression::TextFunc { function, args } => Expression::TextFunc {
             function: *function,
-            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+            args: args
+                .iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
         },
         Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
             function: *function,
-            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+            args: args
+                .iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
         },
         Expression::Call { name, args } => Expression::Call {
             name: name.clone(),
-            args: args.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+            args: args
+                .iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
         },
-        Expression::Coalesce(args) => {
-            Expression::Coalesce(args.iter().map(|a| extract_lookup_joins(a, specs)).collect())
-        }
+        Expression::Coalesce(args) => Expression::Coalesce(
+            args.iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
+        ),
         Expression::IfError { expr: e, alternate } => Expression::IfError {
             expr: Box::new(extract_lookup_joins(e, specs)),
             alternate: Box::new(extract_lookup_joins(alternate, specs)),
@@ -1181,14 +1274,28 @@ pub fn extract_lookup_joins(expr: &Expression, specs: &mut Vec<LookupJoinSpec>) 
                 .as_ref()
                 .map(|a| Box::new(extract_lookup_joins(a, specs))),
         },
-        Expression::InList { expr: e, values } => Expression::InList {
+        Expression::InList {
+            expr: e,
+            values,
+            negated,
+        } => Expression::InList {
             expr: Box::new(extract_lookup_joins(e, specs)),
-            values: values.iter().map(|a| extract_lookup_joins(a, specs)).collect(),
+            values: values
+                .iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
+            negated: *negated,
         },
-        Expression::Greatest(args) => {
-            Expression::Greatest(args.iter().map(|a| extract_lookup_joins(a, specs)).collect())
-        }
-        Expression::Least(args) => Expression::Least(args.iter().map(|a| extract_lookup_joins(a, specs)).collect()),
+        Expression::Greatest(args) => Expression::Greatest(
+            args.iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
+        ),
+        Expression::Least(args) => Expression::Least(
+            args.iter()
+                .map(|a| extract_lookup_joins(a, specs))
+                .collect(),
+        ),
         Expression::NullIf { expr: e, value } => Expression::NullIf {
             expr: Box::new(extract_lookup_joins(e, specs)),
             value: Box::new(extract_lookup_joins(value, specs)),
@@ -1319,12 +1426,17 @@ pub fn extract_thisrow_aggregates(
                 .as_ref()
                 .map(|a| Box::new(extract_thisrow_aggregates(a, aggregates))),
         },
-        Expression::InList { expr: e, values } => Expression::InList {
+        Expression::InList {
+            expr: e,
+            values,
+            negated,
+        } => Expression::InList {
             expr: Box::new(extract_thisrow_aggregates(e, aggregates)),
             values: values
                 .iter()
                 .map(|a| extract_thisrow_aggregates(a, aggregates))
                 .collect(),
+            negated: *negated,
         },
         Expression::Greatest(args) => Expression::Greatest(
             args.iter()
@@ -1366,19 +1478,15 @@ pub fn validate_thisrow_calculated_column(expr: &Expression, host: &str) -> Resu
                         ));
                     }
                     if expression.has_aggregate() {
-                        return Err(
-                            "nested aggregates inside ITERATE are not supported in \
+                        return Err("nested aggregates inside ITERATE are not supported in \
                              calculated columns"
-                                .to_string(),
-                        );
+                            .to_string());
                     }
                     walk(expression, host, true)
                 }
-                _ => Err(
-                    "aggregates in calculated columns are only supported as \
+                _ => Err("aggregates in calculated columns are only supported as \
                      AGG(ITERATE(host, ...)) together with THISROW(...)"
-                        .to_string(),
-                ),
+                    .to_string()),
             },
             Expression::ThisRow { table, .. } => {
                 if !in_iterate {
@@ -1483,7 +1591,10 @@ pub fn resolve_is_filtered(
             default,
         } => Expression::Switch {
             expr: Box::new(recurse(e)),
-            cases: cases.iter().map(|(v, r)| (recurse(v), recurse(r))).collect(),
+            cases: cases
+                .iter()
+                .map(|(v, r)| (recurse(v), recurse(r)))
+                .collect(),
             default: default.as_ref().map(|d| Box::new(recurse(d))),
         },
         Expression::And(l, r) => Expression::And(Box::new(recurse(l)), Box::new(recurse(r))),
@@ -1533,7 +1644,7 @@ pub fn resolve_is_filtered(
             filters,
             variables,
             conditions,
-        in_predicates,
+            in_predicates,
         } => Expression::Keep {
             expr: Box::new(recurse(e)),
             filters: filters.clone(),

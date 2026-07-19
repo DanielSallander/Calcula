@@ -10,6 +10,7 @@ pub mod measure;
 pub mod measure_engine;
 pub mod parser;
 pub mod plan;
+pub mod query_top;
 pub mod script;
 pub mod sql_util;
 pub mod time_intelligence;

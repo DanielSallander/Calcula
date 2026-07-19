@@ -114,18 +114,27 @@ impl Expression {
             | Expression::IsInScope { .. }
             | Expression::IsFiltered { .. }
             | Expression::ThisRow { .. } => Ok(()),
-            // SELECTEDMEASURE() is only legal inside a calculation item. For
-            // ordinary measures / calculated columns it must never appear: it
-            // would reach the renderer unsubstituted (an internal error).
-            Expression::SelectedMeasure => {
+            // SELECTEDMEASURE() and its introspection family are only legal
+            // inside a calculation item. For ordinary measures / calculated
+            // columns they must never appear: they would reach the renderer
+            // unsubstituted (an internal error).
+            Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString => {
                 if allow_selected_measure {
                     Ok(())
                 } else {
-                    Err(EngineError::InvalidExpression(
-                        "SELECTEDMEASURE() is only valid inside a calculation item; \
+                    let function = match self {
+                        Expression::IsSelectedMeasure { .. } => "ISSELECTEDMEASURE()",
+                        Expression::SelectedMeasureName => "SELECTEDMEASURENAME()",
+                        Expression::SelectedMeasureFormatString => "SELECTEDMEASUREFORMATSTRING()",
+                        _ => "SELECTEDMEASURE()",
+                    };
+                    Err(EngineError::InvalidExpression(format!(
+                        "{function} is only valid inside a calculation item; \
                          it cannot be used in a regular measure or calculated column"
-                            .to_string(),
-                    ))
+                    )))
                 }
             }
             // LOOKUPVALUE's table is rendered as a raw join qualifier during
@@ -390,6 +399,7 @@ impl Expression {
             Expression::Query {
                 aggregates,
                 group_by,
+                top,
             } => {
                 // An aggregate-less QUERY (the `QUERY(DISTINCT ...)` form) is
                 // only executable as a MATERIALIZED calculated table — inside
@@ -413,6 +423,29 @@ impl Expression {
                 }
                 for (table, _column) in group_by {
                     validate_identifier(table, "group-by table")?;
+                }
+                // TOP spec: the parser enforces these, but a deserialized
+                // model bypasses it — re-check so a hostile/hand-written file
+                // cannot smuggle a zero limit or an unknown ranked column.
+                if let Some(spec) = top {
+                    if spec.limit == 0 {
+                        return Err(EngineError::InvalidExpression(
+                            "QUERY TOP: the row count must be at least 1".to_string(),
+                        ));
+                    }
+                    let is_output = aggregates
+                        .iter()
+                        .any(|(_, alias)| alias.eq_ignore_ascii_case(&spec.by))
+                        || group_by
+                            .iter()
+                            .any(|(_, c)| c.eq_ignore_ascii_case(&spec.by));
+                    if !is_output {
+                        return Err(EngineError::InvalidExpression(format!(
+                            "QUERY TOP: '{}' is not an aggregate alias or BY column of this \
+                             QUERY",
+                            spec.by
+                        )));
+                    }
                 }
                 Ok(())
             }
@@ -521,7 +554,7 @@ impl Expression {
                 }
                 expr.validate_inner(allow_selected_measure)
             }
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.validate_inner(allow_selected_measure)?;
                 for v in values {
                     v.validate_inner(allow_selected_measure)?;
@@ -700,6 +733,7 @@ mod tests {
         let e = Expression::Query {
             aggregates: vec![(agg(AggregateOp::Sum, col("amount")), "total".into())],
             group_by: vec![("dim; DROP TABLE x; --".into(), "city".into())],
+            top: None,
         };
         assert!(e.validate().is_err());
     }

@@ -114,6 +114,10 @@ mod materialize_tests;
 #[cfg(test)]
 mod meta_tests;
 #[cfg(test)]
+mod not_in_tests;
+#[cfg(test)]
+mod query_top_tests;
+#[cfg(test)]
 mod rank_tests;
 #[cfg(test)]
 mod security_tests;
@@ -2462,12 +2466,20 @@ impl Engine {
     /// filter/slicer context and active role, with no group axis — and
     /// overwrite the column's static `format_string` with the result. A
     /// non-string or NULL result leaves the static format in place.
+    ///
+    /// Calculation-group columns compose: a calculation item's (or selection
+    /// template's) own `format_string_expression` — with the calc-group
+    /// placeholders (`SELECTEDMEASUREFORMATSTRING()` etc.) substituted
+    /// against the base measure — wins for that column; an item's static
+    /// format string wins over the base measure's dynamic format; only a
+    /// calc column with no item-level format at all falls through to the
+    /// base measure's dynamic format.
     async fn apply_dynamic_format_strings(
         &self,
         request: &QueryRequest,
         meta: &mut [ResultColumn],
     ) -> QueryResult<()> {
-        // Distinct measures that carry a dynamic format.
+        // Distinct measures that carry a model-level dynamic format.
         let mut dynamic: Vec<String> = Vec::new();
         for col in meta.iter() {
             let Some(name) = &col.measure else { continue };
@@ -2484,7 +2496,35 @@ impl Engine {
                 dynamic.push(name.clone());
             }
         }
-        if dynamic.is_empty() {
+        // Calc-group columns whose item/selection template carries its own
+        // format: (column index, substituted expression) for dynamic ones,
+        // plus the set of columns where an item-level STATIC format exists
+        // (those must not be overwritten by the base measure's dynamic).
+        let mut item_dynamic: Vec<(usize, Expression)> = Vec::new();
+        let mut item_static_cols: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        for (i, col) in meta.iter().enumerate() {
+            let Some(template) = self.calc_group_template(request, col) else {
+                continue;
+            };
+            if template.format_string().is_some() {
+                item_static_cols.insert(i);
+            }
+            if let Some(fmt_src) = template.format_string_expression() {
+                let Some(base_name) = col.measure.clone() else {
+                    continue;
+                };
+                let measure = self.model.measure(&base_name).map_err(QueryError::Engine)?;
+                let parsed = parse_measure_expression(fmt_src).map_err(QueryError::Engine)?;
+                let info = engine_core::compute::expression::SelectedMeasureInfo {
+                    expression: measure.expression(),
+                    name: &base_name,
+                    format_string: measure.format_string(),
+                };
+                item_dynamic.push((i, parsed.substitute_selected_measure(&info)));
+            }
+        }
+        if dynamic.is_empty() && item_dynamic.is_empty() {
             return Ok(());
         }
 
@@ -2498,52 +2538,138 @@ impl Engine {
                 .expect("filtered to measures with a dynamic format")
                 .to_string();
             let fmt_expr = parse_measure_expression(&fmt_src).map_err(QueryError::Engine)?;
-            // One scalar evaluation under the OUTER context only (mirrors
-            // GVAR): the request's filters/slicers, no group-by axis.
             let synth_name = format!("__dynfmt__{name}");
-            let overlay = self
-                .model
-                .with_overlay_measures(vec![Measure::new(&synth_name, fmt_expr)])
-                .map_err(QueryError::Engine)?;
-            let inner = QueryRequest {
-                measures: vec![synth_name],
-                filters: request.filters.clone(),
-                in_filters: request.in_filters.clone(),
-                or_filters: request.or_filters.clone(),
-                ..Default::default()
-            };
-            let batches = self
-                .plan_and_execute(
-                    &inner,
-                    &inner,
-                    &overlay,
-                    &role_filters,
-                    &CancellationToken::new(),
-                )
-                .await?;
-            if let Some(batch) = batches.first() {
-                if batch.num_rows() > 0 {
-                    if let Some(a) = batch
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        if !arrow::array::Array::is_null(a, 0) {
-                            resolved.insert(name, a.value(0).to_string());
-                        }
-                    }
-                }
+            if let Some(fmt) = self
+                .evaluate_scalar_format(fmt_expr, &synth_name, request, &role_filters)
+                .await?
+            {
+                resolved.insert(name, fmt);
+            }
+        }
+        // Item-level dynamic formats: one evaluation per calc column.
+        let mut item_resolved: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
+        for (n, (i, fmt_expr)) in item_dynamic.into_iter().enumerate() {
+            let synth_name = format!("__dynfmt_item__{n}");
+            if let Some(fmt) = self
+                .evaluate_scalar_format(fmt_expr, &synth_name, request, &role_filters)
+                .await?
+            {
+                item_resolved.insert(i, fmt);
             }
         }
 
-        for col in meta.iter_mut() {
-            if let Some(name) = &col.measure {
+        for (i, col) in meta.iter_mut().enumerate() {
+            if let Some(fmt) = item_resolved.get(&i) {
+                col.format_string = Some(fmt.clone());
+            } else if item_static_cols.contains(&i) {
+                // The item's static format (already reported by the metadata
+                // builder) wins over the base measure's dynamic format.
+            } else if let Some(name) = &col.measure {
                 if let Some(fmt) = resolved.get(name) {
                     col.format_string = Some(fmt.clone());
                 }
             }
         }
         Ok(())
+    }
+
+    /// The calculation item (or selection template) a calc-group result
+    /// column was produced by, when the request applied a group — the
+    /// metadata-side mirror of the expansion's template choice.
+    fn calc_group_template<'a>(
+        &'a self,
+        request: &QueryRequest,
+        col: &ResultColumn,
+    ) -> Option<&'a engine_core::model::CalculationItem> {
+        use engine_core::model::calculation_group::synthetic_measure_name;
+        let app = request.calculation_group.as_ref()?;
+        let group = self.model.calculation_group(&app.group).ok()?;
+        match &col.calculation_item {
+            Some(item_name) => group.item(item_name),
+            None => {
+                // Selection-state columns carry no item; identify them by the
+                // "{measure} [{group}]" synthetic name.
+                let base = col.measure.as_deref()?;
+                if col.name != synthetic_measure_name(base, group.name()) {
+                    return None;
+                }
+                match app.selection {
+                    CalcGroupSelection::MultipleOrEmpty => group.multiple_or_empty_selection(),
+                    CalcGroupSelection::NoSelection => group.no_selection(),
+                    CalcGroupSelection::SelectedItems => None,
+                }
+            }
+        }
+    }
+
+    /// Evaluate one dynamic-format expression as a single scalar under the
+    /// request's OUTER context only (filters/slicers, active role, no
+    /// group-by axis — mirrors GVAR evaluation) and return its string value.
+    /// A NULL, non-string, or empty result yields `None`.
+    ///
+    /// Constant expressions — the common case after calc-group placeholder
+    /// substitution (e.g. `CONCATENATE("#,0", " K")`) — are folded directly
+    /// without a query; they have no fact table to plan against and need
+    /// none.
+    async fn evaluate_scalar_format(
+        &self,
+        fmt_expr: Expression,
+        synth_name: &str,
+        request: &QueryRequest,
+        role_filters: &[FilterPredicate],
+    ) -> QueryResult<Option<String>> {
+        use engine_core::compute::expression::{const_fold_scalar, ConstFold, FoldValue};
+        match const_fold_scalar(&fmt_expr) {
+            ConstFold::Value(FoldValue::Str(s)) if !s.is_empty() => return Ok(Some(s)),
+            // A constant non-string / BLANK / empty result: like the query
+            // path's non-string result, leave the static format in place.
+            ConstFold::Value(_) => return Ok(None),
+            ConstFold::Unsupported(what) => {
+                return Err(QueryError::InvalidQuery(format!(
+                    "dynamic format string expression uses {what}, which is not \
+                     supported in a constant format expression (reference model \
+                     data to evaluate it as a query, or restrict the expression \
+                     to literals, IF/SWITCH/COALESCE, comparisons, and text \
+                     functions)"
+                )));
+            }
+            ConstFold::NotConstant => {}
+        }
+        let overlay = self
+            .model
+            .with_overlay_measures(vec![Measure::new(synth_name, fmt_expr)])
+            .map_err(QueryError::Engine)?;
+        let inner = QueryRequest {
+            measures: vec![synth_name.to_string()],
+            filters: request.filters.clone(),
+            in_filters: request.in_filters.clone(),
+            or_filters: request.or_filters.clone(),
+            ..Default::default()
+        };
+        let batches = self
+            .plan_and_execute(
+                &inner,
+                &inner,
+                &overlay,
+                role_filters,
+                &CancellationToken::new(),
+            )
+            .await?;
+        if let Some(batch) = batches.first() {
+            if batch.num_rows() > 0 {
+                if let Some(a) = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                {
+                    if !arrow::array::Array::is_null(a, 0) {
+                        return Ok(Some(a.value(0).to_string()));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Execute a query that can be cancelled from another task.
@@ -2702,13 +2828,7 @@ impl Engine {
         };
 
         let batches = self
-            .plan_and_execute(
-                &request,
-                effective_request,
-                model,
-                &role_filters,
-                &token,
-            )
+            .plan_and_execute(&request, effective_request, model, &role_filters, &token)
             .await?;
 
         // Store the result unless the cache version moved while executing

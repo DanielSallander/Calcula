@@ -261,6 +261,7 @@ fn walk(
         Expression::Query {
             aggregates,
             group_by: _,
+            ..
         } => {
             for (agg_expr, _alias) in aggregates {
                 walk(agg_expr, measure_names, global_names, block_vars, deps);
@@ -276,6 +277,7 @@ fn walk(
         Expression::InList {
             expr: inner,
             values,
+            ..
         } => {
             walk(inner, measure_names, global_names, block_vars, deps);
             for v in values {
@@ -354,6 +356,11 @@ fn walk(
             // RankWindow has no inner expression sub-trees to recurse into,
             // only (table, column) pairs for order_by/partition_by.
         }
+        // ISSELECTEDMEASURE names concrete measures — report them as measure
+        // dependencies (renames/deletes must surface stale calc items).
+        Expression::IsSelectedMeasure { measures } => {
+            deps.measures.extend(measures.iter().cloned());
+        }
         // Leaves with no sub-expressions.
         Expression::IsInScope { .. }
         | Expression::IsFiltered { .. }
@@ -365,6 +372,8 @@ fn walk(
         | Expression::LiteralDate(_)
         | Expression::Blank
         | Expression::SelectedMeasure
+        | Expression::SelectedMeasureName
+        | Expression::SelectedMeasureFormatString
         | Expression::TableRef(_) => {}
     }
 }

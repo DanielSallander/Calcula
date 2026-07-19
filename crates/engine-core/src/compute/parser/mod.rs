@@ -353,10 +353,17 @@ pub fn is_builtin_function_name(name: &str) -> bool {
         "DATESBETWEEN",
         "CLOSINGBALANCE",
         "OPENINGBALANCE",
+        "PREVIOUSDAY",
+        "NEXTDAY",
+        "FIRSTNONBLANK",
+        "LASTNONBLANK",
         // Value inspection
         "HASONEVALUE",
         "SELECTEDVALUE",
         "SELECTEDMEASURE",
+        "ISSELECTEDMEASURE",
+        "SELECTEDMEASURENAME",
+        "SELECTEDMEASUREFORMATSTRING",
         "FIRST",
         "ISINSCOPE",
         "ISFILTERED",
@@ -648,7 +655,9 @@ pub fn parse_global(name: &str, table: &str, input: &str) -> EngineResult<Global
             name: name.to_string(),
             reason,
         })?;
-        return Ok(crate::model::global_variable::GlobalVariable::new_calendar(name, spec));
+        return Ok(crate::model::global_variable::GlobalVariable::new_calendar(
+            name, spec,
+        ));
     }
 
     let expression = parse_measure_expression(input)?;
@@ -689,13 +698,22 @@ pub fn try_parse_path(input: &str) -> Option<Result<(String, String, String), St
     let parse_col = |s: &str| -> Option<(String, String)> {
         let open = s.find('[')?;
         let close = s.strip_suffix(']')?;
-        Some((s[..open].trim().to_string(), close[open + 1..].trim().to_string()))
+        Some((
+            s[..open].trim().to_string(),
+            close[open + 1..].trim().to_string(),
+        ))
     };
     let Some((t1, id_col)) = parse_col(parts[0]) else {
-        return Some(Err(format!("PATH: expected table[column], got '{}'", parts[0])));
+        return Some(Err(format!(
+            "PATH: expected table[column], got '{}'",
+            parts[0]
+        )));
     };
     let Some((t2, parent_col)) = parse_col(parts[1]) else {
-        return Some(Err(format!("PATH: expected table[column], got '{}'", parts[1])));
+        return Some(Err(format!(
+            "PATH: expected table[column], got '{}'",
+            parts[1]
+        )));
     };
     if !t1.eq_ignore_ascii_case(&t2) {
         return Some(Err(
@@ -716,12 +734,10 @@ fn try_parse_calendar(
         return None;
     }
     let rest = trimmed[8..].trim_start();
-    let Some(inner) = rest.strip_prefix('(') else {
-        return None;
-    };
+    let inner = rest.strip_prefix('(')?;
     let Some(inner) = inner.trim_end().strip_suffix(')') else {
         return Some(Err(
-            "CALENDAR expects the form CALENDAR(YYYY-MM-DD, YYYY-MM-DD)".to_string()
+            "CALENDAR expects the form CALENDAR(YYYY-MM-DD, YYYY-MM-DD)".to_string(),
         ));
     };
     let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
@@ -923,8 +939,7 @@ mod tests {
             Expression::ClearInner { targets, .. } => assert_eq!(targets.len(), 1),
             other => panic!("expected ClearInner, got {other:?}"),
         }
-        let e =
-            parse_measure_expression("SUM(Sales[amount], ALLSELECTED(Product[name]))").unwrap();
+        let e = parse_measure_expression("SUM(Sales[amount], ALLSELECTED(Product[name]))").unwrap();
         assert!(matches!(e, Expression::ClearInner { .. }));
     }
 

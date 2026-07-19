@@ -6,14 +6,15 @@ impl Expression {
     /// Returns `true` if this expression contains any `Aggregate` nodes.
     pub fn has_aggregate(&self) -> bool {
         match self {
-            Expression::LookupValue { search, .. } => {
-                search.iter().any(|(_, e)| e.has_aggregate())
-            }
+            Expression::LookupValue { search, .. } => search.iter().any(|(_, e)| e.has_aggregate()),
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -104,7 +105,7 @@ impl Expression {
             | Expression::DatesInPeriod { .. }
             | Expression::DatesBetween { .. }
             | Expression::SemiAdditiveBalance { .. } => true,
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
             }
             Expression::Greatest(args) | Expression::Least(args) => {
@@ -135,6 +136,9 @@ impl Expression {
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
             | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralDate(_)
@@ -233,7 +237,7 @@ impl Expression {
             | Expression::DatesInPeriod { expr, .. }
             | Expression::DatesBetween { expr, .. }
             | Expression::SemiAdditiveBalance { expr, .. } => expr.has_context_ops(),
-            Expression::InList { expr, values } => {
+            Expression::InList { expr, values, .. } => {
                 expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
             }
             Expression::Greatest(args) | Expression::Least(args) => {
@@ -395,6 +399,84 @@ impl Expression {
         here || super::child_expressions(self)
             .iter()
             .any(|c| c.contains_week_granularity())
+    }
+
+    /// Returns `true` if this tree contains a calculation-group introspection
+    /// marker — `ISSELECTEDMEASURE(...)` ([`Expression::IsSelectedMeasure`]),
+    /// `SELECTEDMEASURENAME()` ([`Expression::SelectedMeasureName`]), or
+    /// `SELECTEDMEASUREFORMATSTRING()`
+    /// ([`Expression::SelectedMeasureFormatString`]) — anywhere. A pre-v23
+    /// engine fails to deserialize these variants — drives the host's
+    /// format-version stamping (v23).
+    pub fn contains_calc_group_introspection(&self) -> bool {
+        matches!(
+            self,
+            Expression::IsSelectedMeasure { .. }
+                | Expression::SelectedMeasureName
+                | Expression::SelectedMeasureFormatString
+        ) || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_calc_group_introspection())
+    }
+
+    /// Returns `true` if this tree uses `NOT IN` anti-membership anywhere —
+    /// a negated [`Expression::InList`] (`col NOT IN {literals}`, carried in
+    /// KEEP conditions) or a negated [`InPredicate`](super::InPredicate)
+    /// (`col NOT IN var[col]`, carried on `Keep`/`KeepIn`). A pre-v23 engine
+    /// silently drops the additive `negated` flag and computes the OPPOSITE
+    /// membership — drives the host's format-version stamping (v23).
+    pub fn contains_negated_membership(&self) -> bool {
+        let here = match self {
+            Expression::InList { negated, .. } => *negated,
+            Expression::Keep { in_predicates, .. } => {
+                in_predicates.iter().any(|p| p.negated)
+            }
+            Expression::KeepIn { predicates, .. } => predicates.iter().any(|p| p.negated),
+            _ => false,
+        };
+        here || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_negated_membership())
+    }
+
+    /// Returns `true` if this tree uses day-level time intelligence anywhere:
+    /// the `Day` date granularity (a `DAY` interval in
+    /// `PRIORPERIOD`/`PARALLELPERIOD`/`DATESINPERIOD` — a pre-v23 engine
+    /// fails to deserialize the enum value) or an
+    /// [`Expression::SemiAdditiveBalance`] with a day shift / non-blank
+    /// boundary
+    /// (`PREVIOUSDAY`/`NEXTDAY`/`FIRSTNONBLANK`/`LASTNONBLANK` — a pre-v23
+    /// engine silently drops the additive `shift_days`/`non_blank` fields and
+    /// computes the plain balance). Drives the host's format-version
+    /// stamping (v23).
+    pub fn contains_day_level_time_intelligence(&self) -> bool {
+        let here = match self {
+            Expression::ToDate { granularity, .. }
+            | Expression::PeriodShift { granularity, .. }
+            | Expression::DatesInPeriod { granularity, .. } => {
+                matches!(granularity, super::DateGranularity::Day)
+            }
+            Expression::SemiAdditiveBalance {
+                shift_days,
+                non_blank,
+                ..
+            } => *shift_days != 0 || *non_blank,
+            _ => false,
+        };
+        here || super::child_expressions(self)
+            .iter()
+            .any(|c| c.contains_day_level_time_intelligence())
+    }
+
+    /// Returns `true` if this tree contains a `QUERY ... TOP` — an
+    /// [`Expression::Query`] whose `top` is set — anywhere. A pre-v23 engine
+    /// silently drops the additive field and materializes the UNRANKED full
+    /// intermediate — drives the host's format-version stamping (v23).
+    pub fn contains_query_top(&self) -> bool {
+        matches!(self, Expression::Query { top: Some(_), .. })
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.contains_query_top())
     }
 
     /// Returns `true` if this tree contains an [`Expression::Query`]
@@ -601,6 +683,7 @@ mod tests {
         assert!(Expression::InList {
             expr: Box::new(w.clone()),
             values: vec![lit_int(1)],
+            negated: false,
         }
         .has_window());
         assert!(selected_value(w.clone(), None).has_window());

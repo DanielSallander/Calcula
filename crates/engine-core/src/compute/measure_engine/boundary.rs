@@ -62,7 +62,7 @@ impl<'a> MeasureEngine<'a> {
         // Register all needed tables.
         for table_name in &all_tables {
             let batch = self.get_table_batch(table_name).await?;
-            let df_name = df_table_name(&table_name);
+            let df_name = df_table_name(table_name);
             // Avoid re-registering.
             if ctx.table(&df_name).await.is_err() {
                 ctx.register_batch(&df_name, batch)?;
@@ -384,7 +384,7 @@ impl<'a> MeasureEngine<'a> {
         ctx: &SessionContext,
         idx: usize,
     ) -> EngineResult<RecordBatch> {
-        let fact_lower = df_table_name(&fact_table);
+        let fact_lower = df_table_name(fact_table);
 
         // Find the unsafe dim in GROUP BY.
         let mut unsafe_dim: Option<(&str, &crate::model::relationship::Relationship)> = None;
@@ -417,7 +417,7 @@ impl<'a> MeasureEngine<'a> {
             }
         };
 
-        let dim_lower = df_table_name(&unsafe_dim_name);
+        let dim_lower = df_table_name(unsafe_dim_name);
         let fact_is_from = rel.from_table() == fact_table;
 
         // Step 1: Compute boundary values per group from the unsafe dim.
@@ -529,7 +529,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         for table_name in &tables_to_join {
-            let tbl = df_table_name(&table_name);
+            let tbl = df_table_name(table_name);
             if main_joined.contains(&tbl) {
                 continue;
             }
@@ -594,7 +594,7 @@ impl<'a> MeasureEngine<'a> {
         eval_ctx: &EvaluationContext,
         ctx: &SessionContext,
     ) -> EngineResult<RecordBatch> {
-        let fact_lower = df_table_name(&fact_table);
+        let fact_lower = df_table_name(fact_table);
 
         let mut select_parts: Vec<String> = Vec::new();
         let mut group_parts: Vec<String> = Vec::new();
@@ -628,7 +628,7 @@ impl<'a> MeasureEngine<'a> {
         }
 
         for table_name in &tables_to_join {
-            let tbl = df_table_name(&table_name);
+            let tbl = df_table_name(table_name);
             if joined.contains(&tbl) {
                 continue;
             }

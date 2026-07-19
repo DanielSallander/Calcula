@@ -101,8 +101,13 @@ pub struct WritebackConstraints {
 
 /// Reserved column names of the synthesized store tables. A key column with
 /// one of these names would collide with the store schema.
-pub const WRITEBACK_RESERVED_COLUMNS: [&str; 5] =
-    ["value", "submitter_id", "submitter_name", "submitted_at", "state"];
+pub const WRITEBACK_RESERVED_COLUMNS: [&str; 5] = [
+    "value",
+    "submitter_id",
+    "submitter_name",
+    "submitted_at",
+    "state",
+];
 
 /// A designer-declared writeback column on a model table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,7 +477,10 @@ mod tests {
             w.history_table_name(),
             "__wb_0198c1c2abcd700080000123456789ab_hist"
         );
-        assert_eq!(w.current_table_name(), "__wb_0198c1c2abcd700080000123456789ab");
+        assert_eq!(
+            w.current_table_name(),
+            "__wb_0198c1c2abcd700080000123456789ab"
+        );
 
         let keys = vec![("ID".to_string(), DataType::Int64)];
         let hist: Vec<String> = w
@@ -482,7 +490,14 @@ mod tests {
             .collect();
         assert_eq!(
             hist,
-            vec!["ID", "value", "submitter_id", "submitter_name", "submitted_at", "state"]
+            vec![
+                "ID",
+                "value",
+                "submitter_id",
+                "submitter_name",
+                "submitted_at",
+                "state"
+            ]
         );
         let cur: Vec<String> = w
             .current_columns(&keys)

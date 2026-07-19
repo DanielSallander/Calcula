@@ -139,6 +139,7 @@ impl Engine {
         let Expression::Query {
             aggregates,
             group_by,
+            top,
         } = gv.expression().clone()
         else {
             return Err(EngineError::MaterializationFailed {
@@ -249,6 +250,29 @@ impl Engine {
                     }
                 })?,
             );
+        }
+
+        // A calculated table's `TOP n BY alias` keeps only the top-ranked rows
+        // in the materialized snapshot (tie-inclusive, one global partition —
+        // there is no outer axis at refresh time). Applied after conforming so
+        // the ranked column is addressed by its declared alias; batches are
+        // concatenated first so the ranking is global, not per batch.
+        if let Some(spec) = &top {
+            let combined =
+                arrow::compute::concat_batches(&target_schema, &conformed).map_err(|e| {
+                    EngineError::MaterializationFailed {
+                        name: name.to_string(),
+                        reason: e.to_string(),
+                    }
+                })?;
+            conformed =
+                vec![
+                    engine_core::compute::query_top::apply_query_top(&combined, spec, &[])
+                        .map_err(|e| EngineError::MaterializationFailed {
+                            name: name.to_string(),
+                            reason: e.to_string(),
+                        })?,
+                ];
         }
 
         self.store_refreshed_table(name, conformed)

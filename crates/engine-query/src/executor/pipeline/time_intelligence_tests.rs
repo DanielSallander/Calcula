@@ -719,12 +719,14 @@ async fn filter_context_prioryear_first_year_is_blank() {
 }
 
 #[tokio::test]
-async fn filter_context_prioryear_gapped_context_fails_closed() {
+async fn filter_context_prioryear_gapped_context_is_value_based() {
     // Context = year=2024 EXCEPT June (month <> 6): an internal hole in the
-    // window [Jan, Dec] 2024. A whole-window PRIORYEAR shift would span the hole
-    // and silently include June 2023 (an over-count). It must fail closed — the
-    // same guarantee the axis path gives via `check_period_shift_axis_contiguous`.
-    let err = run(
+    // window [Jan, Dec] 2024. The whole-window shift would span the hole and
+    // silently include June 2023 — so a gapped context routes to the
+    // VALUE-BASED shift: each distinct context date shifted individually,
+    // keeping exactly the shifted set. PRIORYEAR = 2023 minus June
+    // = 2340 − (east 60 + west 120) = 2160 — never 2340.
+    let batches = run(
         "PRIORYEAR(SUM(fact_sales[amount]))",
         true,
         request_with_filters(
@@ -736,11 +738,12 @@ async fn filter_context_prioryear_gapped_context_fails_closed() {
         ),
     )
     .await
-    .unwrap_err();
-    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
-        panic!("expected a typed TimeIntelligence error for a gapped context, got {err:?}");
-    };
-    assert!(reason.contains("not contiguous"), "got: {reason}");
+    .unwrap();
+    assert_eq!(
+        scalar_measure(&batches),
+        Some(2160.0),
+        "value-based shift must exclude the hole (June 2023)"
+    );
 }
 
 #[tokio::test]
@@ -2325,10 +2328,7 @@ async fn dates_between_parse_errors_are_rejected() {
         "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-13-99\", \"2024-12-31\")",
     )
     .unwrap_err();
-    assert!(
-        err.to_string().contains("invalid start date"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("invalid start date"), "got: {err}");
     // start > end.
     let err = parse_measure_expression(
         "DATESBETWEEN(SUM(fact_sales[amount]), \"2024-12-31\", \"2024-01-01\")",
@@ -2523,10 +2523,7 @@ fn fiscal_year_end_month_out_of_range_is_rejected_at_build() {
     let model = model_with_measure("YTD(SUM(fact_sales[amount]))", true)
         .with_fiscal_year_end_month(Some(13));
     let err = model.validate().unwrap_err();
-    assert!(
-        err.to_string().contains("between 1 and 12"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("between 1 and 12"), "got: {err}");
 }
 
 #[test]
@@ -2882,10 +2879,11 @@ async fn rollup_prioryear_by_region_recomputes() {
 }
 
 #[tokio::test]
-async fn rollup_prioryear_gapped_context_fails_closed() {
-    // A whole-window shift over a GAPPED context (Jun excluded) is ill-defined at
-    // every rollup level identically — the global contiguity guard fails the whole
-    // query closed, rather than silently over-counting June 2023 in any subtotal.
+async fn rollup_prioryear_gapped_context_is_value_based_per_level() {
+    // A GAPPED context (Jun excluded) routes to the value-based shift, and the
+    // lowered set filter is an ordinary aggregate — so ROLLUP recomputes it per
+    // level: east 2023−June = 780−60 = 720, west = 1560−120 = 1440, grand
+    // total = 2160 (never the over-counting 2340).
     let mut req = request_with_filters(
         &[("fact_sales", "region")],
         &[
@@ -2894,13 +2892,13 @@ async fn rollup_prioryear_gapped_context_fails_closed() {
         ],
     );
     req.totals = TotalsMode::Rollup;
-    let err = run("PRIORYEAR(SUM(fact_sales[amount]))", true, req)
+    let batches = run("PRIORYEAR(SUM(fact_sales[amount]))", true, req)
         .await
-        .unwrap_err();
-    let QueryError::Engine(EngineError::TimeIntelligence { reason, .. }) = &err else {
-        panic!("expected a TimeIntelligence contiguity error, got {err:?}");
-    };
-    assert!(reason.contains("not contiguous"), "got: {reason}");
+        .unwrap();
+    let map = rollup_region_map(&batches, "m");
+    assert_eq!(map[&(Some("east".into()), 0)], Some(720.0));
+    assert_eq!(map[&(Some("west".into()), 0)], Some(1440.0));
+    assert_eq!(map[&(None, 1)], Some(2160.0));
 }
 
 #[tokio::test]
@@ -3207,4 +3205,249 @@ async fn hierarchy_repeat_parent_with_ytd_and_rollup() {
     assert_eq!(map[&("USA".into(), "*".into())], 40.0);
     // Grand total.
     assert_eq!(map[&("*".into(), "*".into())], 80.0);
+}
+
+// ===========================================================================
+// Day-level time intelligence (v23): PREVIOUSDAY / NEXTDAY boundary-adjacent
+// days, FIRSTNONBLANK / LASTNONBLANK fact-backed boundaries, and DAY-
+// granularity period shifts — exercised over a DAILY calendar fixture
+// (2024-01-01 .. 2024-03-31).
+//
+// Fact coverage: one row per day for Jan 1 .. Feb 29 (amount = day of month),
+// then Mar 5 .. Mar 15 only — with a NULL amount on Mar 10 and Mar 15. So in
+// March: the first date with data is Mar 5, the last NON-BLANK date is
+// Mar 14, and the calendar boundary Mar 31 has no fact row at all.
+// ===========================================================================
+
+fn dim_date_daily_batch() -> RecordBatch {
+    let mut date_id = Vec::new();
+    let mut datekey = Vec::new();
+    let mut year = Vec::new();
+    let mut quarter = Vec::new();
+    let mut month = Vec::new();
+    for (m, days_in_month) in [(1i64, 31i64), (2, 29), (3, 31)] {
+        for d in 1..=days_in_month {
+            date_id.push(20240000 + m * 100 + d);
+            datekey.push(days_from_civil(2024, m, d));
+            year.push(2024i64);
+            quarter.push(1i64);
+            month.push(m);
+        }
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("date_id", DataType::Int64, true),
+        Field::new("datekey", DataType::Date32, true),
+        Field::new("year", DataType::Int64, true),
+        Field::new("quarter", DataType::Int64, true),
+        Field::new("month", DataType::Int64, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(date_id)),
+            Arc::new(Date32Array::from(datekey)),
+            Arc::new(Int64Array::from(year)),
+            Arc::new(Int64Array::from(quarter)),
+            Arc::new(Int64Array::from(month)),
+        ],
+    )
+    .unwrap()
+}
+
+fn fact_daily_batch() -> RecordBatch {
+    let mut date_id: Vec<i64> = Vec::new();
+    let mut region: Vec<&str> = Vec::new();
+    let mut amount: Vec<Option<f64>> = Vec::new();
+    let mut push = |m: i64, d: i64, a: Option<f64>| {
+        date_id.push(20240000 + m * 100 + d);
+        region.push("east");
+        amount.push(a);
+    };
+    for d in 1..=31 {
+        push(1, d, Some(d as f64));
+    }
+    for d in 1..=29 {
+        push(2, d, Some(d as f64));
+    }
+    for d in 5..=15 {
+        // NULL amounts on Mar 10 and Mar 15 (rows exist, value is blank).
+        let a = if d == 10 || d == 15 {
+            None
+        } else {
+            Some(d as f64)
+        };
+        push(3, d, a);
+    }
+    drop(push);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("date_id", DataType::Int64, true),
+        Field::new("region", DataType::Utf8, true),
+        Field::new("amount", DataType::Float64, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(date_id)),
+            Arc::new(StringArray::from(region)),
+            Arc::new(Float64Array::from(amount)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Plan + execute a measure over the DAILY fixture.
+async fn run_day_level(
+    measure_source: &str,
+    request: QueryRequest,
+) -> QueryResult<Vec<RecordBatch>> {
+    let model = model_with_measure_expr(
+        expression_measure("m", parse_measure_expression(measure_source).unwrap()),
+        &FixtureOpts::default(),
+    );
+    let mut cache = InMemoryCache::new();
+    cache.store("dim_date", dim_date_daily_batch()).unwrap();
+    cache.store("fact_sales", fact_daily_batch()).unwrap();
+
+    let mut registry = SourceRegistry::new();
+    registry.bind("dim_date", 0, SourceBinding::new("public", "dim_date"));
+    registry.bind("fact_sales", 0, SourceBinding::new("public", "fact_sales"));
+
+    let plan = PushdownPlanner::plan(request_ref(&request), &model, &registry, &[])?;
+    QueryExecutor::execute(&plan, &model, &registry, Some(&cache), None, None, &[]).await
+}
+
+#[tokio::test]
+async fn previousday_reads_the_day_before_the_context() {
+    // Context = February: first date Feb 1 -> PREVIOUSDAY = Jan 31 -> 31.0.
+    let batches = run_day_level(
+        "PREVIOUSDAY(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "2")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(31.0));
+}
+
+#[tokio::test]
+async fn nextday_reads_the_day_after_the_context() {
+    // Context = February: last date Feb 29 -> NEXTDAY = Mar 1 -> no fact row
+    // on Mar 1 (March data starts Mar 5) -> blank.
+    let batches = run_day_level(
+        "NEXTDAY(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "2")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), None);
+
+    // Context = January: last date Jan 31 -> NEXTDAY = Feb 1 -> 1.0.
+    let batches = run_day_level(
+        "NEXTDAY(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "1")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(1.0));
+}
+
+#[tokio::test]
+async fn previousday_outside_the_calendar_is_blank() {
+    // Context = January: first date Jan 1 -> PREVIOUSDAY = Dec 31 2023, which
+    // is outside the date table entirely -> blank, never an error.
+    let batches = run_day_level(
+        "PREVIOUSDAY(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "1")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), None);
+}
+
+#[tokio::test]
+async fn lastnonblank_reads_last_date_with_data() {
+    // Context = March: rows exist Mar 5..15, but Mar 10 and Mar 15 are NULL —
+    // the last NON-BLANK date is Mar 14 -> 14.0. The calendar boundary
+    // (CLOSINGBALANCE = Mar 31) has no fact row -> blank, proving the
+    // fact-backed probe differs from the calendar probe.
+    let batches = run_day_level(
+        "LASTNONBLANK(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "3")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(14.0));
+
+    let batches = run_day_level(
+        "CLOSINGBALANCE(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "3")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), None);
+}
+
+#[tokio::test]
+async fn firstnonblank_skips_days_without_data() {
+    // Context = March: data starts Mar 5 -> FIRSTNONBLANK = 5.0, while
+    // OPENINGBALANCE (calendar boundary Mar 1, no row) is blank.
+    let batches = run_day_level(
+        "FIRSTNONBLANK(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "3")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(5.0));
+
+    let batches = run_day_level(
+        "OPENINGBALANCE(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "3")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), None);
+}
+
+#[tokio::test]
+async fn lastnonblank_with_no_data_in_context_is_blank() {
+    // An out-of-data context (the daily calendar only covers 2024, and the
+    // filter keeps no date rows -> empty context) must be blank, never an
+    // error.
+    let batches = run_day_level(
+        "LASTNONBLANK(SUM(fact_sales[amount]))",
+        request_with_filters(&[], &[("year", FilterOperator::Equal, "2023")]),
+    )
+    .await
+    .unwrap();
+    // An empty date context short-circuits to an empty result set (the same
+    // blank contract the other filter-context TI paths use).
+    assert!(
+        batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0),
+        "empty context must yield a blank result"
+    );
+}
+
+#[tokio::test]
+async fn priorperiod_day_granularity_shifts_by_days() {
+    // Context = February (Feb 1..29, contiguous): PRIORPERIOD(-31, DAY)
+    // shifts the whole window back 31 days -> Jan 1..29 -> 1+...+29 = 435.
+    let batches = run_day_level(
+        "PRIORPERIOD(SUM(fact_sales[amount]), -31, DAY)",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "2")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(435.0));
+}
+
+#[tokio::test]
+async fn datesinperiod_day_granularity_trailing_window() {
+    // Context = February: as-of = Feb 29; DATESINPERIOD(-7, DAY) = trailing
+    // 7 days Feb 23..29 -> 23+...+29 = 182.
+    let batches = run_day_level(
+        "DATESINPERIOD(SUM(fact_sales[amount]), -7, DAY)",
+        request_with_filters(&[], &[("month", FilterOperator::Equal, "2")]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scalar_measure(&batches), Some(182.0));
 }

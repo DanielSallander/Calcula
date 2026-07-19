@@ -225,13 +225,13 @@ use crate::model::calculated_column::CalculatedColumn;
 use crate::model::calculation_group::CalculationGroup;
 use crate::model::context::ContextDefinition;
 use crate::model::context_column::ContextColumn;
+use crate::model::culture::Culture;
 use crate::model::global_variable::GlobalVariable;
 use crate::model::hierarchy::Hierarchy;
 use crate::model::kpi::Kpi;
+use crate::model::perspective::Perspective;
 use crate::model::relationship::Relationship;
 use crate::model::security_role::SecurityRole;
-use crate::model::culture::Culture;
-use crate::model::perspective::Perspective;
 use crate::model::source::PersistedSource;
 use crate::model::table::Table;
 use crate::model::table_variable::TableVariable;
@@ -443,8 +443,22 @@ use crate::model::writeback_column::WritebackColumn;
 ///   map on resave — destroying third-party data — so the
 ///   [`ModelFormatTooNew`] gate refuses v22 files on a pre-v22 engine.
 ///
+/// - `23` — calc-group introspection + expression surface: measure/calc-item
+///   expressions may now contain the calc-group placeholders
+///   `ISSELECTEDMEASURE(...)` / `SELECTEDMEASURENAME()` /
+///   `SELECTEDMEASUREFORMATSTRING()` (new [`Expression`] variants),
+///   [`CalculationItem`](crate::model::CalculationItem) gained
+///   `format_string_expression` (a per-item dynamic format string), the
+///   `NOT IN` / `TOPN`-in-`QUERY` / `CROSSFILTER(...)` /
+///   `PREVIOUSDAY`/`NEXTDAY` / `FIRSTNONBLANK`/`LASTNONBLANK` expression
+///   forms landed (new AST variants/fields), and
+///   [`DateGranularity`](crate::compute::expression::DateGranularity) gained
+///   `Day`. A pre-v23 engine would fail to deserialize the new AST nodes (or
+///   silently drop the new item field on resave) — so the
+///   [`ModelFormatTooNew`] gate refuses v23 files on a pre-v23 engine.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 22;
+pub const MODEL_FORMAT_VERSION: u32 = 23;
 
 /// A data model consisting of tables and relationships between them.
 ///

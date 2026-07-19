@@ -1157,6 +1157,76 @@ The `InPredicate` resolves the table variable chain to its base table and accumu
 
 ---
 
+## Calculation-Group and Time-Intelligence Additions (format v23)
+
+### Calculation-group introspection
+
+Inside a **calculation item** (or a group's selection expression) three
+functions complement `SELECTEDMEASURE()` — all folded away when the group is
+applied, before planning:
+
+| Function | Result |
+|----------|--------|
+| `ISSELECTEDMEASURE([M1], [M2], ...)` | `TRUE` when the applied measure is one of the listed measures (exact-name match; arguments validated at model build and dependency-tracked) |
+| `SELECTEDMEASURENAME()` | The applied measure's name, as a string literal |
+| `SELECTEDMEASUREFORMATSTRING()` | The applied measure's static format string (BLANK when none) |
+
+A calculation item may also carry a **format string expression**
+(`CalculationItem::with_format_string_expression`) — the item-level dynamic
+format string, typically `CONCATENATE(SELECTEDMEASUREFORMATSTRING(), " K")`.
+Precedence for a calc-group column's reported format: item expression →
+item static format → base measure's dynamic format → base measure's static
+format. Constant expressions fold without a query.
+
+```
+ITEM Boost = IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())
+```
+
+### NOT IN — anti-membership
+
+Both `IN` forms accept a `NOT` prefix inside KEEP:
+
+```
+SUM(Sales[amount], KEEP(Sales, Sales[color] NOT IN {"Blue", "Red"}))
+SUM(Sales[amount], KEEP(Product, Sales[prod_id] NOT IN premium[id]))
+```
+
+SQL `<>` semantics: a BLANK tested value satisfies neither `IN` nor
+`NOT IN`; an empty set keeps every row under `NOT IN`.
+
+### Day-level time intelligence
+
+`PRIORPERIOD` / `PARALLELPERIOD` / `DATESINPERIOD` accept a `DAY` interval
+(filter-context only, like `WEEK`). Four new filter-context functions ride
+the semi-additive balance machinery:
+
+| Function | Boundary |
+|----------|----------|
+| `PREVIOUSDAY(x)` | The single day before the context's first date |
+| `NEXTDAY(x)` | The single day after the context's last date |
+| `FIRSTNONBLANK(x)` | The first context date **with fact data** (inner must be a simple single-column aggregate or COUNTROWS) |
+| `LASTNONBLANK(x)` | The last context date **with fact data** |
+
+The non-blank boundary is probed once per query over the whole context (not
+per group-by cell — a documented divergence from DAX).
+
+Filter-context period shifts over a **gapped** date context (e.g. Jan+Mar
+without Feb) now compute a value-based per-date shift (DAX `DATEADD`
+semantics with the end-of-month snap) instead of failing closed; contiguous
+contexts keep the algebraic whole-window shift.
+
+### QUERY ... TOP n BY alias
+
+A tie-inclusive top-N over a QUERY intermediate (per outer group when the
+query re-evaluates per group):
+
+```
+VAR top3 = QUERY(SUM(Sales[amount]) AS a BY Product[category] TOP 3 BY a)
+RETURN SUM(top3[a])
+```
+
+See the per-function pages under `docs/functions/` for details.
+
 ## Composition Patterns
 
 Context functions compose by nesting. Read from inside-out to understand the evaluation order.

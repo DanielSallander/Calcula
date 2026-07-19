@@ -14,6 +14,7 @@ use crate::model::schema::validate_identifier;
 
 mod builders;
 mod case_when;
+mod fold;
 mod format;
 mod functions;
 mod globals;
@@ -33,15 +34,15 @@ mod walkers;
 pub use builders::{
     agg, and, blank, block, block_with_globals, call, clear, clear_except, clear_inner,
     clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_between,
-    dates_in_period, datetime_fn,
-    expr_literal_from_arrow, expr_literal_from_scalar, first_value, has_one_value, if_error,
-    if_expr, index_expr, is_blank, is_filtered, is_in_scope, iterate, keep, keep_conditions,
-    keep_in, keep_vars,
-    lit, lit_bool, lit_int, lit_str, not, offset_expr, opening_balance, or, percentile,
-    period_shift, qualified_col, query_expr, reset, reset_inner, reset_outer, safe_divide,
-    scalar_fn, selected_value, switch, table_ref, text_fn, this_row, to_date, traverse,
-    use_relationship, using, window_expr, xor,
+    dates_in_period, datetime_fn, expr_literal_from_arrow, expr_literal_from_scalar,
+    first_non_blank, first_value, has_one_value, if_error, if_expr, index_expr, is_blank,
+    is_filtered, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars, last_non_blank,
+    lit, lit_bool, lit_int, lit_str, next_day, not, offset_expr, opening_balance, or, percentile,
+    period_shift, previous_day, qualified_col, query_expr, query_expr_with_top, reset, reset_inner,
+    reset_outer, safe_divide, scalar_fn, selected_value, switch, table_ref, text_fn, this_row,
+    to_date, traverse, use_relationship, using, window_expr, xor,
 };
+pub use fold::{const_fold_scalar, ConstFold, FoldValue};
 pub use format::{expression_to_formula, measure_to_formula};
 pub use functions::{DateTimeFunction, ScalarFunction};
 pub(crate) use functions::{
@@ -58,11 +59,16 @@ pub use render::{
 pub use text::TextFunction;
 pub use transform::{
     extract_lookup_joins, extract_thisrow_aggregates, resolve_is_filtered, resolve_is_in_scope,
-    validate_thisrow_calculated_column, LookupJoinSpec,
+    validate_thisrow_calculated_column, LookupJoinSpec, SelectedMeasureInfo,
 };
 pub use validate::is_valid_call_name;
 pub(crate) use validate::validate_call_name;
 pub(crate) use walkers::child_expressions;
+
+/// serde `skip_serializing_if` helper for defaulted zero fields.
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
 
 /// Arithmetic operators for binary expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +141,11 @@ pub enum DateGranularity {
     /// Monday. Filter-context only in v1 (a date column on the query axis
     /// fails closed).
     Week,
+    /// Day-level: `PRIORPERIOD(…, "DAY")`, `DATESINPERIOD(…, "DAY")` — plain
+    /// calendar days. Filter-context only in v1 (a date column on the query
+    /// axis fails closed, like [`Week`](Self::Week)); not valid for
+    /// [`ToDate`](Expression::ToDate) (a day-to-date is the day itself).
+    Day,
 }
 
 impl std::fmt::Display for DateGranularity {
@@ -144,8 +155,31 @@ impl std::fmt::Display for DateGranularity {
             Self::Quarter => write!(f, "Quarter"),
             Self::Month => write!(f, "Month"),
             Self::Week => write!(f, "Week"),
+            Self::Day => write!(f, "Day"),
         }
     }
+}
+
+/// Tie-inclusive TOP-N specification on a [`Expression::Query`] intermediate:
+/// `QUERY(SUM(f[amt]) AS a BY p[cat] TOP 3 BY a)`.
+///
+/// Applied AFTER the grouped materialization: the intermediate table keeps
+/// only the rows ranking in the first `limit` positions by the `by` column —
+/// **tie-inclusive** (every row tied with the boundary value is kept, like
+/// DAX `TOPN` and the request-level `top_n`), so more than `limit` rows are
+/// possible. When the query is re-evaluated per outer group (outer group-by
+/// columns injected into the QUERY's group-by), the TOP-N applies **within
+/// each outer group** — DAX-style context propagation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryTop {
+    /// The output column ranked by: an aggregate alias or a group-by output
+    /// column of the QUERY (validated at model build).
+    pub by: String,
+    /// Ranking positions kept per partition (ties at the boundary all kept).
+    pub limit: u32,
+    /// `true` = bottom-N (ascending rank). Default = top-N (descending).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ascending: bool,
 }
 
 /// Defines window frame boundaries for WINDOW expressions.
@@ -496,6 +530,11 @@ pub enum Expression {
         /// Group-by columns as `(table, column)` pairs.
         /// These are automatically included in the output table.
         group_by: Vec<(String, String)>,
+        /// Optional tie-inclusive TOP-N over the materialized rows
+        /// (`TOP n BY alias [ASC]`), applied per outer group. See
+        /// [`QueryTop`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top: Option<QueryTop>,
     },
 
     /// Check if a column has exactly one distinct value in the current context.
@@ -719,6 +758,22 @@ pub enum Expression {
         /// `true` = `OPENINGBALANCE` (first date in context); `false` =
         /// `CLOSINGBALANCE` (last date in context).
         opening: bool,
+        /// Calendar-day offset applied to the boundary date after probing.
+        /// `PREVIOUSDAY` = opening boundary − 1 (`opening: true, shift_days:
+        /// -1`); `NEXTDAY` = closing boundary + 1 (`opening: false,
+        /// shift_days: 1`). `0` for the plain balances.
+        #[serde(default, skip_serializing_if = "is_zero_i64")]
+        shift_days: i64,
+        /// When `true`, the boundary is the first/last context date **with
+        /// fact data** (the inner aggregate's operand is non-BLANK on at
+        /// least one row) rather than the first/last calendar date —
+        /// `FIRSTNONBLANK` / `LASTNONBLANK` (the DAX
+        /// `FIRSTNONBLANKVALUE`/`LASTNONBLANKVALUE` pattern over the date
+        /// key). The boundary is probed **once per query** over the whole
+        /// context — not per group-by cell (documented divergence from DAX,
+        /// which evaluates per cell).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        non_blank: bool,
     },
 
     /// Get measure value at an absolute position within a partition.
@@ -745,12 +800,18 @@ pub enum Expression {
     /// Used inside KEEP conditions to filter by a set of literal values:
     /// ```text
     /// KEEP(dim, dim_product[color] IN {"Blue", "Red", "Black"})
+    /// KEEP(dim, dim_product[color] NOT IN {"Blue", "Red"})
     /// ```
     InList {
         /// The expression to test (typically a column reference).
         expr: Box<Expression>,
         /// The set of values to test against.
         values: Vec<Expression>,
+        /// `true` = anti-membership (`NOT IN`). SQL semantics: a BLANK
+        /// tested value satisfies neither `IN` nor `NOT IN` (consistent
+        /// with `<>`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        negated: bool,
     },
 
     /// Date/time function call: `YEAR(date)`, `MONTH(date)`, `DATEDIFF(...)`, etc.
@@ -989,4 +1050,47 @@ pub enum Expression {
     /// [`Expression::validate_calc_item`] permits it), and the pushdown
     /// planner treats it as unpushable so it can never be pushed to a source.
     SelectedMeasure,
+
+    /// `ISSELECTEDMEASURE([M1], [M2], ...)` — TRUE when the measure a
+    /// calculation item is being applied to is one of the listed measures.
+    ///
+    /// Like [`SelectedMeasure`](Expression::SelectedMeasure) this is legal
+    /// **only** inside a calculation item (or selection expression). It is
+    /// resolved at application time — [`Expression::substitute_selected_measure`]
+    /// folds it to a [`LiteralBool`](Expression::LiteralBool) by comparing the
+    /// applied measure's name (exact, case-sensitive — the same matching used
+    /// for measure lookup) against `measures` — so it never reaches planning
+    /// or SQL generation. The listed names are validated against the model at
+    /// build time and reported by the dependency walkers
+    /// ([`Expression::measure_references`]), so renaming a measure surfaces
+    /// stale references instead of silently changing behavior.
+    IsSelectedMeasure {
+        /// The measure names to compare the applied measure against.
+        measures: Vec<String>,
+    },
+
+    /// `SELECTEDMEASURENAME()` — the name of the measure a calculation item
+    /// is currently being applied to, as a string.
+    ///
+    /// Calc-item-only like [`SelectedMeasure`](Expression::SelectedMeasure);
+    /// folded to a [`LiteralString`](Expression::LiteralString) at application
+    /// time by [`Expression::substitute_selected_measure`]. Prefer
+    /// [`IsSelectedMeasure`](Expression::IsSelectedMeasure) for per-measure
+    /// branching (it is rename-checked and dependency-tracked); use this for
+    /// labels and diagnostics.
+    SelectedMeasureName,
+
+    /// `SELECTEDMEASUREFORMATSTRING()` — the format string of the measure a
+    /// calculation item is currently being applied to.
+    ///
+    /// Calc-item-only like [`SelectedMeasure`](Expression::SelectedMeasure);
+    /// folded at application time by
+    /// [`Expression::substitute_selected_measure`] to a
+    /// [`LiteralString`](Expression::LiteralString) of the applied measure's
+    /// format string, or [`Blank`](Expression::Blank) when the measure has
+    /// none. Its primary home is a calculation item's **format string
+    /// expression** (`CalculationItem::format_string_expression`), where it
+    /// lets an item preserve-and-modify the base measure's format (e.g. append
+    /// `" K"`); it is also legal in the item's value expression.
+    SelectedMeasureFormatString,
 }

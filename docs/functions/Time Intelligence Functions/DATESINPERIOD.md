@@ -14,7 +14,7 @@ DATESINPERIOD(expression, intervals, "granularity")
 |-----------|------------|
 | `expression` | The aggregate to evaluate over the trailing window. |
 | `intervals` | Negative period count — the trailing window size (e.g. `-12` = last 12 periods). |
-| `"granularity"` | `"YEAR"`, `"QUARTER"`, `"MONTH"`, or `"WEEK"` (weeks shift by 7 days). |
+| `"granularity"` | `"YEAR"`, `"QUARTER"`, `"MONTH"`, `"WEEK"`, or `"DAY"` (weeks shift by 7 days). |
 
 ## Return value
 
@@ -41,3 +41,8 @@ With a slicer on March 2024, sums April 2023 through March 2024.
 
 - [DATESBETWEEN](DATESBETWEEN.md)
 - [YTD](YTD.md)
+
+## Day windows
+
+`DATESINPERIOD(SUM(Sales[amount]), -7, DAY)` is the trailing 7 days ending at
+the context's as-of date — meaningful on a daily-grain date table.

@@ -168,6 +168,7 @@ fn rejects_hierarchy_name_collision_with_global_variable() {
                 "Cnt".into(),
             )],
             group_by: vec![("dim_geography".into(), "state".into())],
+            top: None,
         },
     );
     let h = Hierarchy::new(

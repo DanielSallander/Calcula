@@ -53,7 +53,11 @@ pub fn quote_table_ref_double(name: &str) -> String {
     let mut parts = name.split('.');
     if let (Some(schema), Some(table), None) = (parts.next(), parts.next(), parts.next()) {
         if !schema.is_empty() && !table.is_empty() {
-            return format!("{}.{}", quote_ident_double(schema), quote_ident_double(table));
+            return format!(
+                "{}.{}",
+                quote_ident_double(schema),
+                quote_ident_double(table)
+            );
         }
     }
     quote_ident_double(name)

@@ -92,7 +92,7 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
             operand,
             percentile,
         } => has_measure_ref(operand) || has_measure_ref(percentile),
-        Expression::InList { expr, values } => {
+        Expression::InList { expr, values, .. } => {
             has_measure_ref(expr) || values.iter().any(has_measure_ref)
         }
         Expression::Query { aggregates, .. } => aggregates.iter().any(|(e, _)| has_measure_ref(e)),
@@ -314,9 +314,16 @@ fn expand_measure_refs_inner(
             start: start.clone(),
             end: end.clone(),
         }),
-        Expression::SemiAdditiveBalance { expr, opening } => Ok(Expression::SemiAdditiveBalance {
+        Expression::SemiAdditiveBalance {
+            expr,
+            opening,
+            shift_days,
+            non_blank,
+        } => Ok(Expression::SemiAdditiveBalance {
             expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
             opening: *opening,
+            shift_days: *shift_days,
+            non_blank: *non_blank,
         }),
         Expression::SafeDivide {
             numerator,
@@ -441,12 +448,14 @@ fn expand_measure_refs_inner(
         Expression::InList {
             expr: inner,
             values,
+            negated,
         } => Ok(Expression::InList {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
             values: values
                 .iter()
                 .map(|v| expand_measure_refs_inner(v, model, visited))
                 .collect::<crate::error::EngineResult<Vec<_>>>()?,
+            negated: *negated,
         }),
         Expression::Call { name, args } => Ok(Expression::Call {
             name: name.clone(),
@@ -504,6 +513,7 @@ fn expand_measure_refs_inner(
         Expression::Query {
             aggregates,
             group_by,
+            top,
         } => Ok(Expression::Query {
             aggregates: aggregates
                 .iter()
@@ -512,6 +522,7 @@ fn expand_measure_refs_inner(
                 })
                 .collect::<crate::error::EngineResult<Vec<_>>>()?,
             group_by: group_by.clone(),
+            top: top.clone(),
         }),
         // Leaf nodes and anything without MeasureRef pass through unchanged.
         _ => Ok(expr.clone()),
@@ -598,6 +609,7 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::Query {
             aggregates,
             group_by,
+            ..
         } => aggregates
             .iter()
             .find_map(|(e, _)| infer_fact_table(e))
@@ -622,7 +634,7 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         | Expression::DatesInPeriod { expr, .. }
         | Expression::DatesBetween { expr, .. }
         | Expression::SemiAdditiveBalance { expr, .. } => infer_fact_table(expr),
-        Expression::InList { expr, values } => {
+        Expression::InList { expr, values, .. } => {
             infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))
         }
         Expression::Iterate { table, expression } => {

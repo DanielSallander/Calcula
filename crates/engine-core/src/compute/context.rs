@@ -130,6 +130,10 @@ pub struct ResolvedInFilter {
     pub var_column: String,
     /// Filters to apply to the variable's base table (resolved from the variable chain).
     pub var_filters: Vec<ResolvedFilter>,
+    /// `true` = anti-membership (`NOT IN`): keep rows whose value is NOT in
+    /// the set. An empty set then keeps every row; a BLANK tested value
+    /// satisfies neither form (SQL `<>` semantics).
+    pub negated: bool,
 }
 
 /// A resolved evaluation context: the result of walking context operations
@@ -299,9 +303,10 @@ impl<'a> ContextResolver<'a> {
 
     fn walk(&self, expr: &Expression, ctx: &mut EvaluationContext) -> EngineResult<Expression> {
         match expr {
-            // Leaf nodes pass through. SelectedMeasure is always substituted
-            // away before context resolution, but pass it through unchanged
-            // (like MeasureRef) rather than failing here.
+            // Leaf nodes pass through. The calc-group placeholders
+            // (SelectedMeasure and its introspection family) are always
+            // substituted away before context resolution, but pass them
+            // through unchanged (like MeasureRef) rather than failing here.
             Expression::ColumnRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
@@ -309,7 +314,10 @@ impl<'a> ContextResolver<'a> {
             | Expression::LiteralBool(_)
             | Expression::TableRef(_)
             | Expression::MeasureRef(_)
-            | Expression::SelectedMeasure => Ok(expr.clone()),
+            | Expression::SelectedMeasure
+            | Expression::IsSelectedMeasure { .. }
+            | Expression::SelectedMeasureName
+            | Expression::SelectedMeasureFormatString => Ok(expr.clone()),
 
             // Qualified column ref: if table_or_var is a table variable, resolve it
             Expression::QualifiedColumnRef {
@@ -392,6 +400,7 @@ impl<'a> ContextResolver<'a> {
                         var_base_table: base_table,
                         var_column: pred.var_column.clone(),
                         var_filters,
+                        negated: pred.negated,
                     });
                 }
                 Ok(inner)
@@ -498,6 +507,7 @@ impl<'a> ContextResolver<'a> {
                         var_base_table: base_table,
                         var_column: pred.var_column.clone(),
                         var_filters,
+                        negated: pred.negated,
                     });
                 }
                 Ok(inner)
@@ -671,6 +681,7 @@ impl<'a> ContextResolver<'a> {
             Expression::Query {
                 aggregates,
                 group_by,
+                top,
             } => {
                 // Walk aggregate expressions to resolve any context ops within them.
                 let walked_aggs: Vec<(Expression, String)> = aggregates
@@ -683,6 +694,7 @@ impl<'a> ContextResolver<'a> {
                 Ok(Expression::Query {
                     aggregates: walked_aggs,
                     group_by: group_by.clone(),
+                    top: top.clone(),
                 })
             }
 
@@ -810,15 +822,23 @@ impl<'a> ContextResolver<'a> {
             Expression::SemiAdditiveBalance {
                 expr: inner,
                 opening,
+                shift_days,
+                non_blank,
             } => {
                 let inner = self.walk(inner, ctx)?;
                 Ok(Expression::SemiAdditiveBalance {
                     expr: Box::new(inner),
                     opening: *opening,
+                    shift_days: *shift_days,
+                    non_blank: *non_blank,
                 })
             }
 
-            Expression::InList { expr, values } => {
+            Expression::InList {
+                expr,
+                values,
+                negated,
+            } => {
                 let expr = self.walk(expr, ctx)?;
                 let walked: Vec<Expression> = values
                     .iter()
@@ -827,6 +847,7 @@ impl<'a> ContextResolver<'a> {
                 Ok(Expression::InList {
                     expr: Box::new(expr),
                     values: walked,
+                    negated: *negated,
                 })
             }
 
@@ -1048,6 +1069,7 @@ impl<'a> ContextResolver<'a> {
                             var_base_table: base_table,
                             var_column: pred.var_column.clone(),
                             var_filters,
+                            negated: pred.negated,
                         });
                     }
                 }
