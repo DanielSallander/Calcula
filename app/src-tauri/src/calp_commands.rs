@@ -9050,9 +9050,11 @@ fn validate_bi_pivot_definitions(
 ) -> Result<(), String> {
     use pivot_engine::PivotDefinition;
 
-    // Collect all table names, column names, and measure names from data sources
+    // Collect all table names, column names, measure names, and calculation
+    // group names from data sources
     let mut all_tables: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut all_measures: Vec<String> = Vec::new();
+    let mut all_calc_groups: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for ds in data_sources {
         // Navigate into ModelBundle wrapper if present
@@ -9082,6 +9084,14 @@ fn validate_bi_pivot_definitions(
                 }
             }
         }
+
+        if let Some(groups) = model_json.get("calculation_groups").and_then(|g| g.as_array()) {
+            for group in groups {
+                if let Some(name) = group.get("name").and_then(|n| n.as_str()) {
+                    all_calc_groups.insert(name.to_string());
+                }
+            }
+        }
     }
 
     // If no data sources with models, nothing to validate against
@@ -9104,22 +9114,26 @@ fn validate_bi_pivot_definitions(
 
         // Validate row fields
         for field in &def.row_fields {
-            validate_dimension_field(field.name.as_str(), "Row", pivot_name, &all_tables, &mut errors);
+            validate_dimension_field(field.name.as_str(), "Row", pivot_name, &all_tables, &all_calc_groups, &mut errors);
         }
 
         // Validate column fields
         for field in &def.column_fields {
-            validate_dimension_field(field.name.as_str(), "Column", pivot_name, &all_tables, &mut errors);
+            validate_dimension_field(field.name.as_str(), "Column", pivot_name, &all_tables, &all_calc_groups, &mut errors);
         }
 
         // Validate filter fields
         for field in &def.filter_fields {
-            validate_dimension_field(field.field.name.as_str(), "Filter", pivot_name, &all_tables, &mut errors);
+            validate_dimension_field(field.field.name.as_str(), "Filter", pivot_name, &all_tables, &all_calc_groups, &mut errors);
         }
 
-        // Validate value fields — must match a BI measure name
+        // Validate value fields — must match a BI measure name. Stored value
+        // fields carry the DAX-style display wrapper "[Measure]" (see the
+        // pivot editor's handleBiMeasureToggle and the bracket-stripping in
+        // pivot::commands), so compare the bare name too.
         for field in &def.value_fields {
-            if !all_measures.iter().any(|m| m == &field.name) {
+            let bare = field.name.trim_start_matches('[').trim_end_matches(']');
+            if !all_measures.iter().any(|m| m == &field.name || m.as_str() == bare) {
                 errors.push(format!(
                     "BI pivot \"{}\": Value field \"{}\" does not match any measure in the model. Available measures: {}",
                     pivot_name,
@@ -9141,14 +9155,44 @@ fn validate_bi_pivot_definitions(
 }
 
 /// Validate a single dimension field (row, column, or filter) for a BI pivot.
-/// Must be in "Table.Column" format with a valid table and column name.
+/// Must be in "Table.Column" format with a valid table and column name —
+/// except the recognized non-column placements: a calculation group placed as
+/// a dimension (bare group name), the synthetic values-only "Total" row field,
+/// and hierarchy fields ("Table.__hierarchy__.Name").
 fn validate_dimension_field(
     name: &str,
     area: &str,
     pivot_name: &str,
     tables: &std::collections::HashMap<String, Vec<String>>,
+    calc_groups: &std::collections::HashSet<String>,
     errors: &mut Vec<String>,
 ) {
+    // A calculation group placed as a dimension is stored under its bare
+    // group name (the backend maps it to the CALC_GROUP_TABLE pseudo-ref).
+    if calc_groups.contains(name) {
+        return;
+    }
+
+    // The synthetic values-only "Total" row field is an internal placeholder
+    // (re-injected by update_bi_pivot_fields as needed), not a model column.
+    if name == "Total" {
+        return;
+    }
+
+    // Hierarchy placement: only the table part names a model object; the
+    // hierarchy's levels resolve against the model at query time.
+    if let Some((table_name, _hierarchy)) = name.split_once(".__hierarchy__.") {
+        if !tables.contains_key(table_name) {
+            let available = tables.keys().cloned().collect::<Vec<_>>().join(", ");
+            errors.push(format!(
+                "BI pivot \"{}\": {} field \"{}\" references table \"{}\" which does not exist in the model. Available tables: {}",
+                pivot_name, area, name, table_name,
+                if available.is_empty() { "(none)".to_string() } else { available },
+            ));
+        }
+        return;
+    }
+
     if !name.contains('.') {
         errors.push(format!(
             "BI pivot \"{}\": {} field \"{}\" is not in Table.Column format (expected e.g. \"dim_product.categoryname\")",
@@ -9176,6 +9220,101 @@ fn validate_dimension_field(
             pivot_name, area, name, table_name,
             if available.is_empty() { "(none)".to_string() } else { available },
         ));
+    }
+}
+
+#[cfg(test)]
+mod bi_pivot_validation_tests {
+    use super::validate_bi_pivot_definitions;
+    use pivot_engine::{AggregationType, PivotDefinition, PivotField, ValueField};
+
+    fn model_data_source() -> calp::publish::PublishDataSource {
+        calp::publish::PublishDataSource {
+            id: "ds1".to_string(),
+            name: "Model".to_string(),
+            connection_type: "file".to_string(),
+            server: String::new(),
+            database: String::new(),
+            model_json: serde_json::json!({
+                "tables": [
+                    { "name": "dim_customer", "columns": [ { "name": "country" }, { "name": "city" } ] }
+                ],
+                "measures": [ { "name": "Revenue" }, { "name": "% Revenue of Total" } ],
+                "calculation_groups": [ { "name": "Time Intelligence", "items": [] } ]
+            }),
+            bindings: Vec::new(),
+            calculated_table_snapshots: Vec::new(),
+            writeback_history_json: None,
+        }
+    }
+
+    fn bi_def() -> PivotDefinition {
+        PivotDefinition::new(identity::EntityId::ZERO, (0, 0), (0, 0))
+    }
+
+    fn workbook_with_bi_pivot(def: &PivotDefinition) -> persistence::Workbook {
+        let mut wb = persistence::Workbook::default();
+        wb.pivot_definitions.push(persistence::SavedPivotDefinition {
+            id: identity::EntityId::ZERO,
+            source_type: "bi".to_string(),
+            source_sheet_index: None,
+            definition: serde_json::to_value(def).unwrap(),
+        });
+        wb
+    }
+
+    #[test]
+    fn bracketed_measure_value_field_is_valid() {
+        let mut def = bi_def();
+        def.row_fields.push(PivotField::new(0, "dim_customer.country".to_string()));
+        def.value_fields.push(ValueField::new(0, "[Revenue]".to_string(), AggregationType::Sum));
+        let wb = workbook_with_bi_pivot(&def);
+        let result = validate_bi_pivot_definitions(&wb, &[model_data_source()]);
+        assert!(result.is_ok(), "unexpected error: {:?}", result);
+    }
+
+    #[test]
+    fn unknown_measure_still_fails() {
+        let mut def = bi_def();
+        def.value_fields.push(ValueField::new(0, "[Profit]".to_string(), AggregationType::Sum));
+        let wb = workbook_with_bi_pivot(&def);
+        let err = validate_bi_pivot_definitions(&wb, &[model_data_source()]).unwrap_err();
+        assert!(err.contains("does not match any measure"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn calc_group_and_synthetic_total_row_fields_are_valid() {
+        let mut def = bi_def();
+        def.row_fields.push(PivotField::new(0, "Total".to_string()));
+        def.row_fields.push(PivotField::new(0, "Time Intelligence".to_string()));
+        def.value_fields.push(ValueField::new(0, "[% Revenue of Total]".to_string(), AggregationType::Sum));
+        let wb = workbook_with_bi_pivot(&def);
+        let result = validate_bi_pivot_definitions(&wb, &[model_data_source()]);
+        assert!(result.is_ok(), "unexpected error: {:?}", result);
+    }
+
+    #[test]
+    fn hierarchy_field_validates_table_part() {
+        let mut def = bi_def();
+        def.row_fields.push(PivotField::new(0, "dim_customer.__hierarchy__.Geo".to_string()));
+        def.value_fields.push(ValueField::new(0, "[Revenue]".to_string(), AggregationType::Sum));
+        let result = validate_bi_pivot_definitions(&workbook_with_bi_pivot(&def), &[model_data_source()]);
+        assert!(result.is_ok(), "unexpected error: {:?}", result);
+
+        let mut bad = bi_def();
+        bad.row_fields.push(PivotField::new(0, "nope.__hierarchy__.Geo".to_string()));
+        let err = validate_bi_pivot_definitions(&workbook_with_bi_pivot(&bad), &[model_data_source()])
+            .unwrap_err();
+        assert!(err.contains("does not exist"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn stale_grid_style_field_still_fails() {
+        let mut def = bi_def();
+        def.row_fields.push(PivotField::new(0, "Category".to_string()));
+        let err = validate_bi_pivot_definitions(&workbook_with_bi_pivot(&def), &[model_data_source()])
+            .unwrap_err();
+        assert!(err.contains("not in Table.Column format"), "unexpected error: {err}");
     }
 }
 

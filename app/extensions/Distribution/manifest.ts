@@ -43,6 +43,9 @@ export const PublishDialogDefinition: DialogDefinition = {
   id: PUBLISH_DIALOG_ID,
   component: PublishDialog as React.ComponentType<DialogProps>,
   priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open, so a grid-level Escape must not dismiss it.
+  dismissOnEscape: false,
 };
 
 export const PublishModelDialogDefinition: DialogDefinition = {

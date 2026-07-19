@@ -23,10 +23,16 @@ export function DialogContainer(): React.ReactElement {
 
   const activeDialogs = DialogExtensions.getVisibleDialogs();
 
-  // Close the topmost dialog on Escape (capture phase so Monaco can't swallow it)
+  // Close the topmost Escape-dismissible dialog on Escape (capture phase so
+  // Monaco can't swallow it). Dialogs with dismissOnEscape === false are
+  // non-modal floating windows: Escape passes through to the grid untouched.
   const handleEscape = useCallback((e: KeyboardEvent) => {
-    if (e.key === "Escape" && activeDialogs.length > 0) {
-      const top = activeDialogs[activeDialogs.length - 1];
+    if (e.key !== "Escape") return;
+    const dismissible = activeDialogs.filter(
+      (d) => d.definition.dismissOnEscape !== false
+    );
+    if (dismissible.length > 0) {
+      const top = dismissible[dismissible.length - 1];
       DialogExtensions.closeDialog(top.definition.id);
       e.stopPropagation();
     }

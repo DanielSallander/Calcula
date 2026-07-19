@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from "react";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { biGetConnections, publishModel } from "@api";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 
 export function PublishModelDialog({ onClose }: DialogProps) {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
@@ -28,6 +29,22 @@ export function PublishModelDialog({ onClose }: DialogProps) {
       }
     })();
   }, []);
+
+  // Native folder picker for the registry destination.
+  const handleBrowse = async () => {
+    try {
+      const selected = await openNativeDialog({
+        directory: true,
+        multiple: false,
+        title: "Select Registry Folder",
+      });
+      if (selected && typeof selected === "string") {
+        setRegistryPath(selected);
+      }
+    } catch {
+      // user cancelled
+    }
+  };
 
   const handlePublish = async () => {
     setError(null);
@@ -82,8 +99,12 @@ export function PublishModelDialog({ onClose }: DialogProps) {
       </div>
       <div style={fieldStyle}>
         <label>Registry Path</label>
-        <input style={inputStyle} value={registryPath} onChange={(e) => setRegistryPath(e.target.value)}
-          placeholder="C:\shared\registry" />
+        <div style={{ display: "flex", gap: "4px" }}>
+          <input style={{ ...inputStyle, flex: 1 }} value={registryPath}
+            onChange={(e) => setRegistryPath(e.target.value)}
+            placeholder="C:\shared\registry" />
+          <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
+        </div>
       </div>
       <div style={fieldStyle}>
         <label>Package Name</label>

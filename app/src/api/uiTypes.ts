@@ -153,6 +153,13 @@ export interface DialogDefinition {
   width?: number;
   /** Optional default height in px */
   height?: number;
+  /**
+   * Whether the global Escape key closes this dialog (default true).
+   * Set false for non-modal floating windows: the user keeps working in the
+   * grid while they are open, and a grid-level Escape (cancel cell edit,
+   * clear marquee) must not dismiss them. They close via their own buttons.
+   */
+  dismissOnEscape?: boolean;
 }
 
 // ============================================================================
