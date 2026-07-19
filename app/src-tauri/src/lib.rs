@@ -4614,6 +4614,7 @@ pub fn run() {
             calp_commands::calp_import_overrides,
             calp_commands::calp_refresh_preview,
             calp_commands::calp_refresh_apply,
+            calp_commands::calp_reset_subscription,
             calp_commands::calp_detach,
             calp_commands::calp_dev_subscribe,
             calp_commands::calp_dev_refresh,

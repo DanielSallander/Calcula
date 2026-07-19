@@ -1671,7 +1671,13 @@ pub fn calp_pull(
     // workbook tabs, the provenance ledger, and the persisted subscription's
     // local_name all agree — subscribing to a package whose sheet shares a
     // name with an existing sheet must not produce two identically-named tabs.
-    {
+    // The publisher-name -> resolved-name map is kept: pulled pivot
+    // definitions anchor their output by SHEET NAME (destination_sheet), and
+    // without remapping a renamed sheet's pivot would land on the subscriber's
+    // same-named sheet instead.
+    let sheet_rename_map: std::collections::HashMap<String, String> = {
+        let original_names: Vec<String> =
+            result.sheets.iter().map(|ps| ps.name.clone()).collect();
         let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
         calp::pull::resolve_sheet_name_collisions(
             &mut result.sheets,
@@ -1679,7 +1685,13 @@ pub fn calp_pull(
             &mut taken,
             &std::collections::HashSet::new(),
         );
-    }
+        original_names
+            .into_iter()
+            .zip(result.sheets.iter())
+            .filter(|(orig, ps)| *orig != ps.name)
+            .map(|(orig, ps)| (orig, ps.name.clone()))
+            .collect()
+    };
 
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
@@ -2213,6 +2225,7 @@ pub fn calp_pull(
             &pivot_state,
             sheet_offset,
             &embedded_connection_ids,
+            &sheet_rename_map,
         );
     }
 
@@ -8454,6 +8467,7 @@ fn restore_pulled_pivots(
     pivot_state: &crate::pivot::types::PivotState,
     sheet_offset: usize,
     embedded_connection_ids: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+    sheet_rename_map: &std::collections::HashMap<String, String>,
 ) {
     use pivot_engine::{PivotCache, PivotDefinition};
     use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid, update_pivot_region};
@@ -8489,6 +8503,16 @@ fn restore_pulled_pivots(
         };
 
         let pivot_id = def.id;
+
+        // The pivot anchors its output by sheet NAME. If collision resolution
+        // renamed the pulled sheet ("Sheet1" -> "Sheet1 (2)"), rewrite the
+        // stored anchor so the pivot lands on the package's own sheet — not on
+        // the subscriber's same-named sheet (or sheet 0 via the fallback).
+        if let Some(ref dest) = def.destination_sheet {
+            if let Some(renamed) = sheet_rename_map.get(dest) {
+                def.destination_sheet = Some(renamed.clone());
+            }
+        }
 
         // For BI pivots, ensure the source display shows the model name, not a grid range
         if saved.source_type == "bi" && def.source_range_display.is_none() {
@@ -9188,6 +9212,363 @@ pub struct DataSourceInfo {
     pub database: String,
     pub is_configured: bool,
     pub package_name: String,
+}
+
+// ============================================================================
+// Reset Subscription to Published State
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetSubscriptionParams {
+    pub registry_url: String,
+    pub package_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetSubscriptionResponse {
+    pub sheets_reset: usize,
+    pub overrides_cleared: usize,
+    pub pivots_reset: usize,
+    pub resolved_version: String,
+}
+
+/// Undo/redo snapshot for a subscription reset: the full prior content of every
+/// affected sheet (cells, column widths, row heights, merges) plus the cleared
+/// override entries. Restore swaps the state back wholesale and records the
+/// then-current state as the symmetric inverse, so undo/redo ping-pongs exactly.
+/// Cell-based (not re-materialize), so undo works offline.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CalpResetSnapshot {
+    pub sheets: Vec<CalpResetSheetSnapshot>,
+    /// The local sheet ids the reset touched — the override swap is scoped to
+    /// exactly these on both undo and redo.
+    pub override_sheet_ids: Vec<SheetId>,
+    /// The override entries that were cleared (restored on undo).
+    pub overrides: Vec<calp::CellOverride>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CalpResetSheetSnapshot {
+    pub sheet_index: usize,
+    /// Full sparse cell content to restore to (cells not listed are cleared).
+    pub cells: Vec<(u32, u32, engine::Cell)>,
+    pub column_widths: std::collections::HashMap<u32, f64>,
+    pub row_heights: std::collections::HashMap<u32, f64>,
+    pub merges: Vec<crate::api_types::MergedRegion>,
+}
+
+/// Reset a subscription's sheets to the pristine published content of the
+/// currently resolved version: re-pulls that exact version through the same
+/// signature/integrity gates as subscribe, replaces the tracked sheets' cells,
+/// column widths, row heights, and merges in place, and clears the override
+/// layer for those sheets. Recorded as ONE undo transaction ("calp_reset"
+/// custom restore), so Ctrl+Z brings every local change back.
+#[tauri::command]
+pub fn calp_reset_subscription(
+    state: State<AppState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    params: ResetSubscriptionParams,
+    window: tauri::Window,
+) -> Result<ResetSubscriptionResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // Locate the subscription and copy what we need (lock released after).
+    let (resolved_version, tracked): (String, Vec<(SheetId, SheetId)>) = {
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        let sub = subs
+            .subscriptions
+            .iter()
+            .find(|s| s.package_name == params.package_name && s.registry_url == params.registry_url)
+            .ok_or_else(|| format!("Not subscribed to '{}'.", params.package_name))?;
+        (
+            sub.resolved_version.clone(),
+            sub.sheets
+                .iter()
+                .map(|s| (s.package_sheet_id, s.local_sheet_id))
+                .collect(),
+        )
+    };
+
+    // Re-pull the EXACT resolved version (signature + TOFU + checksum gates run
+    // again — reset must not materialize content weaker-verified than pull did).
+    let registry_path = params
+        .registry_url
+        .strip_prefix("file://")
+        .unwrap_or(&params.registry_url);
+    let registry = crate::calp_registry::open_registry(registry_path).map_err(|e| e.to_string())?;
+    let request = calp::pull::PullRequest {
+        package_name: params.package_name.clone(),
+        registry_url: params.registry_url.clone(),
+        version_pin: calp::VersionPin::parse(&format!("={}", resolved_version))
+            .map_err(|e| e.to_string())?,
+        now: chrono::Utc::now().to_rfc3339(),
+    };
+    let result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
+        .map_err(|e| e.to_string())?;
+
+    // Match pulled sheets to their local workbook indices via the ledger.
+    let pkg_to_local: std::collections::HashMap<SheetId, SheetId> =
+        tracked.iter().cloned().collect();
+    let targets: Vec<(usize, SheetId, &calp::pull::PulledSheet)> = {
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        result
+            .sheets
+            .iter()
+            .filter_map(|ps| {
+                let local_sid = *pkg_to_local.get(&ps.package_sheet_id)?;
+                let idx = sheet_ids.iter().position(|id| *id == local_sid)?;
+                Some((idx, local_sid, ps))
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return Err("None of this package's sheets are present in the workbook.".to_string());
+    }
+    let local_sheet_ids: Vec<SheetId> = targets.iter().map(|(_, sid, _)| *sid).collect();
+
+    // Snapshot the CURRENT state of every affected sheet + its overrides,
+    // BEFORE anything is replaced — this is the undo payload.
+    let snapshot = {
+        let mut sheets = Vec::with_capacity(targets.len());
+        {
+            let grids = state.grids.lock().map_err(|e| e.to_string())?;
+            let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+            let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            for (idx, _, _) in &targets {
+                let Some(grid) = grids.get(*idx) else { continue };
+                sheets.push(CalpResetSheetSnapshot {
+                    sheet_index: *idx,
+                    cells: grid
+                        .cells
+                        .iter()
+                        .map(|(k, c)| (k.0, k.1, c.clone()))
+                        .collect(),
+                    column_widths: all_cw.get(*idx).cloned().unwrap_or_default(),
+                    row_heights: all_rh.get(*idx).cloned().unwrap_or_default(),
+                    merges: Vec::new(), // filled below (separate lock scope)
+                });
+            }
+        }
+        for sheet in sheets.iter_mut() {
+            sheet.merges = crate::report::with_sheet_merges(&state, sheet.sheet_index, |m| {
+                m.iter().cloned().collect()
+            });
+        }
+        let overrides = {
+            let layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+            layer
+                .overrides
+                .iter()
+                .filter(|o| local_sheet_ids.contains(&o.sheet_id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        CalpResetSnapshot {
+            sheets,
+            override_sheet_ids: local_sheet_ids.clone(),
+            overrides,
+        }
+    };
+    let overrides_cleared = snapshot.overrides.len();
+
+    // The reset also restores the PACKAGE's pivot definitions — a subscriber
+    // changing "the layout" usually means the pivot layout, and resetting only
+    // the sheet cells would let the modified pivot immediately re-render its
+    // changed layout over the pristine content. Map each published definition
+    // to the LOCAL sheet name (the pull may have renamed sheets at subscribe
+    // time), and only touch pivots that still exist in this workbook.
+    let pkg_name_to_local: std::collections::HashMap<String, String> = {
+        let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        targets
+            .iter()
+            .filter_map(|(idx, _, ps)| {
+                sheet_names
+                    .get(*idx)
+                    .map(|local| (ps.name.clone(), local.clone()))
+            })
+            .collect()
+    };
+    let published_pivots: Vec<(pivot_engine::PivotId, pivot_engine::PivotDefinition)> = {
+        let pivot_tables = pivot_state
+            .pivot_tables
+            .lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        result
+            .pivot_definitions
+            .iter()
+            .filter_map(|saved| {
+                let mut def: pivot_engine::PivotDefinition =
+                    serde_json::from_value(saved.definition.clone()).ok()?;
+                if !pivot_tables.contains_key(&def.id) {
+                    return None;
+                }
+                if let Some(ref dest) = def.destination_sheet {
+                    if let Some(local) = pkg_name_to_local.get(dest) {
+                        def.destination_sheet = Some(local.clone());
+                    }
+                }
+                Some((def.id, def))
+            })
+            .collect()
+    };
+
+    // Snapshot the CURRENT pivot definitions (for undo) before replacing them.
+    // Same "pivot_definition" payload shape the pivot system records itself.
+    #[derive(serde::Serialize)]
+    struct PivotDefinitionSnapshot {
+        pivot_id: pivot_engine::PivotId,
+        definition: pivot_engine::PivotDefinition,
+        overwritten_cells: Vec<crate::pivot::operations::SavedCell>,
+        dest_sheet_idx: usize,
+    }
+    let current_pivot_snapshots: Vec<Vec<u8>> = {
+        let pivot_tables = pivot_state
+            .pivot_tables
+            .lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        published_pivots
+            .iter()
+            .filter_map(|(pid, _)| {
+                let (current_def, _) = pivot_tables.get(pid)?;
+                let dest_sheet_idx =
+                    crate::pivot::operations::resolve_dest_sheet_index(&state, current_def);
+                serde_json::to_vec(&PivotDefinitionSnapshot {
+                    pivot_id: *pid,
+                    definition: current_def.clone(),
+                    overwritten_cells: Vec::new(),
+                    dest_sheet_idx,
+                })
+                .ok()
+            })
+            .collect()
+    };
+
+    // Record the undo transaction FIRST — if applying fails midway the user
+    // can still Ctrl+Z back to the captured state. Changes apply in REVERSE on
+    // undo, so recording [calp_reset, pivot_definition...] restores the pivot
+    // definitions first and the sheet snapshot (which contains the pre-reset
+    // rendering) last.
+    {
+        let data = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+        let description = format!("Reset '{}' to published state", params.package_name);
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo_stack.begin_transaction(&description);
+        undo_stack.record_custom_restore("calp_reset".to_string(), data, &description);
+        for pivot_snap in current_pivot_snapshots {
+            undo_stack.record_custom_restore("pivot_definition".to_string(), pivot_snap, &description);
+        }
+        undo_stack.commit_transaction();
+    }
+
+    // Apply: replace each tracked sheet's grid (style-remapped into the shared
+    // registry, exactly like pull/refresh), widths, heights, and merges.
+    let mut active_affected = false;
+    {
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let mut shared_styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        for (idx, _, pulled) in &targets {
+            let (mut grid, local_styles) = pulled.sheet.to_grid();
+            let local_all = local_styles.all_styles();
+            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
+            for style in local_all {
+                remap.push(shared_styles.get_or_create(style.clone()));
+            }
+            for (_key, cell) in grid.cells.iter_mut() {
+                if cell.style_index < remap.len() {
+                    cell.style_index = remap[cell.style_index];
+                }
+            }
+            if *idx < grids.len() {
+                grids[*idx] = grid;
+            }
+            if *idx < all_cw.len() {
+                all_cw[*idx] = pulled.sheet.column_widths.clone();
+            }
+            if *idx < all_rh.len() {
+                all_rh[*idx] = pulled.sheet.row_heights.clone();
+            }
+        }
+    }
+    {
+        // Sync the active-sheet mirror + rebuild dependency maps if the active
+        // sheet was among the reset sheets.
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some((idx, _, _)) = targets.iter().find(|(idx, _, _)| *idx == active) {
+            let grids = state.grids.lock().map_err(|e| e.to_string())?;
+            if let Some(grid) = grids.get(*idx) {
+                *state.grid.lock().map_err(|e| e.to_string())? = grid.clone();
+            }
+            active_affected = true;
+        }
+    }
+    for (idx, _, pulled) in &targets {
+        let merges: std::collections::HashSet<crate::api_types::MergedRegion> = pulled
+            .sheet
+            .merged_regions
+            .iter()
+            .map(|mr| crate::api_types::MergedRegion {
+                start_row: mr.start_row,
+                start_col: mr.start_col,
+                end_row: mr.end_row,
+                end_col: mr.end_col,
+            })
+            .collect();
+        crate::report::with_sheet_merges(&state, *idx, |m| {
+            *m = merges.clone();
+        });
+    }
+
+    // Clear the override layer for the reset sheets — the pristine content IS
+    // the state now; stale overrides would re-assert the discarded edits.
+    {
+        let mut layer = state.override_layer.lock().map_err(|e| e.to_string())?;
+        layer
+            .overrides
+            .retain(|o| !local_sheet_ids.contains(&o.sheet_id));
+    }
+
+    // Restore the published pivot definitions with an EMPTY cache — the
+    // post-reset pivot refresh (frontend) rebuilds grid-pivot caches from the
+    // pristine source cells and re-queries BI pivots, then redraws.
+    let pivots_reset = {
+        let mut pivot_tables = pivot_state
+            .pivot_tables
+            .lock()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        let mut n = 0usize;
+        for (pid, def) in published_pivots {
+            if let Some(entry) = pivot_tables.get_mut(&pid) {
+                *entry = (def, pivot_engine::PivotCache::new(pid, 0));
+                n += 1;
+            }
+        }
+        n
+    };
+
+    if active_affected {
+        crate::undo_commands::rebuild_all_dependencies(&state);
+    }
+
+    crate::log_info!(
+        "CALP",
+        "Reset '{}' v{}: {} sheet(s), {} pivot(s), {} override(s) cleared",
+        params.package_name,
+        resolved_version,
+        targets.len(),
+        pivots_reset,
+        overrides_cleared
+    );
+
+    Ok(ResetSubscriptionResponse {
+        sheets_reset: targets.len(),
+        overrides_cleared,
+        pivots_reset,
+        resolved_version,
+    })
 }
 
 // ============================================================================

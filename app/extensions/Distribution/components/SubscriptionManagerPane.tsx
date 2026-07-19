@@ -6,9 +6,12 @@
 //          subscriptions being invisible in-memory state.
 
 import React, { useState, useEffect, useCallback } from "react";
-import { getSubscriptions, detach, emitAppEvent, onAppEvent, AppEvents } from "@api";
-import { exportPackageHtml, type Subscription } from "@api/distribution";
+import { getSubscriptions, detach, emitAppEvent, onAppEvent, AppEvents, calculateNow } from "@api";
+import { exportPackageHtml, resetSubscription, type Subscription } from "@api/distribution";
+import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
+
+const subKey = (s: Subscription) => `${s.packageName}@${s.registryUrl}`;
 
 export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
@@ -16,6 +19,10 @@ export function SubscriptionManagerPane(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
   const [exporting, setExporting] = useState<string | null>(null);
+  // Two-step confirm + progress for "Reset to published" (keyed per subscription).
+  const [confirmingReset, setConfirmingReset] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<string | null>(null);
+  const [resetStatus, setResetStatus] = useState<string | null>(null);
 
   // Recipient reach: render this received report to a self-contained HTML the
   // recipient can open without Calcula — save as .html (static report or
@@ -67,6 +74,50 @@ export function SubscriptionManagerPane(): React.ReactElement {
     const unsub = onAppEvent(AppEvents.SHEET_CHANGED, refresh);
     return unsub;
   }, [refresh]);
+
+  // Reset a subscription's sheets to the pristine published content. The
+  // backend records it as ONE undo transaction, so Ctrl+Z restores every
+  // local change (cells, formatting, sizes, merges, override edits).
+  const handleReset = useCallback(async (s: Subscription) => {
+    const key = subKey(s);
+    setError(null);
+    setResetStatus(null);
+    setResetting(key);
+    try {
+      const r = await resetSubscription(s.registryUrl, s.packageName);
+      setConfirmingReset(null);
+      // Re-render pivot output: the published content ships with pivot output
+      // cells STRIPPED (subscribers recalculate them), so after the sheet
+      // content is reset the pivots must redraw onto the pristine sheet.
+      try {
+        const allPivots = await pivot.getAll();
+        for (const p of allPivots) {
+          try { await pivot.refreshCache(p.id); } catch { /* non-fatal */ }
+        }
+        window.dispatchEvent(new Event("pivot:refresh"));
+      } catch (err) {
+        console.error("[Distribution] Pivot re-render after reset failed:", err);
+      }
+      // Recalculate (cross-sheet formulas referencing the reset sheets) and
+      // refetch grid data so the restored content shows.
+      try {
+        await calculateNow();
+      } catch (err) {
+        console.error("[Distribution] Recalc after reset failed:", err);
+      }
+      emitAppEvent(AppEvents.SHEET_CHANGED, {});
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      setResetStatus(
+        `Reset ${s.packageName} to v${r.resolvedVersion}: ${r.sheetsReset} sheet(s), ` +
+        `${r.pivotsReset} pivot(s), ${r.overridesCleared} override(s) cleared. ` +
+        `Press Ctrl+Z to undo.`
+      );
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setResetting(null);
+    }
+  }, []);
 
   const handleDetachAll = useCallback(async () => {
     setError(null);
@@ -143,11 +194,49 @@ export function SubscriptionManagerPane(): React.ReactElement {
                     {exporting === `${s.packageName}:pdf` ? "..." : "PDF"}
                   </button>
                 </div>
+                <div style={{ ...styles.exportRow, flexWrap: "wrap" }}>
+                  {confirmingReset === subKey(s) ? (
+                    <>
+                      <span style={styles.resetWarning}>
+                        Discards your changes to this package&apos;s{" "}
+                        {s.sheets.length} sheet{s.sheets.length !== 1 ? "s" : ""} (cell
+                        edits, formatting, sizes, merges, overrides, pivot layouts) and
+                        restores the published v{s.resolvedVersion}. You can undo with
+                        Ctrl+Z.
+                      </span>
+                      <button
+                        onClick={() => setConfirmingReset(null)}
+                        disabled={resetting !== null}
+                        style={styles.smallBtn}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => handleReset(s)}
+                        disabled={resetting !== null}
+                        style={{ ...styles.smallBtn, ...styles.danger }}
+                      >
+                        {resetting === subKey(s) ? "Resetting..." : "Reset"}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => { setConfirmingReset(subKey(s)); setResetStatus(null); }}
+                      disabled={resetting !== null}
+                      style={styles.smallBtn}
+                      title="Restore this package's sheets to the published content (undoable)"
+                    >
+                      Reset to published...
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })
         )}
       </div>
+
+      {resetStatus && <div style={styles.resetStatus}>{resetStatus}</div>}
 
       {subs.length > 0 && (
         <div style={styles.footer}>
@@ -187,4 +276,6 @@ const styles: Record<string, React.CSSProperties> = {
   danger: { background: "#c5221f", color: "#fff", borderColor: "#c5221f" },
   error: { color: "#c5221f", fontSize: 12, padding: "6px 12px" },
   empty: { padding: "24px 12px", textAlign: "center" as const, color: "#999", fontSize: 12, lineHeight: 1.5 },
+  resetWarning: { fontSize: 11, color: "#c5221f", lineHeight: 1.4, flex: 1 },
+  resetStatus: { fontSize: 12, color: "green", padding: "6px 12px", borderTop: "1px solid #e0e0e0", flexShrink: 0 },
 };

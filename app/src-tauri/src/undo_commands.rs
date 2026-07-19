@@ -630,6 +630,7 @@ fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf:
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
 fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
 fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, d, inv); }
+fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -670,6 +671,10 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // Grid reports: cell-based restore of the report cells + definitions + region.
     // Tagged Objects so the frontend fires grid:refresh on undo/redo.
     m.insert("report_restore", RestoreSpec { restore: r_report_restore, change_class: Objects, defer: true });
+    // Subscription reset: whole-sheet swap (cells/widths/heights/merges) +
+    // override-layer swap for the reset sheets. Deferred (re-acquires grid
+    // locks); tagged Objects so the frontend fires grid:refresh on undo/redo.
+    m.insert("calp_reset", RestoreSpec { restore: r_calp_reset, change_class: Objects, defer: true });
     m
 });
 
@@ -865,6 +870,116 @@ fn apply_report_restore(
             cells: inverse_cells,
             definitions: current_defs,
             merges: inverse_merges,
+        })
+        .unwrap_or_default(),
+    });
+}
+
+/// Restore a subscription-reset snapshot for undo/redo: swap every affected
+/// sheet's FULL content (cells, widths, heights, merges) and the override
+/// layer's entries for those sheets back to the snapshot, capturing the
+/// then-current state as the symmetric inverse. Whole-sheet swaps (unlike the
+/// box-scoped report restore) because a reset replaces the entire sheet.
+/// Cells carry their cached values, so no recalc of the restored cells is
+/// needed; dependency maps are rebuilt when the active sheet was swapped.
+fn apply_calp_reset_restore(
+    state: &AppState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    use crate::calp_commands::{CalpResetSheetSnapshot, CalpResetSnapshot};
+
+    let snapshot: CalpResetSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize calp_reset snapshot: {}", e);
+            return;
+        }
+    };
+
+    let mut inverse_sheets: Vec<CalpResetSheetSnapshot> = Vec::with_capacity(snapshot.sheets.len());
+    let mut active_affected = false;
+
+    for sheet in &snapshot.sheets {
+        let idx = sheet.sheet_index;
+
+        // --- Cells + widths/heights (grid locks scoped per sheet) ---
+        let mut inverse = {
+            let mut mirror = state.grid.lock().unwrap();
+            let mut grids = state.grids.lock().unwrap();
+            let mut all_cw = state.all_column_widths.lock().unwrap();
+            let mut all_rh = state.all_row_heights.lock().unwrap();
+            let active = *state.active_sheet.lock().unwrap();
+            if idx >= grids.len() {
+                continue;
+            }
+
+            let inverse = CalpResetSheetSnapshot {
+                sheet_index: idx,
+                cells: grids[idx]
+                    .cells
+                    .iter()
+                    .map(|(k, c)| (k.0, k.1, c.clone()))
+                    .collect(),
+                column_widths: all_cw.get(idx).cloned().unwrap_or_default(),
+                row_heights: all_rh.get(idx).cloned().unwrap_or_default(),
+                merges: Vec::new(), // filled in the merge pass below
+            };
+
+            let mut restored = engine::Grid::new();
+            for (row, col, cell) in &sheet.cells {
+                restored.set_cell(*row, *col, cell.clone());
+            }
+            grids[idx] = restored;
+            if idx < all_cw.len() {
+                all_cw[idx] = sheet.column_widths.clone();
+            }
+            if idx < all_rh.len() {
+                all_rh[idx] = sheet.row_heights.clone();
+            }
+            if idx == active {
+                *mirror = grids[idx].clone();
+                active_affected = true;
+            }
+            inverse
+        };
+
+        // --- Merges (own lock scope via with_sheet_merges) ---
+        inverse.merges = crate::report::with_sheet_merges(state, idx, |merged| {
+            let prev: Vec<crate::MergedRegion> = merged.iter().cloned().collect();
+            *merged = sheet.merges.iter().cloned().collect();
+            prev
+        });
+
+        inverse_sheets.push(inverse);
+    }
+
+    // --- Override layer: swap the affected sheets' entries ---
+    let inverse_overrides = {
+        let mut layer = state.override_layer.lock().unwrap();
+        let affected: std::collections::HashSet<_> =
+            snapshot.override_sheet_ids.iter().cloned().collect();
+        let current: Vec<calp::CellOverride> = layer
+            .overrides
+            .iter()
+            .filter(|o| affected.contains(&o.sheet_id))
+            .cloned()
+            .collect();
+        layer.overrides.retain(|o| !affected.contains(&o.sheet_id));
+        layer.overrides.extend(snapshot.overrides.iter().cloned());
+        current
+    };
+
+    if active_affected {
+        rebuild_all_dependencies(state);
+    }
+
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "calp_reset".to_string(),
+        data: serde_json::to_vec(&CalpResetSnapshot {
+            sheets: inverse_sheets,
+            override_sheet_ids: snapshot.override_sheet_ids.clone(),
+            overrides: inverse_overrides,
         })
         .unwrap_or_default(),
     });
@@ -2132,6 +2247,7 @@ mod restore_registry_tests {
             ("obj_cell_types", true, CustomRestoreKind::Objects),
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
+            ("calp_reset", true, CustomRestoreKind::Objects),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -2145,8 +2261,8 @@ mod restore_registry_tests {
     /// The deadlock-critical `defer` flag must agree with the legacy
     /// `kind.starts_with("pivot_"/"slicer"/"ribbon_filter"/"obj_")` deferral for
     /// EVERY registered kind — this is what guarantees lock-ordering is preserved.
-    /// `script_grid_cells` and `report_restore` are newer than the legacy
-    /// prefixes but are likewise deferred (both re-acquire the
+    /// `script_grid_cells`, `report_restore`, and `calp_reset` are newer than
+    /// the legacy prefixes but are likewise deferred (all re-acquire the
     /// grid/grids/active-sheet locks for cell-based restores), so they join the
     /// deferred set explicitly; `pane_control*` kinds acquire the PaneControlState
     /// lock and are deferred exactly like their ribbon_filter siblings.
@@ -2159,7 +2275,8 @@ mod restore_registry_tests {
                 || kind.starts_with("pane_control")
                 || kind.starts_with("obj_")
                 || *kind == "script_grid_cells"
-                || *kind == "report_restore";
+                || *kind == "report_restore"
+                || *kind == "calp_reset";
             assert_eq!(
                 spec.defer, legacy_deferred,
                 "defer for '{kind}' disagrees with the legacy prefix deferral"

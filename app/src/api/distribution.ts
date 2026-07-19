@@ -431,6 +431,28 @@ export function detach(): Promise<void> {
   return invokeBackend("calp_detach");
 }
 
+export interface ResetSubscriptionResponse {
+  sheetsReset: number;
+  overridesCleared: number;
+  pivotsReset: number;
+  resolvedVersion: string;
+}
+
+/**
+ * Reset a subscription's sheets to the pristine published content of the
+ * currently resolved version, discarding local edits (cells, formatting,
+ * sizes, merges, overrides) on those sheets AND restoring the package's
+ * published pivot definitions (layout changes revert). One undo step.
+ */
+export function resetSubscription(
+  registryUrl: string,
+  packageName: string,
+): Promise<ResetSubscriptionResponse> {
+  return invokeBackend("calp_reset_subscription", {
+    params: { registryUrl, packageName },
+  });
+}
+
 // ============================================================================
 // Phase 6: Author Workflow
 // ============================================================================
