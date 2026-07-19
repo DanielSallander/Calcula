@@ -83,3 +83,13 @@ export function getSkinTokens(skin: Skin): Record<string, string> {
 export function getSkinGridTheme(skin: Skin) {
   return skinLoader.getMergedGridTheme(skin);
 }
+
+/**
+ * The GridTheme the canvas is actually rendering with right now — includes
+ * accessibility adjustments (high contrast, font scaling) on top of the
+ * active skin. Use this (not getSkinGridTheme) to draw overlay chrome that
+ * must match core-rendered gridlines and text.
+ */
+export function getActiveGridTheme() {
+  return skinLoader.getActiveGridTheme();
+}

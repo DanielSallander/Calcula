@@ -31,6 +31,7 @@ import {
   updateCell,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   fillRange,
   calculateNow,
   recalcControlDependents,
@@ -39,7 +40,8 @@ import {
   getDefaultDimensions,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
-import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
+import { measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
+import { getActiveGridTheme } from "../../theme/skinLoader";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
@@ -277,25 +279,26 @@ export function useSpreadsheetSelection({
   // -------------------------------------------------------------------------
   const handleAutoFitColumn = useCallback(
     async (col: number) => {
-      // Determine which columns to auto-fit:
-      // If selection is type "columns" and the clicked column is within it,
-      // auto-fit ALL selected columns individually. Otherwise just the one.
+      // Determine which columns to auto-fit: when a columns-type selection
+      // (primary range OR any additional range) contains the clicked column,
+      // auto-fit ALL selected columns individually — Excel behavior.
       const columnsToFit: number[] = [];
 
       if (selection?.type === "columns") {
-        const minCol = Math.min(selection.startCol, selection.endCol);
-        const maxCol = Math.max(selection.startCol, selection.endCol);
-        if (col >= minCol && col <= maxCol) {
-          for (let c = minCol; c <= maxCol; c++) {
-            columnsToFit.push(c);
-          }
-          if (selection.additionalRanges) {
-            for (const range of selection.additionalRanges) {
-              const rMin = Math.min(range.startCol, range.endCol);
-              const rMax = Math.max(range.startCol, range.endCol);
-              for (let c = rMin; c <= rMax; c++) {
-                if (!columnsToFit.includes(c)) columnsToFit.push(c);
-              }
+        const ranges = [
+          {
+            start: Math.min(selection.startCol, selection.endCol),
+            end: Math.max(selection.startCol, selection.endCol),
+          },
+          ...(selection.additionalRanges ?? []).map((range) => ({
+            start: Math.min(range.startCol, range.endCol),
+            end: Math.max(range.startCol, range.endCol),
+          })),
+        ];
+        if (ranges.some((r) => col >= r.start && col <= r.end)) {
+          for (const r of ranges) {
+            for (let c = r.start; c <= r.end; c++) {
+              if (!columnsToFit.includes(c)) columnsToFit.push(c);
             }
           }
         } else {
@@ -308,23 +311,44 @@ export function useSpreadsheetSelection({
       try {
         await beginUndoTransaction("Auto-fit columns");
         const styles = await getAllStyles();
-        const theme = { cellFontFamily: DEFAULT_THEME.cellFontFamily, cellFontSize: DEFAULT_THEME.cellFontSize };
+        const activeTheme = getActiveGridTheme();
+        const theme = { cellFontFamily: activeTheme.cellFontFamily, cellFontSize: activeTheme.cellFontSize };
 
+        let appliedCount = 0;
         for (const c of columnsToFit) {
           const cells = await getCellsInCols(c, c);
           const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, config.minColumnWidth);
+          // Excel: an empty column keeps its current width
+          if (optimalWidth === null) continue;
           dispatch(setColumnWidth(c, optimalWidth));
           await setColumnWidthApi(c, optimalWidth);
+          emitAppEvent(AppEvents.COLUMN_RESIZED, {
+            sheetIndex: sheetContext.activeSheetIndex,
+            col: c,
+            width: optimalWidth,
+          });
+          appliedCount++;
         }
 
-        await commitUndoTransaction();
+        if (appliedCount > 0) {
+          await commitUndoTransaction();
+        } else {
+          await cancelUndoTransaction();
+        }
       } catch (err) {
         console.error("Failed to auto-fit columns:", err);
+        // Never leave the transaction open — later edits would silently be
+        // folded into it
+        try {
+          await cancelUndoTransaction();
+        } catch {
+          // already closed
+        }
       }
 
       canvasRef.current?.redraw();
     },
-    [selection, config.minColumnWidth, dispatch, canvasRef]
+    [selection, config.minColumnWidth, dispatch, canvasRef, sheetContext.activeSheetIndex]
   );
 
   // -------------------------------------------------------------------------
@@ -335,19 +359,20 @@ export function useSpreadsheetSelection({
       const rowsToFit: number[] = [];
 
       if (selection?.type === "rows") {
-        const minRow = Math.min(selection.startRow, selection.endRow);
-        const maxRow = Math.max(selection.startRow, selection.endRow);
-        if (row >= minRow && row <= maxRow) {
-          for (let r = minRow; r <= maxRow; r++) {
-            rowsToFit.push(r);
-          }
-          if (selection.additionalRanges) {
-            for (const range of selection.additionalRanges) {
-              const rMin = Math.min(range.startRow, range.endRow);
-              const rMax = Math.max(range.startRow, range.endRow);
-              for (let r = rMin; r <= rMax; r++) {
-                if (!rowsToFit.includes(r)) rowsToFit.push(r);
-              }
+        const ranges = [
+          {
+            start: Math.min(selection.startRow, selection.endRow),
+            end: Math.max(selection.startRow, selection.endRow),
+          },
+          ...(selection.additionalRanges ?? []).map((range) => ({
+            start: Math.min(range.startRow, range.endRow),
+            end: Math.max(range.startRow, range.endRow),
+          })),
+        ];
+        if (ranges.some((r) => row >= r.start && row <= r.end)) {
+          for (const r of ranges) {
+            for (let rr = r.start; rr <= r.end; rr++) {
+              if (!rowsToFit.includes(rr)) rowsToFit.push(rr);
             }
           }
         } else {
@@ -360,7 +385,8 @@ export function useSpreadsheetSelection({
       try {
         await beginUndoTransaction("Auto-fit rows");
         const styles = await getAllStyles();
-        const theme = { cellFontFamily: DEFAULT_THEME.cellFontFamily, cellFontSize: DEFAULT_THEME.cellFontSize };
+        const activeTheme = getActiveGridTheme();
+        const theme = { cellFontFamily: activeTheme.cellFontFamily, cellFontSize: activeTheme.cellFontSize };
 
         for (const r of rowsToFit) {
           const cells = await getCellsInRows(r, r);
@@ -370,20 +396,36 @@ export function useSpreadsheetSelection({
             dimensions?.columnWidths ?? new Map(),
             config.defaultCellWidth,
             theme,
-            config.minRowHeight
+            config.minRowHeight,
+            config.defaultCellHeight,
+            r
           );
-          dispatch(setRowHeight(r, optimalHeight));
-          await setRowHeightApi(r, optimalHeight);
+          // Excel: an empty row resets to the default height
+          const targetHeight = optimalHeight ?? config.defaultCellHeight;
+          dispatch(setRowHeight(r, targetHeight));
+          await setRowHeightApi(r, targetHeight);
+          emitAppEvent(AppEvents.ROW_RESIZED, {
+            sheetIndex: sheetContext.activeSheetIndex,
+            row: r,
+            height: targetHeight,
+          });
         }
 
         await commitUndoTransaction();
       } catch (err) {
         console.error("Failed to auto-fit rows:", err);
+        // Never leave the transaction open — later edits would silently be
+        // folded into it
+        try {
+          await cancelUndoTransaction();
+        } catch {
+          // already closed
+        }
       }
 
       canvasRef.current?.redraw();
     },
-    [selection, dimensions?.columnWidths, config.defaultCellWidth, config.minRowHeight, dispatch, canvasRef]
+    [selection, dimensions?.columnWidths, config.defaultCellWidth, config.minRowHeight, config.defaultCellHeight, dispatch, canvasRef, sheetContext.activeSheetIndex]
   );
 
   // -------------------------------------------------------------------------

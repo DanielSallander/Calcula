@@ -13,8 +13,8 @@ import {
 import { getAutoFilterInfo } from "../lib/filterStore";
 
 // Size of the chevron button area (pixels)
-const BUTTON_SIZE = 18;
-const BUTTON_MARGIN = 2;
+export const BUTTON_SIZE = 18;
+export const BUTTON_MARGIN = 2;
 
 // Module-level storage for chevron button bounds (populated during render, read during click)
 let cachedCanvas: HTMLCanvasElement | null = null;

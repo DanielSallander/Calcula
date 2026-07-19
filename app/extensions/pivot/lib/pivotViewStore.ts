@@ -265,6 +265,11 @@ class CellWindowCache {
     return this.rows.has(rowIndex);
   }
 
+  /** View row indices with cached cells (for sync scans like auto-fit). */
+  getLoadedRowIndices(): number[] {
+    return [...this.rows.keys()];
+  }
+
   /** Store a fetched window of rows. */
   setWindow(startRow: number, rows: PivotRowData[]): void {
     for (let i = 0; i < rows.length; i++) {

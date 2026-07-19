@@ -1327,6 +1327,20 @@ export type {
   GridLayerRegistration,
 } from "./gridLayers";
 
+// Auto-fit contributors (extensions report space needs of overlay-rendered
+// cell content / in-cell chrome to the double-click best-fit measurement)
+export {
+  registerAutoFitContributor,
+  unregisterAutoFitContributor,
+  listAutoFitContributors,
+} from "./autoFitContributors";
+
+export type {
+  AutoFitContributor,
+  AutoFitColumnContribution,
+  AutoFitRowContribution,
+} from "./autoFitContributors";
+
 export type {
   ColumnHeaderOverride,
   ColumnHeaderOverrideProvider,
@@ -1392,6 +1406,7 @@ export {
   subscribeToAppearance,
   getSkinTokens,
   getSkinGridTheme,
+  getActiveGridTheme,
   LIGHT_SKIN_ID,
   DARK_SKIN_ID,
   BUILTIN_DEFAULT_SKIN_ID,

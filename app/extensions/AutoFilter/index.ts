@@ -10,10 +10,11 @@ import {
   hideOverlay,
   indexToCol,
   AppEvents,
+  registerAutoFitContributor,
   type OverlayRegistration,
 } from "@api";
 import { emitAppEvent } from "@api/events";
-import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas } from "./rendering/filterChevronRenderer";
+import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas, BUTTON_SIZE, BUTTON_MARGIN } from "./rendering/filterChevronRenderer";
 import {
   refreshFilterState,
   setCurrentSelection,
@@ -76,6 +77,28 @@ function activate(context: ExtensionContext): void {
     priority: 20, // Above tables and pivots
   } as OverlayRegistration);
   cleanupFns.push(unregOverlay);
+
+  // Double-click best-fit: header cells carry the in-cell chevron button, so
+  // the fitted width must leave room for it beside the header text (and the
+  // header row must stay tall enough to hold the button)
+  cleanupFns.push(
+    registerAutoFitContributor({
+      id: "autofilter-chevrons",
+      measureColumn: (col) => {
+        const info = getAutoFilterInfo();
+        if (!info || !info.enabled) return null;
+        if (col < info.startCol || col > info.endCol) return null;
+        return {
+          extraCellWidth: new Map([[info.startRow, BUTTON_SIZE + BUTTON_MARGIN]]),
+        };
+      },
+      measureRow: (row) => {
+        const info = getAutoFilterInfo();
+        if (!info || !info.enabled || row !== info.startRow) return null;
+        return { requiredHeight: BUTTON_SIZE + BUTTON_MARGIN * 2 };
+      },
+    })
+  );
 
   // 2. Register the dropdown overlay component
   context.ui.overlays.register({

@@ -127,7 +127,8 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
             c,
             theme,
             minColumnWidth,
-            maxColumnWidth
+            maxColumnWidth,
+            defaultRowHeight
           );
           widths.push(measuredWidth);
         }

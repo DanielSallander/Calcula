@@ -165,22 +165,18 @@ export interface PivotRenderResult {
 // CONSTANTS
 // =============================================================================
 
-const FILTER_BUTTON_HEIGHT = 20;
-const FILTER_BUTTON_MIN_WIDTH = 80;
-const FILTER_BUTTON_MAX_WIDTH = 150;
-const FILTER_ARROW_SIZE = 6;
-const FILTER_BUTTON_PADDING = 6;
-
 const EXPAND_ICON_SIZE = 12;
 const EXPAND_ICON_PADDING = 4;
 
 const CELL_PADDING_X = 6;
 const INDENT_SIZE = 20; // pixels per indent level
-const HEADER_FILTER_ARROW_AREA = 20; // width of dropdown arrow area on header filter cells
+
+/** Margin around the in-cell dropdown arrow button (matches drawPivotCell). */
+const ARROW_BUTTON_MARGIN = 3;
 
 // Default cell dimensions for pivot tables
 const DEFAULT_PIVOT_CELL_WIDTH = 100;
-const DEFAULT_PIVOT_CELL_HEIGHT = 24;
+export const DEFAULT_PIVOT_CELL_HEIGHT = 24;
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -938,71 +934,152 @@ export function createPivotTheme(overrides: Partial<PivotTheme> = {}): PivotThem
   return { ...DEFAULT_PIVOT_THEME, ...overrides };
 }
 
+/**
+ * Row access abstraction for column measurement. Non-windowed views expose
+ * view.rows directly; windowed views answer from the cell-window cache (rows
+ * not yet fetched return null and are covered by maxContentSample).
+ */
+export interface PivotColumnMeasureSource {
+  /** Total number of view rows (windowed: totalRowCount). */
+  rowCount: number;
+  /** Row data for view row i, or null when not synchronously available. */
+  getRow: (i: number) => PivotViewResponse['rows'][number] | null;
+  /**
+   * View row indices that have cells available synchronously. When provided,
+   * only these are scanned (windowed pivots hold a few 200-row windows out
+   * of potentially a million rows); omitted means 0..rowCount-1.
+   */
+  availableRowIndices?: () => Iterable<number>;
+  /** Backend-computed widest display string for this column, if any. */
+  maxContentSample?: string;
+  /** Pixel height of view row i — sizes the in-cell arrow buttons. */
+  getRowHeight?: (i: number) => number;
+}
+
+/**
+ * Required pixel width to fully display one pivot cell, mirroring the exact
+ * metrics drawPivotCell / drawFilterDropdownButton use: themed font (bold for
+ * headers/totals), CELL_PADDING_X on both sides, indent + expand icon for row
+ * headers, and the in-cell dropdown arrow button on label headers and filter
+ * combos. Returns null for cells that must not drive the column width
+ * (empty, or spanning multiple columns).
+ */
+export function measurePivotCellRequiredWidth(
+  ctx: CanvasRenderingContext2D,
+  cell: PivotCellData,
+  theme: PivotTheme,
+  rowHeight: number = DEFAULT_PIVOT_CELL_HEIGHT
+): number | null {
+  // Cells spanning multiple columns never drive a single column's width
+  if (cell.colSpan !== undefined && cell.colSpan > 1) {
+    return null;
+  }
+
+  const btnSize = Math.max(0, rowHeight - ARROW_BUTTON_MARGIN * 2);
+  const rawText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+
+  if (cell.cellType === 'FilterDropdown') {
+    // drawFilterDropdownButton: raw text at weight 400 (no bracket
+    // stripping), arrow button on the right; empty renders as "(All)"
+    ctx.font = `400 ${theme.fontSize}px ${theme.fontFamily}`;
+    const textWidth = ctx.measureText(rawText || '(All)').width;
+    return textWidth + CELL_PADDING_X * 2 + btnSize + ARROW_BUTTON_MARGIN;
+  }
+
+  // Strip bracket notation from BI measure names (mirrors drawPivotCell)
+  let displayText = rawText;
+  if (displayText.startsWith('[') && displayText.endsWith(']')) {
+    displayText = displayText.substring(1, displayText.length - 1);
+  }
+
+  if (!displayText) {
+    return null;
+  }
+
+  const { font } = getThemedTextStyle(cell, theme);
+  ctx.font = font;
+  const textWidth = ctx.measureText(displayText).width;
+  let totalWidth = textWidth + CELL_PADDING_X * 2;
+
+  // Row headers: indent + expand/collapse icon shift the text right
+  // (drawPivotCell offsets text only for RowHeader cells)
+  if (cell.cellType === 'RowHeader') {
+    totalWidth += (cell.indentLevel || 0) * INDENT_SIZE;
+    if (cell.isExpandable) {
+      totalWidth += EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+    }
+  }
+
+  // Label headers reserve the dropdown arrow button on the right
+  if (cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
+    totalWidth += btnSize + ARROW_BUTTON_MARGIN;
+  }
+
+  return totalWidth;
+}
+
+/**
+ * Required pixel width for a whole pivot column: the max cell requirement
+ * over all synchronously available rows, combined with the backend's
+ * maxContentSample (which covers rows a windowed view has not fetched).
+ * Returns null when the column has no measurable content.
+ */
+export function measurePivotColumnRequiredWidth(
+  ctx: CanvasRenderingContext2D,
+  source: PivotColumnMeasureSource,
+  colIndex: number,
+  theme: PivotTheme
+): number | null {
+  let required: number | null = null;
+
+  const indices =
+    source.availableRowIndices?.() ??
+    Array.from({ length: source.rowCount }, (_, i) => i);
+
+  for (const i of indices) {
+    if (i >= source.rowCount) continue;
+    const row = source.getRow(i);
+    if (!row || !row.cells || colIndex >= row.cells.length) continue;
+    if (row.visible === false) continue;
+
+    const rowHeight = source.getRowHeight?.(i) ?? DEFAULT_PIVOT_CELL_HEIGHT;
+    const cellWidth = measurePivotCellRequiredWidth(ctx, row.cells[colIndex], theme, rowHeight);
+    if (cellWidth !== null && (required === null || cellWidth > required)) {
+      required = cellWidth;
+    }
+  }
+
+  // The sample is the widest display string across ALL rows (indent
+  // approximated as leading spaces) — measure bold since it can come from a
+  // header/total row; chrome-bearing cells are covered by the scan above.
+  if (source.maxContentSample) {
+    ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
+    const sampleWidth =
+      ctx.measureText(source.maxContentSample).width + CELL_PADDING_X * 2;
+    if (required === null || sampleWidth > required) {
+      required = sampleWidth;
+    }
+  }
+
+  return required;
+}
+
 export function measurePivotColumnWidth(
   ctx: CanvasRenderingContext2D,
   pivotView: PivotViewResponse,
   colIndex: number,
   theme: PivotTheme = DEFAULT_PIVOT_THEME,
   minWidth: number = 60,
-  maxWidth: number = 300
+  maxWidth: number = 300,
+  rowHeight: number = DEFAULT_PIVOT_CELL_HEIGHT
 ): number {
-  let maxContentWidth = minWidth;
+  const source: PivotColumnMeasureSource = {
+    rowCount: pivotView.rows.length,
+    getRow: (i) => pivotView.rows[i] ?? null,
+    maxContentSample: pivotView.columns?.[colIndex]?.maxContentSample,
+    getRowHeight: () => rowHeight,
+  };
 
-  ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
-
-  // Fast path: if the backend provided a max content sample string for this
-  // column, measure just that single string instead of scanning all rows.
-  const column = pivotView.columns?.[colIndex];
-  if (column?.maxContentSample) {
-    const textWidth = ctx.measureText(column.maxContentSample).width;
-    const totalWidth = textWidth + CELL_PADDING_X * 2;
-    maxContentWidth = Math.max(maxContentWidth, totalWidth);
-    return Math.min(maxContentWidth, maxWidth);
-  }
-
-  for (const row of pivotView.rows) {
-    if (colIndex < row.cells.length) {
-      const cell = row.cells[colIndex];
-      const displayText = cell.formattedValue || getCellDisplayValue(cell.value);
-      if (displayText) {
-        const textWidth = ctx.measureText(displayText).width;
-        let totalWidth = textWidth + CELL_PADDING_X * 2;
-
-        // Account for indentation
-        if (cell.indentLevel) {
-          totalWidth += cell.indentLevel * INDENT_SIZE;
-        }
-
-        // Account for expand/collapse icon
-        if (cell.isExpandable) {
-          totalWidth += EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
-        }
-
-        // Account for filter label - ensure bold font is measured correctly
-        if (cell.cellType === 'FilterLabel') {
-          ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
-          const filterTextWidth = ctx.measureText(displayText).width;
-          totalWidth = filterTextWidth + CELL_PADDING_X * 2;
-          ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
-        }
-
-        // Account for filter dropdown combo box (text + arrow button area)
-        if (cell.cellType === 'FilterDropdown') {
-          // Arrow button width equals cell height; add margin + padding
-          const arrowBtnWidth = DEFAULT_PIVOT_CELL_HEIGHT;
-          totalWidth = textWidth + FILTER_BUTTON_PADDING * 2 + arrowBtnWidth + 4;
-          totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH);
-        }
-
-        // Account for header filter dropdown arrow area
-        if (cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
-          totalWidth += HEADER_FILTER_ARROW_AREA;
-        }
-
-        maxContentWidth = Math.max(maxContentWidth, totalWidth);
-      }
-    }
-  }
-
-  return Math.min(maxContentWidth, maxWidth);
+  const required = measurePivotColumnRequiredWidth(ctx, source, colIndex, theme);
+  return Math.min(Math.max(minWidth, Math.ceil(required ?? minWidth)), maxWidth);
 }

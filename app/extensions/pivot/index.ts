@@ -21,7 +21,10 @@ import {
   IconInsertPivot,
   registerCommitGuard,
   showToast,
+  registerAutoFitContributor,
+  getActiveGridTheme,
 } from "@api";
+import type { AutoFitColumnContribution, AutoFitRowContribution } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { setActiveSheet } from "@api/lib";
 import { hasObjectScript, drawObjectScriptBadgeIfPresent } from "@api/objectScriptBadge";
@@ -110,8 +113,14 @@ import {
   handleWritebackModelChanged,
   resetWritebackEditingState,
 } from "./lib/writebackEditing";
-import { drawPivotCell, DEFAULT_PIVOT_THEME, createPivotTheme } from "./rendering/pivot";
-import type { PivotCellDrawResult, PivotTheme } from "./rendering/pivot";
+import {
+  drawPivotCell,
+  DEFAULT_PIVOT_THEME,
+  createPivotTheme,
+  measurePivotColumnRequiredWidth,
+  DEFAULT_PIVOT_CELL_HEIGHT,
+} from "./rendering/pivot";
+import type { PivotCellDrawResult, PivotTheme, PivotColumnMeasureSource } from "./rendering/pivot";
 import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
 
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
@@ -202,6 +211,13 @@ function clearOverlayIconBounds(): void {
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
 const gridRegionsCache = new Map<string, { startRow: number; startCol: number; endRow: number; endCol: number }>();
+
+/**
+ * Last-rendered pixel height per view row, keyed by pivotId (refreshed every
+ * overlay paint). Auto-fit measurement uses these to size the in-cell arrow
+ * buttons exactly like the draw pass (btnSize = rowHeight - margins).
+ */
+const overlayRowHeightsCache = new Map<string, number[]>();
 
 /** Cached reference to the grid canvas element, captured during overlay rendering. */
 let cachedCanvasElement: HTMLCanvasElement | null = null;
@@ -524,6 +540,9 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   const regionEndY = runningY;
   const regionStartY = rowYPositions[0] ?? 0;
 
+  // Keep the latest row heights available to auto-fit measurement
+  overlayRowHeightsCache.set(pivotId, rowHeightValues);
+
   const tPrecompute = performance.now() - t0;
 
   ctx.save();
@@ -736,12 +755,128 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
     }
   }
 
+  // Stroke the region perimeter in the grid's gridline color: the cell
+  // background fills above painted over the boundary gridlines, and core
+  // skips gridlines inside overlay regions — without this the pivot floats
+  // borderless against its neighbors (Excel keeps the gridline visible).
+  if (numCols > 0 && numRows > 0) {
+    const gridTheme = getActiveGridTheme();
+    const regionX0 = colXPositions[0];
+    const regionX1 = colXPositions[numCols - 1] + colWidthValues[numCols - 1];
+    ctx.strokeStyle = gridTheme.gridLine;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.floor(regionX0) + 0.5, regionStartY);
+    ctx.lineTo(Math.floor(regionX0) + 0.5, regionEndY);
+    ctx.moveTo(Math.floor(regionX1) + 0.5, regionStartY);
+    ctx.lineTo(Math.floor(regionX1) + 0.5, regionEndY);
+    ctx.moveTo(regionX0, Math.floor(regionStartY) + 0.5);
+    ctx.lineTo(regionX1, Math.floor(regionStartY) + 0.5);
+    ctx.moveTo(regionX0, Math.floor(regionEndY) + 0.5);
+    ctx.lineTo(regionX1, Math.floor(regionEndY) + 0.5);
+    ctx.stroke();
+  }
+
   ctx.restore();
 
   const drawMs = performance.now() - t0;
   console.log(
     `[PERF][pivot] drawStyledPivotView rows=${numRows} cols=${numCols} | drawn=${cellsDrawn} skipped=${cellsSkipped} | precompute=${tPrecompute.toFixed(1)}ms render=${drawMs.toFixed(1)}ms`
   );
+}
+
+// ============================================================================
+// Auto-fit measurement (double-click best-fit on column/row header edges)
+// ============================================================================
+
+/** Build a measurement row source for a cached pivot view (windowed-aware). */
+function buildColumnMeasureSource(
+  pivotId: string,
+  view: PivotViewResponse,
+  colIndex: number
+): PivotColumnMeasureSource {
+  const isWindowed = view.isWindowed === true;
+  const cache = isWindowed ? getCellWindowCache(pivotId) : undefined;
+  const rowHeights = overlayRowHeightsCache.get(pivotId);
+  return {
+    rowCount: isWindowed ? (view.totalRowCount ?? view.rows.length) : view.rows.length,
+    getRow: isWindowed
+      ? (i) => cache?.getRow(i) ?? null
+      : (i) => view.rows[i] ?? null,
+    // Windowed pivots may span a million view rows but hold only a few
+    // fetched windows — scan just those; maxContentSample covers the rest
+    availableRowIndices: isWindowed && cache
+      ? () => cache.getLoadedRowIndices()
+      : undefined,
+    maxContentSample: view.columns?.[colIndex]?.maxContentSample,
+    getRowHeight: (i) => rowHeights?.[i] ?? DEFAULT_PIVOT_CELL_HEIGHT,
+  };
+}
+
+/**
+ * Column contribution for the core best-fit: pivot cells are repainted by the
+ * overlay with themed fonts and in-cell chrome (dropdown buttons, indent,
+ * expand icons), so the pivot claims its rows and reports the width the
+ * overlay actually needs.
+ */
+function measurePivotAutoFitColumn(
+  col: number,
+  measureCtx: CanvasRenderingContext2D
+): AutoFitColumnContribution | null {
+  const claimedRowRanges: Array<{ startRow: number; endRow: number }> = [];
+  let requiredWidth: number | undefined;
+
+  for (const region of getGridRegions()) {
+    if (region.type !== "pivot" || region.data?.isEmpty) continue;
+    if (col < region.startCol || col > region.endCol) continue;
+    const pivotId = region.data?.pivotId as string | undefined;
+    const view = pivotId ? getCachedPivotView(pivotId) : undefined;
+    // Without a cached view the core grid-cell measurement is the best
+    // available answer — leave the cells unclaimed
+    if (!pivotId || !view) continue;
+
+    claimedRowRanges.push({ startRow: region.startRow, endRow: region.endRow });
+    const colIndex = col - region.startCol;
+    const width = measurePivotColumnRequiredWidth(
+      measureCtx,
+      buildColumnMeasureSource(pivotId, view, colIndex),
+      colIndex,
+      getThemeForPivot(pivotId)
+    );
+    if (width !== null && (requiredWidth === undefined || width > requiredWidth)) {
+      requiredWidth = width;
+    }
+  }
+
+  if (claimedRowRanges.length === 0) return null;
+  return { claimedRowRanges, requiredWidth };
+}
+
+/**
+ * Row contribution for the core best-fit: pivot rows keep at least their
+ * laid-out default height so the in-cell dropdown buttons stay usable;
+ * larger themed fonts raise it.
+ */
+function measurePivotAutoFitRow(row: number): AutoFitRowContribution | null {
+  const claimedColRanges: Array<{ startCol: number; endCol: number }> = [];
+  let requiredHeight: number | undefined;
+
+  for (const region of getGridRegions()) {
+    if (region.type !== "pivot" || region.data?.isEmpty) continue;
+    if (row < region.startRow || row > region.endRow) continue;
+    const pivotId = region.data?.pivotId as string | undefined;
+    if (!pivotId || !getCachedPivotView(pivotId)) continue;
+
+    claimedColRanges.push({ startCol: region.startCol, endCol: region.endCol });
+    const theme = getThemeForPivot(pivotId);
+    const height = Math.max(DEFAULT_PIVOT_CELL_HEIGHT, Math.ceil(theme.fontSize * 1.2) + 4);
+    if (requiredHeight === undefined || height > requiredHeight) {
+      requiredHeight = height;
+    }
+  }
+
+  if (claimedColRanges.length === 0) return null;
+  return { claimedColRanges, requiredHeight };
 }
 
 /**
@@ -1739,6 +1874,16 @@ function activate(context: ExtensionContext): void {
       },
       priority: 10,
       renderBelowSelection: true,
+    })
+  );
+
+  // Double-click best-fit must size pivot columns/rows for the overlay-drawn
+  // content (themed fonts + in-cell chrome), not the underlying grid cells
+  cleanupFunctions.push(
+    registerAutoFitContributor({
+      id: "pivot",
+      measureColumn: measurePivotAutoFitColumn,
+      measureRow: measurePivotAutoFitRow,
     })
   );
 

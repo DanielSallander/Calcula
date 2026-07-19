@@ -37,19 +37,23 @@ pub(crate) fn get_cell_internal_with_merge(
         return None;
     }
 
-    let (display, display_color, formula, style_index, accounting_layout) = if let Some(c) = cell {
+    let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
         let style = styles.get(c.style_index);
         let result = format_cell_value_with_color(&c.value, style, locale);
+        let rt = c
+            .rich_text
+            .as_ref()
+            .map(|runs| crate::api_types::rich_text_runs_to_data(runs));
         let acct = result.accounting.map(|a| AccountingLayout {
             symbol: a.symbol,
             symbol_before: a.symbol_before,
             value: a.value,
         });
         let localized_formula = c.formula_string().map(|f| format!("={}", localize_formula(&f, locale)));
-        (result.text, result.color, localized_formula, c.style_index, acct)
+        (result.text, result.color, localized_formula, c.style_index, rt, acct)
     } else {
         // Empty merge master
-        (String::new(), None, None, 0, None)
+        (String::new(), None, None, 0, None, None)
     };
 
     Some(CellData {
@@ -62,7 +66,7 @@ pub(crate) fn get_cell_internal_with_merge(
         row_span,
         col_span,
         sheet_index: None,
-        rich_text: None,
+        rich_text,
         accounting_layout,
     })
 }
