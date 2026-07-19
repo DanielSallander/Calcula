@@ -7,7 +7,7 @@
 
 import React, { useState, useEffect } from "react";
 import type { DialogProps, ConnectionInfo } from "@api";
-import { pullPackage, emitAppEvent, AppEvents } from "@api";
+import { pullPackage, emitAppEvent, AppEvents, getSheets, setActiveSheetApi } from "@api";
 import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
 import {
   listRegistries,
@@ -202,6 +202,24 @@ export function SubscribeDialog({ onClose }: DialogProps) {
 
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
+
+      // Land the user on the report: activate the FIRST pulled sheet (pulled
+      // sheets are appended at the end of the workbook).
+      if (result.sheetsPulled > 0) {
+        try {
+          const sheetsResult = await getSheets();
+          const firstPulled = sheetsResult.sheets.length - result.sheetsPulled;
+          if (firstPulled >= 0 && firstPulled < sheetsResult.sheets.length) {
+            await setActiveSheetApi(firstPulled);
+            emitAppEvent(AppEvents.SHEET_CHANGED, {
+              sheetIndex: firstPulled,
+              sheetName: sheetsResult.sheets[firstPulled]?.name ?? "",
+            });
+          }
+        } catch (err) {
+          console.warn("[Subscribe] Could not activate pulled sheet:", err);
+        }
+      }
 
       // The pull may have materialized pane controls — tell the Controls pane
       // to reload (cross-extension window event; same name the shell fans the

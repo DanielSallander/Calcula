@@ -953,6 +953,7 @@ pub(crate) fn update_pivot_in_grid(
 /// the longest formatted value, using a character-based width estimate.
 pub(crate) fn auto_fit_pivot_columns(
     state: &AppState,
+    dest_sheet_idx: usize,
     destination: (u32, u32),
     view: &PivotView,
 ) {
@@ -1024,14 +1025,36 @@ pub(crate) fn auto_fit_pivot_columns(
         }
     }
 
-    // Apply column widths
-    let mut widths = state.column_widths.lock().unwrap();
-    for (col_idx, &char_len) in max_len.iter().enumerate() {
-        let grid_col = dest_col + col_idx as u32;
-        let width = ((char_len as f64) * CHAR_WIDTH + CELL_PADDING)
-            .max(MIN_WIDTH)
-            .min(MAX_WIDTH);
-        widths.insert(grid_col, width);
+    // Apply column widths to the DESTINATION sheet's store — the active-sheet
+    // mirror only when the pivot's sheet IS the active one. (Writing the
+    // mirror unconditionally resized whatever sheet the user was LOOKING at:
+    // e.g. a subscribed pivot rendering on its own appended sheet resized the
+    // subscriber's original sheet.)
+    let fitted: Vec<(u32, f64)> = max_len
+        .iter()
+        .enumerate()
+        .map(|(col_idx, &char_len)| {
+            let grid_col = dest_col + col_idx as u32;
+            let width = ((char_len as f64) * CHAR_WIDTH + CELL_PADDING)
+                .max(MIN_WIDTH)
+                .min(MAX_WIDTH);
+            (grid_col, width)
+        })
+        .collect();
+    let active = *state.active_sheet.lock().unwrap();
+    if dest_sheet_idx == active {
+        let mut widths = state.column_widths.lock().unwrap();
+        for (col, w) in fitted {
+            widths.insert(col, w);
+        }
+    } else {
+        let mut all = state.all_column_widths.lock().unwrap();
+        while all.len() <= dest_sheet_idx {
+            all.push(std::collections::HashMap::new());
+        }
+        for (col, w) in fitted {
+            all[dest_sheet_idx].insert(col, w);
+        }
     }
 
     log_debug!(

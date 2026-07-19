@@ -9329,15 +9329,29 @@ pub fn calp_reset_subscription(
     let local_sheet_ids: Vec<SheetId> = targets.iter().map(|(_, sid, _)| *sid).collect();
 
     // Snapshot the CURRENT state of every affected sheet + its overrides,
-    // BEFORE anything is replaced — this is the undo payload.
+    // BEFORE anything is replaced — this is the undo payload. The ACTIVE
+    // sheet's widths/heights live in the mirrors (set_active_sheet uses
+    // take-semantics; its all_* slot is empty while active), so capture from
+    // the mirrors for that sheet.
+    let active_idx = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let snapshot = {
         let mut sheets = Vec::with_capacity(targets.len());
         {
             let grids = state.grids.lock().map_err(|e| e.to_string())?;
+            let mirror_cw = state.column_widths.lock().map_err(|e| e.to_string())?;
+            let mirror_rh = state.row_heights.lock().map_err(|e| e.to_string())?;
             let all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
             let all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
             for (idx, _, _) in &targets {
                 let Some(grid) = grids.get(*idx) else { continue };
+                let (column_widths, row_heights) = if *idx == active_idx {
+                    (mirror_cw.clone(), mirror_rh.clone())
+                } else {
+                    (
+                        all_cw.get(*idx).cloned().unwrap_or_default(),
+                        all_rh.get(*idx).cloned().unwrap_or_default(),
+                    )
+                };
                 sheets.push(CalpResetSheetSnapshot {
                     sheet_index: *idx,
                     cells: grid
@@ -9345,8 +9359,8 @@ pub fn calp_reset_subscription(
                         .iter()
                         .map(|(k, c)| (k.0, k.1, c.clone()))
                         .collect(),
-                    column_widths: all_cw.get(*idx).cloned().unwrap_or_default(),
-                    row_heights: all_rh.get(*idx).cloned().unwrap_or_default(),
+                    column_widths,
+                    row_heights,
                     merges: Vec::new(), // filled below (separate lock scope)
                 });
             }
@@ -9493,17 +9507,21 @@ pub fn calp_reset_subscription(
             }
         }
     }
-    {
-        // Sync the active-sheet mirror + rebuild dependency maps if the active
-        // sheet was among the reset sheets.
-        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-        if let Some((idx, _, _)) = targets.iter().find(|(idx, _, _)| *idx == active) {
+    // Sync the active-sheet mirrors (grid, widths, heights) if the active
+    // sheet was among the reset sheets — the mirrors are the live copies while
+    // a sheet is active; its all_* slots are shadowed.
+    if let Some((idx, _, pulled)) = targets.iter().find(|(idx, _, _)| *idx == active_idx) {
+        {
             let grids = state.grids.lock().map_err(|e| e.to_string())?;
             if let Some(grid) = grids.get(*idx) {
                 *state.grid.lock().map_err(|e| e.to_string())? = grid.clone();
             }
-            active_affected = true;
         }
+        *state.column_widths.lock().map_err(|e| e.to_string())? =
+            pulled.sheet.column_widths.clone();
+        *state.row_heights.lock().map_err(|e| e.to_string())? =
+            pulled.sheet.row_heights.clone();
+        active_affected = true;
     }
     for (idx, _, pulled) in &targets {
         let merges: std::collections::HashSet<crate::api_types::MergedRegion> = pulled

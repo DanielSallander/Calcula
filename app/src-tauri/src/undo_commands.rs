@@ -903,16 +903,23 @@ fn apply_calp_reset_restore(
     for sheet in &snapshot.sheets {
         let idx = sheet.sheet_index;
 
-        // --- Cells + widths/heights (grid locks scoped per sheet) ---
+        // --- Cells + widths/heights (locks scoped per sheet, in the
+        // set_active_sheet canonical order: grids, active_sheet, grid mirror,
+        // column_widths, row_heights, all_cw, all_rh). The ACTIVE sheet's
+        // widths/heights live in the MIRRORS (take-semantics) — capture and
+        // restore through them for that sheet.
         let mut inverse = {
-            let mut mirror = state.grid.lock().unwrap();
             let mut grids = state.grids.lock().unwrap();
+            let active = *state.active_sheet.lock().unwrap();
+            let mut mirror = state.grid.lock().unwrap();
+            let mut mirror_cw = state.column_widths.lock().unwrap();
+            let mut mirror_rh = state.row_heights.lock().unwrap();
             let mut all_cw = state.all_column_widths.lock().unwrap();
             let mut all_rh = state.all_row_heights.lock().unwrap();
-            let active = *state.active_sheet.lock().unwrap();
             if idx >= grids.len() {
                 continue;
             }
+            let is_active = idx == active;
 
             let inverse = CalpResetSheetSnapshot {
                 sheet_index: idx,
@@ -921,8 +928,16 @@ fn apply_calp_reset_restore(
                     .iter()
                     .map(|(k, c)| (k.0, k.1, c.clone()))
                     .collect(),
-                column_widths: all_cw.get(idx).cloned().unwrap_or_default(),
-                row_heights: all_rh.get(idx).cloned().unwrap_or_default(),
+                column_widths: if is_active {
+                    mirror_cw.clone()
+                } else {
+                    all_cw.get(idx).cloned().unwrap_or_default()
+                },
+                row_heights: if is_active {
+                    mirror_rh.clone()
+                } else {
+                    all_rh.get(idx).cloned().unwrap_or_default()
+                },
                 merges: Vec::new(), // filled in the merge pass below
             };
 
@@ -937,8 +952,10 @@ fn apply_calp_reset_restore(
             if idx < all_rh.len() {
                 all_rh[idx] = sheet.row_heights.clone();
             }
-            if idx == active {
+            if is_active {
                 *mirror = grids[idx].clone();
+                *mirror_cw = sheet.column_widths.clone();
+                *mirror_rh = sheet.row_heights.clone();
                 active_affected = true;
             }
             inverse

@@ -784,7 +784,7 @@ pub async fn update_pivot_fields(
 
     // Auto-fit column widths if enabled
     if auto_fit {
-        auto_fit_pivot_columns(&state, destination, &view);
+        auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
     }
 
     // Update pivot region tracking
@@ -5407,7 +5407,7 @@ pub async fn update_bi_pivot_fields(
                 response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
                 update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
                 if auto_fit {
-                    auto_fit_pivot_columns(&state, destination, &view);
+                    auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
                 }
                 update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
                 recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
@@ -6649,7 +6649,7 @@ pub async fn update_bi_pivot_fields(
     response.overwritten_cell_count = count_overwritten_cells(&state, pivot_id, dest_sheet_idx, destination, &view);
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
     if auto_fit {
-        auto_fit_pivot_columns(&state, destination, &view);
+        auto_fit_pivot_columns(&state, dest_sheet_idx, destination, &view);
     }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     recalculate_sheet_formulas(&state, &pivot_state, Some((&*pane_control_state, &*ribbon_filter_state)));
