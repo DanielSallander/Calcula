@@ -108,8 +108,11 @@ export async function getConnection(
 // Connect / Disconnect / Bind
 // ---------------------------------------------------------------------------
 
-export async function connect(connectionId: string): Promise<ConnectionInfo> {
-  const conn = await apiConnect({ connectionId });
+export async function connect(
+  connectionId: string,
+  remember?: boolean,
+): Promise<ConnectionInfo> {
+  const conn = await apiConnect({ connectionId, remember });
   cachedConnections = null;
   return conn;
 }

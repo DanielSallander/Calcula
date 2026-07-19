@@ -1653,7 +1653,7 @@ pub fn calp_pull(
         now,
     };
 
-    let result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
+    let mut result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
@@ -1665,6 +1665,21 @@ pub fn calp_pull(
     .to_string();
 
     let sheets_pulled = result.sheets.len();
+
+    // Resolve pulled-sheet name collisions against the subscriber's existing
+    // sheets (Excel-style "Sheet1 (2)") BEFORE materialization, so the
+    // workbook tabs, the provenance ledger, and the persisted subscription's
+    // local_name all agree — subscribing to a package whose sheet shares a
+    // name with an existing sheet must not produce two identically-named tabs.
+    {
+        let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+        calp::pull::resolve_sheet_name_collisions(
+            &mut result.sheets,
+            &mut result.subscription.sheets,
+            &mut taken,
+            &std::collections::HashSet::new(),
+        );
+    }
 
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
@@ -3358,6 +3373,31 @@ pub fn calp_refresh_apply(
         }
         all_payloads
     };
+
+    // Resolve name collisions for NEW pulled sheets before materialization
+    // (Excel-style "Name (2)"): already-tracked sheets replace in place under
+    // their existing local name and are skipped; a single taken-list threads
+    // across payloads so two subscriptions adding the same name also resolve.
+    // (sheet_names is cloned and released before the subscriptions lock is
+    // taken — no lock-order coupling with the materialization block below.)
+    let mut payloads = payloads;
+    {
+        let mut taken = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+        let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+        for payload in payloads.iter_mut() {
+            let skip: std::collections::HashSet<SheetId> = subs
+                .subscriptions
+                .get(payload.subscription_index)
+                .map(|sub| sub.sheets.iter().map(|s| s.package_sheet_id).collect())
+                .unwrap_or_default();
+            calp::pull::resolve_sheet_name_collisions(
+                &mut payload.pull_result.sheets,
+                &mut payload.pull_result.subscription.sheets,
+                &mut taken,
+                &skip,
+            );
+        }
+    }
 
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
@@ -7954,8 +7994,23 @@ pub struct ConnectionSpecInfo {
     pub preferred_auth: String,
 }
 
-/// Extract server, database, connector type, and preferred auth from a model's connectionSpecs.
+/// Extract server, database, connector type, and preferred auth from a model's
+/// connection metadata. Two shapes exist:
+/// - legacy Studio-era `connectionSpecs` at the ModelBundle wrapper level;
+/// - the engine's persisted sources catalog (v14+) at `model.sources` —
+///   `{ id, kind, preferred_auth, connection: { host, port, database } }` —
+///   which is what Model-Editor-authored models carry. Without this fallback a
+///   subscribed package's connection lands with an empty database and any
+///   live connect silently targets the user's default database (where the
+///   model's schema does not exist).
 pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> ConnectionSpecInfo {
+    let host_port_to_server = |host: &str, port: Option<u64>| -> String {
+        match port {
+            Some(p) if p != 5432 => format!("{}:{}", host, p),
+            _ => host.to_string(),
+        }
+    };
+
     if let Some(specs) = model_json.get("connectionSpecs").and_then(|s| s.as_array()) {
         if let Some(spec) = specs.first() {
             let connector_type = spec.get("connectorType")
@@ -7967,23 +8022,120 @@ pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> Connectio
                 .unwrap_or("UsernamePassword")
                 .to_string();
             if let Some(target) = spec.get("target") {
-                let host = target.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let port = target.get("port").and_then(|v| v.as_u64()).map(|p| p as u16);
+                let host = target.get("host").and_then(|v| v.as_str()).unwrap_or("");
+                let port = target.get("port").and_then(|v| v.as_u64());
                 let database = target.get("database").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let server = if let Some(p) = port {
-                    if p != 5432 { format!("{}:{}", host, p) } else { host }
-                } else {
-                    host
+                return ConnectionSpecInfo {
+                    server: host_port_to_server(host, port),
+                    database,
+                    connector_type,
+                    preferred_auth,
                 };
-                return ConnectionSpecInfo { server, database, connector_type, preferred_auth };
             }
         }
     }
+
+    // Persisted sources catalog (engine v14+): first database-kind source wins.
+    let inner_model = model_json.get("model").unwrap_or(model_json);
+    if let Some(sources) = inner_model.get("sources").and_then(|s| s.as_array()) {
+        for src in sources {
+            let kind = src.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let connector_type = match kind {
+                "postgres" => "PostgreSQL",
+                "sqlserver" => "SqlServer",
+                _ => continue, // in-memory / file sources carry no server target
+            };
+            let preferred_auth = match src.get("preferred_auth").and_then(|v| v.as_str()) {
+                Some(a) if a.eq_ignore_ascii_case("integrated") => "Integrated",
+                _ => "UsernamePassword",
+            };
+            let Some(connection) = src.get("connection") else { continue };
+            let host = connection.get("host").and_then(|v| v.as_str()).unwrap_or("");
+            let port = connection.get("port").and_then(|v| v.as_u64());
+            let database = connection.get("database").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return ConnectionSpecInfo {
+                server: host_port_to_server(host, port),
+                database,
+                connector_type: connector_type.to_string(),
+                preferred_auth: preferred_auth.to_string(),
+            };
+        }
+    }
+
     ConnectionSpecInfo {
         server: String::new(),
         database: String::new(),
         connector_type: String::new(),
         preferred_auth: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod connection_spec_info_tests {
+    use super::extract_connection_spec_info;
+
+    #[test]
+    fn reads_persisted_sources_catalog() {
+        let json = serde_json::json!({
+            "formatVersion": 23,
+            "model": {
+                "sources": [{
+                    "id": "Adventureworks",
+                    "kind": "postgres",
+                    "preferred_auth": "username_password",
+                    "connection": { "host": "localhost", "port": 5432, "database": "Adventureworks", "default_schema": "BI" }
+                }]
+            }
+        });
+        let info = extract_connection_spec_info(&json);
+        assert_eq!(info.server, "localhost");
+        assert_eq!(info.database, "Adventureworks");
+        assert_eq!(info.connector_type, "PostgreSQL");
+        assert_eq!(info.preferred_auth, "UsernamePassword");
+    }
+
+    #[test]
+    fn non_default_port_lands_in_server() {
+        let json = serde_json::json!({
+            "sources": [{
+                "kind": "postgres",
+                "connection": { "host": "db.example.com", "port": 5544, "database": "sales" }
+            }]
+        });
+        let info = extract_connection_spec_info(&json);
+        assert_eq!(info.server, "db.example.com:5544");
+        assert_eq!(info.database, "sales");
+    }
+
+    #[test]
+    fn legacy_connection_specs_still_win() {
+        let json = serde_json::json!({
+            "connectionSpecs": [{
+                "connectorType": "PostgreSQL",
+                "preferred_auth": "Integrated",
+                "target": { "host": "legacy", "port": 5432, "database": "olddb" }
+            }],
+            "model": { "sources": [{ "kind": "postgres", "connection": { "host": "new", "database": "newdb" } }] }
+        });
+        let info = extract_connection_spec_info(&json);
+        assert_eq!(info.server, "legacy");
+        assert_eq!(info.database, "olddb");
+        assert_eq!(info.preferred_auth, "Integrated");
+    }
+
+    #[test]
+    fn in_memory_sources_are_skipped() {
+        let json = serde_json::json!({
+            "model": {
+                "sources": [
+                    { "kind": "inmemory", "connection": {} },
+                    { "kind": "postgres", "connection": { "host": "h", "database": "d" } }
+                ]
+            }
+        });
+        let info = extract_connection_spec_info(&json);
+        assert_eq!(info.server, "h");
+        assert_eq!(info.database, "d");
     }
 }
 

@@ -160,6 +160,57 @@ pub struct PulledSheet {
     pub sheet: Sheet,
 }
 
+/// Rename pulled sheets whose names collide with an already-taken workbook
+/// sheet name (case-insensitive, Excel-style: "Name" → "Name (2)" → "Name (3)"),
+/// keeping the subscription ledger's `local_name` in sync so refresh keeps
+/// matching by `package_sheet_id` under the resolved local name.
+///
+/// - `taken` is the subscriber's current sheet-name list; every FINAL name of a
+///   non-skipped pulled sheet is appended to it, so callers can thread one list
+///   through multiple pulls (multi-subscription refresh) and within-package
+///   duplicates also resolve.
+/// - `skip` holds package sheet ids to leave untouched — refresh passes the
+///   already-tracked sheets, which replace in place under their existing local
+///   name and must not be renamed against their own workbook entry.
+pub fn resolve_sheet_name_collisions(
+    sheets: &mut [PulledSheet],
+    subscribed: &mut [SubscribedSheet],
+    taken: &mut Vec<String>,
+    skip: &std::collections::HashSet<SheetId>,
+) {
+    let mut taken_lower: std::collections::HashSet<String> =
+        taken.iter().map(|n| n.to_lowercase()).collect();
+
+    for ps in sheets.iter_mut() {
+        if skip.contains(&ps.package_sheet_id) {
+            continue;
+        }
+        let mut resolved = ps.name.clone();
+        if taken_lower.contains(&resolved.to_lowercase()) {
+            let mut n = 2usize;
+            loop {
+                let candidate = format!("{} ({})", ps.name, n);
+                if !taken_lower.contains(&candidate.to_lowercase()) {
+                    resolved = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        if resolved != ps.name {
+            if let Some(entry) = subscribed
+                .iter_mut()
+                .find(|s| s.package_sheet_id == ps.package_sheet_id)
+            {
+                entry.local_name = resolved.clone();
+            }
+            ps.name = resolved.clone();
+        }
+        taken_lower.insert(resolved.to_lowercase());
+        taken.push(resolved);
+    }
+}
+
 /// Pull a package from the registry. Returns sheets and metadata for the
 /// caller to integrate into the workbook.
 ///
@@ -678,6 +729,105 @@ pub fn pull(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sheet_name_collision_tests {
+    use super::*;
+
+    fn pulled(name: &str) -> PulledSheet {
+        PulledSheet {
+            package_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
+            name: name.to_string(),
+            sheet: Sheet::new(name.to_string()),
+        }
+    }
+
+    fn subscribed_for(sheets: &[PulledSheet]) -> Vec<SubscribedSheet> {
+        sheets
+            .iter()
+            .map(|ps| SubscribedSheet {
+                package_sheet_id: ps.package_sheet_id,
+                local_sheet_id: ps.sheet.id,
+                local_name: ps.name.clone(),
+                extra: HashMap::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn colliding_name_gets_excel_style_suffix() {
+        let mut sheets = vec![pulled("Sheet1")];
+        let mut subs = subscribed_for(&sheets);
+        let mut taken = vec!["Sheet1".to_string()];
+        resolve_sheet_name_collisions(
+            &mut sheets,
+            &mut subs,
+            &mut taken,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(sheets[0].name, "Sheet1 (2)");
+        assert_eq!(subs[0].local_name, "Sheet1 (2)");
+        assert!(taken.contains(&"Sheet1 (2)".to_string()));
+    }
+
+    #[test]
+    fn collision_check_is_case_insensitive_and_counts_up() {
+        let mut sheets = vec![pulled("Report")];
+        let mut subs = subscribed_for(&sheets);
+        let mut taken = vec!["report".to_string(), "Report (2)".to_string()];
+        resolve_sheet_name_collisions(
+            &mut sheets,
+            &mut subs,
+            &mut taken,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(sheets[0].name, "Report (3)");
+    }
+
+    #[test]
+    fn non_colliding_names_are_untouched() {
+        let mut sheets = vec![pulled("Sales")];
+        let mut subs = subscribed_for(&sheets);
+        let mut taken = vec!["Sheet1".to_string()];
+        resolve_sheet_name_collisions(
+            &mut sheets,
+            &mut subs,
+            &mut taken,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(sheets[0].name, "Sales");
+        assert_eq!(subs[0].local_name, "Sales");
+    }
+
+    #[test]
+    fn duplicates_within_one_pull_also_resolve() {
+        let mut sheets = vec![pulled("Data"), pulled("Data")];
+        let mut subs = subscribed_for(&sheets);
+        let mut taken = Vec::new();
+        resolve_sheet_name_collisions(
+            &mut sheets,
+            &mut subs,
+            &mut taken,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(sheets[0].name, "Data");
+        assert_eq!(sheets[1].name, "Data (2)");
+    }
+
+    #[test]
+    fn skipped_tracked_sheets_are_left_alone() {
+        let mut sheets = vec![pulled("Sheet1"), pulled("Sheet1")];
+        let mut subs = subscribed_for(&sheets);
+        let mut taken = vec!["Sheet1".to_string()];
+        let skip: std::collections::HashSet<SheetId> =
+            [sheets[0].package_sheet_id].into_iter().collect();
+        resolve_sheet_name_collisions(&mut sheets, &mut subs, &mut taken, &skip);
+        // Tracked sheet keeps its package name (it replaces in place);
+        // the genuinely new sheet renames around the existing workbook name.
+        assert_eq!(sheets[0].name, "Sheet1");
+        assert_eq!(sheets[1].name, "Sheet1 (2)");
+    }
+}
 
 #[cfg(test)]
 mod tests {

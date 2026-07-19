@@ -1552,6 +1552,9 @@ pub async fn refresh_pivot_cache(
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
                 calculated_fields: calc_fields,
                 value_column_order,
+                // A refresh exists to fetch fresh data — the identical-fields
+                // cosmetic fast path must not swallow it.
+                force_requery: true,
             }
         };
 
@@ -5372,8 +5375,15 @@ pub async fn update_bi_pivot_fields(
             // request would look identical to an empty pivot and wrongly
             // short-circuit against the stale cache. Never take the fast path
             // while a group is placed.
-            let cosmetic_only =
-                placement.is_none() && is_bi_cosmetic_only_change(definition, &request);
+            // Also never take it when the caller demands fresh data
+            // (refresh_pivot_cache) or when the stored cache has NO records —
+            // a failed earlier query leaves an empty cache behind, and
+            // re-applying the same fields must retry the query, not render
+            // "Grand Total 0" from the empty cache forever.
+            let cosmetic_only = placement.is_none()
+                && !request.force_requery
+                && !stored_cache.records.is_empty()
+                && is_bi_cosmetic_only_change(definition, &request);
             if cosmetic_only {
                 log_info!("PIVOT", "update_bi_pivot_fields: cosmetic-only change, skipping BI query");
                 // Update custom names on existing value fields

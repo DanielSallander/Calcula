@@ -286,6 +286,11 @@ pub struct UpdateConnectionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BiConnectRequest {
     pub connection_id: ConnectionId,
+    /// When Some(false), do NOT cache credentials for later auto-connect after
+    /// a successful connect. None/Some(true) keeps the remember-on-success
+    /// behavior (Windows Credential Manager, keyed by server+database).
+    #[serde(default)]
+    pub remember: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

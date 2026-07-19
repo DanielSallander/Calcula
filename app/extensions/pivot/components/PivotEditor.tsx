@@ -38,6 +38,7 @@ import type {
 import { CALC_GROUP_TABLE } from './types';
 import { useJsonToggle, JsonToggleButton, JsonToggleEditor } from "../../_shared/components/jsonToggle";
 import { splitBiFieldKey } from "../../_shared/lib/biFieldKey";
+import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 
 type EditorTab = 'fields' | 'design';
 
@@ -63,7 +64,10 @@ function BiConnectionBanner({ connectionId, onConnected }: {
 }) {
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [connName, setConnName] = useState("");
+  const [connServer, setConnServer] = useState("");
+  const [connDatabase, setConnDatabase] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
+  const [showCredentials, setShowCredentials] = useState(false);
 
   useEffect(() => {
     getBiConnectionService()?.getConnections().then(conns => {
@@ -71,6 +75,8 @@ function BiConnectionBanner({ connectionId, onConnected }: {
       if (conn) {
         setIsConnected(conn.isConnected);
         setConnName(conn.name);
+        setConnServer(conn.server ?? "");
+        setConnDatabase(conn.database ?? "");
       }
     }).catch(() => {});
   }, [connectionId]);
@@ -78,30 +84,45 @@ function BiConnectionBanner({ connectionId, onConnected }: {
   const handleConnect = useCallback(async () => {
     const biService = getBiConnectionService();
     if (!biService) return;
+    setIsConnecting(true);
     try {
-      const conns = await biService.getConnections();
-      const conn = conns.find(c => c.id === connectionId);
-      if (!conn) return;
-
-      if (!conn.connectionString) {
-        const server = conn.server || "localhost";
-        const db = conn.database || "mydb";
-        const password = window.prompt(
-          `Connect to ${conn.name}\nServer: ${server}\nDatabase: ${db}\n\nEnter password:`,
-        );
-        if (password === null) return;
-        await biService.updateConnection({ id: connectionId, connectionString: `__PASSWORD_ONLY__:${password}` });
-      }
-
-      setIsConnecting(true);
+      // Silent first attempt: uses the stored connection string or credentials
+      // remembered on this machine (Windows Credential Manager).
       await biService.connect(connectionId);
       setIsConnected(true);
       onConnected();
-    } catch (err) {
-      window.alert(`Failed to connect: ${err}`);
+    } catch {
+      // No (working) saved sign-in — ask for credentials in a proper window.
+      setShowCredentials(true);
     } finally {
       setIsConnecting(false);
     }
+  }, [connectionId, onConnected]);
+
+  // Explicit fields from the ConnectSourceDialog. Throws to keep the
+  // dialog open with the error displayed inline.
+  const handleCredentialsConnect = useCallback(async (fields: ConnectSourceFields) => {
+    const biService = getBiConnectionService();
+    if (!biService) throw new Error("BI connection service unavailable");
+    const server = fields.server || "localhost";
+    const db = fields.database;
+    if (!db) throw new Error("Enter the database name.");
+    const user = fields.username || "postgres";
+    await biService.updateConnection({
+      id: connectionId,
+      connectionString: `host=${server} dbname=${db} user=${user} password=${fields.password} sslmode=prefer`,
+    });
+    try {
+      await biService.connect(connectionId, fields.remember);
+    } catch (err) {
+      // Don't leave a known-bad connection string behind — the next silent
+      // attempt would reuse it and fail without ever asking again.
+      await biService.updateConnection({ id: connectionId, connectionString: "" }).catch(() => {});
+      throw err;
+    }
+    setShowCredentials(false);
+    setIsConnected(true);
+    onConnected();
   }, [connectionId, onConnected]);
 
   if (isConnected === null) return null;
@@ -144,6 +165,15 @@ function BiConnectionBanner({ connectionId, onConnected }: {
             {isConnecting ? 'Connecting...' : 'Connect'}
           </button>
         </>
+      )}
+      {showCredentials && (
+        <ConnectSourceDialog
+          connectionName={connName || 'Data source'}
+          server={connServer}
+          database={connDatabase}
+          onCancel={() => setShowCredentials(false)}
+          onConnect={handleCredentialsConnect}
+        />
       )}
     </div>
   );

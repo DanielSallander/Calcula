@@ -86,8 +86,9 @@ export interface IPivotStoreService {
 export interface IBiConnectionService {
   /** Get all connections (cached by the BI extension). */
   getConnections(): Promise<ConnectionInfo[]>;
-  /** Connect a connection to its database. */
-  connect(connectionId: string): Promise<ConnectionInfo>;
+  /** Connect a connection to its database. Pass remember=false to skip
+   *  caching the credentials for later auto-connect (default: remember). */
+  connect(connectionId: string, remember?: boolean): Promise<ConnectionInfo>;
   /** Update connection properties (e.g. provide credentials). */
   updateConnection(request: UpdateConnectionRequest): Promise<ConnectionInfo>;
 }

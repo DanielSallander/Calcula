@@ -58,12 +58,18 @@ export const SubscribeDialogDefinition: DialogDefinition = {
   id: SUBSCRIBE_DIALOG_ID,
   component: SubscribeDialog as React.ComponentType<DialogProps>,
   priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open, so a grid-level Escape must not dismiss it.
+  dismissOnEscape: false,
 };
 
 export const RefreshPreviewDialogDefinition: DialogDefinition = {
   id: REFRESH_PREVIEW_DIALOG_ID,
   component: RefreshPreviewDialog as React.ComponentType<DialogProps>,
   priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open, so a grid-level Escape must not dismiss it.
+  dismissOnEscape: false,
 };
 
 export const DesignateWritebackDialogDefinition: DialogDefinition = {

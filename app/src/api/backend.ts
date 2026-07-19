@@ -3499,6 +3499,8 @@ export interface BiRegionInfo {
 
 export interface BiConnectRequest {
   connectionId: string;
+  /** false = do not cache credentials for later auto-connect (default true). */
+  remember?: boolean;
 }
 
 export interface BiBindRequest {

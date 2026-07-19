@@ -1483,6 +1483,11 @@ pub struct UpdateBiPivotFieldsRequest {
     /// Unified column ordering for interleaving values and calculated fields.
     #[serde(default)]
     pub value_column_order: Option<Vec<ValueColumnRefDef>>,
+    /// Always run the BI query, even when the request matches the current
+    /// definition. Set by refresh_pivot_cache — a refresh whose whole point is
+    /// fresh data must never short-circuit onto the cosmetic fast path.
+    #[serde(default)]
+    pub force_requery: bool,
 }
 
 /// Pseudo table name marking a calculation-group field reference in a

@@ -2131,7 +2131,24 @@ pub async fn bi_connect(
     let idx = {
         let mut engine = engine_arc.lock().await;
         engine.add_postgres(target, auth).await
-            .map_err(|e| format!("Connection failed: {}", e))?
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("non-UTF-8") {
+                    // The server rejected the connection but its error text is in
+                    // a non-UTF-8 locale encoding the driver cannot decode.
+                    // (The connector asks for lc_messages=C to avoid this, but a
+                    // pooler that strips startup options can still land here.)
+                    format!(
+                        "Connection failed: the server rejected the connection, but its error text \
+                         could not be decoded (non-UTF-8 server locale). Common causes: wrong \
+                         password, a username that is not a database role, or a database that does \
+                         not exist on this server. Details: {}",
+                        msg
+                    )
+                } else {
+                    format!("Connection failed: {}", msg)
+                }
+            })?
     };
 
     // After connecting, refresh stale tables (if any were loaded from disk cache)
@@ -2165,8 +2182,10 @@ pub async fn bi_connect(
     // Save cache to disk after successful refresh (crash protection)
     save_cache_for_connection(&bi_state, connection_id).await;
 
-    // Cache credentials for future auto-connect (keyed by server+database)
-    if !server.is_empty() && !database.is_empty() {
+    // Cache credentials for future auto-connect (keyed by server+database) —
+    // unless the caller opted out via remember=false.
+    let remember = request.remember.unwrap_or(true);
+    if remember && !server.is_empty() && !database.is_empty() {
         let stored_conn_str = bi_state.connections.lock().unwrap()
             .get(&connection_id)
             .map(|c| c.connection_string.clone())
