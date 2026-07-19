@@ -9,6 +9,7 @@ import type {
   CalcGroupItemDto,
   HierarchyLevelDto,
   KpiBandDto,
+  ModelCalcGroupInfo,
   ModelCultureInfo,
   ModelOverview,
   ModelRelationshipInfo,
@@ -54,6 +55,28 @@ function secondary(cmd: Command, usage: string): ValueTok {
 function mergeStr(opt: string | undefined, existing: string | null): string | null {
   if (opt === undefined) return existing;
   return opt === "" ? null : opt;
+}
+
+/** A calc-group upsert REPLACES the whole group — every CLI edit that only
+ *  touches items must carry the selection-state expressions (and their
+ *  static + dynamic formats) over unchanged. */
+function selectionCarry(grp: ModelCalcGroupInfo): {
+  multipleOrEmptySelection: string | null;
+  multipleOrEmptySelectionFormat: string | null;
+  multipleOrEmptySelectionFormatExpression: string | null;
+  noSelection: string | null;
+  noSelectionFormat: string | null;
+  noSelectionFormatExpression: string | null;
+} {
+  return {
+    multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
+    multipleOrEmptySelectionFormat: grp.multipleOrEmptySelectionFormat ?? null,
+    multipleOrEmptySelectionFormatExpression:
+      grp.multipleOrEmptySelectionFormatExpression ?? null,
+    noSelection: grp.noSelection ?? null,
+    noSelectionFormat: grp.noSelectionFormat ?? null,
+    noSelectionFormatExpression: grp.noSelectionFormatExpression ?? null,
+  };
 }
 
 function noWildcard(name: string, what: string, line: number): string {
@@ -593,10 +616,7 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
           originalName: group.name,
           name: group.name,
           items,
-          multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
-          multipleOrEmptySelectionFormat: group.multipleOrEmptySelectionFormat ?? null,
-          noSelection: group.noSelection ?? null,
-          noSelectionFormat: group.noSelectionFormat ?? null,
+          ...selectionCarry(group),
         }),
       );
       done(`calc item ${group.name}[${itemName}]`);
@@ -955,10 +975,7 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           originalName: group.name,
           name: group.name,
           items,
-          multipleOrEmptySelection: group.multipleOrEmptySelection ?? null,
-          multipleOrEmptySelectionFormat: group.multipleOrEmptySelectionFormat ?? null,
-          noSelection: group.noSelection ?? null,
-          noSelectionFormat: group.noSelectionFormat ?? null,
+          ...selectionCarry(group),
         }),
       );
       return;
@@ -1348,10 +1365,7 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
           originalName: grp.name,
           name: newName,
           items: grp.items,
-          multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
-          multipleOrEmptySelectionFormat: grp.multipleOrEmptySelectionFormat ?? null,
-          noSelection: grp.noSelection ?? null,
-          noSelectionFormat: grp.noSelectionFormat ?? null,
+          ...selectionCarry(grp),
         }),
       );
       done(grp.name);
@@ -1368,10 +1382,7 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
           originalName: grp.name,
           name: grp.name,
           items,
-          multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
-          multipleOrEmptySelectionFormat: grp.multipleOrEmptySelectionFormat ?? null,
-          noSelection: grp.noSelection ?? null,
-          noSelectionFormat: grp.noSelectionFormat ?? null,
+          ...selectionCarry(grp),
         }),
       );
       done(`${grp.name}[${item.name}]`);
@@ -1532,14 +1543,15 @@ async function runDelete(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
         const t0 = cmd.pos[0] as ValueTok & { kind: "colref" };
         const grp = requireOne(s.overview.calculationGroups, (x) => x.name, t0.table ?? "", "calculation group", cmd.line);
         const items = grp.items.filter((i) => i.name !== t.name);
+        // selectionCarry also fixes a former drop here: this site used to
+        // omit the selection formats, so deleting an item cleared them.
         await mutOverview(s, () =>
           g.upsertCalcGroup({
             connectionId: cid,
             originalName: grp.name,
             name: grp.name,
             items,
-            multipleOrEmptySelection: grp.multipleOrEmptySelection ?? null,
-            noSelection: grp.noSelection ?? null,
+            ...selectionCarry(grp),
           }),
         );
         break;

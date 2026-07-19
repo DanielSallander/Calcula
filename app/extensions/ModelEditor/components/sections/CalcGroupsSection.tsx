@@ -31,8 +31,10 @@ interface SavedGroup {
   /** AS-style selection-state expressions (undefined = not defined). */
   multipleOrEmptySelection?: string;
   multipleOrEmptySelectionFormat?: string;
+  multipleOrEmptySelectionFormatExpression?: string;
   noSelection?: string;
   noSelectionFormat?: string;
+  noSelectionFormatExpression?: string;
   /** Item renames as [oldName, newName] pairs (edit mode only). */
   renames: [string, string][];
 }
@@ -122,8 +124,10 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
     items: CalcGroupItemDto[];
     multipleOrEmptySelection?: string | null;
     multipleOrEmptySelectionFormat?: string | null;
+    multipleOrEmptySelectionFormatExpression?: string | null;
     noSelection?: string | null;
     noSelectionFormat?: string | null;
+    noSelectionFormatExpression?: string | null;
   };
   const enqueueGroupOp = (
     groupName: string,
@@ -146,8 +150,16 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
         payload.multipleOrEmptySelectionFormat,
         g.multipleOrEmptySelectionFormat ?? null,
       );
+      const moeFmtExpr = pick(
+        payload.multipleOrEmptySelectionFormatExpression,
+        g.multipleOrEmptySelectionFormatExpression ?? null,
+      );
       const nosel = pick(payload.noSelection, g.noSelection ?? null);
       const noselFmt = pick(payload.noSelectionFormat, g.noSelectionFormat ?? null);
+      const noselFmtExpr = pick(
+        payload.noSelectionFormatExpression,
+        g.noSelectionFormatExpression ?? null,
+      );
       try {
         const o = await biModelUpsertCalcGroup({
           connectionId,
@@ -156,8 +168,10 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
           items: payload.items,
           multipleOrEmptySelection: moe,
           multipleOrEmptySelectionFormat: moeFmt,
+          multipleOrEmptySelectionFormatExpression: moeFmtExpr,
           noSelection: nosel,
           noSelectionFormat: noselFmt,
+          noSelectionFormatExpression: noselFmtExpr,
         });
         if (payload.name !== g.name) aliasRef.current.set(g.name, payload.name);
         latestGroupsRef.current = latestGroupsRef.current.map((x) =>
@@ -168,8 +182,10 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                 items: payload.items,
                 multipleOrEmptySelection: moe ?? undefined,
                 multipleOrEmptySelectionFormat: moeFmt ?? undefined,
+                multipleOrEmptySelectionFormatExpression: moeFmtExpr ?? undefined,
                 noSelection: nosel ?? undefined,
                 noSelectionFormat: noselFmt ?? undefined,
+                noSelectionFormatExpression: noselFmtExpr ?? undefined,
               }
             : x,
         );
@@ -344,8 +360,21 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
         name: g.name,
         items: g.items,
         ...(which === "moe"
-          ? { multipleOrEmptySelection: next, ...(next ? {} : { multipleOrEmptySelectionFormat: null }) }
-          : { noSelection: next, ...(next ? {} : { noSelectionFormat: null }) }),
+          ? {
+              multipleOrEmptySelection: next,
+              ...(next
+                ? {}
+                : {
+                    multipleOrEmptySelectionFormat: null,
+                    multipleOrEmptySelectionFormatExpression: null,
+                  }),
+            }
+          : {
+              noSelection: next,
+              ...(next
+                ? {}
+                : { noSelectionFormat: null, noSelectionFormatExpression: null }),
+            }),
       };
     });
   };
@@ -362,6 +391,30 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
         ...(which === "moe"
           ? { multipleOrEmptySelectionFormat: next }
           : { noSelectionFormat: next }),
+      };
+    });
+  };
+
+  /** Commit a selection-state DYNAMIC format expression typed in the pane
+   *  (blank = clear; wins over the static format when set). */
+  const editSelectionFormatExpr = (
+    groupName: string,
+    which: "moe" | "nosel",
+    expression: string,
+  ): void => {
+    const next = expression.trim() || null;
+    enqueueGroupOp(groupName, (g) => {
+      const cur =
+        (which === "moe"
+          ? g.multipleOrEmptySelectionFormatExpression
+          : g.noSelectionFormatExpression) ?? null;
+      if (cur === next) return null;
+      return {
+        name: g.name,
+        items: g.items,
+        ...(which === "moe"
+          ? { multipleOrEmptySelectionFormatExpression: next }
+          : { noSelectionFormatExpression: next }),
       };
     });
   };
@@ -393,8 +446,10 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
       items: saved.items,
       multipleOrEmptySelection: saved.multipleOrEmptySelection,
       multipleOrEmptySelectionFormat: saved.multipleOrEmptySelectionFormat,
+      multipleOrEmptySelectionFormatExpression: saved.multipleOrEmptySelectionFormatExpression,
       noSelection: saved.noSelection,
       noSelectionFormat: saved.noSelectionFormat,
+      noSelectionFormatExpression: saved.noSelectionFormatExpression,
     };
     latestGroupsRef.current = oldName
       ? latestGroupsRef.current.map((g) => (g.name === oldName ? savedInfo : g))
@@ -636,6 +691,9 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
             }
             onEditSelectionText={(which, f) => editSelectionExpr(selectedGroup.name, which, f)}
             onEditSelectionFormat={(which, f) => editSelectionFormat(selectedGroup.name, which, f)}
+            onEditSelectionFormatExpr={(which, f) =>
+              editSelectionFormatExpr(selectedGroup.name, which, f)
+            }
           />
         )}
       </div>
@@ -774,6 +832,7 @@ function CalcGroupInspector({
   onEditSelection,
   onEditSelectionText,
   onEditSelectionFormat,
+  onEditSelectionFormatExpr,
 }: {
   group: ModelCalcGroupInfo;
   /** null = the group node itself is selected. */
@@ -796,6 +855,8 @@ function CalcGroupInspector({
   /** Commit a selection expression typed in the pane (blank = clear). */
   onEditSelectionText: (which: "moe" | "nosel", formula: string) => void;
   onEditSelectionFormat: (which: "moe" | "nosel", format: string) => void;
+  /** Commit a selection dynamic format expression (blank = clear). */
+  onEditSelectionFormatExpr: (which: "moe" | "nosel", expression: string) => void;
 }): React.ReactElement {
   const [name, setName] = useState(item ? item.name : group.name);
   const currentName = item ? item.name : group.name;
@@ -813,6 +874,12 @@ function CalcGroupInspector({
       ? (group.multipleOrEmptySelectionFormat ?? "")
       : pseudo === "nosel"
         ? (group.noSelectionFormat ?? "")
+        : "";
+  const pseudoFormatExpr =
+    pseudo === "moe"
+      ? (group.multipleOrEmptySelectionFormatExpression ?? "")
+      : pseudo === "nosel"
+        ? (group.noSelectionFormatExpression ?? "")
         : "";
 
   // The formula is editable in place. The pane remounts when the SELECTED
@@ -833,6 +900,12 @@ function CalcGroupInspector({
   if (pseudoFormat !== formatSeed) {
     if (format === formatSeed) setFormat(pseudoFormat);
     setFormatSeed(pseudoFormat);
+  }
+  const [formatExpr, setFormatExpr] = useState(pseudoFormatExpr);
+  const [formatExprSeed, setFormatExprSeed] = useState(pseudoFormatExpr);
+  if (pseudoFormatExpr !== formatExprSeed) {
+    if (formatExpr === formatExprSeed) setFormatExpr(pseudoFormatExpr);
+    setFormatExprSeed(pseudoFormatExpr);
   }
 
   const commitOnEnter = (e: React.KeyboardEvent<HTMLElement>): void => {
@@ -894,6 +967,21 @@ function CalcGroupInspector({
           onKeyDown={commitOnEnter}
           onBlur={() => {
             if (format.trim() !== pseudoFormat.trim()) onEditSelectionFormat(pseudo, format);
+          }}
+        />
+
+        <label style={label}>Format expression</label>
+        <input
+          style={styles.input}
+          value={formatExpr}
+          placeholder="e.g. SELECTEDMEASUREFORMATSTRING()"
+          title="Dynamic format string expression, evaluated per query per transformed measure. Wins over the static Format when set."
+          disabled={readOnly || pseudoExpr.trim() === ""}
+          onChange={(e) => setFormatExpr(e.target.value)}
+          onKeyDown={commitOnEnter}
+          onBlur={() => {
+            if (formatExpr.trim() !== pseudoFormatExpr.trim())
+              onEditSelectionFormatExpr(pseudo, formatExpr);
           }}
         />
 
@@ -1042,6 +1130,8 @@ interface ItemDraft {
   /** Format string applied to measures transformed by this item ("" = keep
    *  the base measure's format). */
   formatString?: string;
+  /** Dynamic format string expression ("" = none; wins over formatString). */
+  formatStringExpression?: string;
 }
 
 function CalcGroupModal({
@@ -1082,8 +1172,14 @@ function CalcGroupModal({
   });
   const [moeFormula, setMoeFormula] = useState(original?.multipleOrEmptySelection ?? "");
   const [moeFormat, setMoeFormat] = useState(original?.multipleOrEmptySelectionFormat ?? "");
+  const [moeFormatExpr, setMoeFormatExpr] = useState(
+    original?.multipleOrEmptySelectionFormatExpression ?? "",
+  );
   const [noselFormula, setNoselFormula] = useState(original?.noSelection ?? "");
   const [noselFormat, setNoselFormat] = useState(original?.noSelectionFormat ?? "");
+  const [noselFormatExpr, setNoselFormatExpr] = useState(
+    original?.noSelectionFormatExpression ?? "",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1129,6 +1225,7 @@ function CalcGroupModal({
       name: i.name.trim(),
       formula: i.formula.trim(),
       formatString: i.formatString?.trim() || undefined,
+      formatStringExpression: i.formatStringExpression?.trim() || undefined,
     }));
     const lower = finalItems.map((i) => i.name.toLowerCase());
     const dupe = lower.find((n, i) => lower.indexOf(n) !== i);
@@ -1147,8 +1244,10 @@ function CalcGroupModal({
         items: finalItems,
         multipleOrEmptySelection: moe || null,
         multipleOrEmptySelectionFormat: (moe && moeFormat.trim()) || null,
+        multipleOrEmptySelectionFormatExpression: (moe && moeFormatExpr.trim()) || null,
         noSelection: nosel || null,
         noSelectionFormat: (nosel && noselFormat.trim()) || null,
+        noSelectionFormatExpression: (nosel && noselFormatExpr.trim()) || null,
       });
       const renames: [string, string][] = original
         ? items
@@ -1165,8 +1264,10 @@ function CalcGroupModal({
         items: finalItems,
         multipleOrEmptySelection: moe || undefined,
         multipleOrEmptySelectionFormat: (moe && moeFormat.trim()) || undefined,
+        multipleOrEmptySelectionFormatExpression: (moe && moeFormatExpr.trim()) || undefined,
         noSelection: nosel || undefined,
         noSelectionFormat: (nosel && noselFormat.trim()) || undefined,
+        noSelectionFormatExpression: (nosel && noselFormatExpr.trim()) || undefined,
         renames,
       });
     } catch (err: unknown) {
@@ -1254,6 +1355,28 @@ function CalcGroupModal({
             }}
             placeholder="e.g. #,##0.00 or 0.0% (blank = measure format)"
             title="Number format applied to measures transformed by this item (e.g. a YOY% item formatting any measure as a percentage). Blank keeps each measure's own format."
+          />
+        </Field>
+        {/* DYNAMIC format string expression (v23) — evaluated per query per
+            transformed measure; wins over the static Format when set. */}
+        <Field label="Format expression" flex={1}>
+          <input
+            style={styles.input}
+            value={
+              sel === "moe"
+                ? moeFormatExpr
+                : sel === "nosel"
+                  ? noselFormatExpr
+                  : (current?.formatStringExpression ?? "")
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (sel === "moe") setMoeFormatExpr(v);
+              else if (sel === "nosel") setNoselFormatExpr(v);
+              else if (selIndex !== null) updateItem(selIndex, { formatStringExpression: v });
+            }}
+            placeholder="e.g. SELECTEDMEASUREFORMATSTRING()"
+            title="Dynamic format string expression, evaluated per query per transformed measure — e.g. SELECTEDMEASUREFORMATSTRING() to inherit each measure's own format, or IF(...) to switch formats. Wins over the static Format when set."
           />
         </Field>
       </div>

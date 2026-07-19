@@ -1233,6 +1233,17 @@ const WRITEBACK_COLUMN_MIN_FORMAT_VERSION: u64 = 21;
 /// stamped >= 22 to fail closed with the clean "update Calcula" gate.
 const EXTENSION_DATA_MIN_FORMAT_VERSION: u64 = 22;
 
+/// Minimum schema `format_version` required by any v23 expression-language
+/// feature: calc-group introspection functions (expression variants a
+/// pre-v23 engine fails to deserialize), a calculation item's / selection
+/// expression's `format_string_expression` (silently dropped), `NOT IN`
+/// (the additive `negated` flag is dropped — computing the OPPOSITE
+/// membership), day-level time intelligence (`DAY` granularity fails to
+/// deserialize; `shift_days`/`non_blank` are dropped — computing the plain
+/// balance), and `QUERY ... TOP` (the `top` field is dropped — materializing
+/// the unranked intermediate).
+const EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION: u64 = 23;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1301,7 +1312,40 @@ pub fn stamp_feature_format_version(
         || model.fiscal_year_end_month().is_some()
         || !model.cultures().is_empty();
 
-    let required = if !model.extension_data().is_empty() {
+    // v23 expression constructs can ride every expression surface; the
+    // introspection functions only parse inside calc-group items/selection
+    // expressions, but NOT IN / day-TI / QUERY TOP ride measures, columns,
+    // calculated tables (QUERY TOP top-N tables), and calc-group items alike.
+    let has_v23_expr = |e: &bi_engine::Expression| {
+        e.contains_calc_group_introspection()
+            || e.contains_negated_membership()
+            || e.contains_day_level_time_intelligence()
+            || e.contains_query_top()
+    };
+    let uses_v23 = model.measures().iter().any(|m| has_v23_expr(m.expression()))
+        || model
+            .calculated_columns()
+            .iter()
+            .any(|cc| has_v23_expr(cc.expression()))
+        || model
+            .context_columns()
+            .iter()
+            .any(|cc| has_v23_expr(cc.expression()))
+        || model
+            .global_variables()
+            .iter()
+            .any(|gv| has_v23_expr(gv.expression()))
+        || model.calculation_groups().iter().any(|g| {
+            g.items()
+                .iter()
+                .chain(g.multiple_or_empty_selection())
+                .chain(g.no_selection())
+                .any(|i| has_v23_expr(i.expression()) || i.format_string_expression().is_some())
+        });
+
+    let required = if uses_v23 {
+        EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION
+    } else if !model.extension_data().is_empty() {
         EXTENSION_DATA_MIN_FORMAT_VERSION
     } else if !model.writeback_columns().is_empty() {
         WRITEBACK_COLUMN_MIN_FORMAT_VERSION
@@ -1423,6 +1467,54 @@ mod format_gate_tests {
         assert_eq!(
             json.get("format_version").and_then(|v| v.as_u64()),
             Some(EXTENSION_DATA_MIN_FORMAT_VERSION)
+        );
+    }
+
+    #[test]
+    fn stamps_not_in_measure_to_v23() {
+        let model = model_with_measure(
+            "Filtered",
+            "SUM(Sales[amount], KEEP(Sales, Sales[amount] NOT IN {1, 2}))",
+        );
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(20u64));
+        stamp_feature_format_version(&model, &mut json);
+        // A pre-v23 engine drops the `negated` flag and computes the
+        // OPPOSITE membership — the stamp must gate it out.
+        assert_eq!(
+            json.get("format_version").and_then(|v| v.as_u64()),
+            Some(EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION)
+        );
+    }
+
+    #[test]
+    fn stamps_calc_item_format_expression_to_v23() {
+        let item = bi_engine::CalculationItem::from_text("As Is", "SELECTEDMEASURE()")
+            .unwrap()
+            .with_format_string_expression(Some("SELECTEDMEASUREFORMATSTRING()".to_string()));
+        let expr = bi_engine::parse_measure_expression("SUM(Sales[amount])").unwrap();
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![bi_engine::Column::new("amount", bi_engine::DataType::Int64)],
+                )
+                .unwrap(),
+            )
+            .add_measure(bi_engine::Measure::new("Total", expr))
+            .add_calculation_group(bi_engine::CalculationGroup::new("Adjust", vec![item]))
+            .build()
+            .unwrap();
+        let mut json = serde_json::to_value(&model).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("format_version".into(), serde_json::Value::from(22u64));
+        stamp_feature_format_version(&model, &mut json);
+        assert_eq!(
+            json.get("format_version").and_then(|v| v.as_u64()),
+            Some(EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION)
         );
     }
 

@@ -470,8 +470,13 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
     case "calcgroup": {
       const g = requireOne(o.calculationGroups, (x) => x.name, pat!, "calculation group", cmd.line);
       io.print(detailBlock([["calc group", g.name]]));
-      const rows = g.items.map((i) => [i.name, i.formula]);
-      printTable(io, ["item", "formula"], rows, "(no items)");
+      const rows = g.items.map((i) => [
+        i.name,
+        i.formula,
+        i.formatString ?? "",
+        i.formatStringExpression ?? "",
+      ]);
+      printTable(io, ["item", "formula", "format", "format expr"], rows, "(no items)");
       return;
     }
     case "calctable": {

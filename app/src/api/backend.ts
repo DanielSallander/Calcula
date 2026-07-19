@@ -3812,6 +3812,10 @@ export interface CalcGroupItemDto {
   /** Format string applied to measures transformed by this item (e.g.
    *  "0.0%"). Absent = keep the base measure's own format. */
   formatString?: string;
+  /** Dynamic format string expression (v23) — evaluated per query per
+   *  transformed measure, typically SELECTEDMEASUREFORMATSTRING()-based.
+   *  Wins over the static formatString when both are set. Absent = none. */
+  formatStringExpression?: string;
 }
 
 export interface ModelCalcGroupInfo {
@@ -3822,11 +3826,16 @@ export interface ModelCalcGroupInfo {
   multipleOrEmptySelection?: string;
   /** Format string of the multiple-or-empty selection expression. */
   multipleOrEmptySelectionFormat?: string;
+  /** Dynamic format string expression of the multiple-or-empty selection
+   *  expression (v23). */
+  multipleOrEmptySelectionFormatExpression?: string;
   /** AS-style noSelectionExpression source (absent = default: an unfiltered
    *  group applies no item — base measures). */
   noSelection?: string;
   /** Format string of the no-selection expression. */
   noSelectionFormat?: string;
+  /** Dynamic format string expression of the no-selection expression (v23). */
+  noSelectionFormatExpression?: string;
 }
 
 export interface ModelGlobalVariableInfo {
@@ -4252,11 +4261,17 @@ export async function biModelUpsertCalcGroup(params: {
   multipleOrEmptySelection?: string | null;
   /** Format string of the multiple-or-empty selection expression. */
   multipleOrEmptySelectionFormat?: string | null;
+  /** Dynamic format string expression of the multiple-or-empty selection
+   *  expression (blank/undefined = none). Same replace-semantics note. */
+  multipleOrEmptySelectionFormatExpression?: string | null;
   /** AS-style noSelectionExpression (blank/undefined = none). Same
    *  replace-semantics note as above. */
   noSelection?: string | null;
   /** Format string of the no-selection expression. */
   noSelectionFormat?: string | null;
+  /** Dynamic format string expression of the no-selection expression
+   *  (blank/undefined = none). Same replace-semantics note. */
+  noSelectionFormatExpression?: string | null;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_calc_group", {
     connectionId: params.connectionId,
@@ -4265,8 +4280,11 @@ export async function biModelUpsertCalcGroup(params: {
     items: params.items,
     multipleOrEmptySelection: params.multipleOrEmptySelection ?? null,
     multipleOrEmptySelectionFormat: params.multipleOrEmptySelectionFormat ?? null,
+    multipleOrEmptySelectionFormatExpression:
+      params.multipleOrEmptySelectionFormatExpression ?? null,
     noSelection: params.noSelection ?? null,
     noSelectionFormat: params.noSelectionFormat ?? null,
+    noSelectionFormatExpression: params.noSelectionFormatExpression ?? null,
   });
 }
 

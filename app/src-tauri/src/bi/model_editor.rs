@@ -1467,6 +1467,12 @@ pub struct CalcGroupItemDto {
     /// "0.0%"). None/blank = keep the base measure's own format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_string: Option<String>,
+    /// DYNAMIC format string expression (v23) — evaluated per query per
+    /// transformed measure, typically `SELECTEDMEASUREFORMATSTRING()`-based.
+    /// Wins over the static `format_string` when both are set. None/blank =
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_string_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1481,6 +1487,10 @@ pub struct ModelCalcGroupInfo {
     /// Format string of the multiple-or-empty selection expression.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multiple_or_empty_selection_format: Option<String>,
+    /// Dynamic format string expression of the multiple-or-empty selection
+    /// expression (v23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiple_or_empty_selection_format_expression: Option<String>,
     /// AS-style `noSelectionExpression` source (None = default: an unfiltered
     /// group applies no item — base measures).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1488,6 +1498,9 @@ pub struct ModelCalcGroupInfo {
     /// Format string of the no-selection expression.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_selection_format: Option<String>,
+    /// Dynamic format string expression of the no-selection expression (v23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_selection_format_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2280,16 +2293,25 @@ fn build_overview(
                         name: i.name().to_string(),
                         formula: tmpl_source(i),
                         format_string: i.format_string().map(str::to_string),
+                        format_string_expression: i
+                            .format_string_expression()
+                            .map(str::to_string),
                     })
                     .collect(),
                 multiple_or_empty_selection: g.multiple_or_empty_selection().map(tmpl_source),
                 multiple_or_empty_selection_format: g
                     .multiple_or_empty_selection()
                     .and_then(|t| t.format_string().map(str::to_string)),
+                multiple_or_empty_selection_format_expression: g
+                    .multiple_or_empty_selection()
+                    .and_then(|t| t.format_string_expression().map(str::to_string)),
                 no_selection: g.no_selection().map(tmpl_source),
                 no_selection_format: g
                     .no_selection()
                     .and_then(|t| t.format_string().map(str::to_string)),
+                no_selection_format_expression: g
+                    .no_selection()
+                    .and_then(|t| t.format_string_expression().map(str::to_string)),
             }
         })
         .collect();
@@ -3512,8 +3534,10 @@ pub async fn bi_model_upsert_calc_group(
     items: Vec<CalcGroupItemDto>,
     multiple_or_empty_selection: Option<String>,
     multiple_or_empty_selection_format: Option<String>,
+    multiple_or_empty_selection_format_expression: Option<String>,
     no_selection: Option<String>,
     no_selection_format: Option<String>,
+    no_selection_format_expression: Option<String>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -3523,6 +3547,8 @@ pub async fn bi_model_upsert_calc_group(
             return Err("Calculation group name cannot be empty".to_string());
         }
         // Blank/whitespace format = none (keep the base measure's format).
+        // Format string EXPRESSIONS are validated by the model build below
+        // (parse + no-GVAR/QUERY/LOOKUPVALUE + measure-reference checks).
         let clean_format = |f: &Option<String>| -> Option<String> {
             f.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
         };
@@ -3533,14 +3559,18 @@ pub async fn bi_model_upsert_calc_group(
             built_items.push(
                 bi_engine::CalculationItem::new(item.name.clone(), expr)
                     .with_source(item.formula.clone())
-                    .with_format_string(clean_format(&item.format_string)),
+                    .with_format_string(clean_format(&item.format_string))
+                    .with_format_string_expression(clean_format(
+                        &item.format_string_expression,
+                    )),
             );
         }
         // AS-style selection-state expressions: blank/whitespace = not defined
         // (the default — no item applied — kicks in for that state).
         let build_selection = |label: &str,
                                text: &Option<String>,
-                               format: &Option<String>|
+                               format: &Option<String>,
+                               format_expression: &Option<String>|
          -> Result<Option<bi_engine::CalculationItem>, String> {
             match text.as_deref().map(str::trim) {
                 Some(t) if !t.is_empty() => {
@@ -3549,7 +3579,8 @@ pub async fn bi_model_upsert_calc_group(
                     Ok(Some(
                         bi_engine::CalculationItem::new(label.to_string(), expr)
                             .with_source(t.to_string())
-                            .with_format_string(clean_format(format)),
+                            .with_format_string(clean_format(format))
+                            .with_format_string_expression(clean_format(format_expression)),
                     ))
                 }
                 _ => Ok(None),
@@ -3560,11 +3591,13 @@ pub async fn bi_model_upsert_calc_group(
                 "Multiple or empty selection",
                 &multiple_or_empty_selection,
                 &multiple_or_empty_selection_format,
+                &multiple_or_empty_selection_format_expression,
             )?)
             .with_no_selection(build_selection(
                 "No selection",
                 &no_selection,
                 &no_selection_format,
+                &no_selection_format_expression,
             )?);
 
         let mut groups = base.calculation_groups().to_vec();
@@ -3910,7 +3943,7 @@ pub async fn bi_model_upsert_global_variable(
             // first BY table as the last anchor.
             let expanded = bi_engine::expression::expand_measure_refs(&expr_final, base)
                 .map_err(|e| format!("Calculated table '{}': {}", trimmed, e))?;
-            let bi_engine::Expression::Query { aggregates, group_by } = &expanded else {
+            let bi_engine::Expression::Query { aggregates, group_by, .. } = &expanded else {
                 return Err(format!(
                     "Calculated table '{}' must be a table-producing QUERY(...) expression",
                     trimmed
@@ -5295,8 +5328,10 @@ pub async fn script_bi_model(
                         gateway_field(&p, "items")?,
                         gateway_field(&p, "multipleOrEmptySelection")?,
                         gateway_field(&p, "multipleOrEmptySelectionFormat")?,
+                        gateway_field(&p, "multipleOrEmptySelectionFormatExpression")?,
                         gateway_field(&p, "noSelection")?,
                         gateway_field(&p, "noSelectionFormat")?,
+                        gateway_field(&p, "noSelectionFormatExpression")?,
                         w,
                     )
                     .await?,
