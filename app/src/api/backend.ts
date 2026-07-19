@@ -4554,11 +4554,15 @@ export async function biModelFunctionCatalog(): Promise<FunctionDefDto[]> {
  *  editor's function-reference (wiki) pane. */
 export interface FunctionDocDto {
   name: string;
+  /** The function's category — its docs subfolder, e.g. "Math Functions". */
+  category: string;
   markdown: string;
 }
 
 /** The engine's per-function reference docs (embedded into the engine at
- *  BUILD time from its docs/functions/*.md; returns instantly). */
+ *  BUILD time from its docs/functions/(category)/*.md; returns instantly).
+ *  Already in render order: grouped by category (the docs README's index
+ *  order), names sorted within each category. */
 export async function biModelFunctionDocs(): Promise<FunctionDocDto[]> {
   return invoke<FunctionDocDto[]>("bi_model_function_docs", {});
 }

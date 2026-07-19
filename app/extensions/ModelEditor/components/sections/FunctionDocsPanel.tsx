@@ -1,7 +1,8 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/FunctionDocsPanel.tsx
 // PURPOSE: A wiki-like function-reference pane for the model expression
 //          editors. Lists the engine's built-in functions (embedded into the
-//          engine at BUILD time from its docs/functions/*.md) and renders the
+//          engine at BUILD time from its docs/functions/(category)/*.md),
+//          grouped into collapsible per-category sections, and renders the
 //          selected function's Markdown doc in a reader-friendly way, with
 //          clickable cross-links between docs.
 
@@ -71,11 +72,42 @@ export function FunctionDocsPanel({
     onInsert?.(`${docName}(`);
   };
 
+  // Category sections start expanded; a header click toggles. While a search
+  // query is active the collapse state is ignored so matches are never hidden.
+  const [collapsedCategories, setCollapsedCategories] = useState<ReadonlySet<string>>(new Set());
+  const searching = query.trim().length > 0;
+  const toggleCategory = (category: string): void => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return docs;
-    return docs.filter((d) => d.name.toLowerCase().includes(q) || summaryOf(d.markdown).toLowerCase().includes(q));
+    return docs.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        d.category.toLowerCase().includes(q) ||
+        summaryOf(d.markdown).toLowerCase().includes(q),
+    );
   }, [docs, query]);
+
+  // The docs arrive pre-grouped from the engine (categories in the docs
+  // README's index order, names sorted within each), so grouping consecutive
+  // runs preserves the canonical category order — also after filtering.
+  const groups = useMemo(() => {
+    const out: { category: string; docs: FunctionDocDto[] }[] = [];
+    for (const d of filtered) {
+      const last = out[out.length - 1];
+      if (last && last.category === d.category) last.docs.push(d);
+      else out.push({ category: d.category, docs: [d] });
+    }
+    return out;
+  }, [filtered]);
 
   const current = selected ? docs.find((d) => d.name === selected) : null;
   const navigate = (name: string): void => {
@@ -105,6 +137,7 @@ export function FunctionDocsPanel({
             <a style={linkStyle} onClick={() => setSelected(null)}>
               &larr; All functions
             </a>
+            <span style={{ ...styles.muted, fontSize: 11, alignSelf: "center" }}>{current.category}</span>
             {onInsert && (
               <a
                 style={{ ...linkStyle, marginLeft: "auto" }}
@@ -136,43 +169,74 @@ export function FunctionDocsPanel({
                 No function docs found (none were embedded in this engine build).
               </div>
             )}
-            {filtered.map((d) => (
-              <div
-                key={d.name}
-                onClick={() => openDoc(d.name)}
-                onDoubleClick={() => insertFromList(d.name)}
-                draggable={Boolean(onInsert)}
-                onDragStart={(e) => {
-                  // The editor's drop handler accepts plain text — same
-                  // channel the tables & columns tree uses.
-                  e.dataTransfer.setData("text/plain", `${d.name}(`);
-                  e.dataTransfer.effectAllowed = "copy";
-                }}
-                style={{
-                  padding: "6px 10px",
-                  borderBottom: "1px solid #f2f2f2",
-                  cursor: "pointer",
-                }}
-                title={
-                  onInsert
-                    ? `Open ${d.name} — double-click or drag onto the editor to insert`
-                    : `Open ${d.name}`
-                }
-              >
-                <div style={{ fontWeight: 600, fontSize: 12, color: "#2f6fce" }}>{d.name}</div>
-                <div
-                  style={{
-                    ...styles.muted,
-                    fontSize: 11,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {summaryOf(d.markdown)}
+            {groups.map((group) => {
+              const isCollapsed = !searching && collapsedCategories.has(group.category);
+              return (
+                <div key={group.category}>
+                  <div
+                    onClick={() => toggleCategory(group.category)}
+                    title={isCollapsed ? `Expand ${group.category}` : `Collapse ${group.category}`}
+                    style={{
+                      position: "sticky",
+                      top: 0,
+                      zIndex: 1,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "5px 10px",
+                      background: "#f7f8fa",
+                      borderBottom: "1px solid #e8e8e8",
+                      cursor: "pointer",
+                      userSelect: "none",
+                    }}
+                  >
+                    <span style={{ fontSize: 9, color: "#888", width: 10 }}>
+                      {isCollapsed ? "▸" : "▾"}
+                    </span>
+                    <span style={{ fontWeight: 600, fontSize: 11, color: "#555" }}>{group.category}</span>
+                    <span style={{ ...styles.muted, fontSize: 10, marginLeft: "auto" }}>{group.docs.length}</span>
+                  </div>
+                  {!isCollapsed &&
+                    group.docs.map((d) => (
+                      <div
+                        key={d.name}
+                        onClick={() => openDoc(d.name)}
+                        onDoubleClick={() => insertFromList(d.name)}
+                        draggable={Boolean(onInsert)}
+                        onDragStart={(e) => {
+                          // The editor's drop handler accepts plain text — same
+                          // channel the tables & columns tree uses.
+                          e.dataTransfer.setData("text/plain", `${d.name}(`);
+                          e.dataTransfer.effectAllowed = "copy";
+                        }}
+                        style={{
+                          padding: "6px 10px",
+                          borderBottom: "1px solid #f2f2f2",
+                          cursor: "pointer",
+                        }}
+                        title={
+                          onInsert
+                            ? `Open ${d.name} — double-click or drag onto the editor to insert`
+                            : `Open ${d.name}`
+                        }
+                      >
+                        <div style={{ fontWeight: 600, fontSize: 12, color: "#2f6fce" }}>{d.name}</div>
+                        <div
+                          style={{
+                            ...styles.muted,
+                            fontSize: 11,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {summaryOf(d.markdown)}
+                        </div>
+                      </div>
+                    ))}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

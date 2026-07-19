@@ -5551,18 +5551,23 @@ pub fn bi_model_function_catalog(window: tauri::Window) -> Result<Vec<FunctionDe
 #[serde(rename_all = "camelCase")]
 pub struct FunctionDocDto {
     pub name: String,
+    /// The function's category — its docs subfolder, e.g. "Math Functions".
+    pub category: String,
     pub markdown: String,
 }
 
 /// The engine's per-function reference docs, embedded into the engine crate
-/// at BUILD time from its `docs/functions/*.md` (see the engine's build.rs) —
-/// no filesystem access at runtime; edits there require an engine rebuild.
+/// at BUILD time from its `docs/functions/**/*.md` (one category subfolder
+/// per function group; see the engine's build.rs) — no filesystem access at
+/// runtime; edits there require an engine rebuild. The returned order is the
+/// render order: grouped by category (the docs README's index order), names
+/// sorted within each category.
 #[tauri::command]
 pub fn bi_model_function_docs(window: tauri::Window) -> Result<Vec<FunctionDocDto>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     Ok(bi_engine::function_docs()
         .into_iter()
-        .map(|d| FunctionDocDto { name: d.name, markdown: d.markdown })
+        .map(|d| FunctionDocDto { name: d.name, category: d.category, markdown: d.markdown })
         .collect())
 }
 
