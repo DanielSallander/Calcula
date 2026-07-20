@@ -9,8 +9,8 @@ import { describe, it, expect } from "vitest";
 // Inline copies of pure functions from groupingStore.ts
 // ============================================================================
 
-const DEFAULT_ROW_HEADER_WIDTH = 50;
-const DEFAULT_COL_HEADER_HEIGHT = 24;
+const DEFAULT_ROW_HEADER_WIDTH = 22;
+const DEFAULT_COL_HEADER_HEIGHT = 20;
 const PIXELS_PER_LEVEL = 16;
 const LEFT_PAD = 4;
 

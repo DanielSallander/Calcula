@@ -6,10 +6,11 @@
 
 /** Approx. advance (px) of one digit in the header font (12px system-ui). */
 const DIGIT_WIDTH = 7;
-/** Total horizontal padding (px) inside the gutter (both sides combined). */
-const GUTTER_PADDING = 16;
+/** Total horizontal padding (px) inside the gutter (both sides combined). Kept
+ *  tight so the number sits close to the edges, like Excel. */
+const GUTTER_PADDING = 8;
 /** Floor width (px): the gutter never renders narrower than a 2-digit number. */
-export const MIN_ROW_HEADER_WIDTH = 30;
+export const MIN_ROW_HEADER_WIDTH = 22;
 
 /**
  * Excel-style row-header width for the largest visible row NUMBER (1-based).

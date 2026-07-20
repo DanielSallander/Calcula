@@ -6,18 +6,18 @@
  * coordinates from grid geometry and simulate mouse/keyboard events.
  *
  * Default grid dimensions (from core/types/types.ts):
- *   rowHeaderWidth  = 30 px (2-digit Excel gutter; auto-widens with row number)
- *   colHeaderHeight = 24 px
+ *   rowHeaderWidth  = 22 px (2-digit Excel gutter; auto-widens with row number)
+ *   colHeaderHeight = 20 px
  *   defaultCellWidth  = 64 px (Excel 8.43 chars)
  *   defaultCellHeight = 20 px
  */
 import { type Page, type Locator, expect } from "@playwright/test";
 
 // ---- Grid geometry constants (must match core/types/types.ts defaults) ----
-// NOTE: rowHeaderWidth auto-widens with the largest visible row number; 30 is the
+// NOTE: rowHeaderWidth auto-widens with the largest visible row number; 22 is the
 // 2-digit default that holds while the top rows (1..99) are in view.
-const ROW_HEADER_WIDTH = 30;
-const COL_HEADER_HEIGHT = 24;
+const ROW_HEADER_WIDTH = 22;
+const COL_HEADER_HEIGHT = 20;
 const DEFAULT_CELL_WIDTH = 64;
 const DEFAULT_CELL_HEIGHT = 20;
 

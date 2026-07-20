@@ -9,8 +9,8 @@ import { describe, it, expect } from "vitest";
 // Inline copies of pure functions/constants
 // ============================================================================
 
-const DEFAULT_ROW_HEADER_WIDTH = 50;
-const DEFAULT_COL_HEADER_HEIGHT = 24;
+const DEFAULT_ROW_HEADER_WIDTH = 22;
+const DEFAULT_COL_HEADER_HEIGHT = 20;
 const PIXELS_PER_LEVEL = 16;
 const LEFT_PAD = 4;
 const BUTTON_SIZE = 13;
@@ -123,8 +123,8 @@ describe("8 outline levels (Excel max)", () => {
 
   it("row header width at level 8 does not exceed reasonable bounds", () => {
     const headerWidth = computeRowHeaderWidth(8);
-    // 50 + 148 = 198
-    expect(headerWidth).toBe(198);
+    // 22 + 148 = 170
+    expect(headerWidth).toBe(170);
     expect(headerWidth).toBeLessThan(250); // sanity check
   });
 

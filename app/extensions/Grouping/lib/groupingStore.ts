@@ -36,11 +36,11 @@ import type {
 // Constants
 // ============================================================================
 
-/** Default row header width when there is no outline bar. */
-const DEFAULT_ROW_HEADER_WIDTH = 50;
+/** Default row header width when there is no outline bar (matches DEFAULT_GRID_CONFIG). */
+const DEFAULT_ROW_HEADER_WIDTH = 22;
 
-/** Default column header height when there is no outline bar. */
-const DEFAULT_COL_HEADER_HEIGHT = 24;
+/** Default column header height when there is no outline bar (matches DEFAULT_GRID_CONFIG). */
+const DEFAULT_COL_HEADER_HEIGHT = 20;
 
 /** Pixels per outline level in the outline bar. */
 const PIXELS_PER_LEVEL = 16;

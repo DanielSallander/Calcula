@@ -140,7 +140,9 @@ function SpreadsheetContent({
     if (vpW <= 0 || vpH <= 0) return;
     const zoom = gridState.zoom || 1;
     const range = calculateVisibleRange(viewport, config, vpW / zoom, vpH / zoom, dimensions);
-    const desired = computeRowHeaderWidth(range.endRow + 1);
+    // Reserve space for the grouping outline bar (if any) on top of the gutter,
+    // so this hook and the Grouping extension agree on the total header width.
+    const desired = computeRowHeaderWidth(range.endRow + 1) + (config.outlineBarWidth ?? 0);
     if (desired !== config.rowHeaderWidth) {
       dispatch(updateConfig({ rowHeaderWidth: desired }));
     }

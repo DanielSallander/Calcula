@@ -197,7 +197,7 @@ function activate(context: ExtensionContext): void {
     // Use a fixed Y position since the click was in the column header
     const canvas = getFilterChevronCanvas();
     const canvasRect = canvas?.getBoundingClientRect();
-    const colHeaderHeight = 24; // Default column header height
+    const colHeaderHeight = 20; // Default column header height (Excel-tight)
     const anchorRect = {
       x: canvasRect ? canvasRect.left + 50 : 100,
       y: canvasRect ? canvasRect.top + colHeaderHeight : colHeaderHeight,

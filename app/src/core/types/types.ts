@@ -212,8 +212,8 @@ export interface GridConfig {
 export const DEFAULT_GRID_CONFIG: GridConfig = {
   defaultCellWidth: 64, // Excel default column width: 8.43 chars ≈ 64px @ 96 DPI
   defaultCellHeight: 20, // Excel default row height for Calibri 11 (15pt = 20px @ 96 DPI)
-  rowHeaderWidth: 30, // 2-digit Excel-style gutter; auto-widens with the largest visible row
-  colHeaderHeight: 24,
+  rowHeaderWidth: 22, // 2-digit Excel-style gutter; auto-widens with the largest visible row
+  colHeaderHeight: 20, // Excel-tight column header (was 24 — too much margin around the letter)
   totalRows: 1048576, // Excel's row limit
   totalCols: 16384, // Excel's column limit (XFD)
   minColumnWidth: 20,
