@@ -38,6 +38,7 @@ import {
   calculateScrollableRange,
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
+import { buildCellFont, pointsToPixels } from "./fonts";
 import { cellKey } from "../../../core/types";
 import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
 import { hasCellTypes, getCellTypeAt, renderCellTypeCell } from "../../../api/cellTypes";
@@ -338,7 +339,7 @@ function drawCellTextZone(
   const { ctx, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
-  const paddingX = 4;
+  const paddingX = 3;
 
   // Cell types render as their own content (suppressed in Show Formulas mode,
   // where the raw value/formula must stay visible). Unlike the main draw path,
@@ -490,12 +491,14 @@ function drawCellTextZone(
       const fontSize = cellStyle?.fontSize ?? theme.cellFontSize;
       const fontFamily = cellStyle?.fontFamily ?? theme.cellFontFamily;
 
-      ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+      // fontSize is in POINTS; buildCellFont converts to px (matches drawCellText).
+      ctx.font = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
       ctx.fillStyle = cellStyle?.textColor ?? theme.cellText;
       ctx.textBaseline = "middle";
+      const fontSizePx = pointsToPixels(fontSize);
 
       const textX = cellLeft + paddingX;
-      const textY = baseY + actualHeight / 2;
+      const textY = Math.round(baseY + actualHeight / 2);
 
       let textAlign: "left" | "right" | "center" = "left";
       if (state.showFormulas && cell.formula) {
@@ -528,8 +531,8 @@ function drawCellTextZone(
         ctx.beginPath();
         ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
         ctx.lineWidth = 1;
-        ctx.moveTo(drawX, textY + fontSize / 2 + 1);
-        ctx.lineTo(drawX + textWidth, textY + fontSize / 2 + 1);
+        ctx.moveTo(drawX, textY + fontSizePx / 2 + 1);
+        ctx.lineTo(drawX + textWidth, textY + fontSizePx / 2 + 1);
         ctx.stroke();
       }
       

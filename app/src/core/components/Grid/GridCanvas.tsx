@@ -539,7 +539,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
      */
     const animateRowInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
       return new Promise((resolve) => {
-        const targetSize = config.defaultCellHeight || 24;
+        const targetSize = config.defaultCellHeight || 20;
         
         // Set initial animation state - progress starts at 0
         setInsertionAnimation({
@@ -591,7 +591,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
      */
     const animateRowDeletion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
       return new Promise((resolve) => {
-        const targetSize = config.defaultCellHeight || 24;
+        const targetSize = config.defaultCellHeight || 20;
         
         // Set initial animation state - progress starts at 0
         setInsertionAnimation({

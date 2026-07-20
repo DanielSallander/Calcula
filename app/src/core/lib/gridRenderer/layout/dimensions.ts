@@ -44,7 +44,7 @@ export function getRowHeight(
   if (customHeight !== undefined && customHeight > 0) {
     return customHeight;
   }
-  return config.defaultCellHeight || 24;
+  return config.defaultCellHeight || 20;
 }
 
 /**

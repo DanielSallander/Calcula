@@ -180,7 +180,14 @@ export function drawGridLines(state: RenderState): void {
 
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
   ctx.strokeStyle = theme.gridLine;
-  ctx.lineWidth = 1;
+  // Draw gridlines as a crisp 1-DEVICE-pixel hairline (like Excel). The canvas
+  // transform is scaled by devicePixelRatio*zoom, so a lineWidth of 1 would
+  // render as `deviceScale` device pixels — 2px+ on a high-DPI display, which
+  // reads as a heavy, blurry line. 1/deviceScale keeps it a true hairline, and
+  // snapping to the device-pixel grid keeps it sharp.
+  const deviceScale = (ctx.getTransform?.().a) || 1;
+  ctx.lineWidth = 1 / deviceScale;
+  const snap = (v: number): number => (Math.round(v * deviceScale) + 0.5) / deviceScale;
 
   // Calculate insertion/deletion animation offsets (same logic as cells.ts)
   let rowAnimOffset = 0;
@@ -235,8 +242,8 @@ export function drawGridLines(state: RenderState): void {
           ? segmentEndBaseY + rowAnimOffset : segmentEndBaseY;
 
         ctx.beginPath();
-        ctx.moveTo(Math.floor(x) + 0.5, Math.max(segmentStartY, colHeaderHeight));
-        ctx.lineTo(Math.floor(x) + 0.5, Math.min(segmentEndY, height));
+        ctx.moveTo(snap(x), Math.max(segmentStartY, colHeaderHeight));
+        ctx.lineTo(snap(x), Math.min(segmentEndY, height));
         ctx.stroke();
       }
     }
@@ -279,8 +286,8 @@ export function drawGridLines(state: RenderState): void {
           ? segmentEndBaseX + colAnimOffset : segmentEndBaseX;
 
         ctx.beginPath();
-        ctx.moveTo(Math.max(segmentStartX, rowHeaderWidth), Math.floor(y) + 0.5);
-        ctx.lineTo(Math.min(segmentEndX, width), Math.floor(y) + 0.5);
+        ctx.moveTo(Math.max(segmentStartX, rowHeaderWidth), snap(y));
+        ctx.lineTo(Math.min(segmentEndX, width), snap(y));
         ctx.stroke();
       }
     }

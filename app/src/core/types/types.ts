@@ -210,9 +210,9 @@ export interface GridConfig {
  * Default grid configuration values.
  */
 export const DEFAULT_GRID_CONFIG: GridConfig = {
-  defaultCellWidth: 100,
-  defaultCellHeight: 24,
-  rowHeaderWidth: 50,
+  defaultCellWidth: 64, // Excel default column width: 8.43 chars ≈ 64px @ 96 DPI
+  defaultCellHeight: 20, // Excel default row height for Calibri 11 (15pt = 20px @ 96 DPI)
+  rowHeaderWidth: 30, // 2-digit Excel-style gutter; auto-widens with the largest visible row
   colHeaderHeight: 24,
   totalRows: 1048576, // Excel's row limit
   totalCols: 16384, // Excel's column limit (XFD)
@@ -584,8 +584,8 @@ export const DEFAULT_STYLE: StyleData = {
   italic: false,
   underline: "none",
   strikethrough: false,
-  fontSize: 11,
-  fontFamily: "system-ui",
+  fontSize: 11, // points (Excel default body size)
+  fontFamily: "Calibri", // Excel default body font; renderer appends a fallback chain
   textColor: "#000000",
   backgroundColor: "#ffffff",
   textAlign: "general",
@@ -1174,7 +1174,7 @@ export function calculateFreezePaneLayout(
 ): FreezePaneLayout {
   const { freezeRow, freezeCol } = freezeConfig;
   const defaultCellWidth = config.defaultCellWidth || 100;
-  const defaultCellHeight = config.defaultCellHeight || 24;
+  const defaultCellHeight = config.defaultCellHeight || 20;
 
   let frozenColsWidth = 0;
   let frozenRowsHeight = 0;

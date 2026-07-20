@@ -42,7 +42,8 @@ describe("skinLoader merge", () => {
 
   it("density maps to the cell font-size token AND the grid cellFontSize", () => {
     const skin: Skin = { id: "x", name: "X", base: "light", density: "compact" };
-    expect(getMergedTokens(skin)[THEME_TOKENS.FONT_SIZE_CELL]).toBe("11px");
+    // Grid cellFontSize stays in POINTS (11); the CSS token is its px equivalent.
+    expect(getMergedTokens(skin)[THEME_TOKENS.FONT_SIZE_CELL]).toBe(`${11 * 96 / 72}px`);
     expect(getMergedGridTheme(skin).cellFontSize).toBe(11);
   });
 
@@ -131,7 +132,8 @@ describe("accessibility transforms", () => {
   it("minFontScale raises the cell font size", () => {
     initSkinLoader();
     setAccessibility({ minFontScale: 1.5 });
-    expect(getActiveGridTheme().cellFontSize).toBe(Math.round(13 * 1.5));
+    // Default baseline cellFontSize is now 11pt (Excel default).
+    expect(getActiveGridTheme().cellFontSize).toBe(Math.round(11 * 1.5));
   });
 
   it("forcedBase=dark applies the dark baseline even on the light skin", () => {

@@ -433,8 +433,8 @@ pub fn create_app_state() -> AppState {
         row_heights: Mutex::new(HashMap::new()),
         all_column_widths: Mutex::new(vec![HashMap::new()]),
         all_row_heights: Mutex::new(vec![HashMap::new()]),
-        default_row_height: Mutex::new(24.0),
-        default_column_width: Mutex::new(100.0),
+        default_row_height: Mutex::new(20.0), // Excel default: Calibri 11 => 15pt = 20px
+        default_column_width: Mutex::new(64.0), // Excel default: 8.43 chars => 64px @ 96 DPI
         dependents: Mutex::new(DependencyMap::default()),
         dependencies: Mutex::new(DependencyMap::default()),
         calculation_mode: Mutex::new("automatic".to_string()),

@@ -125,6 +125,9 @@ export const THEME_TOKENS = {
   BORDER_DISABLED: '--border-disabled',
   PANEL_BG: '--panel-bg',
   FONT_FAMILY_SANS: '--font-family-sans',
+  /** Cell/editor text font (tracks the grid's cellFontFamily) — distinct from the
+   *  UI sans font, so the inline editor overlay matches the canvas (Excel: Calibri). */
+  FONT_FAMILY_CELL: '--font-family-cell',
   FONT_SIZE_CELL: '--font-size-cell',
   Z_INDEX_EDITOR: '--z-index-editor',
 

@@ -664,8 +664,8 @@ export function CreateChartDialog({
       }
 
       // Calculate pixel placement
-      const defaultCellWidth = 100;
-      const defaultCellHeight = 24;
+      const defaultCellWidth = 64;
+      const defaultCellHeight = 20;
       let chartX = 50;
       let chartY = 50;
 

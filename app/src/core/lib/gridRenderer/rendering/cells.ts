@@ -28,6 +28,7 @@ import {
 } from "../../../../api/cellTypes";
 import { drawCellFill } from "../styles/fillRenderer";
 import { buildMergeSlaveIndex } from "./mergeIndex";
+import { pointsToPixels, buildCellFont } from "../fonts";
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -149,7 +150,9 @@ export function drawRichTextRuns(
     const fontWeight = isBold ? "bold" : "normal";
     const fontStyle = isItalic ? "italic" : "normal";
     const color = run.color ?? baseTextColor;
-    const fontString = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+    // fontSize is in POINTS (rich-text runs and base size are stored as points);
+    // buildCellFont converts to pixels for the canvas.
+    const fontString = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
 
     ctx.font = fontString;
     const width = ctx.measureText(run.text).width;
@@ -188,13 +191,13 @@ export function drawRichTextRuns(
   let remainingWidth = maxWidth;
   if (needsTruncation) {
     // Measure ellipsis with base font
-    const baseFont = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
+    const baseFont = buildCellFont(baseFontStyle, baseFontWeight, baseFontSize, baseFontFamily);
     ctx.font = baseFont;
     ellipsisWidth = ctx.measureText(ellipsis).width;
     remainingWidth = maxWidth - ellipsisWidth;
     if (remainingWidth <= 0) {
       // Not enough room even for ellipsis
-      ctx.font = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
+      ctx.font = baseFont;
       ctx.fillStyle = baseTextColor;
       ctx.fillText(ellipsis, x, y);
       return ellipsisWidth;
@@ -239,12 +242,13 @@ export function drawRichTextRuns(
       truncated = true;
     }
 
-    // Calculate vertical offset for superscript/subscript
+    // Calculate vertical offset for superscript/subscript (offset is in px)
+    const baseFontPx = pointsToPixels(baseFontSize);
     let runY = y;
     if (m.superscript) {
-      runY = y + baseFontSize * SUPERSCRIPT_OFFSET;
+      runY = y + baseFontPx * SUPERSCRIPT_OFFSET;
     } else if (m.subscript) {
-      runY = y + baseFontSize * SUBSCRIPT_OFFSET;
+      runY = y + baseFontPx * SUBSCRIPT_OFFSET;
     }
 
     // Draw the text
@@ -254,7 +258,7 @@ export function drawRichTextRuns(
 
     // Draw underline
     if (m.hasUnderline && textToDraw.length > 0) {
-      const underlineY = runY + m.fontSize / 2 + 1;
+      const underlineY = runY + pointsToPixels(m.fontSize) / 2 + 1;
       ctx.beginPath();
       ctx.strokeStyle = m.color;
       ctx.lineWidth = 1;
@@ -279,8 +283,7 @@ export function drawRichTextRuns(
 
   // Draw ellipsis if truncated
   if (truncated) {
-    const baseFont = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
-    ctx.font = baseFont;
+    ctx.font = buildCellFont(baseFontStyle, baseFontWeight, baseFontSize, baseFontFamily);
     ctx.fillStyle = baseTextColor;
     ctx.fillText(ellipsis, currentX, y);
   }
@@ -473,8 +476,9 @@ export function drawCellText(state: RenderState): void {
 
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
 
-  // Padding inside cells
-  const paddingX = 4;
+  // Padding inside cells. paddingX = 3 matches Excel's left text inset
+  // (~2px pad + the 1px gridline) so the first glyph lands where Excel's does.
+  const paddingX = 3;
   const paddingY = 2;
 
   // Check if we need to run style interceptors
@@ -816,7 +820,7 @@ export function drawCellText(state: RenderState): void {
       const overflowedCells: Array<{ key: string; col: number; x: number; width: number; styleIndex: number }> = [];
       if (!shouldWrapEarly && !isMergedMaster && (textAlign === "left" || textAlign === "center")) {
         // Measure text to see if it exceeds cell width
-        const testFont = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+        const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
         const textWidth = ctx.measureText(displayValue).width + paddingX * 2 + indentOffset;
         if (textWidth > actualWidth) {
@@ -968,7 +972,7 @@ export function drawCellText(state: RenderState): void {
       // Shrink-to-fit: reduce font size to fit cell width
       const shrinkToFit = (baseCellStyle as { shrinkToFit?: boolean }).shrinkToFit === true;
       if (shrinkToFit && availableWidth > 0 && !isEmpty) {
-        const testFont = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+        const testFont = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
         ctx.font = testFont;
         const textWidth = ctx.measureText(displayValue).width;
         if (textWidth > availableWidth) {
@@ -979,11 +983,13 @@ export function drawCellText(state: RenderState): void {
         }
       }
 
-      // Build font string
-      const fontString = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+      // Build font string. fontSize is in POINTS; buildCellFont converts to px.
+      const fontString = buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
       ctx.font = fontString;
       ctx.fillStyle = textColor;
       ctx.textAlign = "left";
+      // Pixel font size for all vertical metrics (line height, baseline offsets).
+      const fontSizePx = pointsToPixels(fontSize);
 
       // Get vertical alignment and text rotation from style
       const vAlign = baseCellStyle.verticalAlign || "middle";
@@ -1029,7 +1035,7 @@ export function drawCellText(state: RenderState): void {
 
       if (shouldWrap) {
         const lines = wrapText(ctx, displayValue, availableWidth);
-        const lineHeight = fontSize * 1.2;
+        const lineHeight = fontSizePx * 1.2;
         const totalTextHeight = lines.length * lineHeight;
         const cellHeight = cellBottom - cellTop;
 
@@ -1070,9 +1076,9 @@ export function drawCellText(state: RenderState): void {
         ctx.textBaseline = "middle";
         const textX = cellLeft + paddingX + indentOffset;
         const textY = vAlign === "top"
-          ? cellTop + paddingY + fontSize / 2
+          ? cellTop + paddingY + fontSizePx / 2
           : vAlign === "bottom"
-            ? cellBottom - paddingY - fontSize / 2
+            ? cellBottom - paddingY - fontSizePx / 2
             : y + actualHeight / 2;
 
         drawRichTextRuns(
@@ -1142,6 +1148,9 @@ export function drawCellText(state: RenderState): void {
         ctx.textBaseline = "middle";
         textY = y + actualHeight / 2;
       }
+      // Snap the baseline to a whole device pixel so the rasterizer can hint the
+      // stems onto the pixel grid (crisper text, closer to Excel's ClearType).
+      textY = Math.round(textY);
 
       // Draw the text with truncation
       drawTextWithTruncation(ctx, displayValue, textX, textY, availableWidth, textAlign);
@@ -1171,11 +1180,11 @@ export function drawCellText(state: RenderState): void {
         if (isAccounting) {
           underlineY = cellBottom - paddingY;
         } else if (vAlign === "top") {
-          underlineY = cellTop + paddingY + fontSize + 1;
+          underlineY = cellTop + paddingY + fontSizePx + 1;
         } else if (vAlign === "bottom") {
           underlineY = cellBottom - paddingY + 1;
         } else {
-          underlineY = textY + fontSize / 2 + 1;
+          underlineY = textY + fontSizePx / 2 + 1;
         }
 
         ctx.strokeStyle = textColor;
@@ -1210,9 +1219,9 @@ export function drawCellText(state: RenderState): void {
         // Position strikethrough at vertical center of text
         let strikeY: number;
         if (vAlign === "top") {
-          strikeY = cellTop + paddingY + fontSize / 2;
+          strikeY = cellTop + paddingY + fontSizePx / 2;
         } else if (vAlign === "bottom") {
-          strikeY = cellBottom - paddingY - fontSize / 2;
+          strikeY = cellBottom - paddingY - fontSizePx / 2;
         } else {
           strikeY = textY;
         }

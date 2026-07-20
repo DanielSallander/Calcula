@@ -374,28 +374,37 @@ export function registerCoreGridContextMenu(): void {
       
       // Get the current width of the first selected column
       const defaults = await getDefaultDimensions();
-      const currentWidth = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
-      
-      // Prompt user for new width
+      const currentWidthPx = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
+
+      // Excel measures column width in "characters" of the default font's digit.
+      // MDW (Maximum Digit Width) of Calibri 11 at 96 DPI = 7px; pixels =
+      // round(chars*MDW) + 5, where 5 = 2px+2px side padding + the 1px gridline.
+      // So the 8.43-char default is 64px, and this dialog speaks Excel's units.
+      const MDW = 7;
+      const pxToChars = (px: number): number => Math.round(((px - 5) / MDW) * 100) / 100;
+      const charsToPx = (chars: number): number => Math.round(chars * MDW) + 5;
+
+      // Prompt user for new width in Excel character units (e.g. 8.43)
       const input = window.prompt(
-        `Enter column width (in pixels):`,
-        String(Math.round(currentWidth))
+        `Enter column width (in characters, Excel units):`,
+        String(pxToChars(currentWidthPx))
       );
-      
+
       if (input === null) return; // User cancelled
-      
-      const newWidth = parseFloat(input);
-      if (isNaN(newWidth) || newWidth <= 0) {
-        alert("Please enter a valid positive number for column width.");
+
+      const chars = parseFloat(input);
+      if (isNaN(chars) || chars < 0) {
+        alert("Please enter a valid non-negative number for column width.");
         return;
       }
-      
+      const newWidth = charsToPx(chars);
+
       // Apply the width to all selected columns
       for (let col = startCol; col <= endCol; col++) {
         await setColumnWidth(col, newWidth);
       }
 
-      console.log(`[GridMenu] Set column width to ${newWidth}px for columns ${startCol}-${endCol}`);
+      console.log(`[GridMenu] Set column width to ${chars} chars (${newWidth}px) for columns ${startCol}-${endCol}`);
 
       // Refresh frontend dimension state and redraw
       window.dispatchEvent(new CustomEvent("dimensions:refresh"));

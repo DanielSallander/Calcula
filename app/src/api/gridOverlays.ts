@@ -322,7 +322,7 @@ export function overlayGetRowHeight(ctx: OverlayRenderContext, row: number): num
   }
   return getRowHeight(
     row,
-    ctx.config.defaultCellHeight ?? 24,
+    ctx.config.defaultCellHeight ?? 20,
     ctx.dimensions.rowHeights
   );
 }
@@ -344,7 +344,7 @@ export function overlayGetColumnX(ctx: OverlayRenderContext, col: number): numbe
 /** Get the Y pixel coordinate of a row's top edge, relative to the canvas. Accounts for hidden rows. */
 export function overlayGetRowY(ctx: OverlayRenderContext, row: number): number {
   const baseGetHeight = createDimensionGetterFromMap(
-    ctx.config.defaultCellHeight ?? 24,
+    ctx.config.defaultCellHeight ?? 20,
     ctx.dimensions.rowHeights
   );
   // Wrap the getter to return 0 for hidden rows
@@ -372,7 +372,7 @@ export function overlayGetColumnsWidth(ctx: OverlayRenderContext, startCol: numb
 
 /** Get the total height of a range of rows (inclusive). Accounts for hidden rows. */
 export function overlayGetRowsHeight(ctx: OverlayRenderContext, startRow: number, endRow: number): number {
-  const defaultHeight = ctx.config.defaultCellHeight ?? 24;
+  const defaultHeight = ctx.config.defaultCellHeight ?? 20;
   const hiddenRows = ctx.dimensions.hiddenRows;
   let height = 0;
   for (let row = startRow; row <= endRow; row++) {

@@ -301,11 +301,12 @@ describe("drawRichTextRuns - deep tests", () => {
         false, false, false, false,
       );
 
-      // 20 * 0.65 = 13
-      const has20 = fontLog.some(f => f.includes("20px"));
-      const has13 = fontLog.some(f => f.includes("13px"));
-      expect(has20).toBe(true);
-      expect(has13).toBe(true);
+      // Sizes are points; the renderer converts to px (x96/72). Base 20pt ->
+      // 26.667px; subscript 20 * 0.65 = 13pt -> 17.333px.
+      const hasBase = fontLog.some(f => f.includes("26.66"));
+      const hasScaled = fontLog.some(f => f.includes("17.33"));
+      expect(hasBase).toBe(true);
+      expect(hasScaled).toBe(true);
     });
 
     it("superscript y-position is above base", () => {
@@ -322,8 +323,8 @@ describe("drawRichTextRuns - deep tests", () => {
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       const baseY = calls[0][2];
       const superY = calls[1][2];
-      // Superscript offset = baseFontSize * -0.35 = 20 * -0.35 = -7
-      expect(superY).toBe(baseY + 20 * (-0.35));
+      // Superscript offset = baseFontPx * -0.35, where baseFontPx = 20pt -> px.
+      expect(superY).toBe(baseY + (20 * 96 / 72) * (-0.35));
     });
 
     it("subscript y-position is below base", () => {
@@ -340,7 +341,8 @@ describe("drawRichTextRuns - deep tests", () => {
       const calls = (ctx.fillText as ReturnType<typeof vi.fn>).mock.calls;
       const baseY = calls[0][2];
       const subY = calls[1][2];
-      expect(subY).toBe(baseY + 20 * 0.2);
+      // Subscript offset = baseFontPx * 0.2, where baseFontPx = 20pt -> px.
+      expect(subY).toBe(baseY + (20 * 96 / 72) * 0.2);
     });
   });
 

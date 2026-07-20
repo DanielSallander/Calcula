@@ -8,6 +8,7 @@
 //          (api/appearance.ts) bridges this to the AppEvents bus + extensions.
 
 import { THEME_TOKENS } from "./tokens";
+import { pointsToPixels } from "../lib/gridRenderer/fonts";
 import { defaultTheme } from "./defaultTheme";
 import { darkTheme } from "./darkTheme";
 import { DEFAULT_THEME, type GridTheme } from "../lib/gridRenderer/types";
@@ -20,11 +21,18 @@ export const SKIN_STORAGE_KEY = "calcula.appearance.skinId";
 /** Id of the persistent <style> element holding the injected CSS variables. */
 const STYLE_EL_ID = "calcula-skin-vars";
 
-/** Cell font-size (px) per density preset. */
+/** Cell font-size (POINTS) per density preset. Feeds the grid cellFontSize
+ *  directly; the CSS --font-size-cell token is the px equivalent (see cellSizeToken). */
 const DENSITY_FONT_SIZE: Record<SkinDensity, number> = {
   comfortable: 13,
   compact: 11,
 };
+
+/** Build the --font-size-cell token (CSS px) from a point size, so the DOM
+ *  editor overlay matches the canvas (which converts the same points to px). */
+function cellSizeToken(points: number): string {
+  return `${pointsToPixels(points)}px`;
+}
 
 const TOKEN_BASELINES: Record<SkinBase, Record<string, string>> = {
   light: defaultTheme,
@@ -69,8 +77,12 @@ function persistId(id: string): void {
 /** Compute the full merged token map for a skin: baseline -> tokens -> density/font. */
 export function getMergedTokens(skin: Skin): Record<string, string> {
   const merged: Record<string, string> = { ...TOKEN_BASELINES[skin.base], ...(skin.tokens ?? {}) };
-  if (skin.density) merged[THEME_TOKENS.FONT_SIZE_CELL] = `${DENSITY_FONT_SIZE[skin.density]}px`;
-  if (skin.fontFamily) merged[THEME_TOKENS.FONT_FAMILY_SANS] = skin.fontFamily;
+  if (skin.density) merged[THEME_TOKENS.FONT_SIZE_CELL] = cellSizeToken(DENSITY_FONT_SIZE[skin.density]);
+  if (skin.fontFamily) {
+    merged[THEME_TOKENS.FONT_FAMILY_SANS] = skin.fontFamily;
+    // Keep the editor overlay font in lockstep with the grid cell font.
+    merged[THEME_TOKENS.FONT_FAMILY_CELL] = skin.fontFamily;
+  }
   return merged;
 }
 
@@ -155,11 +167,12 @@ function applyAccessibility(
     outTokens = { ...TOKEN_BASELINES[o.forcedBase] };
     outGrid = { ...GRID_BASELINES[o.forcedBase] };
     if (skin.density) {
-      outTokens[THEME_TOKENS.FONT_SIZE_CELL] = `${DENSITY_FONT_SIZE[skin.density]}px`;
+      outTokens[THEME_TOKENS.FONT_SIZE_CELL] = cellSizeToken(DENSITY_FONT_SIZE[skin.density]);
       outGrid.cellFontSize = DENSITY_FONT_SIZE[skin.density];
     }
     if (skin.fontFamily) {
       outTokens[THEME_TOKENS.FONT_FAMILY_SANS] = skin.fontFamily;
+      outTokens[THEME_TOKENS.FONT_FAMILY_CELL] = skin.fontFamily;
       outGrid.cellFontFamily = skin.fontFamily;
     }
   } else {
@@ -178,7 +191,7 @@ function applyAccessibility(
     const scaled = Math.round(outGrid.cellFontSize * o.minFontScale);
     if (scaled > outGrid.cellFontSize) {
       outGrid.cellFontSize = scaled;
-      outTokens[THEME_TOKENS.FONT_SIZE_CELL] = `${scaled}px`;
+      outTokens[THEME_TOKENS.FONT_SIZE_CELL] = cellSizeToken(scaled);
     }
   }
 

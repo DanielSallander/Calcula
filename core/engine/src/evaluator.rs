@@ -3482,7 +3482,7 @@ impl<'a> Evaluator<'a> {
 
     /// GET.ROW.HEIGHT(row_number)
     /// Returns the current height of the specified row (1-indexed) in pixels.
-    /// Falls back to default height (24.0) if no custom height is set.
+    /// Falls back to default height (20.0) if no custom height is set.
     fn fn_get_row_height(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
@@ -3494,7 +3494,7 @@ impl<'a> Evaluator<'a> {
                 let height = self.context.row_heights
                     .as_ref()
                     .and_then(|m| m.get(&row_idx).copied())
-                    .unwrap_or(24.0);
+                    .unwrap_or(20.0);
                 EvalResult::Number(height)
             }
             Some(_) => EvalResult::Error(CellError::Value),

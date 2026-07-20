@@ -70,7 +70,8 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
   });
 
   it("does not use the header letter as a width floor", () => {
-    // A single tiny cell: 1 char * 10px + padding 8 + margin 2 = 20
+    // A single tiny cell: 1 char * 10px + padding 6 + margin 2 = 18, clamped up
+    // to the MIN_WIDTH floor of 20.
     const cells = [makeCell({ display: "1" })];
     expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(20);
   });
@@ -81,8 +82,8 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       makeCell({ row: 1, display: "abcdefghij" }),
       makeCell({ row: 2, display: "ab" }),
     ];
-    // 10 chars * 10px + 8 + 2 = 110
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(110);
+    // 10 chars * 10px + 6 + 2 = 108
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(108);
   });
 
   it("measures each cell with its own font (bold is wider)", () => {
@@ -90,8 +91,8 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       makeCell({ row: 0, display: "abcde", styleIndex: 1 }),
       makeCell({ row: 1, display: "abcde" }),
     ];
-    // Bold: 5 * 12 + 10 = 70 beats normal 5 * 10 + 10 = 60
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(70);
+    // Bold: 5 * 12 + 8 = 68 beats normal 5 * 10 + 8 = 58
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(68);
   });
 
   it("ignores cells merged across columns", () => {
@@ -99,7 +100,7 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       makeCell({ row: 0, display: "wide merged content", colSpan: 3 }),
       makeCell({ row: 1, display: "abc" }),
     ];
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(40);
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(38);
   });
 
   it("ignores wrap-text cells; an all-wrapped column is a no-op", () => {
@@ -107,7 +108,7 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       makeCell({ row: 0, display: "very long wrapped text here", styleIndex: 2 }),
       makeCell({ row: 1, display: "abc" }),
     ];
-    expect(measureOptimalColumnWidth(0, mixed, STYLES, THEME, MIN_WIDTH)).toBe(40);
+    expect(measureOptimalColumnWidth(0, mixed, STYLES, THEME, MIN_WIDTH)).toBe(38);
 
     const allWrapped = [
       makeCell({ row: 0, display: "very long wrapped text here", styleIndex: 2 }),
@@ -147,7 +148,7 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       }),
     });
     const cells = [makeCell({ row: 1, display: "abcdefghij" })];
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(110);
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(108);
   });
 
   it("adds contributor extra cell width (in-cell chrome like filter buttons)", () => {
@@ -159,8 +160,8 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
       makeCell({ row: 0, display: "Header" }),
       makeCell({ row: 1, display: "Header" }),
     ];
-    // Header row: 6*10 + 10 + 20 = 90 beats data row 70
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(90);
+    // Header row: 6*10 + 8 + 20 = 88 beats data row 68
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(88);
   });
 
   it("returns null when contributors claim everything and report no width", () => {
@@ -181,15 +182,15 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const cells = [makeCell({ display: "abc" })];
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(40);
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(38);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
 
   it("adds the style indent the renderer shifts text by (8px per level)", () => {
     const cells = [makeCell({ display: "abc", styleIndex: 4 })];
-    // 3 * 10 + 10 padding + 2 * 8 indent = 56
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(56);
+    // 3 * 10 + 8 padding + 2 * 8 indent = 54
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(54);
   });
 
   it("measures rich-text cells per run with each run's own font", () => {
@@ -202,8 +203,8 @@ describe("measureOptimalColumnWidth (Excel semantics)", () => {
         ],
       }),
     ];
-    // 3*10 (normal) + 3*12 (bold) + 10 padding = 76 vs plain 6*10+10 = 70
-    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(76);
+    // 3*10 (normal) + 3*12 (bold) + 8 padding = 74 vs plain 6*10+8 = 68
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(74);
   });
 });
 
@@ -232,15 +233,15 @@ describe("measureOptimalRowHeight (Excel semantics)", () => {
   it("larger fonts raise the row, even on cells without text", () => {
     // Excel: height follows the applied font size, not text presence
     const cells = [makeCell({ display: "", styleIndex: 3 })];
-    // 26 * 1.2 + 4 = 35.2 -> 36
-    expect(measure(cells)).toBe(36);
+    // fontSize 26pt -> 34.667px; 34.667 * 1.2 + 4 = 45.6 -> 46
+    expect(measure(cells)).toBe(46);
   });
 
   it("wrapped text contributes its line count at the current column width", () => {
     const cells = [makeCell({ col: 0, display: "aaaa bbbb cccc", styleIndex: 2 })];
-    // Column width 60 -> available 52 -> "aaaa bbbb cccc" wraps to 3 lines
-    // (each "aaaa " chunk is 50px); 3 * 13 * 1.2 + 4 = 50.8 -> 51
-    expect(measure(cells, 0, new Map([[0, 60]]))).toBe(51);
+    // Column width 60 -> available 54 -> "aaaa bbbb cccc" wraps to 3 lines
+    // (each "aaaa " chunk is 50px); 3 * 17.333px(=13pt) * 1.2 + 4 = 66.4 -> 67
+    expect(measure(cells, 0, new Map([[0, 60]]))).toBe(67);
   });
 
   it("ignores cells merged across rows", () => {
@@ -266,8 +267,8 @@ describe("measureOptimalRowHeight (Excel semantics)", () => {
         richText: [{ text: "ab" }, { text: "c", fontSize: 26 }],
       }),
     ];
-    // 26 * 1.2 + 4 = 35.2 -> 36
-    expect(measure(cells)).toBe(36);
+    // tallest run 26pt -> 34.667px; 34.667 * 1.2 + 4 = 45.6 -> 46
+    expect(measure(cells)).toBe(46);
   });
 
   it("floors contributor-only chrome rows at the default height", () => {

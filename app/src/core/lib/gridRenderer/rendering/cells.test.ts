@@ -271,9 +271,10 @@ describe("drawRichTextRuns", () => {
       false, false, false, false,
     );
 
-    // Find the font entries - superscript should use 65% of the font size (20 * 0.65 = 13)
-    const superFonts = fontLog.filter(f => f.includes("13px") || f.includes("13pt"));
-    const baseFonts = fontLog.filter(f => f.includes("20px") || f.includes("20pt"));
+    // Sizes are points, converted to px (x96/72). Base 20pt -> 26.667px;
+    // superscript 20 * 0.65 = 13pt -> 17.333px.
+    const superFonts = fontLog.filter(f => f.includes("17.33"));
+    const baseFonts = fontLog.filter(f => f.includes("26.66"));
     expect(baseFonts.length).toBeGreaterThan(0);
     expect(superFonts.length).toBeGreaterThan(0);
   });

@@ -266,8 +266,8 @@ describe("drawRichTextRuns - all style properties at once", () => {
 
     expect(ctx.fillText).toHaveBeenCalledTimes(1);
     expect(ctx.fillStyle).toBe("#ff6600");
-    // Font should include bold + italic + 18px + Courier New
-    const font = fontLog.find(f => f.includes("bold") && f.includes("italic") && f.includes("18px") && f.includes("Courier New"));
+    // Font should include bold + italic + Courier New at 18pt -> 24px
+    const font = fontLog.find(f => f.includes("bold") && f.includes("italic") && f.includes("24px") && f.includes("Courier New"));
     expect(font).toBeDefined();
     // Underline and strikethrough should both produce stroke calls
     // 2 decorations = 2 beginPath + 2 moveTo + 2 lineTo + 2 stroke
@@ -337,9 +337,10 @@ describe("drawRichTextRuns - superscript and subscript in same cell", () => {
       false, false, false, false,
     );
 
-    // 30 * 0.65 = 19.5 -> Math.round = 20
-    const hasBase = fontLog.some(f => f.includes("30px"));
-    const hasScaled = fontLog.some(f => f.includes("20px"));
+    // Points -> px (x96/72). Base 30pt -> 40px. Superscript 30 * 0.65 = 19.5
+    // -> Math.round = 20pt -> 26.667px.
+    const hasBase = fontLog.some(f => f.includes("40px"));
+    const hasScaled = fontLog.some(f => f.includes("26.66"));
     expect(hasBase).toBe(true);
     expect(hasScaled).toBe(true);
   });
@@ -461,7 +462,8 @@ describe("drawRichTextRuns - extreme font sizes", () => {
     );
 
     expect(ctx.fillText).toHaveBeenCalledTimes(1);
-    expect(fontLog.some(f => f.includes("200px"))).toBe(true);
+    // 200pt -> 266.667px
+    expect(fontLog.some(f => f.includes("266.66"))).toBe(true);
   });
 
   it("handles fontSize 1 (minimum practical)", () => {
@@ -479,7 +481,8 @@ describe("drawRichTextRuns - extreme font sizes", () => {
       false, false, false, false,
     );
 
-    expect(fontLog.some(f => f.includes("1px"))).toBe(true);
+    // 1pt -> 1.333px
+    expect(fontLog.some(f => f.includes("1.33"))).toBe(true);
   });
 
   it("superscript with fontSize 1 produces scaled size via Math.round", () => {
@@ -497,7 +500,7 @@ describe("drawRichTextRuns - extreme font sizes", () => {
       false, false, false, false,
     );
 
-    // 1 * 0.65 = 0.65, Math.round = 1
-    expect(fontLog.some(f => f.includes("1px"))).toBe(true);
+    // 1 * 0.65 = 0.65, Math.round = 1pt -> 1.333px
+    expect(fontLog.some(f => f.includes("1.33"))).toBe(true);
   });
 });

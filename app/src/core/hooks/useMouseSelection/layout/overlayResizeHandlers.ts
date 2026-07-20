@@ -90,7 +90,7 @@ function getOverlayBottomRightPixel(
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const defaultCellWidth = config.defaultCellWidth || 100;
-  const defaultCellHeight = config.defaultCellHeight || 24;
+  const defaultCellHeight = config.defaultCellHeight || 20;
   const dims = dimensions || createEmptyDimensionOverrides();
 
   // Calculate X position of the right edge of endCol

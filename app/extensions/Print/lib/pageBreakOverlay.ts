@@ -230,7 +230,7 @@ function handleMouseDown(e: MouseEvent): void {
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
-  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
   const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
@@ -288,7 +288,7 @@ function handleMouseMove(e: MouseEvent): void {
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
-  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
   const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
@@ -340,7 +340,7 @@ function handleMouseUp(e: MouseEvent): void {
   const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
   const colHeaderHeight = lastConfig.colHeaderHeight || 24;
   const defaultColWidth = lastConfig.defaultCellWidth || 100;
-  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 20;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
   const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
@@ -446,7 +446,7 @@ export function renderPageBreakOverlay(
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const defaultColWidth = config.defaultCellWidth || 100;
-  const defaultRowHeight = config.defaultRowHeight || 24;
+  const defaultRowHeight = config.defaultRowHeight || 20;
 
   const getColW = createDimensionGetterFromMap(defaultColWidth, dimensions.columnWidths);
   const getRowH = createDimensionGetterFromMap(defaultRowHeight, dimensions.rowHeights);

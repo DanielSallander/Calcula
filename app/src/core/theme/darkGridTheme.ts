@@ -20,8 +20,8 @@ export const DARK_GRID_THEME: GridTheme = {
   cellText: "#e0e0e0",
   cellTextNumber: "#e0e0e0",
   cellTextError: "#f87171",
-  cellFontFamily: "system-ui, -apple-system, sans-serif",
-  cellFontSize: 13,
+  cellFontFamily: "Calibri",
+  cellFontSize: 11, // points (Excel default body size); renderer converts to px
   headerHighlight: "#37373d",
   headerHighlightText: "#ffffff",
   resizeHandle: "#34d399",

@@ -1059,8 +1059,8 @@ export const excelGapFeaturesSuite: TestSuite = {
     // 18. Default Dimensions (H8)
     // ======================================================================
     {
-      name: "Default Dimensions: initial values are 24 and 100",
-      description: "getDefaultDimensions returns defaultRowHeight=24 and defaultColumnWidth=100.",
+      name: "Default Dimensions: setter round-trips row height and column width",
+      description: "After setDefaultRowHeight/Width, getDefaultDimensions reflects the values (defaults are 20 and 64).",
       async run(ctx) {
         // Ensure defaults are set
         await setDefaultRowHeight(24);

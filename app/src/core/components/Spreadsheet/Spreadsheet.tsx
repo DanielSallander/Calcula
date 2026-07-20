@@ -36,8 +36,9 @@ import {
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { getCellFromPixel } from "../../lib/gridRenderer";
-import { calculateFreezePaneLayout } from "../../lib/gridRenderer/layout/viewport";
+import { calculateFreezePaneLayout, calculateVisibleRange } from "../../lib/gridRenderer/layout/viewport";
 import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dimensions";
+import { computeRowHeaderWidth } from "../../lib/gridRenderer/layout/rowHeaderWidth";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { AppEvents, emitAppEvent } from "../../lib/events";
 import { findFloatingRegionAt } from "../../hooks/useMouseSelection/layout/overlayMoveHandlers";
@@ -127,6 +128,23 @@ function SpreadsheetContent({
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
   const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, referenceStyle } = gridState;
+
+  // Excel-style row-header gutter: auto-widen to fit the largest visible row
+  // number (more digits => wider), narrowing back when scrolled up. The row
+  // range depends only on scroll/height (not on rowHeaderWidth), so this can't
+  // feedback-loop. All rowHeaderWidth consumers read config, so updating it here
+  // repositions headers, cells, hit-testing, and the editor consistently.
+  useEffect(() => {
+    const vpW = gridState.viewportDimensions.width;
+    const vpH = gridState.viewportDimensions.height;
+    if (vpW <= 0 || vpH <= 0) return;
+    const zoom = gridState.zoom || 1;
+    const range = calculateVisibleRange(viewport, config, vpW / zoom, vpH / zoom, dimensions);
+    const desired = computeRowHeaderWidth(range.endRow + 1);
+    if (desired !== config.rowHeaderWidth) {
+      dispatch(updateConfig({ rowHeaderWidth: desired }));
+    }
+  }, [viewport, config, dimensions, gridState.viewportDimensions, gridState.zoom, dispatch]);
 
   // -------------------------------------------------------------------------
   // Split bar drag state

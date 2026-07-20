@@ -13,9 +13,10 @@ import {
   collectAutoFitColumnContributions,
   collectAutoFitRowContributions,
 } from "../../../../api/autoFitContributors";
+import { buildCellFont, pointsToPixels } from "../fonts";
 
 /** Horizontal padding inside cells (matches cells.ts paddingX) */
-const PADDING_X = 4;
+const PADDING_X = 3;
 /** Vertical padding inside cells (matches cells.ts paddingY) */
 const PADDING_Y = 2;
 /** Extra margin to prevent content from touching the border */
@@ -54,10 +55,12 @@ function buildFontString(
   themeFontSize: number
 ): string {
   const fontFamily = style?.fontFamily || themeFontFamily;
-  const fontSize = style?.fontSize || themeFontSize;
-  const italic = style?.italic ? "italic" : "";
-  const bold = style?.bold ? "bold" : "";
-  return `${italic} ${bold} ${fontSize}px ${fontFamily}`.trim();
+  const fontSize = style?.fontSize || themeFontSize; // points
+  const fontStyle = style?.italic ? "italic" : "normal";
+  const fontWeight = style?.bold ? "bold" : "normal";
+  // Delegate to buildCellFont so measurement uses the EXACT font string the
+  // renderer draws with (same pt->px conversion, same fallback chain).
+  return buildCellFont(fontStyle, fontWeight, fontSize, fontFamily);
 }
 
 /** Inclusive row/col span merged from contributor claims. */
@@ -101,7 +104,7 @@ function measureRichTextWidth(
       fontSize = Math.round(fontSize * SCRIPT_SCALE);
     }
     const fontFamily = run.fontFamily ?? baseFontFamily;
-    ctx.font = `${isItalic ? "italic" : "normal"} ${isBold ? "bold" : "normal"} ${fontSize}px ${fontFamily}`;
+    ctx.font = buildCellFont(isItalic ? "italic" : "normal", isBold ? "bold" : "normal", fontSize, fontFamily);
     total += ctx.measureText(run.text).width;
   }
   return total;
@@ -339,13 +342,15 @@ export function measureOptimalRowHeight(
 
     hasContent = true;
     hasCellContent = true;
-    let cellHeight = lineCount * fontSize * LINE_HEIGHT_FACTOR + PADDING_Y * 2;
+    // fontSize is in points; the line box is measured in pixels.
+    let cellHeight = lineCount * pointsToPixels(fontSize) * LINE_HEIGHT_FACTOR + PADDING_Y * 2;
 
-    // A single line at (or below) the default font size fits the default row
-    // height — match Excel, where autofit of default-size text lands on the
-    // standard height instead of cramping the row
+    // A single line at (or below) the default font size lands EXACTLY on the
+    // standard row height — match Excel, where autofit of default-size text
+    // yields the standard height. (The 1.2x line box computes slightly taller
+    // than Excel's tighter default, so clamp to the default rather than max().)
     if (lineCount === 1 && fontSize <= theme.cellFontSize) {
-      cellHeight = Math.max(cellHeight, defaultRowHeight);
+      cellHeight = defaultRowHeight;
     }
 
     if (cellHeight > maxHeight) {

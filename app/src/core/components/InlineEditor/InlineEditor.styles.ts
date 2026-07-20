@@ -24,8 +24,9 @@ export const EditorInput = styled.input<EditorInputProps>`
   margin: 0;
   box-sizing: border-box;
 
-  /* Typography */
-  font-family: ${v('--font-family-sans')};
+  /* Typography — mirror the canvas cell font (Excel: Calibri 11pt => 14.667px)
+     so text does not shift/resize when the user starts editing a cell. */
+  font-family: ${v('--font-family-cell')};
   font-size: calc(${v('--font-size-cell')} * ${(p) => p.$zoom ?? 1});
   line-height: calc(${(p) => p.$height}px - ${(p) => 4 * (p.$zoom ?? 1)}px);
   

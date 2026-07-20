@@ -123,7 +123,12 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.BORDER_DISABLED]: '#e5e7eb',
   [THEME_TOKENS.PANEL_BG]: '#f9fafb',
   [THEME_TOKENS.FONT_FAMILY_SANS]: 'system-ui, -apple-system, sans-serif',
-  [THEME_TOKENS.FONT_SIZE_CELL]: '13px',
+  // Cell/editor font (Excel default body font). Keeps the inline editor overlay
+  // in the same family as the canvas cell text.
+  [THEME_TOKENS.FONT_FAMILY_CELL]: 'Calibri, "Segoe UI", Arial, sans-serif',
+  // px equivalent of the default 11pt cell text (11 * 96/72). Fallback for the
+  // inline editor overlay when a cell carries no explicit size.
+  [THEME_TOKENS.FONT_SIZE_CELL]: '14.667px',
   [THEME_TOKENS.Z_INDEX_EDITOR]: '10',
 
   // --- Scrollbar ---

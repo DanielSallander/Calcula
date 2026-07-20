@@ -77,8 +77,8 @@ export const DEFAULT_THEME: GridTheme = {
   cellText: "#000000",
   cellTextNumber: "#000000",
   cellTextError: "#cc0000",
-  cellFontFamily: "system-ui, -apple-system, sans-serif",
-  cellFontSize: 13,
+  cellFontFamily: "Calibri",
+  cellFontSize: 11, // points (Excel default body size); renderer converts to px
   headerHighlight: "#cce0f5",
   headerHighlightText: "#1a5fb4",
   resizeHandle: "#1a5fb4",
