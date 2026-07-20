@@ -60,7 +60,7 @@ const styles = {
     display: flex;
     align-items: center;
     height: 100%;
-    color: #999;
+    color: var(--text-tertiary, #999);
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
@@ -72,7 +72,7 @@ const styles = {
     cursor: pointer;
     white-space: nowrap;
     font-size: 11px;
-    color: #333;
+    color: var(--text-primary, #333);
 
     input {
       cursor: pointer;
@@ -84,7 +84,7 @@ const styles = {
     gap: 2px;
     align-items: center;
     padding: 2px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--border-default, #e0e0e0);
     border-radius: 3px;
   `,
   stylePreset: css`
@@ -94,24 +94,23 @@ const styles = {
     border-radius: 2px;
     cursor: pointer;
     padding: 2px;
-    background: #fff;
+    background: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
 
     &:hover {
-      border-color: #999;
-      background: #f5f5f5;
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
     }
   `,
   stylePresetActive: css`
     width: 28px;
     height: 22px;
-    border: 2px solid #005fb8;
+    border: 2px solid var(--button-pressed-border, rgba(16, 185, 129, 0.45));
     border-radius: 2px;
     cursor: pointer;
     padding: 1px;
-    background: #e8f0fe;
+    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -119,9 +118,9 @@ const styles = {
   selectSmall: css`
     font-size: 11px;
     padding: 1px 4px;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border-default, #ccc);
     border-radius: 3px;
-    background: #fff;
+    background: var(--bg-surface, #fff);
     cursor: pointer;
     min-width: 70px;
   `,

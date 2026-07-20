@@ -14,22 +14,23 @@ const base = css`
   align-items: center;
   justify-content: center;
   gap: 4px;
-  border: 1px solid var(--border-default, #d0d0d0);
+  border: 1px solid transparent;
   border-radius: 4px;
-  background: var(--button-bg, #fff);
+  background: var(--button-bg, transparent);
   color: var(--text-primary, #333);
   cursor: pointer;
   font-family: ${FONT_FAMILY};
   font-size: 12px;
   box-sizing: border-box;
   white-space: nowrap;
+  transition: background-color 80ms ease-out, border-color 80ms ease-out;
 
   &:hover:not(:disabled) {
-    background: var(--button-hover-bg, #f0f0f0);
+    background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
   }
 
   &:active:not(:disabled) {
-    background: var(--button-active-bg, #e0e0e0);
+    background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
   }
 
   &:disabled {
@@ -39,8 +40,24 @@ const base = css`
 `;
 
 const pressed = css`
-  background: var(--button-active-bg, #dceafc);
-  border-color: var(--accent-color, #0078d4);
+  background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
+  border-color: var(--button-pressed-border, rgba(16, 185, 129, 0.45));
+
+  &:hover:not(:disabled) {
+    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
+  }
+`;
+
+/** Visible boundary at rest — for buttons that stand alone on a surface
+ *  (pane control cards, dialogs) rather than in ribbon/toolbar rows, where
+ *  the flat look would read as plain text. */
+const outlined = css`
+  border-color: var(--border-default, #d0d0d0);
+  background: var(--bg-surface, #fff);
+
+  &:hover:not(:disabled) {
+    background: var(--bg-surface-disabled, #f5f5f5);
+  }
 `;
 
 export interface LayoutButtonProps
@@ -49,12 +66,16 @@ export interface LayoutButtonProps
   size?: "sm" | "md";
   /** Stretch to fill the row. */
   grow?: boolean;
+  /** "flat" (default) = transparent at rest, ribbon/toolbar idiom;
+   *  "outlined" = visible border + surface background at rest. */
+  variant?: "flat" | "outlined";
 }
 
 /** A standard button at the shared control height for the current density. */
 export function Button({
   size = "md",
   grow,
+  variant = "flat",
   style,
   className,
   children,
@@ -65,7 +86,7 @@ export function Button({
 
   return (
     <button
-      className={cx(base, className)}
+      className={cx(base, variant === "outlined" && outlined, className)}
       style={{
         height,
         minWidth: compact ? 0 : 28,

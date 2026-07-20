@@ -52,8 +52,8 @@ export const darkTheme: Record<string, string> = {
   // --- Sheet Tabs ---
   [THEME_TOKENS.SHEET_TABS_BG]: "#252526",
   [THEME_TOKENS.SHEET_TABS_BORDER]: "#3a3a3a",
-  [THEME_TOKENS.SHEET_TAB_BG]: "#2d2d2d",
-  [THEME_TOKENS.SHEET_TAB_BORDER]: "#3a3a3a",
+  [THEME_TOKENS.SHEET_TAB_BG]: "#323236",
+  [THEME_TOKENS.SHEET_TAB_BORDER]: "#47474c",
   [THEME_TOKENS.SHEET_TAB_ACTIVE_BG]: "#1e1e1e",
   [THEME_TOKENS.SHEET_TAB_FORMULA_SOURCE_BG]: "#3a2e1a",
   [THEME_TOKENS.SHEET_TAB_FORMULA_SOURCE_BORDER]: "#ff9800",
@@ -140,6 +140,15 @@ export const darkTheme: Record<string, string> = {
   [THEME_TOKENS.SCROLLBAR_THUMB_BORDER_COLOR]: "#3a3a3a",
 
   // --- Ribbon ---
-  [THEME_TOKENS.RIBBON_BUTTON_ACTIVE_BG]: "#37373d",
-  [THEME_TOKENS.RIBBON_BUTTON_HOVER_BG]: "#3a3a3a",
+  [THEME_TOKENS.RIBBON_BUTTON_ACTIVE_BG]: "rgba(255, 255, 255, 0.11)",
+  [THEME_TOKENS.RIBBON_BUTTON_HOVER_BG]: "rgba(255, 255, 255, 0.07)",
+
+  // --- Shared control atoms (@api/layout) ---
+  [THEME_TOKENS.BUTTON_BG]: "transparent",
+  [THEME_TOKENS.BUTTON_HOVER_BG]: "rgba(255, 255, 255, 0.08)",
+  [THEME_TOKENS.BUTTON_ACTIVE_BG]: "rgba(255, 255, 255, 0.13)",
+  // Pressed = accent tint: derived from --accent-primary so skin accent
+  // overrides cascade to toggle states without retuning these.
+  [THEME_TOKENS.BUTTON_PRESSED_BG]: "color-mix(in srgb, var(--accent-primary) 28%, transparent)",
+  [THEME_TOKENS.BUTTON_PRESSED_BORDER]: "color-mix(in srgb, var(--accent-primary) 55%, transparent)",
 };

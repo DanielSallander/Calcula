@@ -38,12 +38,11 @@ const styles = {
     color: var(--text-primary, #333);
 
     &:hover {
-      background: var(--button-hover-bg, #e8e8e8);
-      border-color: var(--border-default, #d0d0d0);
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
     }
 
     &:active {
-      background: var(--button-active-bg, #d6d6d6);
+      background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
     }
   `,
   icon: css`

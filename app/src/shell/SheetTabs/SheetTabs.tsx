@@ -919,6 +919,18 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     editing?.sourceSheetIndex !== undefined &&
     editing.sourceSheetIndex !== activeIndex;
 
+  // Visible tabs in render order; shared by the tab map and drag indicator.
+  const visibleSheets = sheets.filter(s => s.visibility === "visible");
+
+  // True when a tab renders "selected" (raised on the grid background) —
+  // used to hide the Excel-style separators next to selected tabs.
+  const isTabSelected = (s?: SheetInfo): boolean =>
+    !!s && (
+      s.index === activeIndex ||
+      groupedSheets.has(s.index) ||
+      (isInFormulaMode && editing?.sourceSheetIndex === s.index)
+    );
+
   return (
     <S.Container>
       {/* Navigation arrows */}
@@ -945,12 +957,18 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         {isLoading ? (
           <S.LoadingText>Loading...</S.LoadingText>
         ) : (
-          sheets.filter(s => s.visibility === "visible").map((sheet) => {
+          visibleSheets.map((sheet, visIdx) => {
             const isSourceSheet = isInFormulaMode &&
               editing?.sourceSheetIndex === sheet.index;
             const isTargetSheet = isInFormulaMode &&
               sheet.index === activeIndex &&
               !isSourceSheet;
+
+            // Excel-style separators: only between two unselected neighbors.
+            const withSeparator =
+              visIdx > 0 &&
+              !isTabSelected(sheet) &&
+              !isTabSelected(visibleSheets[visIdx - 1]);
 
             return (
               <S.Tab
@@ -963,6 +981,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 $isFormulaSource={isSourceSheet}
                 $isFormulaTarget={isTargetSheet}
                 $tabColor={sheet.tabColor || ""}
+                $withSeparator={withSeparator}
                 onMouseDown={(e) => {
                   handleTabMouseDown(e, sheet.index);
                   handleDragStart(e, sheet.index);
@@ -1028,13 +1047,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         </S.FormulaModeIndicator>
       )}
 
-      {/* Scroll bar area */}
-      <S.ScrollArea />
-
       {/* Drag indicator */}
       {dragState?.dragging && (() => {
         const tabs = getVisibleTabs();
-        const visibleSheets = sheets.filter(s => s.visibility === "visible");
         const dropVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.currentIndex);
         const sourceVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.sourceIndex);
         if (dropVisibleIdx < 0 || sourceVisibleIdx < 0 || dropVisibleIdx === sourceVisibleIdx) return null;

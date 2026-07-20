@@ -6,7 +6,8 @@ const v = (name: string) => `var(${name})`;
 export const Container = styled.div`
   display: flex;
   align-items: center;
-  height: 26px;
+  height: 28px;
+  flex: none;
   background-color: ${v('--sheet-tabs-bg')};
   border-top: 1px solid ${v('--sheet-tabs-border')};
   user-select: none;
@@ -17,15 +18,16 @@ export const Container = styled.div`
 export const NavArea = styled.div`
   display: flex;
   align-items: center;
+  gap: 1px;
   padding: 0 4px;
-  border-right: 1px solid ${v('--sheet-tabs-border')};
 `;
 
 export const NavButton = styled.button`
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: none;
+  border-radius: 4px;
   background-color: transparent;
   color: ${v('--text-secondary')};
   cursor: pointer;
@@ -33,15 +35,16 @@ export const NavButton = styled.button`
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background-color 80ms ease-out;
 
   &:hover:not(:disabled) {
     background-color: ${v('--sheet-tab-bg')};
-    border-radius: 2px;
+    color: ${v('--text-primary')};
   }
 
   &:disabled {
     cursor: default;
-    opacity: 0.35;
+    opacity: 0.3;
   }
 `;
 
@@ -55,12 +58,13 @@ export const HiddenCount = styled.span`
 
 export const TabsArea = styled.div`
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  align-self: stretch;
   flex: 0 1 auto;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 0 4px;
+  padding: 0 2px;
 
   /* Hide scrollbar but keep scrollable */
   scrollbar-width: none;
@@ -75,61 +79,89 @@ interface TabProps {
   $isFormulaSource?: boolean;
   $isFormulaTarget?: boolean;
   $tabColor?: string;
+  /** Thin Excel-style divider on the left edge; hidden next to selected tabs. */
+  $withSeparator?: boolean;
 }
 
+/** True when the tab renders "selected" (raised on the grid background). */
+const isSelected = (p: TabProps) =>
+  !!(p.$isActive || p.$isGrouped || p.$isFormulaSource || p.$isFormulaTarget);
+
+/** Color of the 2px underline shown under selected tabs. */
+const underlineColor = (p: TabProps) => {
+  if (p.$isFormulaSource) return v('--sheet-tab-formula-source-border');
+  if (p.$isFormulaTarget) return v('--sheet-tab-formula-target-border');
+  if (p.$tabColor) return p.$tabColor;
+  return v('--accent-primary');
+};
+
 export const Tab = styled.button<TabProps>`
-  padding: 4px 12px;
-  border: 1px solid ${v('--sheet-tab-border')};
-  border-bottom: none;
-  border-radius: 4px 4px 0 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 14px;
+  border: none;
   background-color: ${props =>
     props.$isFormulaSource
       ? v('--sheet-tab-formula-source-bg')
       : props.$isFormulaTarget
       ? v('--sheet-tab-formula-target-bg')
-      : props.$isActive
+      : isSelected(props)
       ? v('--sheet-tab-active-bg')
-      : props.$isGrouped
-      ? v('--sheet-tab-active-bg')
-      : v('--sheet-tab-bg')
+      : 'transparent'
   };
-  border-color: ${props =>
-    props.$isFormulaSource
-      ? v('--sheet-tab-formula-source-border')
-      : props.$isFormulaTarget
-      ? v('--sheet-tab-formula-target-border')
-      : v('--sheet-tab-border')
+  color: ${props =>
+    props.$isActive && !props.$tabColor
+      ? v('--accent-primary')
+      : isSelected(props)
+      ? v('--text-primary')
+      : v('--text-secondary')
   };
-  color: ${v('--text-primary')};
+  font-weight: ${props => (props.$isActive ? 600 : 400)};
   cursor: pointer;
-  font-size: 11px;
-  margin-right: 2px;
+  font-size: 12px;
   white-space: nowrap;
   flex-shrink: 0;
-  position: relative;
+  transition: background-color 80ms ease-out, color 80ms ease-out;
 
-  ${props => props.$isActive && `
-    border-bottom: 1px solid ${v('--sheet-tab-active-bg')};
-    margin-bottom: -1px;
-    font-weight: 500;
+  /* Selected tabs sit on the grid background with a colored underline. */
+  ${props => isSelected(props) && `
+    box-shadow: inset 0 -2px 0 ${underlineColor(props)};
   `}
 
-  ${props => props.$isGrouped && !props.$isActive && `
-    border-bottom: 1px solid ${v('--sheet-tab-active-bg')};
-    margin-bottom: -1px;
-    font-style: italic;
+  &:hover {
+    ${props => !isSelected(props) && `
+      background-color: ${v('--sheet-tab-bg')};
+      color: ${v('--text-primary')};
+    `}
+  }
+
+  /* Excel-style thin divider between unselected neighbors. */
+  ${props => props.$withSeparator && `
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1px;
+      height: 14px;
+      background-color: ${v('--sheet-tab-border')};
+    }
   `}
 
-  ${props => props.$tabColor && `
+  /* Colored-tab hint while the tab is not selected: a short bottom stripe. */
+  ${props => props.$tabColor && !isSelected(props) && `
     &::after {
       content: '';
       position: absolute;
       bottom: 0;
-      left: 0;
-      right: 0;
+      left: 6px;
+      right: 6px;
       height: 3px;
+      border-radius: 2px 2px 0 0;
       background-color: ${props.$tabColor};
-      border-radius: 0 0 2px 2px;
     }
   `}
 `;
@@ -145,27 +177,30 @@ interface AddButtonProps {
 
 export const AddButton = styled.button<AddButtonProps>`
   width: 22px;
-  height: 20px;
+  height: 22px;
   padding: 0;
-  border: 1px solid ${v('--sheet-tab-border')};
+  border: none;
   border-radius: 4px;
-  background-color: ${v('--sheet-tab-bg')};
+  background-color: transparent;
   color: ${v('--text-secondary')};
   cursor: pointer;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-left: 4px;
+  margin-left: 5px;
+  transition: background-color 80ms ease-out;
+
+  &:hover:not(:disabled) {
+    background-color: ${v('--sheet-tab-bg')};
+    color: ${v('--text-primary')};
+  }
 
   ${props => props.$disabled && `
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
   `}
-`;
-
-export const ScrollArea = styled.div`
-  flex: 0;
 `;
 
 export const LoadingText = styled.span`

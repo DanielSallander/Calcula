@@ -32,13 +32,16 @@ const colorBtnStyle = css`
   background: transparent;
   cursor: pointer;
   font-size: 13px;
-  color: #333;
+  color: var(--text-primary, #333);
   font-family: inherit;
   gap: 0;
 
   &:hover:not(:disabled) {
-    background: #e5e5e5;
-    border-color: #c0c0c0;
+    background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
+  }
+
+  &:active:not(:disabled) {
+    background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
   }
 `;
 
@@ -86,8 +89,8 @@ function ColorDropdown({
         z-index: 1100;
         margin-top: 2px;
         padding: 6px;
-        background: #fff;
-        border: 1px solid #c0c0c0;
+        background: var(--bg-surface, #fff);
+        border: 1px solid var(--border-default, #c0c0c0);
         border-radius: 4px;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
       `}
@@ -100,20 +103,20 @@ function ColorDropdown({
             onClick={() => { onColorSelect(color); onClose(); }}
             className={css`
               width: 16px; height: 16px; padding: 0;
-              border: ${currentColor.toLowerCase() === color.toLowerCase() ? "2px solid #0078d4" : "1px solid #ccc"};
+              border: ${currentColor.toLowerCase() === color.toLowerCase() ? "2px solid var(--button-pressed-border, rgba(16, 185, 129, 0.45))" : "1px solid var(--border-default, #ccc)"};
               border-radius: 2px; background-color: ${color}; cursor: pointer;
-              &:hover { border: 2px solid #333; transform: scale(1.15); }
+              &:hover { border: 2px solid var(--text-primary, #333); transform: scale(1.15); }
             `}
           />
         ))}
       </div>
-      <div className={css`display: flex; align-items: center; gap: 4px; padding-top: 4px; border-top: 1px solid #e0e0e0;`}>
-        <span className={css`font-size: 11px; color: #666;`}>Custom:</span>
+      <div className={css`display: flex; align-items: center; gap: 4px; padding-top: 4px; border-top: 1px solid var(--border-default, #e0e0e0);`}>
+        <span className={css`font-size: 11px; color: var(--text-secondary, #666);`}>Custom:</span>
         <input
           type="color"
           value={currentColor}
           onChange={(e) => { onColorSelect(e.target.value); onClose(); }}
-          className={css`width: 22px; height: 18px; padding: 0; border: 1px solid #ccc; border-radius: 2px; cursor: pointer;`}
+          className={css`width: 22px; height: 18px; padding: 0; border: 1px solid var(--border-default, #ccc); border-radius: 2px; cursor: pointer;`}
         />
       </div>
       {onMoreOptions && (
@@ -121,8 +124,8 @@ function ColorDropdown({
           onClick={() => { onClose(); onMoreOptions(); }}
           className={css`
             display: block; width: 100%; padding: 4px 0; margin-top: 4px;
-            border: none; border-top: 1px solid #e0e0e0; background: none;
-            font-size: 11px; color: #0078d4; cursor: pointer; text-align: center;
+            border: none; border-top: 1px solid var(--border-default, #e0e0e0); background: none;
+            font-size: 11px; color: var(--accent-primary, #0078d4); cursor: pointer; text-align: center;
             &:hover { text-decoration: underline; }
           `}
         >

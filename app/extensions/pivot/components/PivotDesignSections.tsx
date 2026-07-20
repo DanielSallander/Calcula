@@ -27,7 +27,7 @@ const sectionStyles = {
     display: flex;
     align-items: center;
     height: 100%;
-    color: #999;
+    color: var(--text-tertiary, #999);
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
@@ -40,7 +40,7 @@ const sectionStyles = {
     cursor: pointer;
     white-space: nowrap;
     font-size: 11px;
-    color: #333;
+    color: var(--text-primary, #333);
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
 
     input {
@@ -49,22 +49,22 @@ const sectionStyles = {
   `,
   select: css`
     padding: 3px 6px;
-    border: 1px solid #d0d0d0;
+    border: 1px solid var(--border-default, #d0d0d0);
     border-radius: 4px;
     font-size: 11px;
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-    background: #fff;
-    color: #1a1a1a;
+    background: var(--bg-surface, #fff);
+    color: var(--text-primary, #1a1a1a);
     cursor: pointer;
     min-width: 80px;
 
     &:hover {
-      border-color: #999;
+      border-color: var(--text-tertiary, #999);
     }
 
     &:focus {
       outline: none;
-      border-color: #005fb8;
+      border-color: var(--accent-primary, #005fb8);
     }
   `,
 };

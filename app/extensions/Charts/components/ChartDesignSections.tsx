@@ -51,12 +51,11 @@ const s = {
     border-radius: 3px;
     cursor: pointer;
     font-size: 10px;
-    color: #444;
+    color: var(--text-primary, #444);
     min-width: 42px;
 
     &:hover {
-      background: #e8e8e8;
-      border-color: #d0d0d0;
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
     }
   `,
   typeBtnActive: css`
@@ -65,17 +64,17 @@ const s = {
     align-items: center;
     gap: 1px;
     padding: 3px 6px;
-    background: #d6e4f0;
-    border: 1px solid #a0c0e0;
+    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
+    border: 1px solid var(--button-pressed-border, rgba(16, 185, 129, 0.45));
     border-radius: 3px;
     cursor: pointer;
     font-size: 10px;
-    color: #1a1a1a;
+    color: var(--text-primary, #1a1a1a);
     min-width: 42px;
     font-weight: 500;
 
     &:hover {
-      background: #c0d8ec;
+      background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
     }
   `,
   typeIcon: css`
@@ -99,7 +98,7 @@ const s = {
     cursor: pointer;
     white-space: nowrap;
     font-size: 11px;
-    color: #333;
+    color: var(--text-primary, #333);
 
     input {
       cursor: pointer;
@@ -111,10 +110,10 @@ const s = {
   numInput: css`
     font-size: 11px;
     padding: 1px 3px;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border-default, #ccc);
     border-radius: 3px;
-    background: #fff;
-    color: #333;
+    background: var(--bg-surface, #fff);
+    color: var(--text-primary, #333);
   `,
 
   // -- Compact vertical stack for option sections (ribbon-style: use the
@@ -136,9 +135,9 @@ const s = {
     gap: 3px;
     align-items: center;
     padding: 3px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--border-default, #e0e0e0);
     border-radius: 3px;
-    background: #fff;
+    background: var(--bg-surface, #fff);
   `,
   paletteSwatch: css`
     width: 28px;
@@ -147,25 +146,24 @@ const s = {
     border-radius: 2px;
     cursor: pointer;
     padding: 2px;
-    background: #fff;
+    background: var(--bg-surface, #fff);
     display: flex;
     gap: 1px;
     align-items: center;
     justify-content: center;
 
     &:hover {
-      border-color: #999;
-      background: #f5f5f5;
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
     }
   `,
   paletteSwatchActive: css`
     width: 28px;
     height: 22px;
-    border: 2px solid #005fb8;
+    border: 2px solid var(--accent-primary, #005fb8);
     border-radius: 2px;
     cursor: pointer;
     padding: 1px;
-    background: #e8f0fe;
+    background: var(--button-pressed-bg, rgba(16, 185, 129, 0.14));
     display: flex;
     gap: 1px;
     align-items: center;
@@ -180,16 +178,16 @@ const s = {
   // -- Select dropdowns --
   select: css`
     padding: 3px 6px;
-    border: 1px solid #d0d0d0;
+    border: 1px solid var(--border-default, #d0d0d0);
     border-radius: 3px;
     font-size: 11px;
     font-family: inherit;
-    background: #fff;
-    color: #1a1a1a;
+    background: var(--bg-surface, #fff);
+    color: var(--text-primary, #1a1a1a);
     cursor: pointer;
 
-    &:hover { border-color: #999; }
-    &:focus { outline: none; border-color: #0078d4; }
+    &:hover { border-color: var(--text-tertiary, #999); }
+    &:focus { outline: none; border-color: var(--accent-primary, #0078d4); }
   `,
 
   // -- Action buttons --
@@ -204,16 +202,15 @@ const s = {
     border-radius: 3px;
     cursor: pointer;
     font-size: 10px;
-    color: #333;
+    color: var(--text-primary, #333);
     white-space: nowrap;
     font-family: inherit;
 
     &:hover {
-      background: #e8e8e8;
-      border-color: #d0d0d0;
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
     }
     &:active {
-      background: #d6d6d6;
+      background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
     }
   `,
   actionIcon: css`
@@ -896,7 +893,7 @@ export function JsonSection(_props: PanelSectionProps): React.ReactElement | nul
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "2px 6px" }}>
       <JsonToggleButton isActive={jsonToggle.isJsonMode} onClick={jsonToggle.toggle} />
       {jsonToggle.isJsonMode && (
-        <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid #555", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
+        <div style={{ position: "fixed", right: 8, top: 140, width: 420, height: 400, zIndex: 500, border: "1px solid var(--border-default, #555)", borderRadius: 6, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.4)" }}>
           <JsonToggleEditor
             json={jsonToggle.json}
             onChange={jsonToggle.setJson}
@@ -1020,7 +1017,7 @@ export function SeriesColorsSection(_props: PanelSectionProps): React.ReactEleme
             updateSpec({ seriesColors: { ...(spec.seriesColors ?? {}), [name]: e.target.value } })
           }
           title="Series color"
-          style={{ width: 26, height: 20, padding: 0, border: "1px solid #ccc", borderRadius: 3, cursor: "pointer" }}
+          style={{ width: 26, height: 20, padding: 0, border: "1px solid var(--border-default, #ccc)", borderRadius: 3, cursor: "pointer" }}
         />
         <button
           className={s.actionBtn}

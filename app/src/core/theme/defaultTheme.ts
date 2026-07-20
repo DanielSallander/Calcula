@@ -48,8 +48,8 @@ export const defaultTheme: Record<string, string> = {
   // --- Sheet Tabs ---
   [THEME_TOKENS.SHEET_TABS_BG]: '#f0f0f0',
   [THEME_TOKENS.SHEET_TABS_BORDER]: '#d0d0d0',
-  [THEME_TOKENS.SHEET_TAB_BG]: '#e8e8e8',
-  [THEME_TOKENS.SHEET_TAB_BORDER]: '#c0c0c0',
+  [THEME_TOKENS.SHEET_TAB_BG]: '#e2e2e2',
+  [THEME_TOKENS.SHEET_TAB_BORDER]: '#c6c6c6',
   [THEME_TOKENS.SHEET_TAB_ACTIVE_BG]: '#ffffff',
   [THEME_TOKENS.SHEET_TAB_FORMULA_SOURCE_BG]: '#fff3e0',
   [THEME_TOKENS.SHEET_TAB_FORMULA_SOURCE_BORDER]: '#ff9800',
@@ -133,7 +133,16 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.SCROLLBAR_THUMB_BG_HOVER]: '#a0a0a0',
   [THEME_TOKENS.SCROLLBAR_THUMB_BG_ACTIVE]: '#808080',
   [THEME_TOKENS.SCROLLBAR_THUMB_BORDER_COLOR]: '#d1d5db',
-    // --- Ribbon ---
-  [THEME_TOKENS.RIBBON_BUTTON_ACTIVE_BG]: '#e0e0e0',
-  [THEME_TOKENS.RIBBON_BUTTON_HOVER_BG]: '#f3f4f6',
+  // --- Ribbon ---
+  [THEME_TOKENS.RIBBON_BUTTON_ACTIVE_BG]: 'rgba(0, 0, 0, 0.09)',
+  [THEME_TOKENS.RIBBON_BUTTON_HOVER_BG]: 'rgba(0, 0, 0, 0.05)',
+
+  // --- Shared control atoms (@api/layout) ---
+  [THEME_TOKENS.BUTTON_BG]: 'transparent',
+  [THEME_TOKENS.BUTTON_HOVER_BG]: 'rgba(0, 0, 0, 0.06)',
+  [THEME_TOKENS.BUTTON_ACTIVE_BG]: 'rgba(0, 0, 0, 0.10)',
+  // Pressed = accent tint: derived from --accent-primary so skin accent
+  // overrides cascade to toggle states without retuning these.
+  [THEME_TOKENS.BUTTON_PRESSED_BG]: 'color-mix(in srgb, var(--accent-primary) 14%, transparent)',
+  [THEME_TOKENS.BUTTON_PRESSED_BORDER]: 'color-mix(in srgb, var(--accent-primary) 45%, transparent)',
 };

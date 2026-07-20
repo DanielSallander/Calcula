@@ -33,7 +33,7 @@ const sectionStyles = {
     display: flex;
     align-items: center;
     height: 100%;
-    color: #999;
+    color: var(--text-tertiary, #999);
     font-style: italic;
     font-size: 12px;
     white-space: nowrap;
@@ -51,16 +51,16 @@ const sectionStyles = {
     cursor: pointer;
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-size: 11px;
-    color: #333;
+    color: var(--text-primary, #333);
     white-space: nowrap;
 
     &:hover {
-      background: #e8e8e8;
-      border-color: #d0d0d0;
+      background: var(--button-hover-bg, rgba(0, 0, 0, 0.06));
+      border-color: transparent;
     }
 
     &:active {
-      background: #d6d6d6;
+      background: var(--button-active-bg, rgba(0, 0, 0, 0.1));
     }
   `,
   buttonIcon: css`
@@ -80,20 +80,20 @@ const sectionStyles = {
     flex-direction: column;
     gap: 2px;
     font-size: 11px;
-    color: #333;
+    color: var(--text-primary, #333);
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   `,
   sourceLabel: css`
     font-size: 10px;
-    color: #666;
+    color: var(--text-secondary, #666);
   `,
   sourceValue: css`
     font-size: 11px;
-    color: #1a1a1a;
+    color: var(--text-primary, #1a1a1a);
     font-weight: 500;
     padding: 2px 6px;
-    background: #f5f5f5;
-    border: 1px solid #e0e0e0;
+    background: var(--bg-surface-disabled, #f5f5f5);
+    border: 1px solid var(--border-default, #e0e0e0);
     border-radius: 3px;
     max-width: 200px;
     overflow: hidden;

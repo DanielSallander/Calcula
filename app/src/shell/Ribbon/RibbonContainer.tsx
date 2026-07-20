@@ -3,7 +3,7 @@
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
 // REFACTOR: Imports from api layer instead of core internals
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
@@ -12,13 +12,13 @@ import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "./PanelContextMenu";
 import { SectionChrome } from "../components/SectionChrome";
 import type { PanelPlacement } from "../../api/uiTypes";
+import * as S from "./RibbonContainer.styles";
 
 export function RibbonContainer(): React.ReactElement {
   const state = useGridState();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabs, setTabs] = useState<RibbonTabDefinition[]>([]);
   const [isMinimized, setIsMinimized] = useState(false);
-  const prevTabIdsRef = useRef<Set<string>>(new Set());
 
   // Re-render when panel registry changes (badge updates, placement moves)
   const [, setPanelRegistryVersion] = useState(0);
@@ -91,16 +91,6 @@ export function RibbonContainer(): React.ReactElement {
   useEffect(() => {
     const updateTabs = () => {
       const registeredTabs = ExtensionRegistry.getRibbonTabs();
-      const prevIds = prevTabIdsRef.current;
-      const newIds = new Set(registeredTabs.map((t) => t.id));
-
-      // Detect newly added contextual tabs (e.g. Design tab when pivot selected)
-      let newlyAddedTab: RibbonTabDefinition | undefined;
-      if (prevIds.size > 0) {
-        newlyAddedTab = registeredTabs.find((t) => !prevIds.has(t.id));
-      }
-
-      prevTabIdsRef.current = newIds;
       setTabs(registeredTabs);
 
       setActiveTabId((current) => {
@@ -161,97 +151,31 @@ export function RibbonContainer(): React.ReactElement {
     : [];
 
   return (
-    <div
-      style={{
-        backgroundColor: "var(--panel-bg)",
-        borderBottom: "1px solid var(--border-default)",
-        position: "relative",
-        zIndex: 10,
-      }}
-    >
+    <S.RibbonFrame>
       {/* Tab Headers - fixed height to prevent layout shift when contextual tabs appear */}
-      <div
-        style={{
-          display: "flex",
-          gap: "4px",
-          padding: "0 8px",
-          borderBottom: "1px solid var(--border-default)",
-          height: "30px",
-          alignItems: "flex-end",
-          overflow: "hidden",
-        }}
-      >
+      <S.TabStrip>
         {tabs.map((tab) => {
           const isActive = activeTabId === tab.id;
-          const accentColor = tab.color;
           const badge = panelRegistry.getBadge(tab.id);
           return (
-            <button
+            <S.TabButton
               key={tab.id}
+              type="button"
+              $isActive={isActive}
+              $accent={tab.color}
               onClick={() => handleTabClick(tab.id)}
               onContextMenu={(e) => handleTabContextMenu(e, tab.id)}
-              style={{
-                position: "relative",
-                padding: "6px 16px",
-                border: "none",
-                backgroundColor: isActive ? "var(--bg-surface)" : "transparent",
-                borderTopLeftRadius: "4px",
-                borderTopRightRadius: "4px",
-                cursor: "pointer",
-                fontWeight: isActive ? 600 : 400,
-                fontSize: "12px",
-                color: accentColor
-                  ? isActive ? accentColor : accentColor + "cc"
-                  : "var(--text-primary)",
-                fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-                borderBottom: isActive ? "1px solid var(--bg-surface)" : "none",
-                borderTop: accentColor ? `3px solid ${accentColor}` : "none",
-                marginBottom: "-1px",
-              }}
             >
               {tab.label}
-              {badge && (
-                <span
-                  style={{
-                    position: "absolute",
-                    bottom: 2,
-                    right: 2,
-                    minWidth: 13,
-                    height: 13,
-                    padding: "0 3px",
-                    borderRadius: 7,
-                    backgroundColor: "var(--accent-color)",
-                    color: "#fff",
-                    fontSize: 9,
-                    fontWeight: 600,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    lineHeight: 1,
-                    boxSizing: "border-box",
-                    pointerEvents: "none",
-                  }}
-                >
-                  {badge}
-                </span>
-              )}
-            </button>
+              {badge && <S.TabBadge>{badge}</S.TabBadge>}
+            </S.TabButton>
           );
         })}
 
         {tabs.length === 0 && (
-          <div
-            style={{
-              padding: "6px 16px",
-              color: "var(--text-tertiary)",
-              fontStyle: "italic",
-              fontSize: "12px",
-            }}
-          >
-            No tabs registered - add-ins disabled
-          </div>
+          <S.EmptyStripNote>No tabs registered - add-ins disabled</S.EmptyStripNote>
         )}
-      </div>
+      </S.TabStrip>
 
       {/* Tab Content Area - fixed height to prevent grid jumping when tabs change */}
       {/* When minimized, only show if temporarily expanded (tab clicked) */}
@@ -273,7 +197,7 @@ export function RibbonContainer(): React.ReactElement {
           left: isMinimized && tempExpanded ? 0 : undefined,
           right: isMinimized && tempExpanded ? 0 : undefined,
           zIndex: isMinimized && tempExpanded ? 100 : undefined,
-          boxShadow: isMinimized && tempExpanded ? "0 4px 12px rgba(0,0,0,0.15)" : undefined,
+          boxShadow: isMinimized && tempExpanded ? "0 6px 16px rgba(0,0,0,0.18)" : undefined,
           borderBottom: isMinimized && tempExpanded ? "1px solid var(--border-default)" : undefined,
         }}
       >
@@ -320,6 +244,6 @@ export function RibbonContainer(): React.ReactElement {
           onClose={() => setContextMenu(null)}
         />
       )}
-    </div>
+    </S.RibbonFrame>
   );
 }

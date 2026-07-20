@@ -139,4 +139,11 @@ export const THEME_TOKENS = {
   // --- Ribbon ---
   RIBBON_BUTTON_ACTIVE_BG: '--ribbon-button-active-bg',
   RIBBON_BUTTON_HOVER_BG: '--ribbon-button-hover-bg',
+
+  // --- Shared control atoms (@api/layout Button/ToggleButton/Launcher) ---
+  BUTTON_BG: '--button-bg',
+  BUTTON_HOVER_BG: '--button-hover-bg',
+  BUTTON_ACTIVE_BG: '--button-active-bg',
+  BUTTON_PRESSED_BG: '--button-pressed-bg',
+  BUTTON_PRESSED_BORDER: '--button-pressed-border',
 } as const;

@@ -34,7 +34,13 @@ export function SectionChrome({
       style={{
         display: "flex",
         flexDirection: "column",
-        borderRight: isLast ? "none" : "1px solid var(--border-default)",
+        // Inset divider (Excel-style): fades out toward top and bottom instead
+        // of a full-height rule. Width stays 1px — CELL_CHROME_WIDTH depends on
+        // this border contributing exactly 1px to the cell's chrome.
+        borderRight: isLast ? "none" : "1px solid transparent",
+        borderImage: isLast
+          ? undefined
+          : "linear-gradient(to bottom, transparent 8%, var(--border-default) 25%, var(--border-default) 75%, transparent 92%) 1",
         paddingLeft: isFirst ? "4px" : "10px",
         paddingRight: "10px",
         height: "100%",
@@ -47,14 +53,14 @@ export function SectionChrome({
       {label !== undefined && (
         <div
           style={{
-            fontSize: "10px",
+            fontSize: "10.5px",
             color: "var(--text-tertiary)",
             textAlign: "center",
             marginTop: "2px",
-            textTransform: "uppercase",
-            letterSpacing: "0.5px",
             fontWeight: 400,
             whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {label}

@@ -43,6 +43,7 @@ export function ButtonControl({ control }: Props): React.ReactElement {
     <Button
       size={band ? "sm" : "md"}
       grow
+      variant="outlined"
       onClick={handleClick}
       title={`${control.name} (button)`}
       style={styles.button}
