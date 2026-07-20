@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/BuiltIn/DocumentTheme/components/ThemeFontPicker.tsx
 //! PURPOSE: Dropdown to view/switch theme font pairs with live preview on hover.
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import styled from "styled-components";
 import type { ThemeDefinitionData } from "@api";
 import {
@@ -9,6 +9,7 @@ import {
   setDocumentTheme,
 } from "@api/theme";
 import { onAppEvent, AppEvents } from "@api/events";
+import { Popover } from "@api/layout";
 
 const v = (name: string) => `var(${name})`;
 
@@ -54,19 +55,6 @@ export function ThemeFontPicker(): React.ReactElement {
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-      setIsOpen(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen, handleClickOutside]);
-
   /** Live-preview: temporarily apply hovered font pair to the grid. */
   const handlePreview = async (pair: { heading: string; body: string }) => {
     const base = originalThemeRef.current;
@@ -101,8 +89,8 @@ export function ThemeFontPicker(): React.ReactElement {
   };
 
   const isActive = (pair: { heading: string; body: string }) =>
-    currentTheme?.fonts.heading === pair.heading &&
-    currentTheme?.fonts.body === pair.body;
+    currentTheme?.fonts?.heading === pair.heading &&
+    currentTheme?.fonts?.body === pair.body;
 
   return (
     <Container ref={containerRef}>
@@ -112,7 +100,11 @@ export function ThemeFontPicker(): React.ReactElement {
         <Arrow>{isOpen ? "\u25B2" : "\u25BC"}</Arrow>
       </FontButton>
 
-      {isOpen && (
+      <Popover
+        anchorEl={containerRef.current}
+        open={isOpen}
+        onClose={() => setIsOpen(false)}
+      >
         <Dropdown onMouseLeave={handleRevertPreview}>
           <DropdownTitle>Theme Fonts</DropdownTitle>
           <FontList>
@@ -135,7 +127,7 @@ export function ThemeFontPicker(): React.ReactElement {
             ))}
           </FontList>
         </Dropdown>
-      )}
+      </Popover>
     </Container>
   );
 }
@@ -157,7 +149,7 @@ const FontButton = styled.button`
   color: ${v("--text-primary")};
 
   &:hover {
-    background: ${v("--ribbon-btn-hover-bg")};
+    background: ${v("--button-hover-bg")};
     border-color: ${v("--border-default")};
   }
 `;
@@ -176,12 +168,8 @@ const Arrow = styled.span`
   color: ${v("--text-secondary")};
 `;
 
+/* Dropdown chrome only — the hosting Popover owns positioning/dismissal. */
 const Dropdown = styled.div`
-  position: absolute;
-  top: 100%;
-  left: 0;
-  z-index: 1100;
-  margin-top: 2px;
   padding: 8px;
   background: ${v("--panel-bg")};
   border: 1px solid ${v("--border-default")};
@@ -215,7 +203,7 @@ const FontItem = styled.button<{ $active: boolean }>`
   text-align: left;
 
   &:hover {
-    background: ${v("--ribbon-btn-hover-bg")};
+    background: ${v("--button-hover-bg")};
   }
 `;
 

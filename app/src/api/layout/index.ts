@@ -61,3 +61,6 @@ export type { LayoutInputProps } from "./primitives/Input";
 
 export { Select } from "./primitives/Select";
 export type { LayoutSelectProps } from "./primitives/Select";
+
+export { Popover } from "./primitives/Popover";
+export type { PopoverProps } from "./primitives/Popover";

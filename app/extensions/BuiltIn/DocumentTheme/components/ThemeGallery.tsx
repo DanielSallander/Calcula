@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/BuiltIn/DocumentTheme/components/ThemeGallery.tsx
 //! PURPOSE: Dropdown gallery showing built-in themes with color swatches.
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import styled from "styled-components";
 import type { ThemeDefinitionData } from "@api";
 import {
@@ -10,6 +10,7 @@ import {
   getDocumentTheme,
 } from "@api/theme";
 import { onAppEvent, AppEvents } from "@api/events";
+import { Popover } from "@api/layout";
 
 const v = (name: string) => `var(${name})`;
 
@@ -33,19 +34,6 @@ export function ThemeGallery(): React.ReactElement {
     }
   }, [isOpen, themes.length]);
 
-  const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-      setIsOpen(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen, handleClickOutside]);
-
   const handleApply = async (theme: ThemeDefinitionData) => {
     await setDocumentTheme(theme);
     setIsOpen(false);
@@ -64,7 +52,11 @@ export function ThemeGallery(): React.ReactElement {
         <Arrow>{isOpen ? "\u25B2" : "\u25BC"}</Arrow>
       </ThemeButton>
 
-      {isOpen && (
+      <Popover
+        anchorEl={containerRef.current}
+        open={isOpen}
+        onClose={() => setIsOpen(false)}
+      >
         <Dropdown>
           <DropdownTitle>Built-in Themes</DropdownTitle>
           <ThemeList>
@@ -92,7 +84,7 @@ export function ThemeGallery(): React.ReactElement {
             ))}
           </ThemeList>
         </Dropdown>
-      )}
+      </Popover>
     </Container>
   );
 }
@@ -115,7 +107,7 @@ const ThemeButton = styled.button`
   color: ${v("--text-primary")};
 
   &:hover {
-    background: ${v("--ribbon-btn-hover-bg")};
+    background: ${v("--button-hover-bg")};
     border-color: ${v("--border-default")};
   }
 `;
@@ -140,12 +132,8 @@ const Arrow = styled.span`
   color: ${v("--text-secondary")};
 `;
 
+/* Dropdown chrome only — the hosting Popover owns positioning/dismissal. */
 const Dropdown = styled.div`
-  position: absolute;
-  top: 100%;
-  left: 0;
-  z-index: 1100;
-  margin-top: 2px;
   padding: 8px;
   background: ${v("--panel-bg")};
   border: 1px solid ${v("--border-default")};
@@ -179,7 +167,7 @@ const ThemeItem = styled.button<{ $active: boolean }>`
   text-align: left;
 
   &:hover {
-    background: ${v("--ribbon-btn-hover-bg")};
+    background: ${v("--button-hover-bg")};
   }
 `;
 

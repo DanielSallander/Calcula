@@ -2,7 +2,7 @@
 // PURPOSE: Cell Styles gallery for the Home tab ribbon and Format menu.
 // CONTEXT: Provides predefined cell styles matching Excel's Cell Styles gallery.
 
-import React, { useEffect, useRef } from "react";
+import React, { useRef } from "react";
 import { css } from "@emotion/css";
 
 // ============================================================================
@@ -331,34 +331,14 @@ function getItemStyle(def: CellStyleDefinition): React.CSSProperties {
 interface CellStylesGalleryProps {
   onApplyStyle: (formatting: CellStyleDefinition["formatting"]) => void;
   onClose: () => void;
-  /** When true, renders without position:absolute (for use inside menu customContent) */
+  /** When true, renders bare (for menu customContent); otherwise with dropdown
+   *  chrome. Dismissal is the host's job in both modes — the ribbon hosts this
+   *  inside an @api/layout Popover, menus inside their own dismiss logic. */
   inline?: boolean;
 }
 
 export function CellStylesGallery({ onApplyStyle, onClose, inline }: CellStylesGalleryProps) {
   const ref = useRef<HTMLDivElement>(null);
-
-  // Close on outside click (only for dropdown mode, not inline)
-  useEffect(() => {
-    if (inline) return;
-    const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [onClose, inline]);
-
-  // Close on Escape
-  useEffect(() => {
-    if (inline) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [onClose, inline]);
 
   const handleClick = (def: CellStyleDefinition) => {
     if (def.id === "normal") {
@@ -394,14 +374,10 @@ export function CellStylesGallery({ onApplyStyle, onClose, inline }: CellStylesG
     }
   };
 
+  // Dropdown chrome only — the hosting Popover owns positioning/dismissal.
   const wrapperClass = inline
     ? galStyles.container
     : css`
-        position: absolute;
-        top: 100%;
-        left: 0;
-        z-index: 1100;
-        margin-top: 2px;
         border: 1px solid var(--menu-border, #555);
         border-radius: 4px;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);

@@ -16,6 +16,7 @@ import {
   ToggleButton,
   CommandButton,
   Select,
+  Popover,
   useSurfaceLayout,
 } from "@api/layout";
 import type { RibbonContext } from "@api/extensions";
@@ -87,27 +88,10 @@ function ColorDropdown({
   onClose: () => void;
   onMoreOptions?: () => void;
 }) {
-  const ref = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [onClose]);
-
+  // Dropdown chrome only — the hosting Popover owns positioning/dismissal.
   return (
     <div
-      ref={ref}
       className={css`
-        position: absolute;
-        top: 100%;
-        left: 0;
-        z-index: 1100;
-        margin-top: 2px;
         padding: 6px;
         background: var(--bg-surface, #fff);
         border: 1px solid var(--border-default, #c0c0c0);
@@ -174,6 +158,11 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
   const layout = useSurfaceLayout();
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
+
+  // Popover anchors: dropdowns portal to <body> (the band clips overflow),
+  // so each trigger records its wrapper element to anchor against.
+  const cellStylesAnchorRef = React.useRef<HTMLDivElement | null>(null);
+  const colorAnchorsRef = React.useRef(new Map<string, HTMLDivElement>());
 
   const renderItem = (itemId: string, idx: number, size: "sm" | "md") => {
     const item = ITEMS_BY_ID.get(itemId);
@@ -255,7 +244,13 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     if (item.type === "color") {
       const color = state.getCurrentColor(item.id);
       return (
-        <div key={item.id} style={{ position: "relative" }}>
+        <div
+          key={item.id}
+          ref={(el) => {
+            if (el) colorAnchorsRef.current.set(item.id, el);
+            else colorAnchorsRef.current.delete(item.id);
+          }}
+        >
           <button
             className={colorBtnStyle}
             title={item.tooltip}
@@ -273,7 +268,11 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
               backgroundColor: color, borderRadius: "1px", marginTop: "-1px",
             }} />
           </button>
-          {openColorPicker === item.id && (
+          <Popover
+            anchorEl={colorAnchorsRef.current.get(item.id) ?? null}
+            open={openColorPicker === item.id}
+            onClose={() => setOpenColorPicker(null)}
+          >
             <ColorDropdown
               currentColor={color}
               onColorSelect={(c) => state.handleColorSelect(item.id, c)}
@@ -282,7 +281,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
                 DialogExtensions.openDialog("format-cells", { tab: "fill" });
               } : undefined}
             />
-          )}
+          </Popover>
         </div>
       );
     }
@@ -342,7 +341,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
 
     if (item.id === "cellStyles") {
       return (
-        <div key={item.id} style={{ position: "relative", display: "flex" }}>
+        <div key={item.id} ref={cellStylesAnchorRef} style={{ display: "flex" }}>
           <CommandButton
             icon={item.icon}
             label={item.shortLabel ?? item.label}
@@ -351,12 +350,16 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
             data-testid={`fmt-${item.id}`}
             onClick={() => setCellStylesOpen(!cellStylesOpen)}
           />
-          {cellStylesOpen && (
+          <Popover
+            anchorEl={cellStylesAnchorRef.current}
+            open={cellStylesOpen}
+            onClose={() => setCellStylesOpen(false)}
+          >
             <CellStylesGallery
               onApplyStyle={state.handleCellStyleApply}
               onClose={() => setCellStylesOpen(false)}
             />
-          )}
+          </Popover>
         </div>
       );
     }

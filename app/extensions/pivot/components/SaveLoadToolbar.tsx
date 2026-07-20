@@ -4,6 +4,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { css } from '@emotion/css';
+import { Popover } from '@api/layout';
 import type { SourceField, BiPivotModelInfo } from './types';
 import {
   savePivotLayout,
@@ -43,7 +44,11 @@ export function SaveLoadToolbar({
   const [manageMode, setManageMode] = useState(false);
   const [layouts, setLayouts] = useState<PivotLayoutResponse[]>([]);
   const [mismatchDialog, setMismatchDialog] = useState<{ config: PivotLayoutResponse; missing: string[] } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  // Popover anchors — menus portal to <body> so scrollable/clipped ancestors
+  // (the ribbon band, launcher flyouts) can't cut them off.
+  const saveAnchorRef = useRef<HTMLDivElement>(null);
+  const loadAnchorRef = useRef<HTMLDivElement>(null);
+  const templatesAnchorRef = useRef<HTMLDivElement>(null);
 
   // Load layouts from backend on mount
   const refreshLayouts = useCallback(async () => {
@@ -59,19 +64,12 @@ export function SaveLoadToolbar({
     refreshLayouts();
   }, [refreshLayouts]);
 
-  // Close menu on outside click
-  useEffect(() => {
-    if (!activeMenu) return;
-    const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setActiveMenu(null);
-        setSaveAsMode(false);
-        setManageMode(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [activeMenu]);
+  // Close any open menu (Popover onClose): also resets the sub-modes.
+  const closeMenus = useCallback(() => {
+    setActiveMenu(null);
+    setSaveAsMode(false);
+    setManageMode(false);
+  }, []);
 
   const buildRequest = useCallback((name: string, description?: string): SavePivotLayoutRequest | null => {
     const sig = buildSourceSignature(sourceFields, biModel, sourceTableName);
@@ -161,9 +159,9 @@ export function SaveLoadToolbar({
   }
 
   return (
-    <div className={toolbarStyles.container} ref={menuRef}>
+    <div className={toolbarStyles.container}>
       {/* Save button */}
-      <div className={toolbarStyles.buttonGroup}>
+      <div className={toolbarStyles.buttonGroup} ref={saveAnchorRef}>
         <button
           className={toolbarStyles.button}
           onClick={() => {
@@ -179,7 +177,7 @@ export function SaveLoadToolbar({
           Save Layout
         </button>
 
-        {activeMenu === 'save' && !saveAsMode && (
+        <Popover anchorEl={saveAnchorRef.current} open={activeMenu === 'save' && !saveAsMode} onClose={closeMenus}>
           <div className={toolbarStyles.menu}>
             <button
               className={toolbarStyles.menuItem}
@@ -199,9 +197,9 @@ export function SaveLoadToolbar({
               Save As...
             </button>
           </div>
-        )}
+        </Popover>
 
-        {activeMenu === 'save' && saveAsMode && (
+        <Popover anchorEl={saveAnchorRef.current} open={activeMenu === 'save' && saveAsMode} onClose={closeMenus}>
           <div className={toolbarStyles.menu}>
             <div className={toolbarStyles.saveForm}>
               <input
@@ -231,11 +229,11 @@ export function SaveLoadToolbar({
               </div>
             </div>
           </div>
-        )}
+        </Popover>
       </div>
 
       {/* Load button */}
-      <div className={toolbarStyles.buttonGroup}>
+      <div className={toolbarStyles.buttonGroup} ref={loadAnchorRef}>
         <button
           className={toolbarStyles.button}
           onClick={() => {
@@ -251,7 +249,7 @@ export function SaveLoadToolbar({
           Load Layout
         </button>
 
-        {activeMenu === 'load' && (
+        <Popover anchorEl={loadAnchorRef.current} open={activeMenu === 'load'} onClose={closeMenus}>
           <div className={toolbarStyles.menu}>
             {!manageMode && layouts.length === 0 && (
               <div className={toolbarStyles.emptyState}>No saved layouts</div>
@@ -298,11 +296,11 @@ export function SaveLoadToolbar({
               </div>
             )}
           </div>
-        )}
+        </Popover>
       </div>
 
       {/* Templates button */}
-      <div className={toolbarStyles.buttonGroup}>
+      <div className={toolbarStyles.buttonGroup} ref={templatesAnchorRef}>
         <button
           className={toolbarStyles.button}
           onClick={() => setActiveMenu(activeMenu === 'templates' ? null : 'templates')}
@@ -310,7 +308,7 @@ export function SaveLoadToolbar({
           Templates
         </button>
 
-        {activeMenu === 'templates' && (
+        <Popover anchorEl={templatesAnchorRef.current} open={activeMenu === 'templates'} onClose={closeMenus}>
           <div className={toolbarStyles.menu}>
             {PIVOT_TEMPLATES.map(t => (
               <button
@@ -326,7 +324,7 @@ export function SaveLoadToolbar({
               </button>
             ))}
           </div>
-        )}
+        </Popover>
       </div>
 
       {/* Field mismatch dialog */}
@@ -394,11 +392,8 @@ const toolbarStyles = {
       border-color: #bbc0c6;
     }
   `,
+  /* Menu chrome only — the hosting Popover owns positioning/dismissal. */
   menu: css`
-    position: absolute;
-    top: 100%;
-    left: 0;
-    margin-top: 2px;
     background: #fff;
     border: 1px solid #d0d7de;
     border-radius: 6px;
@@ -406,7 +401,6 @@ const toolbarStyles = {
     min-width: 220px;
     max-height: 320px;
     overflow-y: auto;
-    z-index: 10000;
     padding: 4px 0;
   `,
   menuItem: css`
