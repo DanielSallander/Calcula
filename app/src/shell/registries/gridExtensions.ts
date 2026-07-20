@@ -62,6 +62,9 @@ const GROUP_ORDER: Record<string, number> = {
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
 import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight, getDefaultDimensions } from "../../core/lib/tauri-api";
+import { DialogExtensions } from "@api/ui";
+import { columnToLetter } from "../../core/types";
+import { DimensionInputDialog, DIMENSION_INPUT_DIALOG_ID, type DimensionInputData } from "../dialogs/DimensionInputDialog";
 
 // ============================================================================
 // Grid Extension Registry
@@ -214,6 +217,13 @@ export const gridExtensions = new GridExtensionRegistry();
 
 /** Register the default/core context menu items */
 export function registerCoreGridContextMenu(): void {
+  // Register the shared Column Width / Row Height dialog (opened below).
+  DialogExtensions.registerDialog({
+    id: DIMENSION_INPUT_DIALOG_ID,
+    component: DimensionInputDialog,
+    priority: 300,
+  });
+
   // -------------------------------------------------------------------------
   // Clipboard Group
   // -------------------------------------------------------------------------
@@ -368,47 +378,30 @@ export function registerCoreGridContextMenu(): void {
     disabled: false,
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "columns") return;
-      
+
       const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
       const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
-      
-      // Get the current width of the first selected column
+
+      // Seed the dialog with the first selected column's current width.
       const defaults = await getDefaultDimensions();
-      const currentWidthPx = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
+      const currentPx = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
+      const rangeLabel = startCol === endCol
+        ? columnToLetter(startCol)
+        : `${columnToLetter(startCol)}:${columnToLetter(endCol)}`;
 
-      // Excel measures column width in "characters" of the default font's digit.
-      // MDW (Maximum Digit Width) of Calibri 11 at 96 DPI = 7px; pixels =
-      // round(chars*MDW) + 5, where 5 = 2px+2px side padding + the 1px gridline.
-      // So the 8.43-char default is 64px, and this dialog speaks Excel's units.
-      const MDW = 7;
-      const pxToChars = (px: number): number => Math.round(((px - 5) / MDW) * 100) / 100;
-      const charsToPx = (chars: number): number => Math.round(chars * MDW) + 5;
-
-      // Prompt user for new width in Excel character units (e.g. 8.43)
-      const input = window.prompt(
-        `Enter column width (in characters, Excel units):`,
-        String(pxToChars(currentWidthPx))
-      );
-
-      if (input === null) return; // User cancelled
-
-      const chars = parseFloat(input);
-      if (isNaN(chars) || chars < 0) {
-        alert("Please enter a valid non-negative number for column width.");
-        return;
-      }
-      const newWidth = charsToPx(chars);
-
-      // Apply the width to all selected columns
-      for (let col = startCol; col <= endCol; col++) {
-        await setColumnWidth(col, newWidth);
-      }
-
-      console.log(`[GridMenu] Set column width to ${chars} chars (${newWidth}px) for columns ${startCol}-${endCol}`);
-
-      // Refresh frontend dimension state and redraw
-      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      const dialogData: DimensionInputData = {
+        mode: "columnWidth",
+        currentPx,
+        rangeLabel,
+        onResult: async (newPx) => {
+          for (let col = startCol; col <= endCol; col++) {
+            await setColumnWidth(col, newPx);
+          }
+          window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+        },
+      };
+      DialogExtensions.openDialog(DIMENSION_INPUT_DIALOG_ID, dialogData as unknown as Record<string, unknown>);
     },
   });
 
@@ -423,38 +416,30 @@ export function registerCoreGridContextMenu(): void {
     disabled: false,
     onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "rows") return;
-      
+
       const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
       const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
-      
-      // Get the current height of the first selected row
+
+      // Seed the dialog with the first selected row's current height.
       const defaults = await getDefaultDimensions();
-      const currentHeight = await getRowHeight(startRow) ?? defaults.defaultRowHeight;
-      
-      // Prompt user for new height
-      const input = window.prompt(
-        `Enter row height (in pixels):`,
-        String(Math.round(currentHeight))
-      );
-      
-      if (input === null) return; // User cancelled
-      
-      const newHeight = parseFloat(input);
-      if (isNaN(newHeight) || newHeight <= 0) {
-        alert("Please enter a valid positive number for row height.");
-        return;
-      }
-      
-      // Apply the height to all selected rows
-      for (let row = startRow; row <= endRow; row++) {
-        await setRowHeight(row, newHeight);
-      }
+      const currentPx = await getRowHeight(startRow) ?? defaults.defaultRowHeight;
+      const rangeLabel = startRow === endRow
+        ? String(startRow + 1)
+        : `${startRow + 1}:${endRow + 1}`;
 
-      console.log(`[GridMenu] Set row height to ${newHeight}px for rows ${startRow}-${endRow}`);
-
-      // Refresh frontend dimension state and redraw
-      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      const dialogData: DimensionInputData = {
+        mode: "rowHeight",
+        currentPx,
+        rangeLabel,
+        onResult: async (newPx) => {
+          for (let row = startRow; row <= endRow; row++) {
+            await setRowHeight(row, newPx);
+          }
+          window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+        },
+      };
+      DialogExtensions.openDialog(DIMENSION_INPUT_DIALOG_ID, dialogData as unknown as Record<string, unknown>);
     },
   });
 

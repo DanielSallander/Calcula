@@ -8,7 +8,7 @@
  * Default grid dimensions (from core/types/types.ts):
  *   rowHeaderWidth  = 22 px (2-digit Excel gutter; auto-widens with row number)
  *   colHeaderHeight = 20 px
- *   defaultCellWidth  = 64 px (Excel 8.43 chars)
+ *   defaultCellWidth  = 64.29 px (Excel 8.47 chars)
  *   defaultCellHeight = 20 px
  */
 import { type Page, type Locator, expect } from "@playwright/test";
@@ -18,7 +18,7 @@ import { type Page, type Locator, expect } from "@playwright/test";
 // 2-digit default that holds while the top rows (1..99) are in view.
 const ROW_HEADER_WIDTH = 22;
 const COL_HEADER_HEIGHT = 20;
-const DEFAULT_CELL_WIDTH = 64;
+const DEFAULT_CELL_WIDTH = 64.29;
 const DEFAULT_CELL_HEIGHT = 20;
 
 // ---- Selectors ----
