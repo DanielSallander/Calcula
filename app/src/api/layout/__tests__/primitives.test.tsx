@@ -13,6 +13,8 @@ import {
   useSurfaceLayout,
   Field,
   Stack,
+  ControlGrid,
+  CommandButton,
   ItemList,
   Tall,
   type SurfaceLayout,
@@ -84,6 +86,65 @@ describe("Stack", () => {
     renderIn(panelLayout(300), <Stack><div>a</div></Stack>);
     const rootDiv = container.firstElementChild as HTMLElement;
     expect(rootDiv.style.maxHeight).toBe("");
+  });
+});
+
+describe("ControlGrid", () => {
+  const buttons = (n: number) =>
+    Array.from({ length: n }, (_, i) => <button key={i}>{i}</button>);
+
+  it("chunks children row-major into two stacked rows in the band", () => {
+    renderIn(bandLayout(), <ControlGrid>{buttons(6)}</ControlGrid>);
+    const rootDiv = container.firstElementChild as HTMLElement;
+    expect(rootDiv.style.flexDirection).toBe("column");
+    const rows = Array.from(rootDiv.children) as HTMLElement[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelectorAll("button")).toHaveLength(3);
+    expect(rows[1].querySelectorAll("button")).toHaveLength(3);
+    // Reading order preserved: first row holds the first children
+    expect(rows[0].textContent).toBe("012");
+    expect(rows[1].textContent).toBe("345");
+  });
+
+  it("keeps small groups on a single band row (below splitAt)", () => {
+    renderIn(bandLayout(), <ControlGrid>{buttons(4)}</ControlGrid>);
+    const rootDiv = container.firstElementChild as HTMLElement;
+    const rows = Array.from(rootDiv.children) as HTMLElement[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].querySelectorAll("button")).toHaveLength(4);
+  });
+
+  it("honors a custom splitAt threshold", () => {
+    renderIn(bandLayout(), <ControlGrid splitAt={2}>{buttons(3)}</ControlGrid>);
+    const rootDiv = container.firstElementChild as HTMLElement;
+    expect(rootDiv.children).toHaveLength(2);
+  });
+
+  it("renders one wrapping row in the panel", () => {
+    renderIn(panelLayout(300), <ControlGrid>{buttons(6)}</ControlGrid>);
+    const rootDiv = container.firstElementChild as HTMLElement;
+    expect(rootDiv.style.flexDirection).toBe("row");
+    expect(rootDiv.style.flexWrap).toBe("wrap");
+    expect(rootDiv.querySelectorAll("button")).toHaveLength(6);
+  });
+});
+
+describe("CommandButton", () => {
+  it("renders as a full-height icon-over-label hero in the band", () => {
+    renderIn(bandLayout(), <CommandButton icon="P" label="Paste" data-testid="hero" />);
+    const button = container.querySelector("button[data-testid='hero']") as HTMLElement;
+    expect(button).not.toBeNull();
+    expect(button.textContent).toBe("PPaste");
+    expect(button.style.height).toBe("");
+    // Band form uses the hero class (column flex + 100% height via css class)
+    expect(getComputedStyle(button).flexDirection).toBe("column");
+  });
+
+  it("renders as a standard inline button in the panel", () => {
+    renderIn(panelLayout(300), <CommandButton icon="P" label="Paste" data-testid="hero" />);
+    const button = container.querySelector("button[data-testid='hero']") as HTMLElement;
+    expect(button).not.toBeNull();
+    expect(getComputedStyle(button).flexDirection).not.toBe("column");
   });
 });
 

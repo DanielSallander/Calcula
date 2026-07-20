@@ -8,11 +8,31 @@
 import React, { useState } from "react";
 import { css } from "@emotion/css";
 import { DialogExtensions } from "@api/ui";
-import { ControlRow, Button, ToggleButton } from "@api/layout";
+import {
+  ControlRow,
+  ControlGrid,
+  ControlGridBreak,
+  Button,
+  ToggleButton,
+  CommandButton,
+  Select,
+  useSurfaceLayout,
+} from "@api/layout";
 import type { RibbonContext } from "@api/extensions";
 import { ITEMS_BY_ID } from "../homeTabConfig";
 import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
+import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
 import { useHomeTabState } from "./useHomeTabState";
+
+// Excel-style quick number formats for the Number group dropdown.
+const NUMBER_FORMATS: Array<{ label: string; value: string }> = [
+  { label: "General", value: "General" },
+  { label: "Number", value: "0.00" },
+  { label: "Thousands", value: "#,##0.00" },
+  { label: "Percentage", value: "0.00%" },
+  { label: "Scientific", value: "0.00E+00" },
+  { label: "Text", value: "@" },
+];
 
 // ============================================================================
 // Styles (color-picker trigger only — generic buttons use @api/layout)
@@ -151,12 +171,86 @@ interface HomeTabGroupComponentProps {
  */
 export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): React.ReactElement {
   const state = useHomeTabState();
+  const layout = useSurfaceLayout();
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
 
-  const renderItem = (itemId: string) => {
+  const renderItem = (itemId: string, idx: number, size: "sm" | "md") => {
     const item = ITEMS_BY_ID.get(itemId);
     if (!item) return null;
+
+    if (item.id === "rowBreak") {
+      return <ControlGridBreak key={`rowBreak-${idx}`} />;
+    }
+
+    if (item.id === "fontName") {
+      const current = state.currentStyle?.fontFamily ?? "system-ui";
+      const fonts = FONT_LIST.includes(current) ? FONT_LIST : [current, ...FONT_LIST];
+      return (
+        <Select
+          key={item.id}
+          title={item.tooltip}
+          width={layout.container === "band" ? 118 : undefined}
+          value={current}
+          data-testid="fmt-fontName"
+          onChange={(e) => state.handleFontFamilyChange(e.target.value)}
+          style={{ fontFamily: current }}
+        >
+          {fonts.map((f) => (
+            <option key={f} value={f} style={{ fontFamily: f }}>
+              {f}
+            </option>
+          ))}
+        </Select>
+      );
+    }
+
+    if (item.id === "fontSize") {
+      const current = state.currentStyle?.fontSize ?? 11;
+      const sizes = FONT_SIZES.includes(current) ? FONT_SIZES : [...FONT_SIZES, current].sort((a, b) => a - b);
+      return (
+        <Select
+          key={item.id}
+          title={item.tooltip}
+          width={layout.container === "band" ? 52 : undefined}
+          value={String(current)}
+          data-testid="fmt-fontSize"
+          onChange={(e) => state.handleFontSizeChange(Number(e.target.value))}
+        >
+          {sizes.map((s) => (
+            <option key={s} value={String(s)}>
+              {s}
+            </option>
+          ))}
+        </Select>
+      );
+    }
+
+    if (item.id === "numberFormat") {
+      const fmt = state.currentStyle?.numberFormat ?? "General";
+      const known = NUMBER_FORMATS.some((f) => f.value === fmt);
+      return (
+        <Select
+          key={item.id}
+          title={item.tooltip}
+          width={layout.container === "band" ? 112 : undefined}
+          value={fmt}
+          data-testid="fmt-numberFormat"
+          onChange={(e) => state.handleNumberFormatChange(e.target.value)}
+        >
+          {!known && (
+            <option value={fmt} disabled>
+              {fmt}
+            </option>
+          )}
+          {NUMBER_FORMATS.map((f) => (
+            <option key={f.value} value={f.value}>
+              {f.label}
+            </option>
+          ))}
+        </Select>
+      );
+    }
 
     if (item.type === "color") {
       const color = state.getCurrentColor(item.id);
@@ -193,26 +287,6 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
       );
     }
 
-    if (item.id === "cellStyles") {
-      return (
-        <div key={item.id} style={{ position: "relative" }}>
-          <Button
-            title={item.tooltip}
-            onClick={() => setCellStylesOpen(!cellStylesOpen)}
-          >
-            <span style={{ fontSize: "11px" }}>{item.icon}</span>
-            <span style={{ fontSize: "10px", marginLeft: "3px" }}>{"\u25BC"}</span>
-          </Button>
-          {cellStylesOpen && (
-            <CellStylesGallery
-              onApplyStyle={state.handleCellStyleApply}
-              onClose={() => setCellStylesOpen(false)}
-            />
-          )}
-        </div>
-      );
-    }
-
     const itemStyle: React.CSSProperties | undefined =
       item.id === "bold" ? { fontWeight: 700 } :
       item.id === "italic" ? { fontStyle: "italic" } :
@@ -226,6 +300,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
         <ToggleButton
           key={item.id}
           active={active}
+          size={size}
           title={item.tooltip}
           data-testid={`fmt-${item.id}`}
           data-active={active || undefined}
@@ -240,6 +315,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     return (
       <Button
         key={item.id}
+        size={size}
         title={item.tooltip}
         data-testid={`fmt-${item.id}`}
         onClick={() => state.handleItemClick(item)}
@@ -250,9 +326,65 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     );
   };
 
+  // Heroes (Excel-style big Paste / Cell Styles) render full-height beside the
+  // compact grid; the rest pack into band rows (wrapping rows in the sidebar).
+  // Next to a hero the grid stacks three icon-only sm rows, Excel's
+  // cut/copy/painter column; without one it packs two rows of md controls.
+  const heroIds = itemIds.filter((id) => ITEMS_BY_ID.get(id)?.hero);
+  const regularIds = itemIds.filter((id) => !ITEMS_BY_ID.get(id)?.hero);
+  const band = layout.container === "band";
+  const hasHero = heroIds.length > 0;
+  const gridSize: "sm" | "md" = hasHero && band ? "sm" : "md";
+
+  const renderHero = (id: string) => {
+    const item = ITEMS_BY_ID.get(id);
+    if (!item) return null;
+
+    if (item.id === "cellStyles") {
+      return (
+        <div key={item.id} style={{ position: "relative", display: "flex" }}>
+          <CommandButton
+            icon={item.icon}
+            label={item.shortLabel ?? item.label}
+            chevron
+            title={item.tooltip}
+            data-testid={`fmt-${item.id}`}
+            onClick={() => setCellStylesOpen(!cellStylesOpen)}
+          />
+          {cellStylesOpen && (
+            <CellStylesGallery
+              onApplyStyle={state.handleCellStyleApply}
+              onClose={() => setCellStylesOpen(false)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <CommandButton
+        key={item.id}
+        icon={item.icon}
+        label={item.shortLabel ?? item.label}
+        title={item.tooltip}
+        data-testid={`fmt-${item.id}`}
+        onClick={() => state.handleItemClick(item)}
+      />
+    );
+  };
+
   return (
-    <ControlRow gap={3}>
-      {itemIds.map((id) => renderItem(id))}
+    <ControlRow gap={4} align="stretch">
+      {heroIds.map(renderHero)}
+      {regularIds.length > 0 && (
+        <ControlGrid
+          gap={hasHero && band ? 2 : 3}
+          bandRows={hasHero ? 3 : 2}
+          splitAt={hasHero ? 2 : 5}
+        >
+          {regularIds.map((id, idx) => renderItem(id, idx, gridSize))}
+        </ControlGrid>
+      )}
     </ControlRow>
   );
 }

@@ -49,7 +49,19 @@ export function SectionChrome({
         flexShrink: 0,
       }}
     >
-      <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
+      {/* Center section content vertically in the band so single-row sections
+          don't hug the top edge; full-height children still stretch. */}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+        }}
+      >
+        {children}
+      </div>
       {label !== undefined && (
         <div
           style={{

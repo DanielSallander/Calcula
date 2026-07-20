@@ -5,7 +5,7 @@
 import React, { useState, useMemo } from "react";
 import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
-import { FONT_LIST, FONT_SIZES, THEME_FONTS } from "../utils/fontList";
+import { FONT_LIST, FONT_SIZES, THEME_FONTS } from "../../../_shared/lib/fontList";
 import { ColorPicker } from "../components/ColorPicker";
 import { getCachedTheme } from "@api/theme";
 

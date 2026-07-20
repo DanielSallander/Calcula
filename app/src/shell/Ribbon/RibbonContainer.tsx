@@ -12,6 +12,7 @@ import { panelRegistry } from "../registries/panelRegistry";
 import { PanelContextMenu } from "./PanelContextMenu";
 import { SectionChrome } from "../components/SectionChrome";
 import type { PanelPlacement } from "../../api/uiTypes";
+import { RIBBON_BAND_HEIGHT } from "../../api/layout";
 import * as S from "./RibbonContainer.styles";
 
 export function RibbonContainer(): React.ReactElement {
@@ -182,13 +183,13 @@ export function RibbonContainer(): React.ReactElement {
       <div
         data-ribbon-content
         style={{
-          height: isMinimized && !tempExpanded ? "0px" : "92px",
+          height: isMinimized && !tempExpanded ? "0px" : `${RIBBON_BAND_HEIGHT}px`,
           padding: isMinimized && !tempExpanded ? "0 8px" : "6px 8px",
           backgroundColor: "var(--bg-surface)",
           display: isMinimized && !tempExpanded ? "none" : "flex",
           // Bound any tab content to the fixed-height band. A panel authored
           // for the sidebar (tall, vertical) that ends up projected here can
-          // never fit 92px — clip it rather than let it spill over the grid.
+          // never fit the band — clip it rather than let it spill over the grid.
           // (The primary defense is refusing such moves via supportedPlacements;
           // this is defense-in-depth for mis-declared / 3rd-party panels.)
           overflow: "hidden",

@@ -278,11 +278,12 @@ export async function takeRibbonScreenshot(
       ...options,
     });
   } else {
-    // Capture top 150px of the page as ribbon area
+    // Capture the top of the page as the ribbon area: menu bar (~28px) +
+    // tab strip (35px) + 100px content band, with a little slack.
     await expect(page).toHaveScreenshot(`ribbon-${name}.png`, {
       ...DEFAULT_SCREENSHOT_OPTIONS,
       ...options,
-      clip: { x: 0, y: 0, width: 1280, height: 150 },
+      clip: { x: 0, y: 0, width: 1280, height: 180 },
     });
   }
 }

@@ -1,5 +1,6 @@
-//! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/utils/fontList.ts
-// PURPOSE: Common font names for the Font tab dropdown.
+//! FILENAME: app/extensions/_shared/lib/fontList.ts
+// PURPOSE: Common font names/sizes shared by the Format Cells dialog Font tab
+//          and the Home tab's ribbon font pickers.
 
 /** Theme font keywords - resolve to the active theme's heading/body fonts. */
 export const THEME_FONTS = ["Body", "Headings"] as const;

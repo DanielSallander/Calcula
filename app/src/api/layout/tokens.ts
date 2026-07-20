@@ -15,15 +15,16 @@ export const GAP_XS = 4;
 export const GAP_SM = 6;
 export const GAP_MD = 8;
 
-/** Total ribbon content band height (shell-owned, includes 6px padding). */
-export const RIBBON_BAND_HEIGHT = 92;
-/** Usable content height inside the band (92 minus 2x6 padding). */
-export const RIBBON_CONTENT_HEIGHT = 80;
+/** Total ribbon content band height (shell-owned, includes 6px padding).
+ *  Sized so a group fits three 22px control rows plus its label, like Excel. */
+export const RIBBON_BAND_HEIGHT = 100;
+/** Usable content height inside the band (band minus 2x6 padding). */
+export const RIBBON_CONTENT_HEIGHT = 88;
 
 /** Height above which a measured ribbon section demotes to a launcher. */
-export const DEMOTE_HEIGHT = 84;
+export const DEMOTE_HEIGHT = 92;
 /** Height below which a demoted section may promote back inline. */
-export const PROMOTE_HEIGHT = 76;
+export const PROMOTE_HEIGHT = 84;
 
 /** Collapsed launcher button minimum width (matches Excel's collapsed group). */
 export const LAUNCHER_MIN_WIDTH = 56;

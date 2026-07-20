@@ -7,7 +7,8 @@
 
 import React from "react";
 import { css, cx } from "@emotion/css";
-import { CONTROL_HEIGHT_MD, CONTROL_HEIGHT_SM, FONT_FAMILY } from "../tokens";
+import { useSurfaceLayout } from "../context";
+import { CONTROL_HEIGHT_MD, CONTROL_HEIGHT_SM, FONT_FAMILY, LABEL_FONT_SIZE } from "../tokens";
 
 const base = css`
   display: inline-flex;
@@ -118,5 +119,79 @@ export function ToggleButton({
       aria-pressed={active}
       {...rest}
     />
+  );
+}
+
+// ============================================================================
+// CommandButton — the Excel "hero" command (big icon over label in the band)
+// ============================================================================
+
+const heroBand = css`
+  flex-direction: column;
+  gap: 3px;
+  height: 100%;
+  min-width: 52px;
+  padding: 4px 10px;
+`;
+
+export interface CommandButtonProps
+  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+  /** Icon shown above the label in the band, inline before it elsewhere. */
+  icon: React.ReactNode;
+  /** Short label under/next to the icon. */
+  label: string;
+  /** Show a dropdown chevron after the label (menu/gallery affordance). */
+  chevron?: boolean;
+}
+
+/**
+ * A prominent command (Paste, Refresh, Insert Slicer...): in the ribbon band
+ * it renders as the classic full-height icon-over-label hero button; in the
+ * panel/popover it is a standard control-height button with the icon inline.
+ */
+export function CommandButton({
+  icon,
+  label,
+  chevron,
+  className,
+  ...rest
+}: CommandButtonProps): React.ReactElement {
+  const layout = useSurfaceLayout();
+  const chevronGlyph = (
+    <span style={{ fontSize: 8, color: "var(--text-tertiary, #888)" }} aria-hidden>
+      {"▼"}
+    </span>
+  );
+
+  if (layout.container === "band") {
+    return (
+      <button className={cx(base, heroBand, className)} {...rest}>
+        <span style={{ fontSize: 18, lineHeight: 1 }} aria-hidden>
+          {icon}
+        </span>
+        <span
+          style={{
+            fontSize: LABEL_FONT_SIZE,
+            lineHeight: 1,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
+          }}
+        >
+          {label}
+          {chevron && chevronGlyph}
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <Button className={className} {...rest}>
+      <span style={{ fontSize: 13, lineHeight: 1 }} aria-hidden>
+        {icon}
+      </span>
+      <span>{label}</span>
+      {chevron && chevronGlyph}
+    </Button>
   );
 }

@@ -21,6 +21,7 @@ import {
   type HomeTabItem,
 } from "../homeTabConfig";
 import type { CellStyleDefinition } from "../../../_shared/components/CellStylesGallery";
+import { FONT_SIZES } from "../../../_shared/lib/fontList";
 
 export function useHomeTabState() {
   const gridState = useGridState();
@@ -142,6 +143,24 @@ export function useHomeTabState() {
           break;
         }
         case "formatCells": await CommandRegistry.execute(CoreCommands.FORMAT_CELLS); break;
+        case "increaseFontSize": {
+          const size = currentStyle?.fontSize ?? 11;
+          const next = FONT_SIZES.find((s) => s > size) ?? FONT_SIZES[FONT_SIZES.length - 1];
+          await applyFormat({ fontSize: next });
+          break;
+        }
+        case "decreaseFontSize": {
+          const size = currentStyle?.fontSize ?? 11;
+          const smaller = FONT_SIZES.filter((s) => s < size);
+          const next = smaller.length > 0 ? smaller[smaller.length - 1] : FONT_SIZES[0];
+          await applyFormat({ fontSize: next });
+          break;
+        }
+        // Vertical alignment is exclusive; clicking the active state returns
+        // to the spreadsheet default (bottom), mirroring the h-align toggles.
+        case "alignTop": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "top" ? "bottom" : "top" }); break;
+        case "alignMiddle": await applyFormat({ verticalAlign: currentStyle?.verticalAlign === "middle" ? "bottom" : "middle" }); break;
+        case "alignBottom": await applyFormat({ verticalAlign: "bottom" }); break;
         case "alignLeft": await applyFormat({ textAlign: currentStyle?.textAlign === "left" ? "general" : "left" }); break;
         case "alignCenter": await applyFormat({ textAlign: currentStyle?.textAlign === "center" ? "general" : "center" }); break;
         case "alignRight": await applyFormat({ textAlign: currentStyle?.textAlign === "right" ? "general" : "right" }); break;
@@ -200,6 +219,31 @@ export function useHomeTabState() {
     [applyFormat]
   );
 
+  // Ribbon font pickers (Font group row 1)
+  const handleFontFamilyChange = useCallback(
+    async (fontFamily: string) => {
+      await applyFormat({ fontFamily });
+    },
+    [applyFormat]
+  );
+
+  const handleFontSizeChange = useCallback(
+    async (fontSize: number) => {
+      if (Number.isFinite(fontSize) && fontSize > 0) {
+        await applyFormat({ fontSize });
+      }
+    },
+    [applyFormat]
+  );
+
+  // Number-format dropdown (Number group row 1)
+  const handleNumberFormatChange = useCallback(
+    async (numberFormat: string) => {
+      await applyFormat({ numberFormat });
+    },
+    [applyFormat]
+  );
+
   // Handle cell style gallery selection
   const handleCellStyleApply = useCallback(
     async (formatting: CellStyleDefinition["formatting"]) => {
@@ -221,6 +265,9 @@ export function useHomeTabState() {
         case "alignLeft": return currentStyle.textAlign === "left";
         case "alignCenter": return currentStyle.textAlign === "center";
         case "alignRight": return currentStyle.textAlign === "right";
+        case "alignTop": return currentStyle.verticalAlign === "top";
+        case "alignMiddle": return currentStyle.verticalAlign === "middle";
+        case "alignBottom": return currentStyle.verticalAlign === "bottom";
         case "superscript": {
           const runs = currentCellData?.richText;
           return !!(runs?.length === 1 && runs[0].superscript);
@@ -252,6 +299,9 @@ export function useHomeTabState() {
     handleItemClick,
     handleColorSelect,
     handleCellStyleApply,
+    handleFontFamilyChange,
+    handleFontSizeChange,
+    handleNumberFormatChange,
     isActive,
     getCurrentColor,
     applyFormat,

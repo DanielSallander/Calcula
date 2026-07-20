@@ -22,6 +22,9 @@ export interface HomeTabItem {
   icon?: string;
   /** Category for grouping in the customize dialog */
   category: string;
+  /** Render as the group's full-height hero command in the ribbon band
+   *  (Excel's big Paste). Plain click actions only. */
+  hero?: boolean;
 }
 
 /** A group of items in the ribbon */
@@ -49,10 +52,14 @@ export const ALL_ITEMS: HomeTabItem[] = [
   // --- Clipboard ---
   { id: "cut", label: "Cut", shortLabel: "Cut", tooltip: "Cut (Ctrl+X)", type: "button", icon: "\u2702", category: "Clipboard" },
   { id: "copy", label: "Copy", shortLabel: "Copy", tooltip: "Copy (Ctrl+C)", type: "button", icon: "\u2398", category: "Clipboard" },
-  { id: "paste", label: "Paste", shortLabel: "Paste", tooltip: "Paste (Ctrl+V)", type: "button", icon: "\u2399", category: "Clipboard" },
+  { id: "paste", label: "Paste", shortLabel: "Paste", tooltip: "Paste (Ctrl+V)", type: "button", icon: "\u2399", category: "Clipboard", hero: true },
   { id: "formatPainter", label: "Format Painter", shortLabel: "Painter", tooltip: "Format Painter (Ctrl+Shift+C)", type: "button", icon: "\uD83D\uDD8C", category: "Clipboard" },
 
   // --- Font ---
+  { id: "fontName", label: "Font", tooltip: "Font Name", type: "dropdown", category: "Font" },
+  { id: "fontSize", label: "Font Size", tooltip: "Font Size", type: "dropdown", category: "Font" },
+  { id: "increaseFontSize", label: "Increase Font Size", tooltip: "Increase Font Size", type: "button", icon: "A˄", category: "Font" },
+  { id: "decreaseFontSize", label: "Decrease Font Size", tooltip: "Decrease Font Size", type: "button", icon: "A˅", category: "Font" },
   { id: "bold", label: "Bold", tooltip: "Bold (Ctrl+B)", type: "toggle", icon: "B", category: "Font" },
   { id: "italic", label: "Italic", tooltip: "Italic (Ctrl+I)", type: "toggle", icon: "I", category: "Font" },
   { id: "underline", label: "Underline", tooltip: "Underline (Ctrl+U)", type: "toggle", icon: "U", category: "Font" },
@@ -64,6 +71,9 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "formatCells", label: "Format Cells", shortLabel: "Format", tooltip: "Format Cells... (Ctrl+1)", type: "button", icon: "\u2630", category: "Font" },
 
   // --- Alignment ---
+  { id: "alignTop", label: "Top Align", tooltip: "Align Top", type: "toggle", icon: "\u2912", category: "Alignment" },
+  { id: "alignMiddle", label: "Middle Align", tooltip: "Center Vertically", type: "toggle", icon: "\u21c5", category: "Alignment" },
+  { id: "alignBottom", label: "Bottom Align", tooltip: "Align Bottom", type: "toggle", icon: "\u2913", category: "Alignment" },
   { id: "alignLeft", label: "Align Left", tooltip: "Align Left", type: "toggle", icon: "\u2261", category: "Alignment" },
   { id: "alignCenter", label: "Center", tooltip: "Center", type: "toggle", icon: "\u2550", category: "Alignment" },
   { id: "alignRight", label: "Align Right", tooltip: "Align Right", type: "toggle", icon: "\u2261", category: "Alignment" },
@@ -88,13 +98,16 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "clearAll", label: "Clear All", shortLabel: "Clear All", tooltip: "Clear All (formatting + content + comments)", type: "button", icon: "\u2716", category: "Editing" },
 
   // --- Styles ---
-  { id: "cellStyles", label: "Cell Styles", shortLabel: "Styles", tooltip: "Cell Styles", type: "dropdown", icon: "\uD83C\uDFA8", category: "Styles" },
+  { id: "cellStyles", label: "Cell Styles", shortLabel: "Cell Styles", tooltip: "Cell Styles", type: "dropdown", icon: "\uD83C\uDFA8", category: "Styles", hero: true },
 
   // --- Insert ---
   { id: "insertRow", label: "Insert Row", tooltip: "Insert Row", type: "button", icon: "+R", category: "Insert" },
   { id: "insertColumn", label: "Insert Column", tooltip: "Insert Column", type: "button", icon: "+C", category: "Insert" },
   { id: "deleteRow", label: "Delete Row", tooltip: "Delete Row", type: "button", icon: "-R", category: "Insert" },
   { id: "deleteColumn", label: "Delete Column", tooltip: "Delete Column", type: "button", icon: "-C", category: "Insert" },
+
+  // --- Layout ---
+  { id: "rowBreak", label: "Row Break", tooltip: "Starts a new ribbon row at this position", type: "separator", category: "Layout" },
 ];
 
 /** Lookup map for quick access */
@@ -123,17 +136,29 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
     {
       id: "font",
       label: "Font",
-      items: ["bold", "italic", "underline", "strikethrough", "superscript", "subscript", "textColor", "backgroundColor", "formatCells"],
+      items: [
+        "fontName", "fontSize", "increaseFontSize", "decreaseFontSize",
+        "rowBreak",
+        "bold", "italic", "underline", "strikethrough", "textColor", "backgroundColor", "formatCells",
+      ],
     },
     {
       id: "alignment",
       label: "Alignment",
-      items: ["alignLeft", "alignCenter", "alignRight", "wrapText", "mergeCells"],
+      items: [
+        "alignTop", "alignMiddle", "alignBottom", "wrapText",
+        "rowBreak",
+        "alignLeft", "alignCenter", "alignRight", "decreaseIndent", "increaseIndent", "mergeCells",
+      ],
     },
     {
       id: "number",
       label: "Number",
-      items: ["percentFormat", "commaFormat", "increaseDecimal", "decreaseDecimal"],
+      items: [
+        "numberFormat",
+        "rowBreak",
+        "percentFormat", "commaFormat", "increaseDecimal", "decreaseDecimal",
+      ],
     },
     {
       id: "styles",
@@ -141,9 +166,14 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
       items: ["cellStyles"],
     },
     {
+      id: "cells",
+      label: "Cells",
+      items: ["insertRow", "insertColumn", "rowBreak", "deleteRow", "deleteColumn"],
+    },
+    {
       id: "editing",
       label: "Editing",
-      items: ["undo", "redo", "find", "clearFormatting", "clearAll"],
+      items: ["undo", "redo", "find", "rowBreak", "clearFormatting", "clearAll"],
     },
   ],
 };

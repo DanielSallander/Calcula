@@ -45,15 +45,23 @@ export function Group({ label, children }: GroupProps): React.ReactElement {
           minWidth: 0,
         }}
       >
-        <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+          }}
+        >
+          {children}
+        </div>
         <div
           style={{
             fontSize: GROUP_LABEL_FONT_SIZE,
             color: "var(--text-tertiary)",
             textAlign: "center",
             marginTop: 2,
-            textTransform: "uppercase",
-            letterSpacing: "0.5px",
             fontFamily: FONT_FAMILY,
             whiteSpace: "nowrap",
           }}
@@ -128,6 +136,9 @@ export function Stack({ gap = GAP_XS, children }: StackProps): React.ReactElemen
 
 export interface ControlRowProps {
   gap?: number;
+  /** Cross-axis alignment; "stretch" lets full-height children (e.g. a
+   *  CommandButton next to a ControlGrid) fill the band. Default "center". */
+  align?: "center" | "stretch";
   children: React.ReactNode;
 }
 
@@ -135,7 +146,7 @@ export interface ControlRowProps {
  * A horizontal row of compact controls (buttons, toggles, readouts, scrubbers).
  * Band: single row, never wraps. Panel/popover: toolbar row that wraps.
  */
-export function ControlRow({ gap = GAP_SM, children }: ControlRowProps): React.ReactElement {
+export function ControlRow({ gap = GAP_SM, align = "center", children }: ControlRowProps): React.ReactElement {
   const layout = useSurfaceLayout();
   const band = layout.container === "band";
 
@@ -144,9 +155,124 @@ export function ControlRow({ gap = GAP_SM, children }: ControlRowProps): React.R
       style={{
         display: "flex",
         flexDirection: "row",
-        alignItems: "center",
+        alignItems: band && align === "stretch" ? "stretch" : "center",
         gap,
         flexWrap: band ? "nowrap" : "wrap",
+        minWidth: 0,
+        ...(band && align === "stretch" ? { height: "100%" } : {}),
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ============================================================================
+// ControlGrid — compact controls that stack into band rows
+// ============================================================================
+
+/**
+ * Explicit row break inside a ControlGrid: children before/after it land on
+ * separate band rows (curated rows, Excel-style — e.g. font pickers above the
+ * format toggles). Renders nothing itself; ignored in the panel, where the
+ * grid is a single wrapping row anyway.
+ */
+export function ControlGridBreak(): null {
+  return null;
+}
+
+export interface ControlGridProps {
+  gap?: number;
+  /** Rows to pack into in the band (default 2). Ignored when the children
+   *  contain explicit ControlGridBreak markers. */
+  bandRows?: number;
+  /** Minimum child count before band splitting kicks in (default 5) —
+   *  splitting a tiny group saves no width and just looks ragged. */
+  splitAt?: number;
+  children: React.ReactNode;
+}
+
+/**
+ * A set of compact controls that uses the band's height instead of its width:
+ * in the ribbon band the children chunk row-major into up to `bandRows`
+ * stacked rows (halving the group's footprint, Excel-style); in the
+ * panel/popover they flow as one wrapping toolbar row. Reading order is
+ * preserved (left-to-right, then next row). Place ControlGridBreak children
+ * to curate exactly where band rows split.
+ */
+export function ControlGrid({
+  gap = GAP_XS,
+  bandRows = 2,
+  splitAt = 5,
+  children,
+}: ControlGridProps): React.ReactElement {
+  const layout = useSurfaceLayout();
+  const all = React.Children.toArray(children);
+  const isBreak = (node: React.ReactNode): boolean =>
+    React.isValidElement(node) && node.type === ControlGridBreak;
+  const items = all.filter((node) => !isBreak(node));
+
+  if (layout.container === "band") {
+    let rows: React.ReactNode[][];
+    if (all.some(isBreak)) {
+      // Curated rows: split exactly at the markers.
+      rows = [[]];
+      for (const node of all) {
+        if (isBreak(node)) {
+          if (rows[rows.length - 1].length > 0) rows.push([]);
+        } else {
+          rows[rows.length - 1].push(node);
+        }
+      }
+      if (rows[rows.length - 1].length === 0) rows.pop();
+      if (rows.length === 0) rows = [[]];
+    } else {
+      const rowCount =
+        items.length >= splitAt ? Math.max(1, Math.min(bandRows, items.length)) : 1;
+      const perRow = Math.ceil(items.length / rowCount);
+      rows = [];
+      for (let i = 0; i < items.length; i += perRow) {
+        rows.push(items.slice(i, i + perRow));
+      }
+    }
+
+    return (
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          gap,
+          height: "100%",
+          minWidth: 0,
+        }}
+      >
+        {rows.map((row, idx) => (
+          <div
+            key={idx}
+            style={{
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap,
+              flexWrap: "nowrap",
+            }}
+          >
+            {row}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap,
+        flexWrap: "wrap",
         minWidth: 0,
       }}
     >
