@@ -21,12 +21,13 @@ import {
   BI_PANE_ID,
   ConnectionsPaneDefinition,
   CONNECTIONS_PANE_ID,
+  MODEL_DIALOG_ID,
+  CREATE_MODEL_PIVOT_DIALOG_ID,
 } from "./manifest";
 import { getRegionAtCell, getConnections, connect, updateConnection } from "../_shared/lib/bi-api";
 import { ModelDialog } from "./components/ModelDialog";
+import { CreateModelPivotDialog } from "./components/CreateModelPivotDialog";
 import { registerModelOverlayDistribution } from "./lib/modelOverlayDistribution";
-
-const MODEL_DIALOG_ID = "bi:modelDialog";
 
 // ============================================================================
 // State
@@ -73,7 +74,7 @@ function activate(context: ExtensionContext): void {
     }),
   );
 
-  // 4. Register Model Dialog (for "Get Data > Calcula Model")
+  // 4. Register Model Dialog (for "Model > New Model Connection...")
   context.ui.dialogs.register({
     id: MODEL_DIALOG_ID,
     component: ModelDialog,
@@ -81,32 +82,45 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(MODEL_DIALOG_ID));
 
-  // 5. Register "Connections" menu item in External Data menu
-  context.ui.menus.registerItem("externalData", {
-    id: "externalData:connections",
+  // 4b. Register the model-pivot dialog (for "Model > PivotTable from Model...")
+  context.ui.dialogs.register({
+    id: CREATE_MODEL_PIVOT_DIALOG_ID,
+    component: CreateModelPivotDialog,
+    priority: 100,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(CREATE_MODEL_PIVOT_DIALOG_ID));
+
+  // 5. Connections section of the consolidated Model menu
+  context.ui.menus.registerItem("model", {
+    id: "model:connections",
     label: "Connections",
     icon: IconConnections,
+    order: 20,
     action: () => {
       context.ui.taskPanes.addContextKey("connections");
       context.ui.taskPanes.open(CONNECTIONS_PANE_ID);
     },
   });
-
-  // 6. Register "Get Data" submenu in the External Data menu
-  context.ui.menus.registerItem("externalData", {
-    id: "externalData:getData",
-    label: "Get Data",
+  context.ui.menus.registerItem("model", {
+    id: "model:newConnection",
+    label: "New Model Connection...",
     icon: IconGetData,
-    children: [
-      {
-        id: "externalData:getData:calculaModel",
-        label: "Calcula Model...",
-        icon: IconDataModel,
-        action: () => {
-          context.ui.dialogs.show(MODEL_DIALOG_ID);
-        },
-      },
-    ],
+    order: 21,
+    action: () => {
+      context.ui.dialogs.show(MODEL_DIALOG_ID);
+    },
+  });
+
+  // 6. Model-backed pivot creation. Range-based pivots stay under
+  //    Insert > PivotTable...; this entry is strictly for model sources.
+  context.ui.menus.registerItem("model", {
+    id: "model:insertPivot",
+    label: "PivotTable from Model...",
+    icon: IconDataModel,
+    order: 30,
+    action: () => {
+      context.ui.dialogs.show(CREATE_MODEL_PIVOT_DIALOG_ID);
+    },
   });
 
   // 7. Model overlays (model-extensibility Phase 4): carry workbook-layer

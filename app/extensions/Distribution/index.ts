@@ -193,12 +193,6 @@ function activate(context: ExtensionContext): void {
         action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
       },
       {
-        id: "externalData:distribution:publishModel",
-        label: "Publish Model as Package...",
-        icon: IconPublishPackage,
-        action: () => context.ui.dialogs.show(PUBLISH_MODEL_DIALOG_ID),
-      },
-      {
         id: "externalData:distribution:subscribe",
         label: "Subscribe to Package...",
         icon: IconSubscribePackage,
@@ -293,6 +287,16 @@ function activate(context: ExtensionContext): void {
         },
       },
     ],
+  });
+
+  // Model packaging lives in the consolidated Model menu; the rest of the
+  // .calp Distribution surface stays under External Data above.
+  context.ui.menus.registerItem("model", {
+    id: "model:publishModel",
+    label: "Publish Model as Package...",
+    icon: IconPublishPackage,
+    order: 50,
+    action: () => context.ui.dialogs.show(PUBLISH_MODEL_DIALOG_ID),
   });
 
   context.ui.menus.registerItem("externalData", {

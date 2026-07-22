@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/ExternalData/index.ts
 // PURPOSE: External Data extension entry point.
 // CONTEXT: Registers the "External Data" top-level menu.
-//          Other extensions (CsvImportExport, BI) append items to it.
+//          Other extensions (CsvImportExport, Distribution) append items to it.
+//          Model-specific surfaces live in the "Model" menu (ModelMenu ext).
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 

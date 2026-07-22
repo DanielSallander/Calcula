@@ -35,10 +35,13 @@ export function registerCubeFormulaMenuItem(): void {
     },
   });
 
-  registerMenuItem("formulas", {
-    id: "formulas:calculatedMeasures",
+  // Calculated measures are model objects, so they live in the Model menu's
+  // authoring section (next to the Model Editor), not under Formulas.
+  registerMenuItem("model", {
+    id: "model:calculatedMeasures",
     label: "Calculated Measures...",
     icon: IconCalculatedMeasure,
+    order: 11,
     action: () => DialogExtensions.openDialog(CALC_MEASURES_DIALOG_ID, {}),
   });
 }

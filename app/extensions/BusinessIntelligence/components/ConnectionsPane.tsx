@@ -7,65 +7,21 @@ import React, { useState, useCallback, useEffect } from "react";
 import type { TaskPaneViewProps } from "@api";
 import {
   useGridState,
-  columnToLetter,
-  getPivotStoreService,
   DialogExtensions,
   onAppEvent,
 } from "@api";
 import { pivot } from "@api/pivot";
-import type { BiPivotModelInfo } from "@api/pivot";
 import {
   getConnections,
   connect,
   disconnect,
   deleteConnection,
   refreshConnection,
-  getModelInfo,
   updateConnection,
 } from "../../_shared/lib/bi-api";
-import type { ConnectionInfo, BiModelInfo } from "../types";
-
-const MODEL_DIALOG_ID = "bi:modelDialog";
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/** Convert BiModelInfo (from BI connection) to BiPivotModelInfo (for pivot field list). */
-function toBiPivotModelInfo(
-  info: BiModelInfo,
-  connectionId: string,
-): BiPivotModelInfo {
-  const numericTypes = new Set([
-    "integer",
-    "int",
-    "bigint",
-    "float",
-    "double",
-    "decimal",
-    "numeric",
-    "real",
-    "smallint",
-  ]);
-  return {
-    connectionId,
-    tables: info.tables.map((t) => ({
-      name: t.name,
-      columns: t.columns.map((c) => ({
-        name: c.name,
-        dataType: c.dataType,
-        isNumeric: numericTypes.has(c.dataType.toLowerCase()),
-      })),
-    })),
-    measures: info.measures.map((m) => ({
-      name: m.name,
-      table: m.table,
-      sourceColumn: "",
-      aggregation: "sum" as const,
-    })),
-    hierarchies: info.hierarchies,
-  };
-}
+import { createModelPivot } from "../lib/modelPivot";
+import { MODEL_DIALOG_ID } from "../manifest";
+import type { ConnectionInfo } from "../types";
 
 // ============================================================================
 // Styles
@@ -402,31 +358,12 @@ export function ConnectionsPane(
         setLoadingId(connectionId);
         setStatus("Creating pivot table...");
 
-        const modelInfo = await getModelInfo(connectionId);
-        if (!modelInfo) {
-          setStatus("No model loaded for this connection.", "error");
-          return;
-        }
-
         const sel = gridState.selection;
-        const row = sel ? sel.startRow : 0;
-        const col = sel ? sel.startCol : 0;
-        const cellAddress = `${columnToLetter(col)}${row + 1}`;
-
-        const response = await pivot.createFromBiModel({
-          destinationCell: cellAddress,
-          destinationSheet: gridState.sheetContext?.activeSheetIndex,
-          connectionId,
+        await createModelPivot(connectionId, {
+          row: sel ? sel.startRow : 0,
+          col: sel ? sel.startCol : 0,
+          sheetIndex: gridState.sheetContext?.activeSheetIndex,
         });
-
-        const pivotId = response.pivotId;
-        window.dispatchEvent(new Event("grid:refresh"));
-
-        const biModel = toBiPivotModelInfo(modelInfo, connectionId);
-
-        // Open the Pivot editor pane via the IoC service registered by the
-        // Pivot extension (extensions must not import each other directly).
-        getPivotStoreService()?.openBiPivotEditor(pivotId, biModel);
 
         setStatus(`Pivot table created from connection`, "success");
       } catch (err) {

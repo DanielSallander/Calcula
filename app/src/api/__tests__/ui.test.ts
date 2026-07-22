@@ -7,6 +7,7 @@ import {
   registerMenu,
   registerMenuItem,
   getMenus,
+  sortMenuItems,
   subscribeToMenus,
   notifyMenusChanged,
   registerStatusBarItem,
@@ -126,6 +127,31 @@ describe("MenuRegistry (via public API)", () => {
     expect(cb).toHaveBeenCalled();
 
     unsub();
+  });
+
+  it("sortMenuItems orders items by `order` (stable; default 0) without mutating input", () => {
+    // Simulates the Model menu: skeleton separators + items contributed by
+    // extensions in arbitrary activation order.
+    registerMenu({
+      id: "sort-items-menu",
+      label: "Sorted",
+      order: 700,
+      items: [{ id: "sep-1", label: "", separator: true, order: 19 }],
+    });
+    registerMenuItem("sort-items-menu", { id: "late", label: "Late", order: 30, action: vi.fn() });
+    registerMenuItem("sort-items-menu", { id: "early", label: "Early", order: 10, action: vi.fn() });
+    registerMenuItem("sort-items-menu", { id: "unordered-a", label: "A", action: vi.fn() });
+    registerMenuItem("sort-items-menu", { id: "unordered-b", label: "B", action: vi.fn() });
+
+    const menu = getMenus().find((m) => m.id === "sort-items-menu")!;
+    const originalOrder = menu.items.map((i) => i.id);
+    const sorted = sortMenuItems(menu.items).map((i) => i.id);
+
+    // Unordered items (default 0) keep registration order and come first;
+    // ordered items interleave by their explicit order values.
+    expect(sorted).toEqual(["unordered-a", "unordered-b", "early", "sep-1", "late"]);
+    // Registry array is untouched.
+    expect(menu.items.map((i) => i.id)).toEqual(originalOrder);
   });
 });
 

@@ -226,7 +226,7 @@ export function MenuBar(): React.ReactElement {
 
           {openMenu === menu.id && (
             <S.Dropdown>
-              {menu.items.filter(item => !item.hidden).map((item, index) => (
+              {UI.sortMenuItems(menu.items).filter(item => !item.hidden).map((item, index) => (
                 <RecursiveMenuItem
                   key={item.id || index}
                   item={item}

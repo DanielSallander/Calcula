@@ -40,6 +40,13 @@ export const BiPaneDefinition: TaskPaneViewDefinition = {
   closable: true,
 };
 
+// ============================================================================
+// Dialogs
+// ============================================================================
+
+export const MODEL_DIALOG_ID = "bi:modelDialog";
+export const CREATE_MODEL_PIVOT_DIALOG_ID = "bi:createModelPivotDialog";
+
 export const CONNECTIONS_PANE_ID = "connections-pane";
 
 export const ConnectionsPaneDefinition: TaskPaneViewDefinition = {

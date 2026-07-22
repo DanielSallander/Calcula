@@ -81,6 +81,7 @@ import TimelineSlicerExtension from "./TimelineSlicer";
 import AutoFilterExtension from "./AutoFilter";
 import ControlsExtension from "./Controls";
 import ExternalDataExtension from "./ExternalData";
+import ModelMenuExtension from "./ModelMenu";
 import SelectVisibleCellsExtension from "./SelectVisibleCells";
 import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
@@ -157,6 +158,10 @@ export const builtInExtensions: ExtensionModule[] = [
   SubtotalsExtension,
   // ExternalData creates the "externalData" menu — must load before CSV/BI
   ExternalDataExtension,
+  // ModelMenu creates the "model" menu shell (Reports/BI/ModelEditor/
+  // CubeFormulas/Distribution contribute items; order-independent via the
+  // menu registry's dynamic-item merge)
+  ModelMenuExtension,
   CsvImportExportExtension,
   WatchWindowExtension,
   CalculationOptionsExtension,

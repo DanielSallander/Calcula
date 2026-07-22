@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/BusinessIntelligence/components/ModelDialog.tsx
 // PURPOSE: Dialog for creating a BI connection and optionally a pivot table.
-// CONTEXT: Opened from Data > Get Data > Calcula Model menu item.
+// CONTEXT: Opened from Model > New Model Connection... .
 //          Creates a named Connection, then offers to create a pivot from it.
 
 import React, { useState, useCallback } from "react";
@@ -11,49 +11,11 @@ import {
   columnToLetter,
   openTaskPane,
   addTaskPaneContextKey,
-  getPivotStoreService,
 } from "@api";
-import { pivot } from "@api/pivot";
-import type { BiPivotModelInfo } from "@api/pivot";
 import { createConnection, connect, getModelInfo } from "../../_shared/lib/bi-api";
+import { createModelPivot } from "../lib/modelPivot";
 import { CONNECTIONS_PANE_ID } from "../manifest";
 import type { BiModelInfo, ConnectionInfo } from "../types";
-
-/** Convert BiModelInfo to BiPivotModelInfo (for pivot field list). */
-function toBiPivotModelInfo(
-  info: BiModelInfo,
-  connectionId: string,
-): BiPivotModelInfo {
-  const numericTypes = new Set([
-    "integer",
-    "int",
-    "bigint",
-    "float",
-    "double",
-    "decimal",
-    "numeric",
-    "real",
-    "smallint",
-  ]);
-  return {
-    connectionId,
-    tables: info.tables.map((t) => ({
-      name: t.name,
-      columns: t.columns.map((c) => ({
-        name: c.name,
-        dataType: c.dataType,
-        isNumeric: numericTypes.has(c.dataType.toLowerCase()),
-      })),
-    })),
-    measures: info.measures.map((m) => ({
-      name: m.name,
-      table: m.table,
-      sourceColumn: "",
-      aggregation: "sum" as const,
-    })),
-    hierarchies: info.hierarchies,
-  };
-}
 
 // ============================================================================
 // Styles
@@ -263,24 +225,15 @@ export function ModelDialog({
       setError("");
 
       const sel = gridState.selection;
-      const row = sel ? sel.startRow : 0;
-      const col = sel ? sel.startCol : 0;
-      const cellAddress = `${columnToLetter(col)}${row + 1}`;
-
-      const response = await pivot.createFromBiModel({
-        destinationCell: cellAddress,
-        destinationSheet: gridState.sheetContext?.activeSheetIndex,
-        connectionId: createdConnection.id,
-      });
-
-      const pivotId = response.pivotId;
-      window.dispatchEvent(new Event("grid:refresh"));
-
-      const biModel = toBiPivotModelInfo(modelInfo, createdConnection.id);
-
-      // Open the Pivot editor pane via the IoC service registered by the
-      // Pivot extension (extensions must not import each other directly).
-      getPivotStoreService()?.openBiPivotEditor(pivotId, biModel);
+      await createModelPivot(
+        createdConnection.id,
+        {
+          row: sel ? sel.startRow : 0,
+          col: sel ? sel.startCol : 0,
+          sheetIndex: gridState.sheetContext?.activeSheetIndex,
+        },
+        modelInfo,
+      );
 
       onClose();
     } catch (err) {
@@ -314,7 +267,7 @@ export function ModelDialog({
   return (
     <div style={dialogStyles.overlay} onClick={onClose}>
       <div style={dialogStyles.dialog} onClick={(e) => e.stopPropagation()}>
-        <div style={dialogStyles.header}>Get Data - Calcula Model</div>
+        <div style={dialogStyles.header}>New Model Connection</div>
 
         <div style={dialogStyles.body}>
           {/* Connection Name */}

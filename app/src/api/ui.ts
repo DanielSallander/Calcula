@@ -325,6 +325,17 @@ export function getMenus(): MenuDefinition[] {
   return menuRegistry.getMenus();
 }
 
+/**
+ * Return menu items in display order: a stable sort on the optional
+ * MenuItemDefinition.order (default 0). Items without an explicit order keep
+ * their registration order relative to each other, while contributions from
+ * different extensions can interleave deterministically regardless of
+ * activation order. Does not mutate the registry's arrays.
+ */
+export function sortMenuItems(items: MenuItemDefinition[]): MenuItemDefinition[] {
+  return [...items].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
 export function subscribeToMenus(callback: () => void): () => void {
   return menuRegistry.subscribe(callback);
 }

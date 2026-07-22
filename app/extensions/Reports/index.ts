@@ -83,14 +83,16 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsub);
 
-  registerMenuItem("data", {
-    id: "data:createReport",
+  registerMenuItem("model", {
+    id: "model:createReport",
     label: "Report from Design Query...",
+    order: 31,
     action: () => openCreateReportDialog(),
   });
-  registerMenuItem("data", {
-    id: "data:manageReports",
+  registerMenuItem("model", {
+    id: "model:manageReports",
     label: "Manage Reports...",
+    order: 32,
     action: () => showDialog(MANAGE_DIALOG_ID, {}),
   });
 

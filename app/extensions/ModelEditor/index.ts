@@ -17,11 +17,12 @@ const cleanupFns: (() => void)[] = [];
 function activate(context: ExtensionContext): void {
   if (isActivated) return;
 
-  // Entry point next to the other model surfaces in External Data.
-  context.ui.menus.registerItem("externalData", {
-    id: "externalData:modelEditor",
+  // Entry point at the top of the consolidated Model menu.
+  context.ui.menus.registerItem("model", {
+    id: "model:modelEditor",
     label: "Model Editor...",
     icon: IconDataModel,
+    order: 10,
     action: () => void openModelEditorWindow(),
   });
 
