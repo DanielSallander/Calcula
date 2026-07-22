@@ -475,6 +475,11 @@ columns, hierarchies, and calculation groups are not yet available in a chart
 design query (they still work in a pivot). A design query must have at least one
 measure (VALUES) and at least one dimension (ROWS or COLUMNS).
 
+A chart's `FILTERS` can bind a **pane control or ribbon filter** with `@Name` /
+`@"Products.Category"` — the same binding grid reports use (see the grid-report
+section below for the full `@param` rules). The chart re-runs automatically when
+a bound value changes, exactly like an @-bound report.
+
 ---
 
 ## Using a design query in a grid report
@@ -527,3 +532,17 @@ independent conditions on separate `FILTERS` lines. **Renaming** a control or
 ribbon filter breaks reports bound to the old name: on their next refresh the
 old `@Name` no longer resolves and that filter line is dropped (the report shows
 unfiltered data). Names containing a double quote cannot be referenced.
+
+### Report object UX
+
+A report's output region is **protected like a pivot table's**: typing, pasting,
+fill and delete-key clearing into it are rejected (format-only changes stay
+allowed). Change the report through the report itself:
+
+- **Right-click** any report cell → *Edit Design Query…*, *Refresh Report*,
+  *Delete Report*, *Manage Reports…*
+- Selecting a cell inside a report shows the contextual **Report** ribbon tab
+  (name + anchor, Edit Query, Refresh, Delete, Manage) — it disappears when the
+  selection leaves the report, like the pivot Analyze tab.
+- *Edit Design Query…* re-runs the query and saves the new DSL/name as **one
+  undo step** together with the re-materialized cells.

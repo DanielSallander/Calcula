@@ -13,40 +13,18 @@ import {
   type DesignQueryRequest,
 } from "../../_shared/dsl/pivotLayout/designQuery";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
-import { getControlValue, listControlValues, type ControlValue } from "@api/controlValues";
+import { getControlValue } from "@api/controlValues";
 import { reportsBackend } from "../lib/reportsBackend";
-import { substituteControlParams } from "../lib/paramSubstitution";
-
-/** One-line preview of a control's current value, for the `@Name` completion. */
-function describeControlValue(v: ControlValue | undefined): string | undefined {
-  if (!v) return undefined;
-  switch (v.kind) {
-    case "text":
-      return v.value;
-    case "number":
-      return String(v.value);
-    case "boolean":
-      return v.value ? "true" : "false";
-    case "textList":
-      return v.value.join(", ");
-  }
-}
+import { substituteControlParams } from "../../_shared/dsl/pivotLayout/paramSubstitution";
+import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
+import { refreshReportRegions } from "../lib/reportRegions";
+import { colLetter } from "../lib/cellRef";
 
 const DSL_TEMPLATE =
   "# Report — ROWS become row groups, VALUES become measure columns.\n" +
   "# Ctrl+Space suggests fields and measures.\n" +
   "ROWS: \n" +
   "VALUES: ";
-
-function colLetter(col: number): string {
-  let n = col;
-  let s = "";
-  do {
-    s = String.fromCharCode(65 + (n % 26)) + s;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return s;
-}
 
 interface ReportDialogData {
   sheetIndex?: number;
@@ -87,13 +65,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
       .invoke<ConnectionInfo[]>("bi_get_connections", {})
       .then((c) => setConnections(c ?? []))
       .catch(() => setConnections([]));
-    setControlHints(
-      listControlValues().map((c) => ({
-        name: c.name,
-        kind: c.source === "ribbonFilter" ? "filter" : c.controlType,
-        detail: describeControlValue(c.value),
-      })),
-    );
+    setControlHints(buildControlHints());
   }, [isOpen]);
 
   // Fetch the selected connection's model (for autocomplete + compile).
@@ -153,6 +125,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         },
       });
       refreshGridCells();
+      void refreshReportRegions();
       if (result && result.overwrittenCellCount > 0) {
         // Inform the user their cells were replaced (Ctrl+Z reverts it).
         setError(

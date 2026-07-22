@@ -14,10 +14,6 @@ vi.mock("@api/controlValues", () => ({
   getControlValue: (name: string) => controlValues[name],
 }));
 
-/** Count "grid:refresh" (cell REFETCH + repaint) dispatches on window. */
-function gridRefreshCount(spy: ReturnType<typeof vi.spyOn>): number {
-  return spy.mock.calls.filter((c) => (c[0] as Event)?.type === "grid:refresh").length;
-}
 
 // Compile is exercised by its own DSL test suite — here it's routed through a
 // mock so these tests stay on reportRefresh's control flow.
@@ -27,11 +23,7 @@ vi.mock("../../_shared/dsl/pivotLayout/designQuery", () => ({
 }));
 
 import { reportsBackend } from "./reportsBackend";
-import {
-  refreshReport,
-  refreshControlBoundReports,
-  clearReportModelCache,
-} from "./reportRefresh";
+import { refreshReport, clearReportModelCache } from "./reportRefresh";
 
 const MODEL = { tables: [], measures: [] };
 const COMPILED = { request: { connectionId: "conn-1" }, errors: [], warnings: [] };
@@ -137,99 +129,5 @@ describe("refreshReport", () => {
     expect(result).toEqual({ ok: true, overwrittenCellCount: 4 });
     const call = invokeLog.find((c) => c.command === "refresh_report");
     expect((call?.args?.request as Record<string, unknown>).auto).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// refreshControlBoundReports
-// ---------------------------------------------------------------------------
-
-describe("refreshControlBoundReports", () => {
-  it("refreshes only reports referencing a changed control name", async () => {
-    backend.list_reports = () => [
-      makeReport({ id: "r-1", dslText: "FILTERS: x = @Region\nVALUES: [M]" }),
-      makeReport({ id: "r-2", dslText: 'FILTERS: y = @"Products.Category"\nVALUES: [M]' }),
-      makeReport({ id: "r-3", dslText: "ROWS: a\nVALUES: [M]" }),
-    ];
-    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-    await refreshControlBoundReports(["region"]); // case-insensitive
-    const refreshed = invokeLog
-      .filter((c) => c.command === "refresh_report")
-      .map((c) => (c.args?.request as Record<string, unknown>).reportId);
-    expect(refreshed).toEqual(["r-1"]);
-    expect(gridRefreshCount(dispatchSpy)).toBe(1);
-    dispatchSpy.mockRestore();
-  });
-
-  it("refreshes every @-bound report when no names are given", async () => {
-    backend.list_reports = () => [
-      makeReport({ id: "r-1", dslText: "FILTERS: x = @Region\nVALUES: [M]" }),
-      makeReport({ id: "r-2", dslText: "ROWS: a\nVALUES: [M]" }),
-    ];
-    await refreshControlBoundReports();
-    const refreshed = invokeLog
-      .filter((c) => c.command === "refresh_report")
-      .map((c) => (c.args?.request as Record<string, unknown>).reportId);
-    expect(refreshed).toEqual(["r-1"]);
-  });
-
-  it("marks control-driven refreshes as auto", async () => {
-    await refreshControlBoundReports(["Region"]);
-    const call = invokeLog.find((c) => c.command === "refresh_report");
-    expect((call?.args?.request as Record<string, unknown>).auto).toBe(true);
-  });
-
-  it("one failing report does not block the others; grid still refreshes", async () => {
-    backend.list_reports = () => [
-      makeReport({ id: "r-1", dslText: "FILTERS: x = @Region\nVALUES: [M]" }),
-      makeReport({ id: "r-2", dslText: "FILTERS: y = @Region\nVALUES: [M]" }),
-    ];
-    let first = true;
-    backend.refresh_report = () => {
-      if (first) {
-        first = false;
-        throw new Error("boom");
-      }
-      return { reportId: "r-2", rowCount: 1, colCount: 1, overwrittenCellCount: 0 };
-    };
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-    await refreshControlBoundReports(["Region"]);
-    expect(invokeLog.filter((c) => c.command === "refresh_report")).toHaveLength(2);
-    expect(gridRefreshCount(dispatchSpy)).toBe(1);
-    expect(warn).toHaveBeenCalled();
-    dispatchSpy.mockRestore();
-    warn.mockRestore();
-  });
-
-  it("does not dispatch grid:refresh when nothing ran", async () => {
-    backend.list_reports = () => [makeReport({ id: "r-1", dslText: "ROWS: a\nVALUES: [M]" })];
-    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-    await refreshControlBoundReports(["Region"]);
-    expect(gridRefreshCount(dispatchSpy)).toBe(0);
-    dispatchSpy.mockRestore();
-  });
-
-  it("coalesces calls arriving while a pass is in flight", async () => {
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    let listCalls = 0;
-    backend.list_reports = async () => {
-      listCalls++;
-      if (listCalls === 1) await gate;
-      return [makeReport({ id: "r-1", dslText: "FILTERS: x = @Region\nVALUES: [M]" })];
-    };
-
-    const firstPass = refreshControlBoundReports(["Region"]);
-    // Two more changes arrive mid-pass — they must merge into ONE follow-up.
-    void refreshControlBoundReports(["Region"]);
-    void refreshControlBoundReports(["Region"]);
-    release!();
-    await firstPass;
-
-    expect(listCalls).toBe(2); // initial pass + one coalesced follow-up
-    expect(invokeLog.filter((c) => c.command === "refresh_report")).toHaveLength(2);
   });
 });

@@ -1,8 +1,10 @@
 //! FILENAME: app/extensions/Reports/index.ts
 // PURPOSE: Reports extension entry point. A report is a design-query (pivot-layout
 //   DSL) materialized into a range of grid cells — "a report directly into the
-//   grid," no pivot table. Create + manage reports from the Data menu; reports
-//   with @Control filter params auto-refresh when a Controls-pane value changes.
+//   grid," no pivot table. Create + manage reports from the Data menu, edit them
+//   from the right-click menu / contextual Report ribbon tab; reports with
+//   @Control filter params auto-refresh when a bound control / ribbon filter
+//   changes.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
@@ -13,15 +15,26 @@ import {
   ExtensionRegistry,
   getSheets,
 } from "@api";
-import { onControlValueChange } from "@api/controlValues";
 import { CreateReportDialog } from "./components/CreateReportDialog";
 import { ManageReportsDialog } from "./components/ManageReportsDialog";
+import { EditReportDialog } from "./components/EditReportDialog";
+import { CREATE_DIALOG_ID, EDIT_DIALOG_ID, MANAGE_DIALOG_ID } from "./dialogIds";
 import { reportsBackend } from "./lib/reportsBackend";
-import { clearReportModelCache, refreshControlBoundReports } from "./lib/reportRefresh";
+import { clearReportModelCache } from "./lib/reportRefresh";
+import { registerReportQueryProvider } from "./lib/reportQueryProvider";
 import { registerReportDistribution } from "./lib/reportDistribution";
-
-const CREATE_DIALOG_ID = "create-report-dialog";
-const MANAGE_DIALOG_ID = "manage-reports-dialog";
+import { registerReportContextMenu } from "./lib/reportContextMenu";
+import {
+  refreshReportRegions,
+  refreshReportRegionsDebounced,
+  resetReportRegions,
+  setReportRegionsChangedCallback,
+} from "./lib/reportRegions";
+import {
+  handleReportSelectionChange,
+  reevaluateActiveReport,
+  resetReportSelectionHandler,
+} from "./lib/reportSelectionHandler";
 
 const cleanupFns: (() => void)[] = [];
 
@@ -56,11 +69,17 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => unregisterDialog(CREATE_DIALOG_ID));
   registerDialog({ id: MANAGE_DIALOG_ID, component: ManageReportsDialog, priority: 50 });
   cleanupFns.push(() => unregisterDialog(MANAGE_DIALOG_ID));
+  registerDialog({ id: EDIT_DIALOG_ID, component: EditReportDialog, priority: 50 });
+  cleanupFns.push(() => unregisterDialog(EDIT_DIALOG_ID));
 
+  // Selection tracking: create-dialog anchor + the contextual Report tab.
   const unsub = ExtensionRegistry.onSelectionChange((sel) => {
     currentSelection = sel
       ? { startRow: Math.min(sel.startRow, sel.endRow), startCol: Math.min(sel.startCol, sel.endCol) }
       : null;
+    handleReportSelectionChange(
+      sel ? { startRow: sel.startRow, startCol: sel.startCol } : null,
+    );
   });
   cleanupFns.push(unsub);
 
@@ -75,25 +94,30 @@ function activate(context: ExtensionContext): void {
     action: () => showDialog(MANAGE_DIALOG_ID, {}),
   });
 
-  // Auto-refresh reports bound (via @Name) to the controls / ribbon filters that
-  // actually changed. Skip transient (mid-drag) previews; debounce bursts and
-  // accumulate the changed names across the debounce window.
-  let refreshTimer: number | undefined;
-  let changedNames = new Set<string>();
-  const unsubControls = onControlValueChange((detail) => {
-    if (detail.transient) return;
-    changedNames.add(detail.name);
-    if (refreshTimer) window.clearTimeout(refreshTimer);
-    refreshTimer = window.setTimeout(() => {
-      const names = changedNames;
-      changedNames = new Set();
-      void refreshControlBoundReports(names);
-    }, 150);
-  });
+  // Region cache for sync hit-testing (context menu, Report tab): initial load,
+  // re-check the tab after every cache refresh, refresh on sheet switches and —
+  // debounced — on the raw grid:refresh that fires after cell-data changes
+  // (covers undo/redo of report operations).
+  setReportRegionsChangedCallback(reevaluateActiveReport);
+  void refreshReportRegions();
+  const onSheetActivated = () => void refreshReportRegions();
+  const onGridRefresh = () => refreshReportRegionsDebounced();
+  window.addEventListener("sheet:activated", onSheetActivated);
+  window.addEventListener("grid:refresh", onGridRefresh);
   cleanupFns.push(() => {
-    if (refreshTimer) window.clearTimeout(refreshTimer);
-    unsubControls();
+    window.removeEventListener("sheet:activated", onSheetActivated);
+    window.removeEventListener("grid:refresh", onGridRefresh);
+    resetReportRegions();
+    resetReportSelectionHandler();
   });
+
+  // Right-click menu on report regions (Edit Query / Refresh / Delete / Manage).
+  cleanupFns.push(registerReportContextMenu());
+
+  // Auto-refresh on control / ribbon-filter changes: the SHARED query-object
+  // refresh service owns the subscription, debounce, targeting and coalescing —
+  // this extension only contributes its provider.
+  cleanupFns.push(registerReportQueryProvider());
 
   // The per-connection BI model cache must not outlive the model: drop it when a
   // connection or its data changes. Window-event names from the BI extension —

@@ -9,11 +9,13 @@
 //   extraction verbatim.
 
 import type { PivotViewResponse } from "@api/pivot";
+import { getControlValue } from "@api/controlValues";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import {
   compileDesignQuery,
   type DesignQueryRequest,
 } from "../../_shared/dsl/pivotLayout/designQuery";
+import { substituteControlParams } from "../../_shared/dsl/pivotLayout/paramSubstitution";
 import { chartsBackend } from "./chartsBackend";
 import { extractChartData } from "./pivotChartDataReader";
 import type { ParsedChartData, DesignQueryDataSource } from "../types";
@@ -42,12 +44,17 @@ export async function readDesignQueryData(
     );
   }
 
-  const compiled = compileDesignQuery(source.dslText, source.connectionId, biModel);
+  // Resolve @Name params against current control / ribbon-filter values — the
+  // same binding standard reports use (a chart's FILTERS can be driven by a
+  // pane control or ribbon filter; the shared query-object refresh service
+  // re-runs the chart when a bound value changes).
+  const substituted = substituteControlParams(source.dslText, getControlValue);
+  const compiled = compileDesignQuery(substituted, source.connectionId, biModel);
   if (!compiled.request) {
     const detail = compiled.errors
       .map((e) => `Line ${e.location.line}: ${e.message}`)
       .join("\n");
-    throw new Error(`Design query has errors:\n${detail}`);
+    throw new Error(`Design query has errors (after @param substitution):\n${detail}`);
   }
 
   const view = await chartsBackend.invoke<PivotViewResponse>("run_design_query", {

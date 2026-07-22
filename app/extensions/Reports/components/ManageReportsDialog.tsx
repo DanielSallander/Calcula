@@ -5,17 +5,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
 import { listReports, refreshOneReport, deleteReport } from "../lib/reportRefresh";
+import { refreshReportRegions } from "../lib/reportRegions";
+import { colLetter } from "../lib/cellRef";
 import type { ReportInfo } from "../types";
-
-function colLetter(col: number): string {
-  let n = col;
-  let s = "";
-  do {
-    s = String.fromCharCode(65 + (n % 26)) + s;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return s;
-}
 
 const btn: React.CSSProperties = {
   padding: "4px 10px",
@@ -71,6 +63,7 @@ export function ManageReportsDialog(props: DialogProps): React.ReactElement | nu
     try {
       await deleteReport(r.id);
       reload();
+      void refreshReportRegions();
     } catch (e) {
       setError(String(e));
     } finally {

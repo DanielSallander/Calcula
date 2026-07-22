@@ -5,6 +5,7 @@
 
 import React, { useEffect, useState } from "react";
 import { DesignQueryEditor as SharedDesignQueryEditor } from "../../_shared/dsl/pivotLayout/DesignQueryEditor";
+import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import { chartsBackend } from "../lib/chartsBackend";
 
@@ -21,6 +22,8 @@ export function DesignQueryEditor({
   connectionId,
 }: DesignQueryEditorProps): React.ReactElement {
   const [biModel, setBiModel] = useState<BiPivotModelInfo | null>(null);
+  // Charts support @param binding like reports — offer the same @-completion.
+  const [controlHints] = useState(() => buildControlHints());
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +45,12 @@ export function DesignQueryEditor({
   }, [connectionId]);
 
   return (
-    <SharedDesignQueryEditor value={value} onChange={onChange} biModel={biModel} height="220px" />
+    <SharedDesignQueryEditor
+      value={value}
+      onChange={onChange}
+      biModel={biModel}
+      controlHints={controlHints}
+      height="220px"
+    />
   );
 }

@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/Reports/lib/paramSubstitution.test.ts
+//! FILENAME: app/extensions/_shared/dsl/pivotLayout/paramSubstitution.test.ts
 import { describe, it, expect } from "vitest";
 import type { ControlValue } from "@api/controlValues";
 import {

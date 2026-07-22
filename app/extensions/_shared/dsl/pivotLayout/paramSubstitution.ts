@@ -1,9 +1,11 @@
-//! FILENAME: app/extensions/Reports/lib/paramSubstitution.ts
-// PURPOSE: Resolve `@Name` parameters in a report's design-query DSL to the current
-//   control / ribbon-filter value BEFORE compiling — so a report's FILTERS can be
-//   driven interactively by a pane control or a ribbon filter. Pure text
-//   substitution (no DSL grammar change): `@Style` -> `("W")`, then the normal
-//   compiler runs.
+//! FILENAME: app/extensions/_shared/dsl/pivotLayout/paramSubstitution.ts
+// PURPOSE: Resolve `@Name` parameters in a design-query DSL to the current
+//   control / ribbon-filter value BEFORE compiling — THE standard way any
+//   query-bound object (grid report, design-query chart, future visuals) binds
+//   its FILTERS to a pane control or ribbon filter. Pure text substitution (no
+//   DSL grammar change): `@Style` -> `("W")`, then the normal compiler runs.
+//   Lives in _shared/dsl because it is DSL-level, not object-level; the
+//   control-change refresh side is _shared/lib/queryObjectRefresh.ts.
 //
 // Grammar — @params are recognized ONLY on FILTERS lines; an `@` anywhere else
 // (comments, ROWS/CALC lines) or inside a quoted string value is left untouched:
@@ -21,9 +23,9 @@
 //   otherwise                     -> a DSL value list: ("W") / ("A", "B")
 
 import type { ControlValue } from "@api/controlValues";
-import { BARE_PARAM_NAME_RE } from "../../_shared/dsl/pivotLayout/paramNames";
+import { BARE_PARAM_NAME_RE } from "./paramNames";
 
-export { isBareParamName, paramReference } from "../../_shared/dsl/pivotLayout/paramNames";
+export { isBareParamName, paramReference } from "./paramNames";
 
 /** Substituted for an empty selection: a value no real data contains, so the
  *  filter matches nothing (parity with pivots emptied by a "Select None"). */

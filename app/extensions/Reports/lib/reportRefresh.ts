@@ -12,11 +12,7 @@ import {
   type DesignQueryRequest,
 } from "../../_shared/dsl/pivotLayout/designQuery";
 import { reportsBackend } from "./reportsBackend";
-import {
-  dslReferencesControl,
-  hasControlParams,
-  substituteControlParams,
-} from "./paramSubstitution";
+import { substituteControlParams } from "../../_shared/dsl/pivotLayout/paramSubstitution";
 import type { ReportInfo } from "../types";
 
 // The BI model schema is cached per connection so control-driven refreshes don't
@@ -41,14 +37,17 @@ export function clearReportModelCache(): void {
 }
 
 /**
- * Ask the canvas to REFETCH cell data and repaint. Report cells are written
- * backend-side, so the frontend cell cache must refresh — the app-level
+ * Ask the canvas to REFETCH styles + cell data and repaint. Report cells are
+ * written backend-side, so the frontend caches must refresh — the app-level
  * AppEvents.GRID_REFRESH only redraws overlays from the cached cells and would
  * leave freshly materialized cells invisible until the next scroll/sheet
- * switch. Same raw event AutoFilter / PasteSpecial dispatch after their
- * backend writes.
+ * switch. Materialization also CREATES new styles (header fills, bold, number
+ * formats) in the backend StyleRegistry, so the style cache must refetch too or
+ * the report renders unstyled. Same raw events AutoFilter / PasteSpecial /
+ * FormatCells dispatch after their backend writes.
  */
 export function refreshGridCells(): void {
+  window.dispatchEvent(new CustomEvent("styles:refresh"));
   window.dispatchEvent(new CustomEvent("grid:refresh"));
 }
 
@@ -77,10 +76,12 @@ interface BackendReportResult {
  * Never throws — failures come back as `{ ok: false, message }`.
  * `auto` marks control-driven refreshes: the backend skips the undo entry for
  * them unless the write would cover user data outside the report's region.
+ * `updateDsl` (Edit Design Query) persists a new DSL text / name in the same
+ * backend call, so cells + definition change as one undo step.
  */
 export async function refreshReport(
   report: ReportInfo,
-  opts?: { auto?: boolean },
+  opts?: { auto?: boolean; updateDsl?: { dslText: string; name?: string } },
 ): Promise<RefreshResult> {
   const biModel = await getModel(report.connectionId);
   if (!biModel) {
@@ -89,7 +90,8 @@ export async function refreshReport(
       message: "The BI model for this report's connection is not loaded.",
     };
   }
-  const substituted = substituteControlParams(report.dslText, getControlValue);
+  const dslText = opts?.updateDsl?.dslText ?? report.dslText;
+  const substituted = substituteControlParams(dslText, getControlValue);
   const compiled = compileDesignQuery(substituted, report.connectionId, biModel);
   if (!compiled.request) {
     const details = compiled.errors
@@ -106,6 +108,8 @@ export async function refreshReport(
         reportId: report.id,
         query: compiled.request satisfies DesignQueryRequest,
         auto: opts?.auto ?? false,
+        dslText: opts?.updateDsl?.dslText,
+        name: opts?.updateDsl?.name,
       },
     });
     return { ok: true, overwrittenCellCount: result?.overwrittenCellCount };
@@ -127,64 +131,7 @@ export async function refreshOneReport(report: ReportInfo): Promise<RefreshResul
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Control-driven auto-refresh (coalesced)
-// ---------------------------------------------------------------------------
-
-// One pass runs at a time; changes arriving mid-pass are merged into a pending
-// set and served by a single follow-up pass (prevents overlapping refreshes of
-// the same report racing each other).
-let inFlight = false;
-/** undefined = nothing pending; null = pending "all @-bound"; else names. */
-let pendingNames: Set<string> | null | undefined;
-
-async function runControlBoundRefresh(names: Set<string> | null): Promise<void> {
-  const reports = await listReports();
-  const affected = reports.filter((r) =>
-    names ? dslReferencesControl(r.dslText, names) : hasControlParams(r.dslText),
-  );
-  if (affected.length === 0) return;
-  let any = false;
-  for (const r of affected) {
-    const result = await refreshReport(r, { auto: true });
-    if (result.ok) {
-      any = true;
-    } else {
-      console.warn(`[Reports] Auto-refresh of "${r.name}" failed: ${result.message}`);
-    }
-  }
-  if (any) refreshGridCells();
-}
-
-/**
- * Refresh the reports bound (via @Name in FILTERS) to the given changed control
- * names — or every @-bound report when no names are given. Concurrent calls
- * coalesce into one follow-up pass.
- */
-export async function refreshControlBoundReports(
-  changedNames?: Iterable<string>,
-): Promise<void> {
-  const requested: Set<string> | null = changedNames ? new Set(changedNames) : null;
-  if (inFlight) {
-    if (pendingNames === undefined) {
-      pendingNames = requested;
-    } else if (pendingNames === null || requested === null) {
-      pendingNames = null;
-    } else {
-      for (const n of requested) pendingNames.add(n);
-    }
-    return;
-  }
-  inFlight = true;
-  try {
-    let current: Set<string> | null = requested;
-    for (;;) {
-      await runControlBoundRefresh(current);
-      if (pendingNames === undefined) break;
-      current = pendingNames;
-      pendingNames = undefined;
-    }
-  } finally {
-    inFlight = false;
-  }
-}
+// Control-driven auto-refresh lives in the SHARED query-object refresh service
+// (_shared/lib/queryObjectRefresh.ts — one debounce/targeting/coalescing brain
+// for every query-bound object family); this extension registers its provider
+// in reportQueryProvider.ts.

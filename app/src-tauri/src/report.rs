@@ -234,6 +234,13 @@ pub struct RefreshReportRequest {
     /// the visible filter state (the transient-write discipline).
     #[serde(default)]
     pub auto: bool,
+    /// When set (Edit Design Query), the stored DSL text is replaced along with
+    /// the re-materialization — one undoable step covering cells + definition.
+    #[serde(default)]
+    pub dsl_text: Option<String>,
+    /// When set, the report is renamed in the same step.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -611,6 +618,15 @@ pub async fn refresh_report(
         if let Some(d) = defs.iter_mut().find(|d| d.id == request.report_id) {
             d.end_row = end_row;
             d.end_col = end_col;
+            // Edit Design Query: persist the new DSL/name with the same
+            // materialization (the undo snapshot above captured the OLD
+            // definition, so Ctrl+Z reverts text + cells together).
+            if let Some(text) = &request.dsl_text {
+                d.dsl_text = text.clone();
+            }
+            if let Some(name) = &request.name {
+                d.name = name.clone();
+            }
         }
     }
     sync_reports_to_extension_data(&state);

@@ -149,6 +149,7 @@ import { listenTauriEvent } from "@api/backend";
 import { updateCell } from "@api/lib";
 import { ChartEvents } from "./lib/chartEvents";
 import { isPivotDataSource, isDesignQueryDataSource } from "./types";
+import { registerChartQueryProvider } from "./lib/chartQueryProvider";
 import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../_shared/lib/pivotEvents";
 
@@ -683,6 +684,11 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("pivot:refresh", handlePivotChanged);
   });
+
+  // Design-query charts bound to a control / ribbon filter via @Name refresh
+  // through the SHARED query-object refresh service (one debounce/targeting/
+  // coalescing brain for reports + charts) — register this family's provider.
+  cleanupFunctions.push(registerChartQueryProvider());
 
   cleanupFunctions.push(
     context.events.on(PivotEvents.PIVOT_REGIONS_UPDATED, handlePivotChanged),

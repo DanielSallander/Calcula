@@ -18,6 +18,7 @@ import {
   clearRange,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   getCellsInRows,
   getCellsInCols,
   hasContentInRange,
@@ -559,6 +560,10 @@ export function useClipboard(): UseClipboardReturn {
       try {
         await updateCellsBatch(batchUpdates);
       } catch (err) {
+        // Close the transaction opened above — a rejected paste (e.g. into a
+        // protected pivot/report region) must not leave it dangling, or the
+        // user's NEXT edits would silently merge into one undo entry.
+        await cancelUndoTransaction().catch(() => {});
         const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
         alert(msg);
         return;

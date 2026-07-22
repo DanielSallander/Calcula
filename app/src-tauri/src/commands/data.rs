@@ -106,6 +106,80 @@ fn check_spill_protection(
     Ok(())
 }
 
+/// User-facing name of a protected region's owner object.
+fn region_display_name(region_type: &str) -> &str {
+    match region_type {
+        "pivot" => "pivot table",
+        "report" => "report",
+        other => other,
+    }
+}
+
+/// Reject a write when the RANGE intersects any protected object-output region
+/// (pivot table, grid report, ...). Mirrors the single-cell check in
+/// `update_cell_impl` for the range/batch surfaces (paste, fill, delete-key
+/// clear) — an object's output can only be changed through the object itself.
+fn check_region_range_protection(
+    state: &AppState,
+    sheet_index: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    let regions = state.protected_regions.lock().unwrap();
+    if let Some(region) = regions.iter().find(|r| {
+        r.sheet_index == sheet_index
+            && r.start_row <= end_row
+            && r.end_row >= start_row
+            && r.start_col <= end_col
+            && r.end_col >= start_col
+    }) {
+        let what = region_display_name(&region.region_type);
+        return Err(format!(
+            "Cannot change these cells: the range overlaps a {}. Use the {}'s own tools (refresh, edit, delete) to modify it.",
+            what, what
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a batch write when ANY of its target cells lies inside a protected
+/// object-output region. One region-list lock for the whole batch; skips the
+/// scan entirely when the active sheet has no regions.
+fn check_region_cells_protection<'a>(
+    state: &AppState,
+    sheet_index: usize,
+    mut cells: impl Iterator<Item = (u32, u32)> + 'a,
+) -> Result<(), String> {
+    let regions = state.protected_regions.lock().unwrap();
+    let sheet_regions: Vec<&crate::ProtectedRegion> = regions
+        .iter()
+        .filter(|r| r.sheet_index == sheet_index)
+        .collect();
+    if sheet_regions.is_empty() {
+        return Ok(());
+    }
+    if let Some((row, col, region)) = cells.find_map(|(row, col)| {
+        sheet_regions
+            .iter()
+            .find(|r| {
+                row >= r.start_row && row <= r.end_row && col >= r.start_col && col <= r.end_col
+            })
+            .map(|r| (row, col, *r))
+    }) {
+        let what = region_display_name(&region.region_type);
+        return Err(format!(
+            "Cannot change cell ({}, {}): it is part of a {}. Use the {}'s own tools (refresh, edit, delete) to modify it.",
+            row + 1,
+            col + 1,
+            what,
+            what
+        ));
+    }
+    Ok(())
+}
+
 /// Get spill ranges for the active sheet.
 /// Returns the bounding box of each spill range for visual rendering.
 #[tauri::command]
@@ -1886,6 +1960,15 @@ pub fn update_cells_batch(
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
 ) -> Result<Vec<CellData>, String> {
+    // Protected-region guard (paste / fill / multi-edit): reject the WHOLE
+    // batch before any mutation when a target cell sits inside a pivot/report
+    // output region — the single-cell edit path (update_cell_impl) already
+    // rejects these, and a partial paste would be worse than none.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        check_region_cells_protection(&state, active_sheet, updates.iter().map(|u| (u.row, u.col)))?;
+    }
+
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
     // GET.CONTROLVALUE snapshot: built ONCE per batch, BEFORE the grid locks
@@ -2756,6 +2839,9 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
         check_spill_protection(&spill_hosts, active_sheet, row, col, row, col)?;
     }
 
+    // Object-output protection (clearing a pivot/report cell).
+    check_region_range_protection(&state, active_sheet, row, col, row, col)?;
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -2842,6 +2928,9 @@ pub fn clear_range(
         let spill_hosts = state.spill_hosts.lock().unwrap();
         check_spill_protection(&spill_hosts, active_sheet, start_row, start_col, end_row, end_col)?;
     }
+
+    // Object-output protection (delete-key clear over a pivot/report region).
+    check_region_range_protection(&state, active_sheet, start_row, start_col, end_row, end_col)?;
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -2961,6 +3050,9 @@ pub fn clear_range_with_options(
         let min_col = params.start_col.min(params.end_col);
         let max_col = params.start_col.max(params.end_col);
         check_spill_protection(&spill_hosts, active_sheet, min_row, min_col, max_row, max_col)?;
+        // Object-output protection: content clears cannot touch a pivot/report
+        // region (format-only clears stay allowed, matching Excel).
+        check_region_range_protection(&state, active_sheet, min_row, min_col, max_row, max_col)?;
     }
 
     let mut grid = state.grid.lock().unwrap();
@@ -4381,6 +4473,12 @@ pub fn clear_range_on_sheets(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
+    // Object-output protection on every targeted sheet (group clear must not
+    // punch through a pivot/report region on a background sheet).
+    for &sheet_idx in &sheet_indices {
+        check_region_range_protection(&state, sheet_idx, start_row, start_col, end_row, end_col)?;
+    }
+
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
