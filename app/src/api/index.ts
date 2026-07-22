@@ -792,6 +792,7 @@ export {
   // External Data menu icons
   IconGetData,
   IconFromCsv,
+  IconImport,
   IconExport,
   IconConnections,
   // Edit menu icons

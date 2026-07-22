@@ -41,7 +41,7 @@ export function registerCubeFormulaMenuItem(): void {
     id: "model:calculatedMeasures",
     label: "Calculated Measures...",
     icon: IconCalculatedMeasure,
-    order: 11,
+    order: 15,
     action: () => DialogExtensions.openDialog(CALC_MEASURES_DIALOG_ID, {}),
   });
 }

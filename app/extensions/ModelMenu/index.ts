@@ -2,8 +2,10 @@
 // PURPOSE: Model menu extension entry point.
 // CONTEXT: Registers the "Model" top-level menu — the single home for every
 //          Calcula-model (BI) surface. Other extensions append their items:
-//            ModelEditor      -> "Model Editor..."            (order 10)
-//            CubeFormulas     -> "Calculated Measures..."     (order 11)
+//            ModelEditor      -> "Model Editor...",
+//                                "Import Model...",
+//                                "Export Model..."            (order 10-13)
+//            CubeFormulas     -> "Calculated Measures..."     (order 15)
 //            BusinessIntel.   -> "Connections",
 //                                "New Model Connection..."    (order 20-21)
 //            BusinessIntel.   -> "PivotTable from Model..."   (order 30)

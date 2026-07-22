@@ -398,6 +398,15 @@ export const IconExport = (
   </svg>
 );
 
+/** Arrow down into box (Import) */
+export const IconImport = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 8v6h10V8" />
+    <line x1="8" y1="2" x2="8" y2="10" strokeLinecap="round" />
+    <polyline points="5,7.5 8,10 11,7.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 /** Plug (Connections) */
 export const IconConnections = (
   <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
