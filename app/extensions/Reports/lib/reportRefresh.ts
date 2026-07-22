@@ -6,7 +6,6 @@
 //   refresh can surface them; auto-refresh logs them.
 
 import { getControlValue } from "@api/controlValues";
-import { emitAppEvent, AppEvents } from "@api/events";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import {
   compileDesignQuery,
@@ -39,6 +38,18 @@ async function getModel(connectionId: string): Promise<BiPivotModelInfo | null> 
 /** Drop cached models (wired to the BI connection/model-refresh events). */
 export function clearReportModelCache(): void {
   modelCache.clear();
+}
+
+/**
+ * Ask the canvas to REFETCH cell data and repaint. Report cells are written
+ * backend-side, so the frontend cell cache must refresh — the app-level
+ * AppEvents.GRID_REFRESH only redraws overlays from the cached cells and would
+ * leave freshly materialized cells invisible until the next scroll/sheet
+ * switch. Same raw event AutoFilter / PasteSpecial dispatch after their
+ * backend writes.
+ */
+export function refreshGridCells(): void {
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
 }
 
 /** List all reports (empty on failure). */
@@ -106,13 +117,13 @@ export async function refreshReport(
 /** Delete a report and refresh the grid. */
 export async function deleteReport(reportId: string): Promise<void> {
   await reportsBackend.invoke("delete_report", { reportId });
-  emitAppEvent(AppEvents.GRID_REFRESH);
+  refreshGridCells();
 }
 
 /** Refresh a single report (manual), repaint the grid, and return the outcome. */
 export async function refreshOneReport(report: ReportInfo): Promise<RefreshResult> {
   const result = await refreshReport(report);
-  if (result.ok) emitAppEvent(AppEvents.GRID_REFRESH);
+  if (result.ok) refreshGridCells();
   return result;
 }
 
@@ -142,7 +153,7 @@ async function runControlBoundRefresh(names: Set<string> | null): Promise<void> 
       console.warn(`[Reports] Auto-refresh of "${r.name}" failed: ${result.message}`);
     }
   }
-  if (any) emitAppEvent(AppEvents.GRID_REFRESH);
+  if (any) refreshGridCells();
 }
 
 /**

@@ -6,9 +6,8 @@
 //   by its stable data-source id) so it can be refreshed / deleted / managed.
 
 import { registerDistributableObjectProvider } from "@api/distributableObjects";
-import { emitAppEvent, AppEvents } from "@api/events";
 import { reportsBackend } from "./reportsBackend";
-import { listReports } from "./reportRefresh";
+import { listReports, refreshGridCells } from "./reportRefresh";
 
 const REPORT_KIND = "calcula.report";
 
@@ -75,7 +74,7 @@ export function registerReportDistribution(): () => void {
       if (problems.length > 0) {
         console.warn(`[Reports] .calp pull issues:\n${problems.join("\n")}`);
       }
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      refreshGridCells();
     },
   });
 }

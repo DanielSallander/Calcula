@@ -14,11 +14,10 @@ vi.mock("@api/controlValues", () => ({
   getControlValue: (name: string) => controlValues[name],
 }));
 
-const mockEmitAppEvent = vi.fn();
-vi.mock("@api/events", () => ({
-  emitAppEvent: (...args: unknown[]) => mockEmitAppEvent(...args),
-  AppEvents: { GRID_REFRESH: "grid:refresh" },
-}));
+/** Count "grid:refresh" (cell REFETCH + repaint) dispatches on window. */
+function gridRefreshCount(spy: ReturnType<typeof vi.spyOn>): number {
+  return spy.mock.calls.filter((c) => (c[0] as Event)?.type === "grid:refresh").length;
+}
 
 // Compile is exercised by its own DSL test suite — here it's routed through a
 // mock so these tests stay on reportRefresh's control flow.
@@ -152,12 +151,14 @@ describe("refreshControlBoundReports", () => {
       makeReport({ id: "r-2", dslText: 'FILTERS: y = @"Products.Category"\nVALUES: [M]' }),
       makeReport({ id: "r-3", dslText: "ROWS: a\nVALUES: [M]" }),
     ];
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
     await refreshControlBoundReports(["region"]); // case-insensitive
     const refreshed = invokeLog
       .filter((c) => c.command === "refresh_report")
       .map((c) => (c.args?.request as Record<string, unknown>).reportId);
     expect(refreshed).toEqual(["r-1"]);
-    expect(mockEmitAppEvent).toHaveBeenCalledWith("grid:refresh");
+    expect(gridRefreshCount(dispatchSpy)).toBe(1);
+    dispatchSpy.mockRestore();
   });
 
   it("refreshes every @-bound report when no names are given", async () => {
@@ -192,17 +193,21 @@ describe("refreshControlBoundReports", () => {
       return { reportId: "r-2", rowCount: 1, colCount: 1, overwrittenCellCount: 0 };
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
     await refreshControlBoundReports(["Region"]);
     expect(invokeLog.filter((c) => c.command === "refresh_report")).toHaveLength(2);
-    expect(mockEmitAppEvent).toHaveBeenCalledWith("grid:refresh");
+    expect(gridRefreshCount(dispatchSpy)).toBe(1);
     expect(warn).toHaveBeenCalled();
+    dispatchSpy.mockRestore();
     warn.mockRestore();
   });
 
-  it("does not emit GRID_REFRESH when nothing ran", async () => {
+  it("does not dispatch grid:refresh when nothing ran", async () => {
     backend.list_reports = () => [makeReport({ id: "r-1", dslText: "ROWS: a\nVALUES: [M]" })];
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
     await refreshControlBoundReports(["Region"]);
-    expect(mockEmitAppEvent).not.toHaveBeenCalled();
+    expect(gridRefreshCount(dispatchSpy)).toBe(0);
+    dispatchSpy.mockRestore();
   });
 
   it("coalesces calls arriving while a pass is in flight", async () => {

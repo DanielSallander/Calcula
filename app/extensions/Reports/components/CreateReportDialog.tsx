@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps, ConnectionInfo } from "@api";
-import { emitAppEvent, AppEvents } from "@api/events";
+import { refreshGridCells } from "../lib/reportRefresh";
 import { DesignQueryEditor } from "../../_shared/dsl/pivotLayout/DesignQueryEditor";
 import type { DslControlHint } from "../../_shared/dsl/pivotLayout/pivotDslLanguage";
 import {
@@ -152,7 +152,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           query: compiled.request satisfies DesignQueryRequest,
         },
       });
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      refreshGridCells();
       if (result && result.overwrittenCellCount > 0) {
         // Inform the user their cells were replaced (Ctrl+Z reverts it).
         setError(
