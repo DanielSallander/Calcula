@@ -220,9 +220,10 @@ export function Field({
 // FilterPredicateList — shared row-filter editor
 // ============================================================================
 // The engine `FilterPredicate` (table/column/operator/value + optional dynamic
-// USERNAME()/CUSTOMDATA()) is reused verbatim by Security Roles, Table
-// Variables and Context "Keep" operations. This widget + the draft<->DTO
-// mappers keep the operator strings and dynamic handling in ONE place.
+// USERNAME()/CUSTOMDATA()) is reused verbatim by Security Roles and Table
+// Variables. (Contexts are authored as CONTEXT expression text, not through
+// this widget.) This widget + the draft<->DTO mappers keep the operator
+// strings and dynamic handling in ONE place.
 
 /** The bare remote-table guess for a model table: tables imported from a
  *  schema are NAMED "<schema>.<table>", but a source binding's table must be

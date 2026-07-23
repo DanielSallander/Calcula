@@ -241,9 +241,9 @@ async function runLs(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
     case "context": {
       const rows = matchNamed(o.contexts, (c) => c.name, pat).map((c) => [
         c.name,
-        plural(c.operations.length, "operation"),
+        c.expression,
       ]);
-      printTable(io, ["context", "operations"], rows, `No contexts match '${pat}'`);
+      printTable(io, ["context", "definition"], rows, `No contexts match '${pat}'`);
       return;
     }
     case "contextcolumn": {
@@ -524,7 +524,8 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
       io.print(
         detailBlock([
           ["context", c.name],
-          ["operations", JSON.stringify(c.operations, null, 2)],
+          ["definition", c.expression],
+          ["operations", plural(c.operations.length, "operation")],
         ]),
       );
       return;

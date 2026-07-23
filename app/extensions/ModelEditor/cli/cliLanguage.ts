@@ -43,7 +43,7 @@ const OPTION_KEYS: Partial<Record<Kind, string[]>> = {
   perspective: ["tables", "columns", "measures", "description"],
   tablevar: ["source", "filter"],
   scriptfunction: ["params", "returns"],
-  context: ["ops"],
+  context: [],
   writeback: [
     "type",
     "keys",

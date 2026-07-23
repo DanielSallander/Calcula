@@ -664,9 +664,10 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
       return;
     }
     case "context": {
-      const name = noWildcard(primary(cmd, "add context Name [ops='<json>']").text, "context", cmd.line);
+      const name = noWildcard(primary(cmd, "add context Name = <expression>").text, "context", cmd.line);
+      const expression = requireExpr(cmd, "add context Name = KEEP(table, table[col] = value), ...");
       await mutOverview(s, () =>
-        g.upsertContext({ connectionId: cid, name, operations: parseContextOps(cmd) ?? [] }),
+        g.upsertContext({ connectionId: cid, name, expression }),
       );
       done(`context ${name}`);
       return;
@@ -725,19 +726,6 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
     }
     default:
       fail(`'add' does not support '${cmd.kind ?? "?"}' (try 'help add')`, cmd.line);
-  }
-}
-
-function parseContextOps(cmd: Command): ModelOverview["contexts"][number]["operations"] | undefined {
-  const raw = optStr(cmd, "ops");
-  if (raw === undefined) return undefined;
-  if (raw === "") return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) throw new Error("not an array");
-    return parsed as ModelOverview["contexts"][number]["operations"];
-  } catch (e) {
-    fail(`ops= must be a JSON array of context operations (${e instanceof Error ? e.message : String(e)})`, cmd.line);
   }
 }
 
@@ -1029,7 +1017,7 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           connectionId: cid,
           originalName: c.name,
           name: c.name,
-          operations: parseContextOps(cmd) ?? c.operations,
+          expression: cmd.expr !== null && cmd.expr !== "" ? cmd.expr : c.expression,
         }),
       );
       return;
@@ -1430,7 +1418,7 @@ async function runRename(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
     case "context": {
       const c = requireOne(o.contexts, (x) => x.name, oldTok.text, "context", cmd.line);
       await mutOverview(s, () =>
-        g.upsertContext({ connectionId: cid, originalName: c.name, name: newName, operations: c.operations }),
+        g.upsertContext({ connectionId: cid, originalName: c.name, name: newName, expression: c.expression }),
       );
       done(c.name);
       return;

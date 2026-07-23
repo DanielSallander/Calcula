@@ -886,31 +886,41 @@ add func Clamp params=x:Float,lo:Float,hi:Float returns=Float =
     id: "context",
     title: "Contexts",
     group: "Objects",
-    summary: "Named filter-context transforms (keep/clear/reset operations).",
+    summary: "Named, reusable filter expressions (CONTEXT syntax).",
     markdown: `# Contexts
 
-Named filter-context transforms applied by expressions. Their operation
-lists are structured (keep / keepIn / clear / reset / inherit /
-useRelationship), so the CLI takes them as **JSON** — the same shape
-\`show context\` prints. For rich editing, the visual Contexts section is the
-comfortable surface; the CLI is handy for list/rename/delete/copy.
+A context is a named, reusable filter expression. Measures apply one by
+naming it as a context argument — \`SUM(Sales[amount], ctx_2024)\` — or via
+\`USING()\`. The definition is everything after the free-standing \`=\`, in
+the engine's CONTEXT syntax: comma-separated operations.
 
 \`\`\`
 ls contexts [pattern]
 show context <name>
-add context <Name> [ops='<json array>']
-set context <name> ops='<json array>'
+add context <Name> = <expression>
+set context <name> = <expression>     (replaces the definition)
 rename context <old> <new>
 delete context <pattern>
 \`\`\`
 
-| Option | Value | Effect |
-| --- | --- | --- |
-| \`ops=\` | \`'[ … ]'\` | the full operation list as JSON (replaces on set) |
+Operations:
 
-Tip: copy a starting point from an existing context —
-\`show context X\`, edit the JSON, then \`set context Y ops='…'\` (single
-quotes keep the JSON's double quotes intact).`,
+| Operation | Effect |
+| --- | --- |
+| \`KEEP(t, t[col] = v, …)\` | add filters (AND with the current context) |
+| \`t[col] IN var[col]\` (inside KEEP) | membership in a table variable (\`NOT IN\` negates) |
+| \`t[col] = USERNAME()\` / \`CUSTOMDATA()\` | dynamic identity-resolved filter |
+| \`CLEAR(t)\` / \`CLEAR(t[col])\` | remove filters on a table / column |
+| \`CLEAR_INNER(…)\` / \`CLEAR_OUTER(…)\` | clear only group-by / only query-level filters |
+| \`RESET()\` / \`RESET_INNER()\` / \`RESET_OUTER()\` | remove all filters for the scope |
+| \`USERELATIONSHIP("name")\` | activate an inactive relationship |
+| \`other_context\` | inherit all of another context's operations |
+
+\`\`\`
+add context bikes_2024 = KEEP(dim_product, dim_product[categoryname] = "Bikes"),
+    KEEP(dim_date, dim_date[year] = 2024)
+add context no_region = ctx_base, CLEAR(Sales[region])
+\`\`\``,
   },
   {
     id: "contextcolumn",

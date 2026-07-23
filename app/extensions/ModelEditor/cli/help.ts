@@ -137,11 +137,14 @@ const TOPICS: Record<string, string> = {
   add func <Name> params=a:Int,b:Float returns=Float = <body>
   set func <name> params=… returns=… | set func <name> = <body>
   rename func <old> <new>         delete func <pattern>`,
-  context: `Contexts:
-  ls contexts [pattern]           show context <name>   (operations as JSON)
-  add context <Name> ops='[{"type":"clear","filters":[],"clearTargets":[…],"inPredicates":[]}]'
-  set context <name> ops='…'      (replaces the operation list)
-  rename context <old> <new>      delete context <pattern>`,
+  context: `Contexts (reusable filter expressions, applied in measures by name or USING()):
+  ls contexts [pattern]           show context <name>
+  add context <Name> = KEEP(dim_date, dim_date[year] = 2024), CLEAR(Sales[region])
+  set context <name> = <expr>     (replaces the definition)
+  rename context <old> <new>      delete context <pattern>
+  Operations: KEEP (filters, IN/NOT IN memberships, USERNAME()/CUSTOMDATA()),
+  CLEAR/CLEAR_INNER/CLEAR_OUTER, RESET/RESET_INNER/RESET_OUTER,
+  USERELATIONSHIP("name"), or another context's name to inherit.`,
   contextcolumn: `Context columns (measure-driven columns):
   ls contextcolumns [pattern]     show contextcolumn <name>
   delete contextcolumn <pattern>

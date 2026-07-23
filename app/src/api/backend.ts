@@ -3876,6 +3876,8 @@ export interface InPredicateDto {
   column: string;
   varName: string;
   varColumn: string;
+  /** True for a NOT IN anti-membership. */
+  negated: boolean;
 }
 
 /** A single context operation (discriminated by `type`; only the relevant
@@ -3893,6 +3895,10 @@ export interface ContextOpDto {
 
 export interface ModelContextInfo {
   name: string;
+  /** Canonical CONTEXT expression text — the authoring form (upserts parse
+   * this back through the engine's `parse_context`). */
+  expression: string;
+  /** Structured operations, for display (badges/summaries) only. */
   operations: ContextOpDto[];
 }
 
@@ -4434,13 +4440,31 @@ export async function biModelUpsertContext(params: {
   connectionId: string;
   originalName?: string | null;
   name: string;
-  operations: ContextOpDto[];
+  /** CONTEXT expression text, e.g.
+   * `KEEP(dim_date, dim_date[year] = 2024), CLEAR(Sales[region])`. */
+  expression: string;
 }): Promise<ModelOverview> {
   return invoke<ModelOverview>("bi_model_upsert_context", {
     connectionId: params.connectionId,
     originalName: params.originalName ?? null,
     name: params.name,
-    operations: params.operations,
+    expression: params.expression,
+  });
+}
+
+/** Validate a context definition without applying it (positioned parse errors,
+ * plus model-level checks via a dry-run of the upsert path). */
+export async function biModelValidateContext(
+  connectionId: string,
+  name: string,
+  expression: string,
+  originalName?: string | null,
+): Promise<MeasureValidation> {
+  return invoke<MeasureValidation>("bi_model_validate_context", {
+    connectionId,
+    originalName: originalName ?? null,
+    name,
+    expression,
   });
 }
 

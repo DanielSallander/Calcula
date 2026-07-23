@@ -114,6 +114,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_upsert_script_function",
     "bi_model_delete_script_function",
     "bi_model_upsert_context",
+    "bi_model_validate_context",
     "bi_model_delete_context",
     "bi_model_delete_context_column",
     "bi_model_set_date_table",

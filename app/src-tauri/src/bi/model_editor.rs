@@ -1544,6 +1544,9 @@ pub struct ClearTargetDto {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InPredicateDto {
+    /// True for a `NOT IN` anti-membership.
+    #[serde(default)]
+    pub negated: bool,
     pub table: String,
     pub column: String,
     pub var_name: String,
@@ -1575,6 +1578,10 @@ pub struct ContextOpDto {
 #[serde(rename_all = "camelCase")]
 pub struct ModelContextInfo {
     pub name: String,
+    /// Canonical CONTEXT expression text (engine `ContextDefinition::to_text`);
+    /// the authoring form — upserts parse this back via `parse_context`.
+    pub expression: String,
+    /// Structured operations, for display (badges/summaries) only.
     pub operations: Vec<ContextOpDto>,
 }
 
@@ -1900,24 +1907,6 @@ fn storage_mode_from_str(s: &str) -> Result<bi_engine::StorageMode, String> {
     })
 }
 
-fn clear_target_from_dto(t: &ClearTargetDto) -> Result<bi_engine::ClearTarget, String> {
-    match t.kind.as_str() {
-        "column" => {
-            let column = t
-                .column
-                .clone()
-                .filter(|c| !c.trim().is_empty())
-                .ok_or("A column clear-target needs a column")?;
-            Ok(bi_engine::ClearTarget::Column {
-                table: t.table.clone(),
-                column,
-            })
-        }
-        "table" => Ok(bi_engine::ClearTarget::Table(t.table.clone())),
-        other => Err(format!("Unknown clear-target kind '{}'", other)),
-    }
-}
-
 fn clear_target_to_dto(t: &bi_engine::ClearTarget) -> ClearTargetDto {
     match t {
         bi_engine::ClearTarget::Column { table, column } => ClearTargetDto {
@@ -1933,79 +1922,21 @@ fn clear_target_to_dto(t: &bi_engine::ClearTarget) -> ClearTargetDto {
     }
 }
 
-fn in_predicate_from_dto(p: &InPredicateDto) -> bi_engine::InPredicate {
-    bi_engine::InPredicate::new(
-        p.table.clone(),
-        p.column.clone(),
-        p.var_name.clone(),
-        p.var_column.clone(),
-    )
-}
-
 fn in_predicate_to_dto(p: &bi_engine::InPredicate) -> InPredicateDto {
     InPredicateDto {
         table: p.table.clone(),
         column: p.column.clone(),
         var_name: p.var_name.clone(),
         var_column: p.var_column.clone(),
+        negated: p.negated,
     }
 }
 
-/// Build an engine [`ContextOp`] from the flat, discriminated DTO. The engine
-/// type is an enum; the DTO carries every operand field and selects one by
-/// `type`, so the bridge must hand-construct the correct variant (a naive serde
-/// round-trip would not work).
-fn context_op_from_dto(op: &ContextOpDto) -> Result<bi_engine::ContextOp, String> {
-    Ok(match op.r#type.as_str() {
-        "keep" => bi_engine::ContextOp::Keep(
-            op.filters
-                .iter()
-                .map(predicate_from_dto)
-                .collect::<Result<Vec<_>, String>>()?,
-        ),
-        "keepIn" => bi_engine::ContextOp::KeepIn(
-            op.in_predicates.iter().map(in_predicate_from_dto).collect(),
-        ),
-        "clear" => bi_engine::ContextOp::Clear(
-            op.clear_targets
-                .iter()
-                .map(clear_target_from_dto)
-                .collect::<Result<Vec<_>, String>>()?,
-        ),
-        "clearInner" => bi_engine::ContextOp::ClearInner(
-            op.clear_targets
-                .iter()
-                .map(clear_target_from_dto)
-                .collect::<Result<Vec<_>, String>>()?,
-        ),
-        "clearOuter" => bi_engine::ContextOp::ClearOuter(
-            op.clear_targets
-                .iter()
-                .map(clear_target_from_dto)
-                .collect::<Result<Vec<_>, String>>()?,
-        ),
-        "reset" => bi_engine::ContextOp::Reset,
-        "resetInner" => bi_engine::ContextOp::ResetInner,
-        "resetOuter" => bi_engine::ContextOp::ResetOuter,
-        "inherit" => bi_engine::ContextOp::Inherit(
-            op.inherit_context
-                .clone()
-                .filter(|c| !c.trim().is_empty())
-                .ok_or("An inherit operation needs a context name")?,
-        ),
-        "useRelationship" => bi_engine::ContextOp::UseRelationship(
-            op.relationship_name
-                .clone()
-                .filter(|c| !c.trim().is_empty())
-                .ok_or("A use-relationship operation needs a relationship name")?,
-        ),
-        other => return Err(format!("Unknown context operation '{}'", other)),
-    })
-}
-
-/// Flatten an engine [`ContextOp`] back into the discriminated DTO for the
-/// editor (the read half of the enum⇄struct bridge; must handle every variant
-/// so a loaded model never panics or silently drops an operation).
+/// Flatten an engine [`ContextOp`] into the discriminated DTO for display in
+/// the editor (must handle every variant so a loaded model never panics or
+/// silently drops an operation). Write traffic goes the other way as CONTEXT
+/// expression text through the engine's `parse_context` — there is no DTO→
+/// engine bridge anymore.
 fn context_op_to_dto(op: &bi_engine::ContextOp) -> ContextOpDto {
     let mut dto = ContextOpDto {
         r#type: String::new(),
@@ -2321,6 +2252,7 @@ fn build_overview(
         .iter()
         .map(|c| ModelContextInfo {
             name: c.name().to_string(),
+            expression: c.to_text(),
             operations: c.operations().iter().map(context_op_to_dto).collect(),
         })
         .collect();
@@ -4354,8 +4286,9 @@ pub async fn bi_model_delete_script_function(
 // ---------------------------------------------------------------------------
 
 /// Add or update a named context (a composable set of filter operations
-/// referenced by measures via `using(expr, context)`). The flat operation DTOs
-/// are bridged into the engine `ContextOp` enum.
+/// referenced by measures via `using(expr, context)`). The definition arrives
+/// as CONTEXT expression text — e.g. `KEEP(dim_date, dim_date[year] = 2024),
+/// CLEAR(Sales[region])` — parsed by the engine's `parse_context`.
 #[tauri::command]
 pub async fn bi_model_upsert_context(
     bi_state: State<'_, BiState>,
@@ -4363,7 +4296,7 @@ pub async fn bi_model_upsert_context(
     connection_id: ConnectionId,
     original_name: Option<String>,
     name: String,
-    operations: Vec<ContextOpDto>,
+    expression: String,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
@@ -4372,11 +4305,7 @@ pub async fn bi_model_upsert_context(
         if trimmed.is_empty() {
             return Err("Context name cannot be empty".to_string());
         }
-        let ops = operations
-            .iter()
-            .map(context_op_from_dto)
-            .collect::<Result<Vec<_>, String>>()?;
-        let ctx = bi_engine::ContextDefinition::new(trimmed, ops);
+        let ctx = bi_engine::parse_context(trimmed, &expression).map_err(|e| format!("{}", e))?;
 
         let mut contexts = base.contexts().to_vec();
         match original_name.as_deref() {
@@ -4393,6 +4322,76 @@ pub async fn bi_model_upsert_context(
         Ok(edited)
     })
     .await
+}
+
+/// Validate a context definition (expression text) without persisting: parse
+/// errors return a byte position for an editor marker; model-level problems
+/// (unknown tables/columns, unknown inherited context, name collisions) come
+/// from a dry-run through the same path the upsert takes.
+#[tauri::command]
+pub fn bi_model_validate_context(
+    bi_state: State<BiState>,
+    connection_id: ConnectionId,
+    original_name: Option<String>,
+    name: String,
+    expression: String,
+    window: tauri::Window,
+) -> Result<MeasureValidation, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    let (base, calculated) = match editable_base(&bi_state, connection_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(MeasureValidation { ok: false, message: Some(e), position: None });
+        }
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Ok(MeasureValidation {
+            ok: false,
+            message: Some("Context name cannot be empty".to_string()),
+            position: None,
+        });
+    }
+    let ctx = match bi_engine::parse_context(trimmed, &expression) {
+        Ok(ctx) => ctx,
+        Err(bi_engine::EngineError::ParseError { position, message }) => {
+            return Ok(MeasureValidation {
+                ok: false,
+                message: Some(message),
+                position: Some(position),
+            });
+        }
+        Err(other) => {
+            return Ok(MeasureValidation {
+                ok: false,
+                message: Some(format!("{}", other)),
+                position: None,
+            });
+        }
+    };
+    let mut contexts = base.contexts().to_vec();
+    match original_name.as_deref() {
+        Some(orig) => match contexts.iter().position(|c| c.name() == orig) {
+            Some(idx) => contexts[idx] = ctx,
+            None => {
+                return Ok(MeasureValidation {
+                    ok: false,
+                    message: Some(format!("Context '{}' not found", orig)),
+                    position: None,
+                });
+            }
+        },
+        None => contexts.push(ctx),
+    }
+    let edited = base.with_contexts(contexts);
+    let dry_run = edited
+        .validate()
+        .map_err(|e| format!("{}", e))
+        .and_then(|_| build_combined_model(&edited, &calculated).map(|_| ()));
+    Ok(match dry_run {
+        Ok(()) => MeasureValidation { ok: true, message: None, position: None },
+        Err(e) => MeasureValidation { ok: false, message: Some(e), position: None },
+    })
 }
 
 #[tauri::command]
@@ -5447,7 +5446,7 @@ pub async fn script_bi_model(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
                         gateway_field(&p, "name")?,
-                        gateway_field(&p, "operations")?,
+                        gateway_field(&p, "expression")?,
                         w,
                     )
                     .await?,
@@ -7511,78 +7510,51 @@ mod tests {
         assert_eq!(d.operator, "=");
     }
 
-    fn op_dto(ty: &str) -> ContextOpDto {
-        ContextOpDto {
-            r#type: ty.into(),
-            filters: vec![],
-            clear_targets: vec![],
-            in_predicates: vec![],
-            inherit_context: None,
-            relationship_name: None,
-        }
+    #[test]
+    fn context_expression_maps_to_display_dtos_and_round_trips() {
+        // The write path is CONTEXT expression text → parse_context; the read
+        // path renders both the canonical text (to_text) and display DTOs
+        // (context_op_to_dto). Cover every variant through one definition.
+        let ctx = bi_engine::parse_context(
+            "everything",
+            r#"base_ctx, KEEP(Sales, Sales[country] = "US", Sales[cust] IN TopCustomers[id]), CLEAR(Cal[Year], Products), CLEAR_INNER(Cal), CLEAR_OUTER(Sales[region]), RESET(), RESET_INNER(), RESET_OUTER(), USERELATIONSHIP("Sales_Date")"#,
+        )
+        .unwrap();
+
+        let dtos: Vec<ContextOpDto> = ctx.operations().iter().map(context_op_to_dto).collect();
+        let types: Vec<&str> = dtos.iter().map(|d| d.r#type.as_str()).collect();
+        // The mixed KEEP splits into keep + keepIn.
+        assert_eq!(
+            types,
+            [
+                "inherit", "keep", "keepIn", "clear", "clearInner", "clearOuter",
+                "reset", "resetInner", "resetOuter", "useRelationship"
+            ]
+        );
+        assert_eq!(dtos[0].inherit_context.as_deref(), Some("base_ctx"));
+        assert_eq!(dtos[1].filters[0].column, "country");
+        assert_eq!(dtos[2].in_predicates[0].var_name, "TopCustomers");
+        assert!(!dtos[2].in_predicates[0].negated);
+        assert_eq!(dtos[3].clear_targets[0].kind, "column");
+        assert_eq!(dtos[3].clear_targets[0].column.as_deref(), Some("Year"));
+        assert_eq!(dtos[3].clear_targets[1].kind, "table");
+        assert_eq!(dtos[9].relationship_name.as_deref(), Some("Sales_Date"));
+
+        // The canonical text form parses back to the same definition.
+        assert_eq!(bi_engine::parse_context("everything", &ctx.to_text()).unwrap(), ctx);
     }
 
     #[test]
-    fn context_op_bridge_roundtrips_every_variant() {
-        // Unit variants: type string survives the enum round-trip.
-        for ty in ["reset", "resetInner", "resetOuter"] {
-            let back = context_op_to_dto(&context_op_from_dto(&op_dto(ty)).unwrap());
-            assert_eq!(back.r#type, ty);
-        }
-
-        // Keep with a filter.
-        let mut keep = op_dto("keep");
-        keep.filters = vec![rf("Sales", "country", "=", "US", None)];
-        let back = context_op_to_dto(&context_op_from_dto(&keep).unwrap());
-        assert_eq!(back.r#type, "keep");
-        assert_eq!(back.filters.len(), 1);
-        assert_eq!(back.filters[0].column, "country");
-
-        // Clear (column + table targets).
-        let mut clear = op_dto("clear");
-        clear.clear_targets = vec![
-            ClearTargetDto { kind: "column".into(), table: "Cal".into(), column: Some("Year".into()) },
-            ClearTargetDto { kind: "table".into(), table: "Products".into(), column: None },
-        ];
-        let back = context_op_to_dto(&context_op_from_dto(&clear).unwrap());
-        assert_eq!(back.clear_targets.len(), 2);
-        assert_eq!(back.clear_targets[0].kind, "column");
-        assert_eq!(back.clear_targets[0].column.as_deref(), Some("Year"));
-        assert_eq!(back.clear_targets[1].kind, "table");
-        assert_eq!(back.clear_targets[1].column, None);
-
-        // KeepIn membership.
-        let mut keep_in = op_dto("keepIn");
-        keep_in.in_predicates = vec![InPredicateDto {
-            table: "Sales".into(),
-            column: "cust".into(),
-            var_name: "TopCustomers".into(),
-            var_column: "id".into(),
-        }];
-        let back = context_op_to_dto(&context_op_from_dto(&keep_in).unwrap());
-        assert_eq!(back.r#type, "keepIn");
-        assert_eq!(back.in_predicates[0].var_name, "TopCustomers");
-
-        // Inherit + UseRelationship carry their single operand.
-        let mut inherit = op_dto("inherit");
-        inherit.inherit_context = Some("base".into());
-        assert_eq!(
-            context_op_to_dto(&context_op_from_dto(&inherit).unwrap()).inherit_context.as_deref(),
-            Some("base")
-        );
-        let mut use_rel = op_dto("useRelationship");
-        use_rel.relationship_name = Some("Sales_Date".into());
-        assert_eq!(
-            context_op_to_dto(&context_op_from_dto(&use_rel).unwrap()).relationship_name.as_deref(),
-            Some("Sales_Date")
-        );
-    }
-
-    #[test]
-    fn context_op_from_dto_rejects_unknown_and_missing_operands() {
-        assert!(context_op_from_dto(&op_dto("bogus")).is_err());
-        assert!(context_op_from_dto(&op_dto("inherit")).is_err()); // no context name
-        assert!(context_op_from_dto(&op_dto("useRelationship")).is_err());
+    fn context_expression_dynamic_and_not_in_survive_dto_projection() {
+        let ctx = bi_engine::parse_context(
+            "dyn",
+            "KEEP(U, U[login] = USERNAME(), U[tenant] = CUSTOMDATA(), U[id] NOT IN blocked[id])",
+        )
+        .unwrap();
+        let dtos: Vec<ContextOpDto> = ctx.operations().iter().map(context_op_to_dto).collect();
+        assert_eq!(dtos[0].filters[0].dynamic.as_deref(), Some("username"));
+        assert_eq!(dtos[0].filters[1].dynamic.as_deref(), Some("customData"));
+        assert!(dtos[1].in_predicates[0].negated);
     }
 
     #[test]

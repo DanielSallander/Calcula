@@ -4182,6 +4182,7 @@ pub fn run() {
             bi::model_editor::bi_model_upsert_script_function,
             bi::model_editor::bi_model_delete_script_function,
             bi::model_editor::bi_model_upsert_context,
+            bi::model_editor::bi_model_validate_context,
             bi::model_editor::bi_model_delete_context,
             bi::model_editor::bi_model_upsert_context_column,
             bi::model_editor::bi_model_delete_context_column,

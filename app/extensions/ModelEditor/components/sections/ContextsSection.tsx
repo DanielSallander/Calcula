@@ -1,42 +1,30 @@
 // FILENAME: app/extensions/ModelEditor/components/sections/ContextsSection.tsx
-// PURPOSE: Contexts section of the Model Editor window. Contexts are named,
-//          composable filter-operation lists (referenced by measures via
-//          using(expr, context)); the operations editor bridges the flat
-//          operation DTO to the engine's ContextOp enum. (Context COLUMNS are
-//          edited as dynamic calculated columns under the Tables tab — the
-//          backend routes a column by whether its formula references a
-//          measure.)
+// PURPOSE: Contexts section of the Model Editor window. A context is a named,
+//          composable filter transformation referenced by measures via
+//          using(expr, context). Contexts are AUTHORED AS EXPRESSIONS in the
+//          engine's CONTEXT syntax — e.g.
+//            KEEP(dim_date, dim_date[year] = 2024), CLEAR(Sales[region])
+//          — edited in the shared ExpressionWorkspace, validated through the
+//          engine parser (positioned markers), and installed via
+//          bi_model_upsert_context. The structured operations still arrive in
+//          the overview DTO and drive the list's summary badges. (Context
+//          COLUMNS are edited as dynamic calculated columns under the Tables
+//          tab — the backend routes a column by whether its formula references
+//          a measure.)
 
-import React, { useState } from "react";
-import { biModelDeleteContext, biModelUpsertContext } from "@api";
-import type { ContextOpDto, ModelContextInfo, ModelOverview } from "@api";
+import React, { useCallback, useRef, useState } from "react";
 import {
-  Badge,
-  emptyFilterDraft,
-  Field,
-  FilterPredicateList,
-  filterDraftToDto,
-  filterDtoToDraft,
-  isFilterDraftComplete,
-  Modal,
-  styles,
-} from "../editorShared";
-import type { FilterDraft, SectionCtx } from "../editorShared";
-
-const OP_TYPES = [
-  { value: "keep", label: "Keep (add filters)" },
-  { value: "keepIn", label: "Keep IN (membership)" },
-  { value: "clear", label: "Clear (both sources)" },
-  { value: "clearInner", label: "Clear inner (group-by)" },
-  { value: "clearOuter", label: "Clear outer (query-level)" },
-  { value: "reset", label: "Reset (all filters)" },
-  { value: "resetInner", label: "Reset inner" },
-  { value: "resetOuter", label: "Reset outer" },
-  { value: "inherit", label: "Inherit context" },
-  { value: "useRelationship", label: "Use relationship" },
-];
-
-const CLEAR_TYPES = new Set(["clear", "clearInner", "clearOuter"]);
+  biModelDeleteContext,
+  biModelUpsertContext,
+  biModelValidateContext,
+} from "@api";
+import type { ModelContextInfo, ModelOverview } from "@api";
+import { Badge, Field, Modal, styles } from "../editorShared";
+import type { SectionCtx } from "../editorShared";
+import {
+  ExpressionWorkspace,
+  type ExpressionWorkspaceHandle,
+} from "./ExpressionWorkspace";
 
 // ============================================================================
 // Section
@@ -68,8 +56,8 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         <div style={{ ...styles.card, padding: 4 }}>
           {overview.contexts.length === 0 && (
             <div style={{ ...styles.muted, padding: 8 }}>
-              No contexts defined — a context is a reusable set of filter operations applied via
-              using(expr, context).
+              No contexts defined — a context is a reusable filter expression applied via
+              using(expr, context), e.g. KEEP(dim_date, dim_date[year] = 2024).
             </div>
           )}
           {overview.contexts.map((c) => (
@@ -79,14 +67,24 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
             >
               <div style={{ flex: 1, minWidth: 0 }}>
                 <strong>{c.name}</strong>
-                <span style={styles.muted}>
-                  {" "}
-                  — {c.operations.length} operation{c.operations.length === 1 ? "" : "s"}
-                </span>
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3 }}>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3, alignItems: "center" }}>
                   {c.operations.map((op, i) => (
                     <Badge key={i}>{op.type}</Badge>
                   ))}
+                </div>
+                <div
+                  style={{
+                    ...styles.muted,
+                    fontFamily: "monospace",
+                    fontSize: 11,
+                    marginTop: 3,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                  title={c.expression}
+                >
+                  {c.expression}
                 </div>
               </div>
               <button style={styles.smallBtn} disabled={readOnly} onClick={() => setEditingCtx({ original: c })}>
@@ -101,7 +99,7 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       </div>
 
       {editingCtx && (
-        <ContextModal
+        <ContextEditorModal
           connectionId={connectionId}
           overview={overview}
           original={editingCtx.original}
@@ -117,120 +115,10 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 }
 
 // ============================================================================
-// Context operation drafts (mirror ContextOpDto; only the relevant fields
-// matter per `type`).
+// Context add/edit modal — name + the shared expression workspace.
 // ============================================================================
 
-interface ClearTargetDraft {
-  kind: string; // "column" | "table"
-  table: string;
-  column: string;
-}
-
-interface InPredicateDraft {
-  table: string;
-  column: string;
-  varName: string;
-  varColumn: string;
-}
-
-interface ContextOpDraft {
-  type: string;
-  filters: FilterDraft[];
-  clearTargets: ClearTargetDraft[];
-  inPredicates: InPredicateDraft[];
-  inheritContext: string;
-  relationshipName: string;
-}
-
-function emptyOpDraft(): ContextOpDraft {
-  return {
-    type: "keep",
-    filters: [emptyFilterDraft()],
-    clearTargets: [],
-    inPredicates: [],
-    inheritContext: "",
-    relationshipName: "",
-  };
-}
-
-function opDtoToDraft(op: ContextOpDto): ContextOpDraft {
-  return {
-    type: op.type,
-    filters: (op.filters ?? []).map(filterDtoToDraft),
-    clearTargets: (op.clearTargets ?? []).map((t) => ({
-      kind: t.kind,
-      table: t.table,
-      column: t.column ?? "",
-    })),
-    inPredicates: (op.inPredicates ?? []).map((p) => ({
-      table: p.table,
-      column: p.column,
-      varName: p.varName,
-      varColumn: p.varColumn,
-    })),
-    inheritContext: op.inheritContext ?? "",
-    relationshipName: op.relationshipName ?? "",
-  };
-}
-
-function opDraftToDto(op: ContextOpDraft): ContextOpDto {
-  return {
-    type: op.type,
-    filters: op.type === "keep" ? op.filters.map(filterDraftToDto) : [],
-    clearTargets: CLEAR_TYPES.has(op.type)
-      ? op.clearTargets.map((t) => ({
-          kind: t.kind,
-          table: t.table,
-          column: t.kind === "column" ? t.column : null,
-        }))
-      : [],
-    inPredicates:
-      op.type === "keepIn"
-        ? op.inPredicates.map((p) => ({
-            table: p.table,
-            column: p.column,
-            varName: p.varName,
-            varColumn: p.varColumn,
-          }))
-        : [],
-    inheritContext: op.type === "inherit" ? op.inheritContext : null,
-    relationshipName: op.type === "useRelationship" ? op.relationshipName : null,
-  };
-}
-
-function isOpComplete(op: ContextOpDraft): boolean {
-  switch (op.type) {
-    case "keep":
-      return op.filters.length > 0 && op.filters.every(isFilterDraftComplete);
-    case "keepIn":
-      return (
-        op.inPredicates.length > 0 &&
-        op.inPredicates.every(
-          (p) => p.table && p.column && p.varName && p.varColumn.trim() !== "",
-        )
-      );
-    case "clear":
-    case "clearInner":
-    case "clearOuter":
-      return (
-        op.clearTargets.length > 0 &&
-        op.clearTargets.every((t) => t.table && (t.kind === "table" || t.column))
-      );
-    case "inherit":
-      return op.inheritContext !== "";
-    case "useRelationship":
-      return op.relationshipName !== "";
-    default:
-      return true; // reset / resetInner / resetOuter
-  }
-}
-
-// ============================================================================
-// Context add/edit modal
-// ============================================================================
-
-function ContextModal({
+function ContextEditorModal({
   connectionId,
   overview,
   original,
@@ -244,310 +132,112 @@ function ContextModal({
   onSaved: (overview: ModelOverview) => void;
 }): React.ReactElement {
   const [name, setName] = useState(original?.name ?? "");
-  const [ops, setOps] = useState<ContextOpDraft[]>(
-    original && original.operations.length > 0
-      ? original.operations.map(opDtoToDraft)
-      : [emptyOpDraft()],
-  );
-  const [busy, setBusy] = useState(false);
+  const [expression, setExpression] = useState(original?.expression ?? "");
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const workspaceRef = useRef<ExpressionWorkspaceHandle>(null);
 
-  const columnsOf = (t: string): string[] =>
-    overview.tables.find((x) => x.name === t)?.columns.map((c) => c.name) ?? [];
-
-  const updateOp = (index: number, patch: Partial<ContextOpDraft>) =>
-    setOps((os) => os.map((o, i) => (i === index ? { ...o, ...patch } : o)));
-
-  const canSave = name.trim() !== "" && ops.length > 0 && ops.every(isOpComplete);
-
-  const save = async () => {
-    setBusy(true);
+  const handleValidate = useCallback(async () => {
     setError(null);
+    setStatus(null);
+    try {
+      const result = await biModelValidateContext(
+        connectionId,
+        name,
+        expression,
+        original?.name ?? null,
+      );
+      if (result.ok) {
+        workspaceRef.current?.setMarker(null, null);
+        setStatus("Context definition is valid.");
+      } else {
+        workspaceRef.current?.setMarker(result.position, result.message);
+        setError(result.message ?? "Invalid context definition");
+      }
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }, [connectionId, name, expression, original]);
+
+  const handleSave = useCallback(async () => {
+    setError(null);
+    setStatus(null);
+    setBusy(true);
     try {
       onSaved(
         await biModelUpsertContext({
           connectionId,
           originalName: original?.name ?? null,
           name: name.trim(),
-          operations: ops.map(opDraftToDto),
+          expression,
         }),
       );
     } catch (err: unknown) {
       setError(String(err));
       setBusy(false);
     }
-  };
+  }, [connectionId, original, name, expression, onSaved]);
 
   return (
     <Modal
       title={original ? `Edit Context: ${original.name}` : "New Context"}
-      width={820}
+      width={1280}
       onClose={onClose}
       footer={
         <>
           <button style={styles.btn} onClick={onClose}>
             Cancel
           </button>
-          <button style={styles.primaryBtn} disabled={busy || !canSave} onClick={() => void save()}>
-            {busy ? "Saving…" : "Save"}
+          <button style={styles.btn} onClick={() => void handleValidate()}>
+            Validate
+          </button>
+          <button
+            style={styles.primaryBtn}
+            onClick={() => void handleSave()}
+            disabled={busy || !name.trim() || !expression.trim() || !connectionId}
+          >
+            {busy ? "Saving…" : "Save Context"}
           </button>
         </>
       }
     >
+      <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>
+        A context is a reusable filter transformation. Measures apply it by name —
+        SUM(Sales[amount], {name.trim() || "ctx_name"}) — or via USING(). Compose contexts by
+        naming another context as an operation.
+      </div>
+
       <Field label="Name">
         <input
-          style={styles.input}
+          style={{ ...styles.input, maxWidth: 340 }}
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="bikes_2024"
         />
       </Field>
 
-      <div style={styles.field}>
-        <label style={styles.label}>Operations (applied in order)</label>
-        {ops.map((op, i) => (
-          <div
-            key={i}
-            style={{ border: "1px solid #e2e2e2", borderRadius: 4, padding: 8, marginBottom: 8 }}
-          >
-            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-              <select
-                style={{ ...styles.input, flex: 1 }}
-                value={op.type}
-                onChange={(e) => updateOp(i, { type: e.target.value })}
-              >
-                {OP_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                style={styles.smallBtn}
-                onClick={() => setOps((os) => os.filter((_, j) => j !== i))}
-              >
-                Remove op
-              </button>
-            </div>
+      <ExpressionWorkspace
+        ref={workspaceRef}
+        overview={overview}
+        value={expression}
+        onChange={setExpression}
+        label="Definition"
+        hint="Comma-separated operations: KEEP, CLEAR, CLEAR_INNER/OUTER, RESET(_INNER/_OUTER), USERELATIONSHIP, or a context name to inherit."
+        hintTitle={
+          'Examples:\n' +
+          'KEEP(dim_date, dim_date[year] = 2024) — add filters (values may be USERNAME() / CUSTOMDATA())\n' +
+          'KEEP(fact, fact[productid] IN premium[id]) — membership in a table variable (also NOT IN)\n' +
+          'CLEAR(Sales[region]), CLEAR(dim_date) — remove filters on a column / table\n' +
+          'CLEAR_INNER(...) / CLEAR_OUTER(...) — clear only group-by / only query-level filters\n' +
+          'RESET(), RESET_INNER(), RESET_OUTER() — remove all filters for the scope\n' +
+          'USERELATIONSHIP("ShipDate") — activate an inactive relationship\n' +
+          'other_context — inherit all of another context’s operations'
+        }
+      />
 
-            {op.type === "keep" && (
-              <FilterPredicateList
-                overview={overview}
-                filters={op.filters}
-                onChange={(filters) => updateOp(i, { filters })}
-                allowDynamic
-                emptyHint="No filters."
-              />
-            )}
-
-            {op.type === "keepIn" && (
-              <InPredicateEditor
-                overview={overview}
-                preds={op.inPredicates}
-                onChange={(inPredicates) => updateOp(i, { inPredicates })}
-              />
-            )}
-
-            {CLEAR_TYPES.has(op.type) && (
-              <ClearTargetEditor
-                overview={overview}
-                targets={op.clearTargets}
-                columnsOf={columnsOf}
-                onChange={(clearTargets) => updateOp(i, { clearTargets })}
-              />
-            )}
-
-            {op.type === "inherit" && (
-              <select
-                style={styles.input}
-                value={op.inheritContext}
-                onChange={(e) => updateOp(i, { inheritContext: e.target.value })}
-              >
-                <option value="">(context to inherit)</option>
-                {overview.contexts
-                  .filter((c) => c.name !== original?.name)
-                  .map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-              </select>
-            )}
-
-            {op.type === "useRelationship" && (
-              <select
-                style={styles.input}
-                value={op.relationshipName}
-                onChange={(e) => updateOp(i, { relationshipName: e.target.value })}
-              >
-                <option value="">(relationship to activate)</option>
-                {overview.relationships.map((r) => (
-                  <option key={r.name} value={r.name}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {(op.type === "reset" || op.type === "resetInner" || op.type === "resetOuter") && (
-              <div style={styles.hint}>Removes all filters for this scope — no operands.</div>
-            )}
-          </div>
-        ))}
-        <button style={styles.smallBtn} onClick={() => setOps((os) => [...os, emptyOpDraft()])}>
-          Add operation
-        </button>
-      </div>
       {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {status && <div style={{ color: "green", marginBottom: 8, fontSize: 12 }}>{status}</div>}
     </Modal>
-  );
-}
-
-function ClearTargetEditor({
-  overview,
-  targets,
-  columnsOf,
-  onChange,
-}: {
-  overview: ModelOverview;
-  targets: ClearTargetDraft[];
-  columnsOf: (t: string) => string[];
-  onChange: (targets: ClearTargetDraft[]) => void;
-}): React.ReactElement {
-  const update = (i: number, patch: Partial<ClearTargetDraft>) =>
-    onChange(targets.map((t, j) => (j === i ? { ...t, ...patch } : t)));
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {targets.length === 0 && <div style={styles.hint}>No targets.</div>}
-      {targets.map((t, i) => (
-        <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <select
-            style={{ ...styles.input, width: 90, flexShrink: 0 }}
-            value={t.kind}
-            onChange={(e) => update(i, { kind: e.target.value, column: "" })}
-          >
-            <option value="column">column</option>
-            <option value="table">table</option>
-          </select>
-          <select
-            style={{ ...styles.input, flex: 1, minWidth: 0 }}
-            value={t.table}
-            onChange={(e) => update(i, { table: e.target.value, column: "" })}
-          >
-            <option value="">(table)</option>
-            {overview.tables.map((x) => (
-              <option key={x.name} value={x.name}>
-                {x.name}
-              </option>
-            ))}
-          </select>
-          {t.kind === "column" && (
-            <select
-              style={{ ...styles.input, flex: 1, minWidth: 0 }}
-              value={t.column}
-              onChange={(e) => update(i, { column: e.target.value })}
-            >
-              <option value="">(column)</option>
-              {columnsOf(t.table).map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          )}
-          <button style={styles.smallBtn} onClick={() => onChange(targets.filter((_, j) => j !== i))}>
-            Remove
-          </button>
-        </div>
-      ))}
-      <div>
-        <button
-          style={styles.smallBtn}
-          onClick={() => onChange([...targets, { kind: "column", table: "", column: "" }])}
-        >
-          Add target
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function InPredicateEditor({
-  overview,
-  preds,
-  onChange,
-}: {
-  overview: ModelOverview;
-  preds: InPredicateDraft[];
-  onChange: (preds: InPredicateDraft[]) => void;
-}): React.ReactElement {
-  const columnsOf = (t: string): string[] =>
-    overview.tables.find((x) => x.name === t)?.columns.map((c) => c.name) ?? [];
-  const update = (i: number, patch: Partial<InPredicateDraft>) =>
-    onChange(preds.map((p, j) => (j === i ? { ...p, ...patch } : p)));
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {preds.length === 0 && <div style={styles.hint}>No membership predicates.</div>}
-      {preds.map((p, i) => (
-        <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <select
-            style={{ ...styles.input, flex: 1, minWidth: 0 }}
-            value={p.table}
-            onChange={(e) => update(i, { table: e.target.value, column: "" })}
-          >
-            <option value="">(table)</option>
-            {overview.tables.map((x) => (
-              <option key={x.name} value={x.name}>
-                {x.name}
-              </option>
-            ))}
-          </select>
-          <select
-            style={{ ...styles.input, flex: 1, minWidth: 0 }}
-            value={p.column}
-            onChange={(e) => update(i, { column: e.target.value })}
-          >
-            <option value="">(column)</option>
-            {columnsOf(p.table).map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <span style={styles.muted}>in</span>
-          <select
-            style={{ ...styles.input, flex: 1, minWidth: 0 }}
-            value={p.varName}
-            onChange={(e) => update(i, { varName: e.target.value })}
-          >
-            <option value="">(variable)</option>
-            {overview.tableVariables.map((v) => (
-              <option key={v.name} value={v.name}>
-                {v.name}
-              </option>
-            ))}
-          </select>
-          <input
-            style={{ ...styles.input, flex: 1, minWidth: 0 }}
-            value={p.varColumn}
-            onChange={(e) => update(i, { varColumn: e.target.value })}
-            placeholder="var column"
-          />
-          <button style={styles.smallBtn} onClick={() => onChange(preds.filter((_, j) => j !== i))}>
-            Remove
-          </button>
-        </div>
-      ))}
-      <div>
-        <button
-          style={styles.smallBtn}
-          onClick={() =>
-            onChange([...preds, { table: "", column: "", varName: "", varColumn: "" }])
-          }
-        >
-          Add membership
-        </button>
-      </div>
-    </div>
   );
 }

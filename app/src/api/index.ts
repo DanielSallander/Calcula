@@ -439,6 +439,7 @@ export {
   biModelUpsertScriptFunction,
   biModelDeleteScriptFunction,
   biModelUpsertContext,
+  biModelValidateContext,
   biModelDeleteContext,
   biModelDeleteContextColumn,
   biModelSetDateTable,
