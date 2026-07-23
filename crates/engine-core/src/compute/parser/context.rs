@@ -305,8 +305,13 @@ impl Parser {
         Ok(FilterPredicate::new(table, column, operator, value))
     }
 
-    /// Parse a single context operation (KEEP, CLEAR, RESET, or bare name).
-    pub(super) fn parse_context_op(&mut self) -> EngineResult<ContextOp> {
+    /// Parse a single context operation (KEEP, CLEAR, RESET, or bare name)
+    /// within a context DEFINITION, appending the result to `ops`.
+    ///
+    /// Takes an out-vec rather than returning one op because a single
+    /// `KEEP(...)` may mix plain filters and IN-memberships, which map to two
+    /// distinct [`ContextOp`] variants (`Keep` + `KeepIn`).
+    pub(super) fn parse_context_op(&mut self, ops: &mut Vec<ContextOp>) -> EngineResult<()> {
         let name = match self.peek().cloned() {
             Some(Token::Ident(s)) => s,
             other => {
@@ -317,7 +322,7 @@ impl Parser {
         };
 
         let upper = name.to_uppercase();
-        match upper.as_str() {
+        let op = match upper.as_str() {
             "KEEP" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
@@ -331,52 +336,65 @@ impl Parser {
                     }
                 };
                 let mut filters = Vec::new();
+                let mut in_preds = Vec::new();
                 while self.peek() == Some(&Token::Comma) {
                     self.advance()?;
-                    let filter = self.parse_filter_predicate()?;
-                    filters.push(filter);
+                    self.parse_context_def_keep_item(&mut filters, &mut in_preds)?;
                 }
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::Keep(filters))
+                // A mixed KEEP emits Keep before KeepIn — the order the
+                // serializer also uses, so definitions round-trip stably.
+                let empty = filters.is_empty() && in_preds.is_empty();
+                if !filters.is_empty() {
+                    ops.push(ContextOp::Keep(filters));
+                }
+                if !in_preds.is_empty() {
+                    ops.push(ContextOp::KeepIn(in_preds));
+                }
+                if empty {
+                    // KEEP(table) with no predicates — an explicit no-op.
+                    ops.push(ContextOp::Keep(Vec::new()));
+                }
+                return Ok(());
             }
             "CLEAR" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 let targets = self.parse_clear_targets()?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::Clear(targets))
+                ContextOp::Clear(targets)
             }
             "CLEAR_INNER" | "CLEARINNER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 let targets = self.parse_clear_targets()?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::ClearInner(targets))
+                ContextOp::ClearInner(targets)
             }
             "CLEAR_OUTER" | "CLEAROUTER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 let targets = self.parse_clear_targets()?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::ClearOuter(targets))
+                ContextOp::ClearOuter(targets)
             }
             "RESET" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::Reset)
+                ContextOp::Reset
             }
             "RESET_INNER" | "RESETINNER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::ResetInner)
+                ContextOp::ResetInner
             }
             "RESET_OUTER" | "RESETOUTER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::ResetOuter)
+                ContextOp::ResetOuter
             }
             "USERELATIONSHIP" => {
                 self.advance()?;
@@ -390,14 +408,135 @@ impl Parser {
                     }
                 };
                 self.expect(&Token::RParen)?;
-                Ok(ContextOp::UseRelationship(rel_name))
+                ContextOp::UseRelationship(rel_name)
             }
             _ => {
                 // Bare name — inherit from another context.
                 self.advance()?;
-                Ok(ContextOp::Inherit(name))
+                ContextOp::Inherit(name)
             }
+        };
+        ops.push(op);
+        Ok(())
+    }
+
+    /// Parse one comma-separated item inside a context-definition `KEEP(...)`:
+    /// either a filter predicate (`table[col] op value` where the value may
+    /// also be the dynamic `USERNAME()` / `CUSTOMDATA()`), or an IN-membership
+    /// (`table[col] IN var[col]`, optionally `NOT IN`).
+    fn parse_context_def_keep_item(
+        &mut self,
+        filters: &mut Vec<FilterPredicate>,
+        in_preds: &mut Vec<crate::compute::expression::InPredicate>,
+    ) -> EngineResult<()> {
+        use crate::compute::expression::InPredicate;
+
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("KEEP: expected table[column], got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("KEEP: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+
+        // IN / NOT IN membership in a table variable.
+        let negated = if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("NOT"))
+        {
+            self.advance()?;
+            if !matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IN")) {
+                return Err(self.parse_err("expected IN after NOT"));
+            }
+            Some(true)
+        } else if matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("IN")) {
+            Some(false)
+        } else {
+            None
+        };
+        if let Some(negated) = negated {
+            self.advance()?; // consume IN
+            let var_name = match self.advance()?.clone() {
+                Token::Ident(s) => s,
+                tok => {
+                    return Err(
+                        self.parse_err_prev(format!("IN: expected variable name, got {tok:?}"))
+                    );
+                }
+            };
+            self.expect(&Token::LBracket)?;
+            let var_column = match self.advance()?.clone() {
+                Token::Ident(s) => s,
+                tok => {
+                    return Err(
+                        self.parse_err_prev(format!("IN: expected column name, got {tok:?}"))
+                    );
+                }
+            };
+            self.expect(&Token::RBracket)?;
+            in_preds
+                .push(InPredicate::new(table, column, var_name, var_column).with_negated(negated));
+            return Ok(());
         }
+
+        // Comparison filter.
+        let operator = match self.advance()?.clone() {
+            Token::Eq => ComparisonOp::Equal,
+            Token::Neq => ComparisonOp::NotEqual,
+            Token::Gt => ComparisonOp::GreaterThan,
+            Token::Gte => ComparisonOp::GreaterThanOrEqual,
+            Token::Lt => ComparisonOp::LessThan,
+            Token::Lte => ComparisonOp::LessThanOrEqual,
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "KEEP: expected comparison operator or IN, got {tok:?}"
+                )));
+            }
+        };
+
+        let filter = match self.advance()?.clone() {
+            // Dynamic RLS-style values: USERNAME() / CUSTOMDATA().
+            Token::Ident(s)
+                if s.eq_ignore_ascii_case("USERNAME") && self.peek() == Some(&Token::LParen) =>
+            {
+                self.advance()?; // consume '('
+                self.expect(&Token::RParen)?;
+                FilterPredicate::username(table, column, operator)
+            }
+            Token::Ident(s)
+                if s.eq_ignore_ascii_case("CUSTOMDATA") && self.peek() == Some(&Token::LParen) =>
+            {
+                self.advance()?; // consume '('
+                self.expect(&Token::RParen)?;
+                FilterPredicate::custom_data(table, column, operator)
+            }
+            Token::Number(n) => {
+                // Format without trailing .0 for integers.
+                let value = if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
+                    format!("{}", n as i64)
+                } else {
+                    format!("{n}")
+                };
+                FilterPredicate::new(table, column, operator, value)
+            }
+            Token::StringLit(s) | Token::Ident(s) => {
+                FilterPredicate::new(table, column, operator, s)
+            }
+            tok => {
+                return Err(self.parse_err_prev(format!("KEEP: expected value, got {tok:?}")));
+            }
+        };
+        filters.push(filter);
+        Ok(())
     }
 }
 
@@ -831,5 +970,175 @@ mod tests {
             }
             _ => panic!("expected Keep"),
         }
+    }
+
+    #[test]
+    fn parse_context_keep_in_membership() {
+        let ctx = parse_context(
+            "premium_only",
+            "KEEP(fact_sales, fact_sales[productid] IN premium[id])",
+        )
+        .unwrap();
+        assert_eq!(ctx.operations().len(), 1);
+        match &ctx.operations()[0] {
+            ContextOp::KeepIn(preds) => {
+                assert_eq!(preds.len(), 1);
+                assert_eq!(preds[0].table, "fact_sales");
+                assert_eq!(preds[0].column, "productid");
+                assert_eq!(preds[0].var_name, "premium");
+                assert_eq!(preds[0].var_column, "id");
+                assert!(!preds[0].negated);
+            }
+            _ => panic!("expected KeepIn"),
+        }
+    }
+
+    #[test]
+    fn parse_context_keep_not_in_membership() {
+        let ctx = parse_context(
+            "non_premium",
+            "KEEP(fact_sales, fact_sales[productid] NOT IN premium[id])",
+        )
+        .unwrap();
+        match &ctx.operations()[0] {
+            ContextOp::KeepIn(preds) => assert!(preds[0].negated),
+            _ => panic!("expected KeepIn"),
+        }
+    }
+
+    #[test]
+    fn parse_context_keep_mixed_filters_and_in() {
+        // One KEEP mixing a comparison filter and an IN membership yields a
+        // Keep op followed by a KeepIn op.
+        let ctx = parse_context(
+            "mixed",
+            r#"KEEP(fact_sales, fact_sales[year] = 2024, fact_sales[productid] IN premium[id])"#,
+        )
+        .unwrap();
+        assert_eq!(ctx.operations().len(), 2);
+        assert!(matches!(&ctx.operations()[0], ContextOp::Keep(f) if f.len() == 1));
+        assert!(matches!(&ctx.operations()[1], ContextOp::KeepIn(p) if p.len() == 1));
+    }
+
+    #[test]
+    fn parse_context_keep_dynamic_username() {
+        let ctx = parse_context(
+            "own_rows",
+            "KEEP(dim_user, dim_user[login] = USERNAME())",
+        )
+        .unwrap();
+        match &ctx.operations()[0] {
+            ContextOp::Keep(filters) => {
+                assert_eq!(
+                    filters[0].dynamic,
+                    Some(crate::compute::expression::DynamicValue::Username)
+                );
+            }
+            _ => panic!("expected Keep"),
+        }
+    }
+
+    #[test]
+    fn parse_context_keep_dynamic_customdata() {
+        let ctx = parse_context(
+            "tenant_rows",
+            "KEEP(dim_tenant, dim_tenant[key] = CUSTOMDATA())",
+        )
+        .unwrap();
+        match &ctx.operations()[0] {
+            ContextOp::Keep(filters) => {
+                assert_eq!(
+                    filters[0].dynamic,
+                    Some(crate::compute::expression::DynamicValue::CustomData)
+                );
+            }
+            _ => panic!("expected Keep"),
+        }
+    }
+
+    #[test]
+    fn parse_context_userelationship() {
+        let ctx = parse_context("ship_dates", r#"USERELATIONSHIP("ShipDate")"#).unwrap();
+        assert_eq!(
+            ctx.operations()[0],
+            ContextOp::UseRelationship("ShipDate".into())
+        );
+    }
+
+    #[test]
+    fn context_definition_to_text_round_trips() {
+        use crate::compute::expression::InPredicate;
+        use crate::model::context::ClearTarget;
+
+        let ctx = ContextDefinition::new(
+            "everything",
+            vec![
+                ContextOp::Inherit("ctx_base".into()),
+                ContextOp::Keep(vec![
+                    FilterPredicate::new("dim_product", "categoryname", ComparisonOp::Equal, "Bikes"),
+                    FilterPredicate::new("dim_date", "year", ComparisonOp::GreaterThanOrEqual, "2024"),
+                    FilterPredicate::username("dim_user", "login", ComparisonOp::Equal),
+                    FilterPredicate::custom_data("dim_tenant", "key", ComparisonOp::Equal),
+                ]),
+                ContextOp::KeepIn(vec![
+                    InPredicate::new("fact_sales", "productid", "premium", "id"),
+                    InPredicate::new("fact_sales", "customerid", "vips", "id").with_negated(true),
+                ]),
+                ContextOp::Clear(vec![
+                    ClearTarget::Column {
+                        table: "dim_date".into(),
+                        column: "year".into(),
+                    },
+                    ClearTarget::Table("dim_geo".into()),
+                ]),
+                ContextOp::ClearInner(vec![ClearTarget::Table("dim_date".into())]),
+                ContextOp::ClearOuter(vec![ClearTarget::Column {
+                    table: "fact_sales".into(),
+                    column: "region".into(),
+                }]),
+                ContextOp::Reset,
+                ContextOp::ResetInner,
+                ContextOp::ResetOuter,
+                ContextOp::UseRelationship("ShipDate".into()),
+            ],
+        );
+
+        let text = ctx.to_text();
+        let reparsed = parse_context("everything", &text)
+            .unwrap_or_else(|e| panic!("serialized text failed to parse: {e}\ntext: {text}"));
+        assert_eq!(&ctx, &reparsed, "round-trip mismatch for: {text}");
+    }
+
+    #[test]
+    fn context_to_text_quotes_strings_and_bares_numbers() {
+        let ctx = ContextDefinition::new(
+            "vals",
+            vec![ContextOp::Keep(vec![
+                FilterPredicate::new("t", "a", ComparisonOp::Equal, "Bikes"),
+                FilterPredicate::new("t", "b", ComparisonOp::Equal, "2024"),
+                FilterPredicate::new("t", "c", ComparisonOp::Equal, "1.5"),
+                // Not the canonical number form — must stay quoted to survive.
+                FilterPredicate::new("t", "d", ComparisonOp::Equal, "007"),
+            ])],
+        );
+        let text = ctx.to_text();
+        assert_eq!(
+            text,
+            r#"KEEP(t, t[a] = "Bikes", t[b] = 2024, t[c] = 1.5, t[d] = "007")"#
+        );
+        assert_eq!(parse_context("vals", &text).unwrap(), ctx);
+    }
+
+    #[test]
+    fn context_to_text_drops_empty_ops() {
+        let ctx = ContextDefinition::new(
+            "sparse",
+            vec![
+                ContextOp::Keep(Vec::new()),
+                ContextOp::Reset,
+                ContextOp::Clear(Vec::new()),
+            ],
+        );
+        assert_eq!(ctx.to_text(), "RESET()");
     }
 }

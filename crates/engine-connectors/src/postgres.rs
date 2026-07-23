@@ -73,11 +73,33 @@ impl PostgresConnector {
     ///   `require` (TLS mandatory, server certificate not verified).
     pub async fn connect(target: ConnectionTarget, auth: AuthMethod) -> ConnectorResult<Self> {
         let options = Self::build_connect_options(&target, auth)?;
-        let pool = PgPoolOptions::new()
+
+        // Ask the server for untranslated (ASCII) diagnostics via the startup
+        // packet: on Windows servers whose lc_messages locale is not UTF-8
+        // (e.g. "Swedish_Sweden.1252"), errors raised during connection setup
+        // otherwise arrive in a non-UTF-8 encoding the protocol layer cannot
+        // decode — masking the REAL problem ("password authentication failed",
+        // "database … does not exist", "role … does not exist") behind
+        // "Postgres returned a non-UTF-8 string for its error message".
+        // lc_messages is a USERSET GUC, so plain roles may set it.
+        let with_ascii_diagnostics = options.clone().options([("lc_messages", "C")]);
+        let pool = match PgPoolOptions::new()
             .max_connections(DEFAULT_MAX_CONNECTIONS)
-            .connect_with(options)
+            .connect_with(with_ascii_diagnostics)
             .await
-            .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
+        {
+            Ok(pool) => pool,
+            // Some poolers (e.g. PgBouncer without ignore_startup_parameters)
+            // reject the `options` startup parameter — retry without it.
+            Err(e) if e.to_string().contains("unsupported startup parameter") => {
+                PgPoolOptions::new()
+                    .max_connections(DEFAULT_MAX_CONNECTIONS)
+                    .connect_with(options)
+                    .await
+                    .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?
+            }
+            Err(e) => return Err(ConnectorError::ConnectionFailed(e.to_string())),
+        };
         Ok(Self {
             pool,
             temp_table_counter: AtomicU64::new(0),

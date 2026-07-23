@@ -749,12 +749,27 @@ CONTEXT ctx_no_outer_region = CLEAR_OUTER(Sales[region])
 CONTEXT ctx_derived = ctx_bikes, KEEP(dim_date, dim_date[year] = 2024)
 ```
 
+```
+CONTEXT ctx_premium = KEEP(fact_sales, fact_sales[productid] IN premium[id])
+CONTEXT ctx_own_rows = KEEP(dim_user, dim_user[login] = USERNAME())
+CONTEXT ctx_ship = USERELATIONSHIP("ShipDate")
+```
+
 Context operations available in definitions:
-- `KEEP(table, predicates...)` — add filter conditions
+- `KEEP(table, predicates...)` — add filter conditions. Each predicate is
+  `table[column] op value` — the value may also be the dynamic `USERNAME()` /
+  `CUSTOMDATA()` — or an IN-membership `table[column] IN var[column]`
+  (`NOT IN` negates). A KEEP mixing comparisons and memberships yields a
+  `Keep` operation followed by a `KeepIn` operation
 - `CLEAR(table)` / `CLEAR(table[column])` — remove filters
 - `CLEAR_INNER(...)` / `CLEAR_OUTER(...)` — source-specific clearing
 - `RESET()` / `RESET_INNER()` / `RESET_OUTER()` — remove all filters
+- `USERELATIONSHIP("name")` — activate an inactive relationship
 - Bare name (e.g., `ctx_2024`) — inherit all operations from another context
+
+The text form is canonical: `ContextDefinition::to_text()` renders a
+definition back into this syntax (used by hosts to show and edit contexts as
+expressions), and `parse_context()` round-trips it.
 
 **Using contexts in measures (bare name reference):**
 ```

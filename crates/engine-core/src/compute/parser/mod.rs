@@ -554,12 +554,20 @@ pub fn parse_table_variable(input: &str) -> EngineResult<(String, Vec<FilterPred
 /// The input is the body after `CONTEXT name =`. It consists of
 /// comma-separated context operations:
 ///
-/// - `KEEP(table, filter1, filter2, ...)` — add filter predicates
+/// - `KEEP(table, filter1, filter2, ...)` — add filter predicates; each item
+///   is `table[column] op value` (value may be the dynamic `USERNAME()` /
+///   `CUSTOMDATA()`) or an IN-membership `table[column] IN var[column]`
+///   (also `NOT IN`); a KEEP mixing both forms yields a `Keep` and a `KeepIn`
+///   operation
 /// - `CLEAR(table)` / `CLEAR(table[column])` — remove filters on dimensions
 /// - `CLEAR_INNER(...)` / `CLEAR_OUTER(...)` — source-specific clear
 /// - `RESET()` — remove all filters
 /// - `RESET_INNER()` / `RESET_OUTER()` — source-specific reset
+/// - `USERELATIONSHIP("name")` — activate an inactive relationship
 /// - bare name — inherit from another named context
+///
+/// The inverse is [`ContextDefinition::to_text`](crate::model::context::ContextDefinition::to_text),
+/// which renders a definition back into this syntax.
 ///
 /// # Example
 ///
@@ -598,8 +606,7 @@ pub fn parse_context(name: &str, input: &str) -> EngineResult<ContextDefinition>
     let mut ops = Vec::new();
 
     loop {
-        let op = parser.parse_context_op()?;
-        ops.push(op);
+        parser.parse_context_op(&mut ops)?;
         if parser.peek() != Some(&Token::Comma) {
             break;
         }

@@ -558,6 +558,12 @@ let ctx = parse_context("ctx_bikes", r#"KEEP(dim_product, dim_product[categoryna
 
 // Composed context referencing another context
 let ctx = parse_context("ctx_bikes_2024", r#"ctx_2024, KEEP(dim_product, dim_product[categoryname] = "Bikes")"#)?;
+
+// KEEP also accepts IN / NOT IN memberships and dynamic USERNAME()/CUSTOMDATA() values
+let ctx = parse_context("ctx_premium", "KEEP(fact, fact[productid] IN premium[id])")?;
+
+// The inverse: render a definition back to canonical text (round-trips)
+let text = ctx.to_text();
 ```
 
 ### Measure
