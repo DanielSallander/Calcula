@@ -70,8 +70,9 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "scan_extension_directory",
     "uninstall_extension",
   ],
-  // Starting the local MCP server (exposes the live workbook to external clients).
-  mcpServer: ["mcp_start", "mcp_stop", "mcp_set_port", "mcp_status"],
+  // Starting the local MCP server (exposes the live workbook to external
+  // clients) and widening the AI tool-surface access ceiling.
+  mcpServer: ["mcp_start", "mcp_stop", "mcp_set_port", "mcp_status", "set_mcp_access_level"],
   // Model-scoped BI data reads over the workbook's connections. The script/
   // extension broker routes cap.bi.query -> bi_query / bi_get_connections behind
   // the declared-capability CEILING + JIT consent (broker.ts checkPolicy). A

@@ -4427,6 +4427,8 @@ pub fn run() {
             scripting::run_script,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
+            scripting::get_mcp_access_level,
+            scripting::set_mcp_access_level,
             scripting::script_execution_status,
             scripting::grant_script_session_approval,
             scripting::list_scripts,

@@ -105,7 +105,14 @@ pub fn write_cell(
     let value_literal = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
     let script = format!("Calcula.setCellValue({}, {}, {});", row, col, value_literal);
 
-    execute_script(handle, &script)?;
+    // Cell writes are the "mutate" tier — the generated snippet is app-authored,
+    // not arbitrary agent code, so the "script" ceiling is not required.
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
+    run_engine_script(handle, &script)?;
     Ok(format!("Set {}{} = {}", col_letter(col), row + 1, value))
 }
 
@@ -126,7 +133,13 @@ pub fn write_cell_range(
         ));
     }
 
-    execute_script(handle, &script)?;
+    // Mutate tier (see write_cell): app-authored write snippet, not agent code.
+    let script_state = handle.state::<crate::scripting::types::ScriptState>();
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
+    run_engine_script(handle, &script)?;
     Ok(format!("Set {} cell(s)", cells.len()))
 }
 
@@ -241,11 +254,15 @@ pub fn apply_cell_formatting(
     handle: &AppHandle,
     params: &ApplyFormattingParams,
 ) -> Result<String, String> {
-    // External MCP/AI clients are write operations too — gate on Script Security,
-    // exactly like execute_script / create_chart_from_spec ("prompt" without a
-    // session approval refuses; the MCP path is headless).
+    // External MCP/AI clients are write operations too — gate on the AI access
+    // ceiling + Script Security, exactly like execute_script /
+    // create_chart_from_spec ("prompt" without a session approval refuses; the
+    // MCP path is headless).
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
 
     let state = handle.state::<AppState>();
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -339,14 +356,33 @@ pub fn apply_cell_formatting(
     }
     let _ = handle.emit("grid:refresh", ());
 
-    Ok(format!(
-        "Applied formatting to {} cell(s) ({}{}:{}{})",
-        count,
+    let range_label = format!(
+        "{}{}:{}{}",
         col_letter(params.start_col),
         params.start_row + 1,
         col_letter(params.end_col),
         params.end_row + 1
-    ))
+    );
+    crate::scripting::commands::record_mcp_tool_action(
+        &state,
+        "apply_formatting",
+        &format!(
+            "An AI tool applied formatting to {} cell(s) ({}) on sheet {}",
+            count,
+            range_label,
+            active_sheet + 1
+        ),
+        vec![
+            ("sheet", serde_json::json!(active_sheet)),
+            ("cellsModified", serde_json::json!(count)),
+            ("firstRow", serde_json::json!(params.start_row)),
+            ("lastRow", serde_json::json!(params.end_row)),
+            ("firstCol", serde_json::json!(params.start_col)),
+            ("lastCol", serde_json::json!(params.end_col)),
+        ],
+    );
+
+    Ok(format!("Applied formatting to {} cell(s) ({})", count, range_label))
 }
 
 // ============================================================================
@@ -617,9 +653,13 @@ pub fn create_chart_from_spec(
     sheet_index: Option<u32>,
     name: Option<&str>,
 ) -> Result<String, String> {
-    // Mutation -> same gate as run_script (headless 'prompt'/'disabled' refuses).
+    // Mutation -> AI access ceiling + same gate as run_script (headless
+    // 'prompt'/'disabled' refuses).
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
 
     validate_chart_spec_core(spec)?;
 
@@ -658,6 +698,21 @@ pub fn create_chart_from_spec(
     // window "charts:refresh" handler).
     let _ = handle.emit("charts:refresh", ());
 
+    crate::scripting::commands::record_mcp_tool_action(
+        &state,
+        "create_chart_from_spec",
+        &format!(
+            "An AI tool created chart \"{}\" on sheet {}",
+            display_name,
+            sheet + 1
+        ),
+        vec![
+            ("chartId", serde_json::json!(chart_id.to_string())),
+            ("name", serde_json::json!(display_name)),
+            ("sheet", serde_json::json!(sheet)),
+        ],
+    );
+
     Ok(format!(
         "Created chart id={} name=\"{}\" on sheet {} ({} mark)",
         chart_id,
@@ -678,9 +733,13 @@ pub fn create_named_range(
     sheet_index: Option<usize>,
     comment: Option<String>,
 ) -> Result<String, String> {
-    // Mutation -> same gate as run_script (headless 'prompt'/'disabled' refuses).
+    // Mutation -> AI access ceiling + same gate as run_script (headless
+    // 'prompt'/'disabled' refuses).
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
 
     // The command validates the name + range, inserts, and records an undo entry.
     let result = crate::named_ranges::create_named_range(
@@ -701,6 +760,17 @@ pub fn create_named_range(
     // DefinedNames extension bridges this Tauri event to NAMED_RANGES_CHANGED.
     let _ = handle.emit("named-ranges:refresh", ());
 
+    crate::scripting::commands::record_mcp_tool_action(
+        &handle.state::<AppState>(),
+        "create_named_range",
+        &format!("An AI tool created named range '{}' -> {}", name, refers_to),
+        vec![
+            ("name", serde_json::json!(name)),
+            ("refersTo", serde_json::json!(refers_to)),
+            ("sheetIndex", serde_json::json!(sheet_index)),
+        ],
+    );
+
     Ok(format!("Created named range '{}' -> {}", name, refers_to))
 }
 
@@ -719,7 +789,10 @@ pub fn create_table(
     name: Option<&str>,
 ) -> Result<String, String> {
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
 
     let params = crate::tables::CreateTableParams {
         name: name.unwrap_or("").to_string(), // empty => auto-generated "Table1"...
@@ -741,14 +814,28 @@ pub fn create_table(
     let _ = handle.emit("tables:refresh", ());
 
     let table_name = result.table.map(|t| t.name).unwrap_or_else(|| "table".to_string());
-    Ok(format!(
-        "Created table \"{}\" over {}{}:{}{}",
-        table_name,
+    let range_label = format!(
+        "{}{}:{}{}",
         col_letter(start_col),
         start_row + 1,
         col_letter(end_col),
         end_row + 1,
-    ))
+    );
+    crate::scripting::commands::record_mcp_tool_action(
+        &handle.state::<AppState>(),
+        "create_table",
+        &format!("An AI tool created table \"{}\" over {}", table_name, range_label),
+        vec![
+            ("name", serde_json::json!(table_name)),
+            ("range", serde_json::json!(range_label)),
+            ("firstRow", serde_json::json!(start_row)),
+            ("lastRow", serde_json::json!(end_row)),
+            ("firstCol", serde_json::json!(start_col)),
+            ("lastCol", serde_json::json!(end_col)),
+        ],
+    );
+
+    Ok(format!("Created table \"{}\" over {}", table_name, range_label))
 }
 
 /// Map an aggregation string from the AI to the engine's AggregationType (v1 set).
@@ -784,7 +871,10 @@ pub fn create_pivot(
     name: Option<&str>,
 ) -> Result<String, String> {
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Mutate,
+    )?;
 
     if value_fields.is_empty() {
         return Err("create_pivot requires at least one value field (e.g. {field:\"Revenue\", aggregation:\"sum\"}).".to_string());
@@ -820,6 +910,24 @@ pub fn create_pivot(
     // extension bridges this Tauri event to its window "pivot:refresh".
     let _ = handle.emit("pivots:refresh", ());
 
+    crate::scripting::commands::record_mcp_tool_action(
+        &handle.state::<AppState>(),
+        "create_pivot",
+        &format!(
+            "An AI tool created pivot \"{}\" at {} from {}",
+            name.unwrap_or("PivotTable"),
+            destination_cell,
+            source_range,
+        ),
+        vec![
+            ("name", serde_json::json!(name.unwrap_or("PivotTable"))),
+            ("sourceRange", serde_json::json!(source_range)),
+            ("destinationCell", serde_json::json!(destination_cell)),
+            ("rowFieldCount", serde_json::json!(row_field_count)),
+            ("valueFieldCount", serde_json::json!(value_field_count)),
+        ],
+    );
+
     Ok(format!(
         "Created pivot \"{}\" at {} ({} output rows): {} row field(s), {} value field(s)",
         name.unwrap_or("PivotTable"),
@@ -835,12 +943,27 @@ pub fn execute_script(
     handle: &AppHandle,
     code: &str,
 ) -> Result<String, String> {
-    // External MCP clients are script execution too — same security gate.
+    // External MCP clients are script execution too — the AI access ceiling
+    // must allow "script" AND the same security gate as run_script applies.
     // ("prompt" without a session approval refuses: the MCP path is headless
     // and cannot show a confirmation; approve in-app or set level to enabled.)
     let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_script_security(&script_state)?;
+    crate::scripting::commands::check_mcp_access(
+        &script_state,
+        crate::scripting::commands::McpAccessTier::Script,
+    )?;
 
+    run_engine_script(handle, code)
+}
+
+/// Run a script through the engine WITHOUT a tier gate. Callers gate first:
+/// execute_script at the "script" tier; write_cell / write_cell_range at
+/// "mutate" (their generated Calcula.setCellValue/setRange snippets are
+/// app-authored cell writes, not arbitrary agent code).
+fn run_engine_script(
+    handle: &AppHandle,
+    code: &str,
+) -> Result<String, String> {
     let state = handle.state::<AppState>();
 
     // Clone data for isolated execution (same pattern as scripting/commands.rs)

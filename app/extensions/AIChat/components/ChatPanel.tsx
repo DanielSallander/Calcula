@@ -127,11 +127,44 @@ interface McpStatus {
   token: string | null;
 }
 
+/** Access ceiling for the AI tool surface (MCP + in-app chat). */
+type McpAccessLevel = "read" | "mutate" | "script";
+
+const ACCESS_LEVEL_OPTIONS: ReadonlyArray<{ value: McpAccessLevel; label: string }> = [
+  { value: "read", label: "Read only" },
+  { value: "mutate", label: "Read & write (no scripts)" },
+  { value: "script", label: "Full access (scripts allowed)" },
+];
+
 export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
   const [status, setStatus] = useState<McpStatus>({ running: false, port: 8787, token: null });
   const [portInput, setPortInput] = useState("8787");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [accessLevel, setAccessLevel] = useState<McpAccessLevel>("script");
+
+  // Load the persisted access ceiling once.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const level = await aiChatBackend.invoke<McpAccessLevel>("get_mcp_access_level");
+        setAccessLevel(level);
+      } catch {
+        // Ignore — backend not ready
+      }
+    })();
+  }, []);
+
+  const handleAccessLevelChange = useCallback(async (level: McpAccessLevel) => {
+    const previous = accessLevel;
+    setAccessLevel(level);
+    try {
+      await aiChatBackend.invoke("set_mcp_access_level", { level });
+    } catch (err: unknown) {
+      setAccessLevel(previous);
+      setError(String(err));
+    }
+  }, [accessLevel]);
 
   // Poll server status
   const refreshStatus = useCallback(async () => {
@@ -259,6 +292,31 @@ export function ChatPanel(_props: TaskPaneViewProps): React.ReactElement {
 
       // Error message
       error ? React.createElement("p", { style: errorStyle }, error) : null,
+    ),
+
+    // Access Level (capability ceiling for ALL AI tools: MCP + in-app chat)
+    React.createElement("div", { style: sectionStyle },
+      React.createElement("h3", { style: sectionTitleStyle }, "Access Level"),
+      React.createElement("p", { style: textStyle },
+        "Caps what AI tools may do — both MCP clients and the in-app chat. " +
+        "Mutations additionally require the Script Security setting to allow " +
+        "execution, and every AI change is recorded in the workbook audit trail."
+      ),
+      React.createElement("select", {
+        value: accessLevel,
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) =>
+          void handleAccessLevelChange(e.target.value as McpAccessLevel),
+        style: {
+          ...inputStyle,
+          width: "100%",
+          padding: "5px 8px",
+          cursor: "pointer",
+        },
+      },
+        ACCESS_LEVEL_OPTIONS.map((opt) =>
+          React.createElement("option", { key: opt.value, value: opt.value }, opt.label),
+        ),
+      ),
     ),
 
     // Description

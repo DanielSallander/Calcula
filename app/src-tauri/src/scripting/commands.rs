@@ -163,6 +163,38 @@ pub(crate) fn record_script_grid_mutation(
     }
 }
 
+/// Record a non-script MCP/AI tool mutation (formatting, chart/table/pivot/
+/// named-range creation) into the SAME per-workbook audit trail as script grid
+/// mutations (`AuditEvent::ScriptExecuted`, surface "mcp"), so every way an AI
+/// client can change the workbook is visible in the audit viewer — not only the
+/// cell writes that flow through the script engine. `extra` carries the tool's
+/// structured attribution (tool name is added here; pass target details).
+pub(crate) fn record_mcp_tool_action(
+    state: &AppState,
+    tool: &str,
+    desc: &str,
+    extra_fields: Vec<(&str, serde_json::Value)>,
+) {
+    use serde_json::json;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut extra: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    extra.insert("surface".into(), json!("mcp"));
+    extra.insert("tool".into(), json!(tool));
+    for (k, v) in extra_fields {
+        extra.insert(k.to_string(), v);
+    }
+    if let Ok(mut audit) = state.audit_log.lock() {
+        audit.record_with_extra(
+            calp::audit::AuditEvent::ScriptExecuted,
+            desc,
+            "local",
+            &now,
+            extra,
+        );
+    }
+}
+
 /// Key under which the once-per-session "prompt" approval is stored in
 /// `ScriptState.permission_grants`.
 const SESSION_APPROVAL_KEY: &str = "__session__";
@@ -211,6 +243,58 @@ pub(crate) fn check_script_security(script_state: &ScriptState) -> Result<(), St
             }
         }
     }
+}
+
+/// Error sentinel for an AI tool call blocked by the MCP access ceiling.
+pub const MCP_ACCESS_RESTRICTED: &str = "MCP_ACCESS_RESTRICTED";
+
+/// The tier an AI tool call needs: workbook mutations (writes, formatting,
+/// object creation) or arbitrary script execution. Read-only tools need no
+/// check — "read" is always allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpAccessTier {
+    Mutate,
+    Script,
+}
+
+/// Rank of an access-level string; unknown values rank as the most
+/// restrictive tier so a tampered persisted level can never widen access.
+fn mcp_access_rank(level: &str) -> u8 {
+    match level {
+        "script" => 2,
+        "mutate" => 1,
+        _ => 0, // "read" or anything unrecognized
+    }
+}
+
+/// Gate for the AI tool surface (MCP server + in-app AI chat): enforce the
+/// user-set access ceiling ("read" < "mutate" < "script"), THEN the Script
+/// Security consent gate. The ceiling caps what a consented session may do —
+/// e.g. "mutate" lets an agent edit the workbook but never run arbitrary JS.
+pub(crate) fn check_mcp_access(
+    script_state: &ScriptState,
+    required: McpAccessTier,
+) -> Result<(), String> {
+    let ceiling = script_state
+        .mcp_access_level
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let required_rank = match required {
+        McpAccessTier::Mutate => 1,
+        McpAccessTier::Script => 2,
+    };
+    if mcp_access_rank(&ceiling) < required_rank {
+        let needed = match required {
+            McpAccessTier::Mutate => "workbook mutations",
+            McpAccessTier::Script => "script execution",
+        };
+        return Err(format!(
+            "{}: This tool needs {} but the AI access level is set to '{}' (MCP Server panel)",
+            MCP_ACCESS_RESTRICTED, needed, ceiling
+        ));
+    }
+    check_script_security(script_state)
 }
 
 /// Grant session-wide script execution approval. The "prompt" security level
@@ -601,9 +685,44 @@ pub fn set_script_security_level(
     *script_state
         .security_level
         .lock()
-        .map_err(|e| e.to_string())? = level.clone();
+        .map_err(|e| e.to_string())? = level;
     // Persist (per-app, not per-workbook) so the choice survives relaunch (B5).
-    persist_security_level(window.app_handle(), &level);
+    persist_security_config(window.app_handle(), &script_state);
+    Ok(())
+}
+
+/// Get the current AI access ceiling ("read" | "mutate" | "script").
+#[tauri::command]
+pub fn get_mcp_access_level(script_state: State<ScriptState>) -> Result<String, String> {
+    let level = script_state
+        .mcp_access_level
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    Ok(level)
+}
+
+/// Set the AI access ceiling for the MCP / in-app AI tool surface.
+#[tauri::command]
+pub fn set_mcp_access_level(
+    script_state: State<ScriptState>,
+    level: String,
+    window: tauri::Window,
+) -> Result<(), String> {
+    use tauri::Manager;
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let valid_levels = ["read", "mutate", "script"];
+    if !valid_levels.contains(&level.as_str()) {
+        return Err(format!(
+            "Invalid MCP access level '{}'. Must be one of: read, mutate, script",
+            level
+        ));
+    }
+    *script_state
+        .mcp_access_level
+        .lock()
+        .map_err(|e| e.to_string())? = level;
+    persist_security_config(window.app_handle(), &script_state);
     Ok(())
 }
 
@@ -616,13 +735,25 @@ fn security_config_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         .map(|d| d.join("script-security.json"))
 }
 
-/// Persist the Script Security level so it survives relaunch. Best-effort.
-fn persist_security_level(app: &tauri::AppHandle, level: &str) {
+/// Persist the Script Security level + AI access ceiling (one config file) so
+/// both survive relaunch. Best-effort; reads the current values from state.
+fn persist_security_config(app: &tauri::AppHandle, script_state: &ScriptState) {
+    let level = match script_state.security_level.lock() {
+        Ok(l) => l.clone(),
+        Err(_) => return,
+    };
+    let mcp_level = match script_state.mcp_access_level.lock() {
+        Ok(l) => l.clone(),
+        Err(_) => return,
+    };
     if let Some(path) = security_config_path(app) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let json = serde_json::json!({ "securityLevel": level });
+        let json = serde_json::json!({
+            "securityLevel": level,
+            "mcpAccessLevel": mcp_level,
+        });
         if let Ok(bytes) = serde_json::to_vec_pretty(&json) {
             let _ = std::fs::write(&path, bytes);
         }
@@ -641,18 +772,33 @@ fn parse_persisted_level(bytes: &[u8]) -> Option<String> {
         .then(|| level.to_string())
 }
 
-/// Read the persisted Script Security level (if any) and apply it to ScriptState
-/// at startup. Falls back to the in-memory default ("prompt") when the file is
-/// absent or invalid. Called once after the app is built.
+/// Parse + validate a persisted AI access ceiling. Same fail-closed contract as
+/// `parse_persisted_level`: anything unrecognized keeps the in-memory default.
+fn parse_persisted_mcp_level(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let level = value.get("mcpAccessLevel")?.as_str()?;
+    ["read", "mutate", "script"]
+        .contains(&level)
+        .then(|| level.to_string())
+}
+
+/// Read the persisted Script Security config (if any) and apply it to
+/// ScriptState at startup. Falls back to the in-memory defaults ("prompt" /
+/// "script") when the file is absent or a field is invalid. Called once after
+/// the app is built.
 pub fn hydrate_security_level(app: &tauri::AppHandle) {
     use tauri::Manager;
     let Some(path) = security_config_path(app) else { return };
     let Ok(bytes) = std::fs::read(&path) else { return };
+    let Some(state) = app.try_state::<ScriptState>() else { return };
     if let Some(level) = parse_persisted_level(&bytes) {
-        if let Some(state) = app.try_state::<ScriptState>() {
-            if let Ok(mut lvl) = state.security_level.lock() {
-                *lvl = level;
-            }
+        if let Ok(mut lvl) = state.security_level.lock() {
+            *lvl = level;
+        }
+    }
+    if let Some(level) = parse_persisted_mcp_level(&bytes) {
+        if let Ok(mut lvl) = state.mcp_access_level.lock() {
+            *lvl = level;
         }
     }
 }
@@ -676,6 +822,78 @@ mod security_level_tests {
         assert_eq!(parse_persisted_level(br#"{}"#), None);
         assert_eq!(parse_persisted_level(b"not json at all"), None);
         assert_eq!(parse_persisted_level(b""), None);
+    }
+
+    #[test]
+    fn accepts_valid_mcp_levels() {
+        for lvl in ["read", "mutate", "script"] {
+            let bytes = format!("{{\"mcpAccessLevel\":\"{}\"}}", lvl);
+            assert_eq!(
+                super::parse_persisted_mcp_level(bytes.as_bytes()),
+                Some(lvl.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_mcp_levels() {
+        assert_eq!(super::parse_persisted_mcp_level(br#"{"mcpAccessLevel":"admin"}"#), None);
+        assert_eq!(super::parse_persisted_mcp_level(br#"{"mcpAccessLevel":1}"#), None);
+        assert_eq!(super::parse_persisted_mcp_level(br#"{}"#), None);
+    }
+}
+
+#[cfg(test)]
+mod mcp_access_tests {
+    use super::{check_mcp_access, McpAccessTier, MCP_ACCESS_RESTRICTED};
+    use crate::scripting::types::ScriptState;
+
+    /// ScriptState with Script Security "enabled" (so only the ceiling gates)
+    /// and the given AI access ceiling.
+    fn state_with(ceiling: &str) -> ScriptState {
+        let state = ScriptState::new();
+        *state.security_level.lock().unwrap() = "enabled".to_string();
+        *state.mcp_access_level.lock().unwrap() = ceiling.to_string();
+        state
+    }
+
+    #[test]
+    fn read_ceiling_blocks_mutate_and_script() {
+        let state = state_with("read");
+        for tier in [McpAccessTier::Mutate, McpAccessTier::Script] {
+            let err = check_mcp_access(&state, tier).unwrap_err();
+            assert!(err.starts_with(MCP_ACCESS_RESTRICTED), "got: {}", err);
+        }
+    }
+
+    #[test]
+    fn mutate_ceiling_allows_mutate_blocks_script() {
+        let state = state_with("mutate");
+        assert!(check_mcp_access(&state, McpAccessTier::Mutate).is_ok());
+        let err = check_mcp_access(&state, McpAccessTier::Script).unwrap_err();
+        assert!(err.starts_with(MCP_ACCESS_RESTRICTED), "got: {}", err);
+    }
+
+    #[test]
+    fn script_ceiling_allows_both() {
+        let state = state_with("script");
+        assert!(check_mcp_access(&state, McpAccessTier::Mutate).is_ok());
+        assert!(check_mcp_access(&state, McpAccessTier::Script).is_ok());
+    }
+
+    #[test]
+    fn unknown_ceiling_ranks_as_read() {
+        let state = state_with("bogus");
+        let err = check_mcp_access(&state, McpAccessTier::Mutate).unwrap_err();
+        assert!(err.starts_with(MCP_ACCESS_RESTRICTED), "got: {}", err);
+    }
+
+    #[test]
+    fn ceiling_pass_still_defers_to_script_security() {
+        let state = state_with("script");
+        *state.security_level.lock().unwrap() = "disabled".to_string();
+        let err = check_mcp_access(&state, McpAccessTier::Script).unwrap_err();
+        assert!(err.starts_with(super::SCRIPTS_DISABLED), "got: {}", err);
     }
 }
 

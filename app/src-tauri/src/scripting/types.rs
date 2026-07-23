@@ -17,6 +17,11 @@ pub struct ScriptState {
     pub workbook_scripts: Mutex<HashMap<String, WorkbookScript>>,
     /// Global security level: "disabled", "prompt", "enabled"
     pub security_level: Mutex<String>,
+    /// Access ceiling for the AI tool surface (MCP server + in-app AI chat):
+    /// "read" (read-only tools), "mutate" (+ workbook edits/creates), or
+    /// "script" (+ arbitrary script execution). Applied ON TOP of the Script
+    /// Security consent gate — consent authorizes, the ceiling caps.
+    pub mcp_access_level: Mutex<String>,
     /// Workbook-embedded notebooks: notebook_id -> NotebookDocument
     pub workbook_notebooks: Mutex<HashMap<String, NotebookDocument>>,
     /// Active notebook runtime bookkeeping (checkpoints, counters). Only one
@@ -37,6 +42,7 @@ impl ScriptState {
             permission_grants: Mutex::new(HashMap::new()),
             workbook_scripts: Mutex::new(HashMap::new()),
             security_level: Mutex::new("prompt".to_string()),
+            mcp_access_level: Mutex::new("script".to_string()),
             workbook_notebooks: Mutex::new(HashMap::new()),
             notebook_runtime: Mutex::new(NotebookRuntime::new()),
             notebook_executor: super::notebook_executor::NotebookExecutor::new(),
