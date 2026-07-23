@@ -190,6 +190,7 @@ Calcula is under active development. Here is an honest summary of where things s
 | Sheet and workbook protection | Working |
 | Print, page setup, page breaks, PDF export | Working |
 | CSV import/export | Working |
+| Excel `.xlsx` open/save (values, formulas, styles, merges, freeze panes, hidden rows/cols, charts) | Working |
 | Movable/resizable dialogs, app skins, free panel layout | Working |
 
 ### Analytics and Visualization
