@@ -2444,6 +2444,8 @@ mod tests {
             s.visibility = "hidden".to_string();
             s.notes = vec![persistence::SavedNote {
                 row: 0, col: 0, text: "hi".to_string(), author: "me".to_string(),
+                rich_content: None, width: 0.0, height: 0.0, visible: false,
+                created_at: String::new(), modified_at: String::new(),
             }];
             s.hyperlinks = vec![persistence::SavedHyperlink {
                 row: 1, col: 1, target: "https://x".to_string(), display_text: None, tooltip: None,

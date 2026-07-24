@@ -112,6 +112,20 @@ export async function saveFileAs(password?: string): Promise<string | null> {
     });
 
     if (path) {
+      // Lossy-save consent: .xlsx cannot carry every Calcula feature. Silent
+      // destruction on save is the trust-killer — list what will be lost and
+      // let the user confirm (or cancel and pick .cala).
+      if (path.toLowerCase().endsWith('.xlsx')) {
+        const lost = await tracedInvoke<string[]>('xlsx_save_loss_report', {});
+        if (lost.length > 0) {
+          const ok = window.confirm(
+            `Saving as .xlsx will NOT include these Calcula features:\n\n` +
+              lost.map((f) => `  • ${f}`).join('\n') +
+              `\n\nSave as .xlsx anyway? (Use .cala to keep everything.)`,
+          );
+          if (!ok) return null;
+        }
+      }
       emitAppEvent(AppEvents.BEFORE_SAVE, { path });
       await tracedInvoke('save_file', { path, password });
       emitAppEvent(AppEvents.AFTER_SAVE, { path });

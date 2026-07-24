@@ -46,6 +46,173 @@ pub type ComputedPropDependencies = HashMap<u64, HashSet<(usize, u32, u32)>>;
 pub type ComputedPropDependents = HashMap<(usize, u32, u32), HashSet<u64>>;
 
 // ============================================================================
+// Persistence (opaque JSON in user_files "computed_properties.json")
+// ============================================================================
+
+/// Persisted form of one property (id + attribute + formula; the AST and the
+/// cached value rebuild on restore / next evaluation).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedComputedProp {
+    id: u64,
+    attribute: String,
+    formula: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedIndexedProps {
+    index: u32,
+    props: Vec<SavedComputedProp>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedCellProps {
+    row: u32,
+    col: u32,
+    props: Vec<SavedComputedProp>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedSheetComputedProps {
+    sheet_index: usize,
+    columns: Vec<SavedIndexedProps>,
+    rows: Vec<SavedIndexedProps>,
+    cells: Vec<SavedCellProps>,
+}
+
+fn to_saved(props: &[ComputedProperty]) -> Vec<SavedComputedProp> {
+    props
+        .iter()
+        .map(|p| SavedComputedProp {
+            id: p.id,
+            attribute: p.attribute.clone(),
+            formula: p.formula.clone(),
+        })
+        .collect()
+}
+
+/// Serialize all computed properties for user_files, or None when there are
+/// none. Sorted (sheets, then indices) for deterministic artifact bytes.
+pub fn collect_computed_properties_for_save(state: &AppState) -> Option<Vec<u8>> {
+    let storage = state.computed_properties.lock().ok()?;
+    let mut sheets: Vec<SavedSheetComputedProps> = Vec::new();
+    for (sheet_index, sp) in storage.iter() {
+        if sp.column_props.is_empty() && sp.row_props.is_empty() && sp.cell_props.is_empty() {
+            continue;
+        }
+        let mut columns: Vec<SavedIndexedProps> = sp
+            .column_props
+            .iter()
+            .map(|(i, props)| SavedIndexedProps { index: *i, props: to_saved(props) })
+            .collect();
+        columns.sort_by_key(|c| c.index);
+        let mut rows: Vec<SavedIndexedProps> = sp
+            .row_props
+            .iter()
+            .map(|(i, props)| SavedIndexedProps { index: *i, props: to_saved(props) })
+            .collect();
+        rows.sort_by_key(|r| r.index);
+        let mut cells: Vec<SavedCellProps> = sp
+            .cell_props
+            .iter()
+            .map(|((row, col), props)| SavedCellProps {
+                row: *row,
+                col: *col,
+                props: to_saved(props),
+            })
+            .collect();
+        cells.sort_by_key(|c| (c.row, c.col));
+        sheets.push(SavedSheetComputedProps {
+            sheet_index: *sheet_index,
+            columns,
+            rows,
+            cells,
+        });
+    }
+    if sheets.is_empty() {
+        return None;
+    }
+    sheets.sort_by_key(|s| s.sheet_index);
+    serde_json::to_vec_pretty(&sheets).ok()
+}
+
+/// Restore computed properties from the persisted artifact (absent = clear).
+/// Rebuilds the cached AST per property, the dependency maps, and advances the
+/// id counter past the highest restored id.
+pub fn restore_computed_properties(state: &AppState, bytes: Option<&[u8]>) {
+    let saved: Vec<SavedSheetComputedProps> = bytes
+        .and_then(|b| serde_json::from_slice(b).ok())
+        .unwrap_or_default();
+
+    let mut max_id: u64 = 0;
+    {
+        // Lock order mirrors add_computed_property: grids before the
+        // property/dependency stores.
+        let grids = state.grids.lock().unwrap();
+        let mut storage = state.computed_properties.lock().unwrap();
+        let mut deps = state.computed_prop_dependencies.lock().unwrap();
+        let mut rev_deps = state.computed_prop_dependents.lock().unwrap();
+        storage.clear();
+        deps.clear();
+        rev_deps.clear();
+
+        let mut restore_prop = |sheet_index: usize,
+                                sp: &SavedComputedProp,
+                                grid: Option<&Grid>,
+                                deps: &mut ComputedPropDependencies,
+                                rev_deps: &mut ComputedPropDependents|
+         -> ComputedProperty {
+            max_id = max_id.max(sp.id);
+            if let Some(grid) = grid {
+                update_prop_dependencies(sp.id, &sp.formula, sheet_index, grid, deps, rev_deps);
+            }
+            ComputedProperty {
+                id: sp.id,
+                attribute: sp.attribute.clone(),
+                formula: sp.formula.clone(),
+                cached_ast: parser::parse(&sp.formula)
+                    .ok()
+                    .map(|parsed| crate::convert_expr(&parsed)),
+                cached_value: None,
+            }
+        };
+
+        for sheet in &saved {
+            let grid = grids.get(sheet.sheet_index);
+            let entry = storage.entry(sheet.sheet_index).or_default();
+            for c in &sheet.columns {
+                let props: Vec<ComputedProperty> = c
+                    .props
+                    .iter()
+                    .map(|p| restore_prop(sheet.sheet_index, p, grid, &mut deps, &mut rev_deps))
+                    .collect();
+                entry.column_props.insert(c.index, props);
+            }
+            for r in &sheet.rows {
+                let props: Vec<ComputedProperty> = r
+                    .props
+                    .iter()
+                    .map(|p| restore_prop(sheet.sheet_index, p, grid, &mut deps, &mut rev_deps))
+                    .collect();
+                entry.row_props.insert(r.index, props);
+            }
+            for cprops in &sheet.cells {
+                let props: Vec<ComputedProperty> = cprops
+                    .props
+                    .iter()
+                    .map(|p| restore_prop(sheet.sheet_index, p, grid, &mut deps, &mut rev_deps))
+                    .collect();
+                entry.cell_props.insert((cprops.row, cprops.col), props);
+            }
+        }
+    }
+    *state.next_computed_prop_id.lock().unwrap() = max_id + 1;
+}
+
+// ============================================================================
 // Available attributes per target type
 // ============================================================================
 

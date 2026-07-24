@@ -397,6 +397,24 @@ pub struct SavedNote {
     pub col: u32,
     pub text: String,
     pub author: String,
+    /// Rich (HTML) content — None for plain-text notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rich_content: Option<String>,
+    /// Note box width in pixels (0 = app default).
+    #[serde(default)]
+    pub width: f64,
+    /// Note box height in pixels (0 = app default).
+    #[serde(default)]
+    pub height: f64,
+    /// Whether the note box is pinned visible (vs hover-only).
+    #[serde(default)]
+    pub visible: bool,
+    /// Creation timestamp (ISO 8601); empty = unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+    /// Last-modified timestamp (ISO 8601); empty = unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modified_at: String,
 }
 
 /// A hyperlink attached to a cell for persistence.

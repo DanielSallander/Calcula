@@ -611,6 +611,11 @@ pub fn calp_publish(
             .model_writebacks
             .as_ref()
             .is_some_and(|m| !m.is_empty())
+        // Custom objects (e.g. calcula.modelOverlay carrying workbook-layer
+        // measures) are exactly the silent-drop class this gate exists for: an
+        // app without distributable-object providers would pull "successfully"
+        // and never materialize them.
+        || !request.custom_objects.is_empty()
     {
         request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
     }
@@ -1371,12 +1376,20 @@ fn materialize_pulled_sheet_state(
                         sheet_index: *idx,
                         author_name: n.author.clone(),
                         content: n.text.clone(),
-                        rich_content: None,
-                        width: 200.0,
-                        height: 100.0,
-                        visible: false,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        modified_at: None,
+                        rich_content: n.rich_content.clone(),
+                        width: if n.width > 0.0 { n.width } else { 200.0 },
+                        height: if n.height > 0.0 { n.height } else { 100.0 },
+                        visible: n.visible,
+                        created_at: if n.created_at.is_empty() {
+                            chrono::Utc::now().to_rfc3339()
+                        } else {
+                            n.created_at.clone()
+                        },
+                        modified_at: if n.modified_at.is_empty() {
+                            None
+                        } else {
+                            Some(n.modified_at.clone())
+                        },
                     },
                 );
             }
@@ -8677,6 +8690,33 @@ fn refresh_embedded_data_sources(
                             e
                         );
                         continue;
+                    }
+                    // Re-apply the version's materialized calculated-table
+                    // snapshots: set_model only invalidates the QUERY cache,
+                    // so without this a subscriber without source access kept
+                    // serving the OLD version's derived-table data (and a
+                    // newly-materialized table had no data at all).
+                    for (table, path) in &ds.calculated_table_snapshots {
+                        match read_ipc_batch(path) {
+                            Ok(batch) => {
+                                if let Err(e) =
+                                    engine.store_calculated_table_snapshot(table, batch)
+                                {
+                                    crate::log_warn!(
+                                        "CALP",
+                                        "refresh: calculated-table snapshot '{}' not applied: {}",
+                                        table,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => crate::log_warn!(
+                                "CALP",
+                                "refresh: calculated-table snapshot '{}' unreadable: {}",
+                                table,
+                                e
+                            ),
+                        }
                     }
                 }
                 Err(_) => {

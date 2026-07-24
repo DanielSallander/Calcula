@@ -193,6 +193,71 @@ pub fn apply_named_style(
 }
 
 // ============================================================================
+// Persistence (custom styles only — built-ins are seeded at startup)
+// ============================================================================
+
+/// Persisted form of a CUSTOM named style: self-contained (the resolved
+/// CellStyle, not a registry index) so restore is immune to the load-time
+/// style-registry remap.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedNamedStyle {
+    name: String,
+    category: String,
+    style: CellStyle,
+}
+
+/// Serialize the workbook's CUSTOM named styles for user_files, or None when
+/// there are none. Sorted by name for deterministic artifact bytes.
+pub fn collect_named_styles_for_save(state: &AppState) -> Option<Vec<u8>> {
+    let named = state.named_styles.lock().ok()?;
+    let styles = state.style_registry.lock().ok()?;
+    let mut customs: Vec<SavedNamedStyle> = named
+        .values()
+        .filter(|ns| !ns.built_in)
+        .map(|ns| SavedNamedStyle {
+            name: ns.name.clone(),
+            category: ns.category.clone(),
+            style: styles.get(ns.style_index).clone(),
+        })
+        .collect();
+    if customs.is_empty() {
+        return None;
+    }
+    customs.sort_by(|a, b| a.name.cmp(&b.name));
+    serde_json::to_vec_pretty(&customs).ok()
+}
+
+/// Restore CUSTOM named styles from the persisted artifact: previous-session
+/// customs are removed (built-ins stay), then this file's set is inserted with
+/// registry indices minted via get_or_create.
+pub fn restore_named_styles(state: &AppState, bytes: Option<&[u8]>) {
+    let Ok(mut named) = state.named_styles.lock() else { return };
+    named.retain(|_, ns| ns.built_in);
+    let Some(bytes) = bytes else { return };
+    let Ok(customs) = serde_json::from_slice::<Vec<SavedNamedStyle>>(bytes) else {
+        return;
+    };
+    let Ok(mut styles) = state.style_registry.lock() else { return };
+    for c in customs {
+        // A file-supplied name never overwrites a built-in.
+        if named.get(&c.name).is_some_and(|ns| ns.built_in) {
+            continue;
+        }
+        let index = styles.get_or_create(c.style);
+        named.insert(
+            c.name.clone(),
+            NamedCellStyle {
+                name: c.name,
+                built_in: false,
+                style_index: index,
+                category: c.category,
+            },
+        );
+    }
+}
+
+// ============================================================================
 // Built-in Style Initialization
 // ============================================================================
 

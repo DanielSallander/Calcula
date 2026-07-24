@@ -376,7 +376,39 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
         meta_ws.set_hidden(true);
     }
 
+    let wrote_meta_charts = !workbook.charts.is_empty();
     xlsx.save(path)?;
+
+    // Freshness marker: an ORPHAN zip part (valid .xml content type, but no
+    // OPC relationship). Excel/LibreOffice rebuild the package on save and
+    // drop unreferenced parts, so on reopen: marker PRESENT = the file has
+    // not been resaved by another app since Calcula wrote it (the lossless
+    // _calcula_meta chart carry is trustworthy); marker ABSENT = another app
+    // resaved it (its native charts win, even for edits that keep the chart
+    // count unchanged). Best-effort — a failure must not fail the save.
+    if wrote_meta_charts {
+        if let Err(e) = append_freshness_marker(path) {
+            eprintln!("[WARN] xlsx save: freshness marker not written: {}", e);
+        }
+    }
+    Ok(())
+}
+
+/// The orphan-part path checked by the reader (see save_xlsx).
+pub const XLSX_FRESHNESS_MARKER: &str = "calculaMeta/marker.xml";
+
+/// Append the freshness marker part to an already-saved .xlsx (zip append —
+/// does not rewrite the archive).
+fn append_freshness_marker(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut zip = zip::ZipWriter::new_append(file)?;
+    zip.start_file(
+        XLSX_FRESHNESS_MARKER,
+        zip::write::SimpleFileOptions::default(),
+    )?;
+    zip.write_all(b"<calculaMeta generator=\"calcula\"/>")?;
+    zip.finish()?;
     Ok(())
 }
 

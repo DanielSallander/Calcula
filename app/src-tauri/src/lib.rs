@@ -4007,6 +4007,7 @@ pub fn run() {
             persistence::get_auto_recover_settings,
             persistence::set_auto_recover_settings,
             persistence::auto_recover_save,
+            persistence::xlsx_save_loss_report,
             persistence::get_workbook_properties,
             persistence::set_workbook_properties,
             // Sheet commands

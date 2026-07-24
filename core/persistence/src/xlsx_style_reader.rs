@@ -35,6 +35,9 @@ pub struct XlsxStyleData {
     pub cell_xfs: Vec<ParsedXf>,
     /// Per-sheet metadata, keyed by 1-based sheet index
     pub sheet_meta: HashMap<usize, SheetMeta>,
+    /// Sheet visibility from workbook.xml `state` ("hidden"/"veryHidden"),
+    /// keyed by 1-based workbook.xml sheet order. Absent = visible.
+    pub sheet_visibility: HashMap<usize, String>,
 }
 
 /// Font properties parsed from <font> elements.
@@ -117,6 +120,58 @@ pub struct SheetMeta {
     pub hidden_rows: Vec<u32>,
     /// Whether gridlines should be shown (default true)
     pub show_gridlines: bool,
+    /// Sheet tab color as "#RRGGBB" (from sheetPr/tabColor rgb, alpha stripped)
+    pub tab_color: Option<String>,
+    /// Page setup / print settings (Some only when the sheet carries any)
+    pub page_setup: Option<crate::SavedPageSetup>,
+    /// Cell notes (legacy comments) resolved from the sheet's comments part
+    pub notes: Vec<crate::SavedNote>,
+    /// Hyperlinks with external r:id targets resolved via the sheet rels
+    pub hyperlinks: Vec<crate::SavedHyperlink>,
+    /// Raw hyperlink captures pending rels resolution (internal use)
+    pub raw_hyperlinks: Vec<RawHyperlink>,
+}
+
+/// A `<hyperlink>` element as parsed from sheet XML, before the r:id target
+/// is resolved against the sheet's relationships part.
+#[derive(Debug, Clone, Default)]
+pub struct RawHyperlink {
+    pub row: u32,
+    pub col: u32,
+    /// r:id of an EXTERNAL target (resolved via sheet rels)
+    pub rid: Option<String>,
+    /// In-workbook location (e.g. "Sheet2!A1") for internal links
+    pub location: Option<String>,
+    pub display: Option<String>,
+    pub tooltip: Option<String>,
+}
+
+/// Excel-standard page-setup defaults (mirrors what the writer emits when the
+/// app never customized print settings).
+pub(crate) fn default_page_setup() -> crate::SavedPageSetup {
+    crate::SavedPageSetup {
+        paper_size: "a4".to_string(),
+        orientation: "portrait".to_string(),
+        margin_top: 0.75,
+        margin_bottom: 0.75,
+        margin_left: 0.7,
+        margin_right: 0.7,
+        margin_header: 0.3,
+        margin_footer: 0.3,
+        header: String::new(),
+        footer: String::new(),
+        print_area: String::new(),
+        print_titles_rows: String::new(),
+        manual_row_breaks: Vec::new(),
+        print_gridlines: false,
+        center_horizontally: false,
+        center_vertically: false,
+        scale: 100,
+        fit_to_width: 0,
+        fit_to_height: 0,
+        page_order: "downThenOver".to_string(),
+        first_page_number: -1,
+    }
 }
 
 // ============================================================================
@@ -139,11 +194,15 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
     // Build logical sheet order → XML path mapping via workbook.xml + rels
     let logical_sheet_paths = build_sheet_path_mapping(&mut archive);
 
+    // Sheet visibility rides workbook.xml (same order as the mapping above).
+    data.sheet_visibility = parse_sheet_visibility(&mut archive);
+
     if !logical_sheet_paths.is_empty() {
         // Use the relationship-based mapping (1-based logical index → path)
         for (logical_idx, sheet_path) in &logical_sheet_paths {
             if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
-                let meta = parse_sheet_xml(&sheet_xml);
+                let mut meta = parse_sheet_xml(&sheet_xml);
+                resolve_sheet_parts(&mut archive, sheet_path, &mut meta);
                 data.sheet_meta.insert(*logical_idx, meta);
             }
         }
@@ -162,13 +221,56 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
 
         for (sheet_num, sheet_path) in &sheet_paths {
             if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
-                let meta = parse_sheet_xml(&sheet_xml);
+                let mut meta = parse_sheet_xml(&sheet_xml);
+                resolve_sheet_parts(&mut archive, sheet_path, &mut meta);
                 data.sheet_meta.insert(*sheet_num, meta);
             }
         }
     }
 
     Some(data)
+}
+
+/// Resolve a parsed sheet's rels-dependent parts: hyperlink r:id targets and
+/// the legacy comments part (cell notes).
+fn resolve_sheet_parts(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    sheet_path: &str,
+    meta: &mut SheetMeta,
+) {
+    let rels = parse_sheet_rels(archive, sheet_path);
+
+    // Hyperlinks: external targets come from rels; internal links keep their
+    // in-workbook location ("#Sheet2!A1" convention).
+    for raw in std::mem::take(&mut meta.raw_hyperlinks) {
+        let target = match &raw.rid {
+            Some(rid) => rels
+                .get(rid)
+                .filter(|(t, _)| t.contains("hyperlink"))
+                .map(|(_, target)| target.clone()),
+            None => raw.location.as_ref().map(|loc| format!("#{}", loc)),
+        };
+        let Some(target) = target else { continue };
+        meta.hyperlinks.push(crate::SavedHyperlink {
+            row: raw.row,
+            col: raw.col,
+            target,
+            display_text: raw.display,
+            tooltip: raw.tooltip,
+        });
+    }
+
+    // Legacy comments part -> cell notes (threaded comments are a different
+    // relationship type and deliberately not matched here).
+    let comments_target = rels
+        .values()
+        .find(|(t, _)| t.ends_with("/comments") || t.contains("relationships/comments"))
+        .map(|(_, target)| target.clone());
+    if let Some(target) = comments_target {
+        if let Ok(xml) = read_zip_entry(archive, &target) {
+            meta.notes = parse_comments_xml(&xml);
+        }
+    }
 }
 
 /// Build mapping from logical sheet order (1-based) to sheet XML path
@@ -668,7 +770,17 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
     let mut in_sheet_views = false;
     let mut in_merge_cells = false;
     let mut in_sheet_data = false;
+    let mut in_sheet_pr = false;
+    let mut in_hyperlinks = false;
+    let mut in_row_breaks = false;
+    let mut in_odd_header = false;
+    let mut in_odd_footer = false;
     let mut current_row: u32 = 0;
+
+    // Page-setup accumulation: only committed to meta when the sheet actually
+    // carries print settings (Excel writes default pageMargins everywhere).
+    let mut ps = default_page_setup();
+    let mut saw_page_setup = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -678,6 +790,118 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                 let tag_str = std::str::from_utf8(tag.as_ref()).unwrap_or("");
 
                 match tag_str {
+                    "sheetPr" => in_sheet_pr = true,
+                    "tabColor" if in_sheet_pr => {
+                        // <tabColor rgb="FFRRGGBB"/> — strip the alpha byte.
+                        if let Some(rgb) = get_attr(e, "rgb") {
+                            let hex = if rgb.len() == 8 { &rgb[2..] } else { rgb.as_str() };
+                            meta.tab_color = Some(format!("#{}", hex.to_lowercase()));
+                        }
+                    }
+                    "pageSetup" => {
+                        saw_page_setup = true;
+                        if let Some(o) = get_attr(e, "orientation") {
+                            if o == "landscape" {
+                                ps.orientation = "landscape".to_string();
+                            }
+                        }
+                        if let Some(p) = get_attr(e, "paperSize").and_then(|v| v.parse::<u32>().ok()) {
+                            ps.paper_size = match p {
+                                1 => "letter",
+                                5 => "legal",
+                                8 => "a3",
+                                3 => "tabloid",
+                                _ => "a4",
+                            }
+                            .to_string();
+                        }
+                        if let Some(s) = get_attr(e, "scale").and_then(|v| v.parse::<u32>().ok()) {
+                            ps.scale = s;
+                        }
+                        if let Some(w) = get_attr(e, "fitToWidth").and_then(|v| v.parse::<u32>().ok()) {
+                            ps.fit_to_width = w;
+                        }
+                        if let Some(h) = get_attr(e, "fitToHeight").and_then(|v| v.parse::<u32>().ok()) {
+                            ps.fit_to_height = h;
+                        }
+                        if get_attr(e, "pageOrder").as_deref() == Some("overThenDown") {
+                            ps.page_order = "overThenDown".to_string();
+                        }
+                        let use_first = get_attr(e, "useFirstPageNumber")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        if use_first {
+                            if let Some(n) =
+                                get_attr(e, "firstPageNumber").and_then(|v| v.parse::<i32>().ok())
+                            {
+                                ps.first_page_number = n;
+                            }
+                        }
+                    }
+                    "pageMargins" => {
+                        let get_f =
+                            |name: &str| get_attr(e, name).and_then(|v| v.parse::<f64>().ok());
+                        if let Some(v) = get_f("left") { ps.margin_left = v; }
+                        if let Some(v) = get_f("right") { ps.margin_right = v; }
+                        if let Some(v) = get_f("top") { ps.margin_top = v; }
+                        if let Some(v) = get_f("bottom") { ps.margin_bottom = v; }
+                        if let Some(v) = get_f("header") { ps.margin_header = v; }
+                        if let Some(v) = get_f("footer") { ps.margin_footer = v; }
+                        // Non-default margins alone are worth persisting.
+                        if (ps.margin_left - 0.7).abs() > 0.01
+                            || (ps.margin_right - 0.7).abs() > 0.01
+                            || (ps.margin_top - 0.75).abs() > 0.01
+                            || (ps.margin_bottom - 0.75).abs() > 0.01
+                        {
+                            saw_page_setup = true;
+                        }
+                    }
+                    "printOptions" => {
+                        if get_attr(e, "gridLines").map(|v| v == "1" || v == "true").unwrap_or(false) {
+                            ps.print_gridlines = true;
+                            saw_page_setup = true;
+                        }
+                        if get_attr(e, "horizontalCentered")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false)
+                        {
+                            ps.center_horizontally = true;
+                            saw_page_setup = true;
+                        }
+                        if get_attr(e, "verticalCentered")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false)
+                        {
+                            ps.center_vertically = true;
+                            saw_page_setup = true;
+                        }
+                    }
+                    "oddHeader" => in_odd_header = true,
+                    "oddFooter" => in_odd_footer = true,
+                    "rowBreaks" => in_row_breaks = true,
+                    "brk" if in_row_breaks => {
+                        if let Some(id) = get_attr(e, "id").and_then(|v| v.parse::<u32>().ok()) {
+                            ps.manual_row_breaks.push(id);
+                            saw_page_setup = true;
+                        }
+                    }
+                    "hyperlinks" => in_hyperlinks = true,
+                    "hyperlink" if in_hyperlinks => {
+                        // <hyperlink ref="A1" r:id="rId1" location="Sheet2!A1"
+                        //            display=".." tooltip=".."/>
+                        if let Some(r) = get_attr(e, "ref") {
+                            if let Some((row, col)) = parse_cell_ref(&r) {
+                                meta.raw_hyperlinks.push(RawHyperlink {
+                                    row,
+                                    col,
+                                    rid: get_attr(e, "r:id").or_else(|| get_attr(e, "id")),
+                                    location: get_attr(e, "location"),
+                                    display: get_attr(e, "display"),
+                                    tooltip: get_attr(e, "tooltip"),
+                                });
+                            }
+                        }
+                    }
                     "sheetViews" => in_sheet_views = true,
                     "sheetView" if in_sheet_views => {
                         // <sheetView showGridLines="0" ...>
@@ -779,6 +1003,20 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                     _ => {}
                 }
             }
+            Ok(Event::Text(ref t)) => {
+                if in_odd_header || in_odd_footer {
+                    if let Ok(text) = t.unescape() {
+                        if in_odd_header {
+                            ps.header.push_str(&text);
+                        } else {
+                            ps.footer.push_str(&text);
+                        }
+                        if !text.trim().is_empty() {
+                            saw_page_setup = true;
+                        }
+                    }
+                }
+            }
             Ok(Event::End(ref e)) => {
                 let tag = e.local_name();
                 let tag_str = std::str::from_utf8(tag.as_ref()).unwrap_or("");
@@ -786,6 +1024,11 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                     "sheetViews" => in_sheet_views = false,
                     "sheetData" => in_sheet_data = false,
                     "mergeCells" => in_merge_cells = false,
+                    "sheetPr" => in_sheet_pr = false,
+                    "hyperlinks" => in_hyperlinks = false,
+                    "rowBreaks" => in_row_breaks = false,
+                    "oddHeader" => in_odd_header = false,
+                    "oddFooter" => in_odd_footer = false,
                     _ => {}
                 }
             }
@@ -795,7 +1038,185 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
         buf.clear();
     }
 
+    if saw_page_setup {
+        meta.page_setup = Some(ps);
+    }
+
     meta
+}
+
+/// Parse sheet visibility from xl/workbook.xml `<sheet state="...">`
+/// attributes, keyed by 1-based workbook.xml sheet order. Only non-visible
+/// states are recorded.
+pub(crate) fn parse_sheet_visibility(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> HashMap<usize, String> {
+    let mut result = HashMap::new();
+    let Ok(wb_xml) = read_zip_entry(archive, "xl/workbook.xml") else {
+        return result;
+    };
+    let mut reader = Reader::from_str(&wb_xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    let mut idx: usize = 0;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag = e.local_name();
+                if std::str::from_utf8(tag.as_ref()).unwrap_or("") == "sheet" {
+                    idx += 1;
+                    if let Some(state) = get_attr(e, "state") {
+                        if state == "hidden" || state == "veryHidden" {
+                            result.insert(idx, state);
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    result
+}
+
+/// Parse a sheet's `_rels` part into rid -> (type, resolved target path).
+fn parse_sheet_rels(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    sheet_path: &str,
+) -> HashMap<String, (String, String)> {
+    let mut map = HashMap::new();
+    let fname = sheet_path.rsplit('/').next().unwrap_or("");
+    let dir = sheet_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("xl/worksheets");
+    let rels_path = format!("{}/_rels/{}.rels", dir, fname);
+    let Ok(xml) = read_zip_entry(archive, &rels_path) else {
+        return map;
+    };
+    let mut reader = Reader::from_str(&xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag = e.local_name();
+                if std::str::from_utf8(tag.as_ref()).unwrap_or("") == "Relationship" {
+                    let id = get_attr(e, "Id").unwrap_or_default();
+                    let rel_type = get_attr(e, "Type").unwrap_or_default();
+                    let target = get_attr(e, "Target").unwrap_or_default();
+                    let mode = get_attr(e, "TargetMode").unwrap_or_default();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    // External targets (URLs) stay verbatim; internal part
+                    // paths resolve relative to the sheet's directory.
+                    let resolved = if mode == "External" {
+                        target
+                    } else if let Some(rest) = target.strip_prefix("../") {
+                        format!("xl/{}", rest)
+                    } else if target.starts_with('/') {
+                        target.trim_start_matches('/').to_string()
+                    } else {
+                        format!("{}/{}", dir, target)
+                    };
+                    map.insert(id, (rel_type, resolved));
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    map
+}
+
+/// Parse a legacy comments part (xl/commentsN.xml) into cell notes.
+fn parse_comments_xml(xml: &str) -> Vec<crate::SavedNote> {
+    let mut notes = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut authors: Vec<String> = Vec::new();
+    let mut in_author = false;
+    let mut current_author = String::new();
+    let mut in_comment = false;
+    let mut current_ref: Option<(u32, u32)> = None;
+    let mut current_author_id: usize = usize::MAX;
+    let mut in_text = false;
+    let mut text_buf = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag = e.local_name();
+                match std::str::from_utf8(tag.as_ref()).unwrap_or("") {
+                    "author" => {
+                        in_author = true;
+                        current_author.clear();
+                    }
+                    "comment" => {
+                        in_comment = true;
+                        current_ref = get_attr(e, "ref").and_then(|r| parse_cell_ref(&r));
+                        current_author_id = get_attr(e, "authorId")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(usize::MAX);
+                        text_buf.clear();
+                    }
+                    "text" if in_comment => in_text = true,
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref t)) => {
+                if let Ok(text) = t.unescape() {
+                    if in_author {
+                        current_author.push_str(&text);
+                    } else if in_text {
+                        text_buf.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let tag = e.local_name();
+                match std::str::from_utf8(tag.as_ref()).unwrap_or("") {
+                    "author" => {
+                        in_author = false;
+                        authors.push(current_author.clone());
+                    }
+                    "text" => in_text = false,
+                    "comment" => {
+                        if let Some((row, col)) = current_ref.take() {
+                            // Excel prefixes the note text with "Author:\n" —
+                            // keep the text as-is (it IS the note content).
+                            notes.push(crate::SavedNote {
+                                row,
+                                col,
+                                text: text_buf.clone(),
+                                author: authors
+                                    .get(current_author_id)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                rich_content: None,
+                                width: 0.0,
+                                height: 0.0,
+                                visible: false,
+                                created_at: String::new(),
+                                modified_at: String::new(),
+                            });
+                        }
+                        in_comment = false;
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    notes
 }
 
 // ============================================================================

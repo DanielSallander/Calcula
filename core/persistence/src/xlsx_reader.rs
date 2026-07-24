@@ -244,6 +244,20 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             .map(|m| m.show_gridlines)
             .unwrap_or(true);
 
+        // Tab color, notes, hyperlinks, page setup from the XML parse; sheet
+        // visibility from workbook.xml state (hidden sheets stay hidden
+        // instead of silently unhiding on import).
+        let tab_color = sheet_meta
+            .and_then(|m| m.tab_color.clone())
+            .unwrap_or_default();
+        let visibility = style_data
+            .as_ref()
+            .and_then(|sd| sd.sheet_visibility.get(&sheet_number).cloned())
+            .unwrap_or_else(|| "visible".to_string());
+        let notes = sheet_meta.map(|m| m.notes.clone()).unwrap_or_default();
+        let hyperlinks = sheet_meta.map(|m| m.hyperlinks.clone()).unwrap_or_default();
+        let page_setup = sheet_meta.and_then(|m| m.page_setup.clone());
+
         sheets.push(Sheet {
             id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
             name: sheet_name.clone(),
@@ -256,11 +270,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             freeze_col,
             hidden_rows,
             hidden_cols,
-            tab_color: String::new(),
-            visibility: "visible".to_string(),
-            notes: Vec::new(),
-            hyperlinks: Vec::new(),
-            page_setup: None,
+            tab_color,
+            visibility,
+            notes,
+            hyperlinks,
+            page_setup,
             show_gridlines,
         });
     }
@@ -331,6 +345,15 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             let native_entries =
                 crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
 
+            // Freshness marker: Calcula appends an orphan part after saving;
+            // Excel/LibreOffice drop unreferenced parts on resave. Absent
+            // marker = another app resaved this file, so the carry is stale
+            // even where the per-sheet chart COUNT happens to match (an Excel
+            // edit to an existing chart keeps the count unchanged).
+            let marker_present = archive
+                .by_name(crate::xlsx_writer::XLSX_FRESHNESS_MARKER)
+                .is_ok();
+
             let mut native_count: HashMap<usize, usize> = HashMap::new();
             for (sheet_idx, _) in &native_entries {
                 *native_count.entry(*sheet_idx).or_insert(0) += 1;
@@ -341,8 +364,9 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             }
 
             let sheet_untouched = |idx: usize| -> bool {
-                native_count.get(&idx).copied().unwrap_or(0)
-                    == emitted_count.get(&idx).copied().unwrap_or(0)
+                marker_present
+                    && native_count.get(&idx).copied().unwrap_or(0)
+                        == emitted_count.get(&idx).copied().unwrap_or(0)
             };
 
             // Carried charts: on an untouched sheet all of them restore
@@ -414,8 +438,12 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             let defined = crate::xlsx_style_reader::parse_defined_names(&mut archive);
             let mut by_name: HashMap<String, usize> = HashMap::new();
             for (name, refers_to, local_idx) in defined {
-                // Excel built-ins (_xlnm.Print_Area etc.) are not user names.
+                // Excel built-ins: Print_Area / Print_Titles feed the sheet's
+                // page setup (they are sheet-scoped); the rest are internal.
                 if name.starts_with("_xlnm.") {
+                    if name == "_xlnm.Print_Area" || name == "_xlnm.Print_Titles" {
+                        apply_print_defined_name(&mut wb, &sheet_names, &name, &refers_to, local_idx);
+                    }
                     continue;
                 }
                 let sheet_id = match local_idx {
@@ -473,4 +501,47 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     }
 
     Ok(wb)
+}
+
+/// Apply an Excel `_xlnm.Print_Area` / `_xlnm.Print_Titles` defined name to
+/// its sheet's page setup. Multi-range areas (comma-separated) and column
+/// titles are skipped — Calcula models a single print area and repeat-rows.
+fn apply_print_defined_name(
+    wb: &mut Workbook,
+    sheet_names: &[String],
+    name: &str,
+    refers_to: &str,
+    local_idx: Option<usize>,
+) {
+    let Some(i) = local_idx else { return };
+    let Some(nm) = sheet_names.get(i) else { return };
+    let Some(sheet) = wb.sheets.iter_mut().find(|s| &s.name == nm) else {
+        return;
+    };
+    // "Sheet1!$A$1:$F$20" -> "A1:F20"; "'My Sheet'!$1:$2" -> "1:2".
+    let strip = |part: &str| -> String {
+        let range = part.rsplit_once('!').map(|(_, r)| r).unwrap_or(part);
+        range.replace('$', "")
+    };
+    if refers_to.contains(',') {
+        return; // multi-range: unsupported, keep whatever is already set
+    }
+    let value = strip(refers_to.trim());
+    if value.is_empty() {
+        return;
+    }
+    let ps = sheet
+        .page_setup
+        .get_or_insert_with(crate::xlsx_style_reader::default_page_setup);
+    if name == "_xlnm.Print_Area" {
+        ps.print_area = value;
+    } else {
+        // Print_Titles: only a pure row range ("1:2") maps to repeat-rows.
+        let is_row_range = value
+            .split(':')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+        if is_row_range {
+            ps.print_titles_rows = value;
+        }
+    }
 }

@@ -532,6 +532,12 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
                     col: n.col,
                     text: n.content.clone(),
                     author: n.author_name.clone(),
+                    rich_content: n.rich_content.clone(),
+                    width: n.width,
+                    height: n.height,
+                    visible: n.visible,
+                    created_at: n.created_at.clone(),
+                    modified_at: n.modified_at.clone().unwrap_or_default(),
                 })
                 .collect();
         }
@@ -1546,6 +1552,35 @@ fn assemble_workbook_for_save(
         }
     }
 
+    // Serialize author-side writeback DRAFT regions (designated but not yet
+    // published) — without this an author who saves and reopens before
+    // publishing loses every region designation.
+    {
+        let regions = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
+        if !regions.is_empty() {
+            let json = serde_json::to_vec_pretty(&*regions).map_err(|e| e.to_string())?;
+            workbook
+                .user_files
+                .insert("writeback_draft_regions.json".to_string(), json);
+        }
+    }
+
+    // Serialize CUSTOM named cell styles (gallery definitions). Persisted
+    // self-contained (resolved CellStyle, not a registry index) so restore is
+    // immune to the load-time style-registry remap. Built-ins are seeded at
+    // startup and never persisted.
+    if let Some(json) = crate::named_styles_cmd::collect_named_styles_for_save(state) {
+        workbook.user_files.insert("named_styles.json".to_string(), json);
+    }
+
+    // Serialize computed properties (formula-driven attribute bindings).
+    // Restore rebuilds ASTs + the dependency maps + the id counter.
+    if let Some(json) = crate::computed_properties::collect_computed_properties_for_save(state) {
+        workbook
+            .user_files
+            .insert("computed_properties.json".to_string(), json);
+    }
+
     // Copy workbook properties (read-only; last_modified stamping is the
     // caller's decision — save_file stamps, auto-recover does not).
     {
@@ -1927,12 +1962,22 @@ pub fn open_file(
                         sheet_index: sheet_idx,
                         author_name: n.author.clone(),
                         content: n.text.clone(),
-                        rich_content: None,
-                        width: 200.0,
-                        height: 100.0,
-                        visible: false,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        modified_at: None,
+                        rich_content: n.rich_content.clone(),
+                        // 0 = written by a pre-widening file (or xlsx import):
+                        // fall back to the app defaults instead of a 0x0 box.
+                        width: if n.width > 0.0 { n.width } else { 200.0 },
+                        height: if n.height > 0.0 { n.height } else { 100.0 },
+                        visible: n.visible,
+                        created_at: if n.created_at.is_empty() {
+                            chrono::Utc::now().to_rfc3339()
+                        } else {
+                            n.created_at.clone()
+                        },
+                        modified_at: if n.modified_at.is_empty() {
+                            None
+                        } else {
+                            Some(n.modified_at.clone())
+                        },
                     });
                 }
                 notes_storage.insert(sheet_idx, sheet_notes);
@@ -2284,6 +2329,31 @@ pub fn open_file(
         }
     }
 
+    // Restore author-side writeback DRAFT regions (absent file = none).
+    {
+        let restored: Vec<calp::WritebackRegionDeclaration> = workbook
+            .user_files
+            .remove("writeback_draft_regions.json")
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        *state.writeback_draft_regions.lock().map_err(|e| e.to_string())? = restored;
+    }
+
+    // Restore CUSTOM named cell styles (built-ins stay seeded; customs from a
+    // previous session are replaced by this file's set — or removed when the
+    // file carries none).
+    crate::named_styles_cmd::restore_named_styles(
+        &state,
+        workbook.user_files.remove("named_styles.json").as_deref(),
+    );
+
+    // Restore computed properties (rebuilds ASTs, dependency maps, id counter;
+    // absent file = clear).
+    crate::computed_properties::restore_computed_properties(
+        &state,
+        workbook.user_files.remove("computed_properties.json").as_deref(),
+    );
+
     // Restore model writeback entries (writeback COLUMN history) and reset
     // the Blank-projection session floor: this open is a new session, so
     // Blank columns start blank while their history stays intact. The engine
@@ -2602,6 +2672,9 @@ pub fn new_file(
 
     // Clear named styles
     state.named_styles.lock().map_err(|e| e.to_string())?.clear();
+    // Re-seed built-in styles: the clear above wiped them too, which left the
+    // Cell Styles gallery empty after File > New.
+    crate::named_styles_cmd::init_builtin_named_styles(&state);
 
     // Reset theme to default
     *state.theme.lock().map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
@@ -3254,6 +3327,123 @@ pub fn set_auto_recover_settings(
     *state.auto_recover_enabled.lock().unwrap() = enabled;
     *state.auto_recover_interval_ms.lock().unwrap() = interval_ms;
     Ok(AutoRecoverSettings { enabled, interval_ms })
+}
+
+/// List the Calcula features present in the CURRENT workbook that saving as
+/// .xlsx will silently drop (xlsx has no representation for them). The
+/// frontend shows this before a lossy save so the user consents to the loss —
+/// "Working" xlsx support must never mean silent destruction of everything
+/// else. Cheap read-only presence checks; feature VALUES are not serialized.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn xlsx_save_loss_report(
+    state: State<AppState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
+    window: tauri::Window,
+) -> Result<Vec<String>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let mut lost: Vec<String> = Vec::new();
+    let mut check = |present: bool, label: &str| {
+        if present {
+            lost.push(label.to_string());
+        }
+    };
+
+    check(
+        state.conditional_formats.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        "Conditional formatting",
+    );
+    check(
+        state.data_validations.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        "Data validation",
+    );
+    check(
+        !pivot_state.pivot_tables.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Pivot tables",
+    );
+    check(
+        !slicer_state.slicers.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Slicers",
+    );
+    check(
+        !ribbon_filter_state.filters.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Ribbon filters",
+    );
+    check(
+        !pane_control_state.controls.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Pane controls",
+    );
+    check(
+        state.comments.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        "Threaded comments",
+    );
+    check(
+        state.scenarios.lock().map_err(|e| e.to_string())?.values().any(|v| !v.is_empty()),
+        "What-if scenarios",
+    );
+    check(
+        !state.outlines.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Outline groups",
+    );
+    check(
+        !state.object_scripts.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Object scripts",
+    );
+    {
+        let scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        check(!scripts.is_empty(), "Workbook scripts (incl. custom functions)");
+    }
+    check(
+        !script_state.workbook_notebooks.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Notebooks",
+    );
+    check(
+        !state.cell_types.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Cell types (bricks)",
+    );
+    check(
+        !state.cell_behaviors.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Cell behaviors (bricks)",
+    );
+    check(
+        state.sheet_protection.lock().map_err(|e| e.to_string())?.values().any(|p| p.protected)
+            || state.workbook_protection.lock().map_err(|e| e.to_string())?.protected,
+        "Sheet/workbook protection",
+    );
+    check(
+        !bi_state.connections.lock().map_err(|e| e.to_string())?.is_empty(),
+        "BI model connections",
+    );
+    check(
+        !state.subscriptions.lock().map_err(|e| e.to_string())?.subscriptions.is_empty(),
+        "Package subscriptions",
+    );
+    check(
+        !state.writeback_layer.lock().map_err(|e| e.to_string())?.drafts.is_empty()
+            || !state.writeback_draft_regions.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Writeback drafts/regions",
+    );
+    check(
+        !state.extension_data.lock().map_err(|e| e.to_string())?.is_empty(),
+        "Extension data (animations, grid reports, ...)",
+    );
+    check(
+        state.computed_properties.lock().map_err(|e| e.to_string())?.values().any(|s| {
+            !s.column_props.is_empty() || !s.row_props.is_empty() || !s.cell_props.is_empty()
+        }),
+        "Computed properties",
+    );
+    check(
+        state.named_styles.lock().map_err(|e| e.to_string())?.values().any(|ns| !ns.built_in),
+        "Custom named styles",
+    );
+
+    Ok(lost)
 }
 
 #[tauri::command]
