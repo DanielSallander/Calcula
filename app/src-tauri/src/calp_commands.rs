@@ -885,7 +885,7 @@ fn materialize_distributed_scripts(
     package_name: &str,
     modules: &[persistence::SavedScript],
     notebooks: &[persistence::SavedNotebook],
-) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+) -> Result<(Vec<(String, String)>, Vec<(String, String)>, bool), String> {
     use std::collections::HashSet;
 
     // (id, name) of the modules/notebooks ACTUALLY inserted — conflict-skipped
@@ -893,16 +893,38 @@ fn materialize_distributed_scripts(
     // local (or other-package) document to this package.
     let mut applied_modules: Vec<(String, String)> = Vec::new();
     let mut applied_notebooks: Vec<(String, String)> = Vec::new();
+    let custom_functions_changed;
 
     {
         use crate::scripting::types::{ScriptScope, WorkbookScript};
         let mut scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
         let new_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
-        // Removal-on-refresh: drop this package's prior modules it no longer ships.
+        // Removal-on-refresh: drop this package's prior modules it no longer
+        // ships. The reserved Custom Functions record is exempt: it is
+        // subscriber-owned merged data, reconciled per-function below.
         scripts.retain(|id, s| {
-            !(s.source_package.as_deref() == Some(package_name) && !new_ids.contains(id.as_str()))
+            id == CUSTOM_FUNCTIONS_LIB_ID
+                || !(s.source_package.as_deref() == Some(package_name)
+                    && !new_ids.contains(id.as_str()))
         });
+
+        // Custom Functions library: NEVER goes through the same-id conflict
+        // policy — the fixed record id collides BY DESIGN across every
+        // workbook, so preserve-local would silently drop the publisher's
+        // entire library whenever the subscriber authored even one function.
+        // Merge per function instead (None = package no longer ships one, so
+        // its previously-merged functions are stripped).
+        let incoming_lib = modules
+            .iter()
+            .find(|m| m.id == CUSTOM_FUNCTIONS_LIB_ID)
+            .map(|m| m.source.as_str());
+        custom_functions_changed =
+            merge_custom_function_library(&mut scripts, package_name, incoming_lib);
+
         for module in modules {
+            if module.id == CUSTOM_FUNCTIONS_LIB_ID {
+                continue; // handled by the per-function merge above
+            }
             // Conflict = an existing same-id entry NOT owned by this package
             // (local, or a different package). Compute (and clone) up front so the
             // immutable borrow is released before the insert.
@@ -990,7 +1012,213 @@ fn materialize_distributed_scripts(
             );
         }
     }
-    Ok((applied_modules, applied_notebooks))
+    Ok((applied_modules, applied_notebooks, custom_functions_changed))
+}
+
+/// Reserved module-script id under which the Custom Functions (JS UDF) library
+/// is persisted as JSON data (mirrors PERSIST_SCRIPT_ID in @api/customFunctions.ts).
+const CUSTOM_FUNCTIONS_LIB_ID: &str = "__calcula_custom_functions__";
+
+/// Merge a package's custom-function library into the subscriber's reserved
+/// library record, PER FUNCTION:
+/// - The merged record is ALWAYS subscriber-owned (source_package None), so
+///   the whole-record removal-on-refresh never deletes local functions.
+/// - Each package function is stamped `sourcePackage` + a `sourceDigest`
+///   content hash inside the JSON. On refresh, an UNMODIFIED package function
+///   is replaced by the incoming set (updates AND removals propagate), while a
+///   function the subscriber has EDITED since the merge (digest mismatch) is
+///   adopted as local — the subscriber's edit is never silently destroyed.
+/// - A name collision with a local (or other-package) function keeps the
+///   existing one (preserve-local, per function) and logs the skip.
+/// - Incoming names are validated with the same rules as the authoring UI
+///   (JS identifier) — one invalid name in a package must not poison the
+///   shared library and break the subscriber's OWN functions at install.
+/// - Library `capabilities` are NOT unioned: the merged record shares the
+///   subscriber's script id and its live capability grants, so a package must
+///   never widen that declared ceiling. A package function needing an
+///   undeclared capability fails closed at the broker until the subscriber
+///   adds the capability themselves (logged here for transparency).
+///
+/// `incoming_source` is None when the package ships no library, which strips
+/// the package's previously-merged (unmodified) functions. Returns true when
+/// the stored record changed (callers emit "custom-functions:refresh" so the
+/// live UDF registry re-installs without a reopen).
+fn merge_custom_function_library(
+    scripts: &mut std::collections::HashMap<String, crate::scripting::types::WorkbookScript>,
+    package_name: &str,
+    incoming_source: Option<&str>,
+) -> bool {
+    use serde_json::{json, Value};
+
+    let old_source = scripts.get(CUSTOM_FUNCTIONS_LIB_ID).map(|s| s.source.clone());
+    if old_source.is_none() && incoming_source.is_none() {
+        return false;
+    }
+
+    fn parse_lib(src: &str) -> (Vec<Value>, Vec<String>) {
+        let v: Value = match serde_json::from_str(src) {
+            Ok(v) => v,
+            Err(_) => return (Vec::new(), Vec::new()),
+        };
+        let functions = v
+            .get("functions")
+            .and_then(|f| f.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let capabilities = v
+            .get("capabilities")
+            .and_then(|c| c.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        (functions, capabilities)
+    }
+
+    /// Same shape rule as the authoring UI's validateFunctionName
+    /// (@api/customFunctions.ts IDENT_RE): a JS identifier after trim+uppercase.
+    fn is_valid_function_name(name: &str) -> bool {
+        let up = name.trim().to_uppercase();
+        let mut chars = up.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    }
+
+    /// Deterministic content digest of a function definition, EXCLUDING the
+    /// provenance keys this merge adds. serde_json's default map is a BTreeMap
+    /// (sorted keys), so to_string is stable.
+    fn function_digest(f: &Value) -> String {
+        let mut canon = f.clone();
+        if let Some(obj) = canon.as_object_mut() {
+            obj.remove("sourcePackage");
+            obj.remove("sourceDigest");
+        }
+        let bytes = serde_json::to_string(&canon).unwrap_or_default();
+        // FNV-1a 64 — tiny, dependency-free, stable across builds.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes.as_bytes() {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{:016x}", hash)
+    }
+
+    let (existing_fns, caps) = old_source.as_deref().map(parse_lib).unwrap_or_default();
+    // Partition this package's previous contribution: unmodified entries are
+    // dropped (re-added from incoming below — updates/removals propagate);
+    // subscriber-EDITED entries (digest mismatch) are adopted as local so the
+    // edit survives, and the collision check then shields them from incoming.
+    let mut merged: Vec<Value> = Vec::new();
+    for mut f in existing_fns {
+        let from_this_pkg =
+            f.get("sourcePackage").and_then(|p| p.as_str()) == Some(package_name);
+        if !from_this_pkg {
+            merged.push(f);
+            continue;
+        }
+        let stored_digest = f
+            .get("sourceDigest")
+            .and_then(|d| d.as_str())
+            .map(str::to_string);
+        let modified = stored_digest.as_deref() != Some(function_digest(&f).as_str());
+        if modified {
+            if let Some(obj) = f.as_object_mut() {
+                obj.remove("sourcePackage");
+                obj.remove("sourceDigest");
+            }
+            crate::log_warn!(
+                "CALP",
+                "custom function '{}' from package '{}' was edited locally: keeping the edited copy as a local function",
+                f.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                package_name,
+            );
+            merged.push(f);
+        }
+        // Unmodified package function: dropped here, re-added from incoming.
+    }
+
+    if let Some(src) = incoming_source {
+        let (incoming_fns, incoming_caps) = parse_lib(src);
+        let mut taken: std::collections::HashSet<String> = merged
+            .iter()
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+            .map(|n| n.trim().to_uppercase())
+            .collect();
+        for mut f in incoming_fns {
+            let Some(name) = f.get("name").and_then(|n| n.as_str()).map(str::to_string) else {
+                continue;
+            };
+            if !is_valid_function_name(&name) {
+                crate::log_warn!(
+                    "CALP",
+                    "custom function '{}' from package '{}' not applied: invalid function name",
+                    name,
+                    package_name,
+                );
+                continue;
+            }
+            let key = name.trim().to_uppercase();
+            if taken.contains(&key) {
+                crate::log_warn!(
+                    "CALP",
+                    "custom function '{}' from package '{}' not applied: the name is already defined in this workbook",
+                    name,
+                    package_name,
+                );
+                continue;
+            }
+            taken.insert(key);
+            let digest = function_digest(&f);
+            if let Some(obj) = f.as_object_mut() {
+                obj.insert("sourcePackage".to_string(), json!(package_name));
+                obj.insert("sourceDigest".to_string(), json!(digest));
+            }
+            merged.push(f);
+        }
+        // Capabilities are deliberately NOT merged (see fn docs) — only log
+        // when the package declares ones the subscriber's library lacks.
+        for c in incoming_caps {
+            if !caps.contains(&c) {
+                crate::log_warn!(
+                    "CALP",
+                    "package '{}' custom functions declare capability '{}' which this workbook's library does not; those functions will fail closed until the capability is added in the Custom Functions dialog",
+                    package_name,
+                    c,
+                );
+            }
+        }
+    }
+
+    if merged.is_empty() && old_source.is_none() {
+        return false;
+    }
+
+    let mut lib = json!({ "functions": merged });
+    if !caps.is_empty() {
+        lib["capabilities"] = json!(caps);
+    }
+    let new_source = lib.to_string();
+    if old_source.as_deref() == Some(new_source.as_str()) {
+        return false;
+    }
+
+    use crate::scripting::types::{ScriptScope, WorkbookScript};
+    scripts
+        .entry(CUSTOM_FUNCTIONS_LIB_ID.to_string())
+        .and_modify(|s| {
+            s.source = new_source.clone();
+            s.source_package = None; // always subscriber-owned (heals old stamps)
+        })
+        .or_insert_with(|| WorkbookScript {
+            id: CUSTOM_FUNCTIONS_LIB_ID.to_string(),
+            name: "Custom Functions (data)".to_string(),
+            description: Some("Definitions for user-authored formula functions.".to_string()),
+            source: new_source,
+            scope: ScriptScope::Workbook,
+            source_package: None,
+        });
+    true
 }
 
 /// Grow an index-aligned per-sheet Vec store so `idx` is addressable.
@@ -2087,12 +2315,18 @@ pub fn calp_pull(
     // ScriptState. Shared with the refresh path so updates propagate
     // identically. Ledger entries come from the APPLIED lists so a
     // conflict-skipped local document is never attributed to this package.
-    let (applied_modules, applied_notebooks) = materialize_distributed_scripts(
-        &script_state,
-        &result.package_name,
-        &result.module_scripts,
-        &result.notebooks,
-    )?;
+    let (applied_modules, applied_notebooks, custom_functions_changed) =
+        materialize_distributed_scripts(
+            &script_state,
+            &result.package_name,
+            &result.module_scripts,
+            &result.notebooks,
+        )?;
+    if custom_functions_changed {
+        // Re-install the live UDF registry NOW — without this, the pulled
+        // report's custom-function formulas stay #NAME? until a reopen.
+        let _ = tauri::Emitter::emit(&window, "custom-functions:refresh", ());
+    }
     for (id, name) in &applied_modules {
         sub_objects.push(sub_object("moduleScript", id.clone(), name.clone()));
     }
@@ -4389,9 +4623,11 @@ pub fn calp_refresh_apply(
     // C8: materialize each refreshed package's standalone module scripts +
     // notebooks so upstream updates (incl. removals) actually land on refresh,
     // while preserving subscriber-local same-id documents.
+    let mut any_custom_functions_changed = false;
     for (pkg, modules, notebooks) in &module_notebook_updates {
-        let (applied_modules, applied_notebooks) =
+        let (applied_modules, applied_notebooks, cf_changed) =
             materialize_distributed_scripts(&script_state, pkg, modules, notebooks)?;
+        any_custom_functions_changed |= cf_changed;
         let mut entries: Vec<calp::manifest::SubscribedObject> = Vec::new();
         for (id, name) in applied_modules {
             entries.push(calp::manifest::SubscribedObject {
@@ -4410,6 +4646,11 @@ pub fn calp_refresh_apply(
             });
         }
         applied_script_entries.push((pkg.clone(), entries));
+    }
+    if any_custom_functions_changed {
+        // Re-install the live UDF registry NOW — without this, refreshed
+        // custom-function formulas stay stale/#NAME? until a reopen.
+        let _ = tauri::Emitter::emit(&window, "custom-functions:refresh", ());
     }
 
     // Complete the provenance ledger with the script kinds recorded above at

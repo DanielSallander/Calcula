@@ -263,6 +263,76 @@ pub fn build_sheet_path_mapping(
 }
 
 /// Read a file entry from the ZIP archive as a UTF-8 string.
+/// Parse `<definedNames>` from xl/workbook.xml.
+/// Returns (name, refers_to, local_sheet_index) triples, where
+/// `local_sheet_index` is the 0-based position in the workbook.xml sheet order
+/// (which matches calamine's `sheet_names()` order, INCLUDING any hidden
+/// `_calcula_meta` sheet) for sheet-scoped names, or None for workbook scope.
+/// Hidden names (Excel-internal, e.g. solver state) are skipped.
+pub fn parse_defined_names(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> Vec<(String, String, Option<usize>)> {
+    let mut result = Vec::new();
+    let wb_xml = match read_zip_entry(archive, "xl/workbook.xml") {
+        Ok(xml) => xml,
+        Err(_) => return result,
+    };
+    let mut reader = Reader::from_str(&wb_xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+
+    let mut current: Option<(String, Option<usize>)> = None;
+    let mut text_buf = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(ref e)) => {
+                let local = e.local_name();
+                let tag = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                if tag == "definedName" {
+                    let name = get_attr(e, "name").unwrap_or_default();
+                    let hidden = get_attr(e, "hidden")
+                        .map(|v| v == "1" || v == "true")
+                        .unwrap_or(false);
+                    let local_idx = get_attr(e, "localSheetId")
+                        .and_then(|v| v.parse::<usize>().ok());
+                    if !name.is_empty() && !hidden {
+                        current = Some((name, local_idx));
+                    } else {
+                        current = None;
+                    }
+                    text_buf.clear();
+                }
+            }
+            Ok(Event::Text(ref t)) => {
+                if current.is_some() {
+                    if let Ok(s) = t.unescape() {
+                        text_buf.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let local = e.local_name();
+                let tag = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                if tag == "definedName" {
+                    if let Some((name, local_idx)) = current.take() {
+                        let refers_to = text_buf.trim().to_string();
+                        if !refers_to.is_empty() {
+                            result.push((name, refers_to, local_idx));
+                        }
+                    }
+                    text_buf.clear();
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    result
+}
+
 fn read_zip_entry(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, ()> {
     let mut entry = archive.by_name(name).map_err(|_| ())?;
     let mut buf = String::new();

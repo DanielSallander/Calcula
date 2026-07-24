@@ -11,6 +11,7 @@ import {
   DialogExtensions,
   AppEvents,
   IconCustomFunctions,
+  listenTauriEvent,
 } from "@api";
 import { CustomFunctionsDialog } from "./components/CustomFunctionsDialog";
 
@@ -43,6 +44,17 @@ function activate(context: ExtensionContext): void {
     void loadAndInstallCustomFunctions();
   });
   cleanupFns.push(unsub);
+
+  // Bridge the backend "custom-functions:refresh" Tauri event (emitted after a
+  // .calp pull/refresh merges a package's function library) so distributed
+  // functions install live — without this they stay #NAME? until a reopen.
+  let unlistenRefresh: (() => void) | undefined;
+  void listenTauriEvent("custom-functions:refresh", () => {
+    void loadAndInstallCustomFunctions();
+  }).then((un) => {
+    unlistenRefresh = un;
+  });
+  cleanupFns.push(() => unlistenRefresh?.());
 }
 
 function deactivate(): void {

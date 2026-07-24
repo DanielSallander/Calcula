@@ -637,6 +637,92 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         workbook.cell_behaviors =
             crate::cell_behaviors::collect_cell_behaviors_for_save(&behaviors, sheet_ids);
     }
+
+    // ---- Protection (sheet-level + per-cell + workbook structure) ----
+    // Without this, protect_sheet/protect_workbook/set_cell_protection state
+    // (password hashes included) lived only in AppState and every protected
+    // workbook reopened fully unprotected.
+    let (sheet_protections, workbook_protection) = collect_protection_for_save(state, sheet_ids);
+    workbook.sheet_protections = sheet_protections;
+    workbook.workbook_protection = workbook_protection;
+}
+
+/// Collect sheet/cell/workbook protection into the persisted SheetId-keyed
+/// opaque carriers. Cell-protection maps are keyed by (row, col) tuples in
+/// AppState, which JSON cannot represent as object keys, so they serialize as
+/// a `[{ row, col, locked, formulaHidden }]` entry list.
+fn collect_protection_for_save(
+    state: &AppState,
+    sheet_ids: &[SheetId],
+) -> (
+    Vec<persistence::SavedSheetProtection>,
+    Option<serde_json::Value>,
+) {
+    use std::collections::BTreeMap;
+
+    // Gather per-sheet payloads keyed by sheet index (BTreeMap for
+    // deterministic artifact bytes across saves).
+    let mut per_sheet: BTreeMap<usize, (Option<serde_json::Value>, Option<serde_json::Value>)> =
+        BTreeMap::new();
+
+    if let Ok(store) = state.sheet_protection.lock() {
+        for (idx, prot) in store.iter() {
+            // Persist any entry that is protected OR carries a password hash /
+            // custom options — an unprotect leaves no entry worth saving.
+            if !prot.protected && prot.password_hash.is_none() {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(prot) {
+                per_sheet.entry(*idx).or_default().0 = Some(v);
+            }
+        }
+    }
+    if let Ok(store) = state.cell_protection.lock() {
+        for (idx, cells) in store.iter() {
+            if cells.is_empty() {
+                continue;
+            }
+            let mut entries: Vec<serde_json::Value> = cells
+                .iter()
+                .map(|((row, col), cp)| {
+                    serde_json::json!({
+                        "row": row,
+                        "col": col,
+                        "locked": cp.locked,
+                        "formulaHidden": cp.formula_hidden,
+                    })
+                })
+                .collect();
+            // Deterministic order (HashMap iteration is not).
+            entries.sort_by_key(|e| {
+                (
+                    e.get("row").and_then(|v| v.as_u64()).unwrap_or(0),
+                    e.get("col").and_then(|v| v.as_u64()).unwrap_or(0),
+                )
+            });
+            per_sheet.entry(*idx).or_default().1 = Some(serde_json::Value::Array(entries));
+        }
+    }
+
+    let sheet_protections = per_sheet
+        .into_iter()
+        .map(
+            |(idx, (protection, cell_protection))| persistence::SavedSheetProtection {
+                sheet_id: sheet_index_to_id(sheet_ids, idx),
+                protection,
+                cell_protection,
+            },
+        )
+        .collect();
+
+    let workbook_protection = state
+        .workbook_protection
+        .lock()
+        .ok()
+        .filter(|wp| wp.protected)
+        .and_then(|wp| serde_json::to_value(&*wp).ok());
+
+    (sheet_protections, workbook_protection)
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -1351,70 +1437,55 @@ fn restore_pivot_definitions(
 // COMMANDS
 // ============================================================================
 
-#[tauri::command]
-pub fn save_file(
-    state: State<AppState>,
-    file_state: State<FileState>,
-    user_files_state: State<UserFilesState>,
-    slicer_state: State<crate::slicer::SlicerState>,
-    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
-    pane_control_state: State<crate::pane_control::PaneControlState>,
-    script_state: State<crate::scripting::types::ScriptState>,
-    pivot_state: State<'_, crate::pivot::types::PivotState>,
-    bi_state: State<'_, crate::bi::types::BiState>,
-    path: String,
-    // Optional passphrase. `Some` encrypts (and becomes the session password);
-    // `None` falls back to the session password so a plain Ctrl+S keeps an
-    // already-encrypted document encrypted. Ignored for non-`.cala` formats.
-    password: Option<String>,
-    window: tauri::Window,
-) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // If calculate_before_save is enabled, recalculate all formulas first
-    {
-        let calc_before_save = *state.calculate_before_save.lock().unwrap();
-        if calc_before_save {
-            let _ = crate::calculation::calculate_now(
-                state.clone(),
-                user_files_state.clone(),
-                pivot_state.clone(),
-                pane_control_state.clone(),
-                ribbon_filter_state.clone(),
-                None,
-            );
-        }
-    }
-
+/// Assemble the COMPLETE workbook snapshot for a full-fidelity save: all
+/// sheets (via build_workbook_for_save), slicers, ribbon filters, pane
+/// controls, pivot layouts + definitions, object scripts, extension data,
+/// scripts/notebooks, BI roles/connections/caches, the user_files artifacts
+/// (subscriptions/overrides/audit/writeback/model-writeback/autofilters), and
+/// workbook properties. SHARED by save_file and auto_recover_save — any new
+/// persisted surface added here reaches BOTH paths, so the recovery snapshot
+/// can never silently drift behind the real save again.
+#[allow(clippy::too_many_arguments)]
+fn assemble_workbook_for_save(
+    state: &State<AppState>,
+    user_files_state: &State<UserFilesState>,
+    slicer_state: &State<crate::slicer::SlicerState>,
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: &State<crate::pane_control::PaneControlState>,
+    script_state: &State<crate::scripting::types::ScriptState>,
+    pivot_state: &State<crate::pivot::types::PivotState>,
+    bi_state: &State<crate::bi::types::BiState>,
+) -> Result<Workbook, String> {
     // Multi-sheet workbook build (BUG-0011: the old inline single-sheet
     // Workbook::from_grid build dropped every sheet but the active one).
     // build_workbook_for_save captures all sheets, tables, charts,
     // sparklines, user files, theme and defaults, and runs the per-sheet
     // metadata enrichment.
-    let mut workbook = build_workbook_for_save(&state, &user_files_state)?;
+    let mut workbook = build_workbook_for_save(state, user_files_state)?;
     let sheet_ids_save = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-    workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_save);
-    workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
-    workbook.pane_controls = collect_pane_controls_for_save(&pane_control_state);
+    workbook.slicers = collect_slicers_for_save(slicer_state, &sheet_ids_save);
+    workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
+    workbook.pane_controls = collect_pane_controls_for_save(pane_control_state);
     workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
     workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
     workbook.extension_data = state.extension_data.lock().unwrap().clone();
-    workbook.scripts = collect_scripts_for_save(&script_state);
-    workbook.notebooks = collect_notebooks_for_save(&script_state);
+    workbook.scripts = collect_scripts_for_save(script_state);
+    workbook.notebooks = collect_notebooks_for_save(script_state);
 
     // Collect full pivot definitions from PivotState
-    collect_pivot_definitions(&pivot_state, &state, &mut workbook);
+    collect_pivot_definitions(pivot_state, state, &mut workbook);
 
     // Capture per-BI-connection "view as" RLS role selections so they survive
     // save/reload (re-applied when the connection is re-created on re-pull).
-    workbook.bi_connection_roles = crate::bi::commands::collect_bi_connection_roles(&bi_state);
+    workbook.bi_connection_roles = crate::bi::commands::collect_bi_connection_roles(bi_state);
 
     // Embed locally-authored BI connections (model + spec + bindings, no creds)
     // so they reconstruct on open without the original model file.
-    workbook.bi_connections = crate::bi::commands::capture_local_bi_connections(&bi_state);
+    workbook.bi_connections = crate::bi::commands::capture_local_bi_connections(bi_state);
 
     // Embed each local connection's cached table data (size-guarded) so the
     // pivots are interactive offline on another machine.
-    workbook.bi_connection_caches = crate::bi::commands::collect_local_bi_caches(&bi_state);
+    workbook.bi_connection_caches = crate::bi::commands::collect_local_bi_caches(bi_state);
 
     // Serialize subscription metadata into user_files so it persists in the .cala archive
     {
@@ -1475,10 +1546,10 @@ pub fn save_file(
         }
     }
 
-    // Save workbook properties (update last_modified timestamp)
+    // Copy workbook properties (read-only; last_modified stamping is the
+    // caller's decision — save_file stamps, auto-recover does not).
     {
-        let mut props = state.workbook_properties.lock().unwrap();
-        props.last_modified = chrono::Utc::now().to_rfc3339();
+        let props = state.workbook_properties.lock().unwrap();
         workbook.properties = persistence::WorkbookProperties {
             title: props.title.clone(),
             author: props.author.clone(),
@@ -1493,6 +1564,64 @@ pub fn save_file(
 
     // Sheet-level metadata was already enriched by build_workbook_for_save.
     drop(sheet_ids_save);
+    Ok(workbook)
+}
+
+#[tauri::command]
+pub fn save_file(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
+    path: String,
+    // Optional passphrase. `Some` encrypts (and becomes the session password);
+    // `None` falls back to the session password so a plain Ctrl+S keeps an
+    // already-encrypted document encrypted. Ignored for non-`.cala` formats.
+    password: Option<String>,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // If calculate_before_save is enabled, recalculate all formulas first
+    {
+        let calc_before_save = *state.calculate_before_save.lock().unwrap();
+        if calc_before_save {
+            let _ = crate::calculation::calculate_now(
+                state.clone(),
+                user_files_state.clone(),
+                pivot_state.clone(),
+                pane_control_state.clone(),
+                ribbon_filter_state.clone(),
+                None,
+            );
+        }
+    }
+
+    // Stamp last_modified BEFORE assembly so the snapshot carries it (the
+    // background auto-recover path deliberately does NOT stamp).
+    {
+        let mut props = state.workbook_properties.lock().unwrap();
+        props.last_modified = chrono::Utc::now().to_rfc3339();
+    }
+
+    // Full-fidelity workbook assembly, shared with auto_recover_save (the
+    // recovery path previously used its own drifted single-sheet builder and
+    // silently dropped every non-active sheet, all pivots, BI models and
+    // user_files artifacts).
+    let workbook = assemble_workbook_for_save(
+        &state,
+        &user_files_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &script_state,
+        &pivot_state,
+        &bi_state,
+    )?;
 
     let path_buf = PathBuf::from(&path);
 
@@ -1960,6 +2089,60 @@ pub fn open_file(
         }
     }
 
+    // Restore protection (sheet-level + per-cell + workbook structure). The
+    // stores are cleared FIRST so a file without protection never inherits the
+    // previous session's locks. Like CF/DV, all of this was lost on every
+    // reload before this — a protected workbook reopened fully unprotected.
+    if let Ok(mut sheet_prot) = state.sheet_protection.lock() {
+        sheet_prot.clear();
+        for entry in &workbook.sheet_protections {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            if let Some(ref v) = entry.protection {
+                if let Ok(p) =
+                    serde_json::from_value::<crate::protection::SheetProtection>(v.clone())
+                {
+                    sheet_prot.insert(idx, p);
+                }
+            }
+        }
+    }
+    if let Ok(mut cell_prot) = state.cell_protection.lock() {
+        cell_prot.clear();
+        for entry in &workbook.sheet_protections {
+            let idx = sheet_id_to_index(&workbook, entry.sheet_id);
+            let Some(ref v) = entry.cell_protection else { continue };
+            let Some(entries) = v.as_array() else { continue };
+            let sheet_map = cell_prot.entry(idx).or_default();
+            for e in entries {
+                let (Some(row), Some(col)) = (
+                    e.get("row").and_then(|v| v.as_u64()),
+                    e.get("col").and_then(|v| v.as_u64()),
+                ) else {
+                    continue;
+                };
+                sheet_map.insert(
+                    (row as u32, col as u32),
+                    crate::protection::CellProtection {
+                        locked: e.get("locked").and_then(|v| v.as_bool()).unwrap_or(true),
+                        formula_hidden: e
+                            .get("formulaHidden")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    },
+                );
+            }
+        }
+    }
+    if let Ok(mut wb_prot) = state.workbook_protection.lock() {
+        *wb_prot = workbook
+            .workbook_protection
+            .as_ref()
+            .and_then(|v| {
+                serde_json::from_value::<crate::protection::WorkbookProtection>(v.clone()).ok()
+            })
+            .unwrap_or_default();
+    }
+
     // Restore controls (cell-anchored button/checkbox metadata). Like CF/DV
     // these were lost on every reload before this — the CellStyle button flag
     // survived but the onSelect wiring and formula properties did not.
@@ -2366,6 +2549,12 @@ pub fn new_file(
     // Clear sheet protection and cell protection
     state.sheet_protection.lock().map_err(|e| e.to_string())?.clear();
     state.cell_protection.lock().map_err(|e| e.to_string())?.clear();
+    // Workbook structure protection must reset too — without this a File>New
+    // after opening a structure-protected workbook inherits the old password
+    // (and, now that protection persists, would even SAVE the old hash into
+    // the fresh document).
+    *state.workbook_protection.lock().map_err(|e| e.to_string())? =
+        crate::protection::WorkbookProtection::default();
 
     // Clear auto filters
     state.auto_filters.lock().map_err(|e| e.to_string())?.clear();
@@ -3076,6 +3265,8 @@ pub fn auto_recover_save(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -3101,42 +3292,20 @@ pub fn auto_recover_save(
         temp_dir.join("~$calcula_unsaved.cala.recovery")
     };
 
-    // Build the workbook from current state
-    let grid = state.grid.lock().map_err(|e| e.to_string())?;
-    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
-    let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
-    let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
-    let tables = state.tables.lock().map_err(|e| e.to_string())?;
-    let sheet_ids_ar = state.sheet_ids.lock().map_err(|e| e.to_string())?;
-
-    let dimensions = DimensionData {
-        column_widths: col_widths.clone(),
-        row_heights: row_heights.clone(),
-    };
-
-    let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
-    workbook.tables = collect_tables_for_save(&tables, &sheet_ids_ar);
-    workbook.slicers = collect_slicers_for_save(&slicer_state, &sheet_ids_ar);
-    workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
-    workbook.pane_controls = collect_pane_controls_for_save(&pane_control_state);
-    workbook.pivot_layouts = state.pivot_layouts.lock().unwrap().clone();
-    workbook.object_scripts = state.object_scripts.lock().unwrap().clone();
-    workbook.extension_data = state.extension_data.lock().unwrap().clone();
-    workbook.scripts = collect_scripts_for_save(&script_state);
-    workbook.notebooks = collect_notebooks_for_save(&script_state);
-    workbook.charts = collect_charts_for_save(&state, &sheet_ids_ar);
-    workbook.sparklines = collect_sparklines_for_save(&state, &sheet_ids_ar);
-    workbook.user_files = user_files_state
-        .files
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
-    workbook.theme = state.theme.lock().unwrap().clone();
-    workbook.default_row_height = *state.default_row_height.lock().unwrap();
-    workbook.default_column_width = *state.default_column_width.lock().unwrap();
-
-    // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
-    enrich_workbook_metadata(&mut workbook, &state, &sheet_ids_ar);
+    // FULL-fidelity snapshot via the SAME assembly as save_file — the old
+    // inline single-sheet Workbook::from_grid build dropped every non-active
+    // sheet, all pivots, BI models/caches and the user_files artifacts, so a
+    // crash recovery was worse than the last manual save.
+    let workbook = assemble_workbook_for_save(
+        &state,
+        &user_files_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &script_state,
+        &pivot_state,
+        &bi_state,
+    )?;
 
     // Save as .cala to the recovery path. CRITICAL: if the live document is
     // encrypted, the recovery snapshot MUST be encrypted too — otherwise an

@@ -1244,6 +1244,12 @@ const EXTENSION_DATA_MIN_FORMAT_VERSION: u64 = 22;
 /// the unranked intermediate).
 const EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION: u64 = 23;
 
+/// Minimum schema `format_version` for dynamic row-level security: a
+/// `FilterPredicate.dynamic` (USERNAME()/CUSTOMDATA()) is additive serde, so a
+/// pre-v11 engine silently treats it as a STATIC comparison against the
+/// placeholder value — a silent RLS mis-restriction.
+const DYNAMIC_RLS_MIN_FORMAT_VERSION: u64 = 11;
+
 /// Bump a serialized model's `format_version` up to the minimum its features
 /// require before persisting it (`.cala` save / `.calp` publish).
 ///
@@ -1322,7 +1328,27 @@ pub fn stamp_feature_format_version(
             || e.contains_day_level_time_intelligence()
             || e.contains_query_top()
     };
-    let uses_v23 = model.measures().iter().any(|m| has_v23_expr(m.expression()))
+    // Context definitions (CONTEXT expressions) carry predicates the
+    // expression-surface walks above never see: `NOT IN` membership
+    // (InPredicate.negated is additive serde — a pre-v23 engine silently
+    // computes the OPPOSITE membership) and dynamic USERNAME()/CUSTOMDATA()
+    // predicates (a pre-v11 engine treats them as static placeholder
+    // comparisons). Walk model.contexts() explicitly for both.
+    let context_uses_negated_in = model.contexts().iter().any(|c| {
+        c.operations().iter().any(|op| match op {
+            bi_engine::ContextOp::KeepIn(preds) => preds.iter().any(|p| p.negated),
+            _ => false,
+        })
+    });
+    let context_uses_dynamic = model.contexts().iter().any(|c| {
+        c.operations().iter().any(|op| match op {
+            bi_engine::ContextOp::Keep(preds) => preds.iter().any(|p| p.dynamic.is_some()),
+            _ => false,
+        })
+    });
+
+    let uses_v23 = context_uses_negated_in
+        || model.measures().iter().any(|m| has_v23_expr(m.expression()))
         || model
             .calculated_columns()
             .iter()
@@ -1363,6 +1389,8 @@ pub fn stamp_feature_format_version(
         MATERIALIZED_CT_MIN_FORMAT_VERSION
     } else if uses_gvar {
         GVAR_MIN_FORMAT_VERSION
+    } else if context_uses_dynamic {
+        DYNAMIC_RLS_MIN_FORMAT_VERSION
     } else {
         return;
     };

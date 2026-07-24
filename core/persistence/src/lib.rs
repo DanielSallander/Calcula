@@ -132,6 +132,13 @@ pub struct Workbook {
     /// write their hidden rows/cols into the sheet's hidden sets, but the
     /// group STRUCTURE lives only here.
     pub outlines: Vec<SavedSheetOutline>,
+    /// Sheet-level protection + per-cell locked/hidden overrides per sheet
+    /// (opaque app-owned JSON payloads keyed by SheetId, like
+    /// conditional_formats). Password HASHES only — never plaintext.
+    pub sheet_protections: Vec<SavedSheetProtection>,
+    /// Workbook structure protection (opaque app-owned JSON payload; None when
+    /// the workbook is unprotected).
+    pub workbook_protection: Option<serde_json::Value>,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -151,6 +158,23 @@ pub struct SavedSheetConditionalFormats {
 pub struct SavedSheetDataValidations {
     pub sheet_id: SheetId,
     pub ranges: serde_json::Value,
+}
+
+/// Protection state for one sheet. Both payloads are opaque app-owned JSON
+/// (the app's `SheetProtection` shape and a list of per-cell
+/// `{ row, col, locked, formulaHidden }` entries); the persistence layer never
+/// inspects them. Passwords are stored as salted hashes by the app layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSheetProtection {
+    pub sheet_id: SheetId,
+    /// Sheet-level protection settings (None when the sheet is unprotected
+    /// and carries no stored options).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<serde_json::Value>,
+    /// Per-cell locked/formula-hidden overrides (None when empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_protection: Option<serde_json::Value>,
 }
 
 /// Cell-anchored controls for one sheet. `controls` is the opaque app-owned
@@ -467,6 +491,8 @@ impl Workbook {
             comments: Vec::new(),
             scenarios: Vec::new(),
             outlines: Vec::new(),
+            sheet_protections: Vec::new(),
+            workbook_protection: None,
         }
     }
 
@@ -504,6 +530,8 @@ impl Workbook {
             comments: Vec::new(),
             scenarios: Vec::new(),
             outlines: Vec::new(),
+            sheet_protections: Vec::new(),
+            workbook_protection: None,
         }
     }
 }
@@ -1069,6 +1097,40 @@ pub struct SavedPaneControl {
 pub struct CalculaMeta {
     pub version: u32,
     pub tables: Vec<SavedTable>,
+    /// Full-fidelity chart carry (position-keyed): the complete ChartDefinition
+    /// JSON per chart, so a Calcula -> xlsx -> Calcula round-trip restores
+    /// charts losslessly even where the native OOXML chart emission is only an
+    /// approximation (or skipped for non-mappable marks).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<MetaChart>,
+    /// Full-fidelity sparkline carry (position-keyed) — xlsx has no native
+    /// sparkline emission, so this is the only way they survive the format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sparklines: Vec<MetaSparkline>,
+}
+
+/// A chart carried in the `_calcula_meta` sheet, keyed by 0-based visible-sheet
+/// position (SheetIds are re-minted on xlsx import, so ids cannot be used).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaChart {
+    pub sheet_index: usize,
+    pub spec_json: String,
+    /// True when this chart was ALSO emitted as a native OOXML chart at save.
+    /// The reader compares the per-sheet count of these against the file's
+    /// actual native charts to detect Excel-side edits: a mismatch means Excel
+    /// touched the charts, so the native ones win over this stale carry.
+    #[serde(default)]
+    pub native_emitted: bool,
+}
+
+/// A sheet's sparkline groups carried in the `_calcula_meta` sheet
+/// (position-keyed, same rationale as [`MetaChart`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaSparkline {
+    pub sheet_index: usize,
+    pub groups_json: String,
 }
 
 impl CalculaMeta {
@@ -1076,6 +1138,8 @@ impl CalculaMeta {
         Self {
             version: 1,
             tables,
+            charts: Vec::new(),
+            sparklines: Vec::new(),
         }
     }
 

@@ -310,6 +310,16 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         zip.start_file("data_validations.json", options.clone())?;
         zip.write_all(dv_json.as_bytes())?;
     }
+    if !workbook.sheet_protections.is_empty() {
+        let prot_json = serde_json::to_string_pretty(&workbook.sheet_protections)?;
+        zip.start_file("sheet_protections.json", options.clone())?;
+        zip.write_all(prot_json.as_bytes())?;
+    }
+    if let Some(ref wb_prot) = workbook.workbook_protection {
+        let wb_prot_json = serde_json::to_string_pretty(wb_prot)?;
+        zip.start_file("workbook_protection.json", options.clone())?;
+        zip.write_all(wb_prot_json.as_bytes())?;
+    }
     if !workbook.controls.is_empty() {
         let controls_json = serde_json::to_string_pretty(&workbook.controls)?;
         zip.start_file("controls.json", options.clone())?;
@@ -799,6 +809,14 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let outlines: Vec<persistence::SavedSheetOutline> =
         read_optional_json::<Vec<persistence::SavedSheetOutline>>(&mut archive, "outlines.json")?
             .unwrap_or_default();
+    let sheet_protections: Vec<persistence::SavedSheetProtection> =
+        read_optional_json::<Vec<persistence::SavedSheetProtection>>(
+            &mut archive,
+            "sheet_protections.json",
+        )?
+        .unwrap_or_default();
+    let workbook_protection: Option<serde_json::Value> =
+        read_optional_json::<serde_json::Value>(&mut archive, "workbook_protection.json")?;
 
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
@@ -870,6 +888,8 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         comments,
         scenarios,
         outlines,
+        sheet_protections,
+        workbook_protection,
     })
 }
 
@@ -1026,6 +1046,8 @@ mod tests {
             comments: Vec::new(),
             scenarios: Vec::new(),
             outlines: Vec::new(),
+            sheet_protections: Vec::new(),
+            workbook_protection: None,
         }
     }
 
@@ -1313,6 +1335,48 @@ mod tests {
         assert_eq!(loaded.data_validations.len(), 1, "DV must survive the .cala round-trip");
         assert_eq!(loaded.data_validations[0].sheet_id, sheet_id);
         assert_eq!(loaded.data_validations[0].ranges, workbook.data_validations[0].ranges);
+    }
+
+    #[test]
+    fn test_roundtrip_protection() {
+        // Regression: sheet/cell/workbook protection was not modeled in the file
+        // format at all — every protected workbook reopened fully unprotected.
+        // Payloads are opaque to the format (app-owned JSON); this asserts the
+        // per-sheet payloads + SheetId + the workbook-level payload survive.
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.sheet_protections = vec![persistence::SavedSheetProtection {
+            sheet_id,
+            protection: Some(serde_json::json!({
+                "protected": true,
+                "passwordHash": "abc123",
+                "passwordSalt": "salt",
+                "options": { "selectLockedCells": true, "formatCells": false },
+                "allowEditRanges": []
+            })),
+            cell_protection: Some(serde_json::json!([
+                { "row": 2, "col": 3, "locked": false, "formulaHidden": true }
+            ])),
+        }];
+        workbook.workbook_protection =
+            Some(serde_json::json!({ "protected": true, "passwordHash": "wb-hash" }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("protection.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        assert_eq!(loaded.sheet_protections.len(), 1, "sheet protection must survive");
+        assert_eq!(loaded.sheet_protections[0].sheet_id, sheet_id);
+        assert_eq!(
+            loaded.sheet_protections[0].protection,
+            workbook.sheet_protections[0].protection
+        );
+        assert_eq!(
+            loaded.sheet_protections[0].cell_protection,
+            workbook.sheet_protections[0].cell_protection
+        );
+        assert_eq!(loaded.workbook_protection, workbook.workbook_protection);
     }
 
     #[test]

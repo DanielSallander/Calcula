@@ -179,6 +179,12 @@ fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<us
     // mis-target spill protection).
     remap_cell_keyed_map(&mut state.spill_hosts.lock().unwrap(), &remap);
     remap_cell_keyed_map(&mut state.spill_ranges.lock().unwrap(), &remap);
+    // Protection stores are sheet-index-keyed like CF/DV. Without remapping,
+    // deleting/reordering sheets leaves protection attached to the WRONG index
+    // — and now that protection persists, a stale index serializes under a
+    // freshly-minted bogus SheetId and reattaches to sheet 0 on reopen.
+    remap_indexed_map(&mut state.sheet_protection.lock().unwrap(), &remap);
+    remap_indexed_map(&mut state.cell_protection.lock().unwrap(), &remap);
 }
 
 // ============================================================================

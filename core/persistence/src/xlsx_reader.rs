@@ -58,6 +58,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     // ---------- First pass: calamine reads cell values ----------
     let mut sheets = Vec::new();
     let mut tables = Vec::new();
+    let mut meta_charts: Vec<crate::MetaChart> = Vec::new();
+    let mut meta_sparklines: Vec<crate::MetaSparkline> = Vec::new();
 
     // Track 1-based sheet index (matching xl/worksheets/sheetN.xml numbering)
     let mut sheet_number: usize = 0;
@@ -67,13 +69,24 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
 
         // Check if this is the Calcula metadata sheet
         if sheet_name == META_SHEET_NAME {
-            // Extract metadata (tables, etc.) from the hidden sheet
+            // Extract metadata (tables, charts, sparklines) from the hidden
+            // sheet. The JSON may be CHUNKED across row 0 (A1, B1, C1, ...)
+            // to stay under Excel's 32,767-char cell limit — concatenate all
+            // string cells of row 0 in order (a single-cell legacy meta is
+            // just a one-chunk concat).
             if let Ok(range) = workbook.worksheet_range(sheet_name) {
                 if let Some(row) = range.rows().next() {
-                    if let Some(Data::String(json)) = row.first() {
-                        if let Some(meta) = CalculaMeta::from_json(json) {
-                            tables = meta.tables;
-                        }
+                    let json: String = row
+                        .iter()
+                        .filter_map(|c| match c {
+                            Data::String(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(meta) = CalculaMeta::from_json(&json) {
+                        tables = meta.tables;
+                        meta_charts = meta.charts;
+                        meta_sparklines = meta.sparklines;
                     }
                 }
             }
@@ -285,14 +298,89 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         comments: Vec::new(),
         scenarios: Vec::new(),
         outlines: Vec::new(),
+        sheet_protections: Vec::new(),
+        workbook_protection: None,
     };
 
-    // Parse charts from the XLSX archive (separate ZIP pass)
+    // Sparklines have no native xlsx form — the meta carry is the only source.
+    for ms in &meta_sparklines {
+        if ms.sheet_index >= wb.sheets.len() {
+            continue;
+        }
+        wb.sparklines.push(crate::SavedSparkline {
+            sheet_id: wb.sheets[ms.sheet_index].id,
+            groups_json: ms.groups_json.clone(),
+        });
+    }
+
+    // Second ZIP pass: native charts + defined names.
     if let Ok(file) = std::fs::File::open(path) {
         if let Ok(mut archive) = zip::ZipArchive::new(file) {
+            // Charts come from TWO sources that must be reconciled:
+            // - the native OOXML charts in the file (what Excel sees/edits),
+            // - the _calcula_meta carry (lossless ChartDefinitions, but STALE
+            //   the moment Excel edits/adds/removes charts — Excel preserves
+            //   the hidden meta sheet verbatim).
+            // Per sheet: if the native chart count matches the number of
+            // charts the carry says Calcula emitted natively, the file is
+            // untouched -> the lossless carry wins. On ANY mismatch (chart
+            // added/removed in Excel, sheets reordered) the NATIVE charts win
+            // for that sheet, plus carried charts that never had a native
+            // form (non-mappable marks Excel could not have edited).
             let sheet_paths = crate::xlsx_style_reader::build_sheet_path_mapping(&mut archive);
-            let chart_entries = crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
-            for (sheet_idx, mut chart) in chart_entries {
+            let native_entries =
+                crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
+
+            let mut native_count: HashMap<usize, usize> = HashMap::new();
+            for (sheet_idx, _) in &native_entries {
+                *native_count.entry(*sheet_idx).or_insert(0) += 1;
+            }
+            let mut emitted_count: HashMap<usize, usize> = HashMap::new();
+            for mc in meta_charts.iter().filter(|mc| mc.native_emitted) {
+                *emitted_count.entry(mc.sheet_index).or_insert(0) += 1;
+            }
+
+            let sheet_untouched = |idx: usize| -> bool {
+                native_count.get(&idx).copied().unwrap_or(0)
+                    == emitted_count.get(&idx).copied().unwrap_or(0)
+            };
+
+            // Carried charts: on an untouched sheet all of them restore
+            // losslessly; on a touched sheet only the never-emitted ones do.
+            for mc in &meta_charts {
+                if mc.sheet_index >= wb.sheets.len() {
+                    continue;
+                }
+                if !sheet_untouched(mc.sheet_index) && mc.native_emitted {
+                    continue; // superseded by the Excel-edited native charts
+                }
+                // Keep the original chart identity when the carried spec has
+                // one, so a round-trip preserves chart ids.
+                let id = serde_json::from_str::<serde_json::Value>(&mc.spec_json)
+                    .ok()
+                    .and_then(|def| {
+                        def.get("chartId")
+                            .and_then(|v| v.as_str())
+                            .and_then(identity::EntityId::parse)
+                    })
+                    .unwrap_or_else(|| {
+                        identity::EntityId::from_bytes(identity::generate_uuid_v7())
+                    });
+                wb.charts.push(crate::SavedChart {
+                    id,
+                    sheet_id: wb.sheets[mc.sheet_index].id,
+                    spec_json: mc.spec_json.clone(),
+                });
+            }
+
+            // Native charts: only from sheets where the carry is stale (or
+            // absent — an Excel-authored file has no carry at all).
+            for (sheet_idx, mut chart) in native_entries {
+                // A native entry on an "untouched" sheet implies matching
+                // emitted-carry entries exist there — the carry restored them.
+                if sheet_untouched(sheet_idx) {
+                    continue;
+                }
                 // Resolve the positional sheet index to the sheet's stable SheetId
                 if sheet_idx < wb.sheets.len() {
                     chart.sheet_id = wb.sheets[sheet_idx].id;
@@ -312,6 +400,74 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     1,
                 );
                 wb.charts.push(chart);
+            }
+
+            // Defined names -> named ranges. localSheetId indexes the FULL
+            // workbook.xml sheet order (calamine's sheet_names order, which
+            // includes _calcula_meta), so resolve through sheet_names first.
+            //
+            // Calcula's runtime name map is keyed by UPPERCASE NAME ONLY, so
+            // Excel's same-name-different-scope pattern (a "Total" per sheet)
+            // cannot be represented: keep ONE entry per name, preferring the
+            // workbook-scoped one (usable from every sheet), else the first
+            // seen — and warn instead of letting a later insert silently win.
+            let defined = crate::xlsx_style_reader::parse_defined_names(&mut archive);
+            let mut by_name: HashMap<String, usize> = HashMap::new();
+            for (name, refers_to, local_idx) in defined {
+                // Excel built-ins (_xlnm.Print_Area etc.) are not user names.
+                if name.starts_with("_xlnm.") {
+                    continue;
+                }
+                let sheet_id = match local_idx {
+                    Some(i) => {
+                        let Some(nm) = sheet_names.get(i) else { continue };
+                        if nm == META_SHEET_NAME {
+                            continue;
+                        }
+                        match wb.sheets.iter().find(|s| &s.name == nm) {
+                            Some(s) => Some(s.id),
+                            None => continue,
+                        }
+                    }
+                    None => None,
+                };
+                let refers_to = if refers_to.starts_with('=') {
+                    refers_to
+                } else {
+                    format!("={}", refers_to)
+                };
+                let key = name.trim().to_uppercase();
+                if let Some(&existing_idx) = by_name.get(&key) {
+                    let existing_is_global = wb.named_ranges[existing_idx].sheet_id.is_none();
+                    if !existing_is_global && sheet_id.is_none() {
+                        // Workbook scope supersedes a sheet-scoped duplicate.
+                        eprintln!(
+                            "[WARN] xlsx open: defined name '{}' exists in multiple scopes; keeping the workbook-scoped one",
+                            name
+                        );
+                        wb.named_ranges[existing_idx] = crate::SavedNamedRange {
+                            name,
+                            refers_to,
+                            sheet_id,
+                            comment: None,
+                            folder: None,
+                        };
+                    } else {
+                        eprintln!(
+                            "[WARN] xlsx open: defined name '{}' exists in multiple scopes; keeping the first imported",
+                            name
+                        );
+                    }
+                    continue;
+                }
+                by_name.insert(key, wb.named_ranges.len());
+                wb.named_ranges.push(crate::SavedNamedRange {
+                    name,
+                    refers_to,
+                    sheet_id,
+                    comment: None,
+                    folder: None,
+                });
             }
         }
     }
