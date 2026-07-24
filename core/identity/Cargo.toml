@@ -2,6 +2,7 @@
 name = "identity"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Stable identity system for Calcula — UUID v7 types, registry, and operations"
 
 [dependencies]

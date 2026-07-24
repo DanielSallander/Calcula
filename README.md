@@ -276,6 +276,19 @@ The public API is still evolving. If you are looking for something you can ship 
 
 ## Contributing
 
+Contributions are welcome — the most valuable one is an extension we didn't
+write. See [CONTRIBUTING.md](CONTRIBUTING.md) for what helps most right now,
+the architecture ground rules, and the DCO sign-off (`git commit -s`) required
+on every commit.
 
 ## License
 
+Calcula is dual-licensed under either of
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in Calcula by you, as defined in the
+Apache-2.0 license, shall be dual-licensed as above, without any additional
+terms or conditions.
