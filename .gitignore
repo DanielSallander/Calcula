@@ -4,6 +4,7 @@
 # Generated artifacts from cargo build
 /target/
 /core/target/
+/model-engine-lib/target/
 
 # Standalone benchmark crate (not part of workspace, has heavy deps)
 /core/pivot-bench/

@@ -259,7 +259,11 @@ The public API is still evolving. If you are looking for something you can ship 
 
 ## Tech Stack
 
-- **Backend:** Rust (workspace with multiple crates)
+- **Backend:** Rust — two workspaces: `core/` (grid engine, formula parser,
+  `.cala`/`.calp` formats, pivot and script engines) and `model-engine-lib/`
+  (the BI/semantic-model engine: Apache Arrow columnar store + DataFusion query
+  planning with pushdown, measure/context evaluation). Both are in this repo;
+  there are no external path dependencies to satisfy.
 - **Bridge:** Tauri
 - **Frontend:** TypeScript, React, HTML5 Canvas
 - **Testing:** Snapshot/golden-file suites, Playwright E2E against the real WebView, a nightly regression runner with visual baselines, and an oracle-driven soak-testing system (undo, save/reload, and recalc round-trips)

@@ -2,7 +2,7 @@
 //! PURPOSE: Tauri commands for the BI extension — multi-connection model.
 //!          Create/delete/manage connections, load models, connect to databases,
 //!          bind tables, execute queries, and manage locked regions.
-//! CONTEXT: All async commands use the bi-engine crate (Calcula Engine Lib).
+//! CONTEXT: All async commands use the bi-engine crate (model-engine-lib/).
 //!          Engines are shared via Arc<TokioMutex<Engine>> through the EngineRegistry.
 
 use std::path::Path;

@@ -5,7 +5,9 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+# Harmonized with the Calcula repo this workspace now lives in; the license
+# texts are at the repo root (LICENSE-MIT / LICENSE-APACHE).
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 arrow = { version = "53", features = ["prettyprint", "ipc_compression"] }

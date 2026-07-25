@@ -1,4 +1,17 @@
-# Calcula Engine Lib
+# Calcula Model Engine Lib (`model-engine-lib/`)
+
+> **This is a directory inside the Calcula repo, not a separate repository.**
+> Merged in 2026-07-24 (with full history) from the former stand-alone
+> `Calcula Engine Lib` repo, which is now archived. It keeps its OWN Cargo
+> workspace (`model-engine-lib/Cargo.toml`, 4 crates) — deliberately separate
+> from `core/`'s workspace because of its heavy Arrow/DataFusion dependency
+> tree. The host app consumes it via a path dependency:
+> `bi-engine = { path = "../../model-engine-lib/crates/engine" }`
+> (`app/src-tauri/Cargo.toml`). The repo-root `CLAUDE.md` governs the app and
+> `core/`; this file governs everything under `model-engine-lib/`.
+>
+> Naming: "model" engine = the BI/semantic-model engine. Do not confuse it with
+> `core/engine` (crate `grid_engine`), which is the grid/formula engine.
 
 A columnar analytical engine library (Rust crate) that provides in-memory data modeling, query planning with pushdown, and measure computation. Embedded by **Calcula** (spreadsheet), whose in-app **Model Editor** is the data-model designer. (Stand-alone Calcula Studio is RETIRED and FROZEN as of 2026-07-11 — engine changes must NOT consider it, and its build is expected to break against newer engine versions.)
 
@@ -20,9 +33,9 @@ See `docs/architecture.md` for the full vision, data flow diagrams, and feature 
 ## Project Structure
 
 ```
-calcula-engine/
+model-engine-lib/               # (a directory in the Calcula repo)
 ├── CLAUDE.md
-├── Cargo.toml                  # Workspace root
+├── Cargo.toml                  # Workspace root (own workspace)
 ├── docs/
 │   └── architecture.md         # Vision document, data flows, feature roadmap
 │

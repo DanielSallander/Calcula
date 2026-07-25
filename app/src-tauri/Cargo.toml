@@ -35,7 +35,7 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
 regex = "1"
-bi-engine = { path = "../../../Calcula Engine Lib/crates/engine" }
+bi-engine = { path = "../../model-engine-lib/crates/engine" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync"] }
 arrow = "53"
 parquet = { version = "53", features = ["arrow"] }

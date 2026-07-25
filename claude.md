@@ -70,6 +70,17 @@ Calcula/
 │
 │   # 3rd-party extensions are NOT in the repo: scanned at runtime from
 │   # %APPDATA%/com.calcula.app/extensions/.
+│
+├── core/                   # Rust workspace: grid engine, parser, persistence,
+│                           #   pivot-engine, script-engine, .cala/.calp formats
+│
+└── model-engine-lib/       # BI/semantic-model engine (own Cargo workspace).
+                            #   Merged in from the former separate "Calcula
+                            #   Engine Lib" repo 2026-07-24 (history preserved).
+                            #   Crates: engine-core, engine-query,
+                            #   engine-connectors, engine (= crate `bi-engine`).
+                            #   NOT the same as core/engine (`grid_engine`).
+                            #   See model-engine-lib/CLAUDE.md for its rules.
 ```
 
 ### What Lives Where
@@ -209,6 +220,12 @@ When developing a new feature, ask these three questions:
 ## Development environment
 In order for Rust environment to work it must first be set using the script:
 core\setup-rust-env.ps1
+
+The BI/model engine lives in `model-engine-lib/` (its own Cargo workspace, in
+this repo since 2026-07-24). Build/test it with `cargo` from that directory;
+the app consumes it as the `bi-engine` path dependency. Its own coding rules
+(including the MANDATORY `docs/host-integration-changelog.md` entry for every
+host-facing change) are in `model-engine-lib/CLAUDE.md`.
 
 ## Git Commit Messages
 
