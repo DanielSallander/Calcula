@@ -1,0 +1,19 @@
+[package]
+name = "engine-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query planning and pushdown for the Calcula Engine"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+engine-connectors = { path = "../engine-connectors" }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

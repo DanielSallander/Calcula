@@ -1,0 +1,374 @@
+================================================================================
+ Example Measures for Calcula Engine
+================================================================================
+ Syntax reference:
+   Aggregates   : SUM, COUNT, AVG, MIN, MAX, DISTINCTCOUNT, COUNTROWS
+   Functions    : DIVIDE, ROUND, ROUNDUP, ROUNDDOWN, ABS, INT, SQRT, POWER,
+                  MOD, LN, LOG10, SIGN, CEILING, FLOOR, TRUNC
+   Logic        : IF, SWITCH, ISBLANK, COALESCE, BLANK
+   Context      : KEEP, CLEAR, RESET (and INNER/OUTER variants)
+   Variables    : VAR name = expr ... RETURN result_expr
+   Two-stage    : QUERY(AGG(table[col]) AS alias BY table[col], ...) inside VAR
+   Named context: define once, reference by name as a context argument
+
+ Assumes a star schema:
+   fact_sales   : salesorderdetailid, productid, orderqty, unitprice,
+                  linetotal, orderdate, customerid, territoryid
+   dim_product  : productid, productname, categoryname, subcategoryname,
+                  color, listprice, standardcost, ...
+   dim_customer : customerid, fullname, country, city, ...
+   dim_date     : datekey, year, quarter, month, monthname, ...
+   dim_territory: territoryid, territoryname, territorygroup, ...
+================================================================================
+
+
+--- Basic Aggregates -------------------------------------------------------
+
+Total Revenue
+  SUM(fact_sales[linetotal])
+
+Total Quantity Sold
+  SUM(fact_sales[orderqty])
+
+Order Count
+  COUNT(fact_sales[salesorderdetailid])
+
+Average Unit Price
+  AVG(fact_sales[unitprice])
+
+Highest Single Line Total
+  MAX(fact_sales[linetotal])
+
+Lowest Single Line Total
+  MIN(fact_sales[linetotal])
+
+Distinct Product Count
+  DISTINCTCOUNT(fact_sales[productid])
+
+Total Rows
+  COUNTROWS(fact_sales)
+
+
+--- Arithmetic & Ratios ----------------------------------------------------
+
+Revenue per Unit
+  SUM(fact_sales[linetotal]) / SUM(fact_sales[orderqty])
+
+Average Order Value
+  DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]))
+
+Gross Margin %
+  DIVIDE(
+    SUM(fact_sales[linetotal]) - SUM(fact_sales[unitprice]) * SUM(fact_sales[orderqty]),
+    SUM(fact_sales[linetotal])
+  )
+
+Double Revenue
+  SUM(fact_sales[linetotal]) * 2
+
+
+--- DAX-style Functions ----------------------------------------------------
+
+Safe Average Order Value (no divide-by-zero)
+  DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)
+
+Rounded Average Price
+  ROUND(AVG(fact_sales[unitprice]), 2)
+
+Integer Revenue
+  INT(SUM(fact_sales[linetotal]))
+
+Revenue Magnitude (log base 10)
+  LOG10(SUM(fact_sales[linetotal]))
+
+Absolute Deviation from 10M
+  ABS(SUM(fact_sales[linetotal]) - 10000000)
+
+Square Root of Order Count
+  SQRT(COUNT(fact_sales[salesorderdetailid]))
+
+Revenue Squared (for variance calcs)
+  POWER(SUM(fact_sales[linetotal]), 2)
+
+
+--- Conditional Logic ------------------------------------------------------
+
+Revenue Tier
+  IF(SUM(fact_sales[linetotal]) > 1000000, "High", "Low")
+
+Sales Status
+  IF(
+    SUM(fact_sales[orderqty]) > 100,
+    IF(SUM(fact_sales[linetotal]) > 50000, "Hot", "Warm"),
+    "Cold"
+  )
+
+Category Label
+  SWITCH(
+    DISTINCTCOUNT(fact_sales[productid]),
+    1, "Single Product",
+    2, "Two Products",
+    "Multiple Products"
+  )
+
+Revenue or Zero
+  COALESCE(SUM(fact_sales[linetotal]), 0)
+
+Is Blank Check
+  IF(ISBLANK(SUM(fact_sales[linetotal])), 0, SUM(fact_sales[linetotal]))
+
+
+--- KEEP Context (filter slicing) ------------------------------------------
+
+Bikes Revenue
+  SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))
+
+Accessories Revenue
+  SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Accessories"))
+
+Year 2014 Revenue
+  SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] = 2014))
+
+US Revenue
+  SUM(fact_sales[linetotal], KEEP(dim_customer, dim_customer[country] = "United States"))
+
+Bikes Share of Revenue
+  DIVIDE(
+    SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")),
+    SUM(fact_sales[linetotal])
+  )
+
+Year-over-Year (2014 vs 2013)
+  SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] = 2014))
+  - SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] = 2013))
+
+
+--- Named Contexts ---------------------------------------------------------
+-- Define these once in the model, then reference by name:
+--   ctx_bikes       = KEEP(dim_product, dim_product[categoryname] = "Bikes")
+--   ctx_accessories = KEEP(dim_product, dim_product[categoryname] = "Accessories")
+--   ctx_2014        = KEEP(dim_date, dim_date[year] = 2014)
+--   ctx_2013        = KEEP(dim_date, dim_date[year] = 2013)
+--   ctx_us          = KEEP(dim_customer, dim_customer[country] = "United States")
+
+Bikes Revenue (via named context)
+  SUM(fact_sales[linetotal], ctx_bikes)
+
+Accessories Count (via named context)
+  COUNT(fact_sales[salesorderdetailid], ctx_accessories)
+
+US 2014 Revenue (composing two contexts)
+  SUM(fact_sales[linetotal], ctx_us, ctx_2014)
+
+Bikes Share (named context in ratio)
+  DIVIDE(
+    SUM(fact_sales[linetotal], ctx_bikes),
+    SUM(fact_sales[linetotal])
+  )
+
+
+--- VAR / RETURN (scalar variables) ----------------------------------------
+
+Average Order Value (via VAR)
+  VAR total_rev = SUM(fact_sales[linetotal])
+  VAR total_orders = COUNT(fact_sales[salesorderdetailid])
+  RETURN DIVIDE(total_rev, total_orders)
+
+Revenue per Unit, Rounded
+  VAR rev = SUM(fact_sales[linetotal])
+  VAR qty = SUM(fact_sales[orderqty])
+  VAR ratio = DIVIDE(rev, qty)
+  RETURN ROUND(ratio, 2)
+
+Year-over-Year Growth %
+  VAR rev_2014 = SUM(fact_sales[linetotal], ctx_2014)
+  VAR rev_2013 = SUM(fact_sales[linetotal], ctx_2013)
+  RETURN DIVIDE(rev_2014 - rev_2013, rev_2013)
+
+Contribution Margin
+  VAR revenue = SUM(fact_sales[linetotal])
+  VAR cost = SUM(fact_sales[unitprice]) * SUM(fact_sales[orderqty])
+  VAR margin = revenue - cost
+  RETURN DIVIDE(margin, revenue)
+
+Conditional Bonus
+  VAR rev = SUM(fact_sales[linetotal])
+  RETURN IF(rev > 1000000, rev * 0.05, 0)
+
+
+--- QUERY-in-VAR (two-stage aggregation) -----------------------------------
+-- QUERY materializes an intermediate grouped table, then the RETURN
+-- expression aggregates over it. This enables "aggregate of aggregates"
+-- patterns like average monthly revenue or peak quarter.
+
+Average Monthly Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN AVG(monthly[revenue])
+
+Peak Month Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN MAX(monthly[revenue])
+
+Monthly Revenue Range (peak minus trough)
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN MAX(monthly[revenue]) - MIN(monthly[revenue])
+
+Number of Active Months
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN COUNTROWS(monthly)
+
+Average Quarterly Revenue
+  VAR quarterly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[quarter]
+  )
+  RETURN AVG(quarterly[revenue])
+
+Average Revenue per Category
+  VAR by_cat = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_product[categoryname]
+  )
+  RETURN AVG(by_cat[revenue])
+
+Peak-to-Trough Ratio
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN DIVIDE(MAX(monthly[revenue]), MIN(monthly[revenue]))
+
+Rounded Average Monthly Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN ROUND(AVG(monthly[revenue]), 0)
+
+
+--- QUERY + KEEP on intermediate -------------------------------------------
+-- KEEP can filter the intermediate table produced by QUERY, letting you
+-- slice the two-stage aggregation (e.g., "only Q1 months").
+
+Year 2014 Revenue (from yearly QUERY)
+  VAR by_year = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year]
+  )
+  RETURN SUM(by_year[revenue], KEEP(by_year, by_year[year] = 2014))
+
+Q1 Total Revenue (from quarterly QUERY)
+  VAR quarterly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[quarter]
+  )
+  RETURN SUM(quarterly[revenue], KEEP(quarterly, quarterly[quarter] = 1))
+
+Average Q1 Monthly Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month], dim_date[quarter]
+  )
+  RETURN AVG(monthly[revenue], KEEP(monthly, monthly[quarter] = 1))
+
+Rounded Average Q1 Monthly Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month], dim_date[quarter]
+  )
+  RETURN ROUND(AVG(monthly[revenue], KEEP(monthly, monthly[quarter] = 1)), 0)
+
+
+--- QUERY + Named Context (filtered source) --------------------------------
+-- A named context on the inner aggregate filters the source data BEFORE
+-- the QUERY groups it. "Average monthly bikes revenue" means: sum only
+-- bike sales per month, then average across months.
+
+Average Monthly Bikes Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal], ctx_bikes) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN AVG(monthly[revenue])
+
+Peak Monthly Accessories Revenue
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal], ctx_accessories) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN MAX(monthly[revenue])
+
+Rounded Average Yearly Accessories Revenue
+  VAR by_year = QUERY(
+    SUM(fact_sales[linetotal], ctx_accessories) AS revenue
+    BY dim_date[year]
+  )
+  RETURN ROUND(AVG(by_year[revenue]), 0)
+
+Bikes 2013 Revenue (context + KEEP on intermediate)
+  VAR by_year = QUERY(
+    SUM(fact_sales[linetotal], ctx_bikes) AS revenue
+    BY dim_date[year]
+  )
+  RETURN SUM(by_year[revenue], KEEP(by_year, by_year[year] = 2013))
+
+Average Q1 Monthly Bikes Revenue (context + KEEP combined)
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal], ctx_bikes) AS revenue
+    BY dim_date[year], dim_date[month], dim_date[quarter]
+  )
+  RETURN AVG(monthly[revenue], KEEP(monthly, monthly[quarter] = 1))
+
+US Monthly Sales Count
+  VAR monthly = QUERY(
+    COUNT(fact_sales[salesorderdetailid], ctx_us) AS orders
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN AVG(monthly[orders])
+
+
+--- QUERY + Cross-Dimension GROUP BY ----------------------------------------
+-- When the outer query groups by a dimension NOT in the QUERY's own
+-- GROUP BY, the engine injects that dimension into the QUERY's
+-- materialization (context propagation). The result is correct per-group
+-- values from a single materialization.
+--
+-- These measures are designed to be placed on a pivot table with a
+-- GROUP BY on a different dimension than the QUERY's BY clause.
+
+Average Monthly Revenue (use with GROUP BY dim_product[categoryname])
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN AVG(monthly[revenue])
+  -- When grouped by category: engine injects categoryname into the QUERY,
+  -- producing per-category monthly totals, then AVG per category.
+
+Active Month Count (use with GROUP BY dim_territory[territorygroup])
+  VAR monthly = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year], dim_date[month]
+  )
+  RETURN COUNTROWS(monthly)
+  -- When grouped by territory group: each group gets its own month count.
+
+Average Yearly Revenue (use with GROUP BY dim_product[categoryname])
+  VAR by_year = QUERY(
+    SUM(fact_sales[linetotal]) AS revenue
+    BY dim_date[year]
+  )
+  RETURN AVG(by_year[revenue])
+  -- When grouped by category: average yearly revenue per category.

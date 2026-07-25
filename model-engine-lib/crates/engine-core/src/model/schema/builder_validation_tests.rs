@@ -1,0 +1,1210 @@
+//! Build-time validation tests: context name collisions, expression AST
+//! validation (step 0b), lookup-resolution expressions (step 1c), global
+//! variables, and sort-by columns.
+
+use super::test_fixtures::*;
+use super::*;
+use crate::model::column::Column;
+use crate::types::DataType;
+
+// --- Context name collision tests ---
+
+#[test]
+fn rejects_context_name_collision_with_table() {
+    use crate::model::context::{ContextDefinition, ContextOp};
+
+    let ctx = ContextDefinition::new("Sales", vec![ContextOp::Reset]);
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_context(ctx)
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("conflicts with table"));
+}
+
+#[test]
+fn rejects_table_variable_name_collision_with_context() {
+    use crate::model::context::{ContextDefinition, ContextOp};
+
+    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+    let var = TableVariable::new("my_ctx", "Products", vec![]);
+
+    let result = DataModel::builder()
+        .add_table(products_table())
+        .add_context(ctx)
+        .add_table_variable(var)
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("conflicts with context"));
+}
+
+#[test]
+fn accepts_context_with_unique_name() {
+    use crate::compute::expression::{ComparisonOp, FilterPredicate};
+    use crate::model::context::{ContextDefinition, ContextOp};
+
+    let ctx = ContextDefinition::new(
+        "ctx_us",
+        vec![ContextOp::Keep(vec![FilterPredicate::new(
+            "Sales",
+            "region",
+            ComparisonOp::Equal,
+            "US",
+        )])],
+    );
+
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_context(ctx)
+        .build()
+        .unwrap();
+
+    assert_eq!(model.contexts().len(), 1);
+}
+
+#[test]
+fn validate_catches_invalid_deserialized_model() {
+    // Build a valid model, serialize it, tamper with JSON, deserialize.
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_table(products_table())
+        .add_relationship(sales_products_relationship())
+        .build()
+        .unwrap();
+
+    let mut json: serde_json::Value = serde_json::to_value(&model).unwrap();
+    // Remove the Products table so the relationship becomes invalid.
+    let tables = json["tables"].as_array_mut().unwrap();
+    tables.retain(|t| t["name"] != "Products");
+
+    let tampered: DataModel = serde_json::from_value(json).unwrap();
+    assert!(tampered.validate().is_err());
+}
+
+// --- Expression AST validation (step 0b) tests ---
+
+/// JSON for a measure whose expression carries a DATE_TRUNC interval.
+/// Hand-constructed (not produced by the parser) to emulate a hostile
+/// or tampered model file.
+fn date_trunc_measure_json(interval: &str) -> String {
+    format!(
+        r#"{{
+            "name": "FirstOfMonth",
+            "expression": {{
+                "Aggregate": {{
+                    "operation": "Max",
+                    "operand": {{
+                        "DateTimeFunc": {{
+                            "function": "DateTrunc",
+                            "args": [
+                                {{"QualifiedColumnRef": {{"table_or_var": "Sales", "column": "amount"}}}},
+                                {{"LiteralString": "{interval}"}}
+                            ]
+                        }}
+                    }}
+                }}
+            }}
+        }}"#
+    )
+}
+
+#[test]
+fn build_rejects_deserialized_measure_with_hostile_interval() {
+    // The custom Measure Deserialize accepts any Expression tree —
+    // the parser's interval allow-list is bypassed entirely.
+    let measure: Measure =
+        serde_json::from_str(&date_trunc_measure_json("MONTH'); DROP TABLE x; --")).unwrap();
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(measure)
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("invalid interval"), "got: {err}");
+}
+
+#[test]
+fn build_accepts_deserialized_measure_with_benign_interval() {
+    let measure: Measure = serde_json::from_str(&date_trunc_measure_json("MONTH")).unwrap();
+
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(measure)
+        .build()
+        .unwrap();
+    assert_eq!(model.measures().len(), 1);
+}
+
+#[test]
+fn validate_rejects_full_model_json_with_hostile_interval() {
+    // Round-trip a valid model through JSON, splice in a hostile
+    // measure, and confirm DataModel::validate() (which delegates to
+    // build()) rejects it.
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .build()
+        .unwrap();
+
+    let mut json: serde_json::Value = serde_json::to_value(&model).unwrap();
+    let hostile: serde_json::Value =
+        serde_json::from_str(&date_trunc_measure_json("MONTH'); DROP TABLE x; --")).unwrap();
+    json["measures"].as_array_mut().unwrap().push(hostile);
+
+    let tampered: DataModel = serde_json::from_value(json).unwrap();
+    let err = tampered.validate().unwrap_err().to_string();
+    assert!(err.contains("invalid interval"), "got: {err}");
+}
+
+#[test]
+fn build_rejects_context_filter_with_hostile_table() {
+    use crate::compute::expression::{ComparisonOp, FilterPredicate};
+    use crate::model::context::ContextOp;
+
+    let ctx = ContextDefinition::new(
+        "ctx_evil",
+        vec![ContextOp::Keep(vec![FilterPredicate::new(
+            "dim\" ON 1=1; --",
+            "year",
+            ComparisonOp::Equal,
+            "2014",
+        )])],
+    );
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_context(ctx)
+        .build();
+    assert!(result.is_err());
+}
+
+#[test]
+fn build_rejects_table_variable_filter_with_hostile_table() {
+    use crate::compute::expression::{ComparisonOp, FilterPredicate};
+
+    let tv = TableVariable::new(
+        "evil_var",
+        "Sales",
+        vec![FilterPredicate::new(
+            "Sales'; DROP TABLE x; --",
+            "region",
+            ComparisonOp::Equal,
+            "US",
+        )],
+    );
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_table_variable(tv)
+        .build();
+    assert!(result.is_err());
+}
+
+// --- Lookup resolution validation (step 1c) tests ---
+
+#[test]
+fn build_rejects_model_default_lookup_without_placeholder() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .default_lookup_resolution("MAX(category_name)")
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("__column"), "got: {err}");
+}
+
+#[test]
+fn build_rejects_unparseable_model_default_lookup() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .default_lookup_resolution("MAX(")
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("does not parse"), "got: {err}");
+}
+
+#[test]
+fn build_accepts_model_default_lookup_with_placeholder() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .default_lookup_resolution("MAX(__column)")
+        .build()
+        .unwrap();
+    assert_eq!(model.default_lookup_resolution(), Some("MAX(__column)"));
+}
+
+#[test]
+fn build_rejects_unparseable_column_lookup_resolution() {
+    let table = Table::new(
+        "Products",
+        vec![
+            Column::new("id", DataType::Int64),
+            Column::new("name", DataType::String).with_lookup_resolution("MIN(name"),
+        ],
+    )
+    .unwrap();
+
+    let result = DataModel::builder().add_table(table).build();
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("lookup_resolution does not parse"),
+        "got: {err}"
+    );
+}
+
+// --- Calculated table (model global variable) tests ---
+
+/// A valid calculated table: QUERY(SUM(Sales[amount]) AS Amt BY Sales[id]).
+fn query_gv(name: &str, table: &str) -> crate::model::global_variable::GlobalVariable {
+    use crate::compute::aggregate::AggregateOp;
+    use crate::compute::expression::Expression;
+    crate::model::global_variable::GlobalVariable::new(
+        name,
+        table,
+        Expression::Query {
+            aggregates: vec![(
+                Expression::Aggregate {
+                    operation: AggregateOp::Sum,
+                    operand: Box::new(Expression::ColumnRef("amount".into())),
+                },
+                "Amt".into(),
+            )],
+            group_by: vec![("Sales".into(), "id".into())],
+            top: None,
+        },
+    )
+}
+
+#[test]
+fn global_variable_added_to_model() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("total_by_id", "Sales"))
+        .build()
+        .unwrap();
+
+    assert_eq!(model.global_variables().len(), 1);
+    assert!(model.global_variable("total_by_id").is_ok());
+    assert!(model.global_variable("missing").is_err());
+}
+
+#[test]
+fn rejects_scalar_global_variable() {
+    use crate::compute::aggregate::AggregateOp;
+    use crate::compute::expression as expr;
+    use crate::model::global_variable::GlobalVariable;
+
+    // A scalar expression is no longer a valid calculated table — the
+    // guidance points at (hidden) measures instead.
+    let gv = GlobalVariable::new(
+        "total_revenue",
+        "Sales",
+        expr::agg(AggregateOp::Sum, expr::col("amount")),
+    );
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(gv)
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("QUERY"), "got: {err}");
+    assert!(err.contains("measure"), "got: {err}");
+}
+
+#[test]
+fn rejects_duplicate_global_variable_names() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("gv", "Sales"))
+        .add_global_variable(query_gv("gv", "Sales"))
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Duplicate"));
+    assert!(err.contains("gv"));
+}
+
+#[test]
+fn rejects_global_variable_name_collision_with_table() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("Sales", "Sales"))
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("conflicts with table"));
+}
+
+#[test]
+fn rejects_global_variable_name_collision_with_context() {
+    use crate::model::context::{ContextDefinition, ContextOp};
+
+    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_context(ctx)
+        .add_global_variable(query_gv("my_ctx", "Sales"))
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("conflicts with context"));
+}
+
+#[test]
+fn rejects_global_variable_with_missing_table() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("gv", "NonExistent"))
+        .build();
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("NonExistent"));
+}
+
+#[test]
+fn serde_backward_compat_no_global_variables() {
+    // JSON without global_variables field should deserialize with empty vec.
+    let json = r#"{
+        "tables": [],
+        "relationships": [],
+        "measures": [],
+        "calculated_columns": [],
+        "measure_groups": []
+    }"#;
+    let model: DataModel = serde_json::from_str(json).unwrap();
+    assert!(model.global_variables().is_empty());
+}
+
+#[test]
+fn global_variable_json_roundtrip() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_global_variable(query_gv("total_by_id", "Sales"))
+        .build()
+        .unwrap();
+
+    let json = serde_json::to_string_pretty(&model).unwrap();
+    let restored: DataModel = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.global_variables().len(), 1);
+    assert_eq!(restored.global_variables()[0].name(), "total_by_id");
+    assert!(restored.validate().is_ok());
+}
+
+// --- Sort-by column tests ---
+
+#[test]
+fn sort_by_column_accepted() {
+    let table = Table::new(
+        "dim_date",
+        vec![
+            Column::new("month_number", DataType::Int32),
+            Column::new("month_name", DataType::String).with_sort_by("month_number"),
+        ],
+    )
+    .unwrap();
+
+    let model = DataModel::builder().add_table(table).build().unwrap();
+
+    let col = model
+        .table("dim_date")
+        .unwrap()
+        .column("month_name")
+        .unwrap();
+    assert_eq!(col.sort_by_column(), Some("month_number"));
+}
+
+#[test]
+fn sort_by_column_missing_target_rejected() {
+    let table = Table::new(
+        "dim_date",
+        vec![Column::new("month_name", DataType::String).with_sort_by("nonexistent")],
+    )
+    .unwrap();
+
+    let result = DataModel::builder().add_table(table).build();
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("nonexistent"));
+    assert!(err.contains("not found"));
+}
+
+#[test]
+fn sort_by_column_self_reference_rejected() {
+    let table = Table::new(
+        "dim_date",
+        vec![Column::new("month_name", DataType::String).with_sort_by("month_name")],
+    )
+    .unwrap();
+
+    let result = DataModel::builder().add_table(table).build();
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("sort by itself"));
+}
+
+#[test]
+fn sort_by_column_circular_rejected() {
+    let table = Table::new(
+        "dim_date",
+        vec![
+            Column::new("a", DataType::String).with_sort_by("b"),
+            Column::new("b", DataType::String).with_sort_by("a"),
+        ],
+    )
+    .unwrap();
+
+    let result = DataModel::builder().add_table(table).build();
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("circular"));
+}
+
+#[test]
+fn sort_column_for_returns_sort_column() {
+    let table = Table::new(
+        "dim_date",
+        vec![
+            Column::new("month_number", DataType::Int32),
+            Column::new("month_name", DataType::String).with_sort_by("month_number"),
+        ],
+    )
+    .unwrap();
+
+    let model = DataModel::builder().add_table(table).build().unwrap();
+
+    // Column with sort_by returns the sort column.
+    assert_eq!(
+        model.sort_column_for("dim_date", "month_name").unwrap(),
+        "month_number"
+    );
+    // Column without sort_by returns itself.
+    assert_eq!(
+        model.sort_column_for("dim_date", "month_number").unwrap(),
+        "month_number"
+    );
+}
+
+#[test]
+fn sort_by_column_serde_roundtrip() {
+    let table = Table::new(
+        "dim_date",
+        vec![
+            Column::new("month_number", DataType::Int32),
+            Column::new("month_name", DataType::String).with_sort_by("month_number"),
+        ],
+    )
+    .unwrap();
+
+    let model = DataModel::builder().add_table(table).build().unwrap();
+    let json = serde_json::to_string_pretty(&model).unwrap();
+    assert!(json.contains("sort_by_column"));
+    assert!(json.contains("month_number"));
+
+    let restored: DataModel = serde_json::from_str(&json).unwrap();
+    let col = restored
+        .table("dim_date")
+        .unwrap()
+        .column("month_name")
+        .unwrap();
+    assert_eq!(col.sort_by_column(), Some("month_number"));
+    assert!(restored.validate().is_ok());
+}
+
+#[test]
+fn sort_by_column_omitted_from_json_when_none() {
+    let table = Table::new("t", vec![Column::new("a", DataType::Int32)]).unwrap();
+
+    let model = DataModel::builder().add_table(table).build().unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(!json.contains("sort_by_column"));
+}
+
+// --- Date table validation tests (step 11) ---
+
+#[test]
+fn rejects_date_table_that_does_not_exist() {
+    use crate::error::EngineError;
+
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .mark_date_table("dim_date")
+        .build();
+
+    let err = result.unwrap_err();
+    assert!(matches!(err, EngineError::InvalidDateTable { .. }));
+    assert!(err.to_string().contains("not found"));
+}
+
+#[test]
+fn rejects_duplicate_date_roles_on_date_table() {
+    use crate::model::column::DateRole;
+
+    let dim_date = crate::model::table::Table::new(
+        "dim_date",
+        vec![
+            Column::new("year", DataType::Int32).with_date_role(DateRole::Year),
+            Column::new("fiscal_year", DataType::Int32).with_date_role(DateRole::Year),
+        ],
+    )
+    .unwrap();
+
+    let result = DataModel::builder()
+        .add_table(dim_date)
+        .mark_date_table("dim_date")
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Year"), "got: {err}");
+    assert!(err.contains("multiple columns"), "got: {err}");
+}
+
+#[test]
+fn rejects_date_key_role_on_non_date_column() {
+    use crate::model::column::DateRole;
+
+    let dim_date = crate::model::table::Table::new(
+        "dim_date",
+        vec![Column::new("datekey", DataType::Int32).with_date_role(DateRole::DateKey)],
+    )
+    .unwrap();
+
+    let result = DataModel::builder()
+        .add_table(dim_date)
+        .mark_date_table("dim_date")
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("DateKey"), "got: {err}");
+    assert!(err.contains("Date or Timestamp"), "got: {err}");
+}
+
+#[test]
+fn rejects_part_role_on_float_column() {
+    use crate::model::column::DateRole;
+
+    let dim_date = crate::model::table::Table::new(
+        "dim_date",
+        vec![Column::new("month", DataType::Float64).with_date_role(DateRole::Month)],
+    )
+    .unwrap();
+
+    let result = DataModel::builder()
+        .add_table(dim_date)
+        .mark_date_table("dim_date")
+        .build();
+
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("Month"), "got: {err}");
+    assert!(err.contains("integer or string"), "got: {err}");
+}
+
+#[test]
+fn accepts_valid_date_table_and_round_trips_through_serde() {
+    use crate::model::column::DateRole;
+
+    let dim_date = crate::model::table::Table::new(
+        "dim_date",
+        vec![
+            Column::new("datekey", DataType::Date).with_date_role(DateRole::DateKey),
+            Column::new("year", DataType::Int32).with_date_role(DateRole::Year),
+            // String part columns are lenient by design ("Q1"-style labels).
+            Column::new("quarter", DataType::String).with_date_role(DateRole::Quarter),
+            Column::new("month", DataType::Int64).with_date_role(DateRole::Month),
+            // Role-less display column is fine on the date table.
+            Column::new("month_name", DataType::String),
+        ],
+    )
+    .unwrap();
+
+    let model = DataModel::builder()
+        .add_table(dim_date)
+        .mark_date_table("dim_date")
+        .build()
+        .unwrap();
+    assert_eq!(model.date_table(), Some("dim_date"));
+
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(json.contains("\"date_table\""));
+    let restored: DataModel = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.date_table(), Some("dim_date"));
+    restored.validate().unwrap();
+    let year = restored.table("dim_date").unwrap().column("year").unwrap();
+    assert_eq!(year.date_role(), Some(DateRole::Year));
+}
+
+#[test]
+fn unmarked_model_omits_date_table_from_json() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .build()
+        .unwrap();
+    assert_eq!(model.date_table(), None);
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(!json.contains("\"date_table\""));
+}
+
+#[test]
+fn date_roles_on_unmarked_tables_are_not_validated() {
+    use crate::model::column::DateRole;
+
+    // Duplicate roles + bad types, but the table is NOT marked as the date
+    // table — roles are inert metadata until the table is marked.
+    let table = crate::model::table::Table::new(
+        "some_dim",
+        vec![
+            Column::new("a", DataType::Float64).with_date_role(DateRole::Year),
+            Column::new("b", DataType::Float64).with_date_role(DateRole::Year),
+        ],
+    )
+    .unwrap();
+
+    DataModel::builder().add_table(table).build().unwrap();
+}
+
+// --- Script function validation (step 11) ---
+
+use crate::compute::script::{ScriptFunction, ScriptType};
+use crate::error::EngineError;
+
+fn markup_script() -> ScriptFunction {
+    ScriptFunction::builder("markup")
+        .param("cost", ScriptType::Float)
+        .param("rate", ScriptType::Float)
+        .returns(ScriptType::Float)
+        .body("cost * rate")
+        .build()
+}
+
+#[test]
+fn accepts_valid_script_function() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap();
+    assert_eq!(model.script_functions().len(), 1);
+    assert_eq!(model.script_function("markup").unwrap().name(), "markup");
+    // Built model carries the current format version (now v5 after the
+    // security_roles bump).
+    assert_eq!(model.format_version(), MODEL_FORMAT_VERSION);
+}
+
+#[test]
+fn rejects_script_name_colliding_with_builtin() {
+    // SUM is a built-in; the parser would dispatch it before ever emitting a
+    // Call to a script named SUM, so the script would be dead.
+    let script = ScriptFunction::builder("sum")
+        .param("x", ScriptType::Float)
+        .returns(ScriptType::Float)
+        .body("x")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    match err {
+        EngineError::ScriptError { message, .. } => {
+            assert!(message.contains("built-in"), "got: {message}");
+        }
+        other => panic!("expected ScriptError, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_duplicate_script_name() {
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::DuplicateName(_)));
+}
+
+#[test]
+fn rejects_invalid_script_name() {
+    let script = ScriptFunction::builder("bad name")
+        .returns(ScriptType::Int)
+        .body("1")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidIdentifier { .. }));
+}
+
+#[test]
+fn rejects_script_with_unparseable_body_at_build_time() {
+    let script = ScriptFunction::builder("broken")
+        .param("x", ScriptType::Int)
+        .returns(ScriptType::Int)
+        .body("x +") // syntax error
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    match err {
+        EngineError::ScriptError {
+            function, position, ..
+        } => {
+            assert_eq!(function, "broken");
+            assert!(position.is_some(), "syntax error should carry a position");
+        }
+        other => panic!("expected ScriptError, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_script_with_duplicate_parameter() {
+    let script = ScriptFunction::builder("dup")
+        .param("x", ScriptType::Int)
+        .param("x", ScriptType::Int)
+        .returns(ScriptType::Int)
+        .body("x")
+        .build();
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(script)
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::ScriptError { .. }));
+}
+
+#[test]
+fn script_function_survives_json_round_trip_through_model() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_script_function(markup_script())
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(json.contains("script_functions"));
+    let back: DataModel = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.script_functions().len(), 1);
+    back.validate().unwrap();
+}
+
+#[test]
+fn empty_script_functions_omitted_from_json() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(!json.contains("script_functions"));
+}
+
+// --- Incremental refresh validation (builder step 13) ---
+
+use crate::model::table::{IncrementalRefresh, StorageMode};
+
+/// In-memory fact table with a date column, a status column, and a numeric
+/// column — the shapes the incremental-refresh filter validation exercises.
+fn incremental_fact(filter: &str) -> Table {
+    Table::new(
+        "fact_orders",
+        vec![
+            Column::new("order_date", DataType::Date),
+            Column::new("status", DataType::String),
+            Column::new("amount", DataType::Float64),
+        ],
+    )
+    .unwrap()
+    .with_storage_mode(StorageMode::InMemory)
+    .with_incremental_refresh(IncrementalRefresh::new(filter))
+}
+
+#[test]
+fn accepts_date_window_incremental_filter() {
+    let model = DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -7, \"DAY\")",
+        ))
+        .build()
+        .unwrap();
+    assert!(model
+        .table("fact_orders")
+        .unwrap()
+        .incremental_refresh()
+        .is_some());
+}
+
+#[test]
+fn accepts_status_incremental_filter() {
+    assert!(DataModel::builder()
+        .add_table(incremental_fact("status <> \"closed\""))
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn accepts_anded_incremental_filter() {
+    assert!(DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -30, \"DAY\") AND status <> \"closed\""
+        ))
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn rejects_incremental_refresh_on_directquery_table() {
+    let table = Table::new(
+        "fact_orders",
+        vec![Column::new("order_date", DataType::Date)],
+    )
+    .unwrap()
+    // DirectQuery (default storage mode) — incremental refresh is meaningless.
+    .with_incremental_refresh(IncrementalRefresh::new("order_date >= TODAY()"));
+    let err = DataModel::builder().add_table(table).build().unwrap_err();
+    assert!(
+        matches!(err, EngineError::InvalidData(ref m) if m.contains("not InMemory")),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn rejects_incremental_filter_unknown_column() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("ghost_date >= TODAY()"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("unknown column")));
+}
+
+#[test]
+fn rejects_incremental_filter_with_or() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("status <> \"closed\" OR amount > 0"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("OR is not supported")));
+}
+
+#[test]
+fn rejects_incremental_filter_aggregate_rhs() {
+    let err = DataModel::builder()
+        .add_table(incremental_fact("amount > SUM(fact_orders[amount])"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("not a constant value")));
+}
+
+#[test]
+fn rejects_incremental_filter_column_ref_rhs() {
+    // RHS references another column → not a constant.
+    let err = DataModel::builder()
+        .add_table(incremental_fact("amount > order_date"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(ref m) if m.contains("not a constant value")));
+}
+
+#[test]
+fn rejects_incremental_filter_non_comparison() {
+    // A bare boolean column with no comparison operator is not a simple
+    // comparison.
+    let err = DataModel::builder()
+        .add_table(incremental_fact("status"))
+        .build()
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidData(_)));
+}
+
+#[test]
+fn incremental_refresh_survives_json_round_trip_through_model() {
+    let model = DataModel::builder()
+        .add_table(incremental_fact(
+            "order_date >= DATEADD(TODAY(), -7, \"DAY\")",
+        ))
+        .build()
+        .unwrap();
+    let json = serde_json::to_string(&model).unwrap();
+    assert!(json.contains("incremental_refresh"));
+    let back: DataModel = serde_json::from_str(&json).unwrap();
+    back.validate().unwrap();
+    assert_eq!(
+        back.table("fact_orders")
+            .unwrap()
+            .incremental_refresh()
+            .map(|i| i.refresh_filter()),
+        Some("order_date >= DATEADD(TODAY(), -7, \"DAY\")")
+    );
+}
+
+// --- Calculation group validation tests ---
+
+use crate::compute::measure::sum_measure;
+use crate::model::calculated_column::CalculatedColumn;
+use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+
+fn time_group() -> CalculationGroup {
+    CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+            CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+        ],
+    )
+}
+
+#[test]
+fn accepts_valid_calculation_group() {
+    let model = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(time_group())
+        .build()
+        .unwrap();
+    assert_eq!(model.calculation_groups().len(), 1);
+    assert_eq!(model.calculation_group("Time").unwrap().items().len(), 2);
+}
+
+#[test]
+fn rejects_duplicate_calculation_group_names() {
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(time_group())
+        .add_calculation_group(time_group())
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("calculation group"), "got: {err}");
+}
+
+#[test]
+fn rejects_duplicate_item_names_within_group() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+            CalculationItem::from_text("Current", "SELECTEDMEASURE() * 2").unwrap(),
+        ],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("calculation item"), "got: {err}");
+}
+
+#[test]
+fn rejects_empty_calculation_group() {
+    let group = CalculationGroup::new("Time", vec![]);
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("no items"), "got: {err}");
+}
+
+#[test]
+fn rejects_calc_item_with_unknown_measure_ref() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![CalculationItem::from_text("Ratio", "SELECTEDMEASURE() / [Nope]").unwrap()],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown measure"), "got: {err}");
+}
+
+#[test]
+fn rejects_calc_item_with_unknown_qualified_column() {
+    let group = CalculationGroup::new(
+        "Time",
+        vec![
+            CalculationItem::from_text("WithCol", "SELECTEDMEASURE() + SUM(Sales[nonexistent])")
+                .unwrap(),
+        ],
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(sum_measure("Revenue", "Sales", "amount"))
+        .add_calculation_group(group)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown column"), "got: {err}");
+}
+
+#[test]
+fn rejects_selected_measure_in_a_regular_measure() {
+    // A measure (not a calc item) that uses SELECTEDMEASURE() must be rejected
+    // at build time via the regular validate() path.
+    let bad = crate::compute::measure::Measure::new(
+        "Bad",
+        crate::compute::expression::agg(
+            crate::compute::aggregate::AggregateOp::Sum,
+            crate::compute::expression::Expression::SelectedMeasure,
+        ),
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(bad)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}
+
+#[test]
+fn rejects_selected_measure_in_a_calculated_column() {
+    let cc = CalculatedColumn::new(
+        "Bad",
+        "Sales",
+        crate::compute::expression::Expression::SelectedMeasure,
+        DataType::Float64,
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_calculated_column(cc)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURE"), "got: {err}");
+}
+
+fn amount_sum_measure() -> crate::compute::measure::Measure {
+    crate::compute::measure::Measure::new(
+        "Total",
+        crate::compute::expression::agg(
+            crate::compute::aggregate::AggregateOp::Sum,
+            crate::compute::expression::qualified_col("Sales", "amount"),
+        ),
+    )
+}
+
+#[test]
+fn rejects_calc_group_introspection_in_a_regular_measure() {
+    // The whole introspection family is calc-item-only, like SELECTEDMEASURE().
+    let bad = crate::compute::measure::Measure::new(
+        "Bad",
+        crate::compute::expression::Expression::SelectedMeasureName,
+    );
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(bad)
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("SELECTEDMEASURENAME"), "got: {err}");
+}
+
+#[test]
+fn isselectedmeasure_unknown_measure_rejected_at_build() {
+    use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+    let item = CalculationItem::from_text("Boost", "IF(ISSELECTEDMEASURE([Nope]), 1, 2)").unwrap();
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown measure 'Nope'"),
+        "ISSELECTEDMEASURE args must be existence-checked, got: {err}"
+    );
+}
+
+#[test]
+fn item_format_string_expression_validated_at_build() {
+    use crate::model::calculation_group::{CalculationGroup, CalculationItem};
+    // Unparseable format expression → build error.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some("CONCATENATE(".to_string()));
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("does not parse"), "got: {err}");
+
+    // Unknown measure referenced by ISSELECTEDMEASURE inside the format
+    // expression → build error.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some(
+            "IF(ISSELECTEDMEASURE([Nope]), \"0.0%\", SELECTEDMEASUREFORMATSTRING())".to_string(),
+        ));
+    let result = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build();
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("unknown measure 'Nope'"), "got: {err}");
+
+    // A valid format expression builds fine.
+    let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+        .unwrap()
+        .with_format_string_expression(Some(
+            "CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")".to_string(),
+        ));
+    assert!(DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(amount_sum_measure())
+        .add_calculation_group(CalculationGroup::new("G", vec![item]))
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn detail_rows_validated_at_build() {
+    // Well-formed refs to existing columns: accepted.
+    let ok = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["Sales[amount]".to_string()]),
+        )
+        .build();
+    assert!(ok.is_ok(), "got: {:?}", ok.err());
+
+    // Malformed ref (not Table[column]): rejected.
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["just_a_column".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Table[column]"), "got: {err}");
+
+    // Unknown column: rejected.
+    let err = DataModel::builder()
+        .add_table(sales_table())
+        .add_measure(
+            sum_measure("Revenue", "Sales", "amount")
+                .with_detail_rows(vec!["Sales[nonexistent]".to_string()]),
+        )
+        .build()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("nonexistent"), "got: {err}");
+}

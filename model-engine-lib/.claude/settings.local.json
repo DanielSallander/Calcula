@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Agent",
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit",
+      "Skill(code-review)",
+      "Skill(code-review:*)"
+    ],
+    "deny": [
+      "Bash(git commit*)",
+      "Bash(git push*)"
+    ],
+    "ask": []
+  }
+}

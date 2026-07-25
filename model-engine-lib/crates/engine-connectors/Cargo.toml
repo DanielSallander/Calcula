@@ -1,0 +1,31 @@
+[package]
+name = "engine-connectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Data source connectors for the Calcula Engine"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+arrow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-native-tls",
+    "postgres",
+    "chrono",
+    "rust_decimal",
+    "uuid",
+] }
+chrono = "0.4"
+rust_decimal = "1"
+tiberius = { workspace = true }
+bb8 = { workspace = true }
+bb8-tiberius = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

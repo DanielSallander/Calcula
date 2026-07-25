@@ -1,0 +1,27 @@
+[package]
+name = "bi-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Calcula Engine: unified API for analytical computation"
+
+[lib]
+name = "bi_engine"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+engine-connectors = { path = "../engine-connectors" }
+engine-query = { path = "../engine-query" }
+arrow = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "rust_decimal"] }
+rust_decimal = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

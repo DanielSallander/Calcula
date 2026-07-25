@@ -1,0 +1,418 @@
+//! Source registry: maps data model tables to their data source connectors.
+
+use std::collections::HashMap;
+
+use arrow::record_batch::RecordBatch;
+use engine_connectors::auth::{AuthMethodKind, ConnectorAuth};
+use engine_connectors::postgres::PostgresConnector;
+use engine_connectors::sqlserver::SqlServerConnector;
+use engine_connectors::traits::{Connector, ConnectorCapabilities, FetchRequest, SourceTable};
+use engine_connectors::ConnectorResult;
+use engine_core::model::Table;
+
+use crate::csv_connector::CsvConnector;
+use crate::in_memory_connector::InMemoryConnector;
+use crate::parquet_connector::ParquetConnector;
+
+use crate::error::{QueryError, QueryResult};
+
+/// Identifies where a model table's rows come from in a data source: either a
+/// physical `schema.table`, or a user-authored SQL query (`source_query`) that
+/// the SQL builder wraps as a derived table — `(<source_query>) AS t` — so every
+/// downstream filter / aggregate composes on top of it.
+#[derive(Debug, Clone)]
+pub struct SourceBinding {
+    /// Source schema name (e.g., `"sales"`, `"BI"`). Empty for a query source.
+    pub schema: String,
+    /// Source table name (e.g., `"salesorderheader"`). For a query source this
+    /// is the model table name (a label only — never rendered into SQL).
+    pub table: String,
+    /// When set, the rows come from this SQL SELECT instead of `schema.table`.
+    /// The SQL builder renders it as a wrapped subquery.
+    pub source_query: Option<String>,
+}
+
+impl SourceBinding {
+    /// Create a physical `schema.table` source binding.
+    pub fn new(schema: impl Into<String>, table: impl Into<String>) -> Self {
+        Self {
+            schema: schema.into(),
+            table: table.into(),
+            source_query: None,
+        }
+    }
+
+    /// Create a SQL-query source binding. `model_table` is a label; the SQL is
+    /// rendered as `(<sql>) AS t` wherever the table's source is referenced.
+    pub fn new_query(model_table: impl Into<String>, sql: impl Into<String>) -> Self {
+        Self {
+            schema: String::new(),
+            table: model_table.into(),
+            source_query: Some(sql.into()),
+        }
+    }
+}
+
+/// Generate the closed [`AnyConnector`] enum and all of its dispatch.
+///
+/// One invocation lists every built-in connector as `Variant => Type`. The
+/// macro expands that single list into the enum variants, every dispatch method
+/// (the data operations, `capabilities`, the `execute_join_aggregation` join
+/// pushdown, and the `supported_auth_methods` static call that makes a missing
+/// `ConnectorAuth` impl a **compile error**), and the `From<Type>` conversions.
+///
+/// Adding a connector is therefore one line in the [`define_any_connector!`]
+/// invocation — there are no hand-maintained per-method match arms that can
+/// drift out of sync or silently omit a variant.
+macro_rules! define_any_connector {
+    ($($(#[$vmeta:meta])* $variant:ident => $ty:ty),+ $(,)?) => {
+        /// Enum dispatch for connectors, avoiding async-trait object-safety
+        /// issues. The set is **closed** so the `supported_auth_methods`
+        /// dispatch can statically require every variant's type to implement
+        /// [`ConnectorAuth`] — the compile-enforced half of the connector
+        /// checklist (see [`define_any_connector!`]).
+        pub enum AnyConnector {
+            $(
+                $(#[$vmeta])*
+                $variant($ty),
+            )+
+        }
+
+        impl AnyConnector {
+            /// The source-side computation capabilities of the wrapped
+            /// connector (dispatch). The planner consults this — never a
+            /// hardcoded connector name — to decide what to push.
+            pub fn capabilities(&self) -> ConnectorCapabilities {
+                match self { $( AnyConnector::$variant(c) => c.capabilities(), )+ }
+            }
+
+            /// The persisted [`SourceKind`](engine_core::model::SourceKind) of
+            /// this connector, used by the facade to record a source in the
+            /// model's persisted catalog. The macro maps each `AnyConnector`
+            /// variant to the `SourceKind` variant of the **same name**, so a
+            /// future connector added without a matching `SourceKind` variant
+            /// is a compile error here — keeping the two enums in lockstep.
+            pub fn kind(&self) -> engine_core::model::SourceKind {
+                match self {
+                    $( AnyConnector::$variant(_) => engine_core::model::SourceKind::$variant, )+
+                }
+            }
+
+            /// Fetch data from this connector.
+            pub async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.fetch_data(request).await, )+ }
+            }
+
+            /// Execute a raw SQL query.
+            pub async fn execute_query(&self, sql: &str) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.execute_query(sql).await, )+ }
+            }
+
+            /// List tables in the data source.
+            pub async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
+                match self { $( AnyConnector::$variant(c) => c.list_tables().await, )+ }
+            }
+
+            /// Introspect a table's schema.
+            pub async fn introspect_table(&self, schema: &str, table_name: &str) -> ConnectorResult<Table> {
+                match self { $( AnyConnector::$variant(c) => c.introspect_table(schema, table_name).await, )+ }
+            }
+
+            /// Get the row count for a table.
+            pub async fn row_count(&self, schema: &str, table_name: &str) -> ConnectorResult<usize> {
+                match self { $( AnyConnector::$variant(c) => c.row_count(schema, table_name).await, )+ }
+            }
+
+            /// Returns the auth methods supported by this connector type.
+            ///
+            /// This is the ONE site that statically calls each variant type's
+            /// [`ConnectorAuth::supported_auth_methods`] — a connector listed in
+            /// [`define_any_connector!`] that does not implement [`ConnectorAuth`]
+            /// fails to compile. (The in-memory connector implements it trivially:
+            /// it is built from in-process data and supports no auth methods.)
+            pub fn supported_auth_methods(&self) -> Vec<AuthMethodKind> {
+                match self { $( AnyConnector::$variant(_) => <$ty as ConnectorAuth>::supported_auth_methods(), )+ }
+            }
+
+            /// Execute a multi-table aggregation query with JOINs.
+            pub async fn execute_join_aggregation(
+                &self,
+                request: &engine_connectors::JoinAggregationRequest,
+            ) -> ConnectorResult<Vec<RecordBatch>> {
+                match self { $( AnyConnector::$variant(c) => c.execute_join_aggregation(request).await, )+ }
+            }
+        }
+
+        $(
+            impl From<$ty> for AnyConnector {
+                fn from(connector: $ty) -> Self {
+                    AnyConnector::$variant(connector)
+                }
+            }
+        )+
+    };
+}
+
+define_any_connector! {
+    /// PostgreSQL connector.
+    Postgres => PostgresConnector,
+    /// SQL Server connector.
+    SqlServer => SqlServerConnector,
+    /// In-process connector serving canned Arrow batches (testing and simple
+    /// file-less in-memory sources). See [`InMemoryConnector`].
+    InMemory => InMemoryConnector,
+    /// File-backed connector serving CSV files from a directory. See [`CsvConnector`].
+    Csv => CsvConnector,
+    /// File-backed connector serving Apache Parquet files from a directory. See [`ParquetConnector`].
+    Parquet => ParquetConnector,
+}
+
+impl AnyConnector {
+    /// Whether this connector can execute a pushed join-aggregation whose
+    /// GROUP BY / measures are arbitrary expressions (e.g. a context-driven
+    /// calculated column's resolved `CASE`). Connectors that cannot render
+    /// Expression trees (everything but PostgreSQL today) compute such queries
+    /// locally instead — see [`ConnectorCapabilities::expression_pushdown`].
+    pub fn supports_expression_pushdown(&self) -> bool {
+        self.capabilities().expression_pushdown
+    }
+}
+
+/// Tuning for cross-source semi-join (reverse fact → dimension) pushdown.
+///
+/// In a cross-source [`QueryPlan::LocalAggregation`](crate::QueryPlan), a large
+/// dimension on one source is normally fetched **in full** and joined locally to
+/// a fact on another source. When the fact is restricted (a query filter, or an
+/// IN-filter propagated from another filtered dimension), its distinct join-key
+/// set can be pushed to the dimension's fetch so the dimension pulls only the
+/// rows that will survive the join.
+///
+/// This is a **pure performance** optimization only in the provably safe case
+/// this config enables: a **single-fact** query (one measure table) targeting an
+/// **unfiltered, connector-backed** dimension via a single-condition equi
+/// relationship. In that case the dimension is a pure dimension (no measure
+/// reads its rows, so no `DISTINCTCOUNT`-over-dimension changes), it is not a
+/// conformed dimension shared across facts (impossible with one fact), and every
+/// dimension row it drops is one an `INNER`/`LEFT` join would drop anyway — so
+/// the result is byte-identical to the full-fetch path. The stricter, explicit
+/// [`FilterPropagation::Both`](engine_core::model::FilterPropagation) reverse
+/// path (a *semantic* Power BI feature) is unaffected by this config and always
+/// active.
+///
+/// **Disabled by default** (like auto-tiering): it adds one narrow fact-key
+/// fetch per qualifying dimension, which only pays off when that dimension is
+/// large. Hosts whose composite models have large cross-source dimensions opt in
+/// via [`SourceRegistry::set_semi_join_config`] /
+/// [`Engine::set_semi_join_config`](../../bi_engine/struct.Engine.html).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemiJoinConfig {
+    /// Enable cost-based reverse (fact → dimension) key pushdown for the safe
+    /// single-fact case described above. Default `false`.
+    pub reverse_pushdown: bool,
+    /// Upper bound on the distinct fact-key set pushed to a dimension. Above it,
+    /// an opportunistic (cost-based) candidate is **skipped** — the dimension is
+    /// fetched in full rather than sending an oversized `IN` list — because a
+    /// key set that large is unlikely to restrict the dimension much. Explicit
+    /// `Both` relationships are never subject to this abort (their large key
+    /// sets use the connectors' temp-table strategy). Default `100_000`.
+    pub key_set_abort_max: usize,
+}
+
+impl Default for SemiJoinConfig {
+    fn default() -> Self {
+        Self {
+            reverse_pushdown: false,
+            key_set_abort_max: 100_000,
+        }
+    }
+}
+
+/// Registry that maps data model table names to their connectors and
+/// source locations.
+///
+/// Multiple model tables can share the same connector instance (e.g., all
+/// tables from the same PostgreSQL database use one connector).
+pub struct SourceRegistry {
+    /// Map from model table name to (connector index, source binding).
+    bindings: HashMap<String, (usize, SourceBinding)>,
+    /// Connectors, referenced by index.
+    connectors: Vec<AnyConnector>,
+    /// Map from a persisted source id to the connector index it was registered
+    /// under. Populated when a connector is added with an id (e.g. by the
+    /// facade's `wire_sources` / composite-model helpers), letting a table's
+    /// persisted `source_binding.source_id` be resolved to a connector without
+    /// the host tracking indices. Anonymous connectors (no id) are absent.
+    source_ids: HashMap<String, usize>,
+    /// Cross-source semi-join pushdown tuning. Disabled by default; the executor
+    /// reads it during local (cross-source) aggregation. See [`SemiJoinConfig`].
+    semi_join: SemiJoinConfig,
+}
+
+impl SourceRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            bindings: HashMap::new(),
+            connectors: Vec::new(),
+            source_ids: HashMap::new(),
+            semi_join: SemiJoinConfig::default(),
+        }
+    }
+
+    /// Set the cross-source semi-join pushdown tuning. See [`SemiJoinConfig`].
+    pub fn set_semi_join_config(&mut self, config: SemiJoinConfig) {
+        self.semi_join = config;
+    }
+
+    /// Returns the cross-source semi-join pushdown tuning.
+    pub fn semi_join_config(&self) -> SemiJoinConfig {
+        self.semi_join
+    }
+
+    /// Register a connector and return its index.
+    pub fn add_connector(&mut self, connector: AnyConnector) -> usize {
+        let idx = self.connectors.len();
+        self.connectors.push(connector);
+        idx
+    }
+
+    /// Register a connector under an optional stable source id, returning its
+    /// index. When an id is given it is recorded so
+    /// [`connector_index_by_source_id`](Self::connector_index_by_source_id) can
+    /// later resolve a table's persisted `source_binding.source_id` to this
+    /// connector. A repeated id overwrites the previous mapping (the caller —
+    /// the facade — rejects duplicate ids before reaching here).
+    pub fn add_connector_with_id(
+        &mut self,
+        source_id: Option<String>,
+        connector: AnyConnector,
+    ) -> usize {
+        let idx = self.add_connector(connector);
+        if let Some(id) = source_id {
+            self.source_ids.insert(id, idx);
+        }
+        idx
+    }
+
+    /// Resolve a persisted source id to the connector index it was registered
+    /// under, if any. Returns `None` for an unknown id (e.g. a source that the
+    /// host chose to skip when wiring).
+    pub fn connector_index_by_source_id(&self, source_id: &str) -> Option<usize> {
+        self.source_ids.get(source_id).copied()
+    }
+
+    /// Bind a model table name to a connector and source location.
+    pub fn bind(
+        &mut self,
+        model_table: impl Into<String>,
+        connector_index: usize,
+        binding: SourceBinding,
+    ) {
+        self.bindings
+            .insert(model_table.into(), (connector_index, binding));
+    }
+
+    /// Look up the connector for a model table.
+    ///
+    /// Returns [`QueryError::SourceNotRegistered`] when the table has no
+    /// binding, or when its binding points at a connector index that was never
+    /// registered (a host that called `bind` with a stale index) — the latter
+    /// must not panic (library code never panics; see CLAUDE.md), so callers
+    /// can treat an unregistered source uniformly (e.g. the context-column
+    /// pushdown capability probe falls back to local aggregation).
+    pub fn connector_for(&self, model_table: &str) -> QueryResult<&AnyConnector> {
+        let (idx, _) = self
+            .bindings
+            .get(model_table)
+            .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))?;
+        self.connectors
+            .get(*idx)
+            .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))
+    }
+
+    /// Look up a connector by its registration index. Used by host commands that
+    /// run a connector-level operation against a known connection (e.g. a
+    /// consented script's read-only raw-SQL query), where the index comes from
+    /// the connection rather than from a model table binding.
+    pub fn connector_by_index(&self, index: usize) -> Option<&AnyConnector> {
+        self.connectors.get(index)
+    }
+
+    /// Look up the source binding for a model table.
+    pub fn binding_for(&self, model_table: &str) -> QueryResult<&SourceBinding> {
+        let (_, binding) = self
+            .bindings
+            .get(model_table)
+            .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))?;
+        Ok(binding)
+    }
+
+    /// Get the connector index for a model table.
+    pub fn connector_index_for(&self, model_table: &str) -> QueryResult<usize> {
+        let (idx, _) = self
+            .bindings
+            .get(model_table)
+            .ok_or_else(|| QueryError::SourceNotRegistered(model_table.to_string()))?;
+        Ok(*idx)
+    }
+
+    /// Check if a model table is registered.
+    pub fn has_table(&self, model_table: &str) -> bool {
+        self.bindings.contains_key(model_table)
+    }
+}
+
+impl Default for SourceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Test-only: a pushdown-capable connector (a lazy PostgreSQL connector that is
+/// never actually connected) for planner plan-shape tests.
+///
+/// The planner's expression-pushdown gate only inspects the connector *kind*
+/// (never its pool), and plan-shape tests call `plan`, not `execute`, so the
+/// pool is never used. A process-lifetime current-thread runtime is held so
+/// sqlx's lazy pool can spawn its (never-run) reaper task without each sync
+/// `#[test]` needing its own runtime.
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use crate::in_memory_connector::InMemoryConnector;
+
+    #[test]
+    fn postgres_advertises_expression_pushdown() {
+        let c = test_capable_connector();
+        assert!(c.capabilities().expression_pushdown);
+        assert!(c.supports_expression_pushdown());
+    }
+
+    #[test]
+    fn in_memory_is_fetch_only() {
+        let c = AnyConnector::InMemory(InMemoryConnector::new());
+        assert_eq!(c.capabilities(), ConnectorCapabilities::fetch_only());
+        assert!(!c.supports_expression_pushdown());
+    }
+
+    #[test]
+    fn from_connector_builds_matching_variant() {
+        // The macro-generated `From<Type>` conversions back `Engine::add_source`.
+        let c: AnyConnector = InMemoryConnector::new().into();
+        assert!(matches!(c, AnyConnector::InMemory(_)));
+        assert!(c.supported_auth_methods().is_empty());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_capable_connector() -> AnyConnector {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread runtime for test connector")
+    });
+    let _guard = rt.enter();
+    AnyConnector::Postgres(PostgresConnector::lazy_unconnected())
+}

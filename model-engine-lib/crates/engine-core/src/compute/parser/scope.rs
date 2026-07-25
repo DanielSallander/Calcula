@@ -1,0 +1,449 @@
+//! Measure references, USERELATIONSHIP, ISINSCOPE, CLEAR_EXCEPT, and TRAVERSE
+//! parsing.
+
+use super::context::wrap_context_op;
+use super::*;
+use crate::compute::expression::RelationshipPath;
+
+impl Parser {
+    /// Parse `[MeasureName]` or `[MeasureName](context_args...)`.
+    ///
+    /// A lone `[name]` without a preceding table identifier is a measure reference.
+    /// Optional parenthesized context args wrap the reference with context operations.
+    pub(super) fn parse_measure_ref(&mut self) -> EngineResult<Expression> {
+        self.advance()?; // consume [
+        let name = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("expected measure name inside [], got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+
+        let mut result = Expression::MeasureRef(name);
+
+        // Optional context arguments: [MeasureName](KEEP(...), USERELATIONSHIP("rel"), ...)
+        if self.peek() == Some(&Token::LParen) {
+            self.advance()?; // consume (
+            loop {
+                let arg_offset = self.offset_at(self.pos);
+                let context_arg = self.parse_context_arg()?;
+                result = wrap_context_op(result, context_arg, arg_offset)?;
+                if self.peek() != Some(&Token::Comma) {
+                    break;
+                }
+                self.advance()?; // consume comma
+            }
+            self.expect(&Token::RParen)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Parse `USERELATIONSHIP(expr, "relationship_name")` or
+    /// `USERELATIONSHIP("relationship_name")` (as context arg in aggregates).
+    pub(super) fn parse_use_relationship_call(&mut self) -> EngineResult<Expression> {
+        // First argument: could be a string literal (relationship name when used
+        // as context arg) or a full expression (when used as standalone wrapper).
+        let first = match self.peek().cloned() {
+            Some(Token::StringLit(_)) => {
+                // USERELATIONSHIP("rel_name") — context argument form
+                let rel_name = match self.advance()?.clone() {
+                    Token::StringLit(s) => s,
+                    _ => unreachable!(),
+                };
+                self.expect(&Token::RParen)?;
+                return Ok(Expression::UseRelationship {
+                    expr: Box::new(expr::lit_int(0)), // placeholder, replaced by wrap_context_op
+                    relationship_name: rel_name,
+                });
+            }
+            _ => self.parse_expression()?,
+        };
+        // USERELATIONSHIP(expr, "rel_name") — standalone wrapper form
+        self.expect(&Token::Comma)?;
+        let rel_name = match self.advance()?.clone() {
+            Token::StringLit(s) => s,
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "USERELATIONSHIP: expected string literal for relationship name, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::use_relationship(first, rel_name))
+    }
+
+    /// Parse `ISINSCOPE(table[column])`.
+    pub(super) fn parse_isinscope_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISINSCOPE: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISINSCOPE: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::is_in_scope(table, column))
+    }
+
+    /// Parse `RELATED(table[column])` — DAX-compatible sugar for a
+    /// cross-table qualified column reference. The dereference itself is the
+    /// engine's existing row-context navigation: legal where cross-table row
+    /// references are legal (context columns reading a ONE-side table across
+    /// an active many-to-one equi relationship), enforced by those surfaces'
+    /// own validation. Parses straight to `QualifiedColumnRef`, so rendering
+    /// and persistence show the plain `Table[column]` spelling.
+    pub(super) fn parse_related_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("RELATED: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("RELATED: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::qualified_col(table, column))
+    }
+
+    /// Parse `LOOKUPVALUE(table[result_col], table[search_col], expr [, table[search_col2], expr2 ...])`.
+    ///
+    /// All named columns must live on the SAME table (DAX-compatible shape);
+    /// the match expressions are ordinary row-level expressions over the
+    /// host row.
+    pub(super) fn parse_lookupvalue_call(&mut self) -> EngineResult<Expression> {
+        let (table, result_column) = self.parse_bracketed_column("LOOKUPVALUE")?;
+        let mut search = Vec::new();
+        loop {
+            self.expect(&Token::Comma)?;
+            let (search_table, search_column) = self.parse_bracketed_column("LOOKUPVALUE")?;
+            if !search_table.eq_ignore_ascii_case(&table) {
+                return Err(self.parse_err_prev(format!(
+                    "LOOKUPVALUE: search column '{search_table}[{search_column}]' must be on \
+                     the result column's table '{table}'"
+                )));
+            }
+            self.expect(&Token::Comma)?;
+            let value = self.parse_expression()?;
+            search.push((search_column, value));
+            if self.peek() == Some(&Token::RParen) {
+                self.advance()?; // consume ')'
+                break;
+            }
+        }
+        if search.is_empty() {
+            return Err(
+                self.parse_err("LOOKUPVALUE requires at least one search column / value pair")
+            );
+        }
+        Ok(Expression::LookupValue {
+            table,
+            result_column,
+            search,
+        })
+    }
+
+    /// Parse a `table[column]` pair (shared by RELATED / ISFILTERED /
+    /// LOOKUPVALUE style arguments).
+    pub(super) fn parse_bracketed_column(&mut self, func: &str) -> EngineResult<(String, String)> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("{func}: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("{func}: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        Ok((table, column))
+    }
+
+    /// Parse `ISFILTERED(table[column])`.
+    pub(super) fn parse_isfiltered_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISFILTERED: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("ISFILTERED: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::is_filtered(table, column))
+    }
+
+    /// Parse `THISROW(table[column])` — the anchor-row column reference used
+    /// inside a nested `ITERATE` in a calculated column (the EARLIER concept).
+    pub(super) fn parse_thisrow_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("THISROW: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("THISROW: expected column name, got {tok:?}"))
+                );
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::this_row(table, column))
+    }
+
+    /// Parse `CLEAREXCEPT(table, col1, col2, ...)` as a context argument.
+    ///
+    /// Returns a placeholder ClearExcept wrapping Blank — the actual inner
+    /// expression is set by `wrap_context_op`.
+    pub(super) fn parse_clearexcept_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(
+                    self.parse_err_prev(format!("CLEAREXCEPT: expected table name, got {tok:?}"))
+                );
+            }
+        };
+        let mut except_columns = Vec::new();
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?; // consume comma
+                             // Expect table[column] or just column identifier
+            let col_name = match self.advance()?.clone() {
+                Token::Ident(s) => {
+                    // Could be table[col] or just col
+                    if self.peek() == Some(&Token::LBracket) {
+                        self.advance()?; // consume [
+                        let col = match self.advance()?.clone() {
+                            Token::Ident(c) => c,
+                            tok => {
+                                return Err(self.parse_err_prev(format!(
+                                    "CLEAREXCEPT: expected column name, got {tok:?}"
+                                )));
+                            }
+                        };
+                        self.expect(&Token::RBracket)?;
+                        col
+                    } else {
+                        s
+                    }
+                }
+                tok => {
+                    return Err(self.parse_err_prev(format!(
+                        "CLEAREXCEPT: expected column reference, got {tok:?}"
+                    )));
+                }
+            };
+            except_columns.push(col_name);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Expression::ClearExcept {
+            expr: Box::new(Expression::Blank),
+            table,
+            except_columns,
+        })
+    }
+
+    /// Parse a relationship path `table1 -> table2 [-> table3 ...]` used inside
+    /// `TRAVERSE`. The hops are bare table identifiers separated by `->`.
+    pub(super) fn parse_relationship_path(&mut self) -> EngineResult<RelationshipPath> {
+        let mut hops: Vec<String> = Vec::new();
+        match self.advance()?.clone() {
+            Token::Ident(s) => hops.push(s),
+            tok => {
+                return Err(self.parse_err_prev(format!(
+                    "TRAVERSE: expected a table name in the relationship path, got {tok:?}"
+                )));
+            }
+        }
+        while self.peek() == Some(&Token::Arrow) {
+            self.advance()?; // consume ->
+            match self.advance()?.clone() {
+                Token::Ident(s) => hops.push(s),
+                tok => {
+                    return Err(self.parse_err_prev(format!(
+                        "TRAVERSE: expected a table name after '->', got {tok:?}"
+                    )));
+                }
+            }
+        }
+        Ok(RelationshipPath::new(hops))
+    }
+
+    /// Parse `TRAVERSE(expr, table1 -> table2 [-> ...])` — force explicit
+    /// relationship traversal along the named path. This is the inverse of the
+    /// `format.rs` rendering (`TRAVERSE(inner, a -> b -> c)`), so a rendered
+    /// TRAVERSE measure re-parses.
+    pub(super) fn parse_traverse_call(&mut self) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let path = self.parse_relationship_path()?;
+        if path.hops.len() < 2 {
+            return Err(self.parse_err_prev(
+                "TRAVERSE: the relationship path needs at least two tables \
+                 (e.g. Sales -> Products)"
+                    .to_string(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(expr::traverse(inner, path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Measure reference tests ---
+
+    #[test]
+    fn parse_bare_measure_ref() {
+        let expr = parse_measure_expression("[TotalSales]").unwrap();
+        assert!(matches!(expr, Expression::MeasureRef(ref name) if name == "TotalSales"));
+    }
+
+    #[test]
+    fn parse_measure_ref_with_keep() {
+        let expr = parse_measure_expression("[TotalSales](KEEP(dim, dim[year] = 2014))").unwrap();
+        assert!(matches!(expr, Expression::Keep { .. }));
+        if let Expression::Keep { expr: inner, .. } = &expr {
+            assert!(matches!(**inner, Expression::MeasureRef(ref n) if n == "TotalSales"));
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_with_userelationship() {
+        let expr = parse_measure_expression("[TotalSales](USERELATIONSHIP(\"Sales_Dates_Ship\"))")
+            .unwrap();
+        assert!(matches!(expr, Expression::UseRelationship { .. }));
+        if let Expression::UseRelationship {
+            expr: inner,
+            relationship_name,
+        } = &expr
+        {
+            assert!(matches!(**inner, Expression::MeasureRef(ref n) if n == "TotalSales"));
+            assert_eq!(relationship_name, "Sales_Dates_Ship");
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_with_multiple_context_ops() {
+        let expr = parse_measure_expression(
+            "[TotalSales](USERELATIONSHIP(\"rel\"), KEEP(dim, dim[y] = 2024))",
+        )
+        .unwrap();
+        // Outer should be Keep (last context arg wraps outermost)
+        assert!(matches!(expr, Expression::Keep { .. }));
+        if let Expression::Keep { expr: inner, .. } = &expr {
+            // Inner should be UseRelationship
+            assert!(matches!(**inner, Expression::UseRelationship { .. }));
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_in_arithmetic() {
+        let expr = parse_measure_expression("[A] + [B]").unwrap();
+        assert!(matches!(expr, Expression::BinaryOp { .. }));
+        if let Expression::BinaryOp { left, right, .. } = &expr {
+            assert!(matches!(**left, Expression::MeasureRef(ref n) if n == "A"));
+            assert!(matches!(**right, Expression::MeasureRef(ref n) if n == "B"));
+        }
+    }
+
+    // --- TRAVERSE tests ---
+
+    #[test]
+    fn parse_traverse_two_hops() {
+        let expr =
+            parse_measure_expression("TRAVERSE(SUM(Sales[amount]), Sales -> Products)").unwrap();
+        match expr {
+            Expression::Traverse { path, .. } => {
+                assert_eq!(path.hops, vec!["Sales".to_string(), "Products".to_string()]);
+            }
+            other => panic!("expected Traverse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_traverse_three_hops() {
+        let expr = parse_measure_expression(
+            "TRAVERSE(SUM(Sales[amount]), Sales -> Warehouse -> Products)",
+        )
+        .unwrap();
+        if let Expression::Traverse { path, .. } = expr {
+            assert_eq!(path.hops.len(), 3);
+        } else {
+            panic!("expected Traverse");
+        }
+    }
+
+    #[test]
+    fn traverse_single_hop_is_rejected() {
+        assert!(parse_measure_expression("TRAVERSE(SUM(Sales[amount]), Sales)").is_err());
+    }
+
+    #[test]
+    fn arrow_token_does_not_break_binary_minus() {
+        // `-` must still tokenize as subtraction when not followed by `>`.
+        let expr = parse_measure_expression("SUM(Sales[a]) - SUM(Sales[b])").unwrap();
+        assert!(matches!(expr, Expression::BinaryOp { .. }));
+    }
+
+    #[test]
+    fn traverse_render_reparses() {
+        use crate::compute::expression::expression_to_formula;
+        let src = "TRAVERSE(SUM(Sales[amount]), Sales -> Products)";
+        let parsed = parse_measure_expression(src).unwrap();
+        let rendered = expression_to_formula(&parsed, "Sales");
+        let reparsed = parse_measure_expression(&rendered).unwrap();
+        assert!(matches!(reparsed, Expression::Traverse { .. }));
+    }
+}

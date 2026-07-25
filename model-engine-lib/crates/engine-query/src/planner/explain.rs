@@ -1,0 +1,597 @@
+//! Instrumented query planning with execution plan metadata.
+//!
+//! Provides [`PushdownPlanner::plan_explained`], which wraps the standard
+//! planning logic and produces a [`PlanNode`] describing the pushdown
+//! decision and its reasoning.
+
+use std::time::Instant;
+
+use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
+use engine_core::model::DataModel;
+
+use engine_core::compute::expression::FilterPredicate;
+
+use crate::error::QueryResult;
+use crate::planner::pushdown::QueryPlan;
+use crate::planner::PushdownPlanner;
+use crate::registry::SourceRegistry;
+use crate::request::QueryRequest;
+
+impl PushdownPlanner {
+    /// Plan a query and produce an execution plan node describing the decision.
+    ///
+    /// This wraps [`PushdownPlanner::plan`] with timing and metadata collection.
+    /// The returned [`PlanNode`] describes which pushdown strategy was chosen
+    /// and why.
+    ///
+    /// `role_filters` are the active security role's predicates (empty when no
+    /// role is active); see [`PushdownPlanner::plan`].
+    pub fn plan_explained(
+        request: &QueryRequest,
+        model: &DataModel,
+        registry: &SourceRegistry,
+        role_filters: &[FilterPredicate],
+        context_column_cases: &[(
+            crate::request::ColumnRef,
+            engine_core::compute::expression::Expression,
+        )],
+    ) -> QueryResult<(QueryPlan, PlanNode)> {
+        let start = Instant::now();
+        let (plan, projection) = Self::plan_with_cached_diagnostics(
+            request,
+            model,
+            registry,
+            &std::collections::HashSet::new(),
+            role_filters,
+            context_column_cases,
+        )?;
+        let elapsed = start.elapsed();
+
+        // Reconstruct decision reasoning from the plan and request.
+        let mut node = PlanNode::new(PlanOperation::PushdownDecision, "Pushdown Analysis")
+            .with_duration(elapsed);
+
+        // Collect measure info.
+        let measure_names: Vec<String> = request.measures.clone();
+        node.add_property("measures", PlanValue::List(measure_names));
+
+        // Hierarchy group-by: report the resolved expansion (name, depth,
+        // expanded level columns, ragged behavior).
+        if let Some(spec) = crate::planner::pushdown::resolve_hierarchy(request, model)? {
+            node.add_property("hierarchy", PlanValue::Text(spec.name.clone()));
+            node.add_property("hierarchy_depth", PlanValue::Number(spec.depth as f64));
+            node.add_property(
+                "hierarchy_columns",
+                PlanValue::List(
+                    spec.levels
+                        .iter()
+                        .map(|l| format!("{}.{}", spec.table, l.column))
+                        .collect(),
+                ),
+            );
+            node.add_property(
+                "hierarchy_ragged_behavior",
+                PlanValue::Text(format!("{:?}", spec.behavior)),
+            );
+        }
+
+        match &plan {
+            QueryPlan::PushedAggregation {
+                source_table,
+                request: fetch,
+            } => {
+                node.add_property("decision", PlanValue::Text("PushedAggregation".into()));
+                node.add_property(
+                    "reason",
+                    PlanValue::Text(format!(
+                        "Single table with simple aggregates: {source_table}"
+                    )),
+                );
+                node.add_property(
+                    "tables_involved",
+                    PlanValue::List(vec![source_table.clone()]),
+                );
+                node.add_property("all_simple", PlanValue::Bool(true));
+                node.add_property("has_context_ops", PlanValue::Bool(false));
+
+                if let Some(schema) = &fetch.schema {
+                    node.add_property("source_schema", PlanValue::Text(schema.clone()));
+                }
+                node.add_property("source_table", PlanValue::Text(fetch.table.clone()));
+                node.add_property(
+                    "aggregates_count",
+                    PlanValue::Number(fetch.aggregates.len() as f64),
+                );
+                node.add_property(
+                    "filters_pushed",
+                    PlanValue::Number(fetch.filters.len() as f64),
+                );
+
+                if fetch.rollup_totals {
+                    node.add_property("totals", PlanValue::Text("rollup".into()));
+                    node.add_property(
+                        "totals_strategy",
+                        PlanValue::Text("rollup-sql (pushed to source)".into()),
+                    );
+                }
+            }
+            QueryPlan::PushedJoinAggregation {
+                source_table,
+                request,
+                ..
+            } => {
+                node.add_property("decision", PlanValue::Text("PushedJoinAggregation".into()));
+                node.add_property(
+                    "reason",
+                    PlanValue::Text(
+                        "All tables on same source — pushing JOIN + aggregation".into(),
+                    ),
+                );
+                node.add_property("source", PlanValue::Text(source_table.clone()));
+                node.add_property("measures", PlanValue::Number(request.measures.len() as f64));
+                node.add_property("joins", PlanValue::Number(request.joins.len() as f64));
+            }
+            QueryPlan::LocalAggregation {
+                fetches,
+                measures,
+                group_by,
+                lookup_specs,
+                totals,
+                ..
+            } => {
+                node.add_property("decision", PlanValue::Text("LocalAggregation".into()));
+
+                if *totals == crate::request::TotalsMode::Rollup {
+                    node.add_property("totals", PlanValue::Text("rollup".into()));
+                    node.add_property(
+                        "totals_strategy",
+                        PlanValue::Text("rollup-sql (local DataFusion)".into()),
+                    );
+                }
+
+                // Determine the reason for local aggregation.
+                let table_names: Vec<String> =
+                    fetches.iter().map(|(name, _)| name.clone()).collect();
+                let all_simple = measures.iter().all(|m| m.is_simple_aggregate());
+                let any_context_ops = measures.iter().any(|m| m.expression().has_context_ops());
+
+                let reason = if table_names.len() > 1 {
+                    format!("Multiple tables: {}", table_names.join(", "))
+                } else if any_context_ops {
+                    "Measure has context operations (keep/clear/reset/etc.)".into()
+                } else if !all_simple {
+                    "Measure has complex expression (not a simple aggregate)".into()
+                } else {
+                    "Local aggregation required".into()
+                };
+
+                node.add_property("reason", PlanValue::Text(reason));
+                node.add_property("tables_involved", PlanValue::List(table_names));
+                node.add_property("all_simple", PlanValue::Bool(all_simple));
+                node.add_property("has_context_ops", PlanValue::Bool(any_context_ops));
+                node.add_property("fetches_planned", PlanValue::Number(fetches.len() as f64));
+
+                // Report context filters pushed to source fetches.
+                let context_pushed: Vec<String> = fetches
+                    .iter()
+                    .flat_map(|(name, req)| {
+                        req.filters.iter().map(move |f| {
+                            format!("{}.{} {} {}", name, f.column, f.operator.as_sql(), f.value)
+                        })
+                    })
+                    .collect();
+                if !context_pushed.is_empty() {
+                    node.add_property("context_filters_pushed", PlanValue::List(context_pushed));
+                }
+
+                if !group_by.is_empty() {
+                    let group_cols: Vec<String> = group_by
+                        .iter()
+                        .map(|c| format!("{}.{}", c.table, c.column))
+                        .collect();
+                    node.add_property("group_by", PlanValue::List(group_cols));
+                }
+
+                if !lookup_specs.is_empty() {
+                    let lookup_desc: Vec<String> = lookup_specs
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "{}.{} (key: {}.{}, resolution: {})",
+                                s.table, s.column, s.table, s.key_column, s.resolution_sql
+                            )
+                        })
+                        .collect();
+                    node.add_property("lookup_specs", PlanValue::List(lookup_desc));
+                }
+
+                // Report the column projection applied to each source fetch
+                // (an empty column list means a full SELECT * fetch).
+                let projected: Vec<String> = fetches
+                    .iter()
+                    .map(|(name, req)| {
+                        if req.columns.is_empty() {
+                            format!("{name}: all columns")
+                        } else {
+                            format!("{name}: {} column(s)", req.columns.len())
+                        }
+                    })
+                    .collect();
+                node.add_property("projected_columns", PlanValue::List(projected));
+
+                if !projection.fallbacks.is_empty() {
+                    let reasons: Vec<String> = projection
+                        .fallbacks
+                        .iter()
+                        .map(|(table, reason)| format!("{table}: {reason}"))
+                        .collect();
+                    node.add_property("projection_fallbacks", PlanValue::List(reasons));
+                }
+            }
+        }
+
+        Ok((plan, node))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{test_capable_connector, SourceBinding};
+    use crate::request::ColumnRef;
+    use engine_core::compute::aggregate::AggregateOp;
+    use engine_core::compute::expression::{self as expr, ComparisonOp, FilterPredicate};
+    use engine_core::compute::measure::{expression_measure, sum_measure};
+    use engine_core::model::{Column, Relationship, Table};
+    use engine_core::types::DataType;
+
+    fn single_table_model() -> DataModel {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+                Column::new("region", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        DataModel::builder()
+            .add_table(sales)
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap()
+    }
+
+    fn star_schema_model() -> DataModel {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("product_id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        DataModel::builder()
+            .add_table(sales)
+            .add_table(products)
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Products",
+                "Sales",
+                "product_id",
+                "Products",
+                "id",
+            ))
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .build()
+            .unwrap()
+    }
+
+    fn mock_registry(tables: &[&str]) -> SourceRegistry {
+        let mut registry = SourceRegistry::new();
+        // A pushdown-capable connector so the planner's expression-pushdown
+        // gate sees a capable source; plan-shape tests never execute.
+        registry.add_connector(test_capable_connector());
+        for table in tables {
+            registry.bind(
+                *table,
+                0,
+                SourceBinding::new("public", table.to_lowercase()),
+            );
+        }
+        registry
+    }
+
+    #[test]
+    fn explain_pushed_plan_has_correct_properties() {
+        let model = single_table_model();
+        let registry = mock_registry(&["Sales"]);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+
+        assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
+        assert_eq!(node.operation, PlanOperation::PushdownDecision);
+
+        let decision = node
+            .properties
+            .iter()
+            .find(|p| p.key == "decision")
+            .unwrap();
+        assert_eq!(decision.value, PlanValue::Text("PushedAggregation".into()));
+
+        let simple = node
+            .properties
+            .iter()
+            .find(|p| p.key == "all_simple")
+            .unwrap();
+        assert_eq!(simple.value, PlanValue::Bool(true));
+
+        assert!(node.duration.ms >= 0.0);
+    }
+
+    #[test]
+    fn explain_pushed_join_plan_shows_reason() {
+        let model = star_schema_model();
+        let registry = mock_registry(&["Sales", "Products"]);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+
+        assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
+
+        let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
+        match &reason.value {
+            PlanValue::Text(s) => assert!(s.contains("same source")),
+            other => panic!("Expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_local_plan_cross_source_shows_reason() {
+        let model = star_schema_model();
+        // Bind tables to different connectors to force local aggregation.
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("public", "sales"));
+        registry.bind("Products", 1, SourceBinding::new("public", "products"));
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+
+        assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
+
+        let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
+        match &reason.value {
+            PlanValue::Text(s) => assert!(s.contains("Multiple tables")),
+            other => panic!("Expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_reports_totals_mode_and_strategy() {
+        use crate::request::TotalsMode;
+
+        // Pushed single-table rollup.
+        let model = single_table_model();
+        let registry = mock_registry(&["Sales"]);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Sales", "region")],
+            totals: TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+        assert!(matches!(plan, QueryPlan::PushedAggregation { .. }));
+        let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
+        assert_eq!(totals.value, PlanValue::Text("rollup".into()));
+        let strategy = node
+            .properties
+            .iter()
+            .find(|p| p.key == "totals_strategy")
+            .unwrap();
+        assert_eq!(
+            strategy.value,
+            PlanValue::Text("rollup-sql (pushed to source)".into())
+        );
+
+        // Local (cross-source) rollup.
+        let model = star_schema_model();
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("public", "sales"));
+        registry.bind("Products", 1, SourceBinding::new("public", "products"));
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            totals: TotalsMode::Rollup,
+            ..Default::default()
+        };
+
+        let (plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+        assert!(matches!(plan, QueryPlan::LocalAggregation { .. }));
+        let totals = node.properties.iter().find(|p| p.key == "totals").unwrap();
+        assert_eq!(totals.value, PlanValue::Text("rollup".into()));
+        let strategy = node
+            .properties
+            .iter()
+            .find(|p| p.key == "totals_strategy")
+            .unwrap();
+        assert_eq!(
+            strategy.value,
+            PlanValue::Text("rollup-sql (local DataFusion)".into())
+        );
+
+        // No totals: the properties are absent.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            ..Default::default()
+        };
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+        assert!(node.properties.iter().all(|p| p.key != "totals"));
+    }
+
+    #[test]
+    fn explain_reports_hierarchy_expansion() {
+        use engine_core::model::{Hierarchy, HierarchyLevel, RaggedBehavior};
+
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("amount", DataType::Float64),
+                Column::new("country", DataType::String),
+                Column::new("state", DataType::String),
+                Column::new("city", DataType::String),
+            ],
+        )
+        .unwrap();
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_measure(sum_measure("TotalAmount", "Sales", "amount"))
+            .add_hierarchy(
+                Hierarchy::new(
+                    "Geo",
+                    "Sales",
+                    vec![
+                        HierarchyLevel::new("country"),
+                        HierarchyLevel::new("state").with_optional(true),
+                        HierarchyLevel::new("city"),
+                    ],
+                )
+                .with_ragged_behavior(RaggedBehavior::RepeatParent),
+            )
+            .build()
+            .unwrap();
+        let registry = mock_registry(&["Sales"]);
+
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            hierarchy_group_by: Some(crate::request::HierarchyGroupBy::new("Geo", 2)),
+            ..Default::default()
+        };
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+
+        let prop = |key: &str| {
+            node.properties
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("missing property {key}"))
+                .value
+                .clone()
+        };
+        assert_eq!(prop("hierarchy"), PlanValue::Text("Geo".into()));
+        assert_eq!(prop("hierarchy_depth"), PlanValue::Number(2.0));
+        assert_eq!(
+            prop("hierarchy_columns"),
+            PlanValue::List(vec!["Sales.country".into(), "Sales.state".into()])
+        );
+        assert_eq!(
+            prop("hierarchy_ragged_behavior"),
+            PlanValue::Text("RepeatParent".into())
+        );
+
+        // No hierarchy: the properties are absent.
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            ..Default::default()
+        };
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+        assert!(node.properties.iter().all(|p| p.key != "hierarchy"));
+    }
+
+    #[test]
+    fn explain_context_ops_in_reason() {
+        let sales = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+                Column::new("region", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales)
+            .add_measure(expression_measure(
+                "US_Revenue",
+                expr::agg(
+                    AggregateOp::Sum,
+                    expr::keep(
+                        expr::qualified_col("Sales", "amount"),
+                        vec![FilterPredicate::new(
+                            "Sales",
+                            "region",
+                            ComparisonOp::Equal,
+                            "US",
+                        )],
+                    ),
+                ),
+            ))
+            .build()
+            .unwrap();
+
+        let registry = mock_registry(&["Sales"]);
+        let request = QueryRequest {
+            measures: vec!["US_Revenue".into()],
+            group_by: vec![],
+            filters: vec![],
+            lookups: vec![],
+            ..Default::default()
+        };
+
+        let (_plan, node) =
+            PushdownPlanner::plan_explained(&request, &model, &registry, &[], &[]).unwrap();
+
+        let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
+        match &reason.value {
+            PlanValue::Text(s) => assert!(s.contains("context operations")),
+            other => panic!("Expected Text, got {other:?}"),
+        }
+
+        let ctx_ops = node
+            .properties
+            .iter()
+            .find(|p| p.key == "has_context_ops")
+            .unwrap();
+        assert_eq!(ctx_ops.value, PlanValue::Bool(true));
+    }
+}

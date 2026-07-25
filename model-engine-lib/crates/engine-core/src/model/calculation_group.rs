@@ -1,0 +1,744 @@
+//! Calculation groups — reusable measure templates (calculation items).
+//!
+//! A [`CalculationGroup`] is a set of named [`CalculationItem`]s, each a
+//! measure *template* that transforms whichever measure it is applied to. The
+//! template references the applied measure through the
+//! [`SELECTEDMEASURE()`](crate::compute::expression::Expression::SelectedMeasure)
+//! placeholder.
+//!
+//! The classic use is time intelligence: one group `"Time"` with items
+//! `Current = SELECTEDMEASURE()`, `YTD = YTD(SELECTEDMEASURE())`,
+//! `PY = PRIORYEAR(SELECTEDMEASURE())`. Applying it to `[Revenue, Cost]` with
+//! items `[Current, YTD, PY]` produces `Revenue`/`Cost` each as
+//! `Current`/`YTD`/`PY` — `M + N` definitions instead of `M * N` measures.
+//!
+//! Application is a **pure** rewrite: for each requested measure `M` and each
+//! selected item `I`, a synthetic measure is produced whose expression is
+//! `I.expression.substitute_selected_measure(&M.expression)` (see
+//! [`expand_calculation_group`]). The synthetic measures are ordinary measures
+//! and feed the normal multi-measure result machinery.
+
+use serde::{Deserialize, Serialize};
+
+use crate::compute::expression::{child_expressions, Expression, SelectedMeasureInfo};
+use crate::compute::measure::Measure;
+use crate::compute::parser::parse_measure_expression;
+use crate::error::{EngineError, EngineResult};
+use crate::model::schema::DataModel;
+
+/// A single calculation item: a named measure template.
+///
+/// The item's expression is a transform of
+/// [`SELECTEDMEASURE()`](crate::compute::expression::Expression::SelectedMeasure)
+/// — for example `YTD(SELECTEDMEASURE())` or
+/// `DIVIDE(SELECTEDMEASURE() - PRIORYEAR(SELECTEDMEASURE()), PRIORYEAR(SELECTEDMEASURE()))`.
+/// When the group is applied, every `SELECTEDMEASURE()` node is replaced with
+/// the target measure's expression tree.
+///
+/// Like [`Measure`], an item carries its original source text when built from
+/// text: the source is the authoritative, human-readable definition, and the
+/// stored expression AST is a cache of the last successful parse so the item
+/// round-trips and can be re-parsed by the current grammar.
+#[derive(Debug, Clone, Serialize)]
+pub struct CalculationItem {
+    name: String,
+    expression: Expression,
+    /// Original expression source text, when the item was created from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// Format string applied to measures transformed by this item (e.g.
+    /// `"0.0%"`). None = keep the base measure's own format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string: Option<String>,
+    /// Dynamic format string: an expression (source text) evaluated once per
+    /// query per transformed measure — the calc-item analog of
+    /// [`Measure::format_string_expression`](crate::compute::measure::Measure).
+    /// May use `SELECTEDMEASUREFORMATSTRING()` / `SELECTEDMEASURENAME()` /
+    /// `ISSELECTEDMEASURE(...)` (substituted per applied measure) as well as
+    /// `SELECTEDMEASURE()` itself (the measure's value under the outer
+    /// context). When it yields a non-NULL string, it wins over
+    /// [`format_string`](Self::format_string) and the base measure's format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_string_expression: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CalculationItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            name: String,
+            expression: Expression,
+            #[serde(default)]
+            source: Option<String>,
+            #[serde(default)]
+            format_string: Option<String>,
+            #[serde(default)]
+            format_string_expression: Option<String>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        Ok(CalculationItem {
+            name: f.name,
+            expression: f.expression,
+            source: f.source,
+            format_string: f.format_string,
+            format_string_expression: f.format_string_expression,
+        })
+    }
+}
+
+impl CalculationItem {
+    /// Create a calculation item from an already-built expression.
+    ///
+    /// The expression should be a transform of `SELECTEDMEASURE()`; build-time
+    /// validation ([`Expression::validate_calc_item`](crate::compute::expression::Expression::validate_calc_item))
+    /// permits the placeholder but otherwise enforces the same rules as a
+    /// regular measure expression. Items built this way carry no source text.
+    pub fn new(name: impl Into<String>, expression: Expression) -> Self {
+        Self {
+            name: name.into(),
+            expression,
+            source: None,
+            format_string: None,
+            format_string_expression: None,
+        }
+    }
+
+    /// Create a calculation item by parsing its source text.
+    ///
+    /// The text is parsed via
+    /// [`parse_measure_expression`](crate::compute::parser::parse_measure_expression)
+    /// and may use `SELECTEDMEASURE()`. The original text is retained as the
+    /// item's authoritative source (so it round-trips and can be re-parsed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::ParseError`] when the text does not parse.
+    pub fn from_text(name: impl Into<String>, text: impl Into<String>) -> EngineResult<Self> {
+        let text = text.into();
+        let expression = parse_measure_expression(&text)?;
+        Ok(Self {
+            name: name.into(),
+            expression,
+            source: Some(text),
+            format_string: None,
+            format_string_expression: None,
+        })
+    }
+
+    /// Attach (or replace) the original expression source text.
+    pub fn with_source(mut self, text: impl Into<String>) -> Self {
+        self.source = Some(text.into());
+        self
+    }
+
+    /// Set (or clear) the format string applied to measures transformed by
+    /// this item (None = keep the base measure's own format).
+    #[must_use]
+    pub fn with_format_string(mut self, format: Option<String>) -> Self {
+        self.format_string = format;
+        self
+    }
+
+    /// Set (or clear) the dynamic format string expression (source text),
+    /// evaluated once per query per transformed measure. See
+    /// [`format_string_expression`](Self::format_string_expression).
+    #[must_use]
+    pub fn with_format_string_expression(mut self, expression: Option<String>) -> Self {
+        self.format_string_expression = expression;
+        self
+    }
+
+    /// Returns the item name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the item's expression template.
+    pub fn expression(&self) -> &Expression {
+        &self.expression
+    }
+
+    /// Returns the original expression source text, if the item was created
+    /// from text.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Returns the item's format string, if any.
+    pub fn format_string(&self) -> Option<&str> {
+        self.format_string.as_deref()
+    }
+
+    /// Returns the item's dynamic format string expression (source text), if
+    /// any. Evaluated once per query per transformed measure; a non-NULL
+    /// string result wins over [`format_string`](Self::format_string) and the
+    /// base measure's format.
+    pub fn format_string_expression(&self) -> Option<&str> {
+        self.format_string_expression.as_deref()
+    }
+}
+
+/// A named group of [`CalculationItem`]s.
+///
+/// See the [module documentation](self) for the semantics. A group must have
+/// at least one item, and item names must be unique within the group
+/// (enforced by [`DataModelBuilder::build`](crate::model::DataModelBuilder)).
+///
+/// # Selection expressions
+///
+/// Mirroring Analysis Services' calculation-group properties
+/// (`multipleOrEmptySelectionExpression` / `noSelectionExpression`), a group
+/// may carry two optional selection-state templates — each a
+/// `SELECTEDMEASURE()` transform exactly like an item:
+///
+/// - [`multiple_or_empty_selection`](Self::multiple_or_empty_selection):
+///   evaluated when the group's column is filtered to **several items or none**.
+/// - [`no_selection`](Self::no_selection): evaluated when the group's column
+///   is **not filtered at all**.
+///
+/// When a selection expression is absent, the default applies: **no item** —
+/// measures evaluate as their plain selves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalculationGroup {
+    name: String,
+    items: Vec<CalculationItem>,
+    /// Template applied on a multiple-item or empty selection (AS
+    /// `multipleOrEmptySelectionExpression`). None = base measures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    multiple_or_empty_selection: Option<CalculationItem>,
+    /// Template applied when the group's column is not filtered at all (AS
+    /// `noSelectionExpression`). None = base measures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    no_selection: Option<CalculationItem>,
+}
+
+impl CalculationGroup {
+    /// Create a calculation group from a name and its items.
+    pub fn new(name: impl Into<String>, items: Vec<CalculationItem>) -> Self {
+        Self {
+            name: name.into(),
+            items,
+            multiple_or_empty_selection: None,
+            no_selection: None,
+        }
+    }
+
+    /// Append an item to the group (builder-style).
+    #[must_use]
+    pub fn with_item(mut self, item: CalculationItem) -> Self {
+        self.items.push(item);
+        self
+    }
+
+    /// Set (or clear) the multiple-or-empty selection expression
+    /// (builder-style). The item's name is display-only.
+    #[must_use]
+    pub fn with_multiple_or_empty_selection(mut self, expr: Option<CalculationItem>) -> Self {
+        self.multiple_or_empty_selection = expr;
+        self
+    }
+
+    /// Set (or clear) the no-selection expression (builder-style). The item's
+    /// name is display-only.
+    #[must_use]
+    pub fn with_no_selection(mut self, expr: Option<CalculationItem>) -> Self {
+        self.no_selection = expr;
+        self
+    }
+
+    /// Returns the group name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the group's items, in declaration order.
+    pub fn items(&self) -> &[CalculationItem] {
+        &self.items
+    }
+
+    /// Look up an item by name (exact match).
+    pub fn item(&self, name: &str) -> Option<&CalculationItem> {
+        self.items.iter().find(|i| i.name() == name)
+    }
+
+    /// The template applied on a multiple-item or empty selection, if any.
+    pub fn multiple_or_empty_selection(&self) -> Option<&CalculationItem> {
+        self.multiple_or_empty_selection.as_ref()
+    }
+
+    /// The template applied when the group's column is unfiltered, if any.
+    pub fn no_selection(&self) -> Option<&CalculationItem> {
+        self.no_selection.as_ref()
+    }
+}
+
+/// Collect the names of every `MeasureRef` node in `expr` (deduplicated).
+///
+/// Used by model-build validation of calculation items: any concrete measure
+/// a calc item references (distinct from the `SELECTEDMEASURE()` placeholder)
+/// must resolve to a model measure.
+pub(crate) fn measure_ref_names(expr: &Expression) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_measure_ref_names(expr, &mut names);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn collect_measure_ref_names(expr: &Expression, names: &mut Vec<String>) {
+    // Reuse the qualified-column walker shape: recurse via the public
+    // column_references-free path. We only need MeasureRef leaves, so walk a
+    // cloned tree is overkill — instead recurse explicitly over the few node
+    // kinds calc items realistically use, falling back to the generic
+    // sub-expression-free leaves. To stay robust against future variants we
+    // recurse through `substitute_selected_measure`'s structure indirectly:
+    // serialize-free traversal isn't available, so match the common cases.
+    match expr {
+        Expression::MeasureRef(name) => names.push(name.clone()),
+        // ISSELECTEDMEASURE's arguments are measure references by name —
+        // include them so build-time existence validation covers them.
+        Expression::IsSelectedMeasure { measures } => names.extend(measures.iter().cloned()),
+        _ => {
+            for child in child_expressions(expr) {
+                collect_measure_ref_names(child, names);
+            }
+        }
+    }
+}
+
+/// Collect every qualified column reference `(table, column)` in `expr`.
+///
+/// Bare [`Expression::ColumnRef`]s carry no table and are intentionally
+/// skipped here (they are resolved against the applied measure's fact table at
+/// substitution/query time); only [`Expression::QualifiedColumnRef`]s, which
+/// name a concrete table, are returned.
+pub(crate) fn qualified_column_refs(expr: &Expression) -> Vec<(String, String)> {
+    let mut refs = Vec::new();
+    collect_qualified_column_refs(expr, &mut refs);
+    refs
+}
+
+fn collect_qualified_column_refs(expr: &Expression, refs: &mut Vec<(String, String)>) {
+    match expr {
+        Expression::QualifiedColumnRef {
+            table_or_var,
+            column,
+        } => refs.push((table_or_var.clone(), column.clone())),
+        _ => {
+            for child in child_expressions(expr) {
+                collect_qualified_column_refs(child, refs);
+            }
+        }
+    }
+}
+
+/// Format the synthetic result-column / measure name for measure `measure`
+/// transformed by item `item`: `"{measure} [{item}]"`.
+///
+/// This is the documented naming contract for calculation-group results — see
+/// [`expand_calculation_group`] (and `CalculationGroupApplication` in the
+/// engine-query crate, which carries the same ordering/naming contract).
+pub fn synthetic_measure_name(measure: &str, item: &str) -> String {
+    format!("{measure} [{item}]")
+}
+
+/// Expand a calculation-group application into synthetic measures.
+///
+/// Given the `model`, the request's `measures` (the measure names to
+/// transform, in order), the `group` name, and the selected `items` (in
+/// order; an **empty** slice means *all* items in the group), this produces an
+/// ordered list of synthetic [`Measure`]s — one per `(measure, item)` pair,
+/// **measures-outer / items-inner** — plus the matching ordered list of
+/// synthetic names.
+///
+/// For requested measure `M` (in `measures` order) and selected item `I` (in
+/// item order), the synthetic measure's expression is
+/// `I.expression.substitute_selected_measure(&M.expression)` and its name is
+/// [`synthetic_measure_name`]`(M, I)` = `"M [I]"`.
+///
+/// # Errors
+///
+/// - [`EngineError::CalculationGroupNotFound`] when `group` is not in the model.
+/// - [`EngineError::InvalidData`] when a selected item is not in the group,
+///   when a requested measure does not exist, or when a synthetic name would
+///   collide with a measure already in the model.
+pub fn expand_calculation_group(
+    model: &DataModel,
+    measures: &[String],
+    group: &str,
+    items: &[String],
+) -> EngineResult<(Vec<Measure>, Vec<String>)> {
+    let group = model.calculation_group(group)?;
+
+    // Resolve the selected items in the requested order. An empty selection
+    // means all items, in declaration order.
+    let selected: Vec<&CalculationItem> = if items.is_empty() {
+        group.items().iter().collect()
+    } else {
+        let mut resolved = Vec::with_capacity(items.len());
+        for item_name in items {
+            let item = group.item(item_name).ok_or_else(|| {
+                EngineError::InvalidData(format!(
+                    "calculation item '{item_name}' not found in group '{}'",
+                    group.name()
+                ))
+            })?;
+            resolved.push(item);
+        }
+        resolved
+    };
+
+    let mut synthetic = Vec::with_capacity(measures.len() * selected.len());
+    let mut names = Vec::with_capacity(measures.len() * selected.len());
+
+    // Measures-outer, items-inner.
+    for measure_name in measures {
+        let measure = model.measure(measure_name)?;
+        let info = SelectedMeasureInfo {
+            expression: measure.expression(),
+            name: measure_name,
+            format_string: measure.format_string(),
+        };
+        for item in &selected {
+            let expression = item.expression().substitute_selected_measure(&info);
+            let name = synthetic_measure_name(measure_name, item.name());
+            // A synthetic name must not collide with an existing model
+            // measure — that would shadow it ambiguously in the overlay.
+            if model.measure(&name).is_ok() {
+                return Err(EngineError::InvalidData(format!(
+                    "calculation-group synthetic measure name '{name}' collides with \
+                     an existing model measure"
+                )));
+            }
+            let mut synthetic_measure = Measure::new(name.clone(), expression);
+            // The item's format string wins (e.g. a YOY% item formatting any
+            // measure as a percentage); otherwise keep the base measure's.
+            if let Some(fmt) = item.format_string().or(measure.format_string()) {
+                synthetic_measure = synthetic_measure.with_format_string(fmt);
+            }
+            synthetic.push(synthetic_measure);
+            names.push(name);
+        }
+    }
+
+    Ok((synthetic, names))
+}
+
+/// Which selection-state expression of a group to expand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionExpressionKind {
+    /// Several items or none selected (AS `multipleOrEmptySelectionExpression`).
+    MultipleOrEmpty,
+    /// The group's column is not filtered at all (AS `noSelectionExpression`).
+    NoSelection,
+}
+
+/// Expand a group's selection-state expression into synthetic measures — one
+/// per requested measure (no item multiplication), named
+/// [`synthetic_measure_name`]`(M, group)` = `"M [group]"`.
+///
+/// # Errors
+///
+/// - [`EngineError::CalculationGroupNotFound`] when `group` is not in the model.
+/// - [`EngineError::InvalidData`] when the group has no expression for `kind`,
+///   when a requested measure does not exist, or when a synthetic name would
+///   collide with a measure already in the model.
+pub fn expand_calculation_selection(
+    model: &DataModel,
+    measures: &[String],
+    group: &str,
+    kind: SelectionExpressionKind,
+) -> EngineResult<(Vec<Measure>, Vec<String>)> {
+    let group = model.calculation_group(group)?;
+    let template = match kind {
+        SelectionExpressionKind::MultipleOrEmpty => group.multiple_or_empty_selection(),
+        SelectionExpressionKind::NoSelection => group.no_selection(),
+    }
+    .ok_or_else(|| {
+        EngineError::InvalidData(format!(
+            "calculation group '{}' has no {} expression",
+            group.name(),
+            match kind {
+                SelectionExpressionKind::MultipleOrEmpty => "multiple-or-empty selection",
+                SelectionExpressionKind::NoSelection => "no-selection",
+            }
+        ))
+    })?;
+
+    let mut synthetic = Vec::with_capacity(measures.len());
+    let mut names = Vec::with_capacity(measures.len());
+    for measure_name in measures {
+        let measure = model.measure(measure_name)?;
+        let info = SelectedMeasureInfo {
+            expression: measure.expression(),
+            name: measure_name,
+            format_string: measure.format_string(),
+        };
+        let expression = template.expression().substitute_selected_measure(&info);
+        let name = synthetic_measure_name(measure_name, group.name());
+        if model.measure(&name).is_ok() {
+            return Err(EngineError::InvalidData(format!(
+                "calculation-group synthetic measure name '{name}' collides with \
+                 an existing model measure"
+            )));
+        }
+        let mut synthetic_measure = Measure::new(name.clone(), expression);
+        // The template's format string wins; otherwise keep the base measure's.
+        if let Some(fmt) = template.format_string().or(measure.format_string()) {
+            synthetic_measure = synthetic_measure.with_format_string(fmt);
+        }
+        synthetic.push(synthetic_measure);
+        names.push(name);
+    }
+    Ok((synthetic, names))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compute::aggregate::AggregateOp;
+    use crate::compute::expression::{self as expr};
+    use crate::model::column::Column;
+    use crate::model::table::Table;
+    use crate::types::DataType;
+
+    fn sales_model() -> DataModel {
+        let table = Table::new(
+            "Sales",
+            vec![
+                Column::new("amount", DataType::Float64),
+                Column::new("cost", DataType::Float64),
+            ],
+        )
+        .unwrap();
+        DataModel::builder()
+            .add_table(table)
+            .add_measure(Measure::new(
+                "Revenue",
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")),
+            ))
+            .add_measure(Measure::new(
+                "Cost",
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "cost")),
+            ))
+            .add_calculation_group(CalculationGroup::new(
+                "Time",
+                vec![
+                    CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap(),
+                    CalculationItem::from_text("Doubled", "SELECTEDMEASURE() * 2").unwrap(),
+                ],
+            ))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn calc_item_from_text_round_trips_and_reparses() {
+        let item = CalculationItem::from_text("YoY", "SELECTEDMEASURE() * 2").unwrap();
+        assert_eq!(item.name(), "YoY");
+        assert_eq!(item.source(), Some("SELECTEDMEASURE() * 2"));
+
+        let json = serde_json::to_string(&item).unwrap();
+        let restored: CalculationItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name(), "YoY");
+        assert_eq!(restored.source(), Some("SELECTEDMEASURE() * 2"));
+        // The expression survives the round-trip.
+        assert!(matches!(restored.expression(), Expression::BinaryOp { .. }));
+    }
+
+    #[test]
+    fn calc_group_serde_round_trip() {
+        let group = CalculationGroup::new(
+            "Time",
+            vec![CalculationItem::from_text("Current", "SELECTEDMEASURE()").unwrap()],
+        );
+        let json = serde_json::to_string(&group).unwrap();
+        let restored: CalculationGroup = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name(), "Time");
+        assert_eq!(restored.items().len(), 1);
+        assert_eq!(restored.item("Current").unwrap().name(), "Current");
+    }
+
+    #[test]
+    fn expand_produces_measures_outer_items_inner() {
+        let model = sales_model();
+        let (synthetic, names) = expand_calculation_group(
+            &model,
+            &["Revenue".to_string(), "Cost".to_string()],
+            "Time",
+            &["Current".to_string(), "Doubled".to_string()],
+        )
+        .unwrap();
+
+        // 2 measures x 2 items = 4 synthetic measures, measures-outer.
+        assert_eq!(
+            names,
+            vec![
+                "Revenue [Current]",
+                "Revenue [Doubled]",
+                "Cost [Current]",
+                "Cost [Doubled]",
+            ]
+        );
+        assert_eq!(synthetic.len(), 4);
+
+        // Revenue [Current] = SUM(Sales[amount]); Revenue [Doubled] = (... * 2).
+        assert_eq!(
+            synthetic[0].expression().to_sql_string().unwrap(),
+            "SUM(\"amount\")"
+        );
+        assert_eq!(
+            synthetic[1].expression().to_sql_string().unwrap(),
+            "(SUM(\"amount\") * 2)"
+        );
+        assert_eq!(
+            synthetic[2].expression().to_sql_string().unwrap(),
+            "SUM(\"cost\")"
+        );
+        assert_eq!(
+            synthetic[3].expression().to_sql_string().unwrap(),
+            "(SUM(\"cost\") * 2)"
+        );
+    }
+
+    #[test]
+    fn expand_empty_items_means_all() {
+        let model = sales_model();
+        let (_, names) =
+            expand_calculation_group(&model, &["Revenue".to_string()], "Time", &[]).unwrap();
+        assert_eq!(names, vec!["Revenue [Current]", "Revenue [Doubled]"]);
+    }
+
+    #[test]
+    fn expand_folds_isselectedmeasure_per_measure() {
+        // An item that doubles Revenue but passes every other measure through:
+        // IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())
+        let table = Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap();
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(Measure::new(
+                "Revenue",
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")),
+            ))
+            .add_measure(Measure::new(
+                "Orders",
+                expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "amount")),
+            ))
+            .add_calculation_group(CalculationGroup::new(
+                "Adj",
+                vec![CalculationItem::from_text(
+                    "Boost",
+                    "IF(ISSELECTEDMEASURE([Revenue]), SELECTEDMEASURE() * 2, SELECTEDMEASURE())",
+                )
+                .unwrap()],
+            ))
+            .build()
+            .unwrap();
+
+        let (synthetic, _) = expand_calculation_group(
+            &model,
+            &["Revenue".to_string(), "Orders".to_string()],
+            "Adj",
+            &[],
+        )
+        .unwrap();
+
+        // Revenue [Boost]: condition folded TRUE → IF(TRUE, SUM*2, SUM).
+        let revenue_sql = synthetic[0].expression().to_sql_string().unwrap();
+        assert!(
+            revenue_sql.contains("TRUE") && revenue_sql.contains("* 2"),
+            "expected folded TRUE branch, got: {revenue_sql}"
+        );
+        // Orders [Boost]: condition folded FALSE.
+        let orders_sql = synthetic[1].expression().to_sql_string().unwrap();
+        assert!(
+            orders_sql.contains("FALSE"),
+            "expected folded FALSE condition, got: {orders_sql}"
+        );
+        // Nothing unsubstituted survives in either tree.
+        for m in &synthetic {
+            let dbg = format!("{:?}", m.expression());
+            assert!(!dbg.contains("SelectedMeasure"), "unsubstituted: {dbg}");
+        }
+    }
+
+    #[test]
+    fn expand_folds_selectedmeasurename_and_format_string() {
+        let table = Table::new("Sales", vec![Column::new("amount", DataType::Float64)]).unwrap();
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(
+                Measure::new(
+                    "Revenue",
+                    expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")),
+                )
+                .with_format_string("#,0"),
+            )
+            .add_calculation_group(CalculationGroup::new(
+                "Labels",
+                vec![CalculationItem::from_text(
+                    "Tag",
+                    "IF(SELECTEDMEASURENAME() = \"Revenue\", SELECTEDMEASURE(), BLANK())",
+                )
+                .unwrap()],
+            ))
+            .build()
+            .unwrap();
+
+        let (synthetic, _) =
+            expand_calculation_group(&model, &["Revenue".to_string()], "Labels", &[]).unwrap();
+        let sql = synthetic[0].expression().to_sql_string().unwrap();
+        // SELECTEDMEASURENAME() folded to the literal 'Revenue'.
+        assert!(sql.contains("'Revenue'"), "got: {sql}");
+    }
+
+    #[test]
+    fn item_format_string_expression_round_trips_serde() {
+        let item = CalculationItem::from_text("K", "SELECTEDMEASURE()")
+            .unwrap()
+            .with_format_string_expression(Some(
+                "CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")".to_string(),
+            ));
+        let json = serde_json::to_string(&item).unwrap();
+        let restored: CalculationItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.format_string_expression(),
+            Some("CONCATENATE(SELECTEDMEASUREFORMATSTRING(), \" K\")")
+        );
+        // A pre-v23 item JSON (no field) loads with None.
+        let legacy = r#"{"name":"Old","expression":"SelectedMeasure"}"#;
+        let restored: CalculationItem = serde_json::from_str(legacy).unwrap();
+        assert!(restored.format_string_expression().is_none());
+    }
+
+    #[test]
+    fn expand_unknown_group_errors() {
+        let model = sales_model();
+        let err =
+            expand_calculation_group(&model, &["Revenue".to_string()], "Nope", &[]).unwrap_err();
+        assert!(matches!(err, EngineError::CalculationGroupNotFound(_)));
+    }
+
+    #[test]
+    fn expand_unknown_item_errors() {
+        let model = sales_model();
+        let err = expand_calculation_group(
+            &model,
+            &["Revenue".to_string()],
+            "Time",
+            &["Nope".to_string()],
+        )
+        .unwrap_err();
+        assert!(matches!(err, EngineError::InvalidData(_)));
+    }
+
+    #[test]
+    fn expand_unknown_measure_errors() {
+        let model = sales_model();
+        let err = expand_calculation_group(&model, &["Nope".to_string()], "Time", &[]).unwrap_err();
+        assert!(matches!(err, EngineError::MeasureNotFound(_)));
+    }
+}

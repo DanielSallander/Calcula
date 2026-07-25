@@ -1,0 +1,2415 @@
+//! Window measure evaluation (WINDOW / OFFSET / INDEX) via two-stage
+//! materialize-then-window-function execution.
+
+use std::time::Instant;
+
+use arrow::array::{Array, Date32Array, Int64Array, TimestampMicrosecondArray};
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow::record_batch::RecordBatch;
+use datafusion::prelude::SessionContext;
+
+use engine_connectors::FilterCondition;
+use engine_core::compute::aggregate::AggregateOp;
+use engine_core::compute::context::ContextResolver;
+use engine_core::compute::expression::{DateGranularity, Expression};
+use engine_core::compute::measure::{expression_measure, Measure};
+use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
+use engine_core::compute::sql_util::{quote_ident_double, quote_table_ref_double};
+use engine_core::compute::time_intelligence::{
+    lower_time_intelligence, lower_time_intelligence_filtered, lower_to_date_explicit_range,
+    time_intelligence_route, FilterContextPlan, TimeIntelligenceRoute,
+};
+use engine_core::error::EngineError;
+use engine_core::model::{DataModel, DateRole, RaggedBehavior};
+
+use crate::error::{QueryError, QueryResult};
+use crate::planner::HierarchySpec;
+use crate::request::{ColumnRef, GROUPING_ID_COLUMN};
+
+use super::fetch::register_partitioned_table;
+use super::hierarchy::{apply_hide_members_filter, hierarchy_unsupported};
+use super::order_limit::totals_unsupported;
+use super::query_measures::materialize_query_in_pipeline;
+use super::QueryExecutor;
+
+/// Microseconds in one day, for converting a `Timestamp` date key to `Date32`.
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+impl QueryExecutor {
+    /// Evaluate window measures via two-stage execution.
+    ///
+    /// Stage 1: Materialize inner measure grouped by ORDER BY + PARTITION BY
+    ///          columns (+ outer GROUP BY for context propagation).
+    /// Stage 2: Apply SQL window function over the materialized result.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn execute_window_measures(
+        ctx: &SessionContext,
+        window_measures: &[&Measure],
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        date_filters: &[FilterCondition],
+        rollup: bool,
+        hier: Option<&HierarchySpec>,
+        mut plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let resolver = ContextResolver::new(model);
+        // One result per window measure, each shaped [group-by dims..., measure].
+        // They share the same group-by axis, so they are joined on the dim
+        // columns at the end (a single measure is returned as-is).
+        let mut per_measure: Vec<(String, Vec<RecordBatch>)> = Vec::new();
+
+        for measure in window_measures {
+            let name = measure.name();
+            let expr = measure.expression();
+            let fact_table = measure.table();
+
+            // Resolve context operations on the inner expression. The KEEP
+            // filters on the date table refine the as-of date context for the
+            // filter-context path; the axis path ignores them here (they ride
+            // through the normal stage-1 materialization).
+            let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
+
+            // Compound time intelligence: the measure combines window/TI terms
+            // with arithmetic (e.g. YoY = YTD(...) - PRIORYEAR(...), or
+            // DIVIDE(YTD - PY, PY)). Decompose it into its window leaves,
+            // evaluate + join each one (recursively, through this same
+            // two-stage machinery), then apply the surrounding arithmetic over
+            // the joined per-leaf columns. A bare window/TI node skips this and
+            // takes the simple path below.
+            if !is_simple_window_leaf(&stripped_expr) {
+                // A compound TI measure composes with ROLLUP and a ragged hierarchy
+                // when every leaf is a composable filter-context family (the gate
+                // enforces this): each leaf rolls up / applies the level transform,
+                // the leaves are joined carrying `__grouping_id`, HideMembers is
+                // applied, and the arithmetic is evaluated per level.
+                reject_compound_outer_context(name, &eval_ctx)?;
+                // Decompose the ORIGINAL (un-resolved) expression so each leaf
+                // keeps its column qualifiers (so the leaf measure's fact table
+                // is inferred correctly). The outer-context reject above
+                // guarantees there is no outer context to strip here, so the
+                // original and the resolved form are structurally identical.
+                let mut leaves: Vec<(String, Expression)> = Vec::new();
+                let arithmetic = extract_window_leaves(expr, &mut leaves)?;
+                let leaf_measures: Vec<Measure> = leaves
+                    .into_iter()
+                    .map(|(ph, e)| expression_measure(ph, e))
+                    .collect();
+                let leaf_refs: Vec<&Measure> = leaf_measures.iter().collect();
+                // Recurse: each leaf is a simple window node, so this returns a
+                // joined [dims..., __leaf_0, __leaf_1, ...] table.
+                let joined = Box::pin(Self::execute_window_measures(
+                    ctx,
+                    &leaf_refs,
+                    group_by,
+                    model,
+                    date_filters,
+                    rollup,
+                    hier,
+                    plan.as_deref_mut(),
+                ))
+                .await?;
+                let batches =
+                    apply_compound_arithmetic(ctx, joined, &arithmetic, name, group_by).await?;
+                per_measure.push((name.to_string(), batches));
+                continue;
+            }
+
+            // RANK / ROW_NUMBER / DENSE_RANK measure: rank the group-by rows by
+            // an aggregated fact order key (descending), partitioned by group-by
+            // columns. Distinct from the running-window path below (no inner
+            // accumulation).
+            if let Expression::RankWindow {
+                function,
+                order_by,
+                partition_by,
+            } = &stripped_expr
+            {
+                // Ranking a subtotal row against detail rows is meaningless (a
+                // different grain/identity), so ranking measures do not compose
+                // with ROLLUP totals. The upstream gate excludes this; fail closed
+                // here too.
+                if rollup {
+                    return Err(totals_unsupported("ranking measures"));
+                }
+                if hier.is_some() {
+                    return Err(hierarchy_unsupported("ranking measures"));
+                }
+                // A KEEP context around the ranking restricts which fact rows
+                // feed the aggregated order key; context this stage cannot apply
+                // fails closed.
+                Self::reject_unapplyable_axis_window_context(name, &eval_ctx)?;
+                let context_filters = eval_ctx.effective_filters(&[]);
+                let context_filter_refs: Vec<&engine_core::compute::context::ResolvedFilter> =
+                    context_filters.iter().collect();
+                let batches = Self::execute_rank_window(
+                    ctx,
+                    name,
+                    *function,
+                    order_by,
+                    partition_by,
+                    fact_table,
+                    group_by,
+                    model,
+                    &context_filter_refs,
+                    plan.as_deref_mut(),
+                )
+                .await?;
+                per_measure.push((name.to_string(), batches));
+                continue;
+            }
+
+            let group_pairs: Vec<(String, String)> = group_by
+                .iter()
+                .map(|dim| (dim.table.clone(), dim.column.clone()))
+                .collect();
+
+            // Decide the time-intelligence evaluation route. The axis path
+            // (v1) is used when the date table's anchor role columns are on the
+            // query axis; otherwise we fall back to the filter-context path
+            // (v2). Non-time-intelligence window measures route as `None` and
+            // take the existing axis lowering (a no-op pass-through).
+            let route = time_intelligence_route(&stripped_expr, model, &group_pairs)?;
+            if let Some(TimeIntelligenceRoute::FilterContext(plan_info)) = route {
+                let batches = Self::execute_filter_context_time_intelligence(
+                    ctx,
+                    name,
+                    &stripped_expr,
+                    fact_table,
+                    group_by,
+                    model,
+                    &plan_info,
+                    date_filters,
+                    &eval_ctx,
+                    rollup,
+                    hier,
+                    plan.as_deref_mut(),
+                )
+                .await?;
+                per_measure.push((name.to_string(), batches));
+                continue;
+            }
+
+            // ROLLUP / hierarchy compose only with the filter-context route
+            // (handled above); an AXIS-route running window is a genuine SQL window
+            // function whose value at a subtotal / rolled-up level is ill-defined,
+            // so it fails closed. The upstream gate excludes this; fail closed here
+            // too (defense in depth).
+            if rollup {
+                return Err(totals_unsupported(
+                    "axis-mode running / window measures (a date column on the group-by axis)",
+                ));
+            }
+            if hier.is_some() {
+                return Err(hierarchy_unsupported(
+                    "axis-mode running / window measures (a date column on the group-by axis)",
+                ));
+            }
+
+            // Axis path (or non-time-intelligence window measure): lower onto
+            // the Window/Offset machinery relative to the query's group_by axis
+            // and the model's marked date table. Missing prerequisites surface
+            // as typed EngineError::TimeIntelligence — never wrong numbers.
+            let (lowered_expr, time_intelligence) =
+                lower_time_intelligence(&stripped_expr, model, &group_pairs)?;
+
+            // Extract window parameters from the (potentially context-stripped,
+            // time-intelligence-lowered) expression.
+            let (inner, window_info) = extract_window_info(&lowered_expr)?;
+
+            // Build the group-by columns for stage 1: ORDERBY + PARTITIONBY + outer GROUP BY.
+            let mut stage1_group_by: Vec<(String, String)> = Vec::new();
+            for (table, column) in &window_info.order_by {
+                if !stage1_group_by
+                    .iter()
+                    .any(|(t, c)| t.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column))
+                {
+                    stage1_group_by.push((table.clone(), column.clone()));
+                }
+            }
+            for (table, column) in &window_info.partition_by {
+                if !stage1_group_by
+                    .iter()
+                    .any(|(t, c)| t.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column))
+                {
+                    stage1_group_by.push((table.clone(), column.clone()));
+                }
+            }
+            // Inject outer GROUP BY for context propagation.
+            for dim in group_by {
+                if !stage1_group_by.iter().any(|(t, c)| {
+                    t.eq_ignore_ascii_case(&dim.table) && c.eq_ignore_ascii_case(&dim.column)
+                }) {
+                    stage1_group_by.push((dim.table.clone(), dim.column.clone()));
+                }
+            }
+
+            // Apply the measure's resolved KEEP filter context to the inner
+            // aggregate's stage-1 materialization. Without this, a window
+            // measure wrapped in a KEEP — e.g. `KEEP(YTD(SUM(amount)),
+            // region='east')` — would silently drop the filter and accumulate
+            // the running total over ALL rows (a wrong number). Simple KEEP
+            // filters become the stage-1 WHERE, restricting the rows that feed
+            // each per-period aggregate; context this path cannot faithfully
+            // apply (boolean conditions, IN filters, CLEAR/RESET, relationship
+            // overrides, table-variable traversals) fails closed.
+            Self::reject_unapplyable_axis_window_context(name, &eval_ctx)?;
+            let context_filters = eval_ctx.effective_filters(&[]);
+            let context_filter_refs: Vec<&engine_core::compute::context::ResolvedFilter> =
+                context_filters.iter().collect();
+
+            // Stage 1: Materialize inner measure grouped by stage1_group_by.
+            let base_table_name = format!("__window_{}", name.to_lowercase());
+            let agg_pair = vec![(inner.clone(), "__val".to_string())];
+            let s1_start = Instant::now();
+            let batch = materialize_query_in_pipeline(
+                ctx,
+                &agg_pair,
+                &stage1_group_by,
+                &fact_table.to_lowercase(),
+                &context_filter_refs,
+                model,
+                false,
+                None,
+            )
+            .await?;
+            let s1_elapsed = s1_start.elapsed();
+            let s1_rows = batch.num_rows();
+            ctx.register_batch(&base_table_name, batch)?;
+
+            // Fail closed on a gapped axis for a positional period shift
+            // (PRIORYEAR/PRIORPERIOD → LAG/LEAD). The shift is positional over
+            // the periods *present* in the materialized result, so if a period
+            // has no fact rows (and is therefore absent from the axis), the LAG
+            // would silently read the nearest earlier present period instead of
+            // the true prior period — a wrong number with no error. Detect the
+            // gap and return a typed error instead. Running ToDate (YTD/QTD/MTD)
+            // is unaffected: a missing period simply contributes nothing to the
+            // accumulation, which is correct.
+            if let Expression::PeriodShift { granularity, .. } = &stripped_expr {
+                let partition_cols = window_partition_cols(&window_info, group_by);
+                check_period_shift_axis_contiguous(
+                    ctx,
+                    &base_table_name,
+                    &window_info.order_by,
+                    &partition_cols,
+                    *granularity,
+                    name,
+                )
+                .await?;
+            }
+
+            // Stage 2: Build and execute window function SQL.
+            let mut select_parts: Vec<String> = Vec::new();
+
+            // Include outer GROUP BY columns in SELECT. Reference them with the
+            // ORIGINAL case stage 1 emitted (`dim."Col"` → field `Col`);
+            // lowercasing here would not resolve a mixed-case column.
+            for dim in group_by {
+                select_parts.push(quote_ident_double(&dim.column));
+            }
+
+            // Build the window function expression.
+            let window_sql = build_window_sql(&window_info, &stage1_group_by, group_by, name)?;
+            select_parts.push(window_sql);
+
+            let sql = format!("SELECT {} FROM {base_table_name}", select_parts.join(", "));
+
+            let s2_start = Instant::now();
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            let s2_elapsed = s2_start.elapsed();
+            let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            per_measure.push((name.to_string(), batches));
+
+            // Record plan nodes for this window measure.
+            if let Some(ref mut plan_node) = plan {
+                let mut window_node =
+                    PlanNode::new(PlanOperation::MeasureEvaluation, format!("Window: {name}"));
+                window_node.duration = (s1_elapsed + s2_elapsed).into();
+
+                // Report how time-intelligence sugar was lowered.
+                if let Some(description) = time_intelligence {
+                    window_node.add_property("time_intelligence", PlanValue::Text(description));
+                }
+
+                window_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Materialize Inner (Stage 1)",
+                    )
+                    .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                    .with_duration(s1_elapsed),
+                );
+                window_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Window Function (Stage 2)",
+                    )
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                    .with_duration(s2_elapsed),
+                );
+                plan_node.add_child(window_node);
+            }
+        }
+
+        // Combine the per-measure results into one table. A single measure is
+        // returned as-is; multiple measures (which share the group-by axis) are
+        // FULL OUTER JOINed on their dimension columns so the result is one
+        // [dims..., m1, m2, ...] table rather than disjoint per-measure blocks.
+        let combined = join_window_results(ctx, per_measure).await?;
+
+        // HideMembers: drop result rows whose value at an included hierarchy level
+        // is blank (NULL / normalized stopper), exempting ROLLUP subtotal rows for
+        // their rolled-up levels (via `__grouping_id`). Applied to the window
+        // result here so it matches the ordinary side (the combine recursion runs
+        // the same filter), keeping the FULL OUTER JOIN aligned.
+        match hier.filter(|h| h.behavior == RaggedBehavior::HideMembers) {
+            Some(spec) => apply_hide_members_filter(combined, spec, group_by, rollup),
+            None => Ok(combined),
+        }
+    }
+
+    /// Evaluate a `RANK` / `ROW_NUMBER` / `DENSE_RANK` measure over the query's
+    /// group-by rows.
+    ///
+    /// Two stages, like the running-window path, but the order key is an
+    /// **aggregate** rather than a per-period value:
+    /// - Stage 1: materialize one row per group-by combination, aggregating each
+    ///   `ORDERBY` column as `SUM(fact[col])` (the measure being ranked by).
+    /// - Stage 2: `<fn>() OVER (PARTITION BY <partition group-by cols> ORDER BY
+    ///   <order keys> DESC)` — **descending**, so the largest value ranks `1`
+    ///   (the DAX `RANKX` convention used by the function docs).
+    ///
+    /// v1 constraints (fail closed otherwise): a non-empty `group_by`; every
+    /// `ORDERBY` column on the measure's fact table (aggregated with `SUM`); and
+    /// every `PARTITIONBY` column among the query's `group_by` columns. The
+    /// result is shaped `[group-by dims…, <measure>]`, so it combines with other
+    /// window/ordinary measures through the same axis join.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_rank_window(
+        ctx: &SessionContext,
+        name: &str,
+        function: engine_core::compute::expression::RankFunction,
+        order_by: &[(String, String)],
+        partition_by: &[(String, String)],
+        fact_table: &str,
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        context_filters: &[&engine_core::compute::context::ResolvedFilter],
+        plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        use engine_core::compute::aggregate::AggregateOp;
+        use engine_core::compute::expression::{agg, qualified_col, RankFunction};
+
+        if group_by.is_empty() {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' (RANK / ROW_NUMBER / DENSE_RANK) needs a group_by \
+                 axis to rank over"
+            )));
+        }
+        if order_by.is_empty() {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' requires ORDERBY(...)"
+            )));
+        }
+        // The fact table is inferred from the measure's ORDER BY column (it has
+        // no other anchor). That inference is only meaningful when the order key
+        // is a genuine measure column — i.e. `fact_table` is actually the fact of
+        // this query: it owns a group-by column, or it is the *many* side of a
+        // relationship to a group-by dimension. Otherwise an ORDER BY on a
+        // **dimension** attribute (e.g. `ORDERBY(dim_date[year])`) would be
+        // mis-taken as the fact and `SUM(dimension_attribute)` would be a
+        // nonsensical (silently-wrong) order key. Reject that — rank by a fact
+        // measure column, or order the result by a dimension at the request
+        // level (`QueryRequest.order_by`).
+        if !rank_fact_is_genuine(model, fact_table, group_by) {
+            return Err(QueryError::InvalidQuery(format!(
+                "the ranking measure '{name}' must ORDER BY a measure column of the query's fact \
+                 table, but '{fact_table}' is a dimension here; rank by a fact column (the measure \
+                 you are ranking by), or order the result by a dimension with the request-level \
+                 `order_by`"
+            )));
+        }
+        // v1: every ORDER BY column is a measure column on that fact table,
+        // aggregated with SUM. (Ranking by a dimension value alphabetically is
+        // not yet supported — order such a query at the request level instead.)
+        for (t, c) in order_by {
+            if !t.eq_ignore_ascii_case(fact_table) {
+                return Err(QueryError::InvalidQuery(format!(
+                    "the ranking measure '{name}' can only ORDER BY columns of its fact table \
+                     '{fact_table}' (got '{t}[{c}]')"
+                )));
+            }
+        }
+        // v1: every PARTITION BY column must be one of the query's group_by
+        // columns (so the ranking grain stays one row per group-by row).
+        for (t, c) in partition_by {
+            if !group_by
+                .iter()
+                .any(|g| g.table.eq_ignore_ascii_case(t) && g.column.eq_ignore_ascii_case(c))
+            {
+                return Err(QueryError::InvalidQuery(format!(
+                    "the ranking measure '{name}' can only PARTITION BY a group_by column \
+                     (got '{t}[{c}]')"
+                )));
+            }
+        }
+
+        // Stage 1: one row per group-by combination, each order key aggregated.
+        let stage1_group_by: Vec<(String, String)> = group_by
+            .iter()
+            .map(|d| (d.table.clone(), d.column.clone()))
+            .collect();
+        let aggregates: Vec<(Expression, String)> = order_by
+            .iter()
+            .enumerate()
+            .map(|(i, (t, c))| {
+                (
+                    agg(AggregateOp::Sum, qualified_col(t, c)),
+                    format!("__rank_order_{i}"),
+                )
+            })
+            .collect();
+        let base = format!("__rankwin_{}", name.to_lowercase());
+        let s1_start = Instant::now();
+        let batch = materialize_query_in_pipeline(
+            ctx,
+            &aggregates,
+            &stage1_group_by,
+            &fact_table.to_lowercase(),
+            context_filters,
+            model,
+            false,
+            None,
+        )
+        .await?;
+        let s1_rows = batch.num_rows();
+        let s1_elapsed = s1_start.elapsed();
+        ctx.register_batch(&base, batch)?;
+
+        // Stage 2: the SQL ranking window function, descending (largest = 1).
+        let fn_sql = match function {
+            RankFunction::RowNumber => "ROW_NUMBER",
+            RankFunction::Rank => "RANK",
+            RankFunction::DenseRank => "DENSE_RANK",
+        };
+        // `DESC NULLS LAST`: a group whose aggregated order key is NULL (e.g. a
+        // member with fact rows but all-NULL/voided amounts) must rank LAST, not
+        // first. DataFusion's `DESC` defaults to NULLS FIRST, which would put a
+        // blank at rank 1 — a silently-wrong number, contrary to RANKX semantics.
+        let order_terms: Vec<String> = (0..order_by.len())
+            .map(|i| {
+                format!(
+                    "{} DESC NULLS LAST",
+                    quote_ident_double(&format!("__rank_order_{i}"))
+                )
+            })
+            .collect();
+        // Reference the stage-1 columns with their ORIGINAL case (stage 1 emits
+        // `dim."Col"`, which DataFusion names `Col`). Lowercasing here would not
+        // resolve a mixed-case column.
+        let partition_terms: Vec<String> = partition_by
+            .iter()
+            .map(|(_, c)| quote_ident_double(c))
+            .collect();
+        let over = if partition_terms.is_empty() {
+            format!("OVER (ORDER BY {})", order_terms.join(", "))
+        } else {
+            format!(
+                "OVER (PARTITION BY {} ORDER BY {})",
+                partition_terms.join(", "),
+                order_terms.join(", ")
+            )
+        };
+        let mut select_parts: Vec<String> = group_by
+            .iter()
+            .map(|d| quote_ident_double(&d.column))
+            .collect();
+        select_parts.push(format!("{fn_sql}() {over} AS {}", quote_ident_double(name)));
+        let sql = format!("SELECT {} FROM {base}", select_parts.join(", "));
+        let s2_start = Instant::now();
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        let s2_elapsed = s2_start.elapsed();
+        let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        if let Some(plan_node) = plan {
+            let mut node = PlanNode::new(
+                PlanOperation::MeasureEvaluation,
+                format!("Rank window: {name}"),
+            );
+            node.duration = (s1_elapsed + s2_elapsed).into();
+            node.add_child(
+                PlanNode::new(
+                    PlanOperation::DataFusionExecution,
+                    "Aggregate Order Key (Stage 1)",
+                )
+                .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                .with_duration(s1_elapsed),
+            );
+            node.add_child(
+                PlanNode::new(
+                    PlanOperation::DataFusionExecution,
+                    "Rank Function (Stage 2)",
+                )
+                .with_property("sql", PlanValue::Text(sql))
+                .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                .with_duration(s2_elapsed),
+            );
+            plan_node.add_child(node);
+        }
+
+        Ok(batches)
+    }
+
+    /// Evaluate a filter-context time-intelligence measure (date columns NOT on
+    /// the query axis): probe the as-of date from the current date context, then
+    /// evaluate the inner aggregate over the concrete date range as a normal
+    /// context-filtered grouped aggregation.
+    ///
+    /// Unlike the axis path, the lowered expression is a plain
+    /// `Keep(Clear(inner, date cols), [DateKey range])` — a context-wrapped
+    /// aggregate, not a window function — so it is materialized through the
+    /// ordinary grouped-aggregation path (grouped by the non-date dimensions).
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_filter_context_time_intelligence(
+        ctx: &SessionContext,
+        name: &str,
+        stripped_expr: &Expression,
+        fact_table: &str,
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        rollup: bool,
+        hier: Option<&HierarchySpec>,
+        plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let probe_start = Instant::now();
+
+        // FAIL CLOSED (Fix A): the filter-context path faithfully applies only
+        // the date filter context (the probe WHERE picks up the request's and
+        // the measure's date-table filters; the lowered range replaces them).
+        // It does NOT re-apply non-date context, so a TI measure wrapped in any
+        // context op (KEEP on another table, an inner KEEP, USING/CLEAR/RESET/
+        // UseRelationship) would silently drop that context and return a wrong
+        // number (e.g. `KEEP(YTD(SUM(amount)), region='east')` would compute
+        // YTD over ALL regions). Refuse rather than mislead. (The axis path —
+        // date on group_by — handles this differently: it applies simple KEEP
+        // filters to the stage-1 aggregate and fails closed on the rest; see
+        // `reject_unapplyable_axis_window_context`.)
+        Self::reject_unsupported_filter_context_ops(&plan_info.function, eval_ctx, model)?;
+
+        // Classify the calendar. The Gregorian path derives window boundaries
+        // (e.g. start-of-year for YTD) algebraically from the DateKey; a fiscal
+        // (non-Gregorian) calendar reads them from the Year/Quarter/Month *role
+        // columns* instead (see `probe_fiscal_period_start`). On a fiscal calendar
+        // only ToDate (YTD/QTD/MTD/WTD), SemiAdditiveBalance (a boundary-day
+        // balance, calendar-agnostic), and DatesBetween (absolute ISO bounds,
+        // calendar-agnostic) are supported; period shifts and DATESINPERIOD need
+        // fiscal-period arithmetic and fail closed.
+        let is_gregorian = Self::calendar_is_gregorian(ctx, plan_info, model).await?;
+        if !is_gregorian
+            && !matches!(
+                stripped_expr,
+                Expression::ToDate { .. }
+                    | Expression::SemiAdditiveBalance { .. }
+                    | Expression::DatesBetween { .. }
+            )
+        {
+            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: "on a non-Gregorian (fiscal) date table, filter-context time intelligence \
+                         supports only YTD/QTD/MTD/WTD, CLOSINGBALANCE/OPENINGBALANCE, and \
+                         DATESBETWEEN; period shifts (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) and \
+                         DATESINPERIOD over a fiscal calendar are not yet supported — put a date \
+                         column on the group-by axis (the axis path honours the role columns)"
+                    .to_string(),
+            }));
+        }
+
+        // The as-of date = MAX(date key) under the current date context (the
+        // request's date-table filters plus the measure's KEEP filters on the
+        // date table). PeriodShift additionally needs the MIN to shift the whole
+        // window. The registered date table is already pre-filtered by the
+        // request filters; re-applying them in the probe WHERE is idempotent.
+        let where_sql = Self::date_context_where_sql(plan_info, date_filters, eval_ctx, model);
+        let want_min = plan_info.needs_min_context_date;
+        let probe = Self::probe_as_of_date(ctx, plan_info, &where_sql, want_min).await?;
+        let probe_elapsed = probe_start.elapsed();
+
+        // No date rows in context (empty table or null max) → blank result.
+        let Some((as_of_days, min_days)) = probe else {
+            return Ok(Vec::new());
+        };
+
+        // FIRSTNONBLANK / LASTNONBLANK: the boundary is the first/last context
+        // date WITH FACT DATA, not the first/last calendar date — re-probe it
+        // from the fact (joined to the date table under the date context,
+        // restricted to rows where the inner aggregate's operand is non-NULL)
+        // and feed the fact-backed days into the standard boundary lowering.
+        // No qualifying fact row in context → blank result.
+        let (as_of_days, min_days) = if let Expression::SemiAdditiveBalance {
+            expr: inner,
+            non_blank: true,
+            ..
+        } = stripped_expr
+        {
+            let qualified_where =
+                Self::date_context_where_sql_qualified(plan_info, date_filters, eval_ctx, model);
+            match Self::probe_non_blank_boundary(
+                ctx,
+                plan_info,
+                model,
+                fact_table,
+                inner,
+                &qualified_where,
+            )
+            .await?
+            {
+                Some(pair) => pair,
+                None => return Ok(Vec::new()),
+            }
+        } else {
+            (as_of_days, min_days)
+        };
+
+        // A filter-context PERIOD SHIFT (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD)
+        // moves the WHOLE current window back by calendar periods and installs a
+        // contiguous shifted DateKey range. When the current context has an
+        // internal hole (e.g. a slicer selects Jan and Mar but not Feb), that
+        // range would span the hole and silently over-count — so a gapped
+        // context routes to the VALUE-BASED lowering instead: every distinct
+        // context date is shifted individually (DAX DATEADD semantics, with the
+        // end-of-month snap) and the lowered filter keeps exactly the shifted
+        // set. A contiguous context keeps the cheaper algebraic range (byte-
+        // identical to the pre-value-based behavior). ToDate/DATESINPERIOD
+        // build their range purely from the as-of date (a hole contributes
+        // nothing) and boundary balances are a single day, so only
+        // `PeriodShift` routes. (Fiscal PeriodShift was already rejected.)
+        let mut value_shifted_days: Option<Vec<i32>> = None;
+        if let Expression::PeriodShift {
+            offset,
+            granularity,
+            ..
+        } = stripped_expr
+        {
+            let contiguous =
+                Self::filter_context_window_is_contiguous(ctx, plan_info, &where_sql).await?;
+            if !contiguous {
+                let keys = Self::probe_distinct_context_dates(
+                    ctx,
+                    plan_info,
+                    &where_sql,
+                    &plan_info.function,
+                )
+                .await?;
+                let mut shifted: Vec<i32> = Vec::with_capacity(keys.len());
+                for days in &keys {
+                    let s = engine_core::compute::time_intelligence::shift_date32_value(
+                        *days,
+                        *offset,
+                        *granularity,
+                    )
+                    .ok_or_else(|| {
+                        QueryError::Engine(EngineError::TimeIntelligence {
+                            function: plan_info.function.clone(),
+                            reason: format!(
+                                "shifting a context date by {offset} {granularity}(s) \
+                                 overflowed the calendar"
+                            ),
+                        })
+                    })?;
+                    shifted.push(s);
+                }
+                shifted.sort_unstable();
+                shifted.dedup();
+                value_shifted_days = Some(shifted);
+            }
+        }
+
+        // Lower to Keep(Clear(inner, date cols), [DateKey >= start, < end]).
+        // Gregorian: algebraic boundaries (or the value-based date set for a
+        // gapped shift context). Fiscal: a ToDate's period start is probed from
+        // the role columns; a SemiAdditiveBalance is boundary-day only (the
+        // standard lowering uses as-of/min days, not period math, so it is
+        // calendar-agnostic).
+        let (lowered_expr, description) = if let Some(shifted) = &value_shifted_days {
+            let Expression::PeriodShift {
+                expr: inner,
+                offset,
+                granularity,
+            } = stripped_expr
+            else {
+                unreachable!("value_shifted_days is only computed for PeriodShift");
+            };
+            let desc = format!(
+                "{} (filter context, value-based over a non-contiguous context) — {} distinct \
+                 date(s) shifted by {} {}(s) on {}.{}",
+                plan_info.function,
+                shifted.len(),
+                offset,
+                granularity,
+                plan_info.date_table,
+                plan_info.date_key_column
+            );
+            engine_core::compute::time_intelligence::lower_period_shift_value_based(
+                inner,
+                model,
+                &plan_info.date_table,
+                &plan_info.date_key_column,
+                shifted,
+                desc,
+            )
+            .map_err(QueryError::Engine)?
+        } else if is_gregorian {
+            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?
+        } else if let Expression::ToDate {
+            expr: inner,
+            granularity,
+        } = stripped_expr
+        {
+            let Some(start_days) =
+                Self::probe_fiscal_period_start(ctx, plan_info, model, *granularity, &where_sql)
+                    .await?
+            else {
+                return Ok(Vec::new());
+            };
+            let desc = format!(
+                "{} (fiscal filter context; period start read from the role columns) on {}.{}",
+                plan_info.function, plan_info.date_table, plan_info.date_key_column
+            );
+            lower_to_date_explicit_range(
+                inner,
+                model,
+                &plan_info.date_table,
+                &plan_info.date_key_column,
+                start_days,
+                as_of_days,
+                desc,
+            )?
+        } else {
+            lower_time_intelligence_filtered(stripped_expr, model, as_of_days, min_days)?
+        };
+
+        // Evaluate the context-wrapped aggregate grouped by the non-date
+        // dimensions (the date columns are not on the axis here). The KEEP
+        // range filter becomes a CASE WHEN context filter joined to the fact.
+        let outer_group_by: Vec<(String, String)> = group_by
+            .iter()
+            .map(|dim| (dim.table.clone(), dim.column.clone()))
+            .collect();
+        let agg_pair = vec![(lowered_expr, name.to_string())];
+
+        let exec_start = Instant::now();
+        let batch = materialize_query_in_pipeline(
+            ctx,
+            &agg_pair,
+            &outer_group_by,
+            &fact_table.to_lowercase(),
+            &[],
+            model,
+            rollup,
+            hier,
+        )
+        .await?;
+        let exec_elapsed = exec_start.elapsed();
+        let result_rows = batch.num_rows();
+
+        if let Some(plan_node) = plan {
+            let mut node = PlanNode::new(
+                PlanOperation::MeasureEvaluation,
+                format!("Filter-context time intelligence: {name}"),
+            );
+            node.duration = (probe_elapsed + exec_elapsed).into();
+            node.add_property("time_intelligence", PlanValue::Text(description));
+            node.add_property("result_rows", PlanValue::Number(result_rows as f64));
+            plan_node.add_child(node);
+        }
+
+        Ok(vec![batch])
+    }
+
+    /// Fail closed (Fix A) when a filter-context TI measure's resolved
+    /// evaluation context carries anything the filter-context path cannot
+    /// faithfully apply to the final aggregation.
+    ///
+    /// The filter-context path only honours the *date* filter context (probe +
+    /// computed range on the date table). Everything else in `eval_ctx` is
+    /// dropped by this path, so allowing it through would silently produce a
+    /// wrong number. We therefore refuse when the context carries:
+    /// - any KEEP filter / boolean condition / IN filter on a table OTHER than
+    ///   the date table (a date-table KEEP filter is honoured by the probe), or
+    /// - any clear / reset (in any of the both/inner/outer variants), CLEAREXCEPT,
+    ///   relationship override (USERELATIONSHIP), table-variable traversal, or
+    ///   IN filter — composition with these is not implemented here.
+    ///
+    /// Returns [`EngineError::TimeIntelligence`] with an actionable message. The
+    /// axis path (date on group_by) is unaffected: it never reaches here.
+    fn reject_unsupported_filter_context_ops(
+        function: &str,
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> QueryResult<()> {
+        let date_table = model.date_table();
+        let is_date_table =
+            |table: &str| date_table.is_some_and(|dt| dt.eq_ignore_ascii_case(table));
+
+        // KEEP filters / conditions / IN filters that target a non-date table.
+        let non_date_filter = eval_ctx.filters.iter().any(|f| !is_date_table(&f.table));
+        let non_date_in_filter = eval_ctx.in_filters.iter().any(|f| !is_date_table(&f.table));
+        // Any boolean condition is rejected: it may reference any table and the
+        // filter-context aggregation does not apply it.
+        let has_conditions = !eval_ctx.conditions.is_empty();
+
+        // Any clear/reset/relationship-override/traversal of any kind.
+        let has_clear_or_reset = eval_ctx.is_reset
+            || eval_ctx.is_reset_inner
+            || eval_ctx.is_reset_outer
+            || !eval_ctx.cleared_columns.is_empty()
+            || !eval_ctx.cleared_tables.is_empty()
+            || !eval_ctx.cleared_inner_columns.is_empty()
+            || !eval_ctx.cleared_inner_tables.is_empty()
+            || !eval_ctx.cleared_outer_columns.is_empty()
+            || !eval_ctx.cleared_outer_tables.is_empty()
+            || !eval_ctx.clear_except.is_empty();
+        let has_overrides = !eval_ctx.relationship_overrides.is_empty();
+        let has_traversals = !eval_ctx.traversals.is_empty();
+
+        if non_date_filter
+            || non_date_in_filter
+            || has_conditions
+            || has_clear_or_reset
+            || has_overrides
+            || has_traversals
+        {
+            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                function: function.to_string(),
+                reason: "filter-context time intelligence (date not on the query axis) does not \
+                         compose with KEEP/USING/CLEAR/RESET context operations; scope the date \
+                         via query filters, or put a date column on the group-by axis"
+                    .to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Fail closed when an axis-path window measure's resolved context carries
+    /// anything the stage-1 materialization cannot faithfully apply.
+    ///
+    /// The axis (window) path applies the measure's KEEP **filters** to the
+    /// stage-1 aggregate as a WHERE clause (via `materialize_query_in_pipeline`'s
+    /// `source_filters`), which correctly restricts the rows that feed each
+    /// per-period value. It cannot, however, represent boolean conditions, IN
+    /// filters, CLEAR/RESET, relationship overrides (USERELATIONSHIP), or
+    /// table-variable traversals here — applying only the simple filters and
+    /// dropping these would silently return a wrong number. Refuse instead.
+    /// (Simple filters — `column op value`, on the fact or any single-hop
+    /// dimension — are honoured and do not reach this guard.)
+    fn reject_unapplyable_axis_window_context(
+        measure_name: &str,
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+    ) -> QueryResult<()> {
+        let has_conditions = !eval_ctx.conditions.is_empty();
+        let has_in_filters = !eval_ctx.in_filters.is_empty();
+        let has_clear_or_reset = eval_ctx.is_reset
+            || eval_ctx.is_reset_inner
+            || eval_ctx.is_reset_outer
+            || !eval_ctx.cleared_columns.is_empty()
+            || !eval_ctx.cleared_tables.is_empty()
+            || !eval_ctx.cleared_inner_columns.is_empty()
+            || !eval_ctx.cleared_inner_tables.is_empty()
+            || !eval_ctx.cleared_outer_columns.is_empty()
+            || !eval_ctx.cleared_outer_tables.is_empty()
+            || !eval_ctx.clear_except.is_empty();
+        let has_overrides = !eval_ctx.relationship_overrides.is_empty();
+        let has_traversals = !eval_ctx.traversals.is_empty();
+
+        if has_conditions || has_in_filters || has_clear_or_reset || has_overrides || has_traversals
+        {
+            return Err(QueryError::InvalidQuery(format!(
+                "window / running / time-intelligence measure '{measure_name}' is wrapped in \
+                 context operations that the window path cannot apply (boolean conditions, IN \
+                 filters, CLEAR/RESET, USERELATIONSHIP, or table-variable traversal). Only \
+                 simple KEEP filters (column op value) compose with a window measure; remove \
+                 the others, or compute the measure without the window"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether the marked date table is a standard **Gregorian** calendar — its
+    /// `Year`/`Quarter`/`Month` role columns equal the calendar parts extracted
+    /// from the `DateKey`.
+    ///
+    /// The Gregorian filter-context path derives window bounds (start-of-year for
+    /// YTD, the period shift, …) algebraically from the `DateKey` via
+    /// `start_of_period`. For a **fiscal** calendar the role columns hold fiscal
+    /// period numbers, so the period boundaries must instead be read from those
+    /// columns (see `probe_fiscal_period_start`). Returns `false` when any present
+    /// role column diverges from the Gregorian part of the key; `true` when they
+    /// all agree (or there are no role columns to compare).
+    async fn calendar_is_gregorian(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+    ) -> QueryResult<bool> {
+        let Ok(date_table) = model.table(&plan_info.date_table) else {
+            return Ok(true);
+        };
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+
+        // For each present numeric period role column, the calendar part it
+        // must equal (NULL DateKey rows compare to NULL and are ignored).
+        let mut divergence: Vec<String> = Vec::new();
+        for column in date_table.columns() {
+            let part = match column.date_role() {
+                Some(DateRole::Year) => "year",
+                Some(DateRole::Quarter) => "quarter",
+                Some(DateRole::Month) => "month",
+                _ => continue,
+            };
+            let col = quote_ident_double(&column.name().to_lowercase());
+            divergence.push(format!(
+                "CAST({col} AS BIGINT) <> CAST(date_part('{part}', {dk}) AS BIGINT)"
+            ));
+        }
+        if divergence.is_empty() {
+            return Ok(true);
+        }
+
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
+        let sql = format!(
+            "SELECT COUNT(*) FROM {table} WHERE {}",
+            divergence.join(" OR ")
+        );
+        let df = ctx.sql(&sql).await.map_err(|e| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: format!(
+                    "the date table '{}' Year/Quarter/Month role columns could not be compared to \
+                     the date key to classify the calendar: {e}",
+                    plan_info.date_table
+                ),
+            }
+            .into()
+        })?;
+        let batches = df.collect().await?;
+        let diverging = batches
+            .first()
+            .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+            .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+            .unwrap_or(0);
+        Ok(diverging == 0)
+    }
+
+    /// Probe the first `DateKey` of the **fiscal** period (year / quarter / month)
+    /// containing the as-of date, read from the date table's role columns.
+    ///
+    /// For a non-Gregorian calendar the role columns define the periods, so the
+    /// fiscal-`ToDate` start is `MIN(DateKey)` over the rows whose period role
+    /// column(s) match the as-of date's. The as-of date is `MAX(DateKey)` under
+    /// the current date context (`where_sql`); the start is taken over the **full**
+    /// (un-pre-filtered) calendar so it can reach before the context. Returns
+    /// `None` when no matching rows exist (blank result).
+    async fn probe_fiscal_period_start(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+        granularity: DateGranularity,
+        where_sql: &str,
+    ) -> QueryResult<Option<i32>> {
+        let date_table = model
+            .table(&plan_info.date_table)
+            .map_err(QueryError::Engine)?;
+        let role_col = |role: DateRole| -> Option<String> {
+            date_table
+                .columns()
+                .iter()
+                .find(|c| c.date_role() == Some(role))
+                .map(|c| c.name().to_lowercase())
+        };
+        // The role column(s) that define one period at this granularity.
+        let period_cols: Option<Vec<String>> = match granularity {
+            DateGranularity::Year => vec![role_col(DateRole::Year)],
+            DateGranularity::Quarter => vec![role_col(DateRole::Year), role_col(DateRole::Quarter)],
+            DateGranularity::Month => vec![role_col(DateRole::Year), role_col(DateRole::Month)],
+            DateGranularity::Week => vec![role_col(DateRole::Year), role_col(DateRole::Week)],
+            // A day-to-date is the day itself; the parser never produces it
+            // and no fiscal probe is meaningful.
+            DateGranularity::Day => {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: plan_info.function.clone(),
+                    reason: "Day granularity has no to-date form".to_string(),
+                }));
+            }
+        }
+        .into_iter()
+        .collect();
+        let period_cols = period_cols.ok_or_else(|| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason: format!(
+                    "fiscal {granularity:?}-to-date needs the date table '{}' to carry the role \
+                     column(s) that define the period (Year, and Quarter/Month/Week); assign \
+                     them with Column::with_date_role",
+                    plan_info.date_table
+                ),
+            }
+            .into()
+        })?;
+
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+        // The as-of date = MAX(DateKey) under the context (a scalar subquery, so
+        // no date literal is rendered).
+        let as_of_sub = format!("(SELECT MAX({dk}) FROM {table}{ctx_where})");
+        // MIN(DateKey) over the FULL calendar whose period role column(s) equal
+        // the as-of date's — i.e. the first day of its fiscal period.
+        let conds: Vec<String> = period_cols
+            .iter()
+            .map(|c| {
+                let cq = quote_ident_double(c);
+                format!("{cq} = (SELECT {cq} FROM {table} WHERE {dk} = {as_of_sub})")
+            })
+            .collect();
+        let sql = format!(
+            "SELECT MIN({dk}) AS __start FROM {table} WHERE {}",
+            conds.join(" AND ")
+        );
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        match batches.first() {
+            Some(b) if b.num_rows() > 0 => read_date_as_days(b, "__start"),
+            _ => Ok(None),
+        }
+    }
+
+    /// Is the date context of a filter-context PERIOD SHIFT contiguous — i.e.
+    /// does the context filter keep every date-table row inside its own
+    /// `[min, max]` span?
+    ///
+    /// A contiguous context takes the cheap algebraic whole-window shift (the
+    /// shifted half-open `DateKey` range faithfully represents "the same
+    /// window, shifted"). A context with an internal hole (e.g. a slicer that
+    /// selects Jan and Mar but not Feb) routes to the VALUE-BASED lowering
+    /// instead — every distinct context date shifted individually — because
+    /// the algebraic range would span the hole and silently over-count.
+    ///
+    /// The comparison is against the *date table's* rows in the span (not raw
+    /// calendar days), so a coarse calendar — e.g. one row per month — is
+    /// contiguous as long as no in-span row is filtered out. The reference
+    /// therefore matches the granularity the calendar is modelled at.
+    ///
+    /// Residual assumption (documented, not checked): the calendar must be
+    /// uniform across the shifted span — e.g. a monthly calendar must carry
+    /// the same months in the current and the prior period. A calendar gapped
+    /// *differently* across periods is malformed for time intelligence (the
+    /// same assumption the module docs already state).
+    async fn filter_context_window_is_contiguous(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+    ) -> QueryResult<bool> {
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+
+        let probe_error = |reason: String| -> QueryError {
+            EngineError::TimeIntelligence {
+                function: plan_info.function.clone(),
+                reason,
+            }
+            .into()
+        };
+        let read_count = |batches: &[RecordBatch]| -> i64 {
+            batches
+                .first()
+                .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+                .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+                .unwrap_or(0)
+        };
+
+        // Distinct date rows present in the current context.
+        let ctx_sql = format!("SELECT COUNT(DISTINCT {dk}) FROM {table}{ctx_where}");
+        let ctx_days = read_count(
+            &ctx.sql(&ctx_sql)
+                .await
+                .map_err(|e| probe_error(format!("could not count the date context rows: {e}")))?
+                .collect()
+                .await?,
+        );
+
+        // Distinct date rows the table has across the context's [min, max] span,
+        // ignoring the context filter. A scalar MIN/MAX subquery avoids rendering
+        // date literals (no chrono dependency here) and stays exact.
+        let span_sql = format!(
+            "SELECT COUNT(DISTINCT {dk}) FROM {table} \
+             WHERE {dk} >= (SELECT MIN({dk}) FROM {table}{ctx_where}) \
+               AND {dk} <= (SELECT MAX({dk}) FROM {table}{ctx_where})"
+        );
+        let span_days = read_count(
+            &ctx.sql(&span_sql)
+                .await
+                .map_err(|e| probe_error(format!("could not count the date span rows: {e}")))?
+                .collect()
+                .await?,
+        );
+
+        Ok(span_days <= ctx_days)
+    }
+
+    /// Distinct `DateKey` values in the current date context, ascending, as
+    /// `Date32` day counts — the input to the value-based period shift.
+    /// Capped so the generated `IN` set stays bounded.
+    async fn probe_distinct_context_dates(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+        function_label: &str,
+    ) -> QueryResult<Vec<i32>> {
+        const MAX_CONTEXT_DATES: usize = 20_000;
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = quote_table_ref_double(&plan_info.date_table.to_lowercase());
+        let ctx_where = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {where_sql}")
+        };
+        let sql = format!("SELECT DISTINCT {dk} AS __d FROM {table}{ctx_where} ORDER BY __d");
+        let batches = ctx.sql(&sql).await?.collect().await?;
+
+        let mut out: Vec<i32> = Vec::new();
+        for batch in &batches {
+            let idx = batch.schema().index_of("__d").map_err(|e| {
+                QueryError::InvalidQuery(format!("date-set probe is missing its column: {e}"))
+            })?;
+            let array = batch.column(idx);
+            match array.data_type() {
+                ArrowDataType::Date32 => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<Date32Array>()
+                        .ok_or_else(|| {
+                            QueryError::InvalidQuery("date-set probe: bad Date32 array".into())
+                        })?;
+                    out.extend(arr.iter().flatten());
+                }
+                ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .ok_or_else(|| {
+                            QueryError::InvalidQuery("date-set probe: bad Timestamp array".into())
+                        })?;
+                    for micros in arr.iter().flatten() {
+                        let days = micros.div_euclid(MICROS_PER_DAY);
+                        out.push(i32::try_from(days).map_err(|_| {
+                            QueryError::InvalidQuery(
+                                "date-set probe: timestamp out of Date32 range".into(),
+                            )
+                        })?);
+                    }
+                }
+                other => {
+                    return Err(QueryError::InvalidQuery(format!(
+                        "date-set probe: unsupported date key type {other:?}"
+                    )));
+                }
+            }
+            if out.len() > MAX_CONTEXT_DATES {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: function_label.to_string(),
+                    reason: format!(
+                        "the non-contiguous date context has more than {MAX_CONTEXT_DATES} \
+                         distinct dates; narrow the date filter, or put a date column on the \
+                         group-by axis"
+                    ),
+                }));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Like [`Self::date_context_where_sql`] but with every column reference
+    /// qualified by the (lowercased) date table name — for probes that JOIN
+    /// the date table to the fact, where an unqualified date column could be
+    /// ambiguous against a fact column of the same name.
+    fn date_context_where_sql_qualified(
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> String {
+        let date_lower = plan_info.date_table.to_lowercase();
+        let mut parts: Vec<String> = Vec::new();
+        for f in date_filters {
+            let val = engine_core::compute::context::format_filter_value(
+                &plan_info.date_table,
+                &f.column,
+                &f.value,
+                model,
+            );
+            parts.push(format!(
+                "{date_lower}.{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+        for f in eval_ctx
+            .filters
+            .iter()
+            .filter(|f| f.table.eq_ignore_ascii_case(&plan_info.date_table))
+        {
+            let val = engine_core::compute::context::format_filter_value(
+                &f.table, &f.column, &f.value, model,
+            );
+            parts.push(format!(
+                "{date_lower}.{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+        parts.join(" AND ")
+    }
+
+    /// The first/last context date **with fact data** — `MIN`/`MAX` of the
+    /// date key over fact rows joined to the date table under the date
+    /// context, restricted to rows where the inner aggregate's operand is
+    /// non-NULL. Powers `FIRSTNONBLANK` / `LASTNONBLANK`.
+    ///
+    /// The boundary is probed **once per query** over the whole context — not
+    /// per group-by cell (documented divergence from DAX, which evaluates the
+    /// non-blank boundary per cell). Returns `(max_days, min_days)` like the
+    /// calendar probe, or `None` when no qualifying fact row exists.
+    async fn probe_non_blank_boundary(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        model: &DataModel,
+        fact_table: &str,
+        inner: &Expression,
+        qualified_where_sql: &str,
+    ) -> QueryResult<Option<(i32, i32)>> {
+        let function = &plan_info.function;
+        // The inner must be a single simple aggregate so "non-blank" has a
+        // concrete operand column to test. COUNTROWS counts any row (no
+        // operand filter).
+        let operand_column: Option<(String, String)> = match inner {
+            Expression::Aggregate { operation, operand } => {
+                if *operation == AggregateOp::CountRows {
+                    None
+                } else {
+                    match operand.as_ref() {
+                        Expression::QualifiedColumnRef {
+                            table_or_var,
+                            column,
+                        } => Some((table_or_var.clone(), column.clone())),
+                        Expression::ColumnRef(column) => {
+                            Some((fact_table.to_string(), column.clone()))
+                        }
+                        _ => {
+                            return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                                function: function.clone(),
+                                reason: "FIRSTNONBLANK/LASTNONBLANK need a simple aggregate \
+                                         over a single column (e.g. SUM(fact[amount])) so the \
+                                         non-blank boundary has a concrete column to probe"
+                                    .to_string(),
+                            }));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(QueryError::Engine(EngineError::TimeIntelligence {
+                    function: function.clone(),
+                    reason: "FIRSTNONBLANK/LASTNONBLANK need a simple aggregate inner \
+                             expression (e.g. SUM(fact[amount]) or COUNTROWS(fact))"
+                        .to_string(),
+                }));
+            }
+        };
+
+        let fact_lower = fact_table.to_lowercase();
+        let date_lower = plan_info.date_table.to_lowercase();
+        let rel = model
+            .find_relationship(fact_table, &plan_info.date_table)
+            .map_err(QueryError::Engine)?;
+        let left_is_from = rel.from_table() == fact_table;
+        let on_clause = rel.build_on_clause(&fact_lower, &date_lower, left_is_from);
+        let dk = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+
+        let mut where_parts: Vec<String> = Vec::new();
+        if !qualified_where_sql.is_empty() {
+            where_parts.push(qualified_where_sql.to_string());
+        }
+        if let Some((tbl, col)) = operand_column {
+            let t = if tbl.eq_ignore_ascii_case(fact_table) {
+                fact_lower.clone()
+            } else {
+                tbl.to_lowercase()
+            };
+            where_parts.push(format!(
+                "{t}.{} IS NOT NULL",
+                quote_ident_double(&col.to_lowercase())
+            ));
+        }
+        let mut sql = format!(
+            "SELECT MAX({date_lower}.{dk}) AS __max, MIN({date_lower}.{dk}) AS __min \
+             FROM {fact_lower} JOIN {date_lower} ON {on_clause}"
+        );
+        if !where_parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_parts.join(" AND "));
+        }
+
+        let batches = ctx.sql(&sql).await?.collect().await?;
+        let combined = match batches.first() {
+            Some(b) if b.num_rows() > 0 => b,
+            _ => return Ok(None),
+        };
+        let max_days = match read_date_as_days(combined, "__max")? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let min_days = read_date_as_days(combined, "__min")?.unwrap_or(max_days);
+        Ok(Some((max_days, min_days)))
+    }
+
+    /// Build the WHERE clause (without the `WHERE` keyword) selecting the
+    /// current date context on the date table: the request's date-table filters
+    /// plus the measure's resolved KEEP filters on the date table. Empty when no
+    /// date filter applies (probe runs over the whole date table).
+    fn date_context_where_sql(
+        plan_info: &FilterContextPlan,
+        date_filters: &[FilterCondition],
+        eval_ctx: &engine_core::compute::context::EvaluationContext,
+        model: &DataModel,
+    ) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Request filters were pushed onto the date table's fetch as
+        // column/op/value (the table is implicitly the date table).
+        for f in date_filters {
+            let val = engine_core::compute::context::format_filter_value(
+                &plan_info.date_table,
+                &f.column,
+                &f.value,
+                model,
+            );
+            parts.push(format!(
+                "{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+
+        // The measure's KEEP filters that target the date table.
+        for f in eval_ctx
+            .filters
+            .iter()
+            .filter(|f| f.table.eq_ignore_ascii_case(&plan_info.date_table))
+        {
+            let val = engine_core::compute::context::format_filter_value(
+                &f.table, &f.column, &f.value, model,
+            );
+            parts.push(format!(
+                "{} {} {val}",
+                quote_ident_double(&f.column.to_lowercase()),
+                f.operator.as_sql()
+            ));
+        }
+
+        parts.join(" AND ")
+    }
+
+    /// Probe `MAX(date_key)` (and `MIN(date_key)` when `want_min`) of the date
+    /// table under `where_sql`, returning the dates as `Date32` day counts since
+    /// the Unix epoch. Returns `Ok(None)` when the max is NULL (no rows / all
+    /// null) so the caller yields a blank result.
+    async fn probe_as_of_date(
+        ctx: &SessionContext,
+        plan_info: &FilterContextPlan,
+        where_sql: &str,
+        want_min: bool,
+    ) -> QueryResult<Option<(i32, i32)>> {
+        let key_col = quote_ident_double(&plan_info.date_key_column.to_lowercase());
+        let table = plan_info.date_table.to_lowercase();
+        let select = if want_min {
+            format!("MAX({key_col}) AS __max, MIN({key_col}) AS __min")
+        } else {
+            format!("MAX({key_col}) AS __max")
+        };
+        let mut sql = format!("SELECT {select} FROM {}", quote_table_ref_double(&table));
+        if !where_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_sql);
+        }
+
+        let df = ctx.sql(&sql).await?;
+        let batches = df.collect().await?;
+        let combined = match batches.first() {
+            Some(b) if b.num_rows() > 0 => b,
+            _ => return Ok(None),
+        };
+
+        let max_days = match read_date_as_days(combined, "__max")? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let min_days = if want_min {
+            // A non-null MAX guarantees at least one row, so MIN is non-null too.
+            read_date_as_days(combined, "__min")?.unwrap_or(max_days)
+        } else {
+            max_days
+        };
+        Ok(Some((max_days, min_days)))
+    }
+}
+
+/// Read a single-row `Date32`/`Timestamp(Microsecond)` aggregate column as a
+/// `Date32` day count since the Unix epoch. `Ok(None)` when the value is null.
+fn read_date_as_days(batch: &RecordBatch, column: &str) -> QueryResult<Option<i32>> {
+    let idx = batch.schema().index_of(column).map_err(|e| {
+        QueryError::InvalidQuery(format!("date probe is missing column '{column}': {e}"))
+    })?;
+    let array = batch.column(idx);
+    if array.is_null(0) {
+        return Ok(None);
+    }
+    match array.data_type() {
+        ArrowDataType::Date32 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| QueryError::InvalidQuery("date probe: bad Date32 array".into()))?;
+            Ok(Some(arr.value(0)))
+        }
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    QueryError::InvalidQuery("date probe: bad Timestamp array".into())
+                })?;
+            // Floor to the day (Date32 = days since epoch). Negative micros
+            // (pre-1970) use floor division so partial days round toward -inf.
+            let micros = arr.value(0);
+            let days = micros.div_euclid(MICROS_PER_DAY);
+            i32::try_from(days).map(Some).map_err(|_| {
+                QueryError::InvalidQuery("date probe: timestamp out of Date32 range".into())
+            })
+        }
+        other => Err(QueryError::InvalidQuery(format!(
+            "date probe: the DateKey column resolved to {other:?}, expected Date32 or \
+             Timestamp(Microsecond); ensure the DateKey column is Date or Timestamp typed"
+        ))),
+    }
+}
+
+/// Whether a window-family measure is a FILTER-CONTEXT time-intelligence node
+/// that composes with `TotalsMode::Rollup` **or** a ragged hierarchy (v1).
+///
+/// Only a bare `ToDate` (YTD/QTD/MTD/WTD), `DatesInPeriod`, `DatesBetween`,
+/// `SemiAdditiveBalance` (CLOSING/OPENINGBALANCE), or `PeriodShift`
+/// (PRIORYEAR/PRIORPERIOD/PARALLELPERIOD) whose route is
+/// [`TimeIntelligenceRoute::FilterContext`]
+/// qualifies: each lowers to an ordinary `Keep(Clear(inner),[DateKey range])`
+/// aggregate, so per-level recomputation under `GROUP BY ROLLUP` is exact — the
+/// subtotal / grand-total is the measure re-evaluated over the rolled-up row set,
+/// never the (wrong) sum of detail values. A filter-context `PeriodShift` shifts
+/// the whole *date* window — a global property, identical at every rollup level —
+/// and its contiguity guard (`check_filter_context_window_contiguous`) already
+/// fails the whole query closed when the filter punches a hole in the context.
+///
+/// NOT composable (subtotal value ill-defined, so they keep the fail-closed
+/// `totals_unsupported` error): compound time intelligence, the AXIS route (a date
+/// column on the group-by axis), `Window`/`Offset`/`Index` frames, and
+/// `RankWindow`. Resolution or routing errors classify as not-composable (fail
+/// closed). The same families compose with a ragged hierarchy's level transforms
+/// for the same reason (an ordinary aggregate can group on the transformed level
+/// expression).
+pub(super) fn is_composable_filter_context_ti(
+    measure: &Measure,
+    model: &DataModel,
+    group_by: &[ColumnRef],
+) -> bool {
+    let resolver = ContextResolver::new(model);
+    let Ok((stripped, _eval_ctx)) = resolver.resolve(measure.expression()) else {
+        return false;
+    };
+    let group_pairs: Vec<(String, String)> = group_by
+        .iter()
+        .map(|d| (d.table.clone(), d.column.clone()))
+        .collect();
+
+    // A bare composable family.
+    if is_composable_ti_leaf(&stripped, model, &group_pairs) {
+        return true;
+    }
+    // A COMPOUND time-intelligence measure (YoY = YTD − PRIORYEAR, DIVIDE, IF,
+    // COALESCE, IFERROR over TI terms) composes iff EVERY window leaf is itself a
+    // composable filter-context family — then each leaf rolls up and the
+    // arithmetic is applied per level. A bare-but-non-composable leaf (axis route,
+    // Window/Offset/Index, Rank) is not compound and was rejected above.
+    if is_simple_window_leaf(&stripped) {
+        return false;
+    }
+    let mut leaves: Vec<(String, Expression)> = Vec::new();
+    if extract_window_leaves(&stripped, &mut leaves).is_err() {
+        return false;
+    }
+    !leaves.is_empty()
+        && leaves
+            .iter()
+            .all(|(_, e)| is_composable_ti_leaf(e, model, &group_pairs))
+}
+
+/// A single time-intelligence node that composes with ROLLUP / a hierarchy: a
+/// bare filter-context `ToDate` / `DatesInPeriod` / `DatesBetween` /
+/// `SemiAdditiveBalance` / `PeriodShift`.
+fn is_composable_ti_leaf(
+    expr: &Expression,
+    model: &DataModel,
+    group_pairs: &[(String, String)],
+) -> bool {
+    if !matches!(
+        expr,
+        Expression::ToDate { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
+            | Expression::SemiAdditiveBalance { .. }
+            | Expression::PeriodShift { .. }
+    ) {
+        return false;
+    }
+    matches!(
+        time_intelligence_route(expr, model, group_pairs),
+        Ok(Some(TimeIntelligenceRoute::FilterContext(_)))
+    )
+}
+
+/// Whether `fact_table` is a genuine fact for a ranking measure's query — it
+/// either owns one of the `group_by` columns (the query groups on the fact) or
+/// is the *many* side of a relationship to a group-by dimension table. A pure
+/// dimension table (the *one* side) is not a genuine fact, so a measure whose
+/// `ORDERBY` resolved its fact to that dimension is rejected upstream.
+fn rank_fact_is_genuine(model: &DataModel, fact_table: &str, group_by: &[ColumnRef]) -> bool {
+    use engine_core::model::Cardinality;
+
+    if group_by
+        .iter()
+        .any(|g| g.table.eq_ignore_ascii_case(fact_table))
+    {
+        return true;
+    }
+    group_by.iter().any(|g| {
+        model
+            .find_relationship(fact_table, &g.table)
+            .map(|rel| match rel.cardinality() {
+                Cardinality::ManyToOne => rel.from_table().eq_ignore_ascii_case(fact_table),
+                Cardinality::OneToMany => rel.to_table().eq_ignore_ascii_case(fact_table),
+                // A 1:1 link is ambiguous (allow); M:N is never a clean fact join.
+                Cardinality::OneToOne => true,
+                Cardinality::ManyToMany => false,
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Extracted window function parameters.
+struct WindowInfo {
+    /// Window aggregate function (for WINDOW) or None (for OFFSET/INDEX).
+    function: Option<engine_core::compute::aggregate::AggregateOp>,
+    /// ORDER BY columns.
+    order_by: Vec<(String, String)>,
+    /// PARTITION BY columns.
+    partition_by: Vec<(String, String)>,
+    /// Window frame (for WINDOW).
+    frame: Option<engine_core::compute::expression::WindowFrame>,
+    /// OFFSET delta (for OFFSET).
+    delta: Option<i64>,
+    /// INDEX position (for INDEX).
+    position: Option<i64>,
+}
+
+/// Extract window parameters from an expression, returning (inner_measure, window_info).
+fn extract_window_info(expr: &Expression) -> QueryResult<(Expression, WindowInfo)> {
+    match expr {
+        Expression::Window {
+            inner,
+            function,
+            order_by,
+            partition_by,
+            frame,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: Some(*function),
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: frame.clone(),
+                delta: None,
+                position: None,
+            },
+        )),
+        Expression::Offset {
+            inner,
+            delta,
+            order_by,
+            partition_by,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: None,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: None,
+                delta: Some(*delta),
+                position: None,
+            },
+        )),
+        Expression::Index {
+            inner,
+            position,
+            order_by,
+            partition_by,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: None,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: None,
+                delta: None,
+                position: Some(*position),
+            },
+        )),
+        // RankWindow is handled by the dedicated `execute_rank_window` branch
+        // before this function is reached.
+        _ => Err(crate::error::QueryError::InvalidQuery(
+            "expected Window, Offset, or Index expression".into(),
+        )),
+    }
+}
+
+/// Build the SQL window function expression for stage 2.
+fn build_window_sql(
+    info: &WindowInfo,
+    _stage1_group_by: &[(String, String)],
+    outer_group_by: &[ColumnRef],
+    measure_name: &str,
+) -> QueryResult<String> {
+    use engine_core::compute::aggregate::AggregateOp;
+
+    // Build ORDER BY clause.
+    let order_clause: Vec<String> = info
+        .order_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(col))
+        .collect();
+    let order_sql = order_clause.join(", ");
+
+    // Build PARTITION BY clause (includes outer group-by columns that aren't in ORDER BY).
+    let partition_cols = window_partition_cols(info, outer_group_by);
+    let partition_sql = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!("PARTITION BY {} ", partition_cols.join(", "))
+    };
+
+    if let Some(function) = info.function {
+        // WINDOW: AGG("__val") OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)
+        //
+        // Only the aggregates the parser allows as window functions are
+        // supported (SUM/AVG/MIN/MAX/COUNT). Anything else is rejected rather
+        // than rendered: a running DISTINCTCOUNT would silently drop the
+        // DISTINCT (rendering a plain COUNT — wrong numbers), and the
+        // statistical aggregates have no valid window form in DataFusion. This
+        // fail-closed guard matters because a measure's `Expression` AST can be
+        // deserialized straight from a (shared) model file, bypassing the
+        // parser's allow-list.
+        let func_name = match function {
+            AggregateOp::Sum => "SUM",
+            AggregateOp::Average => "AVG",
+            AggregateOp::Min => "MIN",
+            AggregateOp::Max => "MAX",
+            AggregateOp::Count => "COUNT",
+            other => {
+                return Err(QueryError::InvalidQuery(format!(
+                    "aggregate {other:?} is not supported as a window/running calculation; \
+                     only SUM, AVERAGE, MIN, MAX, and COUNT can be windowed \
+                     (a running DISTINCTCOUNT or statistical aggregate must be computed \
+                     as a separate measure)"
+                )));
+            }
+        };
+
+        let frame_sql = match &info.frame {
+            Some(frame) => translate_frame(frame),
+            None => "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW".to_string(),
+        };
+
+        Ok(format!(
+            "{func_name}(\"__val\") OVER ({partition_sql}ORDER BY {order_sql} {frame_sql}) AS {}",
+            quote_ident_double(measure_name)
+        ))
+    } else if let Some(delta) = info.delta {
+        // OFFSET: LAG/LEAD("__val", N) OVER (...)
+        if delta < 0 {
+            Ok(format!(
+                "LAG(\"__val\", {}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
+                delta.unsigned_abs(),
+                quote_ident_double(measure_name)
+            ))
+        } else {
+            Ok(format!(
+                "LEAD(\"__val\", {delta}) OVER ({partition_sql}ORDER BY {order_sql}) AS {}",
+                quote_ident_double(measure_name)
+            ))
+        }
+    } else if let Some(position) = info.position {
+        // INDEX: NTH_VALUE("__val", N) OVER (...) with full frame.
+        if position >= 1 {
+            Ok(format!(
+                "NTH_VALUE(\"__val\", {position}) OVER ({partition_sql}ORDER BY {order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
+                quote_ident_double(measure_name)
+            ))
+        } else {
+            // Negative position: from end. Use NTH_VALUE with reversed ordering.
+            let reverse_order: Vec<String> = info
+                .order_by
+                .iter()
+                .map(|(_, col)| format!("{} DESC", quote_ident_double(col)))
+                .collect();
+            let rev_order_sql = reverse_order.join(", ");
+            let abs_pos = position.unsigned_abs();
+            Ok(format!(
+                "NTH_VALUE(\"__val\", {abs_pos}) OVER ({partition_sql}ORDER BY {rev_order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS {}",
+                quote_ident_double(measure_name)
+            ))
+        }
+    } else {
+        Ok(format!("\"__val\" AS {}", quote_ident_double(measure_name)))
+    }
+}
+
+/// The PARTITION BY columns (quoted, original case to match stage 1) for a
+/// window's stage-2 SQL:
+/// the explicit `partition_by` plus every outer group-by column that is not
+/// already an ORDER BY or PARTITION BY column. Shared by `build_window_sql`
+/// (to render the window) and the period-shift contiguity guard (to check
+/// contiguity within each partition).
+fn window_partition_cols(info: &WindowInfo, outer_group_by: &[ColumnRef]) -> Vec<String> {
+    let order_clause: Vec<String> = info
+        .order_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(col))
+        .collect();
+    let mut partition_cols: Vec<String> = info
+        .partition_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(col))
+        .collect();
+    for dim in outer_group_by {
+        let col_quoted = quote_ident_double(&dim.column);
+        if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
+            partition_cols.push(col_quoted);
+        }
+    }
+    partition_cols
+}
+
+/// Fail closed when a positional period shift (`PRIORYEAR`/`PRIORPERIOD`, lowered
+/// to `LAG`/`LEAD`) would run over a **gapped** date axis.
+///
+/// The shift is positional over the periods actually present in the
+/// materialized stage-1 result. A correct value-based shift requires the axis
+/// to be contiguous at the shift granularity (no missing period within each
+/// PARTITION); otherwise the `LAG` reads the nearest earlier present period
+/// rather than the true prior period, returning a wrong number for the wrong
+/// period with no error. Rather than silently mislead, this verifies contiguity
+/// and returns [`EngineError::TimeIntelligence`] on a gap. (A fully value-based
+/// shift that tolerates gaps by returning NULL for an absent prior period is a
+/// planned enhancement; until then the engine fails closed.)
+///
+/// Contiguity is checked per PARTITION by comparing the span of the period
+/// ordinal (`MAX - MIN + 1`) against the distinct count: they are equal exactly
+/// when no period is missing. The ordinal is the Year value (year shift),
+/// `year*4 + quarter` (quarter shift), or `year*12 + month` (month shift) — the
+/// lowering guarantees these anchor shapes and that the anchor columns carry the
+/// extracted numeric period parts.
+async fn check_period_shift_axis_contiguous(
+    ctx: &SessionContext,
+    base_table: &str,
+    order_by: &[(String, String)],
+    partition_cols: &[String],
+    granularity: DateGranularity,
+    function_label: &str,
+) -> QueryResult<()> {
+    let ord_cols: Vec<String> = order_by
+        .iter()
+        .map(|(_, col)| quote_ident_double(col))
+        .collect();
+    let ordinal = match (granularity, ord_cols.as_slice()) {
+        (DateGranularity::Year, [year]) => format!("CAST({year} AS BIGINT)"),
+        (DateGranularity::Quarter, [year, quarter]) => {
+            format!("(CAST({year} AS BIGINT) * 4 + CAST({quarter} AS BIGINT))")
+        }
+        (DateGranularity::Month, [year, month]) => {
+            format!("(CAST({year} AS BIGINT) * 12 + CAST({month} AS BIGINT))")
+        }
+        // The lowering only ever produces these anchor shapes; anything else
+        // (an unexpected shape) is left to the existing positional behavior.
+        _ => return Ok(()),
+    };
+
+    let part_select = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", partition_cols.join(", "))
+    };
+    let group_clause = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!(" GROUP BY {}", partition_cols.join(", "))
+    };
+    // Count partitions whose period axis has a gap (span != distinct count).
+    let sql = format!(
+        "SELECT COUNT(*) FROM (\
+            SELECT (MAX(__ord) - MIN(__ord) + 1) AS span, COUNT(DISTINCT __ord) AS cnt \
+            FROM (SELECT {ordinal} AS __ord{part_select} FROM {base_table}) t{group_clause}\
+         ) g WHERE g.span <> g.cnt"
+    );
+
+    let gap_error = |reason: String| -> QueryError {
+        EngineError::TimeIntelligence {
+            function: function_label.to_string(),
+            reason,
+        }
+        .into()
+    };
+
+    let df = ctx.sql(&sql).await.map_err(|e| {
+        gap_error(format!(
+            "could not verify the date axis is contiguous for a period shift \
+             (the {granularity:?} anchor columns must hold numeric period parts): {e}"
+        ))
+    })?;
+    let batches = df.collect().await?;
+    let gapped_partitions = batches
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+        .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+        .unwrap_or(0);
+
+    if gapped_partitions > 0 {
+        return Err(gap_error(format!(
+            "the date axis has gaps (one or more {granularity:?} periods are absent from the \
+             result rows), so a positional period shift would read the wrong period instead of \
+             the true prior period. Provide a contiguous date axis — e.g. group by a date \
+             dimension that has a row for every period so empty periods still appear — or remove \
+             the period shift"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `expr` is a bare window/time-intelligence node (a "leaf" that is
+/// materialized into its own column), as opposed to a compound expression that
+/// combines such nodes with arithmetic.
+fn is_simple_window_leaf(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::ToDate { .. }
+            | Expression::PeriodShift { .. }
+            | Expression::DatesInPeriod { .. }
+            | Expression::DatesBetween { .. }
+            | Expression::SemiAdditiveBalance { .. }
+            | Expression::Window { .. }
+            | Expression::Offset { .. }
+            | Expression::Index { .. }
+            | Expression::RankWindow { .. }
+    )
+}
+
+/// Decompose a compound time-intelligence expression into (a) its window/TI
+/// *leaves*, each assigned a `__leaf_N` placeholder, and (b) the surrounding
+/// arithmetic expression with every leaf replaced by an `Expression::ColumnRef`
+/// to its placeholder. The leaves are materialized into columns and joined; the
+/// returned arithmetic is then evaluated over those columns.
+///
+/// Supported combinators are scalar arithmetic over leaves and constants —
+/// `+ - * /`, `DIVIDE`, `IF`, `COALESCE`, `IFERROR` — plus numeric/string/bool
+/// literals. Anything else (a bare aggregate, a raw column, a scalar function
+/// over the fact, a window node in an unsupported position) cannot be evaluated
+/// over the already-aggregated, joined leaf columns, so it fails closed rather
+/// than risk a wrong number.
+fn extract_window_leaves(
+    expr: &Expression,
+    leaves: &mut Vec<(String, Expression)>,
+) -> QueryResult<Expression> {
+    if is_simple_window_leaf(expr) {
+        let placeholder = format!("__leaf_{}", leaves.len());
+        leaves.push((placeholder.clone(), expr.clone()));
+        return Ok(Expression::ColumnRef(placeholder));
+    }
+    match expr {
+        Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
+            left: Box::new(extract_window_leaves(left, leaves)?),
+            op: *op,
+            right: Box::new(extract_window_leaves(right, leaves)?),
+        }),
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Ok(Expression::SafeDivide {
+            numerator: Box::new(extract_window_leaves(numerator, leaves)?),
+            denominator: Box::new(extract_window_leaves(denominator, leaves)?),
+            alternate: match alternate {
+                Some(a) => Some(Box::new(extract_window_leaves(a, leaves)?)),
+                None => None,
+            },
+        }),
+        Expression::Coalesce(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(extract_window_leaves(it, leaves)?);
+            }
+            Ok(Expression::Coalesce(out))
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Ok(Expression::If {
+            condition: Box::new(extract_window_leaves(condition, leaves)?),
+            then_expr: Box::new(extract_window_leaves(then_expr, leaves)?),
+            else_expr: Box::new(extract_window_leaves(else_expr, leaves)?),
+        }),
+        Expression::IfError { expr, alternate } => Ok(Expression::IfError {
+            expr: Box::new(extract_window_leaves(expr, leaves)?),
+            alternate: Box::new(extract_window_leaves(alternate, leaves)?),
+        }),
+        // Constants pass through unchanged (they need no materialization).
+        Expression::LiteralFloat(_)
+        | Expression::LiteralInt(_)
+        | Expression::LiteralString(_)
+        | Expression::LiteralBool(_) => Ok(expr.clone()),
+        _ => Err(QueryError::InvalidQuery(
+            "compound time-intelligence measure combines time-intelligence terms with an \
+             unsupported sub-expression. Supported: arithmetic (+, -, *, /, DIVIDE), and \
+             IF / COALESCE / IFERROR over time-intelligence terms and numeric constants — \
+             not bare aggregates or raw columns. Compute the unsupported part as a separate \
+             measure"
+                .into(),
+        )),
+    }
+}
+
+/// Fail closed when a compound time-intelligence measure carries an outer
+/// context operation (KEEP/USING/CLEAR/RESET/…). v1 evaluates each leaf without
+/// the outer context, so honouring it would require distributing it into every
+/// leaf; until then, refuse rather than silently drop it. Context applied
+/// *inside* a leaf (e.g. `YTD(SUM(KEEP(x, …)))`) is unaffected, as are
+/// query-level filters (which pre-filter the fact).
+fn reject_compound_outer_context(
+    measure_name: &str,
+    eval_ctx: &engine_core::compute::context::EvaluationContext,
+) -> QueryResult<()> {
+    let trivial = eval_ctx.filters.is_empty()
+        && eval_ctx.in_filters.is_empty()
+        && eval_ctx.conditions.is_empty()
+        && !eval_ctx.is_reset
+        && !eval_ctx.is_reset_inner
+        && !eval_ctx.is_reset_outer
+        && eval_ctx.cleared_columns.is_empty()
+        && eval_ctx.cleared_tables.is_empty()
+        && eval_ctx.cleared_inner_columns.is_empty()
+        && eval_ctx.cleared_inner_tables.is_empty()
+        && eval_ctx.cleared_outer_columns.is_empty()
+        && eval_ctx.cleared_outer_tables.is_empty()
+        && eval_ctx.clear_except.is_empty()
+        && eval_ctx.relationship_overrides.is_empty()
+        && eval_ctx.traversals.is_empty();
+    if !trivial {
+        return Err(QueryError::InvalidQuery(format!(
+            "compound time-intelligence measure '{measure_name}' cannot yet be wrapped in a \
+             KEEP / USING / CLEAR / RESET context operation; apply the context inside each \
+             time-intelligence term instead, or use a query-level filter"
+        )));
+    }
+    Ok(())
+}
+
+/// Evaluate a compound measure's arithmetic over the joined per-leaf columns.
+///
+/// `joined` is `[dims..., __leaf_0, __leaf_1, ...]`; `arithmetic` references the
+/// leaves as `__leaf_N` column refs. Renders `SELECT dims, (arithmetic) AS
+/// measure FROM joined`.
+async fn apply_compound_arithmetic(
+    ctx: &SessionContext,
+    joined: Vec<RecordBatch>,
+    arithmetic: &Expression,
+    measure_name: &str,
+    _group_by: &[ColumnRef],
+) -> QueryResult<Vec<RecordBatch>> {
+    // Dimension columns = the joined schema minus the `__leaf_*` placeholders and
+    // the trailing `__grouping_id` (so both the lowercased axis-path dims and the
+    // filter-context dims work). `__grouping_id` (present under ROLLUP) is carried
+    // through as the trailing column, after the computed measure.
+    let has_gid = joined
+        .first()
+        .map(|b| b.schema().field_with_name(GROUPING_ID_COLUMN).is_ok())
+        .unwrap_or(false);
+    let dim_cols: Vec<String> = joined
+        .first()
+        .map(|b| {
+            b.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|n| !n.starts_with("__leaf_") && n != GROUPING_ID_COLUMN)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    register_partitioned_table(ctx, "__compound", joined)?;
+
+    let arith_sql = arithmetic.to_sql_string()?;
+    let mut select_parts: Vec<String> = dim_cols.iter().map(|c| quote_ident_double(c)).collect();
+    select_parts.push(format!(
+        "({arith_sql}) AS {}",
+        quote_ident_double(measure_name)
+    ));
+    if has_gid {
+        select_parts.push(quote_ident_double(GROUPING_ID_COLUMN));
+    }
+    let sql = format!("SELECT {} FROM __compound", select_parts.join(", "));
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
+}
+
+/// Read a single `COUNT(*)`-style i64 from a one-cell query result.
+async fn read_count(ctx: &SessionContext, sql: &str) -> QueryResult<i64> {
+    let batches = ctx.sql(sql).await?.collect().await?;
+    Ok(batches
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
+        .map(|a| if a.is_empty() { 0 } else { a.value(0) })
+        .unwrap_or(0))
+}
+
+/// Combine per-window-measure results — each shaped `[group-by dims..., measure]`
+/// and sharing the same dimension columns — into one `[dims..., m1, m2, ...]`
+/// table by FULL OUTER JOINing on the dimension columns.
+///
+/// A single measure (or none) is returned unchanged. Each result must be
+/// uniquely keyed by its dimension columns so the join cannot fan out (the
+/// standard pivot case, where the group-by axis covers the running/shift axis);
+/// otherwise this fails closed rather than multiply rows.
+async fn join_window_results(
+    ctx: &SessionContext,
+    per_measure: Vec<(String, Vec<RecordBatch>)>,
+) -> QueryResult<Vec<RecordBatch>> {
+    if per_measure.len() <= 1 {
+        return Ok(per_measure
+            .into_iter()
+            .next()
+            .map(|(_, b)| b)
+            .unwrap_or_default());
+    }
+
+    // Dimension columns = the first result's columns minus its own measure
+    // column. All results share these (same group-by axis / route).
+    let (first_name, first_batches) = &per_measure[0];
+    let first_schema = first_batches
+        .first()
+        .map(|b| b.schema())
+        .ok_or_else(|| QueryError::InvalidQuery("a window measure produced no result".into()))?;
+    // ROLLUP: a `__grouping_id` column rides each result. It is identical across
+    // results (same GROUP BY ROLLUP over the same group_by), so it is excluded
+    // from the join key/dim set and carried through as a trailing column.
+    let has_gid = first_schema.field_with_name(GROUPING_ID_COLUMN).is_ok();
+    let dim_cols: Vec<String> = first_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .filter(|n| n != first_name && n != GROUPING_ID_COLUMN)
+        .collect();
+    let measure_names: Vec<String> = per_measure.iter().map(|(n, _)| n.clone()).collect();
+
+    let not_uniquely_keyed = || -> QueryError {
+        QueryError::InvalidQuery(
+            "cannot combine these window/running measures: a result is not uniquely keyed by \
+             the group-by columns (the running or shift axis is finer than the group-by), so \
+             joining them would multiply rows. Add the finer date column(s) to group_by, or \
+             request the measures separately"
+                .into(),
+        )
+    };
+
+    // Register each result and verify unique keying.
+    for (i, (_, batches)) in per_measure.iter().enumerate() {
+        let alias = format!("__wjoin_{i}");
+        register_partitioned_table(ctx, &alias, batches.clone())?;
+
+        let total = read_count(ctx, &format!("SELECT COUNT(*) FROM {alias}")).await?;
+        let distinct = if dim_cols.is_empty() {
+            // No group-by: uniquely keyed only if there is at most one row.
+            if total <= 1 {
+                total
+            } else {
+                return Err(not_uniquely_keyed());
+            }
+        } else {
+            let dims = dim_cols
+                .iter()
+                .map(|c| quote_ident_double(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            read_count(
+                ctx,
+                &format!("SELECT COUNT(*) FROM (SELECT DISTINCT {dims} FROM {alias})"),
+            )
+            .await?
+        };
+        if total != distinct {
+            return Err(not_uniquely_keyed());
+        }
+    }
+
+    // SELECT: COALESCE each dim across all results, then each measure.
+    let q = |c: &str| quote_ident_double(c);
+    let mut select_parts: Vec<String> = Vec::new();
+    for dim in &dim_cols {
+        let coalesced = (0..per_measure.len())
+            .map(|i| format!("__wjoin_{i}.{}", q(dim)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        select_parts.push(format!("COALESCE({coalesced}) AS {}", q(dim)));
+    }
+    for (i, name) in measure_names.iter().enumerate() {
+        select_parts.push(format!("__wjoin_{i}.{}", q(name)));
+    }
+    if has_gid {
+        let coalesced = (0..per_measure.len())
+            .map(|i| format!("__wjoin_{i}.{}", q(GROUPING_ID_COLUMN)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        select_parts.push(format!(
+            "COALESCE({coalesced}) AS {}",
+            q(GROUPING_ID_COLUMN)
+        ));
+    }
+
+    // FROM __wjoin_0 [FULL OUTER JOIN __wjoin_i ON COALESCE(priors) = this | CROSS JOIN].
+    let mut sql = format!("SELECT {} FROM __wjoin_0", select_parts.join(", "));
+    for i in 1..per_measure.len() {
+        if dim_cols.is_empty() {
+            sql.push_str(&format!(" CROSS JOIN __wjoin_{i}"));
+            continue;
+        }
+        let on = dim_cols
+            .iter()
+            .map(|dim| {
+                let lhs = if i == 1 {
+                    format!("__wjoin_0.{}", q(dim))
+                } else {
+                    let priors = (0..i)
+                        .map(|j| format!("__wjoin_{j}.{}", q(dim)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("COALESCE({priors})")
+                };
+                let rhs = format!("__wjoin_{i}.{}", q(dim));
+                // NULL-safe: a NULL group-by member must match itself across
+                // sides (plain `=` yields NULL for NULL = NULL, splitting the
+                // group into half-blank rows).
+                format!("({lhs} = {rhs} OR ({lhs} IS NULL AND {rhs} IS NULL))")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(" FULL OUTER JOIN __wjoin_{i} ON {on}"));
+    }
+
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
+}
+
+/// FULL OUTER JOIN a window-measure result `[dims..., w...]` with an ordinary
+/// (non-window) measure result `[dims..., n...]` on the group-by dimensions,
+/// producing one `[dims..., measures-in-request-order...]` table.
+///
+/// This is what lets a trend measure (YTD / YoY / PRIORYEAR) sit beside its base
+/// measure (plain Revenue) in a single request. The two results come from
+/// different execution paths (the window two-stage path vs. the normal grouped
+/// path), which name the group-by columns with different casing, so the join is
+/// done **by position**: both paths emit the `group_by` dimensions first, in the
+/// same order, so column `i` on each side is the same dimension regardless of
+/// case. Each side must be uniquely keyed by those dimensions — otherwise the
+/// join would multiply rows, so it **fails closed** (the same guard
+/// [`join_window_results`] uses). Output dimension names follow the window side.
+pub(super) async fn join_window_with_normal(
+    ctx: &SessionContext,
+    window_batches: Vec<RecordBatch>,
+    normal_batches: Vec<RecordBatch>,
+    group_by: &[ColumnRef],
+    ordered_measure_names: &[String],
+    window_measure_names: &[String],
+) -> QueryResult<Vec<RecordBatch>> {
+    let n = group_by.len();
+
+    // Read the dimension column names as actually emitted by each side (first
+    // `n` columns, in group_by order). A side that produced no batch at all has
+    // no schema — fail closed rather than guess the shape.
+    let dims_of = |batches: &[RecordBatch]| -> QueryResult<Vec<String>> {
+        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+            QueryError::InvalidQuery(
+                "could not combine window and ordinary measures: a sub-result produced no batch"
+                    .into(),
+            )
+        })?;
+        Ok((0..n).map(|i| schema.field(i).name().clone()).collect())
+    };
+    let win_dims = dims_of(&window_batches)?;
+    let norm_dims = dims_of(&normal_batches)?;
+
+    // ROLLUP: both sides ran the same GROUP BY ROLLUP over the same group_by, so
+    // each carries an identical trailing `__grouping_id`. Detect it (on the window
+    // side) before the batches are moved into the session, and carry it through.
+    let has_gid = window_batches
+        .first()
+        .map(|b| b.schema().field_with_name(GROUPING_ID_COLUMN).is_ok())
+        .unwrap_or(false);
+
+    register_partitioned_table(ctx, "__wn_win", window_batches)?;
+    register_partitioned_table(ctx, "__wn_norm", normal_batches)?;
+
+    let fanout = || -> QueryError {
+        QueryError::InvalidQuery(
+            "cannot combine a window/running/time-intelligence measure with an ordinary measure: \
+             a result is not uniquely keyed by the group-by columns (the running or shift axis is \
+             finer than group_by), so joining them would multiply rows. Add the finer column(s) \
+             to group_by, or request the measures separately"
+                .into(),
+        )
+    };
+
+    // Unique-keying guard on both sides.
+    for (alias, dims) in [("__wn_win", &win_dims), ("__wn_norm", &norm_dims)] {
+        let total = read_count(ctx, &format!("SELECT COUNT(*) FROM {alias}")).await?;
+        let distinct = if dims.is_empty() {
+            if total <= 1 {
+                total
+            } else {
+                return Err(fanout());
+            }
+        } else {
+            let d = dims
+                .iter()
+                .map(|c| quote_ident_double(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            read_count(
+                ctx,
+                &format!("SELECT COUNT(*) FROM (SELECT DISTINCT {d} FROM {alias})"),
+            )
+            .await?
+        };
+        if total != distinct {
+            return Err(fanout());
+        }
+    }
+
+    let q = quote_ident_double;
+    let mut select_parts: Vec<String> = Vec::new();
+    for i in 0..n {
+        select_parts.push(format!(
+            "COALESCE(__wn_win.{}, __wn_norm.{}) AS {}",
+            q(&win_dims[i]),
+            q(&norm_dims[i]),
+            q(&win_dims[i])
+        ));
+    }
+    for name in ordered_measure_names {
+        let side = if window_measure_names.iter().any(|w| w == name) {
+            "__wn_win"
+        } else {
+            "__wn_norm"
+        };
+        select_parts.push(format!("{side}.{}", q(name)));
+    }
+    if has_gid {
+        let gid = q(GROUPING_ID_COLUMN);
+        select_parts.push(format!(
+            "COALESCE(__wn_win.{gid}, __wn_norm.{gid}) AS {gid}"
+        ));
+    }
+
+    let mut sql = format!("SELECT {} FROM __wn_win", select_parts.join(", "));
+    if n == 0 {
+        sql.push_str(" CROSS JOIN __wn_norm");
+    } else {
+        // NULL-SAFE equality: a NULL group-by value (a legitimate dimension
+        // member) must match itself across the two sides. Plain `=` is not
+        // null-safe (`NULL = NULL` is NULL, not TRUE), which would split a NULL
+        // group into two half-blank rows. (`IS NOT DISTINCT FROM` does not
+        // compile under DataFusion 44's coercion, so use the OR form.)
+        let on = (0..n)
+            .map(|i| {
+                let l = format!("__wn_win.{}", q(&win_dims[i]));
+                let r = format!("__wn_norm.{}", q(&norm_dims[i]));
+                format!("({l} = {r} OR ({l} IS NULL AND {r} IS NULL))")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(" FULL OUTER JOIN __wn_norm ON {on}"));
+    }
+
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    Ok(batches)
+}
+
+/// Translate a DAX-style WindowFrame to SQL ROWS BETWEEN clause.
+fn translate_frame(frame: &engine_core::compute::expression::WindowFrame) -> String {
+    use engine_core::compute::expression::BoundaryType;
+
+    let from_sql = match (frame.from, frame.from_type) {
+        (1, BoundaryType::Abs) | (0, BoundaryType::Abs) => "UNBOUNDED PRECEDING".to_string(),
+        (0, BoundaryType::Rel) => "CURRENT ROW".to_string(),
+        (n, BoundaryType::Rel) if n < 0 => format!("{} PRECEDING", n.unsigned_abs()),
+        (n, BoundaryType::Rel) => format!("{n} FOLLOWING"),
+        (n, BoundaryType::Abs) if n > 0 => {
+            // Absolute position from start — approximate as UNBOUNDED PRECEDING
+            // (DataFusion doesn't support absolute row positioning directly).
+            "UNBOUNDED PRECEDING".to_string()
+        }
+        (n, BoundaryType::Abs) if n < 0 => {
+            // Absolute from end — approximate as UNBOUNDED FOLLOWING.
+            "UNBOUNDED PRECEDING".to_string()
+        }
+        _ => "CURRENT ROW".to_string(),
+    };
+
+    let to_sql = match (frame.to, frame.to_type) {
+        (-1, BoundaryType::Abs) | (0, BoundaryType::Abs) => "UNBOUNDED FOLLOWING".to_string(),
+        (0, BoundaryType::Rel) => "CURRENT ROW".to_string(),
+        (n, BoundaryType::Rel) if n < 0 => format!("{} PRECEDING", n.unsigned_abs()),
+        (n, BoundaryType::Rel) => format!("{n} FOLLOWING"),
+        (n, BoundaryType::Abs) if n < 0 => "UNBOUNDED FOLLOWING".to_string(),
+        (n, BoundaryType::Abs) if n > 0 => "UNBOUNDED FOLLOWING".to_string(),
+        _ => "CURRENT ROW".to_string(),
+    };
+
+    format!("ROWS BETWEEN {from_sql} AND {to_sql}")
+}
