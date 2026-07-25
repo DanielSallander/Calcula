@@ -271,12 +271,16 @@ The public API is still evolving. If you are looking for something you can ship 
 
 ## Getting Started
 
-(Currently for developers only)
+(Currently for developers only -- there is no published installer yet.)
 
 1. Clone the repo.
 2. Ensure you have Rust and Node.js installed.
 3. Run `npm install` in the `/app` directory.
 4. Run `npm run tauri dev`.
+
+To build installers (`.msi` + NSIS `.exe`) instead of running from source, use
+`npm run tauri build`. See [docs/design/release-pipeline.md](docs/design/release-pipeline.md)
+for the release process, the ARM64-vs-x64 caveat, and the code-signing status.
 
 ## Contributing
 
