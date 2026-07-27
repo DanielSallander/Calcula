@@ -1,6 +1,7 @@
 //! FILENAME: app/src-tauri/src/commands/mod.rs
 // PURPOSE: Exposes all sub-modules to the rest of the app, maintaining the same API surface.
 
+pub mod coord_shift;
 pub mod data;
 pub mod dimensions;
 pub mod nav;

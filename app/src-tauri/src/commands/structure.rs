@@ -428,6 +428,56 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
     }
 }
 
+/// Move every per-sheet CELL-KEYED store through a structural edit, recording
+/// each one's pre-shift contents into the caller's already-open transaction.
+///
+/// Comments, notes, hyperlinks and cell protection all remember a cell POSITION
+/// and none of them moved with the grid: insert a row above a commented cell
+/// and the comment stayed put, so it annotated whatever value slid into that
+/// position. Delete the row and the comment survived on an unrelated cell.
+/// They share one shape, so they share one shift — see
+/// `commands::coord_shift`, which owns the arithmetic.
+///
+/// The caller must already hold the undo-stack lock inside `begin_transaction`.
+fn shift_per_sheet_cell_stores(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use crate::commands::coord_shift::shift_per_sheet_cell_map;
+
+    macro_rules! shift_store {
+        ($lock:expr, $kind:literal, $label:literal) => {
+            if let Ok(mut store) = $lock {
+                let previous: Vec<((u32, u32), _)> = store
+                    .get(&sheet_index)
+                    .map(|m| m.iter().map(|(k, v)| (*k, v.clone())).collect())
+                    .unwrap_or_default();
+                if shift_per_sheet_cell_map(&mut store, sheet_index, edit) {
+                    undo_stack.record_custom_restore(
+                        $kind.to_string(),
+                        crate::undo_commands::sheet_cell_map_snapshot_bytes(
+                            sheet_index,
+                            previous,
+                        ),
+                        $label,
+                    );
+                }
+            }
+        };
+    }
+
+    shift_store!(state.comments.lock(), "obj_comments", "Shift comments");
+    shift_store!(state.notes.lock(), "obj_notes", "Shift notes");
+    shift_store!(state.hyperlinks.lock(), "obj_hyperlinks", "Shift hyperlinks");
+    shift_store!(
+        state.cell_protection.lock(),
+        "obj_cell_protection",
+        "Shift cell protection"
+    );
+}
+
 /// Track the sheet's AutoFilter through a structural edit, recording the
 /// pre-shift filter into the caller's already-open undo transaction.
 ///
@@ -911,6 +961,13 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
+    shift_per_sheet_cell_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -1115,6 +1172,13 @@ pub fn insert_columns(
     );
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
+    shift_per_sheet_cell_stores(
         &state,
         &mut undo_stack,
         active_sheet,
@@ -1795,6 +1859,13 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
+    shift_per_sheet_cell_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -2052,6 +2123,13 @@ pub fn delete_columns(
     );
     // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
     shift_sheet_auto_filter(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // Comments / notes / hyperlinks / cell protection are cell-keyed and move too.
+    shift_per_sheet_cell_stores(
         &state,
         &mut undo_stack,
         active_sheet,

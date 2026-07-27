@@ -660,6 +660,8 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
         "obj_cell_types", "obj_cell_behaviors", "obj_writeback_regions",
         "obj_object_scripts",
+        // Per-sheet cell-keyed stores moved by a structural edit.
+        "obj_comments", "obj_notes", "obj_hyperlinks", "obj_cell_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1890,6 +1892,59 @@ pub(crate) fn cell_behaviors_snapshot_bytes(
     serde_json::to_vec(&CellBehaviorsObjSnapshot { previous }).unwrap_or_default()
 }
 
+/// Snapshot of ONE sheet's cell-keyed store, for the structural-shift restores.
+///
+/// Generic because comments, notes, hyperlinks and cell protection all share
+/// the `HashMap<sheet, HashMap<(row, col), T>>` shape — a structural edit moves
+/// every entry on the sheet at once, so a per-cell restore (the existing
+/// "comment"/"note"/"hyperlink" kinds) cannot express it.
+///
+/// `previous` is a Vec of pairs rather than a map because JSON object keys must
+/// be strings and these are `(u32, u32)` tuples.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SheetCellMapSnapshot<T> {
+    sheet_index: usize,
+    previous: Vec<((u32, u32), T)>,
+}
+
+/// Serialize one sheet's cell-keyed store for an in-open-transaction restore
+/// (same contract as `cell_types_snapshot_bytes`).
+pub(crate) fn sheet_cell_map_snapshot_bytes<T: serde::Serialize>(
+    sheet_index: usize,
+    previous: Vec<((u32, u32), T)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&SheetCellMapSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
+/// Swap one sheet's cell-keyed store with a snapshot, pushing the CURRENT
+/// contents as the symmetric inverse so redo re-applies the shift.
+fn apply_sheet_cell_map_restore<T>(
+    store: &mut HashMap<usize, HashMap<(u32, u32), T>>,
+    kind: &str,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let snap: SheetCellMapSnapshot<T> = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] bad {} snapshot: {}", kind, e);
+            return;
+        }
+    };
+    let current: Vec<((u32, u32), T)> = store
+        .remove(&snap.sheet_index)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    push_obj_inverse(
+        inverse_transaction,
+        kind,
+        &SheetCellMapSnapshot { sheet_index: snap.sheet_index, previous: current },
+    );
+    store.insert(snap.sheet_index, snap.previous.into_iter().collect());
+}
+
 /// Snapshot for the "obj_object_scripts" CustomRestore — the WHOLE object-script
 /// list before a mutation.
 ///
@@ -2142,6 +2197,22 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
+        }
+        "obj_comments" => {
+            let mut store = state.comments.lock().unwrap();
+            apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
+        }
+        "obj_notes" => {
+            let mut store = state.notes.lock().unwrap();
+            apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
+        }
+        "obj_hyperlinks" => {
+            let mut store = state.hyperlinks.lock().unwrap();
+            apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
+        }
+        "obj_cell_protection" => {
+            let mut store = state.cell_protection.lock().unwrap();
+            apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
         }
         "obj_object_scripts" => {
             let snap: ObjectScriptsObjSnapshot = match serde_json::from_slice(data) {
@@ -2476,6 +2547,10 @@ mod restore_registry_tests {
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
             ("obj_writeback_regions", true, CustomRestoreKind::Objects),
             ("obj_object_scripts", true, CustomRestoreKind::Objects),
+            ("obj_comments", true, CustomRestoreKind::Objects),
+            ("obj_notes", true, CustomRestoreKind::Objects),
+            ("obj_hyperlinks", true, CustomRestoreKind::Objects),
+            ("obj_cell_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];
