@@ -678,6 +678,151 @@ pub fn check_region_compatibility(
     result
 }
 
+/// Result of checking MODEL writeback COLUMN compatibility across versions.
+///
+/// The model-side mirror of [`RegionCompatibility`]. Model writeback columns
+/// have no local drafts to invalidate — `bi_writeback_set_value` submits
+/// straight to the registry — so this exists for a different reason: when a
+/// declaration disappears or changes incompatibly, previously-counted
+/// submissions stop reaching the model. Removal drops out of the read-side
+/// declaration walk in `bi::writeback::collect_distributed_writeback_entries`,
+/// and an incompatible schema change makes the read-side `schema.validate`
+/// gate silently discard rows that were valid when they were submitted.
+/// Neither is wrong — they fail closed — but both make collected data vanish
+/// from a model, so the user has to be told. That is what this reports.
+#[derive(Debug, Clone, Default)]
+pub struct ModelWritebackCompatibility {
+    /// Columns present in both versions and safe to keep counting.
+    pub compatible: Vec<String>,
+    /// Columns present in both but changed such that previously-valid
+    /// submissions may no longer count: `(writeback_id, reason)`.
+    pub incompatible: Vec<(String, String)>,
+    /// Columns added in the new version.
+    pub added: Vec<String>,
+    /// Columns removed in the new version — their submissions stop counting.
+    pub removed: Vec<String>,
+}
+
+impl ModelWritebackCompatibility {
+    /// Ids whose collected data may silently stop reaching the model —
+    /// everything the user needs to be warned about.
+    pub fn affected_ids(&self) -> Vec<&str> {
+        self.removed
+            .iter()
+            .map(|s| s.as_str())
+            .chain(self.incompatible.iter().map(|(id, _)| id.as_str()))
+            .collect()
+    }
+
+    /// Whether anything at all needs reporting.
+    pub fn has_losses(&self) -> bool {
+        !self.removed.is_empty() || !self.incompatible.is_empty()
+    }
+}
+
+/// Compare model writeback COLUMN declarations between two version manifests.
+///
+/// Three things make a shared column incompatible, each because it changes
+/// which submissions the read side accepts:
+/// * **`key_columns`** — submissions address a host row by positional key
+///   values ([`WritebackSubmission::model_key`]). Changing the arity or the
+///   key column names re-points or orphans every existing submission; the
+///   arity check in `collect_distributed_writeback_entries` drops mismatches
+///   outright.
+/// * **`schema`** — the read side re-validates every stored submission against
+///   the CURRENT declaration, so a narrowed schema discards rows that were
+///   valid at submit time.
+/// * **`kind`** — flipping `history` ↔ `masterData` changes the governance of
+///   the column (masterData is approval-gated and editor-restricted), so the
+///   same stored rows project differently.
+///
+/// A widened `allowed_editors` list is not reported; a NARROWED one is, since
+/// it retroactively disqualifies contributors whose entries already counted.
+pub fn check_model_writeback_compatibility(
+    old: &[ModelWritebackDeclaration],
+    new: &[ModelWritebackDeclaration],
+) -> ModelWritebackCompatibility {
+    let mut result = ModelWritebackCompatibility::default();
+
+    let old_ids: std::collections::HashSet<&str> = old.iter().map(|d| d.id.as_str()).collect();
+    let new_ids: std::collections::HashSet<&str> = new.iter().map(|d| d.id.as_str()).collect();
+
+    for id in &new_ids {
+        if !old_ids.contains(id) {
+            result.added.push((*id).to_string());
+        }
+    }
+    for id in &old_ids {
+        if !new_ids.contains(id) {
+            result.removed.push((*id).to_string());
+        }
+    }
+
+    for old_decl in old {
+        let Some(new_decl) = new.iter().find(|d| d.id == old_decl.id) else {
+            continue;
+        };
+
+        let mut reason: Option<String> = None;
+
+        if old_decl.key_columns != new_decl.key_columns {
+            reason = Some(format!(
+                "key columns changed ({} -> {})",
+                if old_decl.key_columns.is_empty() {
+                    "none".to_string()
+                } else {
+                    old_decl.key_columns.join(", ")
+                },
+                if new_decl.key_columns.is_empty() {
+                    "none".to_string()
+                } else {
+                    new_decl.key_columns.join(", ")
+                },
+            ));
+        } else if old_decl.kind != new_decl.kind {
+            reason = Some(format!(
+                "column kind changed ('{}' -> '{}')",
+                old_decl.kind, new_decl.kind
+            ));
+        } else if let (Some(old_schema), Some(new_schema)) = (&old_decl.schema, &new_decl.schema) {
+            if !old_schema.is_compatible_with(new_schema) {
+                reason = Some("schema changed incompatibly".to_string());
+            }
+        }
+
+        // A narrowed editor allowlist retroactively disqualifies contributors.
+        // An empty list means "no restriction", so empty -> non-empty narrows.
+        //
+        // Only for `masterData`: the allowlist is inert on a `history` column —
+        // every enforcement site short-circuits on kind first (the submit gate,
+        // the distributed read-side projection gate, and the local-store gate).
+        // Reporting a `history` column's allowlist edit as a data loss would be
+        // factually wrong, and a warning channel that cries wolf gets ignored.
+        if reason.is_none()
+            && new_decl.kind == "masterData"
+            && !new_decl.allowed_editors.is_empty()
+        {
+            let narrowed = old_decl.allowed_editors.is_empty()
+                || old_decl.allowed_editors.iter().any(|e| {
+                    !new_decl
+                        .allowed_editors
+                        .iter()
+                        .any(|n| n.trim().eq_ignore_ascii_case(e.trim()))
+                });
+            if narrowed {
+                reason = Some("allowed editors narrowed".to_string());
+            }
+        }
+
+        match reason {
+            Some(r) => result.incompatible.push((old_decl.id.clone(), r)),
+            None => result.compatible.push(old_decl.id.clone()),
+        }
+    }
+
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Submission types (Phase 14)
 // ---------------------------------------------------------------------------
@@ -1702,6 +1847,167 @@ mod tests {
         assert_eq!(compat.removed, vec!["r1"]);
         assert_eq!(compat.added, vec!["r2"]);
         assert!(compat.compatible.is_empty());
+    }
+
+    // --- Model writeback compatibility tests ---
+
+    fn make_model_decl(id: &str) -> ModelWritebackDeclaration {
+        ModelWritebackDeclaration {
+            id: id.to_string(),
+            data_source_id: "ds1".to_string(),
+            table: "Sales".to_string(),
+            column: "Forecast".to_string(),
+            key_columns: vec!["Region".to_string(), "Month".to_string()],
+            kind: "history".to_string(),
+            schema: None,
+            allowed_editors: Vec::new(),
+            submission_policy: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn num_schema(min: Option<f64>, max: Option<f64>) -> ValueSchema {
+        ValueSchema {
+            value_type: ValueType::Number,
+            required: false,
+            min,
+            max,
+            max_length: None,
+            pattern: None,
+            enum_values: Vec::new(),
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn model_writeback_compatibility_all_unchanged() {
+        let decls = vec![make_model_decl("w1")];
+        let compat = check_model_writeback_compatibility(&decls, &decls);
+        assert_eq!(compat.compatible, vec!["w1"]);
+        assert!(compat.added.is_empty());
+        assert!(compat.removed.is_empty());
+        assert!(compat.incompatible.is_empty());
+        assert!(!compat.has_losses());
+    }
+
+    #[test]
+    fn model_writeback_compatibility_added_and_removed() {
+        let old = vec![make_model_decl("w1")];
+        let new = vec![make_model_decl("w2")];
+        let compat = check_model_writeback_compatibility(&old, &new);
+        assert_eq!(compat.removed, vec!["w1"]);
+        assert_eq!(compat.added, vec!["w2"]);
+        assert!(compat.compatible.is_empty());
+        // A removed column's submissions stop reaching the model — a loss.
+        assert!(compat.has_losses());
+        assert_eq!(compat.affected_ids(), vec!["w1"]);
+    }
+
+    #[test]
+    fn model_writeback_key_column_change_is_incompatible() {
+        let old = vec![make_model_decl("w1")];
+        let mut changed = make_model_decl("w1");
+        changed.key_columns = vec!["Region".to_string()]; // arity dropped
+        let compat = check_model_writeback_compatibility(&old, &[changed]);
+        assert!(compat.compatible.is_empty());
+        assert_eq!(compat.incompatible.len(), 1);
+        assert!(compat.incompatible[0].1.contains("key columns changed"));
+        assert!(compat.has_losses());
+    }
+
+    #[test]
+    fn model_writeback_kind_flip_is_incompatible() {
+        let old = vec![make_model_decl("w1")];
+        let mut changed = make_model_decl("w1");
+        changed.kind = "masterData".to_string();
+        let compat = check_model_writeback_compatibility(&old, &[changed]);
+        assert_eq!(compat.incompatible.len(), 1);
+        assert!(compat.incompatible[0].1.contains("column kind changed"));
+    }
+
+    #[test]
+    fn model_writeback_narrowed_schema_is_incompatible_but_widened_is_not() {
+        let mut old = make_model_decl("w1");
+        old.schema = Some(num_schema(Some(0.0), Some(100.0)));
+
+        // Narrowing the range retroactively invalidates stored values.
+        let mut narrowed = make_model_decl("w1");
+        narrowed.schema = Some(num_schema(Some(10.0), Some(100.0)));
+        let compat = check_model_writeback_compatibility(&[old.clone()], &[narrowed]);
+        assert_eq!(compat.incompatible.len(), 1);
+        assert!(compat.incompatible[0].1.contains("schema changed incompatibly"));
+
+        // Widening it does not.
+        let mut widened = make_model_decl("w1");
+        widened.schema = Some(num_schema(Some(-10.0), Some(200.0)));
+        let compat = check_model_writeback_compatibility(&[old], &[widened]);
+        assert_eq!(compat.compatible, vec!["w1"]);
+        assert!(!compat.has_losses());
+    }
+
+    /// A masterData column — the only kind for which `allowed_editors` is
+    /// actually enforced.
+    fn make_master_decl(id: &str, editors: &[&str]) -> ModelWritebackDeclaration {
+        let mut d = make_model_decl(id);
+        d.kind = "masterData".to_string();
+        d.allowed_editors = editors.iter().map(|e| e.to_string()).collect();
+        d
+    }
+
+    #[test]
+    fn model_writeback_narrowed_editors_is_incompatible() {
+        // Unrestricted -> restricted disqualifies everyone not on the list.
+        let compat = check_model_writeback_compatibility(
+            &[make_master_decl("w1", &[])],
+            &[make_master_decl("w1", &["ana"])],
+        );
+        assert_eq!(compat.incompatible.len(), 1);
+        assert!(compat.incompatible[0].1.contains("allowed editors narrowed"));
+
+        // Dropping one editor from an existing list also narrows.
+        let compat = check_model_writeback_compatibility(
+            &[make_master_decl("w1", &["ana", "bo"])],
+            &[make_master_decl("w1", &["ana"])],
+        );
+        assert_eq!(compat.incompatible.len(), 1);
+
+        // Widening (restricted -> more editors) is fine, and so is casing drift.
+        let compat = check_model_writeback_compatibility(
+            &[make_master_decl("w1", &["ana", "bo"])],
+            &[make_master_decl("w1", &["ANA", "bo", "cy"])],
+        );
+        assert_eq!(compat.compatible, vec!["w1"]);
+    }
+
+    #[test]
+    fn model_writeback_removing_the_editor_restriction_is_compatible() {
+        // restricted -> unrestricted widens: everyone who counted still counts.
+        let compat = check_model_writeback_compatibility(
+            &[make_master_decl("w1", &["ana"])],
+            &[make_master_decl("w1", &[])],
+        );
+        assert_eq!(compat.compatible, vec!["w1"]);
+        assert!(!compat.has_losses());
+    }
+
+    #[test]
+    fn model_writeback_editor_list_on_a_history_column_is_inert() {
+        // `allowed_editors` is masterData-only at every enforcement site, so
+        // populating it on a `history` column drops no submission and must not
+        // be reported as a loss — a warning channel that cries wolf is ignored.
+        let old = make_model_decl("w1"); // kind == "history"
+        let mut with_editors = make_model_decl("w1");
+        with_editors.allowed_editors = vec!["ana".to_string()];
+        let compat = check_model_writeback_compatibility(&[old], &[with_editors]);
+        assert_eq!(compat.compatible, vec!["w1"]);
+        assert!(!compat.has_losses());
+    }
+
+    #[test]
+    fn model_writeback_compatibility_empty_sets() {
+        let compat = check_model_writeback_compatibility(&[], &[]);
+        assert!(!compat.has_losses());
+        assert!(compat.affected_ids().is_empty());
     }
 
     // --- ReviewEvent serde ---

@@ -4436,6 +4436,8 @@ pub fn calp_refresh_apply(
     // rebuilt below, so removed/incompatible regions are actually detected.
     let old_decls = state.writeback_declarations.lock()
         .map(|d| d.clone()).unwrap_or_default();
+    let old_model_decls = state.model_writeback_declarations.lock()
+        .map(|d| d.clone()).unwrap_or_default();
 
     // Build the upstream-value map for the override rebase: for every
     // override on a refreshed sheet, the new upstream value at the override's
@@ -4704,14 +4706,78 @@ pub fn calp_refresh_apply(
                 .collect();
 
             if !invalidated_ids.is_empty() {
+                let mut dropped = 0usize;
                 if let Ok(mut wb_layer) = state.writeback_layer.lock() {
                     let before = wb_layer.draft_count();
                     wb_layer.drafts.retain(|d| !invalidated_ids.contains(d.region_id.as_str()));
-                    let removed = before - wb_layer.draft_count();
-                    if removed > 0 {
-                        crate::log_info!("CALP", "Refresh invalidated {} writeback drafts for removed/incompatible regions", removed);
+                    dropped = before - wb_layer.draft_count();
+                    if dropped > 0 {
+                        crate::log_info!("CALP", "Refresh invalidated {} writeback drafts for removed/incompatible regions", dropped);
                     }
                 }
+                // AUDIT: losing entered-but-unsubmitted work to an upstream
+                // change is exactly the kind of thing a contributor must be
+                // able to reconstruct afterwards. `WritebackInvalidated`
+                // existed for this and was never recorded anywhere.
+                record_writeback_invalidated(
+                    &state,
+                    &format!(
+                        "Refresh dropped {} writeback draft(s): {} region(s) removed upstream, {} changed incompatibly ({})",
+                        dropped,
+                        compat.removed.len(),
+                        compat.incompatible.len(),
+                        summarize_ids(invalidated_ids.iter().copied()),
+                    ),
+                );
+            }
+        }
+    }
+
+    // Handle MODEL writeback COLUMN changes. There are no drafts to drop —
+    // bi_writeback_set_value submits straight to the registry — but a column
+    // that vanished or narrowed stops counting submissions that previously
+    // reached the model, and nothing told the user until now.
+    {
+        let new_model_decls = state.model_writeback_declarations.lock()
+            .map(|d| d.clone()).unwrap_or_default();
+
+        if !old_model_decls.is_empty() || !new_model_decls.is_empty() {
+            let compat = calp::writeback::check_model_writeback_compatibility(
+                &old_model_decls,
+                &new_model_decls,
+            );
+            if compat.has_losses() {
+                // Name the host table.column, not just the opaque id — the id
+                // is a slug the user has never seen.
+                let label = |id: &str| -> String {
+                    old_model_decls
+                        .iter()
+                        .find(|d| d.id == id)
+                        .map(|d| format!("{}.{}", d.table, d.column))
+                        .unwrap_or_else(|| id.to_string())
+                };
+                let removed: Vec<String> = compat.removed.iter().map(|id| label(id)).collect();
+                let changed: Vec<String> = compat
+                    .incompatible
+                    .iter()
+                    .map(|(id, why)| format!("{} ({})", label(id), why))
+                    .collect();
+
+                crate::log_warn!(
+                    "CALP",
+                    "Refresh changed model writeback columns — collected values may stop counting. Removed: [{}]. Changed: [{}]",
+                    removed.join(", "),
+                    changed.join(", "),
+                );
+                record_writeback_invalidated(
+                    &state,
+                    &format!(
+                        "Refresh changed {} model writeback column(s) — previously collected values may no longer reach the model. Removed: [{}]. Changed: [{}]",
+                        compat.removed.len() + compat.incompatible.len(),
+                        removed.join(", "),
+                        changed.join(", "),
+                    ),
+                );
             }
         }
     }
@@ -4766,6 +4832,42 @@ fn audit_user(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
+/// Join up to 8 ids into a readable list, with a "+N more" tail — audit
+/// descriptions are read by humans and a 200-region package must not produce a
+/// 200-id line.
+///
+/// Sorts first: callers pass a `HashSet` iterator, so without this the WHICH-8
+/// and their order would vary run to run for the identical refresh, making two
+/// audit trails of the same event impossible to compare.
+fn summarize_ids<'a>(ids: impl Iterator<Item = &'a str>) -> String {
+    let mut all: Vec<&str> = ids.collect();
+    all.sort_unstable();
+    let shown: Vec<&str> = all.iter().take(8).copied().collect();
+    if all.len() > shown.len() {
+        format!("{}, +{} more", shown.join(", "), all.len() - shown.len())
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// Record a [`calp::audit::AuditEvent::WritebackInvalidated`] entry.
+///
+/// Best-effort and non-fatal: a poisoned audit mutex must never fail a refresh
+/// that has already applied. Note this still honors the audit log's `enabled`
+/// flag (it is a distribution event, not an always-recorded script event), so
+/// it is a record for workbooks that opted in — not a user-facing notice.
+fn record_writeback_invalidated(state: &AppState, description: &str) {
+    let user = audit_user(state);
+    if let Ok(mut audit) = state.audit_log.lock() {
+        audit.record(
+            calp::audit::AuditEvent::WritebackInvalidated,
+            description,
+            &user,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+}
+
 /// Strip all subscriptions and overrides, converting the workbook to a
 /// standalone (detached) document.
 #[tauri::command]
@@ -4777,11 +4879,19 @@ pub fn calp_detach(state: State<AppState>, window: tauri::Window) -> Result<(), 
     let detached_count = subs.subscriptions.len();
     calp::refresh::detach(&mut subs.subscriptions, &mut layer);
 
-    // Clear writeback index (no subscriptions remain)
+    // Clear the writeback index AND both declaration mirrors — no subscriptions
+    // remain, so no declaration is in force. Leaving the mirrors populated would
+    // let a later refresh diff stale-vs-empty and report every region as removed.
     drop(subs);
     drop(layer);
     if let Ok(mut idx) = state.writeback_index.lock() {
         *idx = calp::WritebackIndex::default();
+    }
+    if let Ok(mut decls) = state.writeback_declarations.lock() {
+        decls.clear();
+    }
+    if let Ok(mut decls) = state.model_writeback_declarations.lock() {
+        decls.clear();
     }
     invalidate_gather_cache(&state);
 
@@ -5253,6 +5363,7 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
     };
 
     let mut all_decls = Vec::new();
+    let mut all_model_decls: Vec<calp::ModelWritebackDeclaration> = Vec::new();
 
     for sub in &subs.subscriptions {
         // Skip dev and file-channel subscriptions (no writeback in those)
@@ -5277,6 +5388,13 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
             if let Some(ref wb_regions) = ver_manifest.writeback_regions {
                 all_decls.extend(wb_regions.iter().cloned());
             }
+            // Same trust rule for MODEL writeback columns: only a
+            // signature-verified manifest may declare one. Mirrored here so
+            // refresh can diff the pre/post sets without re-walking every
+            // subscription's registry.
+            if let Some(ref model_wbs) = ver_manifest.model_writebacks {
+                all_model_decls.extend(model_wbs.iter().cloned());
+            }
         }
     }
 
@@ -5295,6 +5413,9 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
     // Also store the full declarations for schema validation
     if let Ok(mut decls) = state.writeback_declarations.lock() {
         *decls = all_decls;
+    }
+    if let Ok(mut decls) = state.model_writeback_declarations.lock() {
+        *decls = all_model_decls;
     }
 }
 
@@ -5908,66 +6029,80 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
     // over an HTTP transport. Validation runs over the whole batch BEFORE any
     // write, so a single bad value rejects the submit atomically (drafts stay
     // for correction).
+    //
+    // FAIL CLOSED: if that verified read does not yield this region's
+    // declaration, we do NOT fall through and write anyway. `owning_
+    // subscription_for_region` above already verified the same manifest and
+    // found the region, so reaching this point without a declaration means the
+    // manifest changed, failed its signature, or became unreadable between the
+    // two reads — none of which is a reason to skip every schema, lifecycle and
+    // completeness gate and still persist to the shared registry.
     let decl = calp::integrity::verify_and_load_manifest_via(
         &*registry, &package_name, &resolved_version, &calcula_profile_dir(),
     )
     .ok()
     .and_then(|(_, m)| m.writeback_regions)
     .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
-    if let Some(decl) = &decl {
-        // COMPLETENESS (P1): a region the publisher marked `required` must have
-        // every cell filled before submit — otherwise a contributor can submit a
-        // partial mandatory region (2 of 5 line items) believing they're done.
-        if decl.schema.as_ref().map(|s| s.required).unwrap_or(false) {
-            let sel = &decl.selector;
-            let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
-            let mut missing = Vec::new();
-            for row in sel.row_start..=sel.row_end {
-                for col in sel.col_start..=sel.col_end {
-                    let filled = layer.drafts.iter().any(|d| {
-                        d.region_id == *region_id
-                            && d.cell_row == row
-                            && d.cell_col == col
-                            && !matches!(d.value, calp::writeback::SubmissionValue::Empty)
-                    });
-                    if !filled {
-                        missing.push(format!("({}, {})", row + 1, col + 1));
-                    }
+    let Some(decl) = decl.as_ref() else {
+        return Err(format!(
+            "Cannot submit to region '{}': its declaration could not be verified in {} v{}. \
+             The package manifest may have changed or failed signature verification — \
+             refresh the subscription and try again.",
+            region_id, package_name, resolved_version
+        ));
+    };
+    // COMPLETENESS (P1): a region the publisher marked `required` must have
+    // every cell filled before submit — otherwise a contributor can submit a
+    // partial mandatory region (2 of 5 line items) believing they're done.
+    if decl.schema.as_ref().map(|s| s.required).unwrap_or(false) {
+        let sel = &decl.selector;
+        let layer = state.writeback_layer.lock().map_err(|e| e.to_string())?;
+        let mut missing = Vec::new();
+        for row in sel.row_start..=sel.row_end {
+            for col in sel.col_start..=sel.col_end {
+                let filled = layer.drafts.iter().any(|d| {
+                    d.region_id == *region_id
+                        && d.cell_row == row
+                        && d.cell_col == col
+                        && !matches!(d.value, calp::writeback::SubmissionValue::Empty)
+                });
+                if !filled {
+                    missing.push(format!("({}, {})", row + 1, col + 1));
                 }
             }
-            if !missing.is_empty() {
-                let shown: Vec<String> = missing.iter().take(10).cloned().collect();
-                let more = if missing.len() > 10 {
-                    format!(" (+{} more)", missing.len() - 10)
-                } else {
-                    String::new()
-                };
-                return Err(format!(
-                    "This region is required — fill every cell before submitting. Missing {} cell(s): {}{}.",
-                    missing.len(),
-                    shown.join(", "),
-                    more
-                ));
-            }
         }
-        for sub in &to_submit {
-            if let Some(schema) = &decl.schema {
-                schema.validate(&sub.value).map_err(|msg| {
-                    format!(
-                        "Submission for cell ({}, {}) failed validation: {}",
-                        sub.cell_row, sub.cell_col, msg
-                    )
-                })?;
-            }
-            // Lifecycle (deadline / one-shot / locked). One-shot & locked
-            // consult the authoritative registry record; others ignore the flag.
-            let already_submitted = matches!(
-                decl.lifecycle,
-                Some(calp::writeback::LifecyclePolicy::Never)
-                    | Some(calp::writeback::LifecyclePolicy::RequiresUnlock)
-            ) && registry_has_own_submission(state, region_id, sub.cell_row, sub.cell_col);
-            check_lifecycle_policy(decl, already_submitted, &now)?;
+        if !missing.is_empty() {
+            let shown: Vec<String> = missing.iter().take(10).cloned().collect();
+            let more = if missing.len() > 10 {
+                format!(" (+{} more)", missing.len() - 10)
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "This region is required — fill every cell before submitting. Missing {} cell(s): {}{}.",
+                missing.len(),
+                shown.join(", "),
+                more
+            ));
         }
+    }
+    for sub in &to_submit {
+        if let Some(schema) = &decl.schema {
+            schema.validate(&sub.value).map_err(|msg| {
+                format!(
+                    "Submission for cell ({}, {}) failed validation: {}",
+                    sub.cell_row, sub.cell_col, msg
+                )
+            })?;
+        }
+        // Lifecycle (deadline / one-shot / locked). One-shot & locked
+        // consult the authoritative registry record; others ignore the flag.
+        let already_submitted = matches!(
+            decl.lifecycle,
+            Some(calp::writeback::LifecyclePolicy::Never)
+                | Some(calp::writeback::LifecyclePolicy::RequiresUnlock)
+        ) && registry_has_own_submission(state, region_id, sub.cell_row, sub.cell_col);
+        check_lifecycle_policy(decl, already_submitted, &now)?;
     }
 
     for sub in &to_submit {
@@ -6153,12 +6288,23 @@ pub fn calp_export_package_html(
     calp::render_package_html(&registry, &package_name, &version, &opts).map_err(|e| e.to_string())
 }
 
-/// Authorize a PUBLISHER-only writeback action (approve/reject) against a
-/// package version. Proof of publisher ownership is possession of the Ed25519
-/// signing key whose public key the SIGNED version manifest asserts as
-/// `publisher_key`: the publisher's machine has `publisher-key.json` in its
-/// profile dir (written by the first publish), a subscriber does not, and a
-/// different publisher's key won't match. Returns a user-facing error otherwise.
+/// Authorize a PUBLISHER-only writeback action against a package version —
+/// both the review actions (approve/reject) and the "see all submissions"
+/// reads (dashboard load, CSV/Parquet export). Proof of publisher ownership is
+/// possession of the Ed25519 signing key whose public key the SIGNED version
+/// manifest asserts as `publisher_key`: the publisher's machine has
+/// `publisher-key.json` in its profile dir (written by the first publish), a
+/// subscriber does not, and a different publisher's key won't match. Returns a
+/// user-facing error otherwise.
+///
+/// Reads need this as much as writes do. A region's contributors are shown a
+/// [`calp::writeback::VisibilityPolicy`] — `own_only` promises that only the
+/// publisher sees everyone's answers — and the cross-submitter loaders below
+/// deliberately bypass the per-subscriber GATHER filtering because "a region's
+/// owner manages all of it". Without this gate that bypass was available to
+/// every subscriber holding the workbook, so the promise was not kept.
+/// "They can read the shared registry folder anyway" is not a defense: the
+/// app must not be the tool that does it.
 fn require_publisher(
     registry: &dyn calp::RegistryTransport,
     package_name: &str,
@@ -6176,10 +6322,21 @@ fn require_publisher(
         Ok(())
     } else {
         Err(format!(
-            "Only the publisher of '{}' can approve or reject writeback submissions.",
+            "Only the publisher of '{}' can view or manage its writeback submissions.",
             package_name
         ))
     }
+}
+
+/// Resolve a grid writeback region's owning subscription and assert the caller
+/// is that package's publisher. Shared by the dashboard load and both exports,
+/// so all three enforce identically.
+fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
+    let (package_name, resolved_version, registry_path) =
+        owning_subscription_for_region(state, region_id)?;
+    let registry =
+        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    require_publisher(&*registry, &package_name, &resolved_version)
 }
 
 /// Resolve the subscription that declares a model writeback column, returning
@@ -6332,6 +6489,8 @@ pub(crate) fn submit_model_writeback(
 }
 
 /// List a model writeback column's registry submissions (publisher review).
+/// PUBLISHER-GATED, matching `calp_set_model_submission_state`: this returns
+/// every submitter's raw values and identity for the column.
 #[tauri::command]
 pub fn calp_list_model_submissions(
     state: State<AppState>,
@@ -6343,6 +6502,9 @@ pub fn calp_list_model_submissions(
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
     let registry =
         crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    // AUTHORIZATION (parity with calp_set_model_submission_state): this returns
+    // EVERY submitter's raw values and identity for the column. Publisher only.
+    require_publisher(&*registry, &package_name, &resolved_version)?;
     let mut subs: Vec<calp::writeback::WritebackSubmission> = registry
         .load_current_submissions(&package_name, &resolved_version)
         .map_err(|e| e.to_string())?
@@ -6607,9 +6769,12 @@ pub struct RegionSubmissionInfo {
 /// Load EVERY submission for a writeback region across all submitters — the
 /// publisher's "see all" view for the data-collection dashboard (D5). Unlike the
 /// GATHER path, this is not filtered by per-subscriber visibility: a region's
-/// owner manages all of it. Resolves the owning subscription (package + version +
-/// registry) for the region, then collects the current record per (submitter,
-/// cell) slot across the resolved version and older ones (lenient carry-forward).
+/// owner manages all of it — which is why it is PUBLISHER-GATED. Without that
+/// gate the visibility bypass was reachable by every subscriber holding the
+/// workbook, breaking the `own_only` promise the contributor was shown.
+/// Resolves the owning subscription (package + version + registry) for the
+/// region, then collects the current record per (submitter, cell) slot across
+/// the resolved version and older ones (lenient carry-forward).
 #[tauri::command]
 pub fn calp_load_region_submissions(
     state: State<AppState>,
@@ -6617,6 +6782,9 @@ pub fn calp_load_region_submissions(
     window: tauri::Window,
 ) -> Result<Vec<RegionSubmissionInfo>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // AUTHORIZATION: this is the cross-submitter "see all" view — publisher
+    // only, matching approve/reject. Gate BEFORE reading anything.
+    require_region_publisher(&state, &region_id)?;
     let infos = load_region_submission_infos(&state, &region_id)?;
     // Publisher-side, best-effort rollup freshness: submissions arrive while
     // the publisher only reads, so the inbox load keeps the parquet current
@@ -6734,7 +6902,8 @@ fn csv_escape(s: &str) -> String {
 /// Export every submission for a writeback region as CSV text — the publisher's
 /// data-collection output, so collected values can be pivoted / reconciled /
 /// archived instead of being trapped behind the dashboard list. The frontend
-/// saves the returned string as a .csv file.
+/// saves the returned string as a .csv file. PUBLISHER-GATED: this is the same
+/// cross-submitter disclosure as the dashboard, in a form that leaves the app.
 #[tauri::command]
 pub fn calp_export_region_submissions_csv(
     state: State<AppState>,
@@ -6742,6 +6911,9 @@ pub fn calp_export_region_submissions_csv(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // AUTHORIZATION: an export is the same disclosure as the dashboard, in a
+    // form that leaves the app. Publisher only.
+    require_region_publisher(&state, &region_id)?;
     let rows = load_region_submission_infos(&state, &region_id)?;
     let mut out =
         String::from("submitter,submitterId,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason\n");
@@ -6909,7 +7081,8 @@ fn encode_submissions_parquet(
 
 /// Export every submission for a writeback region as Parquet bytes (typed,
 /// columnar — directly readable by DuckDB / Snowflake / Spark / pandas /
-/// Polars). The frontend saves the bytes as a `.parquet` file.
+/// Polars). The frontend saves the bytes as a `.parquet` file. PUBLISHER-GATED,
+/// like the CSV export.
 #[tauri::command]
 pub fn calp_export_region_submissions_parquet(
     state: State<AppState>,
@@ -6917,6 +7090,8 @@ pub fn calp_export_region_submissions_parquet(
     window: tauri::Window,
 ) -> Result<Vec<u8>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // AUTHORIZATION: same disclosure as the CSV export. Publisher only.
+    require_region_publisher(&state, &region_id)?;
     let subs = load_region_current_submissions(&state, &region_id)?;
     encode_submissions_parquet(&subs)
 }
@@ -7068,6 +7243,8 @@ pub struct RegionResponseStatus {
 /// publisher's "7 of 12 submitted / chase the rest" view. Matches each declared
 /// expected respondent case-insensitively against any submitter's display name
 /// or id (with a substring fallback so "Alice" matches "Alice (North)").
+/// PUBLISHER-GATED: `responded` names every contributor, so this is the same
+/// cross-submitter disclosure as the inbox, merely aggregated.
 #[tauri::command]
 pub fn calp_region_response_status(
     state: State<AppState>,
@@ -7079,6 +7256,10 @@ pub fn calp_region_response_status(
         owning_subscription_for_region(&state, &region_id)?;
     let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
+    // AUTHORIZATION: `responded` names every contributor across all submitters
+    // — the same cross-submitter disclosure as the inbox, just aggregated.
+    // Publisher only.
+    require_publisher(&*registry, &package_name, &resolved_version)?;
 
     let expected: Vec<String> = registry
         .get_version_manifest(&package_name, &resolved_version)
@@ -7858,6 +8039,56 @@ mod gather_governance_tests {
         );
         assert_eq!(st.missing, vec!["Carol".to_string()]);
         assert_eq!(st.responded, vec!["Alice (North)".to_string(), "Bob".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod audit_summary_tests {
+    //! `summarize_ids` bounds the audit description a refresh writes when it
+    //! invalidates writeback regions — a 200-region package must not produce a
+    //! 200-id line in the workbook's audit log.
+    use super::summarize_ids;
+
+    #[test]
+    fn summarize_ids_empty() {
+        assert_eq!(summarize_ids(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn summarize_ids_lists_all_when_short() {
+        assert_eq!(summarize_ids(["a", "b", "c"].into_iter()), "a, b, c");
+    }
+
+    #[test]
+    fn summarize_ids_truncates_with_remainder_count() {
+        // Zero-padded so lexicographic order (what summarize_ids applies) and
+        // numeric order agree, keeping the expectation readable.
+        let ids: Vec<String> = (0..12).map(|i| format!("r{:02}", i)).collect();
+        let out = summarize_ids(ids.iter().map(|s| s.as_str()));
+        assert_eq!(out, "r00, r01, r02, r03, r04, r05, r06, r07, +4 more");
+    }
+
+    #[test]
+    fn summarize_ids_exactly_at_cap_has_no_tail() {
+        let ids: Vec<String> = (0..8).map(|i| format!("r{}", i)).collect();
+        let out = summarize_ids(ids.iter().map(|s| s.as_str()));
+        assert!(!out.contains("more"), "no tail expected at the cap: {}", out);
+    }
+
+    #[test]
+    fn summarize_ids_is_order_independent() {
+        // Callers pass HashSet iterators; the same set must always render the
+        // same string (and pick the same 8) no matter the iteration order.
+        let forward = summarize_ids(["c", "a", "b"].into_iter());
+        let reverse = summarize_ids(["b", "c", "a"].into_iter());
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, "a, b, c");
+
+        let many: Vec<String> = (0..12).map(|i| format!("r{:02}", i)).collect();
+        let asc = summarize_ids(many.iter().map(|s| s.as_str()));
+        let desc = summarize_ids(many.iter().rev().map(|s| s.as_str()));
+        assert_eq!(asc, desc);
+        assert!(asc.starts_with("r00, r01"), "{}", asc);
     }
 }
 

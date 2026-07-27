@@ -2727,6 +2727,11 @@ pub fn new_file(
     *state.writeback_index.lock().map_err(|e| e.to_string())? =
         calp::WritebackIndex::default();
     state.writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
+    // The MODEL writeback mirror must be cleared with its grid sibling: new_file
+    // does not call rebuild_writeback_index, so a stale set would survive into
+    // the blank workbook and make the next refresh diff report the PREVIOUS
+    // workbook's columns as removed.
+    state.model_writeback_declarations.lock().map_err(|e| e.to_string())?.clear();
     state.writeback_draft_regions.lock().map_err(|e| e.to_string())?.clear();
 
     // Clear user files

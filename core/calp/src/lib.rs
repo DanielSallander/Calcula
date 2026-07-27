@@ -40,4 +40,7 @@ pub use registry::LocalRegistry;
 pub use transport::RegistryTransport;
 pub use version::{VersionPin, SemVer};
 pub use fold::fold_submissions;
-pub use writeback::{ReviewEvent, WritebackIndex, WritebackRegionDeclaration, WritebackRegionEntry};
+pub use writeback::{
+    ModelWritebackDeclaration, ReviewEvent, WritebackIndex, WritebackRegionDeclaration,
+    WritebackRegionEntry,
+};

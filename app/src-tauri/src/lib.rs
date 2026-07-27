@@ -372,6 +372,12 @@ pub struct AppState {
     pub writeback_index: Mutex<calp::WritebackIndex>,
     /// Full writeback region declarations (for schema validation lookups).
     pub writeback_declarations: Mutex<Vec<calp::WritebackRegionDeclaration>>,
+    /// Full MODEL writeback COLUMN declarations, mirrored from the same
+    /// signature-verified manifests as `writeback_declarations`. Model
+    /// writebacks carry no local drafts, so this exists to give refresh a
+    /// pre/post snapshot: a column that disappears or narrows silently stops
+    /// counting collected submissions, and the user has to be told.
+    pub model_writeback_declarations: Mutex<Vec<calp::ModelWritebackDeclaration>>,
     /// Subscriber identity for writeback submissions.
     pub subscriber_identity: Mutex<Option<calp::SubmitterIdentity>>,
     /// Central cell identity registry for stable CellId tracking.
@@ -522,6 +528,7 @@ pub fn create_app_state() -> AppState {
         audit_log: Mutex::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
         writeback_declarations: Mutex::new(Vec::new()),
+        model_writeback_declarations: Mutex::new(Vec::new()),
         gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
