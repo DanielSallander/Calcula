@@ -115,26 +115,30 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSheet);
 
-  // 7. Subscribe to structure changes (refresh after row/col insert/delete)
-  const unsubRowsInserted = context.events.on(AppEvents.ROWS_INSERTED, () => {
-    refreshAnnotationState();
-  });
-  cleanupFns.push(unsubRowsInserted);
-
-  const unsubColsInserted = context.events.on(AppEvents.COLUMNS_INSERTED, () => {
-    refreshAnnotationState();
-  });
-  cleanupFns.push(unsubColsInserted);
-
-  const unsubRowsDeleted = context.events.on(AppEvents.ROWS_DELETED, () => {
-    refreshAnnotationState();
-  });
-  cleanupFns.push(unsubRowsDeleted);
-
-  const unsubColsDeleted = context.events.on(AppEvents.COLUMNS_DELETED, () => {
-    refreshAnnotationState();
-  });
-  cleanupFns.push(unsubColsDeleted);
+  // 7. Subscribe to structure changes (refresh after row/col insert/delete).
+  //
+  // STRUCTURAL_UNDO is in the set because undoing an insert moves the comments
+  // and notes back — without it the triangles stayed at their post-insert cells
+  // until something else happened to refresh them. Its payload carries no
+  // coordinates, so the only correct response is a re-fetch.
+  //
+  // The repaint matters as much as the refetch: refreshAnnotationState is async
+  // and the indicators are painted from its cache, so a frame drawn before it
+  // resolves still shows the old triangles.
+  const onAnnotationsStale = () => {
+    void refreshAnnotationState().then(() => {
+      context.events.emit(AppEvents.GRID_REFRESH);
+    });
+  };
+  for (const evt of [
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanupFns.push(context.events.on(evt, onAnnotationsStale));
+  }
 
   // 8. Register context menu items
   registerAnnotationContextMenuItems();

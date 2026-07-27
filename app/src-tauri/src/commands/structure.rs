@@ -428,6 +428,191 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
     }
 }
 
+/// Move every per-sheet RANGE-keyed store through a structural edit.
+///
+/// Conditional formats and data validations remember RECTANGLES rather than
+/// single cells, so they need [`coord_shift::shift_range`] rather than
+/// `shift_cell` — but the failure was the same: insert a row above a formatted
+/// range and the highlight stayed on the old rows, now colouring different data.
+///
+/// A rule/validation whose every range was deleted is dropped entirely.
+///
+/// The caller must already hold the undo-stack lock inside `begin_transaction`.
+fn shift_per_sheet_range_stores(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use crate::commands::coord_shift::{shift_range, CellRange};
+
+    // --- Conditional formats: each rule owns a LIST of ranges. ---
+    if let Ok(mut store) = state.conditional_formats.lock() {
+        if let Some(rules) = store.get_mut(&sheet_index) {
+            if !rules.is_empty() {
+                let previous = rules.clone();
+                let mut changed = false;
+
+                rules.retain_mut(|rule| {
+                    let before_len = rule.ranges.len();
+                    rule.ranges.retain_mut(|r| {
+                        let shifted = shift_range(
+                            CellRange {
+                                start_row: r.start_row,
+                                end_row: r.end_row,
+                                start_col: r.start_col,
+                                end_col: r.end_col,
+                            },
+                            edit,
+                        );
+                        match shifted {
+                            Some(n) => {
+                                if (n.start_row, n.end_row, n.start_col, n.end_col)
+                                    != (r.start_row, r.end_row, r.start_col, r.end_col)
+                                {
+                                    changed = true;
+                                    r.start_row = n.start_row;
+                                    r.end_row = n.end_row;
+                                    r.start_col = n.start_col;
+                                    r.end_col = n.end_col;
+                                }
+                                true
+                            }
+                            None => {
+                                changed = true;
+                                false
+                            }
+                        }
+                    });
+                    if rule.ranges.len() != before_len {
+                        changed = true;
+                    }
+                    // A rule with no ranges left applies to nothing.
+                    if rule.ranges.is_empty() {
+                        // Mark changed even when the rule ARRIVED range-less:
+                        // the retain below still drops it, and without this the
+                        // undo entry is skipped and the rule is unrecoverable.
+                        changed = true;
+                        return false;
+                    }
+                    true
+                });
+
+                if changed {
+                    undo_stack.record_custom_restore(
+                        "obj_conditional_formats".to_string(),
+                        crate::undo_commands::conditional_formats_snapshot_bytes(
+                            sheet_index,
+                            previous,
+                        ),
+                        "Shift conditional formats",
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Data validations: one range each. ---
+    if let Ok(mut store) = state.data_validations.lock() {
+        if let Some(ranges) = store.get_mut(&sheet_index) {
+            if !ranges.is_empty() {
+                let previous = ranges.clone();
+                let mut changed = false;
+
+                ranges.retain_mut(|v| {
+                    let shifted = shift_range(
+                        CellRange {
+                            start_row: v.start_row,
+                            end_row: v.end_row,
+                            start_col: v.start_col,
+                            end_col: v.end_col,
+                        },
+                        edit,
+                    );
+                    match shifted {
+                        Some(n) => {
+                            if (n.start_row, n.end_row, n.start_col, n.end_col)
+                                != (v.start_row, v.end_row, v.start_col, v.end_col)
+                            {
+                                changed = true;
+                                v.start_row = n.start_row;
+                                v.end_row = n.end_row;
+                                v.start_col = n.start_col;
+                                v.end_col = n.end_col;
+                            }
+                            true
+                        }
+                        None => {
+                            changed = true;
+                            false
+                        }
+                    }
+                });
+
+                if changed {
+                    undo_stack.record_custom_restore(
+                        "obj_validation".to_string(),
+                        crate::undo_commands::validation_snapshot_bytes(sheet_index, previous),
+                        "Shift data validations",
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Move the ACTIVE sheet's merged regions through a structural edit.
+///
+/// Deliberately records NO undo entry: `capture_grid_snapshot` (the first
+/// statement of every structural command) already copies the whole merge set
+/// into the `GridSnapshot`, and undo restores it wholesale. Adding a second
+/// restore would double-apply against that snapshot in the same transaction.
+/// For the same reason this MUST run after `capture_grid_snapshot`, or the
+/// snapshot would capture post-shift geometry and undo would be a no-op.
+///
+/// Only the active-sheet mirror is touched — `all_merged_regions[active]` is
+/// stale by design until the next sheet switch.
+fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit) {
+    use crate::commands::coord_shift::{shift_range, CellRange};
+
+    let Ok(mut merges) = state.merged_regions.lock() else {
+        return;
+    };
+    if merges.is_empty() {
+        return;
+    }
+
+    let shifted: std::collections::HashSet<crate::api_types::MergedRegion> = merges
+        .iter()
+        .filter_map(|m| {
+            let n = shift_range(
+                CellRange {
+                    start_row: m.start_row,
+                    end_row: m.end_row,
+                    start_col: m.start_col,
+                    end_col: m.end_col,
+                },
+                edit,
+            )?;
+            // A merge that shrank to a single cell must be DROPPED, not kept:
+            // `merge_cells` refuses to create a 1x1, the renderer skips spans
+            // of 1 so it would be invisible, yet it would still block future
+            // merges over that cell and make xlsx export fail.
+            if n.start_row == n.end_row && n.start_col == n.end_col {
+                return None;
+            }
+            Some(crate::api_types::MergedRegion {
+                start_row: n.start_row,
+                end_row: n.end_row,
+                start_col: n.start_col,
+                end_col: n.end_col,
+            })
+        })
+        .collect();
+
+    *merges = shifted;
+}
+
 /// Move every per-sheet CELL-KEYED store through a structural edit, recording
 /// each one's pre-shift contents into the caller's already-open transaction.
 ///
@@ -968,6 +1153,13 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Conditional formats and data validations are RANGE-keyed.
+    shift_per_sheet_range_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -1070,6 +1262,12 @@ pub fn insert_rows(
     drop(grids);
     drop(grid);
     
+    // Merges follow the edit too. Deliberately AFTER the merged_regions
+    // guard above is dropped — std::sync::Mutex is not reentrant, so
+    // shifting while that guard is alive self-deadlocks. Still after
+    // capture_grid_snapshot, which is what makes undo restore them.
+    shift_merged_regions(&state, calp::writeback::StructuralEdit::RowInsert { at: row, count });
+
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_insert(&state, &pivot_state, row, count, active_sheet);
 
@@ -1184,6 +1382,13 @@ pub fn insert_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
+    // Conditional formats and data validations are RANGE-keyed.
+    shift_per_sheet_range_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
     undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
@@ -1286,6 +1491,12 @@ pub fn insert_columns(
     drop(grids);
     drop(grid);
     
+    // Merges follow the edit too. Deliberately AFTER the merged_regions
+    // guard above is dropped — std::sync::Mutex is not reentrant, so
+    // shifting while that guard is alive self-deadlocks. Still after
+    // capture_grid_snapshot, which is what makes undo restore them.
+    shift_merged_regions(&state, calp::writeback::StructuralEdit::ColInsert { at: col, count });
+
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_insert(&state, &pivot_state, col, count, active_sheet);
 
@@ -1866,6 +2077,13 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Conditional formats and data validations are RANGE-keyed.
+    shift_per_sheet_range_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -1992,6 +2210,12 @@ pub fn delete_rows(
     drop(grids);
     drop(grid);
     
+    // Merges follow the edit too. Deliberately AFTER the merged_regions
+    // guard above is dropped — std::sync::Mutex is not reentrant, so
+    // shifting while that guard is alive self-deadlocks. Still after
+    // capture_grid_snapshot, which is what makes undo restore them.
+    shift_merged_regions(&state, calp::writeback::StructuralEdit::RowDelete { at: row, count });
+
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_delete(&state, &pivot_state, row, count, active_sheet);
 
@@ -2135,6 +2359,13 @@ pub fn delete_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
+    // Conditional formats and data validations are RANGE-keyed.
+    shift_per_sheet_range_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted columns
@@ -2261,6 +2492,12 @@ pub fn delete_columns(
     drop(grids);
     drop(grid);
     
+    // Merges follow the edit too. Deliberately AFTER the merged_regions
+    // guard above is dropped — std::sync::Mutex is not reentrant, so
+    // shifting while that guard is alive self-deadlocks. Still after
+    // capture_grid_snapshot, which is what makes undo restore them.
+    shift_merged_regions(&state, calp::writeback::StructuralEdit::ColDelete { at: col, count });
+
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_delete(&state, &pivot_state, col, count, active_sheet);
 

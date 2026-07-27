@@ -56,6 +56,56 @@ pub fn shift_cell(row: u32, col: u32, edit: StructuralEdit) -> Option<(u32, u32)
     }
 }
 
+/// A rectangular range, inclusive on both ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellRange {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start_col: u32,
+    pub end_col: u32,
+}
+
+/// Where a range ends up after `edit`, or `None` when the edit deleted every
+/// row or every column it covered.
+///
+/// The range analogue of [`shift_cell`], and the second of the two shapes these
+/// stores come in: conditional formats, data validations and merged regions all
+/// remember a RECTANGLE rather than a single cell.
+///
+/// Delegates to the same 1-D interval math the writeback-region and AutoFilter
+/// shifts use, so a rectangle and a cell inside it can never disagree about
+/// where the edit put them.
+///
+/// A row edit only moves the row interval and a column edit only the column
+/// interval — an insert far to the right cannot move a range down.
+pub fn shift_range(range: CellRange, edit: StructuralEdit) -> Option<CellRange> {
+    use calp::writeback::{interval_delete, interval_insert};
+    let mut out = range;
+    match edit {
+        StructuralEdit::RowInsert { at, count } => {
+            let (s, e) = interval_insert(range.start_row, range.end_row, at, count);
+            out.start_row = s;
+            out.end_row = e;
+        }
+        StructuralEdit::ColInsert { at, count } => {
+            let (s, e) = interval_insert(range.start_col, range.end_col, at, count);
+            out.start_col = s;
+            out.end_col = e;
+        }
+        StructuralEdit::RowDelete { at, count } => {
+            let (s, e) = interval_delete(range.start_row, range.end_row, at, count)?;
+            out.start_row = s;
+            out.end_row = e;
+        }
+        StructuralEdit::ColDelete { at, count } => {
+            let (s, e) = interval_delete(range.start_col, range.end_col, at, count)?;
+            out.start_col = s;
+            out.end_col = e;
+        }
+    }
+    Some(out)
+}
+
 /// A stored value that ALSO remembers its own cell position.
 ///
 /// Several of these stores duplicate the coordinate: it is the map key AND a
@@ -216,6 +266,55 @@ mod tests {
             for count in 1..20u32 {
                 let _ = shift_cell(7, 7, row_delete(at, count));
                 let _ = shift_cell(7, 7, col_delete(at, count));
+            }
+        }
+    }
+
+    // --- Range shift ---
+
+    fn rng(sr: u32, er: u32, sc: u32, ec: u32) -> CellRange {
+        CellRange { start_row: sr, end_row: er, start_col: sc, end_col: ec }
+    }
+
+    #[test]
+    fn range_row_insert_shifts_or_grows() {
+        // Above the range: pushed down whole.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_insert(5, 2)), Some(rng(12, 22, 0, 3)));
+        // Inside: grows.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_insert(15, 2)), Some(rng(10, 22, 0, 3)));
+        // Below: untouched.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_insert(50, 2)), Some(rng(10, 20, 0, 3)));
+    }
+
+    #[test]
+    fn range_col_edit_does_not_move_rows() {
+        // A column insert must not touch the row interval, and vice versa.
+        assert_eq!(shift_range(rng(10, 20, 5, 8), col_insert(0, 3)), Some(rng(10, 20, 8, 11)));
+        assert_eq!(shift_range(rng(10, 20, 5, 8), row_insert(0, 3)), Some(rng(13, 23, 5, 8)));
+    }
+
+    #[test]
+    fn range_delete_clips_and_removes() {
+        // Wholly inside the deleted rows -> gone.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_delete(5, 30)), None);
+        // Wholly inside the deleted cols -> gone.
+        assert_eq!(shift_range(rng(10, 20, 5, 8), col_delete(0, 20)), None);
+        // Spanning: shrinks.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_delete(12, 3)), Some(rng(10, 17, 0, 3)));
+        // Entirely after: pulled back.
+        assert_eq!(shift_range(rng(10, 20, 0, 3), row_delete(0, 5)), Some(rng(5, 15, 0, 3)));
+    }
+
+    #[test]
+    fn range_shift_never_inverts() {
+        for at in 0..25u32 {
+            for count in 1..25u32 {
+                for edit in [row_delete(at, count), col_delete(at, count)] {
+                    if let Some(r) = shift_range(rng(10, 20, 5, 8), edit) {
+                        assert!(r.start_row <= r.end_row, "rows inverted: {:?} {:?}", r, edit);
+                        assert!(r.start_col <= r.end_col, "cols inverted: {:?} {:?}", r, edit);
+                    }
+                }
             }
         }
     }

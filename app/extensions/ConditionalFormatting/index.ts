@@ -161,6 +161,30 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubGrid);
 
+  // Structural edits: the backend now SHIFTS rule ranges through row/column
+  // insert & delete, so the cached `rules` must be re-read — invalidateCache()
+  // alone only re-evaluates and leaves `state.rules` holding pre-shift ranges,
+  // which makes findMatchingRuleId attach the wrong rule to data bars and icon
+  // sets and shows stale ranges in the Rules Manager.
+  //
+  // STRUCTURAL_UNDO is included because a pure structural undo carries no
+  // updated cells, so the cellEvents path above never fires for it.
+  const onRulesStale = () => {
+    refreshRules().then(() => {
+      const vp = getCurrentViewportBounds();
+      evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
+    });
+  };
+  for (const evt of [
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanupFns.push(context.events.on(evt, onRulesStale));
+  }
+
   // 7. Initial load with actual viewport bounds
   refreshRules().then(() => {
     const vp = getCurrentViewportBounds();

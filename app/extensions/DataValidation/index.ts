@@ -235,6 +235,30 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubCells);
 
+  // Structural edits: the backend now SHIFTS validation ranges through
+  // row/column insert & delete, so the cached ranges (and the per-cell dropdown
+  // / invalid-circle grid regions built from them) must be re-read. A pure
+  // structural UNDO carries no updated cells, so the cellEvents path above
+  // never fires for it — hence STRUCTURAL_UNDO here.
+  //
+  // Any open dropdown or prompt is anchored to a pre-shift cell, so close it.
+  const onValidationStale = () => {
+    hideOverlay(DROPDOWN_OVERLAY_ID);
+    hideOverlay(PROMPT_OVERLAY_ID);
+    setOpenDropdownCell(null);
+    setPromptState(false, null);
+    refreshValidationState();
+  };
+  for (const evt of [
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanupFns.push(context.events.on(evt, onValidationStale));
+  }
+
   // 11. Load initial validation state
   refreshValidationState();
 

@@ -10,6 +10,7 @@ import {
   registerCellClickInterceptor,
   registerCellCursorInterceptor,
   emitAppEvent,
+  onAppEvent,
   AppEvents,
   registerMenuItem,
   gridExtensions,
@@ -305,14 +306,27 @@ function activate(context: ExtensionContext): void {
   // 3. Load initial indicators
   refreshIndicators();
 
-  // 4. Refresh indicators on sheet change or data change
-  const onSheetChange = () => { refreshIndicators(); };
-  window.addEventListener(AppEvents.SHEET_CHANGED, onSheetChange);
-  window.addEventListener(AppEvents.DATA_CHANGED, onSheetChange);
-  cleanups.push(() => {
-    window.removeEventListener(AppEvents.SHEET_CHANGED, onSheetChange);
-    window.removeEventListener(AppEvents.DATA_CHANGED, onSheetChange);
-  });
+  // 4. Refresh indicators whenever the cached coordinates could have moved.
+  //
+  // The backend now SHIFTS hyperlinks through row/column insert & delete, so a
+  // cache that only listened for SHEET_CHANGED/DATA_CHANGED went stale on every
+  // structural edit — and this cache decides where the pointer cursor shows,
+  // where Ctrl+click follows, and which cell the context menu edits. A stale
+  // entry therefore offers "Open Hyperlink" on a cell that has none.
+  // STRUCTURAL_UNDO is included because its payload carries no coordinates, so
+  // the only correct response is a re-fetch. Mirrors AutoFilter's event set.
+  const onIndicatorsStale = () => { refreshIndicators(); };
+  for (const evt of [
+    AppEvents.SHEET_CHANGED,
+    AppEvents.DATA_CHANGED,
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanups.push(onAppEvent(evt, onIndicatorsStale));
+  }
 
   // 5. Track current selection for keyboard shortcut
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

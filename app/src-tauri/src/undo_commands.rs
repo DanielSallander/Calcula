@@ -662,6 +662,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_object_scripts",
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks", "obj_cell_protection",
+        "obj_conditional_formats",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1854,6 +1855,42 @@ struct ValidationObjSnapshot {
     previous: Vec<crate::data_validation::ValidationRange>,
 }
 
+/// Serialized "obj_validation" snapshot bytes for callers recording into an
+/// already-open transaction (same contract as `cell_types_snapshot_bytes`).
+pub(crate) fn validation_snapshot_bytes(
+    sheet_index: usize,
+    previous: Vec<crate::data_validation::ValidationRange>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ValidationObjSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
+/// Snapshot for the "obj_conditional_formats" CustomRestore — one sheet's whole
+/// rule list before the mutation.
+///
+/// Whole-sheet Vec swap because the Vec ORDER is evaluation semantics
+/// (`priority` ordering, and `stop_if_true` breaks the loop), so restoring
+/// rules individually could not reproduce it.
+///
+/// This is the FIRST undo entry conditional formatting has ever had — the CF
+/// commands themselves record none (tracked as BUG-0020). It exists so a
+/// structural shift of rule ranges is undoable; it does not make add/update/
+/// delete undoable.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ConditionalFormatsObjSnapshot {
+    sheet_index: usize,
+    previous: Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+}
+
+/// Serialized "obj_conditional_formats" snapshot bytes (in-open-transaction
+/// contract, as above).
+pub(crate) fn conditional_formats_snapshot_bytes(
+    sheet_index: usize,
+    previous: Vec<crate::conditional_formatting::ConditionalFormatDefinition>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ConditionalFormatsObjSnapshot { sheet_index, previous })
+        .unwrap_or_default()
+}
+
 /// Snapshot for the "obj_cell_types" CustomRestore — every cell-type
 /// assignment on one sheet BEFORE the mutation; restore swaps the sheet's
 /// assignments wholesale (same shape as obj_validation).
@@ -2197,6 +2234,19 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
+        }
+        "obj_conditional_formats" => {
+            let snap: ConditionalFormatsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_conditional_formats snapshot: {}", e); return; }
+            };
+            let mut store = state.conditional_formats.lock().unwrap();
+            let current = store.remove(&snap.sheet_index).unwrap_or_default();
+            push_obj_inverse(inverse_transaction, kind, &ConditionalFormatsObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            store.insert(snap.sheet_index, snap.previous);
         }
         "obj_comments" => {
             let mut store = state.comments.lock().unwrap();
@@ -2551,6 +2601,7 @@ mod restore_registry_tests {
             ("obj_notes", true, CustomRestoreKind::Objects),
             ("obj_hyperlinks", true, CustomRestoreKind::Objects),
             ("obj_cell_protection", true, CustomRestoreKind::Objects),
+            ("obj_conditional_formats", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];
