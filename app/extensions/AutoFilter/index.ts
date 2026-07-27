@@ -241,6 +241,26 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(onAppEvent(AppEvents.TABLE_CREATED, handleTableChanged));
   cleanupFns.push(onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableChanged));
 
+  // Structural edits MOVE the filter in the backend, so the cached range here
+  // must be re-read or the two disagree. That disagreement is not cosmetic:
+  // chevron clicks send a column index RELATIVE to the cached start_col, which
+  // the backend resolves against its own (shifted) start_col — so a stale cache
+  // silently filters a different column than the one the user clicked.
+  const handleStructuralChange = () => {
+    hideOverlay(OVERLAY_ID);
+    setOpenDropdownCol(null);
+    refreshFilterState();
+  };
+  for (const evt of [
+    AppEvents.ROWS_INSERTED,
+    AppEvents.COLUMNS_INSERTED,
+    AppEvents.ROWS_DELETED,
+    AppEvents.COLUMNS_DELETED,
+    AppEvents.STRUCTURAL_UNDO,
+  ]) {
+    cleanupFns.push(onAppEvent(evt, handleStructuralChange));
+  }
+
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(sel);
   });

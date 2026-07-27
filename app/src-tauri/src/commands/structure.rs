@@ -428,6 +428,166 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
     }
 }
 
+/// Track the sheet's AutoFilter through a structural edit, recording the
+/// pre-shift filter into the caller's already-open undo transaction.
+///
+/// AutoFilters were the last coordinate-anchored per-sheet object that
+/// structure edits ignored: inserting a row above a filtered table left the
+/// filter spanning the wrong rows, painted chevrons on a row that is no longer
+/// the header, and (since ownership is re-derived from geometry on reload)
+/// could permanently unlink the filter from the table that owns it.
+///
+/// `column_filters` is keyed RELATIVE to `start_col`, so a column edit that
+/// moves the origin must re-key the criteria — the same rule `resize_table`
+/// follows. Criteria for columns the edit deleted are dropped.
+///
+/// The caller must already hold the undo-stack lock inside `begin_transaction`.
+fn shift_sheet_auto_filter(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    let Ok(mut auto_filters) = state.auto_filters.lock() else {
+        return;
+    };
+    let Some(af) = auto_filters.get_mut(&sheet_index) else {
+        return;
+    };
+
+    let before = af.clone();
+    let old_start_col = af.start_col;
+
+    // Reuse the SAME 1-D interval math the writeback-region shift uses, so
+    // there is one implementation (and one exhaustive no-inversion test) rather
+    // than a second hand-rolled copy of the branch table.
+    use calp::writeback::{interval_delete, interval_insert, StructuralEdit};
+    match edit {
+        StructuralEdit::RowInsert { at, count } => {
+            let (s, e) = interval_insert(af.start_row, af.end_row, at, count);
+            af.start_row = s;
+            af.end_row = e;
+        }
+        StructuralEdit::ColInsert { at, count } => {
+            let (s, e) = interval_insert(af.start_col, af.end_col, at, count);
+            af.start_col = s;
+            af.end_col = e;
+        }
+        StructuralEdit::RowDelete { at, count } => {
+            match interval_delete(af.start_row, af.end_row, at, count) {
+                Some((s, e)) => {
+                    af.start_row = s;
+                    af.end_row = e;
+                }
+                None => {
+                    // Every row of the filter is gone, header included.
+                    auto_filters.remove(&sheet_index);
+                    drop(auto_filters);
+                    record_auto_filter_shift(undo_stack, sheet_index, before);
+                    return;
+                }
+            }
+        }
+        StructuralEdit::ColDelete { at, count } => {
+            match interval_delete(af.start_col, af.end_col, at, count) {
+                Some((s, e)) => {
+                    af.start_col = s;
+                    af.end_col = e;
+                }
+                None => {
+                    auto_filters.remove(&sheet_index);
+                    drop(auto_filters);
+                    record_auto_filter_shift(undo_stack, sheet_index, before);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Re-key criteria whenever the column origin moved, and drop any whose
+    // column no longer exists inside the filter.
+    if af.start_col != old_start_col || !af.column_filters.is_empty() {
+        let new_start = af.start_col;
+        let new_end = af.end_col;
+        let remapped: std::collections::HashMap<u32, crate::autofilter::ColumnFilter> = before
+            .column_filters
+            .iter()
+            .filter_map(|(rel, cf)| {
+                let abs = old_start_col + rel;
+                // Follow the column edit for the absolute position too.
+                let abs = match edit {
+                    calp::writeback::StructuralEdit::ColInsert { at, count } if abs >= at => {
+                        abs + count
+                    }
+                    calp::writeback::StructuralEdit::ColDelete { at, count } => {
+                        if abs >= at.saturating_add(count) {
+                            abs - count
+                        } else if abs >= at {
+                            return None; // The column itself was deleted.
+                        } else {
+                            abs
+                        }
+                    }
+                    _ => abs,
+                };
+                if abs < new_start || abs > new_end {
+                    return None;
+                }
+                let new_rel = abs - new_start;
+                let mut moved = cf.clone();
+                moved.column_index = new_rel;
+                Some((new_rel, moved))
+            })
+            .collect();
+        af.column_filters = remapped;
+    }
+
+    // Hidden rows are positional, so a ROW edit at or above the filter's last
+    // row invalidates them and they are cheapest to drop — keeping a stale set
+    // would hide the wrong data rows, which is worse than showing all of them.
+    //
+    // Anything else must NOT touch them. Clearing unconditionally silently
+    // un-filtered the sheet for edits that provably cannot move a filtered row
+    // (any column edit; a row edit entirely below the filter), leaving the
+    // criteria active with nothing hidden and no recompute anywhere to restore
+    // it — `recompute_hidden_rows` only runs from the filter-mutating commands.
+    let rows_invalidated = match edit {
+        StructuralEdit::RowInsert { at, .. } | StructuralEdit::RowDelete { at, .. } => {
+            at <= before.end_row
+        }
+        StructuralEdit::ColInsert { .. } | StructuralEdit::ColDelete { .. } => false,
+    };
+    if rows_invalidated {
+        af.hidden_rows.clear();
+    }
+
+    // Only record an undo entry when something actually moved — an edit far
+    // below/right of the filter must not push a no-op entry onto the stack.
+    let changed = af.start_row != before.start_row
+        || af.end_row != before.end_row
+        || af.start_col != before.start_col
+        || af.end_col != before.end_col
+        || af.column_filters.len() != before.column_filters.len()
+        || (rows_invalidated && !before.hidden_rows.is_empty());
+    drop(auto_filters);
+    if changed {
+        record_auto_filter_shift(undo_stack, sheet_index, before);
+    }
+}
+
+/// Record the pre-shift AutoFilter into an already-open undo transaction.
+fn record_auto_filter_shift(
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    previous: crate::autofilter::AutoFilter,
+) {
+    undo_stack.record_custom_restore(
+        "obj_autofilter".to_string(),
+        crate::undo_commands::autofilter_snapshot_bytes(sheet_index, Some(previous)),
+        "Shift AutoFilter",
+    );
+}
+
 /// Track author-side writeback DRAFT region selectors through a structural
 /// edit, recording the pre-shift list into the caller's already-open undo
 /// transaction so grid + selectors restore as one step.
@@ -744,6 +904,13 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
+    shift_sheet_auto_filter(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -941,6 +1108,13 @@ pub fn insert_columns(
     }
     // Writeback draft regions are coordinate-anchored and must track the shift.
     shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
+    shift_sheet_auto_filter(
         &state,
         &mut undo_stack,
         active_sheet,
@@ -1614,6 +1788,13 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
+    shift_sheet_auto_filter(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -1864,6 +2045,13 @@ pub fn delete_columns(
     // Writeback draft regions shrink with overlapping deletes; a region whose
     // cells are all deleted is dropped and reported.
     shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // The sheet AutoFilter is coordinate-anchored too and must follow the edit.
+    shift_sheet_auto_filter(
         &state,
         &mut undo_stack,
         active_sheet,

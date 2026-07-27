@@ -185,6 +185,11 @@ fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<us
     // freshly-minted bogus SheetId and reattaches to sheet 0 on reopen.
     remap_indexed_map(&mut state.sheet_protection.lock().unwrap(), &remap);
     remap_indexed_map(&mut state.cell_protection.lock().unwrap(), &remap);
+    // AutoFilters are sheet-index-keyed too and were the one store missing
+    // here: deleting or moving a sheet left every filter attached to the wrong
+    // index, so its criteria hid rows on an unrelated sheet and the owning
+    // table's id no longer matched anything on its own sheet.
+    remap_indexed_map(&mut state.auto_filters.lock().unwrap(), &remap);
 }
 
 // ============================================================================

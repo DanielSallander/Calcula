@@ -409,13 +409,18 @@ impl RegionShiftReport {
 /// Shift one closed interval `[start, end]` for an insert of `count` at `at`.
 /// Returns the new interval.
 ///
+/// Public because the host reuses it for every coordinate-anchored per-sheet
+/// object that must follow a structural grid edit (writeback regions, the sheet
+/// AutoFilter), so the 1-D math has exactly one implementation and one set of
+/// tests.
+///
 /// Boundary rule: an insert exactly AT `start` SHIFTS the interval rather than
 /// expanding it. This deliberately differs from the grid Table helpers, which
 /// expand — a Table is a data range that is meant to grow, whereas a writeback
 /// region is a contract about which cells collect what. Growing it silently
 /// would add a brand-new blank cell to a published form the author already
 /// reviewed; shifting keeps exactly the cells they designated.
-fn interval_insert(start: u32, end: u32, at: u32, count: u32) -> (u32, u32) {
+pub fn interval_insert(start: u32, end: u32, at: u32, count: u32) -> (u32, u32) {
     if start >= at {
         (start + count, end + count)
     } else if end >= at {
@@ -427,7 +432,7 @@ fn interval_insert(start: u32, end: u32, at: u32, count: u32) -> (u32, u32) {
 
 /// Shift one closed interval `[start, end]` for a delete of `count` at `at`.
 /// Returns `None` when the interval is entirely inside the deleted range.
-fn interval_delete(start: u32, end: u32, at: u32, count: u32) -> Option<(u32, u32)> {
+pub fn interval_delete(start: u32, end: u32, at: u32, count: u32) -> Option<(u32, u32)> {
     let del_end = at.saturating_add(count); // exclusive
     if start >= del_end {
         // Entirely after the deleted range — slide back.
@@ -2167,6 +2172,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn interval_helpers_are_public_for_host_reuse() {
+        // The host shifts its own coordinate-anchored per-sheet objects (the
+        // sheet AutoFilter) with these, so their contract is load-bearing
+        // outside this module.
+        assert_eq!(interval_insert(10, 20, 5, 3), (13, 23));
+        assert_eq!(interval_delete(10, 20, 5, 30), None);
+        assert_eq!(interval_delete(10, 20, 25, 5), Some((10, 20)));
     }
 
     // --- Selector-aware compatibility tests ---
