@@ -283,12 +283,22 @@ async function applyTableFilterForSource(
     return;
   }
 
+  // `column_filters` is keyed RELATIVE to the AutoFilter's start_col, and a
+  // table's AutoFilter starts at the table's first column — so the index within
+  // table.columns is already the right key.
+  //
+  // Both invokes below previously named a command/argument that does not exist:
+  // there is no `clear_column_filter` (it is `clear_column_criteria`), and
+  // `set_column_filter_values` requires `include_blanks`. Either one rejects at
+  // the IPC boundary, so clicking a table-sourced slicer item always threw.
   if (selectedItems === null) {
-    await slicerBackend.invoke("clear_column_filter", { columnIndex: colIndex });
+    await slicerBackend.invoke("clear_column_criteria", { columnIndex: colIndex });
   } else {
+    const includeBlanks = selectedItems.some((v) => v === "" || v === "(Blanks)");
     await slicerBackend.invoke("set_column_filter_values", {
       columnIndex: colIndex,
-      values: selectedItems,
+      values: selectedItems.filter((v) => v !== "" && v !== "(Blanks)"),
+      includeBlanks,
     });
   }
 }

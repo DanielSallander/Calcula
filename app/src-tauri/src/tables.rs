@@ -675,7 +675,7 @@ pub fn delete_table(
     };
 
     let table_name_upper = table.name.to_uppercase();
-    rewrite_table_refs_to_ranges(
+    let rewritten_cells = rewrite_table_refs_to_ranges(
         &tables,
         &table_names,
         &mut grids,
@@ -690,30 +690,70 @@ pub fn delete_table(
     }
     table_names.remove(&table_name_upper);
 
-    // Record undo (BUG-0006): the snapshot restores the deleted table.
     drop(tables);
     drop(table_names);
     drop(grids);
     drop(grid);
 
-    clear_table_auto_filter(&state, &table, active_sheet);
-
-    crate::undo_commands::record_table_undo(
-        &state,
-        active_sheet,
-        table_id,
-        Some(table),
-        "Delete table",
-    );
+    let removed_filter = clear_table_auto_filter(&state, &table, active_sheet);
 
     // C10 cleanup: prune any object scripts attached to this table so a deleted
     // table leaves no dangling scripts behind. instanceId == the table id.
     let table_id_str = table_id.to_string();
-    if let Ok(mut scripts) = state.object_scripts.lock() {
+    let scripts_before = if let Ok(mut scripts) = state.object_scripts.lock() {
+        let before = scripts.clone();
         scripts.retain(|s| {
             !(s.object_type == persistence::ScriptableObjectType::Table
                 && s.instance_id.as_deref() == Some(table_id_str.as_str()))
         });
+        if scripts.len() != before.len() { Some(before) } else { None }
+    } else {
+        None
+    };
+
+    // ONE undo transaction covering EVERY side effect. Recording only the table
+    // (BUG-0006) meant Ctrl+Z brought back a table whose AutoFilter was gone,
+    // whose scripts were gone, and whose dependents' structured references had
+    // already been flattened to plain ranges — a half-undo that looked like a
+    // successful one.
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Delete table".to_string());
+
+        // Cells first: restores run in order, and the table must exist again
+        // before anything re-resolves references into it.
+        let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
+            std::collections::HashMap::new();
+        for (sheet_idx, row, col, before) in rewritten_cells {
+            by_sheet.entry(sheet_idx).or_default().push((row, col, before));
+        }
+        for (sheet_index, cells) in by_sheet {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, cells),
+                "Restore table references",
+            );
+        }
+        if let Some(previous) = removed_filter {
+            undo_stack.record_custom_restore(
+                "obj_autofilter".to_string(),
+                crate::undo_commands::autofilter_snapshot_bytes(active_sheet, Some(previous)),
+                "Restore table filter",
+            );
+        }
+        if let Some(previous) = scripts_before {
+            undo_stack.record_custom_restore(
+                "obj_object_scripts".to_string(),
+                crate::undo_commands::object_scripts_snapshot_bytes(previous),
+                "Restore table scripts",
+            );
+        }
+        undo_stack.record_custom_restore(
+            "obj_table".to_string(),
+            crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(table)),
+            "Delete table",
+        );
+        undo_stack.commit_transaction();
     }
 
     TableResult::ok_empty()
@@ -738,6 +778,8 @@ pub fn rename_table(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
 
     // Check if new name already exists
     let upper_new = new_name.to_uppercase();
@@ -760,15 +802,33 @@ pub fn rename_table(
     // Snapshot BEFORE mutating so Ctrl+Z restores the old name (and with it the
     // name-registry entry, which the obj_table restore re-keys).
     let previous = table.clone();
+    let upper_old = table.name.to_uppercase();
 
     // Remove old name, add new name
-    table_names.remove(&table.name.to_uppercase());
+    table_names.remove(&upper_old);
     table_names.insert(upper_new, (active_sheet, table_id));
-    table.name = new_name;
+    table.name = new_name.clone();
 
     let updated = table.clone();
+
+    // Carry every dependent structured reference over to the new name.
+    // Without this the rename silently broke them: `=SUM(Old[Amount])` no
+    // longer resolves, an unresolvable table ref becomes a NamedRef, and the
+    // evaluator renders that as #NAME? — including the totals-row SUBTOTAL
+    // formulas this module writes itself.
+    let renamed_cells = rename_table_refs_in_formulas(
+        &mut grids,
+        &mut grid,
+        active_sheet,
+        &upper_old,
+        &new_name,
+    );
+
     drop(tables);
     drop(table_names);
+    drop(grids);
+    drop(grid);
+
     crate::undo_commands::record_table_undo(
         &state,
         active_sheet,
@@ -776,8 +836,73 @@ pub fn rename_table(
         Some(previous),
         "Rename table",
     );
+    if renamed_cells > 0 {
+        crate::log_info!(
+            "TABLES",
+            "Rename updated {} dependent formula cell(s) to '{}'",
+            renamed_cells,
+            new_name
+        );
+    }
 
     TableResult::ok(updated)
+}
+
+/// Point every `OldName[...]` structured reference at `new_name`, across all
+/// sheets. Returns how many cells changed.
+///
+/// Operates on the AST directly rather than round-tripping through formula
+/// text: the stored form IS the AST, so there is no re-parse that could fail
+/// and silently demote a formula cell to a value cell. Refs to other tables and
+/// bare this-row refs (`[@Col]`) are left untouched.
+fn rename_table_refs_in_formulas(
+    grids: &mut [engine::Grid],
+    grid: &mut engine::Grid,
+    active_sheet: usize,
+    old_name_upper: &str,
+    new_name: &str,
+) -> usize {
+    let mut changed_count = 0usize;
+
+    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
+        // Cheap text prefilter before parsing. A cell can only reference the
+        // old name if its formula text mentions it.
+        let candidates: Vec<(u32, u32, String)> = sheet_grid
+            .cells
+            .iter()
+            .filter_map(|(&(row, col), cell)| {
+                cell.formula_string().and_then(|f| {
+                    if f.to_uppercase().contains(old_name_upper) {
+                        Some((row, col, f))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (row, col, formula_str) in candidates {
+            let Ok(parsed) = parser::parse(&formula_str) else {
+                continue; // Unparseable — leave exactly as-is.
+            };
+            let (renamed, changed) =
+                crate::rename_table_refs_in_ast(&parsed, old_name_upper, new_name);
+            if !changed {
+                continue; // The name appeared in a string literal, not a ref.
+            }
+            if let Some(cell) = sheet_grid.get_cell(row, col) {
+                let mut updated_cell = cell.clone();
+                updated_cell.ast = Some(Box::new(renamed));
+                sheet_grid.set_cell(row, col, updated_cell.clone());
+                if sheet_idx == active_sheet {
+                    grid.set_cell(row, col, updated_cell);
+                }
+                changed_count += 1;
+            }
+        }
+    }
+
+    changed_count
 }
 
 /// Update table style options
@@ -1101,20 +1226,60 @@ pub fn resize_table(
     let min_col = params.start_col.min(params.end_col);
     let max_col = params.start_col.max(params.end_col);
 
-    let new_col_count = (max_col - min_col + 1) as usize;
-    let old_col_count = table.columns.len();
+    // Re-align columns by ABSOLUTE grid position, not by list position.
+    //
+    // Push/truncate-at-the-tail is only correct when start_col is unchanged.
+    // Extend a C:E table leftwards to A:E and the tail logic keeps [X, Y, Z]
+    // and appends two — so column A silently inherits X's name, identity and
+    // calculated-column formula, and the two brand-new columns land on D and E
+    // where Y and Z actually are. Every structured reference into the table then
+    // points at the wrong physical column.
+    //
+    // Mapping each new absolute column back to the old table preserves column
+    // identity (EntityId), name and formula wherever the ranges overlap, and
+    // mints a fresh column only where there was none.
+    let old_start_col = table.start_col;
+    let old_columns = std::mem::take(&mut table.columns);
 
-    // Adjust columns if needed
-    if new_col_count > old_col_count {
-        // Add columns
-        for i in old_col_count..new_col_count {
-            let new_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
-            table.columns.push(TableColumn::new(new_id, format!("Column{}", i + 1)));
+    // Resolve what carries over FIRST, so generated names can avoid colliding
+    // with a carried name that appears later in the range (a table whose column
+    // is literally called "Column1" would otherwise get a duplicate).
+    let carried: Vec<Option<TableColumn>> = (min_col..=max_col)
+        .map(|abs_col| {
+            if abs_col >= old_start_col {
+                old_columns.get((abs_col - old_start_col) as usize).cloned()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut used_names: std::collections::HashSet<String> = carried
+        .iter()
+        .flatten()
+        .map(|c| c.name.to_uppercase())
+        .collect();
+
+    let mut rebuilt: Vec<TableColumn> = Vec::with_capacity(carried.len());
+    for slot in carried {
+        match slot {
+            Some(existing) => rebuilt.push(existing),
+            None => {
+                // Fresh column: first ColumnN not taken by any carried or
+                // previously generated name.
+                let mut n = rebuilt.len() + 1;
+                let mut name = format!("Column{}", n);
+                while used_names.contains(&name.to_uppercase()) {
+                    n += 1;
+                    name = format!("Column{}", n);
+                }
+                used_names.insert(name.to_uppercase());
+                let new_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
+                rebuilt.push(TableColumn::new(new_id, name));
+            }
         }
-    } else if new_col_count < old_col_count {
-        // Remove columns from end
-        table.columns.truncate(new_col_count);
     }
+    table.columns = rebuilt;
 
     table.start_row = min_row;
     table.start_col = min_col;
@@ -1123,7 +1288,24 @@ pub fn resize_table(
 
     let updated = table.clone();
     let table_id = params.table_id;
+    let owns_filter = table.auto_filter_id.is_some() && table.style_options.show_filter_button;
     drop(tables);
+
+    // Keep the table's AutoFilter on the table. `check_table_auto_expand`
+    // already does this for growth; a resize moved the table out from under its
+    // filter, which left the chevrons on the old header row AND broke the
+    // ownership test that decides whether deleting the table may clear it.
+    if owns_filter {
+        if let Ok(mut auto_filters) = state.auto_filters.lock() {
+            if let Some(af) = auto_filters.get_mut(&active_sheet) {
+                af.start_row = updated.start_row;
+                af.end_row = updated.end_row;
+                af.start_col = updated.start_col;
+                af.end_col = updated.end_col;
+            }
+        }
+    }
+
     crate::undo_commands::record_table_undo(
         &state,
         active_sheet,
@@ -1152,7 +1334,9 @@ fn rewrite_table_refs_to_ranges(
     active_sheet: usize,
     table_name_upper: &str,
     target: &Table,
-) {
+) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
+    // Pre-mutation cells, so the caller can make the rewrite undoable.
+    let mut touched: Vec<(usize, u32, u32, Option<engine::Cell>)> = Vec::new();
     // SCOPE GUARD. `resolve_table_refs_in_ast` flattens EVERY table ref in an
     // expression, not just the target's, and a bare `[@Col]` names no table at
     // all — so a naive "contains the name or contains [@" filter would drag
@@ -1218,16 +1402,32 @@ fn rewrite_table_refs_to_ranges(
             let resolved = crate::resolve_table_refs_in_ast(&parsed, &ctx);
             let new_formula = format!("={}", crate::expression_to_formula(&resolved));
 
+            // A re-parse failure must NOT be swallowed: `.ok()` would leave the
+            // cell with ast: None, silently demoting a formula cell to a plain
+            // value. If we cannot produce a valid replacement, keep the original.
+            let Ok(reparsed) = parser::parse(&new_formula) else {
+                crate::log_warn!(
+                    "TABLES",
+                    "Skipped ref rewrite at sheet {} r{}c{}: '{}' did not re-parse",
+                    sheet_idx, row, col, new_formula
+                );
+                continue;
+            };
+
             if let Some(cell) = sheet_grid.get_cell(row, col) {
-                let mut updated = cell.clone();
-                updated.ast = parser::parse(&new_formula).ok().map(Box::new);
+                let before = cell.clone();
+                let mut updated = before.clone();
+                updated.ast = Some(Box::new(reparsed));
                 sheet_grid.set_cell(row, col, updated.clone());
                 if sheet_idx == active_sheet {
                     grid.set_cell(row, col, updated);
                 }
+                touched.push((sheet_idx, row, col, Some(before)));
             }
         }
     }
+
+    touched
 }
 
 /// Drop the sheet AutoFilter a table installed for its header row.
@@ -1236,27 +1436,40 @@ fn rewrite_table_refs_to_ranges(
 /// (`create_table`). Removing the table without removing that filter left a
 /// sheet-level filter nobody could see the origin of — with rows still hidden
 /// by it and no UI to clear them.
-fn clear_table_auto_filter(state: &AppState, table: &Table, sheet_index: usize) {
-    let Some(af_id) = table.auto_filter_id else {
-        return;
-    };
+/// Returns the removed filter so the caller can make the removal undoable.
+fn clear_table_auto_filter(
+    state: &AppState,
+    table: &Table,
+    sheet_index: usize,
+) -> Option<crate::autofilter::AutoFilter> {
+    let af_id = table.auto_filter_id?;
     let Ok(mut auto_filters) = state.auto_filters.lock() else {
-        return;
+        return None;
     };
-    // Only clear the filter this table owns. `auto_filter_id` is the sheet
-    // index today (see `create_table`), so also confirm the filter's range
-    // still matches the table before removing a filter the user set up
-    // independently over a different range.
+    // Only clear the filter this table owns. `auto_filter_id` is just the sheet
+    // index today (see `create_table`), i.e. "this table created the sheet's
+    // filter" — there is no real AutoFilter identity to check against.
     if af_id as usize != sheet_index {
-        return;
+        return None;
     }
+    // Given that, require only that the filter's header row still sits inside
+    // the table's rows and its columns overlap the table's. An exact top-left
+    // match is too brittle: structural row/column inserts shift table bounds
+    // without touching auto_filters at all, so an equality test would silently
+    // decline to clean up and leave an ownerless filter hiding rows.
     let matches_table = auto_filters
         .get(&sheet_index)
-        .map(|af| af.start_row == table.start_row && af.start_col == table.start_col)
+        .map(|af| {
+            af.start_row >= table.start_row
+                && af.start_row <= table.end_row
+                && af.start_col <= table.end_col
+                && af.end_col >= table.start_col
+        })
         .unwrap_or(false);
     if matches_table {
-        auto_filters.remove(&sheet_index);
+        return auto_filters.remove(&sheet_index);
     }
+    None
 }
 
 /// Convert table to range: rewrite all structured references that mention this
@@ -2010,6 +2223,140 @@ mod tests {
     #[test]
     fn test_totals_row_function_default() {
         assert_eq!(TotalsRowFunction::default(), TotalsRowFunction::None);
+    }
+
+    // --- Rename: dependent structured references must follow the table ---
+
+    fn rename_formula(formula: &str, old_upper: &str, new_name: &str) -> Option<String> {
+        let ast = parser::parse(formula).ok()?;
+        let (renamed, changed) = crate::rename_table_refs_in_ast(&ast, old_upper, new_name);
+        if !changed {
+            return None;
+        }
+        Some(format!("={}", crate::expression_to_formula(&renamed)))
+    }
+
+    #[test]
+    fn rename_rewrites_refs_to_the_renamed_table() {
+        let out = rename_formula("=SUM(Sales[Amount])", "SALES", "Revenue")
+            .expect("the ref should have been rewritten");
+        assert!(out.to_uppercase().contains("REVENUE["), "{}", out);
+        assert!(!out.to_uppercase().contains("SALES["), "{}", out);
+    }
+
+    #[test]
+    fn rename_leaves_other_tables_alone() {
+        let out = rename_formula("=SUM(Sales[Amount])+SUM(Costs[Amount])", "SALES", "Revenue")
+            .expect("changed");
+        let upper = out.to_uppercase();
+        assert!(upper.contains("REVENUE["), "{}", out);
+        // The untouched table keeps its STRUCTURED form — the rename must not
+        // flatten it to a range the way convert-to-range would.
+        assert!(upper.contains("COSTS["), "{}", out);
+    }
+
+    #[test]
+    fn rename_is_case_insensitive_on_the_old_name() {
+        assert!(rename_formula("=SUM(sAlEs[Amount])", "SALES", "Revenue").is_some());
+    }
+
+    #[test]
+    fn rename_ignores_unrelated_tables_and_reports_no_change() {
+        assert!(
+            rename_formula("=SUM(Costs[Amount])", "SALES", "Revenue").is_none(),
+            "a formula naming no matching table must report unchanged"
+        );
+    }
+
+    #[test]
+    fn rename_does_not_touch_bare_this_row_refs() {
+        // `[@Col]` carries no table name; it resolves via the containing table,
+        // which a rename does not move.
+        assert!(rename_formula("=[@Price]*2", "SALES", "Revenue").is_none());
+    }
+
+    #[test]
+    fn rename_does_not_touch_string_literals() {
+        // The prefilter is text-based, so a literal mentioning the name reaches
+        // the walker — which must leave it alone and report no change.
+        assert!(
+            rename_formula("=\"Sales[Amount]\"", "SALES", "Revenue").is_none(),
+            "a string literal is not a reference"
+        );
+    }
+
+    // --- Resize: columns re-align by ABSOLUTE position ---
+
+    /// Mirrors the column re-alignment in `resize_table` so the mapping can be
+    /// tested without standing up a full AppState.
+    fn realign(
+        old_start_col: u32,
+        old_names: &[&str],
+        min_col: u32,
+        max_col: u32,
+    ) -> Vec<String> {
+        let old_columns: Vec<TableColumn> = old_names
+            .iter()
+            .map(|n| TableColumn::new(test_id(), n.to_string()))
+            .collect();
+        let carried: Vec<Option<TableColumn>> = (min_col..=max_col)
+            .map(|abs_col| {
+                if abs_col >= old_start_col {
+                    old_columns.get((abs_col - old_start_col) as usize).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut used: std::collections::HashSet<String> = carried
+            .iter()
+            .flatten()
+            .map(|c| c.name.to_uppercase())
+            .collect();
+        let mut rebuilt: Vec<String> = Vec::new();
+        for slot in carried {
+            match slot {
+                Some(existing) => rebuilt.push(existing.name),
+                None => {
+                    let mut n = rebuilt.len() + 1;
+                    let mut name = format!("Column{}", n);
+                    while used.contains(&name.to_uppercase()) {
+                        n += 1;
+                        name = format!("Column{}", n);
+                    }
+                    used.insert(name.to_uppercase());
+                    rebuilt.push(name);
+                }
+            }
+        }
+        rebuilt
+    }
+
+    #[test]
+    fn resize_growing_left_keeps_existing_columns_on_their_own_cells() {
+        // C:E [X,Y,Z] widened to A:E. The tail-append logic used to produce
+        // [X,Y,Z,Column4,Column5] — silently moving X onto column A.
+        let cols = realign(2, &["X", "Y", "Z"], 0, 4);
+        assert_eq!(cols, vec!["Column1", "Column2", "X", "Y", "Z"]);
+    }
+
+    #[test]
+    fn resize_growing_right_appends() {
+        let cols = realign(0, &["X", "Y"], 0, 3);
+        assert_eq!(cols, vec!["X", "Y", "Column3", "Column4"]);
+    }
+
+    #[test]
+    fn resize_shrinking_from_the_left_drops_the_left_columns() {
+        let cols = realign(0, &["X", "Y", "Z"], 1, 2);
+        assert_eq!(cols, vec!["Y", "Z"]);
+    }
+
+    #[test]
+    fn resize_generated_names_do_not_collide_with_carried_ones() {
+        // A carried column literally called "Column1" must not be duplicated.
+        let cols = realign(1, &["Column1"], 0, 1);
+        assert_eq!(cols, vec!["Column2", "Column1"]);
     }
 
     #[test]

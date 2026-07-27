@@ -1614,6 +1614,107 @@ pub fn resolve_table_refs_in_ast(
     }
 }
 
+/// Rewrite the TABLE NAME of every `TableRef` naming `old_name_upper` to
+/// `new_name`, leaving the rest of the expression untouched.
+///
+/// This is what makes a table rename non-destructive. Renaming only re-keyed
+/// the name registry, so `=SUM(Old[Amount])` no longer resolved — and an
+/// unresolvable table ref degrades to a `NamedRef`, which the evaluator turns
+/// into `#NAME?`. The app's own totals-row formulas (`SUBTOTAL(109,Old[Col])`)
+/// broke the same way.
+///
+/// Unlike [`resolve_table_refs_in_ast`] this does NOT flatten anything: refs
+/// stay structured, and refs to other tables are left completely alone. Bare
+/// this-row refs (`[@Col]`, empty table name) are also untouched — they resolve
+/// via the containing table, which a rename does not change.
+///
+/// Returns `(new_ast, changed)`.
+pub fn rename_table_refs_in_ast(
+    ast: &ParserExpr,
+    old_name_upper: &str,
+    new_name: &str,
+) -> (ParserExpr, bool) {
+    let mut changed = false;
+    let out = rename_walk(ast, old_name_upper, new_name, &mut changed);
+    (out, changed)
+}
+
+fn rename_walk(
+    ast: &ParserExpr,
+    old_upper: &str,
+    new_name: &str,
+    changed: &mut bool,
+) -> ParserExpr {
+    let rec = |e: &ParserExpr, changed: &mut bool| rename_walk(e, old_upper, new_name, changed);
+    match ast {
+        ParserExpr::TableRef { table_name, specifier, ref_site_id } => {
+            if !table_name.is_empty() && table_name.to_uppercase() == old_upper {
+                *changed = true;
+                ParserExpr::TableRef {
+                    table_name: new_name.to_string(),
+                    specifier: specifier.clone(),
+                    ref_site_id: *ref_site_id,
+                }
+            } else {
+                ast.clone()
+            }
+        }
+        ParserExpr::Literal(_)
+        | ParserExpr::CellRef { .. }
+        | ParserExpr::ColumnRef { .. }
+        | ParserExpr::RowRef { .. }
+        | ParserExpr::NamedRef { .. } => ast.clone(),
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(rec(left, changed)),
+            op: *op,
+            right: Box::new(rec(right, changed)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(rec(operand, changed)),
+        },
+        ParserExpr::FunctionCall { func, args, ref_site_id } => ParserExpr::FunctionCall {
+            func: func.clone(),
+            args: args.iter().map(|a| rec(a, changed)).collect(),
+            ref_site_id: *ref_site_id,
+        },
+        ParserExpr::Range { sheet, start, end, ref_site_id } => ParserExpr::Range {
+            sheet: sheet.clone(),
+            start: Box::new(rec(start, changed)),
+            end: Box::new(rec(end, changed)),
+            ref_site_id: *ref_site_id,
+        },
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference, ref_site_id } => {
+            ParserExpr::Sheet3DRef {
+                start_sheet: start_sheet.clone(),
+                end_sheet: end_sheet.clone(),
+                reference: Box::new(rec(reference, changed)),
+                ref_site_id: *ref_site_id,
+            }
+        }
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(rec(target, changed)),
+            index: Box::new(rec(index, changed)),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| rec(e, changed)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rec(k, changed), rec(v, changed)))
+                .collect(),
+        },
+        ParserExpr::SpillRef { cell, ref_site_id } => ParserExpr::SpillRef {
+            cell: Box::new(rec(cell, changed)),
+            ref_site_id: *ref_site_id,
+        },
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(rec(operand, changed)),
+        },
+    }
+}
+
 /// Resolves a single TableRef node to CellRef/Range based on table metadata.
 fn resolve_single_table_ref(
     table_name: &str,

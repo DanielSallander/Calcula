@@ -659,6 +659,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
         "obj_cell_types", "obj_cell_behaviors", "obj_writeback_regions",
+        "obj_object_scripts",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1889,6 +1890,56 @@ pub(crate) fn cell_behaviors_snapshot_bytes(
     serde_json::to_vec(&CellBehaviorsObjSnapshot { previous }).unwrap_or_default()
 }
 
+/// Snapshot for the "obj_object_scripts" CustomRestore — the WHOLE object-script
+/// list before a mutation.
+///
+/// Whole-list swap for the same reason as cell behaviors: scripts are
+/// workbook-level and few, and deleting one object can prune several at once.
+/// Exists so `delete_table`'s script pruning is undoable — restoring a table
+/// whose scripts stayed deleted is a half-undo.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ObjectScriptsObjSnapshot {
+    previous: Vec<::persistence::SavedObjectScript>,
+}
+
+/// Serialized "obj_object_scripts" snapshot bytes (same in-open-transaction
+/// contract as cell_types_snapshot_bytes).
+pub(crate) fn object_scripts_snapshot_bytes(
+    previous: Vec<::persistence::SavedObjectScript>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ObjectScriptsObjSnapshot { previous }).unwrap_or_default()
+}
+
+/// Serialized "obj_table" snapshot bytes, for callers recording several
+/// restores into one already-open transaction (see `delete_table`, which must
+/// undo its cell rewrite, filter removal and script pruning together with the
+/// table itself).
+pub(crate) fn table_snapshot_bytes(
+    sheet_index: usize,
+    table_id: identity::EntityId,
+    previous: Option<crate::tables::Table>,
+) -> Vec<u8> {
+    serde_json::to_vec(&TableObjSnapshot { sheet_index, table_id, previous }).unwrap_or_default()
+}
+
+/// Serialized "obj_autofilter" snapshot bytes (same in-open-transaction
+/// contract as `table_snapshot_bytes`).
+pub(crate) fn autofilter_snapshot_bytes(
+    sheet_index: usize,
+    previous: Option<crate::autofilter::AutoFilter>,
+) -> Vec<u8> {
+    serde_json::to_vec(&AutoFilterObjSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
+/// Serialized "script_grid_cells" snapshot bytes (same in-open-transaction
+/// contract as `table_snapshot_bytes`).
+pub(crate) fn script_grid_cells_snapshot_bytes(
+    sheet_index: usize,
+    cells: Vec<(u32, u32, Option<engine::Cell>)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ScriptGridCellsSnapshot { sheet_index, cells }).unwrap_or_default()
+}
+
 /// Snapshot for the "obj_writeback_regions" CustomRestore — the author-side
 /// draft region list before a structural shift, plus the ids that shift
 /// dropped.
@@ -2091,6 +2142,18 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
+        }
+        "obj_object_scripts" => {
+            let snap: ObjectScriptsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_object_scripts snapshot: {}", e); return; }
+            };
+            let mut scripts = state.object_scripts.lock().unwrap();
+            let current = scripts.clone();
+            push_obj_inverse(inverse_transaction, kind, &ObjectScriptsObjSnapshot {
+                previous: current,
+            });
+            *scripts = snap.previous;
         }
         "obj_writeback_regions" => {
             let snap: WritebackRegionsObjSnapshot = match serde_json::from_slice(data) {
@@ -2412,6 +2475,7 @@ mod restore_registry_tests {
             ("obj_cell_types", true, CustomRestoreKind::Objects),
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
             ("obj_writeback_regions", true, CustomRestoreKind::Objects),
+            ("obj_object_scripts", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];
