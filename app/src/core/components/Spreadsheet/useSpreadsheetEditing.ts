@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useEditing, getGlobalEditingValue, setGlobalIsEditing, isGlobalFormulaMode } from "../../hooks";
 import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
-import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
+import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
@@ -314,7 +314,13 @@ export function useSpreadsheetEditing({
         }, "fill");
       }
     } catch (error) {
+      // The commit above is skipped when updateCellsBatch rejects, leaving the
+      // transaction open so later edits join it. Cancel, and tell the user —
+      // a console.error alone reads as "Ctrl+Enter silently did nothing".
+      await cancelUndoTransaction().catch(() => {});
       console.error("[useSpreadsheetEditing] Ctrl+Enter fill failed:", error);
+      const msg = typeof error === "string" ? error : (error as Error)?.message;
+      if (msg) alert(msg);
     }
 
     focusContainerRef.current?.focus();

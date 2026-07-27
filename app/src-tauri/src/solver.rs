@@ -599,6 +599,27 @@ pub fn solver_solve(
         params.variable_cells.len()
     );
 
+    // Sheet protection on the VARIABLE cells, before acquiring other locks.
+    // Note this takes params.sheet_index, not the active sheet — Solver can
+    // target a background sheet, exactly the case the gates' explicit
+    // sheet_index parameter exists for.
+    if let Err(e) = crate::protection::check_sheet_protection_cells(
+        &state,
+        params.sheet_index,
+        params.variable_cells.iter().map(|v| (v.row, v.col)),
+    ) {
+        return SolverResult {
+            found_solution: false,
+            objective_value: f64::NAN,
+            variable_values: Vec::new(),
+            iterations: 0,
+            status_message: e.clone(),
+            updated_cells: Vec::new(),
+            original_values: Vec::new(),
+            error: Some(e),
+        };
+    }
+
     // Check writeback regions before acquiring other locks
     {
         let wb_index = state.writeback_index.lock().unwrap();
@@ -862,6 +883,12 @@ pub fn solver_revert(
     sheet_index: usize,
     original_values: Vec<SolverVariableValue>,
 ) -> SolverResult {
+    // DELIBERATELY NOT protection-gated. This is the undo of solver_solve, and
+    // it restores values the sheet already held. If the sheet were protected
+    // between solve and revert, gating here would strand the user with Solver's
+    // numbers and no way back — the same reasoning that exempts undo replay
+    // (see the exempt-paths block in protection.rs). solver_solve itself IS
+    // gated, so nothing reaches here that protection did not already allow.
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();

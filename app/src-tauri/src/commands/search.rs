@@ -80,6 +80,17 @@ pub fn replace_all(
     // Find all matching cells first
     let matches = grid.find_all(&search, case_sensitive, match_entire_cell, false);
 
+    // Sheet protection over the cells this replace would actually touch. Whole
+    // gesture rejected, matching the batch-write policy: Replace All is one user
+    // action, so applying it to the unlocked subset would silently do half a job.
+    // Checked against the MATCH LIST rather than a bounding rectangle, so a
+    // replace that happens to miss every locked cell still succeeds.
+    crate::protection::check_sheet_protection_cells(
+        &state,
+        active_sheet,
+        matches.iter().copied(),
+    )?;
+
     if matches.is_empty() {
         return Ok(ReplaceResult {
             updated_cells: Vec::new(),
@@ -272,6 +283,9 @@ pub fn replace_single(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // Sheet protection (Replace on a locked cell).
+    crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
 
     // Skip cells in writeback regions
     {

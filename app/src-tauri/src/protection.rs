@@ -364,6 +364,319 @@ fn verify_password(password: &str, salt: &str, hash: &str) -> bool {
 }
 
 // ============================================================================
+// BACKEND ENFORCEMENT
+// ============================================================================
+//
+// Until this existed, sheet protection was enforced ONLY by a frontend commit
+// guard at a single call site — `can_edit_cell` was a Tauri command that no Rust
+// write path ever called. Anything that did not go through inline cell editing
+// (scripts, MCP tools, sort, fill, cross-sheet writes) wrote straight through a
+// protected sheet.
+//
+// WHICH PATHS ARE EXEMPT, AND WHY. Enforcement belongs on paths that carry a
+// USER'S INTENT TO EDIT. These do not, and deliberately do not call the gates
+// below — this list is the authoritative record, so a path missing a gate is
+// either on this list or is a bug:
+//
+//   * Undo / redo replay. An undo may legitimately revert an edit that was made
+//     BEFORE the sheet was protected; gating it would strand the document in a
+//     state the user cannot leave. The mutation being replayed was already
+//     gated when it was first made.
+//   * File load, auto-recover, and `new_file`. These install a document rather
+//     than edit one, and they install the protection record itself.
+//   * Recalculation and spill writes. Engine-driven consequences of an edit that
+//     was already gated at its own entry point. Gating them would make a
+//     protected sheet's formulas stop updating.
+//   * `.calp` subscription reset / refresh. The subscriber asked for the
+//     publisher's content wholesale; protection on those sheets is the
+//     subscriber's own and is re-installed by the reset.
+//   * Report writeback. A writeback value reaches the grid through the ordinary
+//     edit path (Distribution's commit guard allows the commit and the normal
+//     `update_cell` runs), so it is gated there like any other user edit —
+//     nothing separate to exempt.
+//   * `solver_revert`. The undo of `solver_solve`, restoring values the sheet
+//     already held; `solver_solve` is gated, so nothing reaches revert that was
+//     not already allowed. Gating it would strand the user with Solver's output
+//     if the sheet were protected in between.
+//
+// Everything else that writes cells on a user's behalf MUST call a gate.
+
+/// Resolve whether one cell is locked, honouring the "absent means locked"
+/// default that `get_cell_protection` also applies.
+fn cell_is_locked(
+    cell_protection_storage: &CellProtectionStorage,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> bool {
+    cell_protection_storage
+        .get(&sheet_index)
+        .and_then(|sheet| sheet.get(&(row, col)))
+        .map(|cp| cp.locked)
+        .unwrap_or(true)
+}
+
+/// The single decision procedure for "may this cell be written?".
+///
+/// Both the `can_edit_cell` command and the backend gates below route through
+/// this, so the frontend's answer and the backend's answer cannot drift.
+/// Returns `None` when the write is allowed, or `Some(reason)` when refused.
+pub(crate) fn refusal_reason_for_cell(
+    protection_storage: &ProtectionStorage,
+    cell_protection_storage: &CellProtectionStorage,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> Option<String> {
+    let protection = protection_storage.get(&sheet_index)?;
+    if !protection.protected {
+        return None;
+    }
+    let locked = cell_is_locked(cell_protection_storage, sheet_index, row, col);
+    if protection.can_edit_cell(row, col, locked) {
+        None
+    } else {
+        // Full sentence, not "Cell is locked". The frontend guard does
+        // `result.reason || <long fallback>`, so a terse reason is always
+        // truthy and permanently shadows the friendly message the warning
+        // dialog was written for — users only ever saw the two-word string.
+        Some(protection_error(row, col))
+    }
+}
+
+/// Human-facing refusal text. This string IS the UX on every path that surfaces
+/// a Tauri rejection, so it names the cell and says how to proceed.
+fn protection_error(row: u32, col: u32) -> String {
+    format!(
+        "Cannot change cell {}{}: it is locked on a protected sheet. \
+         Unprotect the sheet to edit it (Review > Unprotect Sheet).",
+        crate::pivot::utils::col_index_to_letter(col),
+        row + 1
+    )
+}
+
+/// Reject a write when ANY target cell is locked on a protected sheet.
+///
+/// Mirrors `check_region_cells_protection` in `commands::data` — same shape,
+/// same early-out, so the two protection families read alike at call sites.
+/// Takes an explicit `sheet_index`: unlike the `can_edit_cell` command, many
+/// backend writers target a sheet other than the active one.
+pub(crate) fn check_sheet_protection_cells<'a>(
+    state: &AppState,
+    sheet_index: usize,
+    mut cells: impl Iterator<Item = (u32, u32)> + 'a,
+) -> Result<(), String> {
+    let protection_storage = state.sheet_protection.lock().unwrap();
+    // Early-out before touching the cell store: the overwhelmingly common case
+    // is an unprotected sheet, and this runs on every batch write.
+    match protection_storage.get(&sheet_index) {
+        Some(p) if p.protected => {}
+        _ => return Ok(()),
+    }
+    let cell_protection_storage = state.cell_protection.lock().unwrap();
+
+    if let Some((row, col)) = cells.find(|(row, col)| {
+        refusal_reason_for_cell(
+            &protection_storage,
+            &cell_protection_storage,
+            sheet_index,
+            *row,
+            *col,
+        )
+        .is_some()
+    }) {
+        return Err(protection_error(row, col));
+    }
+    Ok(())
+}
+
+/// Range form of [`check_sheet_protection_cells`].
+///
+/// Deliberately does NOT enumerate the rectangle in the common case. A whole-
+/// column Delete is 1,048,576 cells and a select-all clear is far more; walking
+/// that product under two global mutexes would freeze the app on exactly the
+/// gestures users reach for. `check_region_range_protection`, which this mirrors
+/// at call sites, answers the same question by rectangle intersection and never
+/// touches individual cells.
+///
+/// The cheap decision: on a protected sheet a cell is writable only if it is
+/// EXPLICITLY unlocked (a `cell_protection` entry with `locked == false`) or sits
+/// inside an allow-edit range — absence means locked. So if the rectangle's area
+/// exceeds an upper bound on how many of its cells could possibly be permitted,
+/// at least one locked cell must be in there and we can refuse without scanning.
+/// Only when the bound says the rectangle *might* be fully permitted do we walk
+/// it, and that can only happen when the sparse store really does hold about
+/// that many entries — i.e. the walk is proportional to real data, not to the
+/// address space.
+pub(crate) fn check_sheet_protection_range(
+    state: &AppState,
+    sheet_index: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    let protection_storage = state.sheet_protection.lock().unwrap();
+    let protection = match protection_storage.get(&sheet_index) {
+        Some(p) if p.protected => p,
+        _ => return Ok(()),
+    };
+    let cell_protection_storage = state.cell_protection.lock().unwrap();
+
+    let area = (end_row.saturating_sub(start_row) as u64 + 1)
+        .saturating_mul(end_col.saturating_sub(start_col) as u64 + 1);
+
+    let permitted = permitted_area_in_rect(
+        protection,
+        &cell_protection_storage,
+        sheet_index,
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+    );
+
+    if permitted >= area {
+        return Ok(());
+    }
+
+    // At least one cell is locked. Name it, scanning only far enough to find it
+    // — on a protected sheet the first locked cell is almost always immediate,
+    // and the full product is never walked in the allow case above.
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            if refusal_reason_for_cell(
+                &protection_storage,
+                &cell_protection_storage,
+                sheet_index,
+                row,
+                col,
+            )
+            .is_some()
+            {
+                return Err(protection_error(row, col));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// EXACT count of cells in the rectangle that a protected sheet permits.
+///
+/// Permitted = inside an allow-edit range, OR carrying an explicit
+/// `locked == false` entry. Computed without enumerating the rectangle:
+/// allow-edit ranges are unioned by coordinate compression (there are only ever
+/// a handful, so this is tiny), and explicitly-unlocked cells are counted from
+/// the sparse store, skipping any already inside a range so nothing is
+/// double-counted. Exactness matters — an over-count here would allow a write
+/// that should be refused.
+fn permitted_area_in_rect(
+    protection: &SheetProtection,
+    cell_protection_storage: &CellProtectionStorage,
+    sheet_index: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> u64 {
+    // Allow-edit ranges clipped to the rectangle.
+    let clipped: Vec<(u32, u32, u32, u32)> = protection
+        .allow_edit_ranges
+        .iter()
+        .filter(|r| {
+            r.start_row <= end_row
+                && r.end_row >= start_row
+                && r.start_col <= end_col
+                && r.end_col >= start_col
+        })
+        .map(|r| {
+            (
+                r.start_row.max(start_row),
+                r.start_col.max(start_col),
+                r.end_row.min(end_row),
+                r.end_col.min(end_col),
+            )
+        })
+        .collect();
+
+    // Union area of the clipped ranges, via coordinate compression.
+    let mut union_area: u64 = 0;
+    if !clipped.is_empty() {
+        let mut rows: Vec<u32> = Vec::with_capacity(clipped.len() * 2);
+        let mut cols: Vec<u32> = Vec::with_capacity(clipped.len() * 2);
+        for &(r0, c0, r1, c1) in &clipped {
+            rows.push(r0);
+            rows.push(r1.saturating_add(1));
+            cols.push(c0);
+            cols.push(c1.saturating_add(1));
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        cols.sort_unstable();
+        cols.dedup();
+
+        for rw in rows.windows(2) {
+            for cw in cols.windows(2) {
+                let covered = clipped.iter().any(|&(r0, c0, r1, c1)| {
+                    rw[0] >= r0 && rw[1].saturating_sub(1) <= r1
+                        && cw[0] >= c0 && cw[1].saturating_sub(1) <= c1
+                });
+                if covered {
+                    union_area = union_area.saturating_add(
+                        (rw[1] - rw[0]) as u64 * (cw[1] - cw[0]) as u64,
+                    );
+                }
+            }
+        }
+    }
+
+    // Explicitly-unlocked cells inside the rectangle but OUTSIDE every range.
+    let unlocked_outside = cell_protection_storage
+        .get(&sheet_index)
+        .map(|m| {
+            m.iter()
+                .filter(|((r, c), cp)| {
+                    !cp.locked
+                        && *r >= start_row
+                        && *r <= end_row
+                        && *c >= start_col
+                        && *c <= end_col
+                        && !clipped.iter().any(|&(r0, c0, r1, c1)| {
+                            *r >= r0 && *r <= r1 && *c >= c0 && *c <= c1
+                        })
+                })
+                .count() as u64
+        })
+        .unwrap_or(0);
+
+    union_area.saturating_add(unlocked_outside)
+}
+
+/// Reject a change to the PROTECTION SETTINGS of a sheet that is protected.
+///
+/// This closes the hole that made write enforcement pointless: until now
+/// `update_protection_options`, `add_allow_edit_range`, `remove_allow_edit_range`
+/// and `set_cell_protection` took no password and never checked `protected`, so
+/// anything that could reach them — including any script or MCP tool — could
+/// unlock every cell of a password-protected sheet and then edit freely.
+///
+/// Excel's rule, which this follows: protection settings are not editable while
+/// the sheet is protected. Unprotect first (which DOES verify the password),
+/// change the settings, protect again. That keeps the password check in exactly
+/// one place instead of threading a password through every settings command.
+fn require_sheet_unprotected(state: &AppState, sheet_index: usize, what: &str) -> Result<(), String> {
+    let protection_storage = state.sheet_protection.lock().unwrap();
+    match protection_storage.get(&sheet_index) {
+        Some(p) if p.protected => Err(format!(
+            "Cannot change {} while the sheet is protected. \
+             Unprotect the sheet first (Review > Unprotect Sheet).",
+            what
+        )),
+        _ => Ok(()),
+    }
+}
+
+// ============================================================================
 // COMMANDS
 // ============================================================================
 
@@ -493,6 +806,10 @@ pub fn update_protection_options(
     options: SheetProtectionOptions,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    if let Err(e) = require_sheet_unprotected(&state, active_sheet, "protection options") {
+        return ProtectionResult::err(&e);
+    }
+
     let mut protection_storage = state.sheet_protection.lock().unwrap();
 
     let previous = protection_storage.get(&active_sheet).cloned();
@@ -523,18 +840,29 @@ pub fn add_allow_edit_range(
     params: AddAllowEditRangeParams,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // An allow-edit range is a hole in the protection boundary. Punching one
+    // while the sheet is protected would let anything that can reach this
+    // command open up the whole sheet without the password.
+    if let Err(e) = require_sheet_unprotected(&state, active_sheet, "allow-edit ranges") {
+        return ProtectionResult::err(&e);
+    }
+
     let mut protection_storage = state.sheet_protection.lock().unwrap();
 
     let previous = protection_storage.get(&active_sheet).cloned();
 
+    // Validate BEFORE `entry()`: the duplicate-title check used to run after it,
+    // so a rejected add still left a freshly inserted default record behind —
+    // with no undo entry, since the error path returns before recording.
+    if let Some(existing) = protection_storage.get(&active_sheet) {
+        if existing.allow_edit_ranges.iter().any(|r| r.title == params.title) {
+            return ProtectionResult::err("A range with this title already exists");
+        }
+    }
+
     let protection = protection_storage
         .entry(active_sheet)
         .or_insert_with(SheetProtection::default);
-
-    // Check for duplicate title
-    if protection.allow_edit_ranges.iter().any(|r| r.title == params.title) {
-        return ProtectionResult::err("A range with this title already exists");
-    }
 
     let mut range = AllowEditRange {
         title: params.title,
@@ -577,6 +905,10 @@ pub fn remove_allow_edit_range(
     title: String,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    if let Err(e) = require_sheet_unprotected(&state, active_sheet, "allow-edit ranges") {
+        return ProtectionResult::err(&e);
+    }
+
     let mut protection_storage = state.sheet_protection.lock().unwrap();
 
     let protection = match protection_storage.get_mut(&active_sheet) {
@@ -664,50 +996,24 @@ pub fn can_edit_cell(
     let protection_storage = state.sheet_protection.lock().unwrap();
     let cell_protection_storage = state.cell_protection.lock().unwrap();
 
-    let protection = match protection_storage.get(&active_sheet) {
-        Some(p) => p,
-        None => {
-            return ProtectionCheckResult {
-                can_edit: true,
-                reason: None,
-            };
-        }
-    };
-
-    if !protection.protected {
-        return ProtectionCheckResult {
-            can_edit: true,
-            reason: None,
-        };
-    }
-
-    // Check if cell is in an allow-edit range
-    for range in &protection.allow_edit_ranges {
-        if range.contains(row, col) {
-            return ProtectionCheckResult {
-                can_edit: true,
-                reason: None,
-            };
-        }
-    }
-
-    // Check cell lock status (default is locked)
-    let is_locked = cell_protection_storage
-        .get(&active_sheet)
-        .and_then(|sheet| sheet.get(&(row, col)))
-        .map(|cp| cp.locked)
-        .unwrap_or(true); // Default is locked
-
-    if is_locked {
-        ProtectionCheckResult {
+    // Routed through the SAME decision procedure the backend gates use, so the
+    // frontend's answer and the backend's answer cannot drift. This used to be a
+    // second inline copy of the rule.
+    match refusal_reason_for_cell(
+        &protection_storage,
+        &cell_protection_storage,
+        active_sheet,
+        row,
+        col,
+    ) {
+        Some(reason) => ProtectionCheckResult {
             can_edit: false,
-            reason: Some("Cell is locked".to_string()),
-        }
-    } else {
-        ProtectionCheckResult {
+            reason: Some(reason),
+        },
+        None => ProtectionCheckResult {
             can_edit: true,
             reason: None,
-        }
+        },
     }
 }
 
@@ -751,69 +1057,88 @@ pub fn set_cell_protection(
     params: SetCellProtectionParams,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut cell_protection_storage = state.cell_protection.lock().unwrap();
-
-    // Whole-sheet snapshot before the rewrite. Same shape the structural-shift
-    // path records, so both mutations share one restore kind.
-    let previous: Vec<((u32, u32), CellProtection)> = cell_protection_storage
-        .get(&active_sheet)
-        .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
-        .unwrap_or_default();
-
-    let sheet_protection = cell_protection_storage
-        .entry(active_sheet)
-        .or_insert_with(HashMap::new);
 
     let min_row = params.start_row.min(params.end_row);
     let max_row = params.start_row.max(params.end_row);
     let min_col = params.start_col.min(params.end_col);
     let max_col = params.start_col.max(params.end_col);
 
-    // Touch a cell ONLY when its effective protection actually changes.
+    // PASS 1 — decide, without mutating.
     //
-    // Two reasons this matters. Format Cells sends set_cell_protection on every
-    // OK, whether or not the user opened the Protection tab, so the common case
-    // is a call that changes nothing — and now that this command is undoable, a
-    // blind write would push a second, invisible undo step onto every Ctrl+1
-    // (first Ctrl+Z appears to do nothing) and dirty a clean workbook.
+    // Touch a cell ONLY when its effective protection actually changes. Format
+    // Cells sends this command on every OK, whether or not the user opened the
+    // Protection tab, so the common case is a call that changes nothing: a blind
+    // write would push a second, invisible undo step onto every Ctrl+1 (the
+    // first Ctrl+Z appearing to do nothing) and dirty a clean workbook.
     //
     // A missing entry is not "unset": `get_cell_protection` resolves absence to
     // `default_locked()`, so absence and a stored `default_locked()` are the
-    // same state. Comparing against that effective value keeps us from
+    // same state. Comparing against that effective value also keeps us from
     // materializing an entry per selected cell for a no-op call.
-    let mut changed = false;
-    for row in min_row..=max_row {
-        for col in min_col..=max_col {
-            let effective = sheet_protection
-                .get(&(row, col))
-                .copied()
-                .unwrap_or_else(CellProtection::default_locked);
+    let (previous, pending) = {
+        let cell_protection_storage = state.cell_protection.lock().unwrap();
+        let sheet_map = cell_protection_storage.get(&active_sheet);
 
-            let mut next = effective;
-            if let Some(locked) = params.locked {
-                next.locked = locked;
-            }
-            if let Some(hidden) = params.formula_hidden {
-                next.formula_hidden = hidden;
-            }
+        // Whole-sheet snapshot for undo. Same shape the structural-shift path
+        // records, so both mutations share one restore kind.
+        let previous: Vec<((u32, u32), CellProtection)> = sheet_map
+            .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default();
 
-            if next != effective {
-                sheet_protection.insert((row, col), next);
-                changed = true;
+        let mut pending: Vec<((u32, u32), CellProtection)> = Vec::new();
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let effective = sheet_map
+                    .and_then(|m| m.get(&(row, col)))
+                    .copied()
+                    .unwrap_or_else(CellProtection::default_locked);
+
+                let mut next = effective;
+                if let Some(locked) = params.locked {
+                    next.locked = locked;
+                }
+                if let Some(hidden) = params.formula_hidden {
+                    next.formula_hidden = hidden;
+                }
+
+                if next != effective {
+                    pending.push(((row, col), next));
+                }
             }
         }
-    }
-    drop(cell_protection_storage);
+        (previous, pending)
+    };
 
-    if changed {
-        crate::undo_commands::record_cell_protection_undo(
-            &state,
-            active_sheet,
-            previous,
-            "Change cell protection",
-        );
-        crate::persistence::mark_workbook_modified(&file_state);
+    if pending.is_empty() {
+        return ProtectionResult::ok_empty();
     }
+
+    // Gate only a REAL change, and gate before touching anything — deciding
+    // first means a refusal needs no rollback. Excel greys out the Protection
+    // tab on a protected sheet rather than failing the whole dialog, so a no-op
+    // call (the Format Cells case above) is still accepted.
+    if let Err(e) = require_sheet_unprotected(&state, active_sheet, "cell locking") {
+        return ProtectionResult::err(&e);
+    }
+
+    // PASS 2 — apply.
+    {
+        let mut cell_protection_storage = state.cell_protection.lock().unwrap();
+        let sheet_map = cell_protection_storage
+            .entry(active_sheet)
+            .or_insert_with(HashMap::new);
+        for (key, value) in pending {
+            sheet_map.insert(key, value);
+        }
+    }
+
+    crate::undo_commands::record_cell_protection_undo(
+        &state,
+        active_sheet,
+        previous,
+        "Change cell protection",
+    );
+    crate::persistence::mark_workbook_modified(&file_state);
 
     ProtectionResult::ok_empty()
 }
@@ -1146,6 +1471,158 @@ mod tests {
             StructuralEdit::RowInsert { at: 20, count: 3 }
         ));
         assert_eq!((ranges[0].start_row, ranges[0].end_row), (5, 9));
+    }
+
+    // --- Backend enforcement: the shared decision procedure ---
+    //
+    // `refusal_reason_for_cell` is the ONE rule both the can_edit_cell command
+    // and every backend gate consult, so these pin the semantics for both.
+
+    fn stores(
+        prot: Option<(usize, SheetProtection)>,
+        cells: Vec<(usize, (u32, u32), CellProtection)>,
+    ) -> (ProtectionStorage, CellProtectionStorage) {
+        let mut p = ProtectionStorage::new();
+        if let Some((idx, sp)) = prot {
+            p.insert(idx, sp);
+        }
+        let mut c = CellProtectionStorage::new();
+        for (idx, key, value) in cells {
+            c.entry(idx).or_default().insert(key, value);
+        }
+        (p, c)
+    }
+
+    fn unlocked() -> CellProtection {
+        let mut cp = CellProtection::default_locked();
+        cp.locked = false;
+        cp
+    }
+
+    #[test]
+    fn a_sheet_with_no_protection_record_allows_everything() {
+        let (p, c) = stores(None, vec![]);
+        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+    }
+
+    #[test]
+    fn an_unprotected_record_allows_everything() {
+        let (p, c) = stores(Some((0, SheetProtection::default())), vec![]);
+        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+    }
+
+    #[test]
+    fn a_locked_cell_on_a_protected_sheet_is_refused() {
+        // Absence means locked, so this cell has no entry at all.
+        let (p, c) = stores(Some((0, protected_with(vec![]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_some());
+    }
+
+    #[test]
+    fn an_unlocked_cell_on_a_protected_sheet_is_allowed() {
+        let (p, c) = stores(
+            Some((0, protected_with(vec![]))),
+            vec![(0, (5, 5), unlocked())],
+        );
+        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+        // Its neighbour, with no entry, is still locked.
+        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 6).is_some());
+    }
+
+    #[test]
+    fn a_locked_cell_inside_an_allow_edit_range_is_allowed() {
+        let (p, c) = stores(Some((0, protected_with(vec![range(5, 9, 0, 3)]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &c, 0, 7, 1).is_none(), "inside");
+        assert!(refusal_reason_for_cell(&p, &c, 0, 7, 9).is_some(), "outside");
+    }
+
+    #[test]
+    fn protection_is_resolved_per_sheet_not_globally() {
+        // The whole reason the gates take an explicit sheet_index: many backend
+        // writers target a sheet other than the active one, and the old
+        // can_edit_cell command could only ever answer for the active sheet.
+        let (p, c) = stores(Some((1, protected_with(vec![]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &c, 1, 0, 0).is_some(), "sheet 1 protected");
+        assert!(refusal_reason_for_cell(&p, &c, 0, 0, 0).is_none(), "sheet 0 is not");
+    }
+
+    // --- Range gate: exact permitted-area accounting ---
+    //
+    // The range gate must never walk the whole rectangle in the allow case (a
+    // whole-column Delete is >1M cells), so it decides from an EXACT permitted-
+    // cell count instead. Exactness is the safety property: an over-count would
+    // allow a write that should be refused.
+
+    fn permitted(
+        ranges: Vec<AllowEditRange>,
+        unlocked: Vec<(u32, u32)>,
+        rect: (u32, u32, u32, u32),
+    ) -> u64 {
+        let prot = protected_with(ranges);
+        let mut store = CellProtectionStorage::new();
+        let sheet = store.entry(0).or_default();
+        for key in unlocked {
+            sheet.insert(key, super::tests::unlocked());
+        }
+        permitted_area_in_rect(&prot, &store, 0, rect.0, rect.1, rect.2, rect.3)
+    }
+
+    #[test]
+    fn no_permissions_means_zero_permitted_area() {
+        assert_eq!(permitted(vec![], vec![], (0, 0, 9, 9)), 0);
+    }
+
+    #[test]
+    fn an_allow_edit_range_contributes_its_clipped_area() {
+        // Range rows 0..4 x cols 0..4 = 25 cells, but the rectangle only asks
+        // about rows 0..2 x cols 0..2, so only the 3x3 = 9 overlap counts.
+        assert_eq!(permitted(vec![range(0, 4, 0, 4)], vec![], (0, 0, 2, 2)), 9);
+    }
+
+    #[test]
+    fn overlapping_allow_edit_ranges_are_not_double_counted() {
+        // Two 3x3 ranges sharing a 2x2 corner cover 9 + 9 - 4 = 14 cells.
+        // A naive sum would say 18 and wrongly allow a 15-cell rectangle.
+        let a = range(0, 2, 0, 2);
+        let b = range(1, 3, 1, 3);
+        assert_eq!(permitted(vec![a, b], vec![], (0, 0, 3, 3)), 14);
+    }
+
+    #[test]
+    fn unlocked_cells_inside_a_range_are_not_double_counted() {
+        // The cell is both inside the allow-edit range AND explicitly unlocked;
+        // it must count once, or a 10-cell rect could look fully permitted with
+        // only 9 distinct permitted cells.
+        assert_eq!(
+            permitted(vec![range(0, 0, 0, 0)], vec![(0, 0)], (0, 0, 0, 0)),
+            1
+        );
+    }
+
+    #[test]
+    fn unlocked_cells_outside_every_range_add_up() {
+        assert_eq!(permitted(vec![], vec![(0, 0), (1, 1)], (0, 0, 1, 1)), 2);
+    }
+
+    #[test]
+    fn a_fully_permitted_rectangle_matches_its_area() {
+        // 2x2 rectangle fully covered => permitted == area, which is what lets
+        // the gate allow without scanning a single cell.
+        let area = 4u64;
+        assert_eq!(permitted(vec![range(0, 1, 0, 1)], vec![], (0, 0, 1, 1)), area);
+        // One cell short => strictly less than area => the gate refuses.
+        assert!(permitted(vec![range(0, 1, 0, 0)], vec![], (0, 0, 1, 1)) < area);
+    }
+
+    #[test]
+    fn a_huge_rectangle_is_decided_without_enumeration() {
+        // A whole column on a protected sheet with one small unlocked block.
+        // The point is that this returns promptly: permitted is computed from
+        // the sparse store and the range list, never from the 1,048,576-cell
+        // product.
+        let p = permitted(vec![range(0, 9, 0, 0)], vec![], (0, 0, 1_048_575, 0));
+        assert_eq!(p, 10);
+        assert!(p < 1_048_576);
     }
 
     // --- What the save path must keep ---

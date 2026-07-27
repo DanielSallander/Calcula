@@ -722,8 +722,15 @@ fn update_cell_impl(
     // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
     let user_files = user_files_state.files.lock().unwrap();
 
-    // Check if cell is in a protected region (e.g., pivot table, chart)
+    // Check sheet protection: a locked cell on a protected sheet is refused.
     let active_sheet_for_region_check = *state.active_sheet.lock().unwrap();
+    crate::protection::check_sheet_protection_cells(
+        &state,
+        active_sheet_for_region_check,
+        std::iter::once((row, col)),
+    )?;
+
+    // Check if cell is in a protected region (e.g., pivot table, chart)
     if let Some(region) = state.get_region_at_cell(active_sheet_for_region_check, row, col) {
         return Err(format!(
             "Cannot edit cell ({}, {}): it is part of a protected {} region (id: {}).",
@@ -2071,6 +2078,31 @@ pub(crate) fn update_cells_batch_with_controls(
         return Ok(Vec::new());
     }
 
+    // Sheet protection. Deliberately checked HERE, in the shared core, rather
+    // than in the `update_cells_batch` wrapper: the script host and the MCP
+    // tools call this function directly (scripting/commands.rs), so a gate in
+    // the wrapper would leave exactly those surfaces unenforced — which is how
+    // the region check above ended up with that hole.
+    //
+    // Scripts are gated like any other writer. Excel's VBA equivalent is
+    // `Protect(UserInterfaceOnly:=True)`, which defaults to False; enforcing by
+    // default is both the Excel-faithful and the secure choice, and Calcula's
+    // script surfaces are sandboxed precisely so they do not get ambient
+    // authority the user did not grant.
+    //
+    // WHOLE-BATCH rejection, not partial: `CellUpdateInput` carries no sheet
+    // field, so a batch is one sheet's worth of one user gesture (a paste, a
+    // fill). Excel refuses such a gesture outright rather than applying the part
+    // that happens to land on unlocked cells.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_cells(
+            &state,
+            active_sheet,
+            updates.iter().map(|u| (u.row, u.col)),
+        )?;
+    }
+
     // Check if any target cell is a spilled value (before acquiring other locks)
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2839,6 +2871,9 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
         check_spill_protection(&spill_hosts, active_sheet, row, col, row, col)?;
     }
 
+    // Sheet protection (clearing a locked cell on a protected sheet).
+    crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
+
     // Object-output protection (clearing a pivot/report cell).
     check_region_range_protection(&state, active_sheet, row, col, row, col)?;
 
@@ -2928,6 +2963,11 @@ pub fn clear_range(
         let spill_hosts = state.spill_hosts.lock().unwrap();
         check_spill_protection(&spill_hosts, active_sheet, start_row, start_col, end_row, end_col)?;
     }
+
+    // Sheet protection (delete-key clear over locked cells).
+    crate::protection::check_sheet_protection_range(
+        &state, active_sheet, start_row, start_col, end_row, end_col,
+    )?;
 
     // Object-output protection (delete-key clear over a pivot/report region).
     check_region_range_protection(&state, active_sheet, start_row, start_col, end_row, end_col)?;
@@ -3041,6 +3081,19 @@ pub fn clear_range_with_options(
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Sheet protection applies to FORMAT clears too, unlike the region check
+    // below — hence it sits outside that `if`. Excel defaults allowFormatCells
+    // to false, so restyling a locked cell on a protected sheet is refused
+    // exactly like changing its value.
+    crate::protection::check_sheet_protection_range(
+        &state,
+        active_sheet,
+        params.start_row.min(params.end_row),
+        params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row),
+        params.start_col.max(params.end_col),
+    )?;
 
     // Check if any cell in the range is a spill host (not the origin) — block content-clearing operations
     if !matches!(params.apply_to, ClearApplyTo::Formats) {
@@ -3387,6 +3440,19 @@ pub fn clear_range_with_options(
 /// - Row or column orientation
 #[tauri::command]
 pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> Result<SortRangeResult, String> {
+    // Sheet protection: a sort rewrites every cell in the range, so a single
+    // locked cell refuses the whole sort. (Excel gates this on allowSort too,
+    // but that option is not enforced anywhere yet — see the enforcement notes
+    // in protection.rs.)
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_range(
+            &state, active_sheet,
+            params.start_row.min(params.end_row), params.start_col.min(params.end_col),
+            params.start_row.max(params.end_row), params.start_col.max(params.end_col),
+        )?;
+    }
+
     // Check if any cell in the sort range is a spilled value
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
@@ -4140,6 +4206,29 @@ pub fn remove_duplicates(
     state: State<AppState>,
     params: RemoveDuplicatesParams,
 ) -> RemoveDuplicatesResult {
+    // Sheet protection first, before any grid lock: removing duplicates rewrites
+    // the whole range. Reported through the result's `error` field, since this
+    // command does not return Result.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if let Err(e) = crate::protection::check_sheet_protection_range(
+            &state,
+            active_sheet,
+            params.start_row.min(params.end_row),
+            params.start_col.min(params.end_col),
+            params.start_row.max(params.end_row),
+            params.start_col.max(params.end_col),
+        ) {
+            return RemoveDuplicatesResult {
+                success: false,
+                duplicates_removed: 0,
+                unique_remaining: 0,
+                updated_cells: Vec::new(),
+                error: Some(e),
+            };
+        }
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -4386,6 +4475,18 @@ pub fn update_cell_on_sheets(
     col: u32,
     value: String,
 ) -> Result<(), String> {
+    // Sheet protection on EVERY targeted sheet, before any other lock is taken.
+    // Group edit is refused outright if any one sheet protects the cell — the
+    // alternative (writing the sheets that allow it) would silently produce a
+    // group edit that did not apply to the whole group.
+    for &sheet_idx in &sheet_indices {
+        crate::protection::check_sheet_protection_cells(
+            &state,
+            sheet_idx,
+            std::iter::once((row, col)),
+        )?;
+    }
+
     let locale = state.locale.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -4476,6 +4577,12 @@ pub fn clear_range_on_sheets(
     // Object-output protection on every targeted sheet (group clear must not
     // punch through a pivot/report region on a background sheet).
     for &sheet_idx in &sheet_indices {
+        // Sheet protection is per-sheet, so a group clear must be refused if ANY
+        // targeted sheet protects those cells — this is the cross-sheet case the
+        // active-sheet-only `can_edit_cell` command could never answer.
+        crate::protection::check_sheet_protection_range(
+            &state, sheet_idx, start_row, start_col, end_row, end_col,
+        )?;
         check_region_range_protection(&state, sheet_idx, start_row, start_col, end_row, end_col)?;
     }
 
@@ -4558,6 +4665,19 @@ pub fn fill_range(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let user_files = user_files_state.files.lock().unwrap();
+
+    // Sheet protection over the FILL TARGET (the source is only read).
+    {
+        let active = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_range(
+            &state,
+            active,
+            target_start_row.min(target_end_row),
+            target_start_col.min(target_end_col),
+            target_start_row.max(target_end_row),
+            target_start_col.max(target_end_col),
+        )?;
+    }
 
     // Check if target range overlaps any writeback region
     {

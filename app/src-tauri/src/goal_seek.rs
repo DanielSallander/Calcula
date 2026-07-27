@@ -127,6 +127,22 @@ pub fn goal_seek(
         params.target_row, params.target_col, params.target_value,
         params.variable_row, params.variable_col);
 
+    // Sheet protection on the CHANGING cell, before acquiring other locks.
+    // Goal Seek writes that cell permanently, so a locked cell refuses the run.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if let Err(e) = crate::protection::check_sheet_protection_range(
+            &state,
+            active_sheet,
+            params.variable_row,
+            params.variable_col,
+            params.variable_row,
+            params.variable_col,
+        ) {
+            return error_result(&e);
+        }
+    }
+
     // Check writeback region before acquiring other locks
     {
         let wb_index = state.writeback_index.lock().unwrap();

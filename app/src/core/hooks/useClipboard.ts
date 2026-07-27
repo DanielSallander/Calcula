@@ -822,8 +822,18 @@ export function useClipboard(): UseClipboardReturn {
               }
             } catch (err) {
               const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+              // CANCEL, never commit. Destination cells are written one at a
+              // time (and for a move, the source is not cleared until later),
+              // so committing here records a half-finished gesture: destination
+              // data already overwritten by the writes that succeeded, with no
+              // single undo that puts it back. Cancel discards the partial work
+              // instead of enshrining it.
+              //
+              // Newly load-bearing: a mid-range write can now be refused by
+              // sheet protection, so this path went from near-unreachable to
+              // routine.
+              await cancelUndoTransaction().catch(() => {});
               alert(msg);
-              await commitUndoTransaction();
               return;
             }
           }
@@ -1259,8 +1269,18 @@ export function useClipboard(): UseClipboardReturn {
               }
             } catch (err) {
               const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+              // CANCEL, never commit. Destination cells are written one at a
+              // time (and for a move, the source is not cleared until later),
+              // so committing here records a half-finished gesture: destination
+              // data already overwritten by the writes that succeeded, with no
+              // single undo that puts it back. Cancel discards the partial work
+              // instead of enshrining it.
+              //
+              // Newly load-bearing: a mid-range write can now be refused by
+              // sheet protection, so this path went from near-unreachable to
+              // routine.
+              await cancelUndoTransaction().catch(() => {});
               alert(msg);
-              await commitUndoTransaction();
               return;
             }
           }

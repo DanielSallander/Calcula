@@ -7,6 +7,7 @@ import {
   AppEvents,
   hideDialog,
   registerCommitGuard,
+  registerEditGuard,
 } from "@api";
 import { protectionEditGuard, PROTECTION_WARNING_DIALOG_ID } from "./handlers/editGuardHandler";
 import { ProtectionWarningModal } from "./components/ProtectionWarningModal";
@@ -51,15 +52,35 @@ function activate(context: ExtensionContext): void {
 
   console.log("[Protection] Activating...");
 
-  // 1. Register edit guard (blocks editing locked cells on protected sheets)
-  const unregEditGuard = registerCommitGuard(async (row, col, _value) => {
+  // 1a. Edit guard — refuse to START an edit on a locked cell.
+  //
+  // Protection previously registered ONLY a commit guard, which meant a user
+  // could click a locked cell, open the inline editor, type a whole formula and
+  // only be refused on Enter, with the typed text discarded. Excel refuses at
+  // the keypress. This registry also covers the Delete-key clear and the
+  // formula-bar entry points, which the commit guard never saw.
+  cleanupFns.push(registerEditGuard(protectionEditGuard));
+
+  // 1b. Commit guard — the backstop for edits that began before the sheet was
+  // protected (protection can change mid-edit), and for paths that commit
+  // without going through startEdit.
+  const unregCommitGuard = registerCommitGuard(async (row, col, _value) => {
     const result = await protectionEditGuard(row, col);
     if (result && result.blocked) {
       return { action: "block" as const };
     }
     return null;
   });
-  cleanupFns.push(unregEditGuard);
+  cleanupFns.push(unregCommitGuard);
+
+  // NOTE: no RANGE guard is registered, deliberately. `checkRangeGuards` is
+  // SYNCHRONOUS, so a guard there cannot ask the backend whether the individual
+  // cells are locked; the only thing it could cheaply consult is the cached
+  // "sheet is protected" flag, and blocking every range on a protected sheet
+  // would refuse edits to unlocked cells and allow-edit ranges — exactly the
+  // cells protection is meant to leave writable. Paste / fill / drag-move are
+  // enforced in the backend instead (commands/data.rs), which can resolve each
+  // cell's lock state precisely.
 
   // 2. Register dialogs
   context.ui.dialogs.register({

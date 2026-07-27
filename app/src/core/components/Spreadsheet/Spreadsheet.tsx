@@ -32,6 +32,7 @@ import {
   unmergeCells,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   setSplitWindow as backendSetSplitWindow,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
@@ -566,7 +567,13 @@ function SpreadsheetContent({
       await commitUndoTransaction();
       cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null }, "clear");
     } catch (error) {
+      // clearRangeWithOptions can now be refused by sheet protection, which
+      // skips the commit and leaves the transaction open for later edits to
+      // join. Cancel it, and surface the reason instead of failing silently.
+      await cancelUndoTransaction().catch(() => {});
       console.error("[Spreadsheet] Failed to clear all:", error);
+      const msg = typeof error === "string" ? error : (error as Error)?.message;
+      if (msg) alert(msg);
     }
   }, [selection]);
 

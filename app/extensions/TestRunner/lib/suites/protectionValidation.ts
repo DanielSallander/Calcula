@@ -65,6 +65,17 @@ export const protectionValidationSuite: TestSuite = {
         await setDataValidation(A.row, A.col, A.row, A.col, makeValidation(rule));
         await ctx.settle();
 
+        // Unlock the cell BEFORE protecting. Backend enforcement now refuses
+        // writes to locked cells on a protected sheet, and a cell with no
+        // CellProtection entry resolves to locked — so without this the writes
+        // below are rejected and the test would measure the wrong thing. This
+        // test is about validation surviving protection, not about protection
+        // blocking writes.
+        await setCellProtection({
+          startRow: A.row, startCol: A.col, endRow: A.row, endCol: A.col,
+          locked: false,
+        });
+
         await protectSheet();
         await ctx.settle();
 

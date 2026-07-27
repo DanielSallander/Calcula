@@ -110,6 +110,20 @@ pub fn data_table_one_var(
         params.sheet_index
     );
 
+    // Sheet protection over the table rectangle, which this command rewrites
+    // wholesale (and whose input cell it overwrites temporarily). Uses
+    // params.sheet_index, so a protected background sheet is covered too.
+    if let Err(e) = crate::protection::check_sheet_protection_range(
+        &state,
+        params.sheet_index,
+        params.start_row.min(params.end_row),
+        params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row),
+        params.start_col.max(params.end_col),
+    ) {
+        return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -322,6 +336,20 @@ pub fn data_table_two_var(
         params.end_col,
         params.sheet_index
     );
+
+    // Sheet protection over the table rectangle, which this command rewrites
+    // wholesale (and whose input cell it overwrites temporarily). Uses
+    // params.sheet_index, so a protected background sheet is covered too.
+    if let Err(e) = crate::protection::check_sheet_protection_range(
+        &state,
+        params.sheet_index,
+        params.start_row.min(params.end_row),
+        params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row),
+        params.start_col.max(params.end_col),
+    ) {
+        return DataTableResult { cells: Vec::new(), updated_cells: Vec::new(), error: Some(e) };
+    }
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();

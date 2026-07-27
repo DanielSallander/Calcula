@@ -382,6 +382,43 @@ pub(crate) fn apply_script_modified_grids(
         }
     };
 
+    // SHEET PROTECTION, decided for EVERY sheet before ANY of them is mutated.
+    //
+    // Two reasons this is a whole-workbook pre-pass rather than a per-sheet gate
+    // at each write:
+    //
+    //  1. The active sheet is gated inside `update_cells_batch_with_controls`,
+    //     which runs AFTER the non-active grids have already been swapped in
+    //     below. Without this pre-pass, a refusal on the active sheet would
+    //     return early leaving every other sheet's writes applied — and skipped
+    //     past their recalc, dirty flag and audit entries.
+    //  2. Non-active sheets are installed by a wholesale `app_grids[idx] =
+    //     after_grid.clone()`, which consults nothing. A script calling
+    //     `Calcula.workbook.sheets(i).range(...).setValue(...)` on a protected
+    //     background sheet would otherwise write straight through it.
+    //
+    // Deciding first makes a refusal atomic: nothing has been touched yet, so
+    // there is nothing to roll back.
+    {
+        let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let empty_grid = Grid::new();
+        for (idx, after_grid) in modified_grids.iter().enumerate() {
+            if idx >= app_grids.len() {
+                continue;
+            }
+            let before = app_grids.get(idx).unwrap_or(&empty_grid);
+            let diff = diff_grids_to_updates(before, after_grid);
+            if diff.is_empty() {
+                continue;
+            }
+            crate::protection::check_sheet_protection_cells(
+                state,
+                idx,
+                diff.iter().map(|u| (u.row, u.col)),
+            )?;
+        }
+    }
+
     // Apply non-active-sheet writes the undoable + recalc-tracked way (no longer a
     // silent wholesale swap). For each non-active sheet the script changed, snapshot
     // its BEFORE cells (the union of populated coords in both grids — each entry

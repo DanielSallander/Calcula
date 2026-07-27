@@ -28,9 +28,27 @@ export const protectionSuite: TestSuite = {
   description: "Tests sheet protection, cell protection, allow-edit ranges, workbook protection.",
 
   afterEach: async (ctx) => {
-    // Always unprotect after each test
-    try { await unprotectSheet(); } catch { /* ignore */ }
-    try { await unprotectWorkbook(); } catch { /* ignore */ }
+    // Always unprotect after each test.
+    //
+    // ORDER AND PASSWORDS BOTH MATTER now that the backend enforces protection.
+    // unprotect_sheet is the ONLY command that accepts a password, and the
+    // settings commands below (removeAllowEditRange, setCellProtection) are
+    // refused while the sheet is still protected. So a teardown that failed to
+    // unprotect used to leave one dirty sheet; today it would leave every
+    // subsequent suite's ctx.setCells rejected. Try the passwords this suite
+    // actually uses, not just the empty one.
+    for (const pwd of [undefined, "test123"] as const) {
+      try {
+        const r = await unprotectSheet(pwd);
+        if (r?.success) break;
+      } catch { /* ignore */ }
+    }
+    for (const pwd of [undefined, "test123"] as const) {
+      try {
+        const r = await unprotectWorkbook(pwd);
+        if (r?.success) break;
+      } catch { /* ignore */ }
+    }
     try { await removeAllowEditRange("TestEditRange"); } catch { /* ignore */ }
     // Reset cell protection to default (locked) for the test area
     try {

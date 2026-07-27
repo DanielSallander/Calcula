@@ -8,7 +8,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
-import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
+import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, beginUndoTransaction, commitUndoTransaction, cancelUndoTransaction, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
 import { cellEvents, cellToChange } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -1198,6 +1198,12 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           updatedCells = await updateCellsBatch(batchUpdates);
         } catch (err) {
           const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+          // Close the transaction opened before this try. Returning without
+          // cancelling leaves it OPEN, and every later edit then joins the
+          // orphaned transaction instead of forming its own undo step — so the
+          // user's next Ctrl+Z reverts an unbounded amount of unrelated work.
+          // Sheet protection can now refuse this batch, making that routine.
+          await cancelUndoTransaction().catch(() => {});
           alert(msg);
           setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
           dragStartRef.current = null;
@@ -1423,6 +1429,9 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           updatedCells = await updateCellsBatch(batchUpdates);
         } catch (err) {
           const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+          // Same leak as completeFill above: without this the transaction
+          // opened at "Auto-fill to edge" stays open and swallows later edits.
+          await cancelUndoTransaction().catch(() => {});
           alert(msg);
           return;
         }
