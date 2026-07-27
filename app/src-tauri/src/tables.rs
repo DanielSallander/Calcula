@@ -720,8 +720,12 @@ pub fn delete_table(
         let mut undo_stack = state.undo_stack.lock().unwrap();
         undo_stack.begin_transaction("Delete table".to_string());
 
-        // Cells first: restores run in order, and the table must exist again
-        // before anything re-resolves references into it.
+        // Undo replays a transaction's changes in REVERSE record order
+        // (undo_commands.rs: `transaction.changes.iter().rev()`, and deferred
+        // restores execute in the order they were collected during that reverse
+        // pass). So recording the cells FIRST makes them restore LAST — after
+        // the table object exists again, which is what the restored structured
+        // references need in order to resolve.
         let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
             std::collections::HashMap::new();
         for (sheet_idx, row, col, before) in rewritten_cells {
@@ -829,27 +833,49 @@ pub fn rename_table(
     drop(grids);
     drop(grid);
 
-    crate::undo_commands::record_table_undo(
-        &state,
-        active_sheet,
-        table_id,
-        Some(previous),
-        "Rename table",
-    );
-    if renamed_cells > 0 {
-        crate::log_info!(
-            "TABLES",
-            "Rename updated {} dependent formula cell(s) to '{}'",
-            renamed_cells,
-            new_name
+    // ONE transaction covering the rename AND the rewritten cells. Recording
+    // only the table meant Ctrl+Z put the old name back on the registry while
+    // every dependent formula kept saying the NEW name — so undoing a rename
+    // produced #NAME? everywhere. Cells are recorded first so they restore last
+    // (undo replays a transaction in reverse), i.e. after the table is back.
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Rename table".to_string());
+        let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
+            std::collections::HashMap::new();
+        for (sheet_idx, row, col, before) in renamed_cells {
+            by_sheet.entry(sheet_idx).or_default().push((row, col, before));
+        }
+        let cell_count: usize = by_sheet.values().map(|v| v.len()).sum();
+        for (sheet_index, cells) in by_sheet {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, cells),
+                "Restore table references",
+            );
+        }
+        undo_stack.record_custom_restore(
+            "obj_table".to_string(),
+            crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(previous)),
+            "Rename table",
         );
+        undo_stack.commit_transaction();
+
+        if cell_count > 0 {
+            crate::log_info!(
+                "TABLES",
+                "Rename updated {} dependent formula cell(s) to '{}'",
+                cell_count,
+                new_name
+            );
+        }
     }
 
     TableResult::ok(updated)
 }
 
 /// Point every `OldName[...]` structured reference at `new_name`, across all
-/// sheets. Returns how many cells changed.
+/// sheets. Returns the PRE-mutation cells so the caller can make it undoable.
 ///
 /// Operates on the AST directly rather than round-tripping through formula
 /// text: the stored form IS the AST, so there is no re-parse that could fail
@@ -861,8 +887,8 @@ fn rename_table_refs_in_formulas(
     active_sheet: usize,
     old_name_upper: &str,
     new_name: &str,
-) -> usize {
-    let mut changed_count = 0usize;
+) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
+    let mut touched: Vec<(usize, u32, u32, Option<engine::Cell>)> = Vec::new();
 
     for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
         // Cheap text prefilter before parsing. A cell can only reference the
@@ -891,18 +917,19 @@ fn rename_table_refs_in_formulas(
                 continue; // The name appeared in a string literal, not a ref.
             }
             if let Some(cell) = sheet_grid.get_cell(row, col) {
-                let mut updated_cell = cell.clone();
+                let before = cell.clone();
+                let mut updated_cell = before.clone();
                 updated_cell.ast = Some(Box::new(renamed));
                 sheet_grid.set_cell(row, col, updated_cell.clone());
                 if sheet_idx == active_sheet {
                     grid.set_cell(row, col, updated_cell);
                 }
-                changed_count += 1;
+                touched.push((sheet_idx, row, col, Some(before)));
             }
         }
     }
 
-    changed_count
+    touched
 }
 
 /// Update table style options
@@ -1288,31 +1315,86 @@ pub fn resize_table(
 
     let updated = table.clone();
     let table_id = params.table_id;
-    let owns_filter = table.auto_filter_id.is_some() && table.style_options.show_filter_button;
+    let claims_filter = table.auto_filter_id.is_some() && table.style_options.show_filter_button;
     drop(tables);
 
     // Keep the table's AutoFilter on the table. `check_table_auto_expand`
     // already does this for growth; a resize moved the table out from under its
-    // filter, which left the chevrons on the old header row AND broke the
-    // ownership test that decides whether deleting the table may clear it.
-    if owns_filter {
+    // filter, which left the chevrons on the old header row.
+    //
+    // OWNERSHIP: a sheet has exactly one AutoFilter and `auto_filter_id` is only
+    // the sheet index, so "this table has show_filter_button" does NOT prove the
+    // sheet's filter belongs to it — with two filter-bearing tables on a sheet
+    // the filter belongs to whichever was created last. Verify against the
+    // table's PRE-resize bounds before touching anything, or resizing table B
+    // silently drags table A's filter (and its criteria) onto B.
+    let mut filter_undo: Option<crate::autofilter::AutoFilter> = None;
+    if claims_filter {
         if let Ok(mut auto_filters) = state.auto_filters.lock() {
             if let Some(af) = auto_filters.get_mut(&active_sheet) {
-                af.start_row = updated.start_row;
-                af.end_row = updated.end_row;
-                af.start_col = updated.start_col;
-                af.end_col = updated.end_col;
+                let is_ours = af.start_row >= previous.start_row
+                    && af.start_row <= previous.end_row
+                    && af.start_col <= previous.end_col
+                    && af.end_col >= previous.start_col;
+                if is_ours {
+                    filter_undo = Some(af.clone());
+
+                    // `column_filters` is keyed RELATIVE to start_col. Moving
+                    // start_col without re-keying would leave every existing
+                    // criterion pointing at a different physical column —
+                    // filtering the wrong data with no visible change.
+                    if af.start_col != updated.start_col {
+                        let old_start = af.start_col;
+                        let remapped: std::collections::HashMap<u32, crate::autofilter::ColumnFilter> =
+                            af.column_filters
+                                .iter()
+                                .filter_map(|(rel, cf)| {
+                                    let abs = old_start + rel;
+                                    if abs < updated.start_col || abs > updated.end_col {
+                                        return None; // Column left the table.
+                                    }
+                                    let new_rel = abs - updated.start_col;
+                                    let mut moved = cf.clone();
+                                    moved.column_index = new_rel;
+                                    Some((new_rel, moved))
+                                })
+                                .collect();
+                        af.column_filters = remapped;
+                    } else {
+                        // Same origin: drop criteria for columns the resize cut.
+                        let max_rel = updated.end_col - updated.start_col;
+                        af.column_filters.retain(|rel, _| *rel <= max_rel);
+                    }
+
+                    af.start_row = updated.start_row;
+                    af.end_row = updated.end_row;
+                    af.start_col = updated.start_col;
+                    af.end_col = updated.end_col;
+                }
             }
         }
     }
 
-    crate::undo_commands::record_table_undo(
-        &state,
-        active_sheet,
-        table_id,
-        Some(previous),
-        "Resize table",
-    );
+    // ONE transaction: undoing the resize must also put the filter back where
+    // it was, criteria and all. Recording only the table left Ctrl+Z restoring
+    // the old bounds while the filter stayed on the resized range.
+    {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Resize table".to_string());
+        if let Some(af_previous) = filter_undo {
+            undo_stack.record_custom_restore(
+                "obj_autofilter".to_string(),
+                crate::undo_commands::autofilter_snapshot_bytes(active_sheet, Some(af_previous)),
+                "Restore table filter",
+            );
+        }
+        undo_stack.record_custom_restore(
+            "obj_table".to_string(),
+            crate::undo_commands::table_snapshot_bytes(active_sheet, table_id, Some(previous)),
+            "Resize table",
+        );
+        undo_stack.commit_transaction();
+    }
 
     TableResult::ok(updated)
 }
@@ -2350,6 +2432,52 @@ mod tests {
     fn resize_shrinking_from_the_left_drops_the_left_columns() {
         let cols = realign(0, &["X", "Y", "Z"], 1, 2);
         assert_eq!(cols, vec!["Y", "Z"]);
+    }
+
+    // --- Resize: AutoFilter criteria re-key with a moved start_col ---
+
+    /// Mirrors the `column_filters` remap in `resize_table`. Keys are RELATIVE
+    /// to the filter's start_col, so a moved origin must re-key them or every
+    /// criterion silently filters a different physical column.
+    fn remap_filter_keys(
+        old_start: u32,
+        keys: &[u32],
+        new_start: u32,
+        new_end: u32,
+    ) -> Vec<u32> {
+        let mut out: Vec<u32> = keys
+            .iter()
+            .filter_map(|rel| {
+                let abs = old_start + rel;
+                if abs < new_start || abs > new_end {
+                    return None;
+                }
+                Some(abs - new_start)
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn resize_rekeys_filter_criteria_when_origin_moves_left() {
+        // Filter at col 2 with criteria on relative 0 and 1 (abs 2 and 3).
+        // Table widens to start at col 0, so those become relative 2 and 3.
+        assert_eq!(remap_filter_keys(2, &[0, 1], 0, 4), vec![2, 3]);
+    }
+
+    #[test]
+    fn resize_rekeys_filter_criteria_when_origin_moves_right() {
+        // Filter at col 0, criteria on abs 1 and 2; table now starts at 1.
+        assert_eq!(remap_filter_keys(0, &[1, 2], 1, 3), vec![0, 1]);
+    }
+
+    #[test]
+    fn resize_drops_criteria_for_columns_that_left_the_table() {
+        // abs 0 and 5; new range is cols 1..=3, so both fall outside.
+        assert!(remap_filter_keys(0, &[0, 5], 1, 3).is_empty());
+        // abs 2 survives, abs 9 does not.
+        assert_eq!(remap_filter_keys(0, &[2, 9], 0, 4), vec![2]);
     }
 
     #[test]

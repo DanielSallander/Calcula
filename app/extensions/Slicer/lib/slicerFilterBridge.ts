@@ -267,6 +267,7 @@ async function applyTableFilterForSource(
   // path (value listing, connections, filtering) was implemented and working.
   const tables = await slicerBackend.invoke<Array<{
     id: string;
+    startCol: number;
     columns: Array<{ name: string }>;
     styleOptions: { headerRow: boolean; showFilterButton: boolean };
   }>>("get_tables_for_sheet", { sheetIndex });
@@ -277,11 +278,35 @@ async function applyTableFilterForSource(
     return;
   }
 
-  const colIndex = table.columns.findIndex((c) => c.name === fieldName);
-  if (colIndex < 0) {
+  const colOffset = table.columns.findIndex((c) => c.name === fieldName);
+  if (colOffset < 0) {
     console.warn("[Slicer] Column not found:", fieldName);
     return;
   }
+
+  // A sheet has exactly ONE AutoFilter, and `column_filters` is keyed relative
+  // to THAT filter's start_col — not to the table's. With two filter-bearing
+  // tables on a sheet the filter belongs to whichever was created last, so an
+  // index taken straight from `table.columns` would filter the wrong columns.
+  // Translate through absolute grid coordinates, and refuse when the target
+  // column is not inside the filter at all.
+  const afRange = await slicerBackend.invoke<
+    [number, number, number, number] | null
+  >("get_auto_filter_range", {});
+  if (!afRange) {
+    console.warn("[Slicer] No AutoFilter on this sheet; cannot apply table filter");
+    return;
+  }
+  const [, afStartCol, , afEndCol] = afRange;
+  const absCol = table.startCol + colOffset;
+  if (absCol < afStartCol || absCol > afEndCol) {
+    console.warn(
+      `[Slicer] Column '${fieldName}' (grid col ${absCol}) is outside the sheet's AutoFilter ` +
+        `(cols ${afStartCol}-${afEndCol}) — the filter belongs to a different table.`,
+    );
+    return;
+  }
+  const colIndex = absCol - afStartCol;
 
   // `column_filters` is keyed RELATIVE to the AutoFilter's start_col, and a
   // table's AutoFilter starts at the table's first column — so the index within
