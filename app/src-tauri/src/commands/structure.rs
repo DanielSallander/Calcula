@@ -568,57 +568,27 @@ fn shift_per_sheet_range_stores(
 
     // --- Allow-edit ranges: the exceptions carved out of sheet protection. ---
     //
-    // These are ENFORCED (`SheetProtection::can_edit_cell` returns true for any
-    // cell inside one), so drift here is not a misplaced decoration — it is a
-    // protection boundary pointing at the wrong cells. An unshifted range both
-    // leaves cells editable that the author locked and locks cells they
-    // deliberately opened up.
-    //
-    // A range whose rows or columns were entirely deleted is DROPPED. That
-    // fails SAFE: it removes an exception, tightening protection, rather than
-    // leaving a stale rectangle that keeps unintended cells writable.
+    // Arithmetic and fail-safe drop rule live in
+    // [`coord_shift::shift_allow_edit_ranges`]; this is the wiring.
     if let Ok(mut store) = state.sheet_protection.lock() {
         if let Some(protection) = store.get_mut(&sheet_index) {
             if !protection.allow_edit_ranges.is_empty() {
-                let previous = protection.clone();
-                let mut changed = false;
+                // Snapshot ONLY the ranges — never the whole record. The
+                // sheet-level `protected` flag / password / options are not
+                // undo-tracked by the protection commands, so capturing them
+                // here would make undo of this edit silently revert protection
+                // changes the author made afterwards.
+                let previous_ranges = protection.allow_edit_ranges.clone();
 
-                protection.allow_edit_ranges.retain_mut(|r| {
-                    let shifted = shift_range(
-                        CellRange {
-                            start_row: r.start_row,
-                            end_row: r.end_row,
-                            start_col: r.start_col,
-                            end_col: r.end_col,
-                        },
-                        edit,
-                    );
-                    match shifted {
-                        Some(n) => {
-                            if (n.start_row, n.end_row, n.start_col, n.end_col)
-                                != (r.start_row, r.end_row, r.start_col, r.end_col)
-                            {
-                                changed = true;
-                                r.start_row = n.start_row;
-                                r.end_row = n.end_row;
-                                r.start_col = n.start_col;
-                                r.end_col = n.end_col;
-                            }
-                            true
-                        }
-                        None => {
-                            changed = true;
-                            false
-                        }
-                    }
-                });
-
-                if changed {
+                if crate::commands::coord_shift::shift_allow_edit_ranges(
+                    &mut protection.allow_edit_ranges,
+                    edit,
+                ) {
                     undo_stack.record_custom_restore(
                         "obj_sheet_protection".to_string(),
                         crate::undo_commands::sheet_protection_snapshot_bytes(
                             sheet_index,
-                            Some(previous),
+                            previous_ranges,
                         ),
                         "Shift allow-edit ranges",
                     );

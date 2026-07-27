@@ -916,13 +916,19 @@ mod tests {
 
     #[test]
     fn shifted_allow_edit_range_still_covers_the_same_logical_cells() {
-        // Range over rows 5..9; two rows inserted above moves it to 7..11.
-        // The cell that was editable must still be editable at its new home,
-        // and the cell that slid into the OLD position must not be.
-        let before = protected_with(vec![range(5, 9, 0, 3)]);
-        assert!(before.can_edit_cell(5, 0, true), "inside the exception");
+        use crate::commands::coord_shift::{shift_allow_edit_ranges, StructuralEdit};
 
-        let after = protected_with(vec![range(7, 11, 0, 3)]);
+        // Rows 5..9 are the exception; two rows inserted at row 0 push it down.
+        let mut ranges = vec![range(5, 9, 0, 3)];
+        assert!(shift_allow_edit_ranges(
+            &mut ranges,
+            StructuralEdit::RowInsert { at: 0, count: 2 }
+        ));
+        assert_eq!((ranges[0].start_row, ranges[0].end_row), (7, 11));
+
+        // The cell that was editable must still be editable at its new home,
+        // and whatever slid into the OLD position must not be.
+        let after = protected_with(ranges);
         assert!(after.can_edit_cell(7, 0, true), "moved with its rows");
         assert!(
             !after.can_edit_cell(5, 0, true),
@@ -932,20 +938,85 @@ mod tests {
 
     #[test]
     fn dropping_a_vanished_allow_edit_range_fails_safe() {
-        // When every row of an exception is deleted the shift drops it. That
-        // TIGHTENS protection (one fewer exception), which is the safe
-        // direction; keeping a stale rectangle would leave cells writable that
-        // the author never opened up.
-        let with_exception = protected_with(vec![range(5, 9, 0, 3)]);
-        assert!(with_exception.can_edit_cell(5, 0, true));
+        use crate::commands::coord_shift::{shift_allow_edit_ranges, StructuralEdit};
 
-        let dropped = protected_with(vec![]);
+        // Deleting every row of an exception drops it. That TIGHTENS protection
+        // (one fewer exception), which is the safe direction; keeping a stale
+        // rectangle would leave cells writable the author never opened up.
+        let mut ranges = vec![range(5, 9, 0, 3)];
+        assert!(protected_with(ranges.clone()).can_edit_cell(5, 0, true));
+
+        assert!(shift_allow_edit_ranges(
+            &mut ranges,
+            StructuralEdit::RowDelete { at: 5, count: 5 }
+        ));
+        assert!(ranges.is_empty(), "a fully deleted exception is dropped");
+
+        let dropped = protected_with(ranges);
         assert!(
             !dropped.can_edit_cell(5, 0, true),
             "a locked cell must be locked again once its exception is gone"
         );
         // Unlocked cells are unaffected either way.
         assert!(dropped.can_edit_cell(5, 0, false));
+    }
+
+    #[test]
+    fn column_delete_narrows_an_allow_edit_range_without_widening_it() {
+        use crate::commands::coord_shift::{shift_allow_edit_ranges, StructuralEdit};
+
+        // Exception spans cols 2..6. Deleting cols 4..5 must narrow it to 2..4,
+        // never leave it spanning cells that were outside it before.
+        let mut ranges = vec![range(0, 3, 2, 6)];
+        assert!(shift_allow_edit_ranges(
+            &mut ranges,
+            StructuralEdit::ColDelete { at: 4, count: 2 }
+        ));
+        assert_eq!((ranges[0].start_col, ranges[0].end_col), (2, 4));
+        assert_eq!((ranges[0].start_row, ranges[0].end_row), (0, 3), "rows untouched");
+
+        let after = protected_with(ranges);
+        assert!(after.can_edit_cell(0, 4, true));
+        assert!(
+            !after.can_edit_cell(0, 5, true),
+            "the range must not cover a column it never covered"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_misses_every_range_reports_no_change() {
+        use crate::commands::coord_shift::{shift_allow_edit_ranges, StructuralEdit};
+
+        // Rows inserted BELOW the exception leave it alone. The false return is
+        // load-bearing: the caller skips recording an undo entry, so a no-op
+        // edit must not push one.
+        let mut ranges = vec![range(5, 9, 0, 3)];
+        assert!(!shift_allow_edit_ranges(
+            &mut ranges,
+            StructuralEdit::RowInsert { at: 20, count: 3 }
+        ));
+        assert_eq!((ranges[0].start_row, ranges[0].end_row), (5, 9));
+    }
+
+    #[test]
+    fn shift_preserves_each_range_password_gate() {
+        use crate::commands::coord_shift::{shift_allow_edit_ranges, StructuralEdit};
+
+        // Each AllowEditRange carries its OWN password hash/salt. That is why
+        // the undo snapshot can be scoped to the Vec alone: a range restored
+        // from it comes back with its gate intact.
+        let mut gated = range(5, 9, 0, 3);
+        gated.password_hash = Some("hash".to_string());
+        gated.password_salt = Some("salt".to_string());
+
+        let mut ranges = vec![gated];
+        assert!(shift_allow_edit_ranges(
+            &mut ranges,
+            StructuralEdit::RowInsert { at: 0, count: 1 }
+        ));
+        assert_eq!(ranges[0].start_row, 6);
+        assert_eq!(ranges[0].password_hash.as_deref(), Some("hash"));
+        assert_eq!(ranges[0].password_salt.as_deref(), Some("salt"));
     }
 
     #[test]

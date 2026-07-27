@@ -1864,25 +1864,38 @@ pub(crate) fn validation_snapshot_bytes(
     serde_json::to_vec(&ValidationObjSnapshot { sheet_index, previous }).unwrap_or_default()
 }
 
-/// Snapshot for the "obj_sheet_protection" CustomRestore — one sheet's whole
-/// protection record before the mutation.
+/// Snapshot for the "obj_sheet_protection" CustomRestore — one sheet's
+/// allow-edit ranges before the mutation.
 ///
-/// Whole-record rather than just the ranges: the password hash and salt live on
-/// the same struct, and a partial restore that resurrected ranges without them
-/// would change who can edit what. `None` means the sheet had no record at all.
+/// Scoped to `allow_edit_ranges` ONLY, deliberately. The rest of
+/// `SheetProtection` (`protected`, the sheet-level `password_hash`/
+/// `password_salt`, `options`) is NOT undo-tracked by any protection command —
+/// `protect_sheet` / `unprotect_sheet` / `update_protection_options` /
+/// `add_allow_edit_range` / `remove_allow_edit_range` record nothing. So by the
+/// time this restore runs, those fields may legitimately hold values NEWER than
+/// this snapshot, and swapping the whole record back would silently revert them:
+/// undoing an unrelated row insert would unprotect a sheet the author protected
+/// afterwards, discarding the password hash, and the now-unprotected record is
+/// what `collect_protection_for_save` writes.
+///
+/// Restoring only the ranges is safe precisely because each `AllowEditRange`
+/// carries its OWN `password_hash`/`password_salt` — a range resurrected from
+/// this Vec comes back with its gate intact, so who-can-edit-what is preserved
+/// exactly without touching sheet-level state the shift never mutated.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SheetProtectionObjSnapshot {
     sheet_index: usize,
-    previous: Option<crate::protection::SheetProtection>,
+    previous_ranges: Vec<crate::protection::AllowEditRange>,
 }
 
 /// Serialized "obj_sheet_protection" snapshot bytes (in-open-transaction
 /// contract, as for `cell_types_snapshot_bytes`).
 pub(crate) fn sheet_protection_snapshot_bytes(
     sheet_index: usize,
-    previous: Option<crate::protection::SheetProtection>,
+    previous_ranges: Vec<crate::protection::AllowEditRange>,
 ) -> Vec<u8> {
-    serde_json::to_vec(&SheetProtectionObjSnapshot { sheet_index, previous }).unwrap_or_default()
+    serde_json::to_vec(&SheetProtectionObjSnapshot { sheet_index, previous_ranges })
+        .unwrap_or_default()
 }
 
 /// Snapshot for the "obj_conditional_formats" CustomRestore — one sheet's whole
@@ -2262,14 +2275,25 @@ fn apply_object_swap_restore(
                 Err(e) => { eprintln!("[undo] bad obj_sheet_protection snapshot: {}", e); return; }
             };
             let mut store = state.sheet_protection.lock().unwrap();
-            let current = store.remove(&snap.sheet_index);
+            // Swap ONLY allow_edit_ranges on the LIVE record; see the snapshot
+            // struct's doc comment for why the rest must be left alone.
+            let current = if store.contains_key(&snap.sheet_index) {
+                let record = store.get_mut(&snap.sheet_index).unwrap();
+                std::mem::replace(&mut record.allow_edit_ranges, snap.previous_ranges)
+            } else if snap.previous_ranges.is_empty() {
+                // No record and nothing to put back — don't materialize an empty
+                // protection record as a side effect of undo.
+                Vec::new()
+            } else {
+                let mut record = crate::protection::SheetProtection::default();
+                record.allow_edit_ranges = snap.previous_ranges;
+                store.insert(snap.sheet_index, record);
+                Vec::new()
+            };
             push_obj_inverse(inverse_transaction, kind, &SheetProtectionObjSnapshot {
                 sheet_index: snap.sheet_index,
-                previous: current,
+                previous_ranges: current,
             });
-            if let Some(previous) = snap.previous {
-                store.insert(snap.sheet_index, previous);
-            }
         }
         "obj_conditional_formats" => {
             let snap: ConditionalFormatsObjSnapshot = match serde_json::from_slice(data) {

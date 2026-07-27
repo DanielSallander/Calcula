@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 
-use calp::writeback::StructuralEdit;
+// Re-exported: every public fn here takes one, so callers must be able to name
+// it without reaching into `calp` themselves.
+pub use calp::writeback::StructuralEdit;
 
 /// Where a cell at `(row, col)` ends up after `edit`, or `None` when the edit
 /// deleted the row/column it lived in.
@@ -202,6 +204,57 @@ impl CellAnchored for crate::hyperlinks::Hyperlink {
 
 /// Carries no coordinates of its own — the map key is the only position.
 impl CellAnchored for crate::protection::CellProtection {}
+
+/// Shift every allow-edit rectangle of one sheet through a structural edit.
+///
+/// Unlike the other stores here, these rectangles are ENFORCED —
+/// `SheetProtection::can_edit_cell` grants write access to any cell inside one —
+/// so drift is not a misplaced decoration but a protection boundary pointing at
+/// the wrong cells.
+///
+/// A rectangle whose rows or columns are entirely deleted is DROPPED. That fails
+/// SAFE: it removes an exception (tightening protection) rather than leaving a
+/// stale rectangle that keeps unintended cells writable. Each range keeps its own
+/// `password_hash`/`password_salt`, so a shift never changes who can open it.
+///
+/// Returns whether anything moved or was dropped, so the caller can skip
+/// recording an undo entry when the edit missed every range.
+pub fn shift_allow_edit_ranges(
+    ranges: &mut Vec<crate::protection::AllowEditRange>,
+    edit: StructuralEdit,
+) -> bool {
+    let mut changed = false;
+    ranges.retain_mut(|r| {
+        let shifted = shift_range(
+            CellRange {
+                start_row: r.start_row,
+                end_row: r.end_row,
+                start_col: r.start_col,
+                end_col: r.end_col,
+            },
+            edit,
+        );
+        match shifted {
+            Some(n) => {
+                if (n.start_row, n.end_row, n.start_col, n.end_col)
+                    != (r.start_row, r.end_row, r.start_col, r.end_col)
+                {
+                    changed = true;
+                    r.start_row = n.start_row;
+                    r.end_row = n.end_row;
+                    r.start_col = n.start_col;
+                    r.end_col = n.end_col;
+                }
+                true
+            }
+            None => {
+                changed = true;
+                false
+            }
+        }
+    });
+    changed
+}
 
 /// Apply [`shift_cell`] to every entry of one sheet in a
 /// `HashMap<sheet_index, HashMap<(row, col), T>>` store.
