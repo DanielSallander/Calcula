@@ -5451,10 +5451,22 @@ pub fn calp_get_writeback_draft_regions(
     Ok(drafts.clone())
 }
 
+/// Mark the workbook dirty. Draft writeback regions live in the .cala
+/// (`user_files/writeback_draft_regions.json`) and are written only by the save
+/// path, so a region designated on an otherwise-clean document was silently
+/// discarded at close: the close prompt and auto-recover both gate on
+/// `is_modified`, and nothing on the draft-region path ever set it.
+fn mark_workbook_modified(file_state: &crate::persistence::FileState) {
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+}
+
 /// Add a new draft writeback region.
 #[tauri::command]
 pub fn calp_add_writeback_region(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     region: calp::WritebackRegionDeclaration,
     window: tauri::Window,
 ) -> Result<(), String> {
@@ -5478,6 +5490,7 @@ pub fn calp_add_writeback_region(
         .map_err(|e| format!("Region overlaps with existing draft: {}", e))?;
 
     drafts.push(region);
+    mark_workbook_modified(&file_state);
     Ok(())
 }
 
@@ -5485,6 +5498,7 @@ pub fn calp_add_writeback_region(
 #[tauri::command]
 pub fn calp_remove_writeback_region(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     region_id: String,
     window: tauri::Window,
 ) -> Result<bool, String> {
@@ -5492,7 +5506,11 @@ pub fn calp_remove_writeback_region(
     let mut drafts = state.writeback_draft_regions.lock().map_err(|e| e.to_string())?;
     let len_before = drafts.len();
     drafts.retain(|r| r.id != region_id);
-    Ok(drafts.len() < len_before)
+    let removed = drafts.len() < len_before;
+    if removed {
+        mark_workbook_modified(&file_state);
+    }
+    Ok(removed)
 }
 
 /// Update an existing draft writeback region (replace by ID).
@@ -5511,6 +5529,7 @@ pub fn calp_remove_writeback_region(
 #[tauri::command]
 pub fn calp_update_writeback_region(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     region: calp::WritebackRegionDeclaration,
     window: tauri::Window,
 ) -> Result<(), String> {
@@ -5530,6 +5549,7 @@ pub fn calp_update_writeback_region(
         .map_err(|e| format!("Invalid update: {}", e))?;
 
     drafts[pos] = updated;
+    mark_workbook_modified(&file_state);
     Ok(())
 }
 
@@ -6169,9 +6189,15 @@ pub fn calp_submit_region(
 
 /// Submit the drafts of EVERY writeback region that has any — the "I'm done /
 /// submit all" action, so a contributor doesn't leave whole regions as unsent
-/// drafts believing they're done. Returns the total values submitted. Surfaces
-/// the first region's error (e.g. a required region with empty cells), leaving
-/// the rest unsubmitted so the contributor can fix and retry.
+/// drafts believing they're done. Returns the total values submitted.
+///
+/// PARTIAL SUCCESS IS REPORTED AS SUCH. Each region commits durably and
+/// independently (registry write, then local drafts advance to Submitted), so
+/// when region 3 of 5 fails validation, regions 1-2 are already sent. Bailing
+/// with `?` reported that as a total failure — the contributor was told nothing
+/// went through while their answers were in fact already in the publisher's
+/// registry, which is the one thing a data-collection UI must never get wrong.
+/// The error text now names what DID send, so a retry is an informed choice.
 #[tauri::command]
 pub fn calp_submit_all_regions(
     state: State<AppState>,
@@ -6189,8 +6215,27 @@ pub fn calp_submit_all_regions(
         set.into_iter().collect()
     };
     let mut total = 0usize;
+    let mut submitted_regions = 0usize;
     for region_id in region_ids {
-        total += submit_region_internal(&state, &region_id)?;
+        match submit_region_internal(&state, &region_id) {
+            Ok(n) => {
+                total += n;
+                if n > 0 {
+                    submitted_regions += 1;
+                }
+            }
+            Err(e) => {
+                if total == 0 {
+                    return Err(e);
+                }
+                return Err(format!(
+                    "{}\n\nNote: {} value(s) across {} region(s) were already submitted \
+                     successfully before this failure and do NOT need resending. \
+                     Fix the problem above and submit again to send the rest.",
+                    e, total, submitted_regions
+                ));
+            }
+        }
     }
     Ok(total)
 }
@@ -7454,11 +7499,23 @@ pub(crate) fn apply_gather_governance(
 /// Lenient version-binding carry-forward, extracted (behavior-preserving) from
 /// `build_gather_data` so the writeback dataset builder (bi::writeback_source)
 /// merges IDENTICALLY: submissions made against strictly OLDER versions of the
-/// same region carry forward — but only when that version's region schema is
-/// compatible with the current one (matching check_region_compatibility: both
-/// schemas present → compare; either absent → compatible; region absent in that
-/// version → nothing to carry). Newest `updated_at` wins per (submitter, cell)
-/// slot. A `Strict` version binding disables carry-forward entirely.
+/// same region carry forward — but only when that version's region is compatible
+/// with the current one. "Compatible" must mean exactly what
+/// `check_region_compatibility` means, since that is what the refresh path uses
+/// to decide whether to keep a subscriber's drafts:
+///
+/// * GEOMETRY — the old selector's cells must still address the same thing
+///   (`preserves_cell_meaning_of`). Submissions are keyed by ABSOLUTE
+///   `(cell_row, cell_col)`, so carrying them across a moved or shrunk region
+///   drops them onto cells that now hold a different field. This gate is why
+///   the check exists: without it a region that slid down two rows between
+///   versions would silently re-file last quarter's answers against the wrong
+///   rows, and the aggregate would look plausible.
+/// * SCHEMA — both present → compare; either absent → compatible.
+/// * Region absent in that version → nothing to carry.
+///
+/// Newest `updated_at` wins per (submitter, cell) slot. A `Strict` version
+/// binding disables carry-forward entirely.
 pub(crate) fn merge_lenient_submissions(
     mut submissions: Vec<calp::writeback::WritebackSubmission>,
     older: &[(
@@ -7483,10 +7540,14 @@ pub(crate) fn merge_lenient_submissions(
     for (old_regions, old_by_region) in older {
         let compatible = match old_regions.iter().find(|r| r.id == region.id) {
             None => false,
-            Some(old_r) => match (&old_r.schema, &region.schema) {
-                (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
-                _ => true,
-            },
+            Some(old_r) => {
+                // Geometry first, exactly as check_region_compatibility orders it.
+                region.selector.preserves_cell_meaning_of(&old_r.selector)
+                    && match (&old_r.schema, &region.schema) {
+                        (Some(old_s), Some(new_s)) => old_s.is_compatible_with(new_s),
+                        _ => true,
+                    }
+            }
         };
         if !compatible {
             continue;
@@ -8122,19 +8183,39 @@ mod merge_lenient_tests {
     };
     use calp::SubmitterIdentity;
 
+    /// One stable sheet id for the whole module. The same region id across two
+    /// package versions necessarily sits on the same sheet, so minting a fresh
+    /// random id per fixture call would have made every "old version" look like
+    /// it lived somewhere else — which the geometry gate (correctly) treats as
+    /// incompatible.
+    fn fixed_sheet() -> identity::SheetId {
+        identity::SheetId::from_bytes([7u8; 16])
+    }
+
     fn region(
         version_binding: Option<VersionBinding>,
         schema: Option<ValueSchema>,
     ) -> WritebackRegionDeclaration {
-        let sheet_id = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        region_at(version_binding, schema, 0, 0, 0, 0)
+    }
+
+    /// A region with an explicit selector, for the geometry-gate tests.
+    fn region_at(
+        version_binding: Option<VersionBinding>,
+        schema: Option<ValueSchema>,
+        row_start: u32,
+        row_end: u32,
+        col_start: u32,
+        col_end: u32,
+    ) -> WritebackRegionDeclaration {
         WritebackRegionDeclaration {
             id: "r".to_string(),
             selector: RegionSelector {
-                sheet_id,
-                row_start: 0,
-                row_end: 0,
-                col_start: 0,
-                col_end: 0,
+                sheet_id: fixed_sheet(),
+                row_start,
+                row_end,
+                col_start,
+                col_end,
             },
             mode: None,
             schema,
@@ -8280,6 +8361,49 @@ mod merge_lenient_tests {
             vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
         )];
         assert!(merge_lenient_submissions(Vec::new(), &older, &r).is_empty());
+    }
+
+    // 5. GEOMETRY GATE (parity with check_region_compatibility): submissions are
+    //    keyed by ABSOLUTE cell coordinates, so a region that moved or shrank
+    //    between versions must carry nothing — otherwise last version's answers
+    //    are re-filed against cells that now hold a different field.
+    #[test]
+    fn moved_region_carries_nothing() {
+        let current = region_at(None, None, 5, 9, 0, 3); // slid down 5 rows
+        let older = vec![older_with(
+            Some(region_at(None, None, 0, 4, 0, 3)),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert!(
+            merge_lenient_submissions(Vec::new(), &older, &current).is_empty(),
+            "a moved region must not drag old answers onto the new cells"
+        );
+    }
+
+    #[test]
+    fn shrunk_region_carries_nothing() {
+        let current = region_at(None, None, 0, 4, 0, 1); // lost columns
+        let older = vec![older_with(
+            Some(region_at(None, None, 0, 4, 0, 3)),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert!(merge_lenient_submissions(Vec::new(), &older, &current).is_empty());
+    }
+
+    #[test]
+    fn grown_region_with_same_origin_still_carries() {
+        // The benign edit: the author extended the form. Every stored answer
+        // still sits at the same cell meaning the same thing, so carry-forward
+        // must keep working — this is what stops the gate being over-eager.
+        let current = region_at(None, None, 0, 20, 0, 5);
+        let older = vec![older_with(
+            Some(region_at(None, None, 0, 4, 0, 3)),
+            vec![submission("bob", 2.0, "2026-06-11T10:00:00Z")],
+        )];
+        assert_eq!(
+            merge_lenient_submissions(Vec::new(), &older, &current).len(),
+            1
+        );
     }
 }
 
@@ -9038,6 +9162,13 @@ fn restore_pulled_pivots(
         if let Some(ref dest) = def.destination_sheet {
             if let Some(renamed) = sheet_rename_map.get(dest) {
                 def.destination_sheet = Some(renamed.clone());
+            }
+        }
+        // The SOURCE anchor is a sheet name too, and needs the same remap —
+        // otherwise a pulled pivot reads the subscriber's same-named sheet.
+        if let Some(ref src) = def.source_sheet {
+            if let Some(renamed) = sheet_rename_map.get(src) {
+                def.source_sheet = Some(renamed.clone());
             }
         }
 
@@ -9948,6 +10079,11 @@ pub fn calp_reset_subscription(
                 if let Some(ref dest) = def.destination_sheet {
                     if let Some(local) = pkg_name_to_local.get(dest) {
                         def.destination_sheet = Some(local.clone());
+                    }
+                }
+                if let Some(ref src) = def.source_sheet {
+                    if let Some(local) = pkg_name_to_local.get(src) {
+                        def.source_sheet = Some(local.clone());
                     }
                 }
                 Some((def.id, def))

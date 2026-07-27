@@ -1430,10 +1430,9 @@ function activate(context: ExtensionContext): void {
     invalidateAllChartCaches();
     context.events.emit(AppEvents.GRID_REFRESH);
   };
-  window.addEventListener("app:table-definitions-updated", handleTableDefsUpdated);
-  cleanupFunctions.push(() => {
-    window.removeEventListener("app:table-definitions-updated", handleTableDefsUpdated);
-  });
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableDefsUpdated),
+  );
 
   // -----------------------------------------------------------------------
   // Chart Series Reference Drag/Resize

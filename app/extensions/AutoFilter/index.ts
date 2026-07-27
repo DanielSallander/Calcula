@@ -13,7 +13,7 @@ import {
   registerAutoFitContributor,
   type OverlayRegistration,
 } from "@api";
-import { emitAppEvent } from "@api/events";
+import { emitAppEvent, onAppEvent } from "@api/events";
 import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas, BUTTON_SIZE, BUTTON_MARGIN } from "./rendering/filterChevronRenderer";
 import {
   refreshFilterState,
@@ -238,12 +238,8 @@ function activate(context: ExtensionContext): void {
   const handleTableChanged = () => {
     refreshFilterState();
   };
-  window.addEventListener("app:table-created", handleTableChanged);
-  window.addEventListener("app:table-definitions-updated", handleTableChanged);
-  cleanupFns.push(() => {
-    window.removeEventListener("app:table-created", handleTableChanged);
-    window.removeEventListener("app:table-definitions-updated", handleTableChanged);
-  });
+  cleanupFns.push(onAppEvent(AppEvents.TABLE_CREATED, handleTableChanged));
+  cleanupFns.push(onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableChanged));
 
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(sel);

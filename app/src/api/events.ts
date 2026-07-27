@@ -72,6 +72,15 @@ export const AppEvents = {
   // Named ranges
   NAMED_RANGES_CHANGED: "app:named-ranges-changed",
 
+  // Table (ListObject) lifecycle. These live in @api rather than inside the
+  // Table extension because Pivot, Charts and AutoFilter all need to know when
+  // a table's geometry or column set changes — an extension reaching into
+  // another extension's internals (or hardcoding its event strings) is exactly
+  // what the facade rule forbids. String values are unchanged, so existing
+  // window listeners keep working during migration.
+  TABLE_CREATED: "app:table-created",
+  TABLE_DEFINITIONS_UPDATED: "app:table-definitions-updated",
+
   // Blur commit prevention
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 

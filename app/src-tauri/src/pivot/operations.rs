@@ -794,18 +794,89 @@ pub(crate) fn check_pivot_overlap(
     let (dest_row, dest_col) = destination;
     let regions = state.protected_regions.lock().unwrap();
     for region in regions.iter() {
-        if region.region_type == "pivot"
-            && region.sheet_index == sheet_index
+        // Any GENERATED output region is off limits, not just another pivot's.
+        // Dropping a pivot on top of a BI refresh target or a grid report is the
+        // same failure: two writers own the same cells and the loser's output is
+        // silently overwritten on the next refresh.
+        if !matches!(region.region_type.as_str(), "pivot" | "bi" | "report") {
+            continue;
+        }
+        if region.sheet_index == sheet_index
             && dest_row >= region.start_row
             && dest_row <= region.end_row
             && dest_col >= region.start_col
             && dest_col <= region.end_col
         {
+            let what = match region.region_type.as_str() {
+                "pivot" => "an existing pivot table",
+                "bi" => "a model refresh region",
+                _ => "a report region",
+            };
             return Err(format!(
-                "Cannot create pivot table: destination cell is inside an existing pivot table ({})",
-                region.id
+                "Cannot create pivot table: destination cell is inside {} ({})",
+                what, region.id
             ));
         }
+    }
+    Ok(())
+}
+
+/// Snapshot the workbook's sheet names.
+///
+/// Callers that need to resolve a sheet name while holding `pivot_tables` must
+/// take this FIRST: `delete_sheet` locks `sheet_names` and then `pivot_tables`,
+/// so resolving under `pivot_tables` is the reverse order and two concurrent
+/// commands could deadlock. Snapshotting sidesteps the ordering entirely.
+pub(crate) fn sheet_names_snapshot(state: &AppState) -> Vec<String> {
+    state
+        .sheet_names
+        .lock()
+        .map(|names| names.clone())
+        .unwrap_or_default()
+}
+
+/// Index of `name` within a [`sheet_names_snapshot`], or `None`.
+///
+/// Pivot definitions anchor both their destination and their source by sheet
+/// name (never a raw index, which a sheet move would silently repoint).
+pub(crate) fn index_of_sheet(sheet_names: &[String], name: &str) -> Option<usize> {
+    sheet_names.iter().position(|n| n == name)
+}
+
+/// Reject a pivot whose output would land on its own source data.
+///
+/// Nothing checked this before: `check_pivot_overlap` compares the destination
+/// only against OTHER generated regions, so a pivot pointed at a cell inside its
+/// own source range would begin overwriting the rows it reads. The next refresh
+/// then aggregates its own output — the classic self-referential corruption,
+/// with no cycle detection anywhere to catch it (the dependency graph is
+/// cell→cell and never sees a pivot's read set).
+///
+/// Only meaningful when both live on the same sheet.
+pub(crate) fn check_pivot_source_destination_overlap(
+    source_sheet: usize,
+    source_start: (u32, u32),
+    source_end: (u32, u32),
+    dest_sheet: usize,
+    destination: (u32, u32),
+) -> Result<(), String> {
+    if source_sheet != dest_sheet {
+        return Ok(());
+    }
+    let (dest_row, dest_col) = destination;
+    let (sr, sc) = source_start;
+    let (er, ec) = source_end;
+    // Normalize, so a caller passing the corners in either order still works.
+    let (r0, r1) = if sr <= er { (sr, er) } else { (er, sr) };
+    let (c0, c1) = if sc <= ec { (sc, ec) } else { (ec, sc) };
+
+    if dest_row >= r0 && dest_row <= r1 && dest_col >= c0 && dest_col <= c1 {
+        return Err(
+            "Cannot create pivot table: the destination is inside the source range, so the \
+             pivot would overwrite the data it reads. Choose a destination outside the source \
+             (or put it on another sheet)."
+                .to_string(),
+        );
     }
     Ok(())
 }

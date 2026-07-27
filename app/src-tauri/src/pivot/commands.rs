@@ -229,6 +229,17 @@ pub fn create_pivot_inner(
         source_end.0 = grid.max_row;
     }
 
+    // Reject a pivot that would overwrite its own source. Checked AFTER the
+    // clamp above: an unclamped full-column selection (A:D -> A1:D1048576)
+    // would otherwise swallow every destination in those columns.
+    check_pivot_source_destination_overlap(
+        source_sheet_idx,
+        source_start,
+        source_end,
+        dest_sheet_idx,
+        destination,
+    )?;
+
     let has_headers = request.has_headers.unwrap_or(true);
 
     // Build cache from grid
@@ -249,11 +260,16 @@ pub fn create_pivot_inner(
     );
     definition.source_table_name = request.source_table_name.clone();
 
-    // Store destination sheet in definition
+    // Store source + destination sheet in definition. Recording the SOURCE
+    // sheet is what lets refresh and drill-through read the right sheet
+    // instead of assuming sheet 0.
     {
         let sheet_names = state.sheet_names.lock().unwrap();
         if dest_sheet_idx < sheet_names.len() {
             definition.destination_sheet = Some(sheet_names[dest_sheet_idx].clone());
+        }
+        if source_sheet_idx < sheet_names.len() {
+            definition.source_sheet = Some(sheet_names[source_sheet_idx].clone());
         }
     }
 
@@ -1309,6 +1325,11 @@ pub fn get_pivot_source_data(
         group_path.len()
     );
 
+    // Snapshot the sheet names BEFORE taking pivot_tables. `delete_sheet` locks
+    // sheet_names and then pivot_tables; taking them in the opposite order here
+    // would be a classic AB/BA deadlock between two concurrent commands.
+    let sheet_names_snapshot = sheet_names_snapshot(&state);
+
     let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
@@ -1317,9 +1338,14 @@ pub fn get_pivot_source_data(
     let max = max_records.unwrap_or(1000);
     let result = drill_down(definition, cache, &group_path, max);
 
-    // Convert source rows to formatted strings
+    // Convert source rows to formatted strings, reading the pivot's ACTUAL
+    // source sheet. Drilling through a Sheet3 pivot used to show Sheet1's rows.
+    let source_sheet_idx = definition
+        .source_sheet
+        .as_deref()
+        .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
+        .unwrap_or(0);
     let grids = state.grids.lock().unwrap();
-    let source_sheet_idx = 0; // TODO: use definition's source sheet
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| "Source sheet not found".to_string())?;
@@ -1572,6 +1598,12 @@ pub async fn refresh_pivot_cache(
         return update_bi_pivot_fields(state, pivot_state, pane_control_state, ribbon_filter_state, bi_state, bi_request).await;
     }
 
+    // Snapshot sheet names BEFORE the pivot_tables lock — `delete_sheet` takes
+    // sheet_names then pivot_tables, so resolving names under pivot_tables is
+    // the reverse order. (The pre-existing `resolve_dest_sheet_index` call
+    // below still does that; this at least does not add another instance.)
+    let sheet_names_snapshot = sheet_names_snapshot(&state);
+
     // 1. Lock briefly: read source info, build new cache from grid, release locks
     let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx, destination) = {
         let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
@@ -1595,8 +1627,14 @@ pub async fn refresh_pivot_cache(
             let has_headers = definition.source_has_headers;
             let source_table_name = definition.source_table_name.clone();
 
-            // If the pivot is linked to a table, resolve its current range
-            let mut source_sheet_idx: usize = 0; // TODO: resolve from definition.source_sheet
+            // Resolve the recorded source sheet by name. Falls back to sheet 0
+            // only for pre-existing definitions that never stored one.
+            let mut source_sheet_idx: usize = definition
+                .source_sheet
+                .as_deref()
+                .and_then(|name| index_of_sheet(&sheet_names_snapshot, name))
+                .unwrap_or(0);
+            // If the pivot is linked to a table, its current range wins.
             if let Some(ref table_name) = source_table_name {
                 let table_names = state.table_names.lock().unwrap();
                 if let Some((sheet_index, table_id)) = table_names.get(&table_name.to_uppercase()) {

@@ -17,6 +17,7 @@ import {
   updateTableStyle as backendUpdateTableStyle,
   toggleTotalsRow as backendToggleTotalsRow,
   resizeTable as backendResizeTable,
+  renameTable as backendRenameTable,
   convertToRange as backendConvertToRange,
   checkTableAutoExpand as backendCheckAutoExpand,
   enforceTableHeader as backendEnforceTableHeader,
@@ -95,6 +96,25 @@ export async function deleteTableAsync(tableId: string): Promise<boolean> {
     await refreshCache();
   }
   return result.success;
+}
+
+/**
+ * Rename a table via the backend.
+ *
+ * Returns the backend's error message on failure (duplicate name, invalid
+ * identifier) so the caller can surface it — a rename that silently does
+ * nothing is worse than one that explains itself.
+ */
+export async function renameTableAsync(
+  tableId: string,
+  newName: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const result = await backendRenameTable(tableId, newName);
+  if (result.success) {
+    await refreshCache();
+    return { ok: true };
+  }
+  return { ok: false, error: result.error ?? "Rename failed" };
 }
 
 /**

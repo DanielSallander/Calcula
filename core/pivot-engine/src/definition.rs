@@ -645,6 +645,17 @@ pub struct PivotDefinition {
     /// Destination sheet name (if different from source).
     pub destination_sheet: Option<String>,
 
+    /// SOURCE sheet name. `None` means "the sheet that was active when the
+    /// pivot was created", which is what every consumer assumed — by
+    /// hardcoding sheet 0. A range pivot built on Sheet3 then refreshed from
+    /// Sheet1's cells and drilled through into Sheet1's rows.
+    ///
+    /// Stored by NAME to match `destination_sheet`; resolved to an index at use
+    /// time, so renaming a sheet keeps working through the same remap the
+    /// destination already gets.
+    #[serde(default)]
+    pub source_sheet: Option<String>,
+
     /// Version for cache invalidation.
     pub version: u64,
 
@@ -761,6 +772,7 @@ impl PivotDefinition {
             layout: PivotLayout::default(),
             destination: (0, 0),
             destination_sheet: None,
+            source_sheet: None,
             version: 0,
             allow_multiple_filters_per_field: false,
             enable_data_value_editing: false,

@@ -472,7 +472,7 @@ export function bootstrapShell(): void {
     slicer: ["slicers:refresh"],
     ribbonFilter: ["filterpane:filters-refreshed"],
     paneControl: ["controlspane:controls-refreshed"],
-    objects: ["charts:refresh", "sparklines:refresh", "app:table-definitions-updated", "animation:refresh", "grid:refresh"],
+    objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh"],
   };
   onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
     const fired = new Set<string>();

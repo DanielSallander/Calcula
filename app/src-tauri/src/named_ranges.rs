@@ -162,10 +162,29 @@ pub fn create_named_range(
         };
     }
 
+    let key = name.to_uppercase();
+
+    // Names and TABLE names share one formula namespace but live in two
+    // unrelated registries, so nothing stopped a name from shadowing a table.
+    // Which one won then depended on resolution order (names are resolved
+    // first, then tables, at every call site) — the same formula could mean
+    // different things depending on the path that resolved it.
+    if let Ok(table_names) = state.table_names.lock() {
+        if table_names.contains_key(&key) {
+            return NamedRangeResult {
+                success: false,
+                named_range: None,
+                error: Some(format!(
+                    "A table named '{}' already exists. Names and tables share one namespace — pick a different name.",
+                    name
+                )),
+            };
+        }
+    }
+
     let mut named_ranges = state.named_ranges.lock().unwrap();
 
     // Check for duplicate name (case-insensitive)
-    let key = name.to_uppercase();
     if named_ranges.contains_key(&key) {
         return NamedRangeResult {
             success: false,

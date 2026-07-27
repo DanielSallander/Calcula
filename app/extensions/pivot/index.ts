@@ -2066,8 +2066,9 @@ function activate(context: ExtensionContext): void {
       console.error("[Pivot Extension] Failed to refresh table-linked pivots:", err);
     }
   };
-  window.addEventListener("app:table-definitions-updated", handleTableDefsUpdated);
-  cleanupFunctions.push(() => window.removeEventListener("app:table-definitions-updated", handleTableDefsUpdated));
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, handleTableDefsUpdated),
+  );
 
   // Also refresh regions when grid refreshes (sheet switch, etc.)
   // Do NOT trigger another repaint (triggerRepaint=false) to avoid infinite loop.

@@ -261,6 +261,10 @@ async function applyTableFilterForSource(
   selectedItems: string[] | null,
   sheetIndex: number,
 ): Promise<void> {
+  // `get_tables_for_sheet` reads the named sheet regardless of which one is
+  // active. It was invoked here long before it existed on the Rust side, so
+  // every table-sourced slicer threw on click; the rest of the table-slicer
+  // path (value listing, connections, filtering) was implemented and working.
   const tables = await slicerBackend.invoke<Array<{
     id: string;
     columns: Array<{ name: string }>;

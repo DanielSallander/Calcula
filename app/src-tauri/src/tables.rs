@@ -467,6 +467,20 @@ fn build_subtotal_formula(
 }
 
 /// Validate table name
+/// Whether a defined name (named range) already claims this identifier.
+///
+/// Tables and defined names resolve out of two unrelated registries into ONE
+/// formula namespace, with names resolved first at every call site. A table
+/// sharing a name with a defined name is therefore permanently unreachable by
+/// name — so refuse the collision instead of creating the ambiguity.
+fn name_collides_with_defined_name(state: &AppState, name: &str) -> bool {
+    state
+        .named_ranges
+        .lock()
+        .map(|names| names.contains_key(&name.to_uppercase()))
+        .unwrap_or(false)
+}
+
 fn is_valid_table_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
         return false;
@@ -508,6 +522,10 @@ pub fn create_table(
         return TableResult::err("Invalid table name");
     } else if table_names.contains_key(&params.name.to_uppercase()) {
         return TableResult::err("Table name already exists");
+    } else if name_collides_with_defined_name(&state, &params.name) {
+        return TableResult::err(
+            "A defined name with this name already exists. Names and tables share one namespace — pick a different name.",
+        );
     } else {
         params.name
     };
@@ -624,7 +642,14 @@ pub fn create_table(
     TableResult::ok(table)
 }
 
-/// Delete a table
+/// Delete a table.
+///
+/// The table OBJECT goes away; the cells stay. So every dependent formula is
+/// rewritten from `Table1[Amount]` to the equivalent absolute range first —
+/// exactly as `convert_to_range` does — and the AutoFilter the table installed
+/// is removed. Previously neither happened: structured references were left as
+/// `_UNRESOLVED` NamedRef sentinels the evaluator rejects, and a sheet-level
+/// AutoFilter survived with no visible owner and rows still hidden by it.
 #[tauri::command]
 pub fn delete_table(
     state: State<AppState>,
@@ -633,23 +658,46 @@ pub fn delete_table(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
 
-    let sheet_tables = match tables.get_mut(&active_sheet) {
-        Some(t) => t,
-        None => return TableResult::err("No tables on this sheet"),
+    // Clone before removal: the ref rewrite below needs the table still present
+    // in the registry to resolve `Table1[Col]` into a concrete range.
+    let table = match tables.get(&active_sheet).and_then(|st| st.get(&table_id)) {
+        Some(t) => t.clone(),
+        None => {
+            return if tables.contains_key(&active_sheet) {
+                TableResult::err("Table not found")
+            } else {
+                TableResult::err("No tables on this sheet")
+            }
+        }
     };
 
-    let table = match sheet_tables.remove(&table_id) {
-        Some(t) => t,
-        None => return TableResult::err("Table not found"),
-    };
+    let table_name_upper = table.name.to_uppercase();
+    rewrite_table_refs_to_ranges(
+        &tables,
+        &table_names,
+        &mut grids,
+        &mut grid,
+        active_sheet,
+        &table_name_upper,
+        &table,
+    );
 
-    // Remove from name registry
-    table_names.remove(&table.name.to_uppercase());
+    if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
+        sheet_tables.remove(&table_id);
+    }
+    table_names.remove(&table_name_upper);
 
     // Record undo (BUG-0006): the snapshot restores the deleted table.
     drop(tables);
     drop(table_names);
+    drop(grids);
+    drop(grid);
+
+    clear_table_auto_filter(&state, &table, active_sheet);
+
     crate::undo_commands::record_table_undo(
         &state,
         active_sheet,
@@ -681,6 +729,11 @@ pub fn rename_table(
     if !is_valid_table_name(&new_name) {
         return TableResult::err("Invalid table name");
     }
+    if name_collides_with_defined_name(&state, &new_name) {
+        return TableResult::err(
+            "A defined name with this name already exists. Names and tables share one namespace — pick a different name.",
+        );
+    }
 
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
@@ -704,12 +757,27 @@ pub fn rename_table(
         None => return TableResult::err("Table not found"),
     };
 
+    // Snapshot BEFORE mutating so Ctrl+Z restores the old name (and with it the
+    // name-registry entry, which the obj_table restore re-keys).
+    let previous = table.clone();
+
     // Remove old name, add new name
     table_names.remove(&table.name.to_uppercase());
     table_names.insert(upper_new, (active_sheet, table_id));
     table.name = new_name;
 
-    TableResult::ok(table.clone())
+    let updated = table.clone();
+    drop(tables);
+    drop(table_names);
+    crate::undo_commands::record_table_undo(
+        &state,
+        active_sheet,
+        table_id,
+        Some(previous),
+        "Rename table",
+    );
+
+    TableResult::ok(updated)
 }
 
 /// Update table style options
@@ -1024,6 +1092,10 @@ pub fn resize_table(
         None => return TableResult::err("Table not found"),
     };
 
+    // Snapshot BEFORE mutating: a resize can also add or truncate COLUMNS, so
+    // undo has to restore the whole table object, not just the boundaries.
+    let previous = table.clone();
+
     let min_row = params.start_row.min(params.end_row);
     let max_row = params.start_row.max(params.end_row);
     let min_col = params.start_col.min(params.end_col);
@@ -1049,7 +1121,142 @@ pub fn resize_table(
     table.end_row = max_row;
     table.end_col = max_col;
 
-    TableResult::ok(table.clone())
+    let updated = table.clone();
+    let table_id = params.table_id;
+    drop(tables);
+    crate::undo_commands::record_table_undo(
+        &state,
+        active_sheet,
+        table_id,
+        Some(previous),
+        "Resize table",
+    );
+
+    TableResult::ok(updated)
+}
+
+/// Rewrite every structured reference that mentions `table_name_upper` into
+/// absolute A1 references, across ALL sheets.
+///
+/// Must run while the table is STILL in the registry — resolution needs it to
+/// turn `Table1[Amount]` into a concrete range. Shared by `convert_to_range`
+/// and `delete_table`: both leave the cells in place, so a formula over the
+/// table's columns should keep working against the now-plain range. Skipping
+/// this on delete left `Table1[Amount]` as an `_UNRESOLVED` NamedRef sentinel
+/// that the evaluator rejects — a silent breakage of every dependent formula.
+fn rewrite_table_refs_to_ranges(
+    tables: &TableStorage,
+    table_names: &TableNameRegistry,
+    grids: &mut [engine::Grid],
+    grid: &mut engine::Grid,
+    active_sheet: usize,
+    table_name_upper: &str,
+    target: &Table,
+) {
+    // SCOPE GUARD. `resolve_table_refs_in_ast` flattens EVERY table ref in an
+    // expression, not just the target's, and a bare `[@Col]` names no table at
+    // all — so a naive "contains the name or contains [@" filter would drag
+    // OTHER, still-live tables' structured references into the rewrite and
+    // destroy them permanently (the AST is the stored form; undo only restores
+    // the Table object, not the cells).
+    //
+    // So: only touch a formula that refers to the target and to NOTHING else.
+    // A mixed formula is left alone — its target ref degrades to #NAME? exactly
+    // as before this rewrite existed, which is loud and reversible, whereas
+    // silently de-structuring a live table's formulas is neither.
+    let other_names: Vec<String> = table_names
+        .keys()
+        .filter(|n| n.as_str() != table_name_upper)
+        .cloned()
+        .collect();
+
+    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
+        // Fast filter on the formula text before paying for a parse.
+        let formula_cells: Vec<(u32, u32, String)> = sheet_grid
+            .cells
+            .iter()
+            .filter_map(|(&(row, col), cell)| {
+                cell.formula_string().and_then(|f| {
+                    let f_upper = f.to_uppercase();
+                    // A bare `[@Col]` resolves against the table CONTAINING the
+                    // cell, so it is only ours when the cell is inside the
+                    // target's own range on the target's own sheet.
+                    let this_row_ref_is_ours = f_upper.contains("[@")
+                        && sheet_idx == target.sheet_index
+                        && row >= target.start_row
+                        && row <= target.end_row
+                        && col >= target.start_col
+                        && col <= target.end_col;
+                    let names_target = f_upper.contains(table_name_upper);
+                    if !names_target && !this_row_ref_is_ours {
+                        return None;
+                    }
+                    // Refuse anything that also names another table.
+                    if other_names.iter().any(|n| f_upper.contains(n.as_str())) {
+                        return None;
+                    }
+                    Some((row, col, f))
+                })
+            })
+            .collect();
+
+        for (row, col, formula_str) in formula_cells {
+            let parsed = match parser::parse(&formula_str) {
+                Ok(ast) => ast,
+                Err(_) => continue, // Can't parse — leave as-is
+            };
+            if !crate::ast_has_table_refs(&parsed) {
+                continue;
+            }
+
+            let ctx = crate::TableRefContext {
+                tables,
+                table_names,
+                current_sheet_index: sheet_idx,
+                current_row: row,
+            };
+            let resolved = crate::resolve_table_refs_in_ast(&parsed, &ctx);
+            let new_formula = format!("={}", crate::expression_to_formula(&resolved));
+
+            if let Some(cell) = sheet_grid.get_cell(row, col) {
+                let mut updated = cell.clone();
+                updated.ast = parser::parse(&new_formula).ok().map(Box::new);
+                sheet_grid.set_cell(row, col, updated.clone());
+                if sheet_idx == active_sheet {
+                    grid.set_cell(row, col, updated);
+                }
+            }
+        }
+    }
+}
+
+/// Drop the sheet AutoFilter a table installed for its header row.
+///
+/// A table with `show_filter_button` creates an AutoFilter on its sheet
+/// (`create_table`). Removing the table without removing that filter left a
+/// sheet-level filter nobody could see the origin of — with rows still hidden
+/// by it and no UI to clear them.
+fn clear_table_auto_filter(state: &AppState, table: &Table, sheet_index: usize) {
+    let Some(af_id) = table.auto_filter_id else {
+        return;
+    };
+    let Ok(mut auto_filters) = state.auto_filters.lock() else {
+        return;
+    };
+    // Only clear the filter this table owns. `auto_filter_id` is the sheet
+    // index today (see `create_table`), so also confirm the filter's range
+    // still matches the table before removing a filter the user set up
+    // independently over a different range.
+    if af_id as usize != sheet_index {
+        return;
+    }
+    let matches_table = auto_filters
+        .get(&sheet_index)
+        .map(|af| af.start_row == table.start_row && af.start_col == table.start_col)
+        .unwrap_or(false);
+    if matches_table {
+        auto_filters.remove(&sheet_index);
+    }
 }
 
 /// Convert table to range: rewrite all structured references that mention this
@@ -1077,72 +1284,27 @@ pub fn convert_to_range(
 
     let table_name_upper = table.name.to_uppercase();
 
-    // Scan ALL cells in ALL sheets for formulas that reference this table.
-    // We check the formula text for the table name (case-insensitive) as a
-    // fast filter before parsing.
-    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
-        // Collect cells that need formula rewriting
-        let formula_cells: Vec<(u32, u32, String)> = sheet_grid
-            .cells
-            .iter()
-            .filter_map(|(&(row, col), cell)| {
-                cell.formula_string().and_then(|f| {
-                    let f_upper = f.to_uppercase();
-                    // Check if formula mentions the table name or uses standalone @ refs
-                    if f_upper.contains(&table_name_upper) || f_upper.contains("[@") {
-                        Some((row, col, f))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-
-        for (row, col, formula_str) in formula_cells {
-            // Parse the formula
-            let parsed = match parser::parse(&formula_str) {
-                Ok(ast) => ast,
-                Err(_) => continue, // Can't parse — leave as-is
-            };
-
-            // Check if the AST actually contains table refs
-            if !crate::ast_has_table_refs(&parsed) {
-                continue;
-            }
-
-            // Build a context for resolution — using the formula cell's row
-            let ctx = crate::TableRefContext {
-                tables: &tables,
-                table_names: &table_names,
-                current_sheet_index: sheet_idx,
-                current_row: row,
-            };
-
-            // Resolve table refs → CellRef/Range nodes
-            let resolved = crate::resolve_table_refs_in_ast(&parsed, &ctx);
-
-            // Serialize back to formula string
-            let new_formula = format!("={}", crate::expression_to_formula(&resolved));
-
-            // Update the cell's formula (keep existing value/style)
-            if let Some(cell) = sheet_grid.get_cell(row, col) {
-                let mut updated = cell.clone();
-                updated.ast = parser::parse(&new_formula).ok().map(Box::new);
-                sheet_grid.set_cell(row, col, updated.clone());
-
-                // Also update the primary grid if this is the active sheet
-                if sheet_idx == active_sheet {
-                    grid.set_cell(row, col, updated);
-                }
-            }
-        }
-    }
+    rewrite_table_refs_to_ranges(
+        &tables,
+        &table_names,
+        &mut grids,
+        &mut grid,
+        active_sheet,
+        &table_name_upper,
+        &table,
+    );
 
     // Remove the table from the registry
     if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
         sheet_tables.remove(&table_id);
     }
     table_names.remove(&table_name_upper);
+
+    drop(tables);
+    drop(table_names);
+    drop(grids);
+    drop(grid);
+    clear_table_auto_filter(&state, &table, active_sheet);
 
     TableResult::ok_empty()
 }
@@ -1399,6 +1561,46 @@ pub fn get_all_tables(
         .get(&active_sheet)
         .map(|sheet_tables| sheet_tables.values().cloned().collect())
         .unwrap_or_default()
+}
+
+/// Get all tables on a SPECIFIC sheet, regardless of which sheet is active.
+///
+/// [`get_all_tables`] reads the active sheet only, which is why every consumer
+/// that wants a named sheet's tables had to switch sheets first or go without.
+/// Results are ordered by name so a caller can render a stable list.
+#[tauri::command]
+pub fn get_tables_for_sheet(
+    state: State<AppState>,
+    sheet_index: usize,
+) -> Vec<Table> {
+    let tables = state.tables.lock().unwrap();
+    let mut out: Vec<Table> = tables
+        .get(&sheet_index)
+        .map(|sheet_tables| sheet_tables.values().cloned().collect())
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.name.to_uppercase().cmp(&b.name.to_uppercase()));
+    out
+}
+
+/// Every table in the WORKBOOK, across all sheets.
+///
+/// Each [`Table`] carries its own `sheet_index`, so the flat list is
+/// self-describing. Ordered by (sheet, name) for a stable render.
+#[tauri::command]
+pub fn get_tables_all_sheets(
+    state: State<AppState>,
+) -> Vec<Table> {
+    let tables = state.tables.lock().unwrap();
+    let mut out: Vec<Table> = tables
+        .values()
+        .flat_map(|sheet_tables| sheet_tables.values().cloned())
+        .collect();
+    out.sort_by(|a, b| {
+        a.sheet_index
+            .cmp(&b.sheet_index)
+            .then_with(|| a.name.to_uppercase().cmp(&b.name.to_uppercase()))
+    });
+    out
 }
 
 /// Resolve a structured reference (e.g., "Table1[Column1]")

@@ -4386,6 +4386,8 @@ pub fn run() {
             tables::get_table_by_name,
             tables::get_table_at_cell,
             tables::get_all_tables,
+            tables::get_tables_for_sheet,
+            tables::get_tables_all_sheets,
             tables::resolve_structured_reference,
             tables::convert_formula_to_table_refs,
             // Goal Seek command

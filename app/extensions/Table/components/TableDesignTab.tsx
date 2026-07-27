@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { css } from "@emotion/css";
-import { onAppEvent, emitAppEvent, showDialog } from "@api";
+import { onAppEvent, emitAppEvent, showDialog, useGridState } from "@api";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
 import { Stack, ControlRow, Field, Input, Button } from "@api/layout";
 import { TableEvents } from "../lib/tableEvents";
@@ -19,6 +19,8 @@ import {
   toggleTotalsRowAsync,
   convertToRangeAsync,
   deleteTableAsync,
+  renameTableAsync,
+  resizeTableAsync,
   type Table,
   type TableStyleOptions,
 } from "../lib/tableStore";
@@ -38,6 +40,14 @@ const sectionStyles = {
     color: #999;
     font-style: italic;
     font-size: 12px;
+    white-space: nowrap;
+  `,
+  inlineError: css`
+    font-size: 11px;
+    color: #c42b1c;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   `,
   checkboxLabel: css`
@@ -113,30 +123,111 @@ function useDesignTableState(): {
 
 export function PropertiesSection(_props: PanelSectionProps): React.ReactElement {
   const { tableState } = useDesignTableState();
+  const gridState = useGridState();
   const [tableName, setTableName] = useState("");
   const [savedName, setSavedName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync the editable name whenever a table-state broadcast arrives
+  // Sync the editable name whenever a table-state broadcast arrives. Also
+  // clears any stale error so switching tables doesn't carry the last one over.
   useEffect(() => {
     if (tableState?.table) {
       setTableName(tableState.table.name);
       setSavedName(tableState.table.name);
+      setRenameError(null);
     }
   }, [tableState]);
 
   const table = tableState?.table ?? null;
 
-  const saveTableName = useCallback(() => {
-    if (!table || tableName === savedName) return;
+  // Re-broadcast so every Design section refreshes its own cached copy of the
+  // table (each section holds its own), instead of showing pre-change values.
+  const refreshTableState = useCallback(() => {
+    emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+    emitAppEvent(TableEvents.TABLE_REQUEST_STATE);
+  }, []);
+
+  // The rename must reach the BACKEND. This used to update local React state
+  // only, so the box accepted a new name, showed it, and reverted on the next
+  // table-state broadcast — structured references kept resolving against the
+  // old name and nothing said why.
+  //
+  // `inFlight` guards the Enter path: onKeyDown calls this and then blurs, and
+  // the blur handler calls it again before the first await has resolved
+  // (savedName is only updated after), which fired two renames and two undo
+  // entries for one keystroke.
+  const renameInFlight = useRef(false);
+  const saveTableName = useCallback(async () => {
+    if (!table || renameInFlight.current || tableName === savedName) return;
     const trimmed = tableName.trim();
-    if (trimmed === "") {
+    if (trimmed === "" || trimmed === savedName) {
       setTableName(savedName);
       return;
     }
-    setSavedName(trimmed);
-    setTableName(trimmed);
-  }, [table, tableName, savedName]);
+    renameInFlight.current = true;
+    setRenameError(null);
+    try {
+      const result = await renameTableAsync(table.id, trimmed);
+      if (result.ok) {
+        setSavedName(trimmed);
+        setTableName(trimmed);
+        refreshTableState();
+      } else {
+        // Duplicate or invalid name: revert the box and say why.
+        setRenameError(result.error ?? "Rename failed");
+        setTableName(savedName);
+      }
+    } finally {
+      renameInFlight.current = false;
+    }
+  }, [table, tableName, savedName, refreshTableState]);
+
+  // Resize to the CURRENT SELECTION. Excel opens a range picker prefilled with
+  // the table's range; selecting first and then clicking is the same gesture
+  // without a modal, and it reuses the selection the user already has.
+  //
+  // Selection is ANCHOR -> ACTIVE, not min/max: dragging up or left yields
+  // end < start. Normalize before comparing or the button stays disabled for
+  // exactly the drags that grow a table upward.
+  const selection = gridState.selection;
+  const selRange = selection
+    ? {
+        startRow: Math.min(selection.startRow, selection.endRow),
+        endRow: Math.max(selection.startRow, selection.endRow),
+        startCol: Math.min(selection.startCol, selection.endCol),
+        endCol: Math.max(selection.startCol, selection.endCol),
+      }
+    : null;
+
+  const canResize =
+    !!table &&
+    !!selRange &&
+    // A table needs a header row plus at least one data row.
+    selRange.endRow > selRange.startRow &&
+    !(
+      selRange.startRow === table.startRow &&
+      selRange.startCol === table.startCol &&
+      selRange.endRow === table.endRow &&
+      selRange.endCol === table.endCol
+    );
+
+  const handleResize = useCallback(async () => {
+    if (!table || !selRange) return;
+    setRenameError(null);
+    const updated = await resizeTableAsync(
+      table.id,
+      selRange.startRow,
+      selRange.startCol,
+      selRange.endRow,
+      selRange.endCol,
+    );
+    if (!updated) {
+      setRenameError("Resize failed — the range may overlap another table.");
+      return;
+    }
+    refreshTableState();
+  }, [table, selRange, refreshTableState]);
 
   if (!tableState) {
     return (
@@ -155,16 +246,31 @@ export function PropertiesSection(_props: PanelSectionProps): React.ReactElement
           width={120}
           value={tableName}
           onChange={(e) => setTableName(e.target.value)}
-          onBlur={saveTableName}
+          onBlur={() => { void saveTableName(); }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              saveTableName();
+              void saveTableName();
               nameInputRef.current?.blur();
             }
           }}
         />
       </Field>
-      <Button disabled>Resize Table</Button>
+      {renameError && (
+        <div className={sectionStyles.inlineError} title={renameError}>
+          {renameError}
+        </div>
+      )}
+      <Button
+        disabled={!canResize}
+        onClick={() => { void handleResize(); }}
+        title={
+          canResize
+            ? "Resize this table to the selected range"
+            : "Select the new range on the grid first"
+        }
+      >
+        Resize Table
+      </Button>
     </Stack>
   );
 }

@@ -80,13 +80,33 @@ pub enum AuditEvent {
 }
 
 impl AuditEvent {
-    /// Script-activity events are recorded EVEN WHEN the (distribution) audit log
-    /// is disabled. The Transparency pillar requires script grid mutations AND
-    /// capability use to be visible by default ("you should never wonder what the
-    /// code touched"); distribution events (subscribe/refresh/override/writeback/…)
-    /// remain opt-in via the `enabled` flag.
+    /// Events recorded EVEN WHEN the (distribution) audit log is disabled.
+    ///
+    /// The Transparency pillar requires that a user never has to wonder what
+    /// touched their data, so two classes are always on:
+    ///
+    /// * SCRIPT ACTIVITY — grid mutations and capability use.
+    /// * WRITEBACK — submitting is the moment a contributor's typed values
+    ///   LEAVE THE MACHINE for a shared registry, which makes it an egress
+    ///   event much closer to a `CapabilityCall` (net.fetch and friends) than
+    ///   to bookkeeping like subscribe/refresh. `WritebackReviewed` and
+    ///   `WritebackInvalidated` are its counterparts: an approve/reject changes
+    ///   whether someone's answer counts, and an invalidation silently discards
+    ///   entered work. Recording those only when a workbook happened to opt in
+    ///   meant the trail was absent exactly when someone needed to reconstruct
+    ///   what they had sent.
+    ///
+    /// The remaining distribution events (subscribe/refresh/override/publish/…)
+    /// stay opt-in via the `enabled` flag.
     pub fn is_always_recorded(&self) -> bool {
-        matches!(self, AuditEvent::ScriptExecuted | AuditEvent::CapabilityCall)
+        matches!(
+            self,
+            AuditEvent::ScriptExecuted
+                | AuditEvent::CapabilityCall
+                | AuditEvent::WritebackSubmitted
+                | AuditEvent::WritebackReviewed
+                | AuditEvent::WritebackInvalidated
+        )
     }
 }
 
@@ -144,10 +164,43 @@ impl AuditLog {
             extra,
         });
 
-        // Trim to max_entries if set
+        // Trim to max_entries if set.
+        //
+        // ALWAYS-RECORDED ENTRIES ARE EVICTED LAST. A plain oldest-first drain
+        // let high-volume opt-in traffic push the always-on trail out of the
+        // window: an `immediate`-policy writeback region submits on every
+        // committed cell, so a busy form could evict the script-activity
+        // entries that are supposed to be non-negotiable. Drop the oldest
+        // opt-in entries first, and only fall back to dropping always-recorded
+        // ones once nothing else is left to give.
         if self.max_entries > 0 && self.entries.len() > self.max_entries {
-            let excess = self.entries.len() - self.max_entries;
-            self.entries.drain(..excess);
+            let mut excess = self.entries.len() - self.max_entries;
+
+            let optional_count = self
+                .entries
+                .iter()
+                .filter(|e| !e.event.is_always_recorded())
+                .count();
+            if optional_count >= excess {
+                // Enough opt-in entries to absorb the whole overflow.
+                let mut to_drop = excess;
+                self.entries.retain(|e| {
+                    if to_drop > 0 && !e.event.is_always_recorded() {
+                        to_drop -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            } else {
+                // Drop every opt-in entry, then the oldest always-recorded ones.
+                self.entries.retain(|e| e.event.is_always_recorded());
+                excess -= optional_count;
+                if excess > 0 {
+                    let excess = excess.min(self.entries.len());
+                    self.entries.drain(..excess);
+                }
+            }
         }
     }
 
@@ -181,6 +234,59 @@ mod tests {
         assert!(!log.enabled);
         log.record(AuditEvent::Subscribe, "test", "user", "2026-01-01T00:00:00Z");
         assert_eq!(log.entry_count(), 0);
+    }
+
+    #[test]
+    fn writeback_events_record_even_when_disabled() {
+        let mut log = AuditLog::new();
+        assert!(!log.enabled);
+        for ev in [
+            AuditEvent::WritebackSubmitted,
+            AuditEvent::WritebackReviewed,
+            AuditEvent::WritebackInvalidated,
+        ] {
+            log.record(ev, "wb", "user", "2026-01-01T00:00:00Z");
+        }
+        assert_eq!(
+            log.entry_count(),
+            3,
+            "writeback egress/review/invalidation must not depend on the opt-in flag"
+        );
+        // Distribution bookkeeping stays opt-in.
+        log.record(AuditEvent::Refresh, "r", "user", "2026-01-01T00:00:00Z");
+        assert_eq!(log.entry_count(), 3);
+    }
+
+    #[test]
+    fn trim_evicts_optional_entries_before_always_recorded_ones() {
+        let mut log = AuditLog::new_enabled(4);
+        // Two always-recorded entries first, so an oldest-first drain would
+        // have taken exactly these.
+        log.record(AuditEvent::ScriptExecuted, "script-a", "u", "t1");
+        log.record(AuditEvent::CapabilityCall, "cap-a", "u", "t2");
+        for i in 0..6 {
+            log.record(AuditEvent::Refresh, &format!("refresh-{i}"), "u", "t3");
+        }
+        assert_eq!(log.entry_count(), 4);
+        let kept: Vec<&str> = log.entries.iter().map(|e| e.description.as_str()).collect();
+        assert!(kept.contains(&"script-a"), "script trail evicted: {:?}", kept);
+        assert!(kept.contains(&"cap-a"), "capability trail evicted: {:?}", kept);
+        // The survivors among the optional entries are the NEWEST ones.
+        assert!(kept.contains(&"refresh-5"), "{:?}", kept);
+        assert!(!kept.contains(&"refresh-0"), "{:?}", kept);
+    }
+
+    #[test]
+    fn trim_falls_back_to_dropping_always_recorded_when_nothing_else_left() {
+        // The cap is still a hard bound — an all-always-recorded log must not
+        // grow without limit just because every entry is privileged.
+        let mut log = AuditLog::new_enabled(3);
+        for i in 0..7 {
+            log.record(AuditEvent::ScriptExecuted, &format!("s{i}"), "u", "t");
+        }
+        assert_eq!(log.entry_count(), 3);
+        let kept: Vec<&str> = log.entries.iter().map(|e| e.description.as_str()).collect();
+        assert_eq!(kept, vec!["s4", "s5", "s6"], "oldest-first within the class");
     }
 
     #[test]
