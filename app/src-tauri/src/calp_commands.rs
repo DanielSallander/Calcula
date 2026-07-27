@@ -5496,6 +5496,18 @@ pub fn calp_remove_writeback_region(
 }
 
 /// Update an existing draft writeback region (replace by ID).
+///
+/// The STORED selector always wins. Editing a region changes its policy/schema
+/// fields only — the UI says so outright ("range can't be changed — remove &
+/// re-designate to move it") and posts the region back verbatim, so the
+/// incoming selector is an echo of whatever the client last read, not an
+/// intent to move anything.
+///
+/// Honoring that echo would be a live data-integrity bug: structural edits
+/// re-anchor draft selectors in the backend (see `shift_writeback_draft_regions`)
+/// without the pane re-reading them, so a pane held open across an inserted
+/// column would post a pre-shift rectangle and silently undo the re-anchoring —
+/// re-pointing the collection surface at exactly the cells the shift avoided.
 #[tauri::command]
 pub fn calp_update_writeback_region(
     state: State<AppState>,
@@ -5508,13 +5520,16 @@ pub fn calp_update_writeback_region(
     let pos = drafts.iter().position(|r| r.id == region.id)
         .ok_or_else(|| format!("Region '{}' not found", region.id))?;
 
+    let mut updated = region;
+    updated.selector = drafts[pos].selector.clone();
+
     // Validate: build index with the updated region replacing the old one
     let mut test = drafts.clone();
-    test[pos] = region.clone();
+    test[pos] = updated.clone();
     calp::WritebackIndex::from_declarations(&test)
         .map_err(|e| format!("Invalid update: {}", e))?;
 
-    drafts[pos] = region;
+    drafts[pos] = updated;
     Ok(())
 }
 

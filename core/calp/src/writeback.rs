@@ -353,6 +353,183 @@ pub struct RegionSelector {
     pub col_end: u32,
 }
 
+impl RegionSelector {
+    /// Whether `self` (the NEW selector) keeps every cell of `old` addressable
+    /// at the same absolute coordinate AND at the same logical position within
+    /// the region.
+    ///
+    /// Submissions are keyed by absolute `(cell_row, cell_col)`
+    /// ([`WritebackSubmission`]), never by an offset from the region's origin.
+    /// So the only selector change that leaves stored answers meaning what they
+    /// meant is one that keeps the ORIGIN fixed and grows (or stays) at the far
+    /// edges: an author extending the form to collect more rows.
+    ///
+    /// Everything else — a different sheet, a moved origin, or a shrink — either
+    /// orphans stored submissions or re-points them at cells that now hold a
+    /// different field. Both are losses the subscriber must be told about, which
+    /// is why [`check_region_compatibility`] treats this as the gate.
+    pub fn preserves_cell_meaning_of(&self, old: &RegionSelector) -> bool {
+        self.sheet_id == old.sheet_id
+            && self.row_start == old.row_start
+            && self.col_start == old.col_start
+            && self.row_end >= old.row_end
+            && self.col_end >= old.col_end
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structural edits (row/column insert & delete)
+// ---------------------------------------------------------------------------
+
+/// A structural grid edit that moves cells underneath a writeback region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralEdit {
+    RowInsert { at: u32, count: u32 },
+    RowDelete { at: u32, count: u32 },
+    ColInsert { at: u32, count: u32 },
+    ColDelete { at: u32, count: u32 },
+}
+
+/// What [`shift_regions_for_edit`] did, so the caller can report it instead of
+/// silently rewriting the author's collection surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionShiftReport {
+    /// Ids whose selector changed (moved, grew, or shrank).
+    pub moved: Vec<String>,
+    /// Ids removed because every cell they covered was deleted.
+    pub dropped: Vec<String>,
+}
+
+impl RegionShiftReport {
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_empty() && self.dropped.is_empty()
+    }
+}
+
+/// Shift one closed interval `[start, end]` for an insert of `count` at `at`.
+/// Returns the new interval.
+///
+/// Boundary rule: an insert exactly AT `start` SHIFTS the interval rather than
+/// expanding it. This deliberately differs from the grid Table helpers, which
+/// expand — a Table is a data range that is meant to grow, whereas a writeback
+/// region is a contract about which cells collect what. Growing it silently
+/// would add a brand-new blank cell to a published form the author already
+/// reviewed; shifting keeps exactly the cells they designated.
+fn interval_insert(start: u32, end: u32, at: u32, count: u32) -> (u32, u32) {
+    if start >= at {
+        (start + count, end + count)
+    } else if end >= at {
+        (start, end + count)
+    } else {
+        (start, end)
+    }
+}
+
+/// Shift one closed interval `[start, end]` for a delete of `count` at `at`.
+/// Returns `None` when the interval is entirely inside the deleted range.
+fn interval_delete(start: u32, end: u32, at: u32, count: u32) -> Option<(u32, u32)> {
+    let del_end = at.saturating_add(count); // exclusive
+    if start >= del_end {
+        // Entirely after the deleted range — slide back.
+        Some((start - count, end - count))
+    } else if start >= at && end < del_end {
+        // Entirely inside the deleted range — nothing left.
+        None
+    } else if start >= at {
+        // Starts inside, extends beyond — clamp the head, shrink.
+        Some((at, end - count))
+    } else if end >= del_end {
+        // Spans the whole deleted range — shrink.
+        Some((start, end - count))
+    } else if end >= at {
+        // Tail falls inside the deleted range — clamp the tail.
+        Some((start, at.saturating_sub(1)))
+    } else {
+        // Entirely before the deleted range.
+        Some((start, end))
+    }
+}
+
+/// Track author-side writeback region selectors through a structural grid edit
+/// on `sheet_id`, so a designated collection surface keeps pointing at the
+/// cells the author actually designated.
+///
+/// Without this, `RegionSelector` is raw coordinates with no anchoring: insert
+/// a column at B under a region covering A:D and column D silently starts
+/// collecting what column C used to hold — the subscribers' answers land in the
+/// wrong field and nothing anywhere reports it.
+///
+/// Only ever call this for DRAFT (author-side, unpublished) regions. Published
+/// declarations live in an immutable signed manifest and must never be rewritten
+/// locally — the manifest is the contract, and a local grid edit does not change
+/// what the publisher declared.
+pub fn shift_regions_for_edit(
+    regions: &mut Vec<WritebackRegionDeclaration>,
+    sheet_id: SheetId,
+    edit: StructuralEdit,
+) -> RegionShiftReport {
+    let mut report = RegionShiftReport::default();
+    let mut dropped_idx: Vec<usize> = Vec::new();
+
+    for (i, region) in regions.iter_mut().enumerate() {
+        if region.selector.sheet_id != sheet_id {
+            continue;
+        }
+        let before = region.selector.clone();
+        let sel = &mut region.selector;
+
+        match edit {
+            StructuralEdit::RowInsert { at, count } => {
+                let (s, e) = interval_insert(sel.row_start, sel.row_end, at, count);
+                sel.row_start = s;
+                sel.row_end = e;
+            }
+            StructuralEdit::ColInsert { at, count } => {
+                let (s, e) = interval_insert(sel.col_start, sel.col_end, at, count);
+                sel.col_start = s;
+                sel.col_end = e;
+            }
+            StructuralEdit::RowDelete { at, count } => {
+                match interval_delete(sel.row_start, sel.row_end, at, count) {
+                    Some((s, e)) => {
+                        sel.row_start = s;
+                        sel.row_end = e;
+                    }
+                    None => {
+                        dropped_idx.push(i);
+                        report.dropped.push(region.id.clone());
+                        continue;
+                    }
+                }
+            }
+            StructuralEdit::ColDelete { at, count } => {
+                match interval_delete(sel.col_start, sel.col_end, at, count) {
+                    Some((s, e)) => {
+                        sel.col_start = s;
+                        sel.col_end = e;
+                    }
+                    None => {
+                        dropped_idx.push(i);
+                        report.dropped.push(region.id.clone());
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if region.selector != before {
+            report.moved.push(region.id.clone());
+        }
+    }
+
+    // Remove back-to-front so earlier indices stay valid.
+    for i in dropped_idx.into_iter().rev() {
+        regions.remove(i);
+    }
+
+    report
+}
+
 // ---------------------------------------------------------------------------
 // Positional range (runtime)
 // ---------------------------------------------------------------------------
@@ -656,6 +833,24 @@ pub fn check_region_compatibility(
     // Compare shared regions
     for old_region in old {
         if let Some(new_region) = new.iter().find(|r| r.id == old_region.id) {
+            // GEOMETRY FIRST. Submissions are keyed by absolute cell
+            // coordinates, so a region that moved or shrank between versions
+            // either orphans stored answers or re-points them at cells that now
+            // hold a different field. Deciding this on schema alone let a moved
+            // region carry forward silently — "column D = headcount" quietly
+            // becoming "column D = salary" after an inserted column, with the
+            // subscriber's previous answers dragged along.
+            if !new_region
+                .selector
+                .preserves_cell_meaning_of(&old_region.selector)
+            {
+                result.incompatible.push((
+                    old_region.id.clone(),
+                    "Region moved or shrank — stored cell positions no longer line up"
+                        .to_string(),
+                ));
+                continue;
+            }
             match (&old_region.schema, &new_region.schema) {
                 (Some(old_schema), Some(new_schema)) => {
                     if old_schema.is_compatible_with(new_schema) {
@@ -1847,6 +2042,193 @@ mod tests {
         assert_eq!(compat.removed, vec!["r1"]);
         assert_eq!(compat.added, vec!["r2"]);
         assert!(compat.compatible.is_empty());
+    }
+
+    // --- Structural shift tests ---
+
+    /// Shorthand: (row_start, row_end, col_start, col_end) of a region by id.
+    fn geom(regions: &[WritebackRegionDeclaration], id: &str) -> (u32, u32, u32, u32) {
+        let s = &regions.iter().find(|r| r.id == id).expect("region present").selector;
+        (s.row_start, s.row_end, s.col_start, s.col_end)
+    }
+
+    #[test]
+    fn row_insert_before_region_shifts_it_down() {
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        let report = shift_regions_for_edit(&mut regions, s, StructuralEdit::RowInsert { at: 5, count: 3 });
+        assert_eq!(geom(&regions, "r1"), (13, 23, 0, 3));
+        assert_eq!(report.moved, vec!["r1"]);
+        assert!(report.dropped.is_empty());
+    }
+
+    #[test]
+    fn row_insert_at_region_start_shifts_rather_than_expands() {
+        // Deliberately unlike the grid Table helpers: a published form must not
+        // silently gain a brand-new blank row the author never reviewed.
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowInsert { at: 10, count: 2 });
+        assert_eq!(geom(&regions, "r1"), (12, 22, 0, 3));
+    }
+
+    #[test]
+    fn row_insert_inside_region_expands_it() {
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowInsert { at: 15, count: 2 });
+        assert_eq!(geom(&regions, "r1"), (10, 22, 0, 3));
+    }
+
+    #[test]
+    fn row_insert_after_region_leaves_it_alone() {
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        let report = shift_regions_for_edit(&mut regions, s, StructuralEdit::RowInsert { at: 50, count: 2 });
+        assert_eq!(geom(&regions, "r1"), (10, 20, 0, 3));
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn col_insert_before_region_shifts_it_right() {
+        // THE BUG THIS FIXES: without the shift, a region covering A:D would
+        // still say cols 0..3 while column 3 now holds what column 2 held —
+        // subscribers' answers silently land in the wrong field.
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 0, 9, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::ColInsert { at: 0, count: 1 });
+        assert_eq!(geom(&regions, "r1"), (0, 9, 1, 4));
+    }
+
+    #[test]
+    fn other_sheets_are_untouched() {
+        let a = make_sheet_id();
+        let b = make_sheet_id();
+        let mut regions = vec![make_decl("r1", a, 10, 20, 0, 3), make_decl("r2", b, 10, 20, 0, 3)];
+        let report = shift_regions_for_edit(&mut regions, a, StructuralEdit::RowInsert { at: 0, count: 5 });
+        assert_eq!(geom(&regions, "r1"), (15, 25, 0, 3));
+        assert_eq!(geom(&regions, "r2"), (10, 20, 0, 3));
+        assert_eq!(report.moved, vec!["r1"]);
+    }
+
+    #[test]
+    fn row_delete_entirely_covering_region_drops_it() {
+        let s = make_sheet_id();
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3), make_decl("r2", s, 40, 50, 0, 3)];
+        let report = shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at: 5, count: 30 });
+        assert_eq!(report.dropped, vec!["r1"]);
+        assert!(regions.iter().all(|r| r.id != "r1"));
+        // r2 survives, slid up by the deleted count.
+        assert_eq!(geom(&regions, "r2"), (10, 20, 0, 3));
+        assert_eq!(report.moved, vec!["r2"]);
+    }
+
+    #[test]
+    fn row_delete_variants_clamp_without_inverting() {
+        let s = make_sheet_id();
+        // Head clipped: region starts inside the deleted range, extends beyond.
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at: 8, count: 5 });
+        assert_eq!(geom(&regions, "r1"), (8, 15, 0, 3));
+
+        // Spans the whole deleted range: shrink in place.
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at: 12, count: 3 });
+        assert_eq!(geom(&regions, "r1"), (10, 17, 0, 3));
+
+        // Tail clipped: deleted range starts inside and runs past the end.
+        let mut regions = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at: 15, count: 30 });
+        assert_eq!(geom(&regions, "r1"), (10, 14, 0, 3));
+    }
+
+    #[test]
+    fn shifted_regions_never_invert() {
+        // Every delete offset/width against a fixed region must leave a sane
+        // interval or drop the region outright — never start > end.
+        let s = make_sheet_id();
+        for at in 0..30u32 {
+            for count in 1..30u32 {
+                let mut regions = vec![make_decl("r1", s, 10, 20, 5, 8)];
+                shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at, count });
+                if let Some(r) = regions.first() {
+                    assert!(
+                        r.selector.row_start <= r.selector.row_end,
+                        "inverted rows at={} count={}: {:?}", at, count, r.selector
+                    );
+                }
+                let mut regions = vec![make_decl("r1", s, 10, 20, 5, 8)];
+                shift_regions_for_edit(&mut regions, s, StructuralEdit::ColDelete { at, count });
+                if let Some(r) = regions.first() {
+                    assert!(
+                        r.selector.col_start <= r.selector.col_end,
+                        "inverted cols at={} count={}: {:?}", at, count, r.selector
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Selector-aware compatibility tests ---
+
+    #[test]
+    fn moved_region_is_incompatible() {
+        let s = make_sheet_id();
+        let old = vec![make_decl("r1", s, 0, 9, 0, 3)];
+        let new = vec![make_decl("r1", s, 5, 14, 0, 3)]; // slid down
+        let compat = check_region_compatibility(&old, &new);
+        assert!(compat.compatible.is_empty());
+        assert_eq!(compat.incompatible.len(), 1);
+        assert!(compat.incompatible[0].1.contains("moved or shrank"));
+    }
+
+    #[test]
+    fn shrunk_region_is_incompatible() {
+        let s = make_sheet_id();
+        let old = vec![make_decl("r1", s, 0, 9, 0, 3)];
+        let new = vec![make_decl("r1", s, 0, 9, 0, 2)]; // lost a column
+        let compat = check_region_compatibility(&old, &new);
+        assert_eq!(compat.incompatible.len(), 1);
+    }
+
+    #[test]
+    fn grown_region_with_same_origin_stays_compatible() {
+        // The common benign edit: the author extends the form to collect more
+        // rows. Every stored answer still sits at the same cell meaning the
+        // same thing, so drafts must NOT be invalidated.
+        let s = make_sheet_id();
+        let old = vec![make_decl("r1", s, 0, 9, 0, 3)];
+        let new = vec![make_decl("r1", s, 0, 19, 0, 5)];
+        let compat = check_region_compatibility(&old, &new);
+        assert_eq!(compat.compatible, vec!["r1"]);
+        assert!(compat.incompatible.is_empty());
+    }
+
+    #[test]
+    fn region_moved_to_another_sheet_is_incompatible() {
+        let a = make_sheet_id();
+        let b = make_sheet_id();
+        let compat = check_region_compatibility(
+            &[make_decl("r1", a, 0, 9, 0, 3)],
+            &[make_decl("r1", b, 0, 9, 0, 3)],
+        );
+        assert_eq!(compat.incompatible.len(), 1);
+    }
+
+    #[test]
+    fn round_trip_shift_returns_to_compatible() {
+        // Insert then delete the same rows: the selector lands back where it
+        // started, coordinates line up again, and carry-forward is safe. A
+        // revision counter would have wrongly flagged this; comparing the
+        // selectors themselves gets it right.
+        let s = make_sheet_id();
+        let original = vec![make_decl("r1", s, 10, 20, 0, 3)];
+        let mut regions = original.clone();
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowInsert { at: 0, count: 4 });
+        shift_regions_for_edit(&mut regions, s, StructuralEdit::RowDelete { at: 0, count: 4 });
+        assert_eq!(geom(&regions, "r1"), (10, 20, 0, 3));
+        let compat = check_region_compatibility(&original, &regions);
+        assert_eq!(compat.compatible, vec!["r1"]);
     }
 
     // --- Model writeback compatibility tests ---

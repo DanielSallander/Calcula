@@ -428,6 +428,73 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
     }
 }
 
+/// Track author-side writeback DRAFT region selectors through a structural
+/// edit, recording the pre-shift list into the caller's already-open undo
+/// transaction so grid + selectors restore as one step.
+///
+/// `RegionSelector` is raw coordinates with no anchoring, so without this an
+/// inserted column silently re-points a published collection surface: a region
+/// covering A:D keeps saying cols 0..3 while col 3 now holds what col 2 held,
+/// and every subscriber's answer lands in the wrong field with nothing
+/// reporting it.
+///
+/// DRAFTS ONLY. `state.writeback_declarations` mirrors PUBLISHED declarations
+/// from immutable signed manifests — the manifest is the contract, and a local
+/// grid edit does not change what the publisher declared. Rewriting those would
+/// desync the app from the signature it verified (and `rebuild_writeback_index`
+/// overwrites them from the manifest anyway).
+///
+/// The caller must already hold the undo-stack lock inside `begin_transaction`,
+/// matching the cell-types / cell-behaviors helpers directly above.
+fn shift_writeback_draft_regions(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    let Some(sheet_id) = state
+        .sheet_ids
+        .lock()
+        .ok()
+        .and_then(|ids| ids.get(sheet_index).copied())
+    else {
+        return;
+    };
+
+    let Ok(mut regions) = state.writeback_draft_regions.lock() else {
+        return;
+    };
+    if regions.is_empty() {
+        return;
+    }
+
+    let previous = regions.clone();
+    let report = calp::writeback::shift_regions_for_edit(&mut regions, sheet_id, edit);
+    if report.is_empty() {
+        return;
+    }
+
+    undo_stack.record_custom_restore(
+        "obj_writeback_regions".to_string(),
+        crate::undo_commands::writeback_regions_snapshot_bytes(
+            previous,
+            report.dropped.clone(),
+        ),
+        "Shift writeback regions",
+    );
+
+    // A dropped region is the author losing a configured collection surface —
+    // never let that happen silently.
+    if !report.dropped.is_empty() {
+        crate::log_warn!(
+            "CALP",
+            "Structural edit removed {} writeback draft region(s) whose cells were all deleted: {}",
+            report.dropped.len(),
+            report.dropped.join(", ")
+        );
+    }
+}
+
 /// Shift protected regions when columns are deleted.
 fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
@@ -670,6 +737,13 @@ pub fn insert_rows(
             );
         }
     }
+    // Writeback draft regions are coordinate-anchored and must track the shift.
+    shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -865,6 +939,13 @@ pub fn insert_columns(
             );
         }
     }
+    // Writeback draft regions are coordinate-anchored and must track the shift.
+    shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
     undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
@@ -1525,6 +1606,14 @@ pub fn delete_rows(
             );
         }
     }
+    // Writeback draft regions shrink with overlapping deletes; a region whose
+    // cells are all deleted is dropped and reported.
+    shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -1772,6 +1861,14 @@ pub fn delete_columns(
             );
         }
     }
+    // Writeback draft regions shrink with overlapping deletes; a region whose
+    // cells are all deleted is dropped and reported.
+    shift_writeback_draft_regions(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted columns

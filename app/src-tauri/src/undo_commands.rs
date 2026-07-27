@@ -658,7 +658,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     for k in [
         "obj_chart", "obj_sparklines", "obj_table", "obj_autofilter",
         "obj_validation", "obj_named_range", "obj_freeze", "obj_extension_data",
-        "obj_cell_types", "obj_cell_behaviors",
+        "obj_cell_types", "obj_cell_behaviors", "obj_writeback_regions",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1889,6 +1889,48 @@ pub(crate) fn cell_behaviors_snapshot_bytes(
     serde_json::to_vec(&CellBehaviorsObjSnapshot { previous }).unwrap_or_default()
 }
 
+/// Snapshot for the "obj_writeback_regions" CustomRestore — the author-side
+/// draft region list before a structural shift, plus the ids that shift
+/// dropped.
+///
+/// Applied as a SELECTOR MERGE rather than a whole-list swap: restore puts back
+/// the geometry of regions that still exist and resurrects only the ids the
+/// shift itself dropped. A whole-list swap would also roll back schema/policy
+/// edits made after the structural edit (those commands record no undo entry of
+/// their own), and would resurrect regions the author deliberately removed
+/// later. Undoing an insert should undo the insert's effect on geometry —
+/// nothing else.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WritebackRegionsObjSnapshot {
+    /// Regions as they were: restore each one's SELECTOR if it still exists.
+    previous: Vec<calp::WritebackRegionDeclaration>,
+    /// Ids that may be re-inserted from `previous` when currently absent —
+    /// exactly the ones the shift dropped, so a region the author deleted for
+    /// their own reasons afterwards is not resurrected behind their back.
+    #[serde(default)]
+    resurrect_ids: Vec<String>,
+    /// Ids to delete if present. Empty when recording the forward shift; the
+    /// inverse uses it so REDO can re-drop what undo resurrected.
+    #[serde(default)]
+    remove_ids: Vec<String>,
+}
+
+/// Serialized "obj_writeback_regions" snapshot bytes (same in-open-transaction
+/// contract as cell_types_snapshot_bytes). Without this, undoing an insert
+/// would restore the grid but leave the shifted selectors behind —
+/// reintroducing exactly the coordinate drift the shift exists to prevent.
+pub(crate) fn writeback_regions_snapshot_bytes(
+    previous: Vec<calp::WritebackRegionDeclaration>,
+    dropped_ids: Vec<String>,
+) -> Vec<u8> {
+    serde_json::to_vec(&WritebackRegionsObjSnapshot {
+        previous,
+        resurrect_ids: dropped_ids,
+        remove_ids: Vec::new(),
+    })
+    .unwrap_or_default()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NamedRangeObjSnapshot {
     /// Uppercase registry key.
@@ -2049,6 +2091,56 @@ fn apply_object_swap_restore(
                 previous: current,
             });
             crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
+        }
+        "obj_writeback_regions" => {
+            let snap: WritebackRegionsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_writeback_regions snapshot: {}", e); return; }
+            };
+            let mut regions = state.writeback_draft_regions.lock().unwrap();
+
+            // What this apply is about to change, computed BEFORE mutating, so
+            // the inverse is an exact mirror: whatever we insert, redo removes;
+            // whatever we remove, redo re-inserts.
+            let will_insert: Vec<String> = snap
+                .previous
+                .iter()
+                .filter(|p| {
+                    snap.resurrect_ids.contains(&p.id) && !regions.iter().any(|r| r.id == p.id)
+                })
+                .map(|p| p.id.clone())
+                .collect();
+            let will_remove: Vec<String> = snap
+                .remove_ids
+                .iter()
+                .filter(|id| regions.iter().any(|r| r.id == **id))
+                .cloned()
+                .collect();
+            push_obj_inverse(inverse_transaction, kind, &WritebackRegionsObjSnapshot {
+                previous: regions.clone(),
+                resurrect_ids: will_remove.clone(),
+                remove_ids: will_insert.clone(),
+            });
+
+            // 1. Selector-only restore for regions that still exist, so later
+            //    schema/policy edits on them survive the undo.
+            for prev in &snap.previous {
+                if let Some(cur) = regions.iter_mut().find(|r| r.id == prev.id) {
+                    cur.selector = prev.selector.clone();
+                }
+            }
+            // 2. Re-insert what this apply is allowed to resurrect, at roughly
+            //    the original position.
+            for (i, prev) in snap.previous.iter().enumerate() {
+                if will_insert.contains(&prev.id) {
+                    let at = i.min(regions.len());
+                    regions.insert(at, prev.clone());
+                }
+            }
+            // 3. Drop what the mirror direction had resurrected.
+            if !will_remove.is_empty() {
+                regions.retain(|r| !will_remove.contains(&r.id));
+            }
         }
         "obj_named_range" => {
             let snap: NamedRangeObjSnapshot = match serde_json::from_slice(data) {
@@ -2227,6 +2319,62 @@ pub(crate) fn record_freeze_undo(
 }
 
 #[cfg(test)]
+mod writeback_regions_snapshot_tests {
+    //! The "obj_writeback_regions" snapshot is applied as a selector MERGE, not
+    //! a whole-list swap, so undoing a structural edit reverts the geometry it
+    //! shifted without rolling back unrelated later edits. These pin that.
+    use super::*;
+
+    fn decl(id: &str, sheet: identity::SheetId, r0: u32, r1: u32) -> calp::WritebackRegionDeclaration {
+        calp::WritebackRegionDeclaration {
+            id: id.to_string(),
+            selector: calp::writeback::RegionSelector {
+                sheet_id: sheet,
+                row_start: r0,
+                row_end: r1,
+                col_start: 0,
+                col_end: 3,
+            },
+            mode: None,
+            schema: None,
+            visibility: None,
+            submission_policy: None,
+            version_binding: None,
+            lifecycle: None,
+            aggregation_hint: None,
+            expected_respondents: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn snapshot_bytes_round_trip_carries_dropped_ids() {
+        let s = identity::SheetId::from_bytes(identity::generate_uuid_v7());
+        let bytes = writeback_regions_snapshot_bytes(
+            vec![decl("a", s, 0, 5), decl("b", s, 10, 15)],
+            vec!["b".to_string()],
+        );
+        let snap: WritebackRegionsObjSnapshot = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(snap.previous.len(), 2);
+        assert_eq!(snap.resurrect_ids, vec!["b"]);
+        assert!(
+            snap.remove_ids.is_empty(),
+            "the forward record never removes; only the inverse does"
+        );
+    }
+
+    #[test]
+    fn snapshot_tolerates_missing_optional_fields() {
+        // `#[serde(default)]` on both id lists — an older payload must not
+        // fail to deserialize and silently skip the restore.
+        let snap: WritebackRegionsObjSnapshot =
+            serde_json::from_str(r#"{"previous":[]}"#).unwrap();
+        assert!(snap.resurrect_ids.is_empty());
+        assert!(snap.remove_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod restore_registry_tests {
     use super::*;
 
@@ -2263,6 +2411,7 @@ mod restore_registry_tests {
             ("obj_extension_data", true, CustomRestoreKind::Objects),
             ("obj_cell_types", true, CustomRestoreKind::Objects),
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
+            ("obj_writeback_regions", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];

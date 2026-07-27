@@ -484,6 +484,30 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
         }
     }
 
+    // Drop author-side writeback DRAFT regions on the deleted sheet, same rule
+    // as tables and pivots above. `RegionSelector.sheet_id` is a stable SheetId,
+    // so these would otherwise survive as a configured collection surface
+    // pointing at a sheet that no longer exists — and publish a selector for it.
+    // (Read before the sheet_ids entry is removed further down.)
+    {
+        let deleted_sheet_id = state.sheet_ids.lock().ok().and_then(|ids| ids.get(index).copied());
+        if let Some(sid) = deleted_sheet_id {
+            if let Ok(mut regions) = state.writeback_draft_regions.lock() {
+                let before = regions.len();
+                regions.retain(|r| r.selector.sheet_id != sid);
+                let dropped = before - regions.len();
+                if dropped > 0 {
+                    crate::log_warn!(
+                        "CALP",
+                        "Deleting sheet '{}' removed {} writeback draft region(s) on it",
+                        deleted_name,
+                        dropped
+                    );
+                }
+            }
+        }
+    }
+
     // Remove pivot tables whose destination is the deleted sheet
     {
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
