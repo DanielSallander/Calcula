@@ -566,6 +566,67 @@ fn shift_per_sheet_range_stores(
         }
     }
 
+    // --- Allow-edit ranges: the exceptions carved out of sheet protection. ---
+    //
+    // These are ENFORCED (`SheetProtection::can_edit_cell` returns true for any
+    // cell inside one), so drift here is not a misplaced decoration — it is a
+    // protection boundary pointing at the wrong cells. An unshifted range both
+    // leaves cells editable that the author locked and locks cells they
+    // deliberately opened up.
+    //
+    // A range whose rows or columns were entirely deleted is DROPPED. That
+    // fails SAFE: it removes an exception, tightening protection, rather than
+    // leaving a stale rectangle that keeps unintended cells writable.
+    if let Ok(mut store) = state.sheet_protection.lock() {
+        if let Some(protection) = store.get_mut(&sheet_index) {
+            if !protection.allow_edit_ranges.is_empty() {
+                let previous = protection.clone();
+                let mut changed = false;
+
+                protection.allow_edit_ranges.retain_mut(|r| {
+                    let shifted = shift_range(
+                        CellRange {
+                            start_row: r.start_row,
+                            end_row: r.end_row,
+                            start_col: r.start_col,
+                            end_col: r.end_col,
+                        },
+                        edit,
+                    );
+                    match shifted {
+                        Some(n) => {
+                            if (n.start_row, n.end_row, n.start_col, n.end_col)
+                                != (r.start_row, r.end_row, r.start_col, r.end_col)
+                            {
+                                changed = true;
+                                r.start_row = n.start_row;
+                                r.end_row = n.end_row;
+                                r.start_col = n.start_col;
+                                r.end_col = n.end_col;
+                            }
+                            true
+                        }
+                        None => {
+                            changed = true;
+                            false
+                        }
+                    }
+                });
+
+                if changed {
+                    undo_stack.record_custom_restore(
+                        "obj_sheet_protection".to_string(),
+                        crate::undo_commands::sheet_protection_snapshot_bytes(
+                            sheet_index,
+                            Some(previous),
+                        ),
+                        "Shift allow-edit ranges",
+                    );
+                }
+            }
+        }
+    }
+
     // --- Data validations: one range each. ---
     if let Ok(mut store) = state.data_validations.lock() {
         if let Some(ranges) = store.get_mut(&sheet_index) {

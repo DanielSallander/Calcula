@@ -888,6 +888,66 @@ pub fn get_workbook_protection_status(state: State<AppState>) -> WorkbookProtect
 mod tests {
     use super::*;
 
+    // --- Allow-edit ranges through a structural edit ---
+    //
+    // These pin the SECURITY property of the shift in commands/structure.rs:
+    // an allow-edit range is an exception carved out of protection, so drift
+    // must never leave a stale rectangle keeping unintended cells writable.
+
+    fn protected_with(ranges: Vec<AllowEditRange>) -> SheetProtection {
+        SheetProtection {
+            protected: true,
+            allow_edit_ranges: ranges,
+            ..Default::default()
+        }
+    }
+
+    fn range(start_row: u32, end_row: u32, start_col: u32, end_col: u32) -> AllowEditRange {
+        AllowEditRange {
+            title: "r".to_string(),
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            password_hash: None,
+            password_salt: None,
+        }
+    }
+
+    #[test]
+    fn shifted_allow_edit_range_still_covers_the_same_logical_cells() {
+        // Range over rows 5..9; two rows inserted above moves it to 7..11.
+        // The cell that was editable must still be editable at its new home,
+        // and the cell that slid into the OLD position must not be.
+        let before = protected_with(vec![range(5, 9, 0, 3)]);
+        assert!(before.can_edit_cell(5, 0, true), "inside the exception");
+
+        let after = protected_with(vec![range(7, 11, 0, 3)]);
+        assert!(after.can_edit_cell(7, 0, true), "moved with its rows");
+        assert!(
+            !after.can_edit_cell(5, 0, true),
+            "the old position must NOT stay writable — that is the drift bug"
+        );
+    }
+
+    #[test]
+    fn dropping_a_vanished_allow_edit_range_fails_safe() {
+        // When every row of an exception is deleted the shift drops it. That
+        // TIGHTENS protection (one fewer exception), which is the safe
+        // direction; keeping a stale rectangle would leave cells writable that
+        // the author never opened up.
+        let with_exception = protected_with(vec![range(5, 9, 0, 3)]);
+        assert!(with_exception.can_edit_cell(5, 0, true));
+
+        let dropped = protected_with(vec![]);
+        assert!(
+            !dropped.can_edit_cell(5, 0, true),
+            "a locked cell must be locked again once its exception is gone"
+        );
+        // Unlocked cells are unaffected either way.
+        assert!(dropped.can_edit_cell(5, 0, false));
+    }
+
     #[test]
     fn test_default_protection_options() {
         let options = SheetProtectionOptions::default();

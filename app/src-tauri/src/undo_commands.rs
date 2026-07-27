@@ -662,7 +662,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_object_scripts",
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks", "obj_cell_protection",
-        "obj_conditional_formats",
+        "obj_conditional_formats", "obj_sheet_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1864,6 +1864,27 @@ pub(crate) fn validation_snapshot_bytes(
     serde_json::to_vec(&ValidationObjSnapshot { sheet_index, previous }).unwrap_or_default()
 }
 
+/// Snapshot for the "obj_sheet_protection" CustomRestore — one sheet's whole
+/// protection record before the mutation.
+///
+/// Whole-record rather than just the ranges: the password hash and salt live on
+/// the same struct, and a partial restore that resurrected ranges without them
+/// would change who can edit what. `None` means the sheet had no record at all.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SheetProtectionObjSnapshot {
+    sheet_index: usize,
+    previous: Option<crate::protection::SheetProtection>,
+}
+
+/// Serialized "obj_sheet_protection" snapshot bytes (in-open-transaction
+/// contract, as for `cell_types_snapshot_bytes`).
+pub(crate) fn sheet_protection_snapshot_bytes(
+    sheet_index: usize,
+    previous: Option<crate::protection::SheetProtection>,
+) -> Vec<u8> {
+    serde_json::to_vec(&SheetProtectionObjSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
 /// Snapshot for the "obj_conditional_formats" CustomRestore — one sheet's whole
 /// rule list before the mutation.
 ///
@@ -2235,6 +2256,21 @@ fn apply_object_swap_restore(
             });
             crate::cell_behaviors::replace_all(&mut behaviors, snap.previous);
         }
+        "obj_sheet_protection" => {
+            let snap: SheetProtectionObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_sheet_protection snapshot: {}", e); return; }
+            };
+            let mut store = state.sheet_protection.lock().unwrap();
+            let current = store.remove(&snap.sheet_index);
+            push_obj_inverse(inverse_transaction, kind, &SheetProtectionObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            if let Some(previous) = snap.previous {
+                store.insert(snap.sheet_index, previous);
+            }
+        }
         "obj_conditional_formats" => {
             let snap: ConditionalFormatsObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2602,6 +2638,7 @@ mod restore_registry_tests {
             ("obj_hyperlinks", true, CustomRestoreKind::Objects),
             ("obj_cell_protection", true, CustomRestoreKind::Objects),
             ("obj_conditional_formats", true, CustomRestoreKind::Objects),
+            ("obj_sheet_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];
