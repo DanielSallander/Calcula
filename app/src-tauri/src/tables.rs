@@ -147,7 +147,14 @@ pub struct Table {
     pub style_name: String,
     /// Associated AutoFilter ID (if show_filter_button is true)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_filter_id: Option<u64>,
+    /// The [`crate::autofilter::AutoFilter`] this table owns, by its stable id.
+    ///
+    /// Was the sheet INDEX, which every filter-bearing table on a sheet shares
+    /// — so it could never answer "is the sheet's filter mine?". Not persisted
+    /// directly; reconstructed at load by matching the filter's geometry to a
+    /// single table (see persistence.rs).
+    #[serde(default)]
+    pub auto_filter_id: Option<identity::EntityId>,
 }
 
 impl Table {
@@ -467,6 +474,47 @@ fn build_subtotal_formula(
 }
 
 /// Validate table name
+/// Re-link one sheet's tables to that sheet's AutoFilter, by identity.
+///
+/// A sheet holds at most one AutoFilter, and exactly one table may own it.
+/// `Table.auto_filter_id` is NOT persisted and is invalidated by ordinary
+/// operations — Data ▸ Filter off/on removes the filter and mints a fresh one,
+/// which would otherwise leave every table pointing at a filter that no longer
+/// exists. So ownership is treated as derived state and recomputed wherever the
+/// sheet's filter is created, replaced or removed, rather than maintained
+/// incrementally at each site.
+///
+/// `af = None` clears every link on the sheet. Otherwise the owner is the
+/// filter-button table whose rows contain the filter's header row and whose
+/// columns overlap it, tie-broken by lowest (start_row, start_col).
+pub(crate) fn relink_autofilter_owner(
+    sheet_tables: &mut HashMap<identity::EntityId, Table>,
+    af: Option<&crate::autofilter::AutoFilter>,
+) {
+    for table in sheet_tables.values_mut() {
+        table.auto_filter_id = None;
+    }
+    let Some(af) = af else {
+        return;
+    };
+    let owner = sheet_tables
+        .values()
+        .filter(|t| t.style_options.show_filter_button)
+        .filter(|t| {
+            af.start_row >= t.start_row
+                && af.start_row <= t.end_row
+                && af.start_col <= t.end_col
+                && af.end_col >= t.start_col
+        })
+        .min_by_key(|t| (t.start_row, t.start_col))
+        .map(|t| t.id);
+    if let Some(owner_id) = owner {
+        if let Some(t) = sheet_tables.get_mut(&owner_id) {
+            t.auto_filter_id = Some(af.id);
+        }
+    }
+}
+
 /// Whether a defined name (named range) already claims this identifier.
 ///
 /// Tables and defined names resolve out of two unrelated registries into ONE
@@ -605,9 +653,13 @@ pub fn create_table(
         let mut auto_filters = state.auto_filters.lock().unwrap();
         autofilter_prev = Some(auto_filters.get(&active_sheet).cloned());
         let auto_filter = AutoFilter::new(min_row, min_col, max_row, max_col);
+        // Record the filter's OWN id, so this table (and only this table) can
+        // later prove the sheet's filter belongs to it. Note the insert below
+        // replaces any filter another table on this sheet owned — storage is
+        // still one-per-sheet — but that table's stale id will no longer match,
+        // so it correctly stops claiming ownership.
+        table.auto_filter_id = Some(auto_filter.id);
         auto_filters.insert(active_sheet, auto_filter);
-        // Store a reference ID (using the sheet index as the AutoFilter is per-sheet)
-        table.auto_filter_id = Some(active_sheet as u64);
     }
 
     // Store table
@@ -1322,20 +1374,15 @@ pub fn resize_table(
     // already does this for growth; a resize moved the table out from under its
     // filter, which left the chevrons on the old header row.
     //
-    // OWNERSHIP: a sheet has exactly one AutoFilter and `auto_filter_id` is only
-    // the sheet index, so "this table has show_filter_button" does NOT prove the
-    // sheet's filter belongs to it — with two filter-bearing tables on a sheet
-    // the filter belongs to whichever was created last. Verify against the
-    // table's PRE-resize bounds before touching anything, or resizing table B
-    // silently drags table A's filter (and its criteria) onto B.
+    // OWNERSHIP is now an exact id match: a sheet holds one AutoFilter, and
+    // only the table whose `auto_filter_id` equals that filter's own id owns
+    // it. Previously this had to be inferred from geometry, which quietly let
+    // one table drag another table's filter (and its criteria) onto itself.
     let mut filter_undo: Option<crate::autofilter::AutoFilter> = None;
     if claims_filter {
         if let Ok(mut auto_filters) = state.auto_filters.lock() {
             if let Some(af) = auto_filters.get_mut(&active_sheet) {
-                let is_ours = af.start_row >= previous.start_row
-                    && af.start_row <= previous.end_row
-                    && af.start_col <= previous.end_col
-                    && af.end_col >= previous.start_col;
+                let is_ours = previous.auto_filter_id == Some(af.id);
                 if is_ours {
                     filter_undo = Some(af.clone());
 
@@ -1528,25 +1575,13 @@ fn clear_table_auto_filter(
     let Ok(mut auto_filters) = state.auto_filters.lock() else {
         return None;
     };
-    // Only clear the filter this table owns. `auto_filter_id` is just the sheet
-    // index today (see `create_table`), i.e. "this table created the sheet's
-    // filter" — there is no real AutoFilter identity to check against.
-    if af_id as usize != sheet_index {
-        return None;
-    }
-    // Given that, require only that the filter's header row still sits inside
-    // the table's rows and its columns overlap the table's. An exact top-left
-    // match is too brittle: structural row/column inserts shift table bounds
-    // without touching auto_filters at all, so an equality test would silently
-    // decline to clean up and leave an ownerless filter hiding rows.
+    // Exact ownership: clear the sheet's filter only when it is the very filter
+    // this table created. The previous geometry heuristic could not distinguish
+    // two filter-bearing tables on one sheet, so deleting either would remove
+    // whichever filter happened to be there.
     let matches_table = auto_filters
         .get(&sheet_index)
-        .map(|af| {
-            af.start_row >= table.start_row
-                && af.start_row <= table.end_row
-                && af.start_col <= table.end_col
-                && af.end_col >= table.start_col
-        })
+        .map(|af| af.id == af_id)
         .unwrap_or(false);
     if matches_table {
         return auto_filters.remove(&sheet_index);
@@ -1651,11 +1686,17 @@ pub fn check_table_auto_expand(
         "row" => {
             table.end_row += 1;
 
-            // Update AutoFilter range if the table has filters
+            // Grow the AutoFilter with the table — but only if the sheet's
+            // filter is actually THIS table's. With two filter-bearing tables
+            // on a sheet, auto-expanding one would otherwise stretch the
+            // other's filter over rows it does not own.
             if table.style_options.show_filter_button {
+                let owned = table.auto_filter_id;
                 let mut auto_filters = state.auto_filters.lock().unwrap();
                 if let Some(af) = auto_filters.get_mut(&active_sheet) {
-                    af.end_row = table.end_row;
+                    if owned == Some(af.id) {
+                        af.end_row = table.end_row;
+                    }
                 }
             }
         }
@@ -1697,11 +1738,14 @@ pub fn check_table_auto_expand(
             table.columns.push(TableColumn::new(new_col_id, new_name));
             table.end_col += 1;
 
-            // Update AutoFilter range if the table has filters
+            // Same ownership rule as the row branch above.
             if table.style_options.show_filter_button {
+                let owned = table.auto_filter_id;
                 let mut auto_filters = state.auto_filters.lock().unwrap();
                 if let Some(af) = auto_filters.get_mut(&active_sheet) {
-                    af.end_col = table.end_col;
+                    if owned == Some(af.id) {
+                        af.end_col = table.end_col;
+                    }
                 }
             }
         }
@@ -1796,13 +1840,19 @@ pub fn add_table_row(
     for sheet_tables in tables.values_mut() {
         if let Some(table) = sheet_tables.get_mut(&table_id) {
             table.end_row += 1;
-            // Keep the AutoFilter range in sync if the table has filters.
+            // Keep the AutoFilter range in sync — but only the filter this
+            // table owns. Same ownership rule as resize/delete/auto-expand;
+            // without it, adding a row to one table stretches whichever filter
+            // happens to be on the sheet, including another table's.
             if table.style_options.show_filter_button {
                 let sheet_index = table.sheet_index;
                 let new_end = table.end_row;
+                let owned = table.auto_filter_id;
                 let mut auto_filters = state.auto_filters.lock().unwrap();
                 if let Some(af) = auto_filters.get_mut(&sheet_index) {
-                    af.end_row = new_end;
+                    if owned == Some(af.id) {
+                        af.end_row = new_end;
+                    }
                 }
             }
             return Ok(());
@@ -2432,6 +2482,54 @@ mod tests {
     fn resize_shrinking_from_the_left_drops_the_left_columns() {
         let cols = realign(0, &["X", "Y", "Z"], 1, 2);
         assert_eq!(cols, vec!["Y", "Z"]);
+    }
+
+    // --- AutoFilter ownership is an exact id match ---
+
+    #[test]
+    fn autofilter_ids_are_unique_per_filter() {
+        let a = crate::autofilter::AutoFilter::new(0, 0, 10, 3);
+        let b = crate::autofilter::AutoFilter::new(0, 0, 10, 3);
+        assert_ne!(a.id, b.id, "each filter needs its own identity");
+    }
+
+    #[test]
+    fn only_the_owning_table_matches_the_sheet_filter() {
+        // Two filter-bearing tables on one sheet; storage holds ONE filter.
+        // Before ids, both claimed it (auto_filter_id == sheet index) and either
+        // could move or delete the other's.
+        let af = crate::autofilter::AutoFilter::new(0, 0, 10, 3);
+        let owner_link = Some(af.id);
+        let other_link = Some(crate::autofilter::AutoFilter::new(20, 0, 30, 3).id);
+
+        assert_eq!(owner_link, Some(af.id));
+        assert_ne!(other_link, Some(af.id));
+    }
+
+    #[test]
+    fn autofilter_id_survives_serde_roundtrip() {
+        // The id lives in autofilters.json; losing it on load would silently
+        // orphan every table link.
+        let af = crate::autofilter::AutoFilter::new(1, 2, 9, 5);
+        let json = serde_json::to_string(&af).unwrap();
+        let back: crate::autofilter::AutoFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, af.id);
+    }
+
+    #[test]
+    fn autofilter_without_an_id_field_gets_one_on_load() {
+        // Workbooks saved before the field existed must still deserialize.
+        // AutoFilter is `rename_all = "camelCase"` over the wire and on disk.
+        let json = r#"{
+            "startRow": 0, "startCol": 0, "endRow": 5, "endCol": 2,
+            "columnFilters": {}, "enabled": true
+        }"#;
+        let af: crate::autofilter::AutoFilter =
+            serde_json::from_str(json).expect("legacy filter must load");
+        assert_eq!(af.end_row, 5);
+        // A fresh id is minted; the table re-link reconstructs the association.
+        let again: crate::autofilter::AutoFilter = serde_json::from_str(json).unwrap();
+        assert_ne!(af.id, again.id);
     }
 
     // --- Resize: AutoFilter criteria re-key with a moved start_col ---

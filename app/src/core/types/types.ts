@@ -2138,6 +2138,9 @@ export interface FilterCriteria {
  * AutoFilter info returned from the backend.
  */
 export interface AutoFilterInfo {
+  /** EntityId (UUID string) — stable identity, so a Table can prove this
+   *  filter is the one it owns. */
+  id: string;
   /** Start row of the AutoFilter range (0-based, typically header row) */
   startRow: number;
   /** Start column of the AutoFilter range (0-based) */

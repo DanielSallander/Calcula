@@ -756,6 +756,9 @@ export interface FilterCriteria {
  * AutoFilter info returned from the backend.
  */
 export interface AutoFilterInfo {
+  /** EntityId (UUID string). Compare with `Table.autoFilterId` to confirm a
+   *  table owns this filter before acting on it. */
+  id: string;
   startRow: number;
   startCol: number;
   endRow: number;
@@ -2463,7 +2466,9 @@ export interface Table {
   columns: TableColumn[];
   styleOptions: TableStyleOptions;
   styleName: string;
-  autoFilterId?: number;
+  /** EntityId of the AutoFilter this table owns (UUID string), if any.
+   *  Was the sheet index, which every filter-bearing table on a sheet shared. */
+  autoFilterId?: string;
 }
 
 /**

@@ -252,6 +252,16 @@ pub struct ColumnFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFilter {
+    /// Stable identity for this filter.
+    ///
+    /// Exists so a Table can prove the sheet's filter is ITS filter. Before
+    /// this, `Table.auto_filter_id` held the sheet index, which every
+    /// filter-bearing table on a sheet shares — so nothing could tell whose
+    /// filter it was, and resize/delete/slicer had to guess from geometry.
+    /// Workbooks saved before this field get a fresh id on load, and the
+    /// table re-link reconstructs the association from geometry once.
+    #[serde(default = "new_auto_filter_id")]
+    pub id: identity::EntityId,
     /// Start row of the AutoFilter range (0-based, typically header row)
     pub start_row: u32,
     /// Start column of the AutoFilter range (0-based)
@@ -269,10 +279,17 @@ pub struct AutoFilter {
     pub enabled: bool,
 }
 
+/// Mint a fresh AutoFilter identity. Also the serde default, so a workbook
+/// saved before `AutoFilter::id` existed loads with a valid id.
+fn new_auto_filter_id() -> identity::EntityId {
+    identity::EntityId::from_bytes(identity::generate_uuid_v7())
+}
+
 impl AutoFilter {
     /// Create a new AutoFilter for a range.
     pub fn new(start_row: u32, start_col: u32, end_row: u32, end_col: u32) -> Self {
         AutoFilter {
+            id: new_auto_filter_id(),
             start_row: start_row.min(end_row),
             start_col: start_col.min(end_col),
             end_row: start_row.max(end_row),
@@ -332,6 +349,9 @@ pub struct AutoFilterResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFilterInfo {
+    /// Stable id, so a caller holding a Table can confirm the sheet's filter is
+    /// that table's before acting on it.
+    pub id: identity::EntityId,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,
@@ -355,6 +375,7 @@ impl From<&AutoFilter> for AutoFilterInfo {
         }
 
         AutoFilterInfo {
+            id: af.id,
             start_row: af.start_row,
             start_col: af.start_col,
             end_row: af.end_row,
@@ -995,6 +1016,12 @@ pub fn apply_auto_filter(
         recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
     }
 
+    // Snapshot for the ownership re-link, performed AFTER the auto_filters
+    // guard is released (see below) — `create_table` locks tables THEN
+    // auto_filters, so acquiring them the other way round here would be a
+    // classic AB/BA deadlock between two concurrent commands.
+    let af_snapshot = auto_filter.clone();
+
     let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
     let all_rows: HashSet<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
     let visible_rows: Vec<u32> = all_rows.difference(&auto_filter.hidden_rows).copied().collect();
@@ -1008,6 +1035,17 @@ pub fn apply_auto_filter(
     };
     drop(auto_filters);
     drop(grids);
+
+    // Ownership is derived, not maintained: this path both CREATES a filter
+    // (fresh id — the Data ▸ Filter re-apply case) and RELOCATES an existing
+    // one (same id, new range, so a stale claim would otherwise survive a
+    // move). Recomputing here covers both.
+    if let Ok(mut tables) = state.tables.lock() {
+        if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
+            crate::tables::relink_autofilter_owner(sheet_tables, Some(&af_snapshot));
+        }
+    }
+
     crate::undo_commands::record_autofilter_undo(&state, active_sheet, undo_previous, "Apply AutoFilter");
     result
 }
@@ -1154,6 +1192,18 @@ pub fn remove_auto_filter(
         let all_rows: Vec<u32> = ((auto_filter.start_row + 1)..=auto_filter.end_row).collect();
 
         drop(auto_filters);
+
+        // The filter is gone, so no table owns one any more. Leaving stale ids
+        // behind would make Data ▸ Filter off/on permanently orphan every
+        // table's link: the re-apply mints a NEW id that matches nothing.
+        // Done AFTER releasing auto_filters — `create_table` locks tables then
+        // auto_filters, so the reverse order here would risk a deadlock.
+        if let Ok(mut tables) = state.tables.lock() {
+            if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
+                crate::tables::relink_autofilter_owner(sheet_tables, None);
+            }
+        }
+
         crate::undo_commands::record_autofilter_undo(
             &state,
             active_sheet,

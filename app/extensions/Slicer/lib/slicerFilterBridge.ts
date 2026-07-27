@@ -268,6 +268,7 @@ async function applyTableFilterForSource(
   const tables = await slicerBackend.invoke<Array<{
     id: string;
     startCol: number;
+    autoFilterId?: string;
     columns: Array<{ name: string }>;
     styleOptions: { headerRow: boolean; showFilterButton: boolean };
   }>>("get_tables_for_sheet", { sheetIndex });
@@ -285,33 +286,35 @@ async function applyTableFilterForSource(
   }
 
   // A sheet has exactly ONE AutoFilter, and `column_filters` is keyed relative
-  // to THAT filter's start_col — not to the table's. With two filter-bearing
-  // tables on a sheet the filter belongs to whichever was created last, so an
-  // index taken straight from `table.columns` would filter the wrong columns.
-  // Translate through absolute grid coordinates, and refuse when the target
-  // column is not inside the filter at all.
-  const afRange = await slicerBackend.invoke<
-    [number, number, number, number] | null
-  >("get_auto_filter_range", {});
-  if (!afRange) {
+  // to THAT filter's start_col — not to the table's. So two things have to hold
+  // before we can touch it: the filter must actually BE this table's (compare
+  // ids; with several filter-bearing tables on a sheet it belongs to just one),
+  // and the index must be translated through absolute grid coordinates.
+  const af = await slicerBackend.invoke<{
+    id: string;
+    startCol: number;
+    endCol: number;
+  } | null>("get_auto_filter", {});
+  if (!af) {
     console.warn("[Slicer] No AutoFilter on this sheet; cannot apply table filter");
     return;
   }
-  const [, afStartCol, , afEndCol] = afRange;
-  const absCol = table.startCol + colOffset;
-  if (absCol < afStartCol || absCol > afEndCol) {
+  if (!table.autoFilterId || table.autoFilterId !== af.id) {
     console.warn(
-      `[Slicer] Column '${fieldName}' (grid col ${absCol}) is outside the sheet's AutoFilter ` +
-        `(cols ${afStartCol}-${afEndCol}) — the filter belongs to a different table.`,
+      `[Slicer] The sheet's AutoFilter is not owned by table ${tableId} — refusing to filter ` +
+        `another table's columns.`,
     );
     return;
   }
-  const colIndex = absCol - afStartCol;
+  const absCol = table.startCol + colOffset;
+  if (absCol < af.startCol || absCol > af.endCol) {
+    console.warn(
+      `[Slicer] Column '${fieldName}' (grid col ${absCol}) is outside the AutoFilter range.`,
+    );
+    return;
+  }
+  const colIndex = absCol - af.startCol;
 
-  // `column_filters` is keyed RELATIVE to the AutoFilter's start_col, and a
-  // table's AutoFilter starts at the table's first column — so the index within
-  // table.columns is already the right key.
-  //
   // Both invokes below previously named a command/argument that does not exist:
   // there is no `clear_column_filter` (it is `clear_column_criteria`), and
   // `set_column_filter_values` requires `include_blanks`. Either one rejects at

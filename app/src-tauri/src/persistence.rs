@@ -2409,21 +2409,45 @@ pub fn open_file(
             auto_filters.clear();
         }
 
+        // Re-link each sheet's filter to the ONE table that owns it.
+        //
+        // This used to stamp `auto_filter_id` onto EVERY filter-button table on
+        // the sheet, which is what made ownership unanswerable after a reload:
+        // three tables all claimed the sheet's single filter, so deleting or
+        // resizing any of them would move or remove it. Storage is still
+        // one-per-sheet, so pick the best geometric match — the table whose
+        // header row and column span the filter actually covers — and link only
+        // that one. Ties break on the lowest (row, col) for determinism.
         let mut tables_guard = state.tables.lock().map_err(|e| e.to_string())?;
         for (sheet_index, sheet_tables) in tables_guard.iter_mut() {
-            for table in sheet_tables.values_mut() {
-                if table.style_options.show_filter_button {
-                    auto_filters.entry(*sheet_index).or_insert_with(|| {
+            // Seed a filter from the lowest filter-button table when the
+            // workbook has none saved (pre-existing behavior, kept).
+            if !auto_filters.contains_key(sheet_index) {
+                if let Some(seed) = sheet_tables
+                    .values()
+                    .filter(|t| t.style_options.show_filter_button)
+                    .min_by_key(|t| (t.start_row, t.start_col))
+                {
+                    auto_filters.insert(
+                        *sheet_index,
                         crate::autofilter::AutoFilter::new(
-                            table.start_row,
-                            table.start_col,
-                            table.end_row,
-                            table.end_col,
-                        )
-                    });
-                    table.auto_filter_id = Some(*sheet_index as u64);
+                            seed.start_row,
+                            seed.start_col,
+                            seed.end_row,
+                            seed.end_col,
+                        ),
+                    );
                 }
             }
+
+            // `auto_filter_id` is derived state and is never persisted, so it is
+            // recomputed here with the same rule every runtime path uses. This
+            // replaces stamping the sheet index onto EVERY filter-button table,
+            // which left three tables all claiming one filter after a reload.
+            crate::tables::relink_autofilter_owner(
+                sheet_tables,
+                auto_filters.get(sheet_index),
+            );
         }
     }
 
