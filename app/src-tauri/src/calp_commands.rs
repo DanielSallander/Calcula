@@ -5451,16 +5451,12 @@ pub fn calp_get_writeback_draft_regions(
     Ok(drafts.clone())
 }
 
-/// Mark the workbook dirty. Draft writeback regions live in the .cala
-/// (`user_files/writeback_draft_regions.json`) and are written only by the save
-/// path, so a region designated on an otherwise-clean document was silently
-/// discarded at close: the close prompt and auto-recover both gate on
-/// `is_modified`, and nothing on the draft-region path ever set it.
-fn mark_workbook_modified(file_state: &crate::persistence::FileState) {
-    if let Ok(mut modified) = file_state.is_modified.lock() {
-        *modified = true;
-    }
-}
+// Draft writeback regions live in the .cala
+// (`user_files/writeback_draft_regions.json`) and are written only by the save
+// path, so a region designated on an otherwise-clean document was silently
+// discarded at close. Now shared with the protection commands, which had the
+// same gap — see `persistence::mark_workbook_modified`.
+use crate::persistence::mark_workbook_modified;
 
 /// Add a new draft writeback region.
 #[tauri::command]

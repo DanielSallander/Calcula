@@ -33,6 +33,18 @@ pub struct FileState {
     pub is_encrypted: Mutex<bool>,
 }
 
+/// Mark the workbook dirty.
+///
+/// Any command that mutates state which lives in the .cala but is written only
+/// by the save path must call this: the close prompt and auto-recover both gate
+/// on `is_modified`, so a mutation that never sets it is silently discarded at
+/// close on an otherwise-clean document.
+pub(crate) fn mark_workbook_modified(file_state: &FileState) {
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+}
+
 /// Virtual filesystem for user files stored inside the .cala archive.
 #[derive(Default)]
 pub struct UserFilesState {
@@ -673,9 +685,19 @@ fn collect_protection_for_save(
 
     if let Ok(store) = state.sheet_protection.lock() {
         for (idx, prot) in store.iter() {
-            // Persist any entry that is protected OR carries a password hash /
-            // custom options — an unprotect leaves no entry worth saving.
-            if !prot.protected && prot.password_hash.is_none() {
+            // Persist any entry that still carries authored intent. The old
+            // predicate tested only `protected`/`password_hash` despite a
+            // comment claiming it considered options, so an unprotected sheet
+            // lost its allow-edit ranges AND its custom options at the next
+            // save. That hit the normal authoring order (define the exceptions,
+            // THEN protect), the protect -> add ranges -> unprotect -> save
+            // sequence, and the record the `obj_sheet_protection` undo arm
+            // rebuilds (unprotected + ranges).
+            if !prot.protected
+                && prot.password_hash.is_none()
+                && prot.allow_edit_ranges.is_empty()
+                && prot.options == crate::protection::SheetProtectionOptions::default()
+            {
                 continue;
             }
             if let Ok(v) = serde_json::to_value(prot) {

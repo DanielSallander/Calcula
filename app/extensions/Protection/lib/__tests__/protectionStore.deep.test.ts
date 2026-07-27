@@ -54,6 +54,12 @@ interface EditGuardResult {
   message: string;
 }
 
+/**
+ * MIRROR of `handlers/editGuardHandler.ts#protectionEditGuard`, with its two
+ * dependencies injected so the decision logic can be tested without a backend.
+ * Keep the branches in step with the real one — this copy is documentation as
+ * much as it is a test subject.
+ */
 async function protectionEditGuard(
   row: number,
   col: number,
@@ -72,7 +78,15 @@ async function protectionEditGuard(
       };
     }
   } catch {
-    // fail-open
+    // Fail CLOSED: we only get here when the sheet IS protected and we merely
+    // could not resolve this cell. Allowing the edit would make any transient
+    // backend error a silent bypass.
+    return {
+      blocked: true,
+      message:
+        "Could not verify sheet protection for this cell, so the edit was blocked. " +
+        "Unprotect the sheet to edit it.",
+    };
   }
   return null;
 }
@@ -391,11 +405,27 @@ describe("edit guard interaction with protection", () => {
     expect(result!.message).toContain("protected sheet");
   });
 
-  it("fail-open on canEditCell error", async () => {
+  it("fails CLOSED when canEditCell errors on a protected sheet", async () => {
     const result = await protectionEditGuard(
       0,
       0,
       () => true,
+      async () => {
+        throw new Error("backend down");
+      },
+    );
+    expect(result?.blocked).toBe(true);
+    expect(result?.message).toContain("Could not verify sheet protection");
+  });
+
+  it("still allows the edit when the sheet is not protected at all", async () => {
+    // The fail-closed branch must not leak into unprotected sheets: the fast
+    // path returns before any backend call, so a broken backend cannot lock a
+    // user out of an unprotected sheet.
+    const result = await protectionEditGuard(
+      0,
+      0,
+      () => false,
       async () => {
         throw new Error("backend down");
       },

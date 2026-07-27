@@ -472,7 +472,13 @@ export function bootstrapShell(): void {
     slicer: ["slicers:refresh"],
     ribbonFilter: ["filterpane:filters-refreshed"],
     paneControl: ["controlspane:controls-refreshed"],
-    objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh"],
+    // "protection:refresh" is security-relevant, not cosmetic: the Protection
+    // extension caches whether the active sheet is protected, and its edit
+    // guard skips the backend check entirely when that cache reads "false".
+    // Protection commands are undoable, so an undo can flip the backend record
+    // with no sheet change — without this the cache would stay stale and the
+    // guard would wave edits through on a re-protected sheet.
+    objects: ["charts:refresh", "sparklines:refresh", AppEvents.TABLE_DEFINITIONS_UPDATED, "animation:refresh", "grid:refresh", "protection:refresh"],
   };
   onAppEvent<MutationRefreshPayload>(AppEvents.MUTATION_REFRESH, (payload) => {
     const fired = new Set<string>();

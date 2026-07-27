@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/Protection/handlers/editGuardHandler.ts
 // PURPOSE: Edit guard that blocks cell editing on protected sheets for locked cells.
-// CONTEXT: Registered via registerEditGuard(). Checks canEditCell() before editing starts.
+// CONTEXT: Registered via registerCommitGuard() (see ../index.ts) — NOT
+// registerEditGuard, despite this file's original comment. Checks canEditCell()
+// before a cell commit is applied.
 
 import {
   canEditCell,
@@ -43,7 +45,15 @@ export async function protectionEditGuard(
     }
   } catch (error) {
     console.error("[Protection] Edit guard error:", error);
-    // On error, allow editing (fail-open)
+    // Fail CLOSED. We only reach this branch when the cached flag already says
+    // the sheet IS protected — we merely could not determine this cell's
+    // status. Allowing the edit would turn any transient backend error into a
+    // silent bypass of the only enforcement point sheet protection has.
+    const message =
+      "Could not verify sheet protection for this cell, so the edit was blocked. " +
+      "Unprotect the sheet to edit it.";
+    showDialog(PROTECTION_WARNING_DIALOG_ID, { message });
+    return { blocked: true, message };
   }
 
   return null;

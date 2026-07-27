@@ -112,12 +112,33 @@ function activate(context: ExtensionContext): void {
 
   // 5. Subscribe to events
 
-  // Sheet changed: refresh protection state and update menu labels
-  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, async () => {
-    await refreshProtectionState();
-    refreshMenu(context);
-  });
-  cleanupFns.push(unsubSheet);
+  // The cached protection flag is a SECURITY-relevant cache, not a UI
+  // convenience: protectionEditGuard skips the backend canEditCell call
+  // entirely when it reads "not protected", so any event that can change the
+  // backend record while the active sheet index stays put must refresh it.
+  //
+  // SHEET_CHANGED alone was not enough. It only fires when the active index
+  // actually moves (SheetTabs), so opening a workbook whose active sheet is
+  // protected — while already sitting on that same index — left the flag
+  // `false` from the PREVIOUS document and the guard waved every edit through.
+  // Undo/redo can likewise flip the backend record with no sheet change now
+  // that the protection commands are undoable.
+  // "protection:refresh" is fanned out by the Shell translator from the
+  // MUTATION_REFRESH "objects" domain, which fires on undo/redo of the
+  // (now undoable) protection commands.
+  const refreshEvents = [
+    AppEvents.SHEET_CHANGED,
+    AppEvents.AFTER_OPEN,
+    AppEvents.AFTER_NEW,
+    "protection:refresh",
+  ];
+  for (const evt of refreshEvents) {
+    const unsub = context.events.on(evt, async () => {
+      await refreshProtectionState();
+      refreshMenu(context);
+    });
+    cleanupFns.push(unsub);
+  }
 
   // 6. Load initial protection state
   refreshProtectionState().then(() => {

@@ -662,7 +662,8 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_object_scripts",
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks", "obj_cell_protection",
-        "obj_conditional_formats", "obj_sheet_protection",
+        "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
+        "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
     }
@@ -1867,16 +1868,15 @@ pub(crate) fn validation_snapshot_bytes(
 /// Snapshot for the "obj_sheet_protection" CustomRestore — one sheet's
 /// allow-edit ranges before the mutation.
 ///
-/// Scoped to `allow_edit_ranges` ONLY, deliberately. The rest of
-/// `SheetProtection` (`protected`, the sheet-level `password_hash`/
-/// `password_salt`, `options`) is NOT undo-tracked by any protection command —
-/// `protect_sheet` / `unprotect_sheet` / `update_protection_options` /
-/// `add_allow_edit_range` / `remove_allow_edit_range` record nothing. So by the
-/// time this restore runs, those fields may legitimately hold values NEWER than
-/// this snapshot, and swapping the whole record back would silently revert them:
-/// undoing an unrelated row insert would unprotect a sheet the author protected
-/// afterwards, discarding the password hash, and the now-unprotected record is
-/// what `collect_protection_for_save` writes.
+/// Scoped to `allow_edit_ranges` ONLY, deliberately — this is the inverse of a
+/// structural shift, which moves rectangles and touches nothing else. Widening
+/// it to the whole record would make undo of a row insert also revert whatever
+/// `protect_sheet` / `unprotect_sheet` / `update_protection_options` did
+/// afterwards, silently unprotecting the sheet and dropping its password hash.
+/// (Those commands are undoable now, via the separate whole-record
+/// `obj_sheet_protection_record` kind below, so they would at least be on the
+/// stack — but they are still SEPARATE user actions, and one Ctrl+Z must not
+/// undo two of them.)
 ///
 /// Restoring only the ranges is safe precisely because each `AllowEditRange`
 /// carries its OWN `password_hash`/`password_salt` — a range resurrected from
@@ -1896,6 +1896,36 @@ pub(crate) fn sheet_protection_snapshot_bytes(
 ) -> Vec<u8> {
     serde_json::to_vec(&SheetProtectionObjSnapshot { sheet_index, previous_ranges })
         .unwrap_or_default()
+}
+
+/// Snapshot for the "obj_sheet_protection_record" CustomRestore — one sheet's
+/// WHOLE protection record before the mutation. `None` = the sheet had no
+/// record at all, so undo must remove the key rather than leave a default one.
+///
+/// Deliberately distinct from `obj_sheet_protection` above, which is scoped to
+/// `allow_edit_ranges`. Each kind is the exact inverse of one mutation:
+/// the structural shift only moves rectangles, whereas `protect_sheet` /
+/// `unprotect_sheet` / `update_protection_options` change sheet-level fields
+/// and must be able to put the password hash and salt back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SheetProtectionRecordSnapshot {
+    sheet_index: usize,
+    previous: Option<crate::protection::SheetProtection>,
+}
+
+/// Record undo for a command that replaces a sheet's whole protection record.
+///
+/// Call AFTER dropping the `sheet_protection` guard — this takes the undo-stack
+/// lock, and `record_object_undo` opens its own transaction when none is open.
+pub(crate) fn record_sheet_protection_record_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Option<crate::protection::SheetProtection>,
+    description: &str,
+) {
+    let data = serde_json::to_vec(&SheetProtectionRecordSnapshot { sheet_index, previous })
+        .unwrap_or_default();
+    record_object_undo(state, "obj_sheet_protection_record", data, description);
 }
 
 /// Snapshot for the "obj_conditional_formats" CustomRestore — one sheet's whole
@@ -1985,6 +2015,47 @@ pub(crate) fn sheet_cell_map_snapshot_bytes<T: serde::Serialize>(
     previous: Vec<((u32, u32), T)>,
 ) -> Vec<u8> {
     serde_json::to_vec(&SheetCellMapSnapshot { sheet_index, previous }).unwrap_or_default()
+}
+
+/// Snapshot for the "obj_workbook_protection" CustomRestore — the whole
+/// workbook-protection record before the mutation.
+///
+/// Whole-record here IS correct, unlike the sheet-level case: this store has
+/// exactly two writers (`protect_workbook` / `unprotect_workbook`), both of
+/// which now record undo, so no untracked field can be newer than the snapshot.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkbookProtectionObjSnapshot {
+    previous: crate::protection::WorkbookProtection,
+}
+
+/// Record undo for a workbook-protection mutation.
+///
+/// Call AFTER dropping the `workbook_protection` guard.
+pub(crate) fn record_workbook_protection_undo(
+    state: &AppState,
+    previous: crate::protection::WorkbookProtection,
+    description: &str,
+) {
+    let data = serde_json::to_vec(&WorkbookProtectionObjSnapshot { previous }).unwrap_or_default();
+    record_object_undo(state, "obj_workbook_protection", data, description);
+}
+
+/// Record undo for a command that rewrites one sheet's cell-protection map.
+///
+/// Reuses the `obj_cell_protection` kind that the structural-shift path already
+/// registers — until now that kind was recorded ONLY by the shift, so
+/// `set_cell_protection` itself (locking/unlocking a range) was not undoable.
+///
+/// Call AFTER dropping the `cell_protection` guard; the recorder takes the
+/// undo-stack lock.
+pub(crate) fn record_cell_protection_undo(
+    state: &AppState,
+    sheet_index: usize,
+    previous: Vec<((u32, u32), crate::protection::CellProtection)>,
+    description: &str,
+) {
+    let data = sheet_cell_map_snapshot_bytes(sheet_index, previous);
+    record_object_undo(state, "obj_cell_protection", data, description);
 }
 
 /// Swap one sheet's cell-keyed store with a snapshot, pushing the CURRENT
@@ -2294,6 +2365,35 @@ fn apply_object_swap_restore(
                 sheet_index: snap.sheet_index,
                 previous_ranges: current,
             });
+        }
+        "obj_workbook_protection" => {
+            let snap: WorkbookProtectionObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_workbook_protection snapshot: {}", e); return; }
+            };
+            let mut wb = state.workbook_protection.lock().unwrap();
+            let current = wb.clone();
+            *wb = snap.previous;
+            push_obj_inverse(inverse_transaction, kind, &WorkbookProtectionObjSnapshot {
+                previous: current,
+            });
+        }
+        "obj_sheet_protection_record" => {
+            let snap: SheetProtectionRecordSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_sheet_protection_record snapshot: {}", e); return; }
+            };
+            let mut store = state.sheet_protection.lock().unwrap();
+            let current = store.remove(&snap.sheet_index);
+            push_obj_inverse(inverse_transaction, kind, &SheetProtectionRecordSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+            // Absent `previous` means the sheet had NO record — leave the key
+            // removed rather than inserting a default one.
+            if let Some(previous) = snap.previous {
+                store.insert(snap.sheet_index, previous);
+            }
         }
         "obj_conditional_formats" => {
             let snap: ConditionalFormatsObjSnapshot = match serde_json::from_slice(data) {
@@ -2663,6 +2763,8 @@ mod restore_registry_tests {
             ("obj_cell_protection", true, CustomRestoreKind::Objects),
             ("obj_conditional_formats", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection", true, CustomRestoreKind::Objects),
+            ("obj_sheet_protection_record", true, CustomRestoreKind::Objects),
+            ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
         ];

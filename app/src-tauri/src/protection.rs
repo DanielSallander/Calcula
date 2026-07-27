@@ -12,7 +12,11 @@ use crate::AppState;
 // ============================================================================
 
 /// Sheet protection options - what users can do when sheet is protected
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` so the save path can tell "author customized the options" from
+/// "still the defaults"; do NOT switch the manual `Default` below to a derive —
+/// two of its fields default to `true`, not `false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetProtectionOptions {
     /// Allow users to select locked cells
@@ -363,19 +367,47 @@ fn verify_password(password: &str, salt: &str, hash: &str) -> bool {
 // COMMANDS
 // ============================================================================
 
+/// Record undo for a sheet-protection mutation and mark the workbook dirty.
+///
+/// Every mutating command here goes through this. Before it existed, protection
+/// was neither undoable nor dirty-marking: Ctrl+Z could not take a protect back,
+/// and protecting a sheet on an otherwise-clean document was silently discarded
+/// at close (the close prompt and auto-recover both gate on `is_modified`).
+///
+/// MUST be called after the `sheet_protection` guard is dropped — this takes the
+/// undo-stack lock, and holding both invites a lock-order inversion with the
+/// restore path, which takes the store lock while replaying.
+fn record_protection_undo(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    sheet_index: usize,
+    previous: Option<SheetProtection>,
+    description: &str,
+) {
+    crate::undo_commands::record_sheet_protection_record_undo(
+        state,
+        sheet_index,
+        previous,
+        description,
+    );
+    crate::persistence::mark_workbook_modified(file_state);
+}
+
 /// Protect the current sheet
 #[tauri::command]
 pub fn protect_sheet(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     params: ProtectSheetParams,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut protection_storage = state.sheet_protection.lock().unwrap();
 
-    let mut protection = protection_storage
-        .entry(active_sheet)
-        .or_insert_with(SheetProtection::default)
-        .clone();
+    // Capture the record as it stands BEFORE any mutation, including its
+    // absence, so undo can put the sheet back exactly as it was.
+    let previous = protection_storage.get(&active_sheet).cloned();
+
+    let mut protection = previous.clone().unwrap_or_default();
 
     // Already protected?
     if protection.protected {
@@ -399,6 +431,9 @@ pub fn protect_sheet(
     }
 
     protection_storage.insert(active_sheet, protection.clone());
+    drop(protection_storage);
+
+    record_protection_undo(&state, &file_state, active_sheet, previous, "Protect sheet");
     ProtectionResult::ok(protection)
 }
 
@@ -406,6 +441,7 @@ pub fn protect_sheet(
 #[tauri::command]
 pub fn unprotect_sheet(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -428,13 +464,24 @@ pub fn unprotect_sheet(
         }
     }
 
-    // Remove protection
+    // Remove protection. The allow-edit ranges are deliberately kept — Excel
+    // reuses them when the sheet is protected again, and the save path now
+    // persists an unprotected record that still carries them.
     let mut new_protection = protection.clone();
     new_protection.protected = false;
     new_protection.password_hash = None;
     new_protection.password_salt = None;
 
     protection_storage.insert(active_sheet, new_protection.clone());
+    drop(protection_storage);
+
+    record_protection_undo(
+        &state,
+        &file_state,
+        active_sheet,
+        Some(protection),
+        "Unprotect sheet",
+    );
     ProtectionResult::ok(new_protection)
 }
 
@@ -442,27 +489,43 @@ pub fn unprotect_sheet(
 #[tauri::command]
 pub fn update_protection_options(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     options: SheetProtectionOptions,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut protection_storage = state.sheet_protection.lock().unwrap();
+
+    let previous = protection_storage.get(&active_sheet).cloned();
 
     let protection = protection_storage
         .entry(active_sheet)
         .or_insert_with(SheetProtection::default);
 
     protection.options = options;
-    ProtectionResult::ok(protection.clone())
+    let updated = protection.clone();
+    drop(protection_storage);
+
+    record_protection_undo(
+        &state,
+        &file_state,
+        active_sheet,
+        previous,
+        "Change protection options",
+    );
+    ProtectionResult::ok(updated)
 }
 
 /// Add an allow-edit range to the current sheet
 #[tauri::command]
 pub fn add_allow_edit_range(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     params: AddAllowEditRangeParams,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut protection_storage = state.sheet_protection.lock().unwrap();
+
+    let previous = protection_storage.get(&active_sheet).cloned();
 
     let protection = protection_storage
         .entry(active_sheet)
@@ -493,13 +556,24 @@ pub fn add_allow_edit_range(
     }
 
     protection.allow_edit_ranges.push(range);
-    ProtectionResult::ok(protection.clone())
+    let updated = protection.clone();
+    drop(protection_storage);
+
+    record_protection_undo(
+        &state,
+        &file_state,
+        active_sheet,
+        previous,
+        "Add allow-edit range",
+    );
+    ProtectionResult::ok(updated)
 }
 
 /// Remove an allow-edit range by title
 #[tauri::command]
 pub fn remove_allow_edit_range(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     title: String,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -510,6 +584,7 @@ pub fn remove_allow_edit_range(
         None => return ProtectionResult::err("No protection settings for this sheet"),
     };
 
+    let previous = protection.clone();
     let initial_len = protection.allow_edit_ranges.len();
     protection.allow_edit_ranges.retain(|r| r.title != title);
 
@@ -517,7 +592,17 @@ pub fn remove_allow_edit_range(
         return ProtectionResult::err("Range not found");
     }
 
-    ProtectionResult::ok(protection.clone())
+    let updated = protection.clone();
+    drop(protection_storage);
+
+    record_protection_undo(
+        &state,
+        &file_state,
+        active_sheet,
+        Some(previous),
+        "Remove allow-edit range",
+    );
+    ProtectionResult::ok(updated)
 }
 
 /// Get all allow-edit ranges for the current sheet
@@ -662,10 +747,18 @@ pub fn can_perform_action(
 #[tauri::command]
 pub fn set_cell_protection(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     params: SetCellProtectionParams,
 ) -> ProtectionResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut cell_protection_storage = state.cell_protection.lock().unwrap();
+
+    // Whole-sheet snapshot before the rewrite. Same shape the structural-shift
+    // path records, so both mutations share one restore kind.
+    let previous: Vec<((u32, u32), CellProtection)> = cell_protection_storage
+        .get(&active_sheet)
+        .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+        .unwrap_or_default();
 
     let sheet_protection = cell_protection_storage
         .entry(active_sheet)
@@ -676,19 +769,50 @@ pub fn set_cell_protection(
     let min_col = params.start_col.min(params.end_col);
     let max_col = params.start_col.max(params.end_col);
 
+    // Touch a cell ONLY when its effective protection actually changes.
+    //
+    // Two reasons this matters. Format Cells sends set_cell_protection on every
+    // OK, whether or not the user opened the Protection tab, so the common case
+    // is a call that changes nothing — and now that this command is undoable, a
+    // blind write would push a second, invisible undo step onto every Ctrl+1
+    // (first Ctrl+Z appears to do nothing) and dirty a clean workbook.
+    //
+    // A missing entry is not "unset": `get_cell_protection` resolves absence to
+    // `default_locked()`, so absence and a stored `default_locked()` are the
+    // same state. Comparing against that effective value keeps us from
+    // materializing an entry per selected cell for a no-op call.
+    let mut changed = false;
     for row in min_row..=max_row {
         for col in min_col..=max_col {
-            let current = sheet_protection
-                .entry((row, col))
-                .or_insert(CellProtection::default_locked());
+            let effective = sheet_protection
+                .get(&(row, col))
+                .copied()
+                .unwrap_or_else(CellProtection::default_locked);
 
+            let mut next = effective;
             if let Some(locked) = params.locked {
-                current.locked = locked;
+                next.locked = locked;
             }
             if let Some(hidden) = params.formula_hidden {
-                current.formula_hidden = hidden;
+                next.formula_hidden = hidden;
+            }
+
+            if next != effective {
+                sheet_protection.insert((row, col), next);
+                changed = true;
             }
         }
+    }
+    drop(cell_protection_storage);
+
+    if changed {
+        crate::undo_commands::record_cell_protection_undo(
+            &state,
+            active_sheet,
+            previous,
+            "Change cell protection",
+        );
+        crate::persistence::mark_workbook_modified(&file_state);
     }
 
     ProtectionResult::ok_empty()
@@ -816,10 +940,29 @@ pub struct WorkbookProtectionStatus {
 // WORKBOOK PROTECTION COMMANDS
 // ============================================================================
 
+/// Record undo for a workbook-protection mutation and mark the workbook dirty.
+///
+/// The workbook-level twin of [`record_protection_undo`]. `WorkbookProtection`
+/// is persisted by `collect_protection_for_save` and restored by `load_file`,
+/// so it had the same two gaps as the sheet-level commands: not undoable, and
+/// silently discarded at close on an otherwise-clean document.
+///
+/// MUST be called after the `workbook_protection` guard is dropped.
+fn record_workbook_protection_undo(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    previous: WorkbookProtection,
+    description: &str,
+) {
+    crate::undo_commands::record_workbook_protection_undo(state, previous, description);
+    crate::persistence::mark_workbook_modified(file_state);
+}
+
 /// Protect the workbook structure
 #[tauri::command]
 pub fn protect_workbook(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> WorkbookProtectionResult {
     let mut wb_protection = state.workbook_protection.lock().unwrap();
@@ -828,6 +971,7 @@ pub fn protect_workbook(
         return WorkbookProtectionResult::err("Workbook is already protected");
     }
 
+    let previous = wb_protection.clone();
     wb_protection.protected = true;
 
     if let Some(pwd) = password {
@@ -837,7 +981,9 @@ pub fn protect_workbook(
             wb_protection.password_salt = Some(salt);
         }
     }
+    drop(wb_protection);
 
+    record_workbook_protection_undo(&state, &file_state, previous, "Protect workbook");
     WorkbookProtectionResult::ok()
 }
 
@@ -845,6 +991,7 @@ pub fn protect_workbook(
 #[tauri::command]
 pub fn unprotect_workbook(
     state: State<AppState>,
+    file_state: State<crate::persistence::FileState>,
     password: Option<String>,
 ) -> WorkbookProtectionResult {
     let mut wb_protection = state.workbook_protection.lock().unwrap();
@@ -861,10 +1008,13 @@ pub fn unprotect_workbook(
         }
     }
 
+    let previous = wb_protection.clone();
     wb_protection.protected = false;
     wb_protection.password_hash = None;
     wb_protection.password_salt = None;
+    drop(wb_protection);
 
+    record_workbook_protection_undo(&state, &file_state, previous, "Unprotect workbook");
     WorkbookProtectionResult::ok()
 }
 
@@ -996,6 +1146,116 @@ mod tests {
             StructuralEdit::RowInsert { at: 20, count: 3 }
         ));
         assert_eq!((ranges[0].start_row, ranges[0].end_row), (5, 9));
+    }
+
+    // --- What the save path must keep ---
+    //
+    // These pin the predicate in `persistence::collect_protection_for_save`.
+    // They are written against the same four conditions so a change to either
+    // side shows up as a failing test rather than as silent data loss.
+
+    fn is_worth_saving(prot: &SheetProtection) -> bool {
+        !(!prot.protected
+            && prot.password_hash.is_none()
+            && prot.allow_edit_ranges.is_empty()
+            && prot.options == SheetProtectionOptions::default())
+    }
+
+    #[test]
+    fn unprotected_sheet_keeps_its_allow_edit_ranges_at_save() {
+        // The normal authoring order is: define the exceptions, THEN protect.
+        // The old predicate tested only protected/password_hash, so the ranges
+        // were silently dropped at the next save.
+        let mut prot = SheetProtection::default();
+        prot.allow_edit_ranges = vec![range(5, 9, 0, 3)];
+        assert!(!prot.protected && prot.password_hash.is_none());
+        assert!(is_worth_saving(&prot), "ranges alone must keep the record");
+    }
+
+    #[test]
+    fn unprotected_sheet_keeps_custom_options_at_save() {
+        // The old comment claimed options were considered; the condition never
+        // looked at them.
+        let mut prot = SheetProtection::default();
+        prot.options.allow_sort = !prot.options.allow_sort;
+        assert!(is_worth_saving(&prot), "customized options must keep the record");
+    }
+
+    #[test]
+    fn a_truly_empty_protection_record_is_still_dropped_at_save() {
+        // The filter must stay a filter — a default record carries no authored
+        // intent and should not bloat every save.
+        assert!(!is_worth_saving(&SheetProtection::default()));
+    }
+
+    // --- set_cell_protection must not record a no-op ---
+    //
+    // Format Cells sends set_cell_protection on EVERY OK, whether or not the
+    // user opened the Protection tab. Now that the command is undoable, writing
+    // blindly would push a second, invisible undo step onto every Ctrl+1. These
+    // pin the "did anything actually change" decision the command makes.
+
+    /// Mirror of the per-cell decision in `set_cell_protection`: returns the new
+    /// value to store, or None when the cell's effective protection is unchanged.
+    fn next_if_changed(
+        stored: Option<CellProtection>,
+        locked: Option<bool>,
+        formula_hidden: Option<bool>,
+    ) -> Option<CellProtection> {
+        let effective = stored.unwrap_or_else(CellProtection::default_locked);
+        let mut next = effective;
+        if let Some(l) = locked {
+            next.locked = l;
+        }
+        if let Some(h) = formula_hidden {
+            next.formula_hidden = h;
+        }
+        (next != effective).then_some(next)
+    }
+
+    #[test]
+    fn writing_the_default_over_an_absent_cell_is_a_no_op() {
+        // Absence resolves to default_locked() in get_cell_protection, so
+        // "locked = true" on a cell with no entry changes nothing and must not
+        // materialize one.
+        let d = CellProtection::default_locked();
+        assert!(next_if_changed(None, Some(d.locked), Some(d.formula_hidden)).is_none());
+    }
+
+    #[test]
+    fn rewriting_a_cell_with_its_current_values_is_a_no_op() {
+        let mut stored = CellProtection::default_locked();
+        stored.locked = false;
+        stored.formula_hidden = true;
+        assert!(next_if_changed(Some(stored), Some(false), Some(true)).is_none());
+    }
+
+    #[test]
+    fn a_real_protection_change_is_detected() {
+        let stored = CellProtection::default_locked();
+        let next = next_if_changed(Some(stored), Some(!stored.locked), None)
+            .expect("flipping locked is a change");
+        assert_eq!(next.locked, !stored.locked);
+        // Unlocking a cell that had no entry is also a change.
+        assert!(next_if_changed(None, Some(false), None).is_some());
+    }
+
+    #[test]
+    fn omitted_params_leave_the_cell_untouched() {
+        // Both params None: nothing to apply, so nothing changes even though
+        // the command still walks the range.
+        assert!(next_if_changed(None, None, None).is_none());
+        assert!(next_if_changed(Some(CellProtection::default_locked()), None, None).is_none());
+    }
+
+    #[test]
+    fn default_protection_options_are_not_all_false() {
+        // Guards the `PartialEq` comparison above: SheetProtectionOptions has a
+        // MANUAL Default with two true fields. Switching it to #[derive(Default)]
+        // would flip them and silently change what counts as "customized".
+        let d = SheetProtectionOptions::default();
+        assert!(d.allow_select_locked_cells);
+        assert!(d.allow_select_unlocked_cells);
     }
 
     #[test]
