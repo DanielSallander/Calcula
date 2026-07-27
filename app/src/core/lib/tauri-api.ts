@@ -21,6 +21,28 @@ import type {
   SplitConfig,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
+import { AppEvents, emitAppEvent } from "./events";
+
+/**
+ * Announce a row/column insert or delete.
+ *
+ * Emitted HERE rather than at the call site so EVERY caller announces it. The
+ * toolbar path in Spreadsheet.tsx used to emit these by hand, which meant any
+ * other caller — Subtotals inserting subtotal rows, DataForm deleting a record
+ * — silently skipped the announcement, and every coordinate cache in the app
+ * (AutoFilter, Pivot, Table, Review, Hyperlinks, conditional formats, data
+ * validations) stayed pinned to pre-edit positions with no way to notice.
+ *
+ * The payload carries the edit's position and size. It deliberately does NOT
+ * carry a sheet index: these commands always act on the ACTIVE sheet, and
+ * resolving it here would mean reaching into grid state from the IPC layer.
+ */
+function emitStructuralEvent(
+  event: string,
+  detail: { startRow?: number; startCol?: number; count: number },
+): void {
+  emitAppEvent(event, detail);
+}
 
 // ============================================================================
 // UDF pre-resolution hook (Inversion of Control)
@@ -949,6 +971,7 @@ export async function insertRows(row: number, count: number): Promise<CellData[]
   console.log(`[tauri-api] insertRows(${row}, ${count})`);
   const result = await invoke<CellData[]>("insert_rows", { row, count });
   console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
+  emitStructuralEvent(AppEvents.ROWS_INSERTED, { startRow: row, count });
   return result;
 }
 
@@ -961,6 +984,7 @@ export async function insertColumns(col: number, count: number): Promise<CellDat
   console.log(`[tauri-api] insertColumns(${col}, ${count})`);
   const result = await invoke<CellData[]>("insert_columns", { col, count });
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
+  emitStructuralEvent(AppEvents.COLUMNS_INSERTED, { startCol: col, count });
   return result;
 }
 
@@ -973,6 +997,7 @@ export async function deleteRows(row: number, count: number): Promise<CellData[]
   console.log(`[tauri-api] deleteRows(${row}, ${count})`);
   const result = await invoke<CellData[]>("delete_rows", { row, count });
   console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
+  emitStructuralEvent(AppEvents.ROWS_DELETED, { startRow: row, count });
   return result;
 }
 
@@ -985,6 +1010,7 @@ export async function deleteColumns(col: number, count: number): Promise<CellDat
   console.log(`[tauri-api] deleteColumns(${col}, ${count})`);
   const result = await invoke<CellData[]>("delete_columns", { col, count });
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
+  emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
   return result;
 }
 

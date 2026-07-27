@@ -44,7 +44,15 @@ export const AppEvents = {
   // per-feature refresh events, so Core never names a feature.
   MUTATION_REFRESH: "app:mutation-refresh",
 
-  // Structure events (row/column insert/delete)
+  // Structure events (row/column insert/delete).
+  //
+  // Emitted by the tauri-api wrappers themselves, so EVERY caller announces the
+  // edit — not just the toolbar. Payload:
+  //   ROWS_INSERTED / ROWS_DELETED       { startRow: number; count: number }
+  //   COLUMNS_INSERTED / COLUMNS_DELETED { startCol: number; count: number }
+  // These commands always act on the ACTIVE sheet, so no sheet index is
+  // carried. This payload is visible to user scripts (see the scriptHost
+  // allowlist), so treat its shape as public.
   ROWS_INSERTED: "app:rows-inserted",
   COLUMNS_INSERTED: "app:columns-inserted",
   ROWS_DELETED: "app:rows-deleted",

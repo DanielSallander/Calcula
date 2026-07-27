@@ -106,6 +106,65 @@ pub fn shift_range(range: CellRange, edit: StructuralEdit) -> Option<CellRange> 
     Some(out)
 }
 
+/// Apply [`shift_cell`] to a FLAT `HashMap<(sheet, row, col), V>` store —
+/// the third shape these stores come in (on-grid controls, spill tracking),
+/// where the sheet index lives in the key rather than an outer map.
+///
+/// `shift_value` is called on each surviving entry so a value that itself holds
+/// coordinates can follow; pass a no-op closure when it does not. Entries whose
+/// cell was deleted are dropped. Returns whether anything changed.
+///
+/// Rebuilds rather than mutating in place, for the same collision reason as
+/// [`shift_per_sheet_cell_map`].
+pub fn shift_flat_cell_map<V>(
+    store: &mut HashMap<(usize, u32, u32), V>,
+    sheet_index: usize,
+    edit: StructuralEdit,
+    mut shift_value: impl FnMut(&mut V, StructuralEdit),
+) -> bool {
+    if store.is_empty() {
+        return false;
+    }
+    let original: Vec<((usize, u32, u32), V)> = store.drain().collect();
+    let mut changed = false;
+    let mut rebuilt: HashMap<(usize, u32, u32), V> = HashMap::with_capacity(original.len());
+
+    for ((sheet, row, col), mut value) in original {
+        if sheet != sheet_index {
+            rebuilt.insert((sheet, row, col), value); // Other sheets untouched.
+            continue;
+        }
+        match shift_cell(row, col, edit) {
+            Some((new_row, new_col)) => {
+                if (new_row, new_col) != (row, col) {
+                    changed = true;
+                }
+                shift_value(&mut value, edit);
+                rebuilt.insert((sheet, new_row, new_col), value);
+            }
+            None => changed = true,
+        }
+    }
+
+    *store = rebuilt;
+    changed
+}
+
+/// Shift a bare `(row, col)` pair stored INSIDE a value, dropping the whole
+/// entry's usefulness if the cell it pointed at was deleted.
+///
+/// Returns false when the target cell is gone, so the caller can decide whether
+/// the containing entry still means anything.
+pub fn shift_coord_pair(cell: &mut (u32, u32), edit: StructuralEdit) -> bool {
+    match shift_cell(cell.0, cell.1, edit) {
+        Some(n) => {
+            *cell = n;
+            true
+        }
+        None => false,
+    }
+}
+
 /// A stored value that ALSO remembers its own cell position.
 ///
 /// Several of these stores duplicate the coordinate: it is the map key AND a
@@ -317,6 +376,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- Flat (sheet, row, col)-keyed shift ---
+
+    #[test]
+    fn flat_map_shifts_only_the_target_sheet() {
+        let mut store: HashMap<(usize, u32, u32), &str> = HashMap::new();
+        store.insert((0, 5, 1), "target");
+        store.insert((1, 5, 1), "other");
+
+        let changed = shift_flat_cell_map(&mut store, 0, row_insert(0, 2), |_, _| {});
+        assert!(changed);
+        assert_eq!(store.get(&(0, 7, 1)), Some(&"target"));
+        assert_eq!(store.get(&(1, 5, 1)), Some(&"other"), "other sheet intact");
+    }
+
+    #[test]
+    fn flat_map_drops_entries_on_deleted_cells() {
+        let mut store: HashMap<(usize, u32, u32), &str> = HashMap::new();
+        store.insert((0, 5, 1), "gone");
+        store.insert((0, 9, 1), "kept");
+
+        shift_flat_cell_map(&mut store, 0, row_delete(4, 3), |_, _| {});
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(&(0, 6, 1)), Some(&"kept"));
+    }
+
+    #[test]
+    fn flat_map_shifts_coordinates_held_in_the_value() {
+        // The spill pair stores coordinates in the value as well as the key;
+        // if only the key moved, the two sides would disagree about which
+        // cells a formula owns.
+        let mut store: HashMap<(usize, u32, u32), (u32, u32)> = HashMap::new();
+        store.insert((0, 5, 0), (3, 0)); // cell (5,0) is owned by origin (3,0)
+
+        shift_flat_cell_map(&mut store, 0, row_insert(0, 2), |v, e| {
+            assert!(shift_coord_pair(v, e));
+        });
+        assert_eq!(store.get(&(0, 7, 0)), Some(&(5, 0)), "key AND value moved");
+    }
+
+    #[test]
+    fn shift_coord_pair_reports_deletion() {
+        let mut c = (5u32, 2u32);
+        assert!(shift_coord_pair(&mut c, row_insert(0, 1)));
+        assert_eq!(c, (6, 2));
+        let mut gone = (5u32, 2u32);
+        assert!(!shift_coord_pair(&mut gone, row_delete(4, 3)));
     }
 
     #[test]

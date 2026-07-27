@@ -428,6 +428,60 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
     }
 }
 
+/// Move the FLAT `(sheet, row, col)`-keyed SPILL tracking through a structural
+/// edit.
+///
+/// The spill pair (`spill_hosts`: spill cell -> origin; `spill_ranges`: origin
+/// -> its spill cells) must move IN LOCKSTEP, keys and values, or the two sides
+/// disagree about which cells a formula owns — which both lets a write clobber
+/// a live spill area and falsely blocks writes on vacated cells. Note the
+/// DELETE paths already refuse an edit that would partially break a spill
+/// range; this handles the cases they allow, and inserts, which were unguarded.
+///
+/// Records no undo entry: the spill maps are session-only derived state
+/// (persistence clears them on load and nothing rebuilds them from disk).
+///
+/// ON-GRID CONTROLS ARE DELIBERATELY NOT SHIFTED HERE. They look like the same
+/// shape — `HashMap<(sheet, row, col), ControlMetadata>` — but their cell key is
+/// only one of three places their position lives: FLOATING controls keep pixel
+/// x/y/width/height inside `properties`, and an attached object script is keyed
+/// by the coordinate-derived instance id `control-<sheet>-<row>-<col>`. Moving
+/// the key alone renames the control out from under its script and leaves the
+/// pixel geometry behind, and the Controls extension caches per-controlId render
+/// state that nothing invalidates on a structural edit. Shifting controls needs
+/// all four moved together plus an undo entry (the store is persisted and
+/// user-authored); doing the key in isolation breaks more than it fixes.
+fn shift_flat_cell_stores(
+    state: &AppState,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use crate::commands::coord_shift::{shift_coord_pair, shift_flat_cell_map};
+
+    // spill_hosts: value is the ORIGIN cell of the spill that owns this cell.
+    if let Ok(mut hosts) = state.spill_hosts.lock() {
+        let mut orphaned = false;
+        shift_flat_cell_map(&mut hosts, sheet_index, edit, |origin, e| {
+            if !shift_coord_pair(origin, e) {
+                orphaned = true;
+            }
+        });
+        if orphaned {
+            // The origin was deleted, so every cell claiming it is meaningless.
+            // Cheaper and safer to drop the whole sheet's tracking than to keep
+            // entries pointing at a formula that no longer exists.
+            hosts.retain(|&(sheet, _, _), _| sheet != sheet_index);
+        }
+    }
+
+    // spill_ranges: value is the LIST of cells this origin spilled into.
+    if let Ok(mut ranges) = state.spill_ranges.lock() {
+        shift_flat_cell_map(&mut ranges, sheet_index, edit, |cells, e| {
+            cells.retain_mut(|c| shift_coord_pair(c, e));
+        });
+    }
+}
+
 /// Move every per-sheet RANGE-keyed store through a structural edit.
 ///
 /// Conditional formats and data validations remember RECTANGLES rather than
@@ -1160,6 +1214,8 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
+    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count });
     undo_stack.commit_transaction();
 
     // First, update formula references in ALL cells that reference rows at or after the insertion point
@@ -1389,6 +1445,8 @@ pub fn insert_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
+    // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
+    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColInsert { at: col, count });
     undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
@@ -2084,6 +2142,8 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
+    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowDelete { at: row, count });
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
@@ -2366,6 +2426,8 @@ pub fn delete_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
+    // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
+    shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count });
     undo_stack.commit_transaction();
     
     // First, remove cells in the deleted columns

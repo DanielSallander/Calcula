@@ -1489,20 +1489,34 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       break;
 
     // ---- row / column ----
+    //
+    // The structural events are emitted by the tauri-api wrappers and carry no
+    // sheet index (they always act on the active sheet). The SCRIPT contract
+    // does declare `sheetIndex` — see objectContexts.d.ts, which is fed to
+    // Monaco verbatim — so enrich it here rather than let scripts read
+    // `undefined` with no type error. Same treatment sheet.onDataChange gets.
     case "row.onInsert":
-      wireAppEventForwarder(mw, hook, AppEvents.ROWS_INSERTED);
+      addForwarder(mw, hook, onAppEvent(AppEvents.ROWS_INSERTED, (detail) => {
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, ...(detail as object) });
+      }));
       break;
     case "row.onDelete":
-      wireAppEventForwarder(mw, hook, AppEvents.ROWS_DELETED);
+      addForwarder(mw, hook, onAppEvent(AppEvents.ROWS_DELETED, (detail) => {
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, ...(detail as object) });
+      }));
       break;
     case "row.onResize":
       wireAppEventForwarder(mw, hook, AppEvents.ROW_RESIZED);
       break;
     case "column.onInsert":
-      wireAppEventForwarder(mw, hook, AppEvents.COLUMNS_INSERTED);
+      addForwarder(mw, hook, onAppEvent(AppEvents.COLUMNS_INSERTED, (detail) => {
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, ...(detail as object) });
+      }));
       break;
     case "column.onDelete":
-      wireAppEventForwarder(mw, hook, AppEvents.COLUMNS_DELETED);
+      addForwarder(mw, hook, onAppEvent(AppEvents.COLUMNS_DELETED, (detail) => {
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, ...(detail as object) });
+      }));
       break;
     case "column.onResize":
       wireAppEventForwarder(mw, hook, AppEvents.COLUMN_RESIZED);

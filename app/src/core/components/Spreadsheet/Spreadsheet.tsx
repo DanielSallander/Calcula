@@ -585,15 +585,8 @@ function SpreadsheetContent({
     try {
       await insertRows(startRow, count);
 
-      // Notify extensions about the structural change BEFORE refreshing cells,
-      // so overlays (e.g., pivot tables) can shift their regions synchronously
-      // before the grid redraws.
-      emitAppEvent(AppEvents.ROWS_INSERTED, {
-        sheetIndex: gridState.sheetContext.activeSheetIndex,
-        startRow,
-        count,
-      });
-
+      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
+      // so every caller announces it — not just this one.)
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
 
@@ -629,15 +622,8 @@ function SpreadsheetContent({
     try {
       await insertColumns(startCol, count);
 
-      // Notify extensions about the structural change BEFORE refreshing cells,
-      // so overlays (e.g., pivot tables) can shift their regions synchronously
-      // before the grid redraws.
-      emitAppEvent(AppEvents.COLUMNS_INSERTED, {
-        sheetIndex: gridState.sheetContext.activeSheetIndex,
-        startCol,
-        count,
-      });
-
+      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
+      // so every caller announces it — not just this one.)
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
 
@@ -673,15 +659,8 @@ function SpreadsheetContent({
     try {
       await deleteRows(startRow, count);
 
-      // Notify extensions about the structural change BEFORE refreshing cells,
-      // so overlays (e.g., pivot tables) can shift their regions synchronously
-      // before the grid redraws.
-      emitAppEvent(AppEvents.ROWS_DELETED, {
-        sheetIndex: gridState.sheetContext.activeSheetIndex,
-        startRow,
-        count,
-      });
-
+      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
+      // so every caller announces it — not just this one.)
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
 
@@ -718,15 +697,8 @@ function SpreadsheetContent({
     try {
       await deleteColumns(startCol, count);
 
-      // Notify extensions about the structural change BEFORE refreshing cells,
-      // so overlays (e.g., pivot tables) can shift their regions synchronously
-      // before the grid redraws.
-      emitAppEvent(AppEvents.COLUMNS_DELETED, {
-        sheetIndex: gridState.sheetContext.activeSheetIndex,
-        startCol,
-        count,
-      });
-
+      // (ROWS/COLUMNS_INSERTED/DELETED is emitted by the tauri-api wrapper,
+      // so every caller announces it — not just this one.)
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
 

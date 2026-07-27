@@ -419,8 +419,18 @@ pub fn get_workbook_state_digest(
             digest.pivots.insert(id_key(id), to_value_or_null(definition));
         }
     }
+    // Skip sheets whose list is EMPTY. An empty Vec and an absent key are
+    // behaviourally identical everywhere in the app (every reader iterates the
+    // Vec), but they are not identical to the oracle: save omits empty entries
+    // and load never recreates the key, so a sheet left holding `vec![]` —
+    // which any delete-the-last-rule path produces, including the structural
+    // shift — showed up as a phantom `"0": []` that vanished across a
+    // save/reload or undo/redo round trip and was reported as a diff.
     if let Ok(cf) = state.conditional_formats.lock() {
         for (sheet, defs) in cf.iter() {
+            if defs.is_empty() {
+                continue;
+            }
             digest
                 .conditional_formats
                 .insert(sheet.to_string(), to_value_or_null(defs));
@@ -428,6 +438,9 @@ pub fn get_workbook_state_digest(
     }
     if let Ok(dv) = state.data_validations.lock() {
         for (sheet, ranges) in dv.iter() {
+            if ranges.is_empty() {
+                continue;
+            }
             digest
                 .data_validations
                 .insert(sheet.to_string(), to_value_or_null(ranges));
