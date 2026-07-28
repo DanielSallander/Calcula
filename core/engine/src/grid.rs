@@ -435,6 +435,28 @@ mod tests {
     }
 
     #[test]
+    fn tiers_are_index_keyed_so_a_structural_edit_must_renumber_them() {
+        // Pins WHY commands/structure.rs shifts these. A column style is stored
+        // against a column INDEX, so inserting a column to its left leaves the
+        // style on the wrong column unless something renumbers it — the same
+        // drift class as comments, notes and allow-edit ranges.
+        let mut grid = Grid::new();
+        grid.set_column_style(3, 9);
+        assert_eq!(grid.effective_style_index(0, 3), 9);
+
+        // Simulate the shift a column-insert at 0 must perform.
+        let shifted: Vec<(u32, usize)> =
+            grid.column_styles.iter().map(|(&c, &s)| (c + 1, s)).collect();
+        grid.column_styles.clear();
+        for (c, s) in shifted {
+            grid.set_column_style(c, s);
+        }
+
+        assert_eq!(grid.effective_style_index(0, 4), 9, "moved with its column");
+        assert_eq!(grid.effective_style_index(0, 3), 0, "old column is bare");
+    }
+
+    #[test]
     fn setting_a_tier_to_index_zero_clears_it() {
         let mut grid = Grid::new();
         grid.set_row_style(1, 6);

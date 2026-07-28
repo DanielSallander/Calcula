@@ -45,6 +45,8 @@ fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
             .collect(),
         max_row: grid.max_row,
         max_col: grid.max_col,
+        row_styles: grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+        column_styles: grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
     }
 }
 
@@ -741,11 +743,81 @@ fn shift_per_sheet_cell_stores(
     shift_store!(state.comments.lock(), "obj_comments", "Shift comments");
     shift_store!(state.notes.lock(), "obj_notes", "Shift notes");
     shift_store!(state.hyperlinks.lock(), "obj_hyperlinks", "Shift hyperlinks");
-    shift_store!(
-        state.cell_protection.lock(),
-        "obj_cell_protection",
-        "Shift cell protection"
-    );
+    // Cell protection is NOT shifted here any more, and needs no replacement:
+    // lock state now rides on `Cell.style_index`, which moves with the cell
+    // itself when rows or columns are inserted or deleted.
+}
+
+/// Shift the row/column default-style tiers through a structural edit.
+///
+/// These are keyed by row/column INDEX, so an insert or delete renumbers them
+/// exactly like any other coordinate-anchored store: without this, inserting a
+/// row above a styled row leaves the style on the wrong row, and a formatted
+/// column drifts one column left after a delete.
+///
+/// Records NO undo entry, deliberately — `capture_grid_snapshot` takes the
+/// tiers (as it does merged regions) and undo restores them wholesale, so a
+/// second restore would double-apply within the same transaction. For the same
+/// reason this MUST run AFTER the snapshot is captured.
+/// Takes the grids BORROWED: the structure commands hold both `state.grid` and
+/// `state.grids` when they call this, and `std::sync::Mutex` is not reentrant.
+fn shift_style_tiers(
+    grid: &mut engine::Grid,
+    grids: &mut [engine::Grid],
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::{interval_delete, interval_insert, StructuralEdit as SE};
+
+    // Only the matching axis moves: row edits renumber rows, column edits
+    // renumber columns.
+    let shift_axis = |map: &std::collections::HashMap<u32, usize>,
+                      at: u32,
+                      count: u32,
+                      inserting: bool| {
+        let mut out: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for (&idx, &style) in map.iter() {
+            // Reuse the shared 1-D interval math by treating the single index
+            // as a degenerate [idx, idx] interval — same rule the cell and
+            // range shifts use, so a tier can never drift differently.
+            let moved = if inserting {
+                Some(interval_insert(idx, idx, at, count))
+            } else {
+                interval_delete(idx, idx, at, count)
+            };
+            if let Some((start, _end)) = moved {
+                out.insert(start, style);
+            }
+            // `None` = the row/column itself was deleted; its tier goes with it.
+        }
+        out
+    };
+
+    let apply = |grid: &mut engine::Grid| match edit {
+        SE::RowInsert { at, count } => {
+            grid.row_styles = shift_axis(&grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, true)
+                .into_iter().collect();
+        }
+        SE::RowDelete { at, count } => {
+            grid.row_styles = shift_axis(&grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, false)
+                .into_iter().collect();
+        }
+        SE::ColInsert { at, count } => {
+            grid.column_styles = shift_axis(&grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, true)
+                .into_iter().collect();
+        }
+        SE::ColDelete { at, count } => {
+            grid.column_styles = shift_axis(&grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, false)
+                .into_iter().collect();
+        }
+    };
+
+    apply(grid);
+    // Both mirrors, or the tier becomes invisible to readers that resolve
+    // against `grids[active_sheet]`.
+    if let Some(g) = grids.get_mut(sheet_index) {
+        apply(g);
+    }
 }
 
 /// Track the sheet's AutoFilter through a structural edit, recording the
@@ -1238,6 +1310,14 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Row/column style tiers are index-keyed too, so they renumber with the
+    // same edit. Runs AFTER capture_grid_snapshot (see the fn doc).
+    shift_style_tiers(
+        &mut grid,
+        &mut grids,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1466,6 +1546,14 @@ pub fn insert_columns(
     shift_per_sheet_cell_stores(
         &state,
         &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // Row/column style tiers are index-keyed too, so they renumber with the
+    // same edit. Runs AFTER capture_grid_snapshot (see the fn doc).
+    shift_style_tiers(
+        &mut grid,
+        &mut grids,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
@@ -2166,6 +2254,14 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Row/column style tiers are index-keyed too, so they renumber with the
+    // same edit. Runs AFTER capture_grid_snapshot (see the fn doc).
+    shift_style_tiers(
+        &mut grid,
+        &mut grids,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2447,6 +2543,14 @@ pub fn delete_columns(
     shift_per_sheet_cell_stores(
         &state,
         &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // Row/column style tiers are index-keyed too, so they renumber with the
+    // same edit. Runs AFTER capture_grid_snapshot (see the fn doc).
+    shift_style_tiers(
+        &mut grid,
+        &mut grids,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );

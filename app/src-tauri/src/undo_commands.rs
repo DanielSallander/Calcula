@@ -395,6 +395,8 @@ fn apply_changes(
                         .collect(),
                     max_row: grid.max_row,
                     max_col: grid.max_col,
+                    row_styles: grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+                    column_styles: grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
                 };
                 inverse_transaction.add_change(CellChange::RestoreSnapshot(current_snapshot));
 
@@ -426,6 +428,9 @@ fn apply_changes(
                 grid.cells = snapshot.cells.clone();
                 grid.max_row = snapshot.max_row;
                 grid.max_col = snapshot.max_col;
+                grid.row_styles = snapshot.row_styles.iter().map(|(k, v)| (*k, *v)).collect();
+                grid.column_styles =
+                    snapshot.column_styles.iter().map(|(k, v)| (*k, *v)).collect();
                 *row_heights = snapshot.row_heights.clone();
                 *column_widths = snapshot.column_widths.clone();
                 merged_regions.clear();
@@ -438,6 +443,8 @@ fn apply_changes(
                     grids[active_sheet].cells = grid.cells.clone();
                     grids[active_sheet].max_row = grid.max_row;
                     grids[active_sheet].max_col = grid.max_col;
+                    grids[active_sheet].row_styles = grid.row_styles.clone();
+                    grids[active_sheet].column_styles = grid.column_styles.clone();
                 }
 
                 structural_restore = true;

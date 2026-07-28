@@ -28,6 +28,11 @@ pub struct GridSnapshot {
     pub merged_regions: HashSet<UndoMergeRegion>,
     pub max_row: u32,
     pub max_col: u32,
+    /// Row/column default-style tiers. Captured here for the same reason
+    /// `merged_regions` is: a structural edit shifts them, and undo restores
+    /// the snapshot wholesale rather than each store recording its own inverse.
+    pub row_styles: HashMap<u32, usize>,
+    pub column_styles: HashMap<u32, usize>,
 }
 
 /// Represents a single atomic change that can be undone.
