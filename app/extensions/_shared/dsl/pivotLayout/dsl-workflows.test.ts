@@ -8,7 +8,9 @@ import { parse } from "./parser";
 import { compile, type CompileContext } from "./compiler";
 import { serialize } from "./serializer";
 import { processDsl } from "./index";
-import { PIVOT_TEMPLATES } from "../../../Pivot/lib/namedConfigs";
+// NOTE: no import from any extension. _shared must not depend on a specific
+// extension — the assertions about Pivot's PIVOT_TEMPLATES live in
+// extensions/Pivot/lib/pivotTemplates.test.ts. What stays here is DSL-only.
 import type { SourceField, ZoneField } from "../../components/types";
 import type { LayoutConfig, BiPivotModelInfo } from "../../components/types";
 
@@ -277,31 +279,6 @@ describe("Iterative refinement workflow", () => {
 // ============================================================================
 
 describe("Template application workflow", () => {
-  it("PIVOT_TEMPLATES array has expected templates", () => {
-    expect(PIVOT_TEMPLATES.length).toBeGreaterThanOrEqual(4);
-    const names = PIVOT_TEMPLATES.map((t) => t.name);
-    expect(names).toContain("Basic Summary");
-    expect(names).toContain("Cross-Tab");
-    expect(names).toContain("Year-over-Year");
-    expect(names).toContain("Detailed Report");
-  });
-
-  it("Basic Summary template lexes and parses without errors", () => {
-    const template = PIVOT_TEMPLATES.find((t) => t.name === "Basic Summary")!;
-    const { tokens, errors: lexErrors } = lex(template.dslText);
-    expect(lexErrors).toHaveLength(0);
-    const { errors: parseErrors } = parse(tokens);
-    expect(parseErrors).toHaveLength(0);
-  });
-
-  it("Cross-Tab template lexes and parses without errors", () => {
-    const template = PIVOT_TEMPLATES.find((t) => t.name === "Cross-Tab")!;
-    const { tokens, errors: lexErrors } = lex(template.dslText);
-    expect(lexErrors).toHaveLength(0);
-    const { errors: parseErrors } = parse(tokens);
-    expect(parseErrors).toHaveLength(0);
-  });
-
   it("customizes Basic Summary template with finance fields", () => {
     // Replace placeholder comments with actual fields
     const customized = `ROWS:    Department, CostCenter
@@ -369,13 +346,6 @@ LAYOUT:  outline, auto-fit`;
     expect(result2.values).toHaveLength(2);
     expect(result2.layout.reportLayout).toBe("outline");
     expect(result2.layout.autoFitColumnWidths).toBe(true);
-  });
-
-  it("all templates produce valid token streams", () => {
-    for (const template of PIVOT_TEMPLATES) {
-      const { errors } = lex(template.dslText);
-      expect(errors).toHaveLength(0);
-    }
   });
 
   it("template with values-on-rows layout compiles correctly", () => {

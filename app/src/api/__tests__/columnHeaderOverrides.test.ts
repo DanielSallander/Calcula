@@ -1,15 +1,38 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
-  setColumnHeaderOverrideProvider,
+  setColumnHeaderOverrideProvider as registerProvider,
   getColumnHeaderOverride,
-  registerColumnHeaderClickInterceptor,
+  registerColumnHeaderClickInterceptor as registerInterceptor,
   checkColumnHeaderClickInterceptor,
 } from "../columnHeaderOverrides";
 
 describe("columnHeaderOverrides", () => {
-  // Clean up between tests
+  // These registries are MULTI-provider and module-level: registering appends,
+  // and the only way to remove a registration is the cleanup function it
+  // returns. `setColumnHeaderOverrideProvider(null)` is documented as a no-op
+  // that returns a no-op cleanup — it does NOT clear the registry — so the old
+  // beforeEach cleared nothing and providers leaked from test to test. A later
+  // test then read the FIRST registered provider's answer instead of its own.
+  const cleanups: Array<() => void> = [];
+
+  function setColumnHeaderOverrideProvider(
+    ...args: Parameters<typeof registerProvider>
+  ): () => void {
+    const cleanup = registerProvider(...args);
+    cleanups.push(cleanup);
+    return cleanup;
+  }
+
+  function registerColumnHeaderClickInterceptor(
+    ...args: Parameters<typeof registerInterceptor>
+  ): () => void {
+    const cleanup = registerInterceptor(...args);
+    cleanups.push(cleanup);
+    return cleanup;
+  }
+
   beforeEach(() => {
-    setColumnHeaderOverrideProvider(null);
+    while (cleanups.length) cleanups.pop()!();
   });
 
   describe("setColumnHeaderOverrideProvider / getColumnHeaderOverride", () => {
@@ -50,9 +73,28 @@ describe("columnHeaderOverrides", () => {
       expect(getColumnHeaderOverride(0, 0)).toEqual({ text: "Second" });
     });
 
-    it("last provider wins", () => {
+    // Was "last provider wins", asserting the pre-multi-provider single-slot
+    // semantics where a second call REPLACED the first. The registry has since
+    // become multi-provider: providers are sorted by priority (ascending) and
+    // the FIRST non-null answer wins, so at equal priority the earliest
+    // registration takes precedence. The only production caller (Table) invokes
+    // its previous cleanup before re-registering, so it never has two live.
+    it("first non-null provider wins at equal priority", () => {
       setColumnHeaderOverrideProvider(() => ({ text: "First" }));
       setColumnHeaderOverrideProvider(() => ({ text: "Second" }));
+      expect(getColumnHeaderOverride(0, 0)).toEqual({ text: "First" });
+    });
+
+    it("falls through to the next provider when one returns null", () => {
+      setColumnHeaderOverrideProvider(() => null);
+      setColumnHeaderOverrideProvider(() => ({ text: "Second" }));
+      expect(getColumnHeaderOverride(0, 0)).toEqual({ text: "Second" });
+    });
+
+    it("unregistering a provider lets the next one answer", () => {
+      const cleanup = setColumnHeaderOverrideProvider(() => ({ text: "First" }));
+      setColumnHeaderOverrideProvider(() => ({ text: "Second" }));
+      cleanup();
       expect(getColumnHeaderOverride(0, 0)).toEqual({ text: "Second" });
     });
 
@@ -69,11 +111,9 @@ describe("columnHeaderOverrides", () => {
   });
 
   describe("registerColumnHeaderClickInterceptor / checkColumnHeaderClickInterceptor", () => {
-    beforeEach(() => {
-      // Clear interceptor by registering null-equivalent
-      const cleanup = registerColumnHeaderClickInterceptor(() => null);
-      cleanup();
-    });
+    // No local cleanup needed: the outer beforeEach unregisters everything this
+    // file registered. (The previous version registered an interceptor and
+    // immediately removed it, which cleared nothing that was already there.)
 
     it("returns null when no interceptor is registered", () => {
       expect(checkColumnHeaderClickInterceptor(0, 50, 10, 0, 100, 24)).toBeNull();

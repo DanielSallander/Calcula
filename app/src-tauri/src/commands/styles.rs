@@ -34,7 +34,22 @@ pub fn set_cell_style(
     row: u32,
     col: u32,
     style_index: usize,
-) -> Option<CellData> {
+) -> Result<Option<CellData>, String> {
+    // Sheet protection, before any lock below.
+    //
+    // Returns Result (it used to return a bare Option) so a refusal can reach
+    // the user. This command takes an ARBITRARY style index and is reachable
+    // from Format Painter and Paste-Formats, so once `CellStyle.locked` is
+    // authoritative it becomes the sharpest unlock vector there is: painting
+    // format from an unlocked cell onto a locked one would otherwise silently
+    // unlock it on a protected sheet.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_range(
+            &state, active_sheet, row, col, row, col,
+        )?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -54,7 +69,7 @@ pub fn set_cell_style(
         (1, 1)
     };
 
-    if let Some(cell) = grid.get_cell(row, col) {
+    Ok(if let Some(cell) = grid.get_cell(row, col) {
         let mut updated_cell = cell.clone();
         updated_cell.style_index = style_index;
         grid.set_cell(row, col, updated_cell.clone());
@@ -124,7 +139,7 @@ pub fn set_cell_style(
             rich_text: None,
             accounting_layout: None,
         })
-    }
+    })
 }
 
 /// Apply formatting to a range of cells.
@@ -134,6 +149,27 @@ pub fn apply_formatting(
     file_state: State<FileState>,
     params: FormattingParams,
 ) -> Result<FormattingResult, String> {
+    // Sheet protection, BEFORE any lock below (the gate takes the protection
+    // stores; taking it after `grid`/`style_registry` would fix a lock order
+    // that other gate call sites do not share).
+    //
+    // Formatting a locked cell on a protected sheet is an edit like any other —
+    // Excel refuses it, and `clear_range_with_options` already refuses format
+    // clears here. This gate also becomes load-bearing once `CellStyle.locked`
+    // is the source of truth: without it, `applyFormatting({locked: false})`
+    // would be an ungated way to unlock a protected sheet and then write freely.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_cells(
+            &state,
+            active_sheet,
+            params
+                .rows
+                .iter()
+                .flat_map(|r| params.cols.iter().map(move |c| (*r, *c))),
+        )?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -417,6 +453,20 @@ pub fn apply_formatting_to_sheets(
     sheet_indices: Vec<usize>,
     params: FormattingParams,
 ) -> Result<(), String> {
+    // Sheet protection on EVERY targeted sheet, before any lock below. Refuses
+    // the whole group format if any one sheet protects those cells, matching
+    // the group-edit policy in update_cell_on_sheets.
+    for &sheet_idx in &sheet_indices {
+        crate::protection::check_sheet_protection_cells(
+            &state,
+            sheet_idx,
+            params
+                .rows
+                .iter()
+                .flat_map(|r| params.cols.iter().map(move |c| (*r, *c))),
+        )?;
+    }
+
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();

@@ -15,7 +15,9 @@ describe('AppEvents', () => {
   });
 
   it('event count stays stable', () => {
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`57`);
+    // 59 since TABLE_CREATED / TABLE_DEFINITIONS_UPDATED were promoted to @api
+    // so the Table extension could stop re-declaring them locally.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`59`);
   });
 
   it('all values use the app: prefix', () => {

@@ -81,6 +81,19 @@ pub fn apply_named_style(
     rows: Vec<u32>,
     cols: Vec<u32>,
 ) -> Result<FormattingResult, String> {
+    // Sheet protection. Applying a named style rewrites the target cells'
+    // style_index wholesale, so once `CellStyle.locked` is authoritative this is
+    // an unlock vector too — the built-in "Normal" style carries locked:true,
+    // and any user-defined style could carry locked:false.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_cells(
+            &state,
+            active_sheet,
+            rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
+        )?;
+    }
+
     // Look up the named style
     let style_index = {
         let named = state.named_styles.lock().unwrap();

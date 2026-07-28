@@ -543,12 +543,21 @@ export async function getAllStyles(): Promise<StyleData[]> {
   return invoke<StyleData[]>("get_all_styles");
 }
 
+/**
+ * Point a cell at an existing style index.
+ *
+ * REJECTS when the cell is locked on a protected sheet. This command takes an
+ * arbitrary style index, so it is the sharpest way to change a cell's
+ * protection attributes wholesale (Format Painter and Paste-Formats both go
+ * through it) — callers must handle the rejection rather than assume success.
+ * Resolves to `null` when the target cell does not exist.
+ */
 export async function setCellStyle(
   row: number,
   col: number,
   styleIndex: number
-): Promise<CellData> {
-  return invoke<CellData>("set_cell_style", { row, col, styleIndex });
+): Promise<CellData | null> {
+  return invoke<CellData | null>("set_cell_style", { row, col, styleIndex });
 }
 
 /**
