@@ -130,9 +130,18 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
             zip.write_all(styles_json.as_bytes())?;
         }
 
-        // layout.json — column widths, row heights
-        let layout = SheetLayout::from_dimensions(&sheet.column_widths, &sheet.row_heights);
-        if !layout.column_widths.is_empty() || !layout.row_heights.is_empty() {
+        // layout.json — column widths, row heights, row/column style tiers
+        let layout = SheetLayout::from_dimensions_and_styles(
+            &sheet.column_widths,
+            &sheet.row_heights,
+            &sheet.row_styles,
+            &sheet.column_styles,
+        );
+        if !layout.column_widths.is_empty()
+            || !layout.row_heights.is_empty()
+            || !layout.row_styles.is_empty()
+            || !layout.column_styles.is_empty()
+        {
             let layout_json = serde_json::to_string_pretty(&layout)?;
             zip.start_file(format!("{}/layout.json", base_path), options.clone())?;
             zip.write_all(layout_json.as_bytes())?;
@@ -440,8 +449,11 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         .unwrap_or(SheetLayout {
             column_widths: std::collections::BTreeMap::new(),
             row_heights: std::collections::BTreeMap::new(),
+            row_styles: std::collections::BTreeMap::new(),
+            column_styles: std::collections::BTreeMap::new(),
         });
         let (col_widths, row_heights) = layout.to_dimensions();
+        let (sheet_row_styles, sheet_column_styles) = layout.to_style_tiers();
 
         // Use stored sheet_id or mint a fresh one for old .cala files
         let sheet_id = sheet_entry.sheet_id.unwrap_or_else(|| {
@@ -452,6 +464,8 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             id: sheet_id,
             name: sheet_entry.name.clone(),
             cells,
+            row_styles: sheet_row_styles,
+            column_styles: sheet_column_styles,
             column_widths: col_widths,
             row_heights: row_heights,
             styles: style_list.clone(),
@@ -997,6 +1011,8 @@ mod tests {
             id: SheetId::from_bytes(identity::generate_uuid_v7()),
             name: "Sales Data".to_string(),
             cells,
+            row_styles: std::collections::HashMap::new(),
+            column_styles: std::collections::HashMap::new(),
             column_widths: col_widths,
             row_heights: row_heights,
             styles,

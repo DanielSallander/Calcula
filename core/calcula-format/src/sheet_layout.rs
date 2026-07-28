@@ -15,6 +15,20 @@ pub struct SheetLayout {
     /// Row heights keyed by row index (only non-default heights).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub row_heights: BTreeMap<u32, f64>,
+
+    /// Default STYLE index per row — Excel's `<row s="..">` tier.
+    ///
+    /// Lives in layout.json rather than styles.json because it is per-sheet
+    /// positional data (like widths and heights), not a style definition: the
+    /// style itself is already interned in the registry, and this only records
+    /// which index a row defaults to. Keeping it here also means a whole-row
+    /// format costs one entry instead of a materialized cell per column.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub row_styles: BTreeMap<u32, usize>,
+
+    /// Default STYLE index per column — Excel's `<col s="..">` tier.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_styles: BTreeMap<u32, usize>,
 }
 
 impl SheetLayout {
@@ -26,6 +40,23 @@ impl SheetLayout {
         SheetLayout {
             column_widths: column_widths.iter().map(|(&k, &v)| (k, v)).collect(),
             row_heights: row_heights.iter().map(|(&k, &v)| (k, v)).collect(),
+            row_styles: BTreeMap::new(),
+            column_styles: BTreeMap::new(),
+        }
+    }
+
+    /// Create from dimensions plus the row/column style tiers.
+    pub fn from_dimensions_and_styles(
+        column_widths: &HashMap<u32, f64>,
+        row_heights: &HashMap<u32, f64>,
+        row_styles: &HashMap<u32, usize>,
+        column_styles: &HashMap<u32, usize>,
+    ) -> Self {
+        SheetLayout {
+            column_widths: column_widths.iter().map(|(&k, &v)| (k, v)).collect(),
+            row_heights: row_heights.iter().map(|(&k, &v)| (k, v)).collect(),
+            row_styles: row_styles.iter().map(|(&k, &v)| (k, v)).collect(),
+            column_styles: column_styles.iter().map(|(&k, &v)| (k, v)).collect(),
         }
     }
 
@@ -34,6 +65,14 @@ impl SheetLayout {
         let col_widths = self.column_widths.iter().map(|(&k, &v)| (k, v)).collect();
         let row_heights = self.row_heights.iter().map(|(&k, &v)| (k, v)).collect();
         (col_widths, row_heights)
+    }
+
+    /// The row/column style tiers as HashMaps, for rebuilding a `Grid`.
+    pub fn to_style_tiers(&self) -> (HashMap<u32, usize>, HashMap<u32, usize>) {
+        (
+            self.row_styles.iter().map(|(&k, &v)| (k, v)).collect(),
+            self.column_styles.iter().map(|(&k, &v)| (k, v)).collect(),
+        )
     }
 }
 

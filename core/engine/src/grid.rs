@@ -26,6 +26,19 @@ pub struct Grid {
     
     /// Tracks the highest column index currently in use.
     pub max_col: u32,
+
+    /// Default style for an entire ROW, by row index.
+    ///
+    /// Excel's `<row s="..">` tier. Without this, styling a whole row or column
+    /// means materializing a `Cell` at every position — 1,048,576 of them for a
+    /// column — which inflates `max_row`/`max_col`, the used range, the saved
+    /// file and every full-grid scan. With it, a whole-column format is ONE
+    /// entry.
+    pub row_styles: FxHashMap<u32, usize>,
+
+    /// Default style for an entire COLUMN, by column index. Excel's
+    /// `<col s="..">` tier. Consulted after [`Grid::row_styles`].
+    pub column_styles: FxHashMap<u32, usize>,
 }
 
 impl Grid {
@@ -35,6 +48,61 @@ impl Grid {
             cells: CellMap::default(),
             max_row: 0,
             max_col: 0,
+            row_styles: FxHashMap::default(),
+            column_styles: FxHashMap::default(),
+        }
+    }
+
+    /// The style index that actually applies at (row, col).
+    ///
+    /// Resolution order, matching Excel: **cell > row > column > default**.
+    ///
+    /// `style_index == 0` on a cell means INHERIT, not "explicitly default".
+    /// Index 0 is the default style, and a cell that has never been formatted
+    /// carries 0, so treating it as an explicit choice would make every
+    /// pre-existing cell opaque to a row or column style applied later — the
+    /// tier would only ever affect empty positions, which defeats it.
+    ///
+    /// Consequence to be aware of: Clear Formats (which sets `style_index = 0`)
+    /// now returns a cell to its row/column default rather than to the workbook
+    /// default. That is what Excel does.
+    ///
+    /// With no row or column styles registered this returns exactly
+    /// `cell.style_index`, so the tier is inert until something writes to it.
+    pub fn effective_style_index(&self, row: u32, col: u32) -> usize {
+        if let Some(cell) = self.cells.get(&(row, col)) {
+            if cell.style_index != 0 {
+                return cell.style_index;
+            }
+        }
+        if let Some(&idx) = self.row_styles.get(&row) {
+            if idx != 0 {
+                return idx;
+            }
+        }
+        if let Some(&idx) = self.column_styles.get(&col) {
+            if idx != 0 {
+                return idx;
+            }
+        }
+        0
+    }
+
+    /// Set (or clear, with index 0) the default style for a whole row.
+    pub fn set_row_style(&mut self, row: u32, style_index: usize) {
+        if style_index == 0 {
+            self.row_styles.remove(&row);
+        } else {
+            self.row_styles.insert(row, style_index);
+        }
+    }
+
+    /// Set (or clear, with index 0) the default style for a whole column.
+    pub fn set_column_style(&mut self, col: u32, style_index: usize) {
+        if style_index == 0 {
+            self.column_styles.remove(&col);
+        } else {
+            self.column_styles.insert(col, style_index);
         }
     }
 
@@ -304,5 +372,75 @@ mod tests {
 
         let results = grid.find_all("123", false, false, false);
         assert_eq!(results.len(), 2); // 123 and 1234
+    }
+
+    // ------------------------------------------------------------------
+    // Row / column style tiers
+    // ------------------------------------------------------------------
+
+    fn styled(style_index: usize) -> Cell {
+        let mut c = Cell::new();
+        c.style_index = style_index;
+        c
+    }
+
+    #[test]
+    fn with_no_tiers_the_resolver_is_todays_behaviour() {
+        // The whole tier is inert until something writes to it, which is what
+        // makes it safe to introduce ahead of the readers.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, styled(7));
+        assert_eq!(grid.effective_style_index(0, 0), 7);
+        assert_eq!(grid.effective_style_index(5, 5), 0, "absent cell");
+    }
+
+    #[test]
+    fn a_column_style_reaches_cells_that_already_exist() {
+        // The point of "0 means inherit": a cell that was typed into before the
+        // column was styled carries style_index 0, and must still pick the
+        // column up. Treating 0 as an explicit choice would make the tier apply
+        // only to empty positions.
+        let mut grid = Grid::new();
+        grid.set_cell(3, 2, Cell::new()); // typed, never formatted -> index 0
+        grid.set_column_style(2, 9);
+        assert_eq!(grid.effective_style_index(3, 2), 9);
+        assert_eq!(grid.effective_style_index(3, 1), 0, "other column unaffected");
+    }
+
+    #[test]
+    fn resolution_order_is_cell_then_row_then_column() {
+        let mut grid = Grid::new();
+        grid.set_column_style(0, 3);
+        assert_eq!(grid.effective_style_index(0, 0), 3, "column applies");
+
+        grid.set_row_style(0, 5);
+        assert_eq!(grid.effective_style_index(0, 0), 5, "row beats column");
+
+        grid.set_cell(0, 0, styled(8));
+        assert_eq!(grid.effective_style_index(0, 0), 8, "cell beats row");
+    }
+
+    #[test]
+    fn a_column_style_costs_one_entry_not_a_million_cells() {
+        // The reason this tier exists: styling a whole column must not
+        // materialize a Cell per row, which would inflate max_row and the used
+        // range and be persisted in full.
+        let mut grid = Grid::new();
+        grid.set_column_style(4, 2);
+        assert_eq!(grid.column_styles.len(), 1);
+        assert!(grid.cells.is_empty(), "no cells materialized");
+        assert_eq!(grid.max_row, 0, "used range untouched");
+        // ...and it still resolves anywhere down the column.
+        assert_eq!(grid.effective_style_index(1_048_575, 4), 2);
+    }
+
+    #[test]
+    fn setting_a_tier_to_index_zero_clears_it() {
+        let mut grid = Grid::new();
+        grid.set_row_style(1, 6);
+        assert_eq!(grid.effective_style_index(1, 0), 6);
+        grid.set_row_style(1, 0);
+        assert!(grid.row_styles.is_empty(), "cleared, not stored as 0");
+        assert_eq!(grid.effective_style_index(1, 0), 0);
     }
 }

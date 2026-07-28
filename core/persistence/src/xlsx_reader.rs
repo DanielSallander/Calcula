@@ -276,6 +276,12 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             hyperlinks,
             page_setup,
             show_gridlines,
+            // xlsx <row s=".."> / <col s=".."> are not read yet — see
+            // xlsx_style_reader, which parses no protection or default-style
+            // attributes. Empty means every cell resolves through its own
+            // style, i.e. exactly the pre-tier behaviour.
+            row_styles: HashMap::new(),
+            column_styles: HashMap::new(),
         });
     }
 

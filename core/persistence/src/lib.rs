@@ -596,6 +596,11 @@ pub struct Sheet {
     pub page_setup: Option<SavedPageSetup>,
     /// Whether gridlines should be shown (default true)
     pub show_gridlines: bool,
+    /// Default style index per ROW (Excel's `<row s="..">` tier). Lets a whole
+    /// row carry a style without materializing a cell at every column.
+    pub row_styles: HashMap<u32, usize>,
+    /// Default style index per COLUMN (Excel's `<col s="..">` tier).
+    pub column_styles: HashMap<u32, usize>,
 }
 
 impl Sheet {
@@ -618,6 +623,8 @@ impl Sheet {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
+            row_styles: HashMap::new(),
+            column_styles: HashMap::new(),
         }
     }
 
@@ -652,6 +659,8 @@ impl Sheet {
             hyperlinks: Vec::new(),
             page_setup: None,
             show_gridlines: true,
+            row_styles: grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+            column_styles: grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
         }
     }
 
@@ -668,6 +677,16 @@ impl Sheet {
         for ((row, col), saved_cell) in &self.cells {
             let cell = saved_cell.to_cell();
             grid.set_cell(*row, *col, cell);
+        }
+
+        // Rebuild the row/column style tiers. Deliberately NOT via set_cell, so
+        // they do not touch max_row/max_col — a styled column must not make the
+        // sheet report a million used rows.
+        for (row, idx) in &self.row_styles {
+            grid.set_row_style(*row, *idx);
+        }
+        for (col, idx) in &self.column_styles {
+            grid.set_column_style(*col, *idx);
         }
 
         (grid, style_registry)

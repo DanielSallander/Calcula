@@ -348,6 +348,12 @@ pub fn pull(
             hyperlinks: metadata.hyperlinks,
             page_setup: metadata.page_setup,
             show_gridlines: metadata.show_gridlines,
+            // Row/column style tiers are not carried in a .calp package yet —
+            // the published layout.json is written by the publish path, which
+            // does not emit them. Empty means every cell resolves through its
+            // own style, i.e. the pre-tier behaviour.
+            row_styles: std::collections::HashMap::new(),
+            column_styles: std::collections::HashMap::new(),
         };
 
         pulled_sheets.push(PulledSheet {
