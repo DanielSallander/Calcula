@@ -1333,6 +1333,24 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Named ranges hold their definition as a formula STRING, so they are
+    // coordinate holders too. Sheet name is read here (not held) so the shift
+    // can tell a local reference from one pointing at another sheet.
+    {
+        let sheet_name = state
+            .sheet_names
+            .lock()
+            .ok()
+            .and_then(|n| n.get(active_sheet).cloned())
+            .unwrap_or_default();
+        shift_named_ranges(
+            &state,
+            &mut undo_stack,
+            active_sheet,
+            &sheet_name,
+            calp::writeback::StructuralEdit::RowInsert { at: row, count },
+        );
+    }
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1587,6 +1605,24 @@ pub fn insert_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
+    // Named ranges hold their definition as a formula STRING, so they are
+    // coordinate holders too. Sheet name is read here (not held) so the shift
+    // can tell a local reference from one pointing at another sheet.
+    {
+        let sheet_name = state
+            .sheet_names
+            .lock()
+            .ok()
+            .and_then(|n| n.get(active_sheet).cloned())
+            .unwrap_or_default();
+        shift_named_ranges(
+            &state,
+            &mut undo_stack,
+            active_sheet,
+            &sheet_name,
+            calp::writeback::StructuralEdit::ColInsert { at: col, count },
+        );
+    }
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1756,9 +1792,14 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
         let row_abs = &caps[3];
         let row_num: u32 = caps[4].parse().unwrap_or(0);
         
-        // Only shift if row is NOT absolute (no $) and row is at or after from_row
+        // A STRUCTURAL edit shifts absolute references too. `$` protects a
+        // reference from being adjusted when the formula is COPIED — it does not
+        // pin it to a physical row. Insert a row above row 5 and Excel rewrites
+        // =$A$5 to =$A$6; leaving it at $A$5 would silently re-point the formula
+        // at different data. (Contrast shift_formula_row_references_for_fill,
+        // which is the copy/fill path and MUST respect `$`.)
         // from_row is 0-indexed, row_num is 1-indexed
-        let new_row = if row_abs.is_empty() && row_num > from_row {
+        let new_row = if row_num > from_row {
             ((row_num as i32) + delta).max(1) as u32
         } else {
             row_num
@@ -1774,13 +1815,15 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
         let end_abs = &caps[3];
         let end_row: u32 = caps[4].parse().unwrap_or(0);
         
-        let new_start = if start_abs.is_empty() && start_row > from_row {
+        // Absolute markers are preserved in the output but do not prevent the
+        // shift — see the note above.
+        let new_start = if start_row > from_row {
             ((start_row as i32) + delta).max(1) as u32
         } else {
             start_row
         };
         
-        let new_end = if end_abs.is_empty() && end_row > from_row {
+        let new_end = if end_row > from_row {
             ((end_row as i32) + delta).max(1) as u32
         } else {
             end_row
@@ -1822,8 +1865,9 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
         
         let col_index = col_to_index(col_letters);
         
-        // Only shift if column is NOT absolute (no $) and col is at or after from_col
-        let new_col_index = if col_abs.is_empty() && col_index >= from_col {
+        // Structural edits shift absolute references too; `$` is a copy/fill
+        // marker, not a pin to a physical column. See the row equivalent above.
+        let new_col_index = if col_index >= from_col {
             ((col_index as i32) + delta).max(0) as u32
         } else {
             col_index
@@ -1844,13 +1888,13 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
         let start_index = col_to_index(start_col);
         let end_index = col_to_index(end_col);
         
-        let new_start_index = if start_abs.is_empty() && start_index >= from_col {
+        let new_start_index = if start_index >= from_col {
             ((start_index as i32) + delta).max(0) as u32
         } else {
             start_index
         };
         
-        let new_end_index = if end_abs.is_empty() && end_index >= from_col {
+        let new_end_index = if end_index >= from_col {
             ((end_index as i32) + delta).max(0) as u32
         } else {
             end_index
@@ -2307,6 +2351,24 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Named ranges hold their definition as a formula STRING, so they are
+    // coordinate holders too. Sheet name is read here (not held) so the shift
+    // can tell a local reference from one pointing at another sheet.
+    {
+        let sheet_name = state
+            .sheet_names
+            .lock()
+            .ok()
+            .and_then(|n| n.get(active_sheet).cloned())
+            .unwrap_or_default();
+        shift_named_ranges(
+            &state,
+            &mut undo_stack,
+            active_sheet,
+            &sheet_name,
+            calp::writeback::StructuralEdit::RowDelete { at: row, count },
+        );
+    }
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2614,6 +2676,24 @@ pub fn delete_columns(
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
+    // Named ranges hold their definition as a formula STRING, so they are
+    // coordinate holders too. Sheet name is read here (not held) so the shift
+    // can tell a local reference from one pointing at another sheet.
+    {
+        let sheet_name = state
+            .sheet_names
+            .lock()
+            .ok()
+            .and_then(|n| n.get(active_sheet).cloned())
+            .unwrap_or_default();
+        shift_named_ranges(
+            &state,
+            &mut undo_stack,
+            active_sheet,
+            &sheet_name,
+            calp::writeback::StructuralEdit::ColDelete { at: col, count },
+        );
+    }
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -3203,5 +3283,147 @@ fn shift_misc_coordinate_stores(
             ),
             "Shift positional stores",
         );
+    }
+}
+
+/// Shift named-range definitions through a structural edit.
+///
+/// `NamedRange.refers_to` holds a formula string ("=Sheet1!$A$1:$B$10"), so a
+/// name is just another coordinate holder — and an unshifted one silently
+/// re-points every formula that uses it at different data, with nothing visibly
+/// wrong. Names almost always use ABSOLUTE references, which is why this only
+/// became correct once the structural shift stopped treating `$` as a pin.
+///
+/// SHEET SCOPING is the subtlety. A name may refer to a sheet other than the one
+/// being edited ("=Sheet2!$A$1"), and inserting a row on Sheet1 must not touch
+/// it. The reference is only shifted when its sheet qualifier names the edited
+/// sheet, or when there is no qualifier at all AND the name is scoped to that
+/// sheet — an unqualified workbook-scoped name is ambiguous, so it is left
+/// alone rather than guessed at.
+///
+/// Records one `obj_named_ranges` undo entry when anything moved.
+fn shift_named_ranges(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    sheet_name: &str,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::StructuralEdit as SE;
+
+    let mut store = match state.named_ranges.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if store.is_empty() {
+        return;
+    }
+    let previous: Vec<(String, crate::named_ranges::NamedRange)> =
+        store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    let mut changed = false;
+    for nr in store.values_mut() {
+        // Which sheet does this definition point at? Take the qualifier from the
+        // reference itself when present; fall back to the name's own scope.
+        let qualifier = nr
+            .refers_to
+            .trim_start_matches('=')
+            .split('!')
+            .next()
+            .filter(|q| nr.refers_to.contains('!'))
+            .map(|q| q.trim_matches('\'').to_string());
+
+        let targets_this_sheet = match qualifier {
+            Some(q) => q.eq_ignore_ascii_case(sheet_name),
+            // Unqualified: only a sheet-scoped name is unambiguously local.
+            None => nr.sheet_index == Some(sheet_index),
+        };
+        if !targets_this_sheet {
+            continue;
+        }
+
+        let shifted = match edit {
+            SE::RowInsert { at, count } => {
+                shift_formula_row_references(&nr.refers_to, at, count as i32)
+            }
+            SE::RowDelete { at, count } => {
+                shift_formula_row_references(&nr.refers_to, at, -(count as i32))
+            }
+            SE::ColInsert { at, count } => {
+                shift_formula_col_references(&nr.refers_to, at, count as i32)
+            }
+            SE::ColDelete { at, count } => {
+                shift_formula_col_references(&nr.refers_to, at, -(count as i32))
+            }
+        };
+        if shifted != nr.refers_to {
+            nr.refers_to = shifted;
+            changed = true;
+        }
+    }
+    drop(store);
+
+    if changed {
+        undo_stack.record_custom_restore(
+            "obj_named_ranges".to_string(),
+            crate::undo_commands::named_ranges_snapshot_bytes(previous),
+            "Shift named ranges",
+        );
+    }
+}
+
+#[cfg(test)]
+mod structural_formula_shift_tests {
+    use super::{shift_formula_col_references, shift_formula_row_references};
+
+    // A STRUCTURAL edit (insert/delete row or column) shifts ABSOLUTE references
+    // too. `$` marks a reference as immune to being adjusted when the formula is
+    // COPIED; it does not pin the reference to a physical row or column. Excel
+    // rewrites =$A$5 to =$A$6 when you insert a row above row 5, and leaving it
+    // alone would silently re-point the formula at different data.
+    //
+    // This is the rule named ranges depend on: their definitions are almost
+    // always fully absolute ("=Sheet1!$A$1:$B$10"), so under the old behaviour
+    // they could never shift at all.
+
+    #[test]
+    fn inserting_a_row_shifts_absolute_row_references() {
+        // Insert 1 row at index 4 (row 5 in 1-based terms).
+        assert_eq!(shift_formula_row_references("=$A$5", 4, 1), "=$A$6");
+        assert_eq!(shift_formula_row_references("=A5", 4, 1), "=A6");
+    }
+
+    #[test]
+    fn references_above_the_insertion_point_do_not_move() {
+        assert_eq!(shift_formula_row_references("=$A$3", 4, 1), "=$A$3");
+    }
+
+    #[test]
+    fn deleting_a_row_pulls_absolute_references_up() {
+        assert_eq!(shift_formula_row_references("=$A$8", 4, -1), "=$A$7");
+    }
+
+    #[test]
+    fn an_absolute_range_grows_when_a_row_is_inserted_inside_it() {
+        // =SUM($A$1:$A$10) with a row inserted at index 4 must cover $A$1:$A$11,
+        // or the sum silently stops including the new row.
+        assert_eq!(
+            shift_formula_row_references("=SUM($A$1:$A$10)", 4, 1),
+            "=SUM($A$1:$A$11)"
+        );
+    }
+
+    #[test]
+    fn inserting_a_column_shifts_absolute_column_references() {
+        // Insert 1 column at index 1 (column B).
+        assert_eq!(shift_formula_col_references("=$C$5", 1, 1), "=$D$5");
+        assert_eq!(shift_formula_col_references("=$A$5", 1, 1), "=$A$5", "left of it");
+    }
+
+    #[test]
+    fn absolute_markers_survive_the_shift() {
+        // The `$` must still be there afterwards — it still governs copy/fill.
+        let out = shift_formula_row_references("=$A$5", 4, 1);
+        assert!(out.contains("$A$"), "absolute markers preserved: {out}");
     }
 }

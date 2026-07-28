@@ -676,7 +676,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
-        "obj_coord_stores",
+        "obj_coord_stores", "obj_named_ranges",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2374,6 +2374,20 @@ fn apply_object_swap_restore(
                 previous: current,
             });
         }
+        "obj_named_ranges" => {
+            let snap: NamedRangesObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_named_ranges snapshot: {}", e); return; }
+            };
+            let mut store = state.named_ranges.lock().unwrap();
+            let current: Vec<(String, crate::named_ranges::NamedRange)> =
+                store.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            store.clear();
+            for (k, v) in snap.previous {
+                store.insert(k, v);
+            }
+            push_obj_inverse(inverse_transaction, kind, &NamedRangesObjSnapshot { previous: current });
+        }
         "obj_coord_stores" => {
             let snap: CoordStoresObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2792,6 +2806,7 @@ mod restore_registry_tests {
             ("obj_sheet_protection", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection_record", true, CustomRestoreKind::Objects),
             ("obj_coord_stores", true, CustomRestoreKind::Objects),
+            ("obj_named_ranges", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -2870,4 +2885,22 @@ pub(crate) fn coord_stores_snapshot_bytes(
         hidden_rows,
     })
     .unwrap_or_default()
+}
+
+/// Snapshot for the "obj_named_ranges" CustomRestore — the whole named-range
+/// map before a structural edit rewrote the definitions.
+///
+/// Whole-map rather than per-name: a single edit can touch many definitions,
+/// the map is small (names are authored by hand), and a partial restore could
+/// leave two names disagreeing about where the same range lives.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NamedRangesObjSnapshot {
+    previous: Vec<(String, crate::named_ranges::NamedRange)>,
+}
+
+/// Serialized "obj_named_ranges" snapshot bytes (in-open-transaction contract).
+pub(crate) fn named_ranges_snapshot_bytes(
+    previous: Vec<(String, crate::named_ranges::NamedRange)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&NamedRangesObjSnapshot { previous }).unwrap_or_default()
 }
