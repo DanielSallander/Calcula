@@ -492,6 +492,33 @@ impl StyleRegistry {
         index
     }
 
+    /// Intern a style, guaranteeing a NON-ZERO index.
+    ///
+    /// Index 0 is overloaded: it is the default style, and on a cell it also
+    /// means "inherit from the row/column tier" (see
+    /// `Grid::effective_style_index`). A cell that must carry an EXPLICIT style
+    /// therefore cannot use it — even when that style happens to equal the
+    /// default.
+    ///
+    /// The case that forces this: a column is unlocked via its tier, and the
+    /// user re-locks ONE cell in it. The style that cell needs is "locked, and
+    /// otherwise default" — which IS the default, so plain `get_or_create`
+    /// hands back 0, the cell reads as "inherit", and it stays unlocked. Here we
+    /// append a duplicate of the default instead, giving the cell something
+    /// concrete to point at. Dedup is only a size optimisation, so one extra
+    /// entry costs nothing but correctness gains.
+    pub fn get_or_create_explicit(&mut self, style: CellStyle) -> usize {
+        let index = self.get_or_create(style.clone());
+        if index != 0 {
+            return index;
+        }
+        // Deliberately NOT recorded in `style_to_index`: that map must keep
+        // pointing the default at 0 so ordinary interning still dedupes.
+        let explicit = self.styles.len();
+        self.styles.push(style);
+        explicit
+    }
+
     /// Get a style by its index.
     /// Returns the default style (index 0) if index is out of bounds.
     pub fn get(&self, index: usize) -> &CellStyle {

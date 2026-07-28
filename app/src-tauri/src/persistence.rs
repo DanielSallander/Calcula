@@ -705,32 +705,12 @@ fn collect_protection_for_save(
             }
         }
     }
-    if let Ok(store) = state.cell_protection.lock() {
-        for (idx, cells) in store.iter() {
-            if cells.is_empty() {
-                continue;
-            }
-            let mut entries: Vec<serde_json::Value> = cells
-                .iter()
-                .map(|((row, col), cp)| {
-                    serde_json::json!({
-                        "row": row,
-                        "col": col,
-                        "locked": cp.locked,
-                        "formulaHidden": cp.formula_hidden,
-                    })
-                })
-                .collect();
-            // Deterministic order (HashMap iteration is not).
-            entries.sort_by_key(|e| {
-                (
-                    e.get("row").and_then(|v| v.as_u64()).unwrap_or(0),
-                    e.get("col").and_then(|v| v.as_u64()).unwrap_or(0),
-                )
-            });
-            per_sheet.entry(*idx).or_default().1 = Some(serde_json::Value::Array(entries));
-        }
-    }
+    // NOTE: `cell_protection` is deliberately NOT written any more. Cell lock
+    // state is a CELL FORMAT attribute on `CellStyle` and already rides in the
+    // saved style registry, so writing it here too would create a second copy
+    // that could disagree with the first. The load path still READS the legacy
+    // field, once, to import pre-migration files (see the LEGACY IMPORT block);
+    // a re-save then drops it.
 
     let sheet_protections = per_sheet
         .into_iter()
@@ -2173,13 +2153,29 @@ pub fn open_file(
             }
         }
     }
-    if let Ok(mut cell_prot) = state.cell_protection.lock() {
-        cell_prot.clear();
+    // LEGACY IMPORT: cell lock state used to live in a side map
+    // (`sheet_protections[].cell_protection`); it is now a CELL FORMAT attribute
+    // on `CellStyle`. Files written before the migration still carry the side
+    // map, and simply ignoring it would silently RE-LOCK every cell the author
+    // had unlocked — no error, no warning, and the sheet would just stop being
+    // editable where it used to be. So translate each entry into a style stamp
+    // on the cell it names.
+    //
+    // One-way and idempotent: the save path no longer writes `cell_protection`,
+    // so a re-save drops the legacy field and this loop finds nothing next time.
+    {
+        // `state.grid` is the authoritative mirror for the ACTIVE sheet and was
+        // already cloned out of `all_grids` earlier in this function, so writing
+        // only `grids[idx]` would leave the active sheet un-imported.
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let mut active_grid = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let mut styles = state.style_registry.lock().unwrap();
         for entry in &workbook.sheet_protections {
             let idx = sheet_id_to_index(&workbook, entry.sheet_id);
             let Some(ref v) = entry.cell_protection else { continue };
             let Some(entries) = v.as_array() else { continue };
-            let sheet_map = cell_prot.entry(idx).or_default();
+            let Some(grid) = grids.get_mut(idx) else { continue };
             for e in entries {
                 let (Some(row), Some(col)) = (
                     e.get("row").and_then(|v| v.as_u64()),
@@ -2187,16 +2183,36 @@ pub fn open_file(
                 ) else {
                     continue;
                 };
-                sheet_map.insert(
-                    (row as u32, col as u32),
-                    crate::protection::CellProtection {
-                        locked: e.get("locked").and_then(|v| v.as_bool()).unwrap_or(true),
-                        formula_hidden: e
-                            .get("formulaHidden")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                    },
-                );
+                let (row, col) = (row as u32, col as u32);
+                let locked = e.get("locked").and_then(|v| v.as_bool()).unwrap_or(true);
+                let formula_hidden = e
+                    .get("formulaHidden")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Start from whatever style the cell already resolves to, so the
+                // import changes ONLY the protection attributes.
+                let mut style = styles.get(grid.effective_style_index(row, col)).clone();
+                if style.locked == locked && style.formula_hidden == formula_hidden {
+                    continue;
+                }
+                style.locked = locked;
+                style.formula_hidden = formula_hidden;
+                // Explicit: a per-cell stamp must not land on index 0, which a
+                // cell reads as "inherit from the row/column tier".
+                let style_index = styles.get_or_create_explicit(style);
+
+                let mut cell = grid.get_cell(row, col).cloned().unwrap_or_else(|| engine::Cell {
+                    value: engine::CellValue::Empty,
+                    ast: None,
+                    style_index: 0,
+                    rich_text: None,
+                });
+                cell.style_index = style_index;
+                grid.set_cell(row, col, cell.clone());
+                if idx == active_sheet {
+                    active_grid.set_cell(row, col, cell);
+                }
             }
         }
     }

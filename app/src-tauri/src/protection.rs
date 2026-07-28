@@ -410,19 +410,23 @@ fn verify_password(password: &str, salt: &str, hash: &str) -> bool {
 //
 // Everything else that writes cells on a user's behalf MUST call a gate.
 
-/// Resolve whether one cell is locked, honouring the "absent means locked"
-/// default that `get_cell_protection` also applies.
-fn cell_is_locked(
-    cell_protection_storage: &CellProtectionStorage,
-    sheet_index: usize,
+/// Resolve whether one cell is locked.
+///
+/// Lock state is a CELL FORMAT attribute, resolved through the row/column style
+/// tiers exactly like any other formatting — `Grid::effective_style_index`
+/// applies cell > row > column > default. That is what lets a whole column be
+/// unlocked with ONE entry instead of a materialized cell per row.
+///
+/// "Absence means locked" survives in two forms, and both land on the same
+/// answer because `engine::CellStyle::default()` has `locked: true`: a cell that is not
+/// in the grid at all, and a cell whose style_index is 0 with no tier above it.
+pub(crate) fn cell_is_locked(
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
     row: u32,
     col: u32,
 ) -> bool {
-    cell_protection_storage
-        .get(&sheet_index)
-        .and_then(|sheet| sheet.get(&(row, col)))
-        .map(|cp| cp.locked)
-        .unwrap_or(true)
+    styles.get(grid.effective_style_index(row, col)).locked
 }
 
 /// The single decision procedure for "may this cell be written?".
@@ -430,9 +434,14 @@ fn cell_is_locked(
 /// Both the `can_edit_cell` command and the backend gates below route through
 /// this, so the frontend's answer and the backend's answer cannot drift.
 /// Returns `None` when the write is allowed, or `Some(reason)` when refused.
+///
+/// Takes the grid BORROWED rather than reaching into `AppState`: several
+/// callers (find/replace, the script apply path) already hold the grid and the
+/// style registry when they gate, and `std::sync::Mutex` is not reentrant.
 pub(crate) fn refusal_reason_for_cell(
     protection_storage: &ProtectionStorage,
-    cell_protection_storage: &CellProtectionStorage,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
     sheet_index: usize,
     row: u32,
     col: u32,
@@ -441,7 +450,7 @@ pub(crate) fn refusal_reason_for_cell(
     if !protection.protected {
         return None;
     }
-    let locked = cell_is_locked(cell_protection_storage, sheet_index, row, col);
+    let locked = cell_is_locked(grid, styles, row, col);
     if protection.can_edit_cell(row, col, locked) {
         None
     } else {
@@ -470,53 +479,93 @@ fn protection_error(row: u32, col: u32) -> String {
 /// same early-out, so the two protection families read alike at call sites.
 /// Takes an explicit `sheet_index`: unlike the `can_edit_cell` command, many
 /// backend writers target a sheet other than the active one.
-pub(crate) fn check_sheet_protection_cells<'a>(
-    state: &AppState,
+/// Pure form: decide against ALREADY-BORROWED state.
+///
+/// Exists because the gate now needs the grid and the style registry, and
+/// several callers hold one or both when they gate — find/replace holds
+/// `grid` + `style_registry`, the script apply path holds `grids`. A wrapper
+/// that re-locked those would self-deadlock (`std::sync::Mutex` is not
+/// reentrant), so those callers pass their borrows straight through.
+pub(crate) fn check_sheet_protection_cells_in<'a>(
+    protection_storage: &ProtectionStorage,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
     sheet_index: usize,
     mut cells: impl Iterator<Item = (u32, u32)> + 'a,
 ) -> Result<(), String> {
-    let protection_storage = state.sheet_protection.lock().unwrap();
-    // Early-out before touching the cell store: the overwhelmingly common case
-    // is an unprotected sheet, and this runs on every batch write.
     match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => {}
         _ => return Ok(()),
     }
-    let cell_protection_storage = state.cell_protection.lock().unwrap();
-
     if let Some((row, col)) = cells.find(|(row, col)| {
-        refusal_reason_for_cell(
-            &protection_storage,
-            &cell_protection_storage,
-            sheet_index,
-            *row,
-            *col,
-        )
-        .is_some()
+        refusal_reason_for_cell(protection_storage, grid, styles, sheet_index, *row, *col).is_some()
     }) {
         return Err(protection_error(row, col));
     }
     Ok(())
 }
 
+/// Reject a write when ANY target cell is locked on a protected sheet.
+///
+/// Mirrors `check_region_cells_protection` in `commands::data` — same shape,
+/// same early-out, so the two protection families read alike at call sites.
+/// Takes an explicit `sheet_index`: unlike the `can_edit_cell` command, many
+/// backend writers target a sheet other than the active one.
+///
+/// LOCK ORDER. The dominant order across the app's commands is
+/// `grid -> grids -> style_registry -> ...`, and callers that hold the grid
+/// while gating take `sheet_protection` AFTER `style_registry`. This wrapper
+/// must not invert that, or two threads deadlock: one holding the grid waiting
+/// on protection, one holding protection waiting on the grid. So the cheap
+/// "is this sheet even protected?" probe takes `sheet_protection` in a scope
+/// that RELEASES it, and the real check then acquires in canonical order.
+pub(crate) fn check_sheet_protection_cells<'a>(
+    state: &AppState,
+    sheet_index: usize,
+    cells: impl Iterator<Item = (u32, u32)> + 'a,
+) -> Result<(), String> {
+    // Probe and release. The overwhelmingly common case is an unprotected
+    // sheet, and this runs on every batch write — not worth locking the grid.
+    let protected = {
+        let p = state.sheet_protection.lock().unwrap();
+        p.get(&sheet_index).map(|s| s.protected).unwrap_or(false)
+    };
+    if !protected {
+        return Ok(());
+    }
+
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    // `state.grid` is the authoritative mirror for the ACTIVE sheet;
+    // `grids[active_sheet]` is documented as stale.
+    if sheet_index == active_sheet {
+        let grid = state.grid.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        check_sheet_protection_cells_in(&protection_storage, &grid, &styles, sheet_index, cells)
+    } else {
+        let grids = state.grids.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        let Some(grid) = grids.get(sheet_index) else {
+            return Ok(());
+        };
+        check_sheet_protection_cells_in(&protection_storage, grid, &styles, sheet_index, cells)
+    }
+}
+
 /// Range form of [`check_sheet_protection_cells`].
 ///
 /// Deliberately does NOT enumerate the rectangle in the common case. A whole-
 /// column Delete is 1,048,576 cells and a select-all clear is far more; walking
-/// that product under two global mutexes would freeze the app on exactly the
-/// gestures users reach for. `check_region_range_protection`, which this mirrors
-/// at call sites, answers the same question by rectangle intersection and never
-/// touches individual cells.
+/// that product under three global mutexes would freeze the app on exactly the
+/// gestures users reach for.
 ///
-/// The cheap decision: on a protected sheet a cell is writable only if it is
-/// EXPLICITLY unlocked (a `cell_protection` entry with `locked == false`) or sits
-/// inside an allow-edit range — absence means locked. So if the rectangle's area
-/// exceeds an upper bound on how many of its cells could possibly be permitted,
-/// at least one locked cell must be in there and we can refuse without scanning.
-/// Only when the bound says the rectangle *might* be fully permitted do we walk
-/// it, and that can only happen when the sparse store really does hold about
-/// that many entries — i.e. the walk is proportional to real data, not to the
-/// address space.
+/// The reason it can avoid that: on a protected sheet the DEFAULT is locked
+/// (`engine::CellStyle::default().locked == true`, and index 0 is the default style).
+/// So a position is writable only if something positively grants it — an
+/// allow-edit range, an unlocked column tier, an unlocked row tier, or the
+/// cell's own unlocked style. Everything else is locked, which means finding a
+/// refusal is a matter of finding ONE position nothing grants.
 pub(crate) fn check_sheet_protection_range(
     state: &AppState,
     sheet_index: usize,
@@ -525,140 +574,106 @@ pub(crate) fn check_sheet_protection_range(
     end_row: u32,
     end_col: u32,
 ) -> Result<(), String> {
-    let protection_storage = state.sheet_protection.lock().unwrap();
+    // Probe and release, then acquire in canonical order — see the lock-order
+    // note on `check_sheet_protection_cells`.
+    let protected = {
+        let p = state.sheet_protection.lock().unwrap();
+        p.get(&sheet_index).map(|s| s.protected).unwrap_or(false)
+    };
+    if !protected {
+        return Ok(());
+    }
+
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    if sheet_index == active_sheet {
+        let grid = state.grid.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        check_sheet_protection_range_in(
+            &protection_storage, &grid, &styles, sheet_index,
+            start_row, start_col, end_row, end_col,
+        )
+    } else {
+        let grids = state.grids.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        let Some(grid) = grids.get(sheet_index) else {
+            return Ok(());
+        };
+        check_sheet_protection_range_in(
+            &protection_storage, grid, &styles, sheet_index,
+            start_row, start_col, end_row, end_col,
+        )
+    }
+}
+
+/// Pure form of [`check_sheet_protection_range`], over borrowed state.
+pub(crate) fn check_sheet_protection_range_in(
+    protection_storage: &ProtectionStorage,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    sheet_index: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
     let protection = match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => p,
         _ => return Ok(()),
     };
-    let cell_protection_storage = state.cell_protection.lock().unwrap();
 
-    let area = (end_row.saturating_sub(start_row) as u64 + 1)
-        .saturating_mul(end_col.saturating_sub(start_col) as u64 + 1);
+    let in_allow_range = |row: u32, col: u32| {
+        protection.allow_edit_ranges.iter().any(|r| r.contains(row, col))
+    };
+    let tier_unlocked = |idx: usize| idx != 0 && !styles.get(idx).locked;
 
-    let permitted = permitted_area_in_rect(
-        protection,
-        &cell_protection_storage,
-        sheet_index,
-        start_row,
-        start_col,
-        end_row,
-        end_col,
-    );
+    // FAST PATH 1 — every column in the rectangle carries an unlocked column
+    // tier. This is the case the whole tier design exists for: "unlock the input
+    // column, then protect the sheet". O(columns), so a whole-column selection
+    // costs ONE probe rather than a million.
+    let all_cols_unlocked = (start_col..=end_col)
+        .all(|c| grid.column_styles.get(&c).copied().is_some_and(tier_unlocked));
 
-    if permitted >= area {
+    // FAST PATH 2 — same for rows. Guarded by a row count, because evaluating it
+    // for a tall rectangle would itself be the walk we are avoiding.
+    let row_span = end_row.saturating_sub(start_row) as u64 + 1;
+    let all_rows_unlocked = row_span <= 4096
+        && (start_row..=end_row)
+            .all(|r| grid.row_styles.get(&r).copied().is_some_and(tier_unlocked));
+
+    if all_cols_unlocked || all_rows_unlocked {
+        // The background grants every position. Only a cell with its OWN locked
+        // style can still refuse, and those are sparse — scan the populated
+        // cells, not the rectangle.
+        if let Some((&(row, col), _)) = grid.cells.iter().find(|(&(r, c), cell)| {
+            r >= start_row && r <= end_row && c >= start_col && c <= end_col
+                && cell.style_index != 0
+                && styles.get(cell.style_index).locked
+                && !in_allow_range(r, c)
+        }) {
+            return Err(protection_error(row, col));
+        }
         return Ok(());
     }
 
-    // At least one cell is locked. Name it, scanning only far enough to find it
-    // — on a protected sheet the first locked cell is almost always immediate,
-    // and the full product is never walked in the allow case above.
+    // Otherwise SOME position has no tier granting it, so the default (locked)
+    // applies there unless an allow-edit range or the cell's own style grants
+    // it. Find the first such position. On a protected sheet this is almost
+    // always the very first cell examined, because "locked" is the default —
+    // the scan only runs long when the author has unlocked a lot of individual
+    // cells, i.e. it is bounded by real authored data rather than by the
+    // address space.
     for row in start_row..=end_row {
         for col in start_col..=end_col {
-            if refusal_reason_for_cell(
-                &protection_storage,
-                &cell_protection_storage,
-                sheet_index,
-                row,
-                col,
-            )
-            .is_some()
+            if refusal_reason_for_cell(protection_storage, grid, styles, sheet_index, row, col)
+                .is_some()
             {
                 return Err(protection_error(row, col));
             }
         }
     }
     Ok(())
-}
-
-/// EXACT count of cells in the rectangle that a protected sheet permits.
-///
-/// Permitted = inside an allow-edit range, OR carrying an explicit
-/// `locked == false` entry. Computed without enumerating the rectangle:
-/// allow-edit ranges are unioned by coordinate compression (there are only ever
-/// a handful, so this is tiny), and explicitly-unlocked cells are counted from
-/// the sparse store, skipping any already inside a range so nothing is
-/// double-counted. Exactness matters — an over-count here would allow a write
-/// that should be refused.
-fn permitted_area_in_rect(
-    protection: &SheetProtection,
-    cell_protection_storage: &CellProtectionStorage,
-    sheet_index: usize,
-    start_row: u32,
-    start_col: u32,
-    end_row: u32,
-    end_col: u32,
-) -> u64 {
-    // Allow-edit ranges clipped to the rectangle.
-    let clipped: Vec<(u32, u32, u32, u32)> = protection
-        .allow_edit_ranges
-        .iter()
-        .filter(|r| {
-            r.start_row <= end_row
-                && r.end_row >= start_row
-                && r.start_col <= end_col
-                && r.end_col >= start_col
-        })
-        .map(|r| {
-            (
-                r.start_row.max(start_row),
-                r.start_col.max(start_col),
-                r.end_row.min(end_row),
-                r.end_col.min(end_col),
-            )
-        })
-        .collect();
-
-    // Union area of the clipped ranges, via coordinate compression.
-    let mut union_area: u64 = 0;
-    if !clipped.is_empty() {
-        let mut rows: Vec<u32> = Vec::with_capacity(clipped.len() * 2);
-        let mut cols: Vec<u32> = Vec::with_capacity(clipped.len() * 2);
-        for &(r0, c0, r1, c1) in &clipped {
-            rows.push(r0);
-            rows.push(r1.saturating_add(1));
-            cols.push(c0);
-            cols.push(c1.saturating_add(1));
-        }
-        rows.sort_unstable();
-        rows.dedup();
-        cols.sort_unstable();
-        cols.dedup();
-
-        for rw in rows.windows(2) {
-            for cw in cols.windows(2) {
-                let covered = clipped.iter().any(|&(r0, c0, r1, c1)| {
-                    rw[0] >= r0 && rw[1].saturating_sub(1) <= r1
-                        && cw[0] >= c0 && cw[1].saturating_sub(1) <= c1
-                });
-                if covered {
-                    union_area = union_area.saturating_add(
-                        (rw[1] - rw[0]) as u64 * (cw[1] - cw[0]) as u64,
-                    );
-                }
-            }
-        }
-    }
-
-    // Explicitly-unlocked cells inside the rectangle but OUTSIDE every range.
-    let unlocked_outside = cell_protection_storage
-        .get(&sheet_index)
-        .map(|m| {
-            m.iter()
-                .filter(|((r, c), cp)| {
-                    !cp.locked
-                        && *r >= start_row
-                        && *r <= end_row
-                        && *c >= start_col
-                        && *c <= end_col
-                        && !clipped.iter().any(|&(r0, c0, r1, c1)| {
-                            *r >= r0 && *r <= r1 && *c >= c0 && *c <= c1
-                        })
-                })
-                .count() as u64
-        })
-        .unwrap_or(0);
-
-    union_area.saturating_add(unlocked_outside)
 }
 
 /// Reject a change to the PROTECTION SETTINGS of a sheet that is protected.
@@ -1002,15 +1017,19 @@ pub fn can_edit_cell(
     col: u32,
 ) -> ProtectionCheckResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Canonical order: grid -> style_registry -> sheet_protection. See the
+    // lock-order note on `check_sheet_protection_cells`.
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
     let protection_storage = state.sheet_protection.lock().unwrap();
-    let cell_protection_storage = state.cell_protection.lock().unwrap();
 
     // Routed through the SAME decision procedure the backend gates use, so the
     // frontend's answer and the backend's answer cannot drift. This used to be a
     // second inline copy of the rule.
     match refusal_reason_for_cell(
         &protection_storage,
-        &cell_protection_storage,
+        &grid,
+        &styles,
         active_sheet,
         row,
         col,
@@ -1072,6 +1091,23 @@ pub fn set_cell_protection(
     let min_col = params.start_col.min(params.end_col);
     let max_col = params.start_col.max(params.end_col);
 
+    // Lock state is now a CELL FORMAT attribute, so this command applies a style
+    // delta rather than writing a side map — the same thing `apply_formatting`
+    // does, and the reason Format Painter and Paste-Formats carry protection for
+    // free.
+    //
+    // WHOLE-COLUMN / WHOLE-ROW selections take the tier instead of per-cell
+    // styles. "Unlock the input column, then protect the sheet" is the canonical
+    // Excel workflow, and doing it per cell would materialize 1,048,576 cells,
+    // push max_row to the sheet limit and persist all of it.
+    // Excel's sheet limits. A selection reaching the last row/column from 0 is
+    // a whole-column / whole-row selection, which is how the grid reports
+    // clicking a column or row header.
+    const MAX_ROW_INDEX: u32 = 1_048_575;
+    const MAX_COL_INDEX: u32 = 16_383;
+    let whole_columns = min_row == 0 && max_row >= MAX_ROW_INDEX;
+    let whole_rows = min_col == 0 && max_col >= MAX_COL_INDEX;
+
     // PASS 1 — decide, without mutating.
     //
     // Touch a cell ONLY when its effective protection actually changes. Format
@@ -1079,46 +1115,69 @@ pub fn set_cell_protection(
     // Protection tab, so the common case is a call that changes nothing: a blind
     // write would push a second, invisible undo step onto every Ctrl+1 (the
     // first Ctrl+Z appearing to do nothing) and dirty a clean workbook.
-    //
-    // A missing entry is not "unset": `get_cell_protection` resolves absence to
-    // `default_locked()`, so absence and a stored `default_locked()` are the
-    // same state. Comparing against that effective value also keeps us from
-    // materializing an entry per selected cell for a no-op call.
-    let (previous, pending) = {
-        let cell_protection_storage = state.cell_protection.lock().unwrap();
-        let sheet_map = cell_protection_storage.get(&active_sheet);
-
-        // Whole-sheet snapshot for undo. Same shape the structural-shift path
-        // records, so both mutations share one restore kind.
-        let previous: Vec<((u32, u32), CellProtection)> = sheet_map
-            .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
-            .unwrap_or_default();
-
-        let mut pending: Vec<((u32, u32), CellProtection)> = Vec::new();
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
-                let effective = sheet_map
-                    .and_then(|m| m.get(&(row, col)))
-                    .copied()
-                    .unwrap_or_else(CellProtection::default_locked);
-
-                let mut next = effective;
-                if let Some(locked) = params.locked {
-                    next.locked = locked;
-                }
-                if let Some(hidden) = params.formula_hidden {
-                    next.formula_hidden = hidden;
-                }
-
-                if next != effective {
-                    pending.push(((row, col), next));
-                }
-            }
+    let apply_delta = |style: &engine::CellStyle| {
+        let mut next = style.clone();
+        if let Some(locked) = params.locked {
+            next.locked = locked;
         }
-        (previous, pending)
+        if let Some(hidden) = params.formula_hidden {
+            next.formula_hidden = hidden;
+        }
+        next
     };
 
-    if pending.is_empty() {
+    enum Plan {
+        /// (col_or_row_index, new_style)
+        Tier(Vec<(u32, engine::CellStyle)>, bool /* is_column */),
+        /// ((row, col), new_style)
+        Cells(Vec<((u32, u32), engine::CellStyle)>),
+    }
+
+    let plan = {
+        let grid = state.grid.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+
+        if whole_columns || whole_rows {
+            let is_column = whole_columns;
+            let range: Vec<u32> = if is_column {
+                (min_col..=max_col).collect()
+            } else {
+                (min_row..=max_row).collect()
+            };
+            let mut changes = Vec::new();
+            for idx in range {
+                let current_idx = if is_column {
+                    grid.column_styles.get(&idx).copied().unwrap_or(0)
+                } else {
+                    grid.row_styles.get(&idx).copied().unwrap_or(0)
+                };
+                let current = styles.get(current_idx);
+                let next = apply_delta(current);
+                if &next != current {
+                    changes.push((idx, next));
+                }
+            }
+            Plan::Tier(changes, is_column)
+        } else {
+            let mut changes = Vec::new();
+            for row in min_row..=max_row {
+                for col in min_col..=max_col {
+                    let current = styles.get(grid.effective_style_index(row, col));
+                    let next = apply_delta(current);
+                    if &next != current {
+                        changes.push(((row, col), next));
+                    }
+                }
+            }
+            Plan::Cells(changes)
+        }
+    };
+
+    let nothing_to_do = match &plan {
+        Plan::Tier(v, _) => v.is_empty(),
+        Plan::Cells(v) => v.is_empty(),
+    };
+    if nothing_to_do {
         return ProtectionResult::ok_empty();
     }
 
@@ -1132,21 +1191,60 @@ pub fn set_cell_protection(
 
     // PASS 2 — apply.
     {
-        let mut cell_protection_storage = state.cell_protection.lock().unwrap();
-        let sheet_map = cell_protection_storage
-            .entry(active_sheet)
-            .or_insert_with(HashMap::new);
-        for (key, value) in pending {
-            sheet_map.insert(key, value);
+        let mut grid = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let mut styles = state.style_registry.lock().unwrap();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        undo_stack.begin_transaction("Change cell protection".to_string());
+
+        match plan {
+            Plan::Tier(changes, is_column) => {
+                for (idx, style) in changes {
+                    let style_index = styles.get_or_create(style);
+                    // BOTH mirrors: `state.grid` is authoritative for the active
+                    // sheet, but several read paths resolve tiers against
+                    // `grids[active_sheet]`. Letting them diverge would make the
+                    // tier invisible to those readers.
+                    if is_column {
+                        grid.set_column_style(idx, style_index);
+                        if active_sheet < grids.len() {
+                            grids[active_sheet].set_column_style(idx, style_index);
+                        }
+                    } else {
+                        grid.set_row_style(idx, style_index);
+                        if active_sheet < grids.len() {
+                            grids[active_sheet].set_row_style(idx, style_index);
+                        }
+                    }
+                }
+            }
+            Plan::Cells(changes) => {
+                for ((row, col), style) in changes {
+                    // EXPLICIT: a per-cell protection change must never land on
+                    // index 0, which a cell reads as "inherit". Otherwise
+                    // re-locking one cell inside a tier-unlocked column would
+                    // resolve straight back to the unlocked tier.
+                    let style_index = styles.get_or_create_explicit(style);
+                    let previous_cell = grid.get_cell(row, col).cloned();
+                    let mut cell = previous_cell.clone().unwrap_or_else(|| engine::Cell {
+                        value: engine::CellValue::Empty,
+                        ast: None,
+                        style_index: 0,
+                        rich_text: None,
+                    });
+                    cell.style_index = style_index;
+                    grid.set_cell(row, col, cell.clone());
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(row, col, cell);
+                    }
+                    undo_stack.record_cell_change(row, col, previous_cell);
+                }
+            }
         }
+
+        undo_stack.commit_transaction();
     }
 
-    crate::undo_commands::record_cell_protection_undo(
-        &state,
-        active_sheet,
-        previous,
-        "Change cell protection",
-    );
     crate::persistence::mark_workbook_modified(&file_state);
 
     ProtectionResult::ok_empty()
@@ -1159,14 +1257,17 @@ pub fn get_cell_protection(
     row: u32,
     col: u32,
 ) -> CellProtection {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let cell_protection_storage = state.cell_protection.lock().unwrap();
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
 
-    cell_protection_storage
-        .get(&active_sheet)
-        .and_then(|sheet| sheet.get(&(row, col)))
-        .cloned()
-        .unwrap_or_else(CellProtection::default_locked)
+    // Lock state is a cell FORMAT attribute, resolved through the row/column
+    // style tiers. A cell that is absent, or whose style_index is 0 with no
+    // tier above it, resolves to the default style — which is locked.
+    let style = styles.get(grid.effective_style_index(row, col));
+    CellProtection {
+        locked: style.locked,
+        formula_hidden: style.formula_hidden,
+    }
 }
 
 /// Verify password for an allow-edit range
@@ -1487,19 +1588,31 @@ mod tests {
     // `refusal_reason_for_cell` is the ONE rule both the can_edit_cell command
     // and every backend gate consult, so these pin the semantics for both.
 
+    /// Build (protection record, grid, style registry) for the tests.
+    ///
+    /// Lock state now rides on the cell's STYLE, so "this cell is unlocked"
+    /// means "this cell points at a style whose `locked` is false" — the same
+    /// resolution the gates perform. `cells` lists the positions to unlock.
     fn stores(
         prot: Option<(usize, SheetProtection)>,
         cells: Vec<(usize, (u32, u32), CellProtection)>,
-    ) -> (ProtectionStorage, CellProtectionStorage) {
+    ) -> (ProtectionStorage, engine::Grid, engine::StyleRegistry) {
         let mut p = ProtectionStorage::new();
         if let Some((idx, sp)) = prot {
             p.insert(idx, sp);
         }
-        let mut c = CellProtectionStorage::new();
-        for (idx, key, value) in cells {
-            c.entry(idx).or_default().insert(key, value);
+        let mut grid = engine::Grid::new();
+        let mut styles = engine::StyleRegistry::new();
+        for (_sheet, (row, col), cp) in cells {
+            let mut style = engine::CellStyle::new();
+            style.locked = cp.locked;
+            style.formula_hidden = cp.formula_hidden;
+            let idx = styles.get_or_create(style);
+            let mut cell = engine::Cell::new();
+            cell.style_index = idx;
+            grid.set_cell(row, col, cell);
         }
-        (p, c)
+        (p, grid, styles)
     }
 
     fn unlocked() -> CellProtection {
@@ -1510,39 +1623,39 @@ mod tests {
 
     #[test]
     fn a_sheet_with_no_protection_record_allows_everything() {
-        let (p, c) = stores(None, vec![]);
-        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+        let (p, g, st) = stores(None, vec![]);
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 5, 5).is_none());
     }
 
     #[test]
     fn an_unprotected_record_allows_everything() {
-        let (p, c) = stores(Some((0, SheetProtection::default())), vec![]);
-        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+        let (p, g, st) = stores(Some((0, SheetProtection::default())), vec![]);
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 5, 5).is_none());
     }
 
     #[test]
     fn a_locked_cell_on_a_protected_sheet_is_refused() {
         // Absence means locked, so this cell has no entry at all.
-        let (p, c) = stores(Some((0, protected_with(vec![]))), vec![]);
-        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_some());
+        let (p, g, st) = stores(Some((0, protected_with(vec![]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 5, 5).is_some());
     }
 
     #[test]
     fn an_unlocked_cell_on_a_protected_sheet_is_allowed() {
-        let (p, c) = stores(
+        let (p, g, st) = stores(
             Some((0, protected_with(vec![]))),
             vec![(0, (5, 5), unlocked())],
         );
-        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 5).is_none());
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 5, 5).is_none());
         // Its neighbour, with no entry, is still locked.
-        assert!(refusal_reason_for_cell(&p, &c, 0, 5, 6).is_some());
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 5, 6).is_some());
     }
 
     #[test]
     fn a_locked_cell_inside_an_allow_edit_range_is_allowed() {
-        let (p, c) = stores(Some((0, protected_with(vec![range(5, 9, 0, 3)]))), vec![]);
-        assert!(refusal_reason_for_cell(&p, &c, 0, 7, 1).is_none(), "inside");
-        assert!(refusal_reason_for_cell(&p, &c, 0, 7, 9).is_some(), "outside");
+        let (p, g, st) = stores(Some((0, protected_with(vec![range(5, 9, 0, 3)]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 7, 1).is_none(), "inside");
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 7, 9).is_some(), "outside");
     }
 
     #[test]
@@ -1550,89 +1663,99 @@ mod tests {
         // The whole reason the gates take an explicit sheet_index: many backend
         // writers target a sheet other than the active one, and the old
         // can_edit_cell command could only ever answer for the active sheet.
-        let (p, c) = stores(Some((1, protected_with(vec![]))), vec![]);
-        assert!(refusal_reason_for_cell(&p, &c, 1, 0, 0).is_some(), "sheet 1 protected");
-        assert!(refusal_reason_for_cell(&p, &c, 0, 0, 0).is_none(), "sheet 0 is not");
+        let (p, g, st) = stores(Some((1, protected_with(vec![]))), vec![]);
+        assert!(refusal_reason_for_cell(&p, &g, &st, 1, 0, 0).is_some(), "sheet 1 protected");
+        assert!(refusal_reason_for_cell(&p, &g, &st, 0, 0, 0).is_none(), "sheet 0 is not");
     }
-
-    // --- Range gate: exact permitted-area accounting ---
+    // --- Range gate over the style tiers ---
     //
-    // The range gate must never walk the whole rectangle in the allow case (a
-    // whole-column Delete is >1M cells), so it decides from an EXACT permitted-
-    // cell count instead. Exactness is the safety property: an over-count would
-    // allow a write that should be refused.
+    // The range gate must never walk the rectangle in the allow case: a
+    // whole-column Delete is >1M positions. It relies on the default being
+    // LOCKED, so a position is writable only if something positively grants it
+    // — an allow-edit range, an unlocked column tier, an unlocked row tier, or
+    // the cell's own unlocked style.
 
-    fn permitted(
-        ranges: Vec<AllowEditRange>,
-        unlocked: Vec<(u32, u32)>,
-        rect: (u32, u32, u32, u32),
-    ) -> u64 {
-        let prot = protected_with(ranges);
-        let mut store = CellProtectionStorage::new();
-        let sheet = store.entry(0).or_default();
-        for key in unlocked {
-            sheet.insert(key, super::tests::unlocked());
+    /// A protected sheet plus a grid/registry, with an optional unlocked tier.
+    fn tiered(
+        unlocked_cols: Vec<u32>,
+        unlocked_rows: Vec<u32>,
+    ) -> (ProtectionStorage, engine::Grid, engine::StyleRegistry) {
+        let mut p = ProtectionStorage::new();
+        p.insert(0, protected_with(vec![]));
+        let mut grid = engine::Grid::new();
+        let mut styles = engine::StyleRegistry::new();
+        let mut open = engine::CellStyle::new();
+        open.locked = false;
+        let open_idx = styles.get_or_create(open);
+        for c in unlocked_cols {
+            grid.set_column_style(c, open_idx);
         }
-        permitted_area_in_rect(&prot, &store, 0, rect.0, rect.1, rect.2, rect.3)
+        for r in unlocked_rows {
+            grid.set_row_style(r, open_idx);
+        }
+        (p, grid, styles)
     }
 
     #[test]
-    fn no_permissions_means_zero_permitted_area() {
-        assert_eq!(permitted(vec![], vec![], (0, 0, 9, 9)), 0);
-    }
-
-    #[test]
-    fn an_allow_edit_range_contributes_its_clipped_area() {
-        // Range rows 0..4 x cols 0..4 = 25 cells, but the rectangle only asks
-        // about rows 0..2 x cols 0..2, so only the 3x3 = 9 overlap counts.
-        assert_eq!(permitted(vec![range(0, 4, 0, 4)], vec![], (0, 0, 2, 2)), 9);
-    }
-
-    #[test]
-    fn overlapping_allow_edit_ranges_are_not_double_counted() {
-        // Two 3x3 ranges sharing a 2x2 corner cover 9 + 9 - 4 = 14 cells.
-        // A naive sum would say 18 and wrongly allow a 15-cell rectangle.
-        let a = range(0, 2, 0, 2);
-        let b = range(1, 3, 1, 3);
-        assert_eq!(permitted(vec![a, b], vec![], (0, 0, 3, 3)), 14);
-    }
-
-    #[test]
-    fn unlocked_cells_inside_a_range_are_not_double_counted() {
-        // The cell is both inside the allow-edit range AND explicitly unlocked;
-        // it must count once, or a 10-cell rect could look fully permitted with
-        // only 9 distinct permitted cells.
-        assert_eq!(
-            permitted(vec![range(0, 0, 0, 0)], vec![(0, 0)], (0, 0, 0, 0)),
-            1
+    fn a_whole_column_unlocked_by_its_tier_is_writable() {
+        // The case the tier exists for: "unlock the input column, then protect".
+        // Decided without touching a single one of the million positions.
+        let (p, g, st) = tiered(vec![4], vec![]);
+        assert!(
+            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 4, 1_048_575, 4).is_ok(),
+            "an unlocked column tier grants the whole column"
         );
     }
 
     #[test]
-    fn unlocked_cells_outside_every_range_add_up() {
-        assert_eq!(permitted(vec![], vec![(0, 0), (1, 1)], (0, 0, 1, 1)), 2);
+    fn a_neighbouring_column_stays_locked() {
+        let (p, g, st) = tiered(vec![4], vec![]);
+        assert!(
+            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 5, 10, 5).is_err(),
+            "column 5 has no tier, so the default (locked) applies"
+        );
     }
 
     #[test]
-    fn a_fully_permitted_rectangle_matches_its_area() {
-        // 2x2 rectangle fully covered => permitted == area, which is what lets
-        // the gate allow without scanning a single cell.
-        let area = 4u64;
-        assert_eq!(permitted(vec![range(0, 1, 0, 1)], vec![], (0, 0, 1, 1)), area);
-        // One cell short => strictly less than area => the gate refuses.
-        assert!(permitted(vec![range(0, 1, 0, 0)], vec![], (0, 0, 1, 1)) < area);
+    fn a_cell_relocked_by_its_own_style_refuses_inside_an_unlocked_column() {
+        // Precedence is cell > row > column, so an individually re-locked cell
+        // must still refuse even though its column is open. This is the case the
+        // sparse override scan exists for.
+        let (p, mut g, mut st) = tiered(vec![4], vec![]);
+        // get_or_create_explicit, not get_or_create: "locked and otherwise
+        // default" IS the default style, so plain interning returns index 0 —
+        // which a cell reads as "inherit" and would resolve back to the
+        // unlocked column. This is exactly the hole the explicit variant closes.
+        let shut = st.get_or_create_explicit(engine::CellStyle::new()); // locked: true
+        assert_ne!(shut, 0, "an explicit style must not be the inherit sentinel");
+        let mut cell = engine::Cell::new();
+        cell.style_index = shut;
+        g.set_cell(7, 4, cell);
+        assert!(
+            check_sheet_protection_range_in(&p, &g, &st, 0, 0, 4, 1_048_575, 4).is_err(),
+            "one re-locked cell refuses the range"
+        );
     }
 
     #[test]
-    fn a_huge_rectangle_is_decided_without_enumeration() {
-        // A whole column on a protected sheet with one small unlocked block.
-        // The point is that this returns promptly: permitted is computed from
-        // the sparse store and the range list, never from the 1,048,576-cell
-        // product.
-        let p = permitted(vec![range(0, 9, 0, 0)], vec![], (0, 0, 1_048_575, 0));
-        assert_eq!(p, 10);
-        assert!(p < 1_048_576);
+    fn an_unlocked_row_tier_grants_its_row() {
+        let (p, g, st) = tiered(vec![], vec![2]);
+        assert!(check_sheet_protection_range_in(&p, &g, &st, 0, 2, 0, 2, 500).is_ok());
+        assert!(
+            check_sheet_protection_range_in(&p, &g, &st, 0, 3, 0, 3, 500).is_err(),
+            "row 3 has no tier"
+        );
     }
+
+    #[test]
+    fn an_unprotected_sheet_is_never_refused() {
+        let mut p = ProtectionStorage::new();
+        p.insert(0, SheetProtection::default()); // protected: false
+        let g = engine::Grid::new();
+        let st = engine::StyleRegistry::new();
+        assert!(check_sheet_protection_range_in(&p, &g, &st, 0, 0, 0, 1_048_575, 16_383).is_ok());
+    }
+
 
     // --- What the save path must keep ---
     //

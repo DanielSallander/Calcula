@@ -85,11 +85,22 @@ pub fn replace_all(
     // action, so applying it to the unlocked subset would silently do half a job.
     // Checked against the MATCH LIST rather than a bounding rectangle, so a
     // replace that happens to miss every locked cell still succeeds.
-    crate::protection::check_sheet_protection_cells(
-        &state,
-        active_sheet,
-        matches.iter().copied(),
-    )?;
+    //
+    // Uses the BORROWED form: this command already holds `grid` and
+    // `style_registry`, which the gate now needs to resolve lock state through
+    // the style tiers, and std::sync::Mutex is not reentrant — the locking
+    // wrapper would deadlock here. `sheet_protection` is taken last, matching
+    // the canonical grid -> style_registry -> sheet_protection order.
+    {
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        crate::protection::check_sheet_protection_cells_in(
+            &protection_storage,
+            &grid,
+            &styles,
+            active_sheet,
+            matches.iter().copied(),
+        )?;
+    }
 
     if matches.is_empty() {
         return Ok(ReplaceResult {
@@ -287,8 +298,14 @@ pub fn replace_single(
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
-    // Sheet protection (Replace on a locked cell).
-    crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
+    // Sheet protection (Replace on a locked cell). Borrowed form — `grid` and
+    // `styles` are already held above; see the note in `replace_all`.
+    {
+        let protection_storage = state.sheet_protection.lock().unwrap();
+        crate::protection::check_sheet_protection_range_in(
+            &protection_storage, &grid, &styles, active_sheet, row, col, row, col,
+        )?;
+    }
 
     // Skip cells in writeback regions
     {

@@ -401,6 +401,12 @@ pub(crate) fn apply_script_modified_grids(
     // there is nothing to roll back.
     {
         let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        // Borrowed gate form: `grids` is held for the whole loop and
+        // std::sync::Mutex is not reentrant, so the locking wrapper would
+        // deadlock here. Acquire the rest in canonical order
+        // (grids -> style_registry -> sheet_protection).
+        let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
         let empty_grid = Grid::new();
         for (idx, after_grid) in modified_grids.iter().enumerate() {
             if idx >= app_grids.len() {
@@ -411,8 +417,13 @@ pub(crate) fn apply_script_modified_grids(
             if diff.is_empty() {
                 continue;
             }
-            crate::protection::check_sheet_protection_cells(
-                state,
+            // Lock state is read from the PRE-script grid — whether the user may
+            // write a cell depends on what the sheet looks like now, not on what
+            // the script wants it to become.
+            crate::protection::check_sheet_protection_cells_in(
+                &protection_storage,
+                before,
+                &styles,
                 idx,
                 diff.iter().map(|u| (u.row, u.col)),
             )?;
