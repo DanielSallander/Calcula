@@ -16,6 +16,24 @@ pub(crate) fn get_cell_internal_with_merge(
     col: u32,
     locale: &LocaleSettings,
 ) -> Option<CellData> {
+    get_cell_internal_with_merge_hiding(grid, styles, merged_regions, row, col, locale, false)
+}
+
+/// As above, but able to WITHHOLD the formula string.
+///
+/// `hide_formulas` comes from the caller's protection check (see
+/// `protection::formula_is_hidden`). When set, the cell's value and formatting
+/// are still returned — only the formula text is suppressed, which is exactly
+/// what Excel's "Hidden" protection attribute means.
+pub(crate) fn get_cell_internal_with_merge_hiding(
+    grid: &Grid,
+    styles: &StyleRegistry,
+    merged_regions: &HashSet<MergedRegion>,
+    row: u32,
+    col: u32,
+    locale: &LocaleSettings,
+    hide_formulas: bool,
+) -> Option<CellData> {
     // Check if this cell is the master of a merged region
     let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
 
@@ -55,7 +73,11 @@ pub(crate) fn get_cell_internal_with_merge(
             symbol_before: a.symbol_before,
             value: a.value,
         });
-        let localized_formula = c.formula_string().map(|f| format!("={}", localize_formula(&f, locale)));
+        let localized_formula = if hide_formulas {
+            None
+        } else {
+            c.formula_string().map(|f| format!("={}", localize_formula(&f, locale)))
+        };
         (result.text, result.color, localized_formula, effective_style_index, rt, acct)
     } else {
         // Empty merge master, or an empty cell that a row/column style reaches

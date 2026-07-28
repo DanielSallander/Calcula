@@ -428,6 +428,45 @@ pub(crate) fn cell_is_locked(
     styles.get(grid.effective_style_index(row, col)).locked
 }
 
+/// Whether this cell's FORMULA must be withheld.
+///
+/// `formula_hidden` is the second half of Excel's cell protection, and it only
+/// bites while the sheet is protected. It was stored, persisted and round-tripped
+/// through xlsx but enforced nowhere: the formula bar blanked it for display,
+/// while `get_cell` happily returned the formula string over IPC — so any script,
+/// AI tool or extension read it straight out. Display-blanking is not hiding.
+///
+/// Takes borrowed state for the same reason the gates do: callers hold the grid.
+pub(crate) fn formula_is_hidden(
+    protection_storage: &ProtectionStorage,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> bool {
+    let Some(protection) = protection_storage.get(&sheet_index) else {
+        return false;
+    };
+    if !protection.protected {
+        return false;
+    }
+    styles.get(grid.effective_style_index(row, col)).formula_hidden
+}
+
+/// `AppState` form of [`formula_is_hidden`] for callers holding no locks.
+///
+/// Returns a closure-friendly snapshot: whether the sheet is protected at all,
+/// so a caller reading many cells pays the lock cost once.
+pub(crate) fn sheet_is_protected(state: &AppState, sheet_index: usize) -> bool {
+    state
+        .sheet_protection
+        .lock()
+        .ok()
+        .and_then(|p| p.get(&sheet_index).map(|s| s.protected))
+        .unwrap_or(false)
+}
+
 /// The single decision procedure for "may this cell be written?".
 ///
 /// Both the `can_edit_cell` command and the backend gates below route through
@@ -1784,6 +1823,72 @@ mod tests {
         assert!(check_sheet_protection_range_in(&p, &g, &st, 0, 0, 0, 1_048_575, 16_383).is_ok());
     }
 
+
+    // --- formula_hidden: withholding, not blanking ---
+
+    fn hidden_fixture(protected: bool, hidden: bool)
+        -> (ProtectionStorage, engine::Grid, engine::StyleRegistry)
+    {
+        let mut p = ProtectionStorage::new();
+        let mut sp = SheetProtection::default();
+        sp.protected = protected;
+        p.insert(0, sp);
+
+        let mut grid = engine::Grid::new();
+        let mut styles = engine::StyleRegistry::new();
+        let mut style = engine::CellStyle::new();
+        style.formula_hidden = hidden;
+        let idx = styles.get_or_create_explicit(style);
+        let mut cell = engine::Cell::new();
+        cell.style_index = idx;
+        grid.set_cell(1, 1, cell);
+        (p, grid, styles)
+    }
+
+    #[test]
+    fn a_hidden_formula_is_withheld_on_a_protected_sheet() {
+        let (p, g, st) = hidden_fixture(true, true);
+        assert!(formula_is_hidden(&p, &g, &st, 0, 1, 1));
+    }
+
+    #[test]
+    fn hiding_does_nothing_until_the_sheet_is_protected() {
+        // Excel semantics: the Hidden attribute is inert on an unprotected
+        // sheet. Marking cells hidden while designing must not blank them.
+        let (p, g, st) = hidden_fixture(false, true);
+        assert!(!formula_is_hidden(&p, &g, &st, 0, 1, 1));
+    }
+
+    #[test]
+    fn a_protected_sheet_does_not_hide_unmarked_cells() {
+        let (p, g, st) = hidden_fixture(true, false);
+        assert!(!formula_is_hidden(&p, &g, &st, 0, 1, 1));
+    }
+
+    #[test]
+    fn hiding_follows_the_row_column_tier_like_any_other_format() {
+        // formula_hidden is a style attribute, so a column marked hidden covers
+        // cells that carry no style of their own.
+        let mut p = ProtectionStorage::new();
+        p.insert(0, protected_with(vec![]));
+        let mut grid = engine::Grid::new();
+        let mut styles = engine::StyleRegistry::new();
+        let mut style = engine::CellStyle::new();
+        style.formula_hidden = true;
+        let idx = styles.get_or_create_explicit(style);
+        grid.set_column_style(2, idx);
+
+        assert!(formula_is_hidden(&p, &grid, &styles, 0, 500, 2), "via column tier");
+        assert!(!formula_is_hidden(&p, &grid, &styles, 0, 500, 3), "other column");
+    }
+
+    #[test]
+    fn a_sheet_with_no_protection_record_hides_nothing() {
+        let p = ProtectionStorage::new();
+        let g = engine::Grid::new();
+        let st = engine::StyleRegistry::new();
+        assert!(!formula_is_hidden(&p, &g, &st, 0, 0, 0));
+    }
 
     // --- Option flags: the second, independent axis ---
     //

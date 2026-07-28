@@ -50,6 +50,21 @@ pub fn read_cell_range(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
+    // Formula hiding applies to the AI surface too — arguably most of all. A
+    // sheet marked "hidden" is asserting the formulas are not for reading, and
+    // an AI tool that dumps them into model context is the widest possible
+    // disclosure. One probe: hiding only bites on a protected sheet.
+    let sheet_protected = {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        state
+            .sheet_protection
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&active)
+            .map(|p| p.protected)
+            .unwrap_or(false)
+    };
+
     let mut table = String::new();
     let mut formulas: Vec<String> = Vec::new();
 
@@ -61,7 +76,9 @@ pub fn read_cell_range(
                 let display = format_cell_value(&cell.value, style, &locale);
                 vals.push(display);
                 if let Some(f) = cell.formula_string() {
-                    formulas.push(format!("{}{}:{}", col_letter(col), row + 1, f));
+                    if !(sheet_protected && style.formula_hidden) {
+                        formulas.push(format!("{}{}:{}", col_letter(col), row + 1, f));
+                    }
                 }
             } else {
                 vals.push(String::new());

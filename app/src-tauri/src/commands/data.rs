@@ -225,8 +225,16 @@ pub fn get_viewport_cells(
 
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    // One probe for the whole viewport: formula hiding only bites on a
+    // protected sheet, so an unprotected one skips the per-cell check entirely.
+    let sheet_protected = {
+        // Deref-and-drop: no guard is held across the grid locks above.
+        let active = *state.active_sheet.lock().unwrap();
+        protection.get(&active).map(|p| p.protected).unwrap_or(false)
+    };
     let perf_t1_locks = Instant::now();
 
     // Build O(1) merge lookup by master cell (same pattern as update_cells_batch)
@@ -305,7 +313,16 @@ pub fn get_viewport_cells(
                     symbol_before: a.symbol_before,
                     value: a.value,
                 });
-                (result.text, result.color, formula_display(&c, &locale), effective_style_index, rt, acct)
+                // Withhold the formula for cells marked hidden on a protected
+                // sheet. Value and formatting still render.
+                let formula = if sheet_protected
+                    && styles.get(effective_style_index).formula_hidden
+                {
+                    None
+                } else {
+                    formula_display(&c, &locale)
+                };
+                (result.text, result.color, formula, effective_style_index, rt, acct)
             } else {
                 (String::new(), None, None, effective_style_index, None, None)
             };
@@ -344,11 +361,20 @@ pub fn get_viewport_cells(
 /// Get a single cell's data.
 #[tauri::command]
 pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
+    // Withhold the formula when the sheet is protected and the cell is marked
+    // hidden — the value and formatting still come through.
+    let hide = crate::protection::formula_is_hidden(
+        &protection, &grid, &styles, active_sheet, row, col,
+    );
+    crate::commands::utils::get_cell_internal_with_merge_hiding(
+        &grid, &styles, &merged_regions, row, col, &locale, hide,
+    )
 }
 
 /// Batch-get cell display values from arbitrary sheets (for Watch Window).
@@ -4162,14 +4188,25 @@ pub fn get_cells_in_rows(
 ) -> Vec<CellData> {
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    // One probe for the whole viewport: formula hiding only bites on a
+    // protected sheet, so an unprotected one skips the per-cell check entirely.
+    let sheet_protected = {
+        // Deref-and-drop: no guard is held across the grid locks above.
+        let active = *state.active_sheet.lock().unwrap();
+        protection.get(&active).map(|p| p.protected).unwrap_or(false)
+    };
     let mut cells = Vec::new();
 
     for &(row, col) in grid.cells.keys() {
         if row >= start_row && row <= end_row {
             if let Some(cell_data) =
-                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
+                crate::commands::utils::get_cell_internal_with_merge_hiding(
+                    &grid, &styles, &merged_regions, row, col, &locale,
+                    sheet_protected && styles.get(grid.effective_style_index(row, col)).formula_hidden,
+                )
             {
                 cells.push(cell_data);
             }
@@ -4190,14 +4227,25 @@ pub fn get_cells_in_cols(
 ) -> Vec<CellData> {
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let protection = state.sheet_protection.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    // One probe for the whole viewport: formula hiding only bites on a
+    // protected sheet, so an unprotected one skips the per-cell check entirely.
+    let sheet_protected = {
+        // Deref-and-drop: no guard is held across the grid locks above.
+        let active = *state.active_sheet.lock().unwrap();
+        protection.get(&active).map(|p| p.protected).unwrap_or(false)
+    };
     let mut cells = Vec::new();
 
     for &(row, col) in grid.cells.keys() {
         if col >= start_col && col <= end_col {
             if let Some(cell_data) =
-                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
+                crate::commands::utils::get_cell_internal_with_merge_hiding(
+                    &grid, &styles, &merged_regions, row, col, &locale,
+                    sheet_protected && styles.get(grid.effective_style_index(row, col)).formula_hidden,
+                )
             {
                 cells.push(cell_data);
             }
