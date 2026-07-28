@@ -87,7 +87,7 @@ pub struct ParsedAlignment {
 }
 
 /// A cell XF record combining indices into fonts/fills/borders/numFmts.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ParsedXf {
     pub font_id: usize,
     pub fill_id: usize,
@@ -99,6 +99,34 @@ pub struct ParsedXf {
     pub apply_border: bool,
     pub apply_number_format: bool,
     pub apply_alignment: bool,
+    /// `<protection locked="..">`. Excel's default is LOCKED, which is why this
+    /// mirrors `CellStyle::default()`; an xf with no `<protection>` child leaves
+    /// it true.
+    pub locked: bool,
+    /// `<protection hidden="..">` — hide the formula when the sheet is protected.
+    pub formula_hidden: bool,
+    pub apply_protection: bool,
+}
+
+impl Default for ParsedXf {
+    fn default() -> Self {
+        Self {
+            font_id: 0,
+            fill_id: 0,
+            border_id: 0,
+            num_fmt_id: 0,
+            alignment: ParsedAlignment::default(),
+            apply_font: false,
+            apply_fill: false,
+            apply_border: false,
+            apply_number_format: false,
+            apply_alignment: false,
+            // Excel's default: cells are locked, formulas visible.
+            locked: true,
+            formula_hidden: false,
+            apply_protection: false,
+        }
+    }
 }
 
 /// Per-sheet metadata that calamine doesn't provide.
@@ -652,6 +680,9 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                                     current_xf.apply_number_format =
                                         val == "1" || val == "true"
                                 }
+                                "applyProtection" => {
+                                    current_xf.apply_protection = val == "1" || val == "true"
+                                }
                                 "applyAlignment" => {
                                     current_xf.apply_alignment =
                                         val == "1" || val == "true"
@@ -666,6 +697,24 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                             xf_depth = 0;
                         } else {
                             xf_depth = 1;
+                        }
+                    }
+                    // <protection locked=".." hidden=".."> — the xlsx home for
+                    // cell lock state, which Calcula also stores as a style
+                    // attribute. Absent child = Excel's default (locked).
+                    "protection" if in_cell_xfs && xf_depth > 0 => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val = std::str::from_utf8(&attr.value).unwrap_or("");
+                            match key {
+                                "locked" => {
+                                    current_xf.locked = val == "1" || val == "true"
+                                }
+                                "hidden" => {
+                                    current_xf.formula_hidden = val == "1" || val == "true"
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     "alignment" if in_cell_xfs && xf_depth > 0 => {
@@ -1513,6 +1562,19 @@ pub fn xf_to_cell_style(
         r if r <= 180 => TextRotation::Custom(-((r - 90) as i16)),
         _ => TextRotation::None,
     };
+
+    // Protection. Excel stores locked/hidden as part of the cell FORMAT
+    // (`cellXfs/<xf>/<protection>`), which is exactly where Calcula keeps them
+    // too — so this is a direct mapping rather than a translation. Previously
+    // nothing was read and every imported cell silently came in locked.
+    //
+    // The `<protection>` child is only authoritative when the xf opts in via
+    // applyProtection; otherwise the xf inherits, and Excel's inherited default
+    // is locked — which `CellStyle::new()` already is, so we leave it alone.
+    if xf.apply_protection {
+        style.locked = xf.locked;
+        style.formula_hidden = xf.formula_hidden;
+    }
 
     style
 }

@@ -814,6 +814,19 @@ fn convert_style_to_format(style: &CellStyle) -> Format {
     // Borders
     format = apply_borders(format, &style.borders);
 
+    // Protection. Excel keeps locked/hidden in the cell format
+    // (`cellXfs/<xf>/<protection>`), the same place Calcula does, so this
+    // round-trips with the reader. Nothing was emitted before, which meant an
+    // exported workbook lost every unlocked cell: on re-open in Excel the whole
+    // sheet read as locked, and protecting it would have frozen the inputs the
+    // author had deliberately opened up.
+    if !style.locked {
+        format = format.set_unlocked();
+    }
+    if style.formula_hidden {
+        format = format.set_hidden();
+    }
+
     format
 }
 

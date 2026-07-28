@@ -563,10 +563,16 @@ pub fn publish(
             )?;
         }
 
-        // Layout (column widths + row heights as simple JSON)
-        let layout = calcula_format::sheet_layout::SheetLayout::from_dimensions(
+        // Layout: column widths + row heights, plus the row/column default-style
+        // tiers. The tiers must travel with the package — a whole-column format
+        // is stored ONCE there rather than as a style on every cell, so omitting
+        // them would silently drop that formatting for the subscriber while
+        // per-cell styles came through fine.
+        let layout = calcula_format::sheet_layout::SheetLayout::from_dimensions_and_styles(
             &sheet.column_widths,
             &sheet.row_heights,
+            &sheet.row_styles,
+            &sheet.column_styles,
         );
         registry.write_artifact(
             pkg, ver,

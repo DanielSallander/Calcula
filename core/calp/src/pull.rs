@@ -305,15 +305,19 @@ pub fn pull(
             }
         };
 
-        // Read layout
-        let (column_widths, row_heights) = {
+        // Read layout: dimensions plus the row/column default-style tiers.
+        let (column_widths, row_heights, pulled_row_styles, pulled_column_styles) = {
             match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/layout.json"))? {
                 Some(bytes) => {
                     let layout: calcula_format::sheet_layout::SheetLayout =
                         serde_json::from_slice(&bytes)?;
-                    layout.to_dimensions()
+                    let (cw, rh) = layout.to_dimensions();
+                    let (rs, cs) = layout.to_style_tiers();
+                    (cw, rh, rs, cs)
                 }
-                None => (HashMap::new(), HashMap::new()),
+                // Pre-tier packages simply have none; every cell then resolves
+                // through its own style, which is the old behaviour.
+                None => (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new()),
             }
         };
 
@@ -348,12 +352,8 @@ pub fn pull(
             hyperlinks: metadata.hyperlinks,
             page_setup: metadata.page_setup,
             show_gridlines: metadata.show_gridlines,
-            // Row/column style tiers are not carried in a .calp package yet —
-            // the published layout.json is written by the publish path, which
-            // does not emit them. Empty means every cell resolves through its
-            // own style, i.e. the pre-tier behaviour.
-            row_styles: std::collections::HashMap::new(),
-            column_styles: std::collections::HashMap::new(),
+            row_styles: pulled_row_styles,
+            column_styles: pulled_column_styles,
         };
 
         pulled_sheets.push(PulledSheet {
