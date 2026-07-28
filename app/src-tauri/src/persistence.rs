@@ -2522,7 +2522,10 @@ pub fn open_file(
         .cells
         .iter()
         .map(|((row, col), cell)| {
-            let style = styles.get(cell.style_index);
+            // Honour the row/column style tiers for both the formatted display
+            // and the index handed to the frontend.
+            let effective_style_index = grid.effective_style_index(*row, *col);
+            let style = styles.get(effective_style_index);
             // Look up merge span for this cell
             let (row_span, col_span) = merged
                 .iter()
@@ -2535,7 +2538,7 @@ pub fn open_file(
                 formula: cell.formula_string().map(|f| format!("={}", f)),
                 display: format_cell_value(&cell.value, style, &locale),
                 display_color: None,
-                style_index: cell.style_index,
+                style_index: effective_style_index,
                 row_span,
                 col_span,
                 sheet_index: None,

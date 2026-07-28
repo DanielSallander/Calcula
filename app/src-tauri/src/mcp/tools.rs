@@ -57,7 +57,7 @@ pub fn read_cell_range(
         let mut vals: Vec<String> = Vec::new();
         for col in start_col..=end_col {
             if let Some(cell) = grid.get_cell(row, col) {
-                let style = styles.get(cell.style_index);
+                let style = styles.get(grid.effective_style_index(row, col));
                 let display = format_cell_value(&cell.value, style, &locale);
                 vals.push(display);
                 if let Some(f) = cell.formula_string() {

@@ -2092,8 +2092,10 @@ pub fn set_calculated_column(
                 cell.style_index = existing.style_index;
             }
 
-            // Format display value for frontend
-            let style = styles.get(cell.style_index);
+            // Format display value for frontend. The cell keeps its own explicit
+            // style_index (preserved above); only the DISPLAY honours the row/column
+            // tiers, resolved against the grid this cell is written to.
+            let style = styles.get(grid.effective_style_index(row, abs_col));
             let display = crate::format_cell_value(&cell.value, style, &locale);
 
             computed.push(ComputedCell {

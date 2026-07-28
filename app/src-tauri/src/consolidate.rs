@@ -141,7 +141,9 @@ fn build_cell_data(
     locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
-    let style = styles.get(cell.style_index);
+    // Honour the row/column style tiers for display and for the index we hand out.
+    let effective_style_index = grid.effective_style_index(row, col);
+    let style = styles.get(effective_style_index);
     let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
@@ -158,7 +160,7 @@ fn build_cell_data(
         display,
         display_color: None,
         formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: cell.style_index,
+        style_index: effective_style_index,
         row_span,
         col_span,
         sheet_index,

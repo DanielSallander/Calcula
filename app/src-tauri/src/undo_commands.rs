@@ -292,7 +292,10 @@ fn apply_changes(
                         if active_sheet < grids.len() {
                             grids[active_sheet].set_cell(*row, *col, cell.clone());
                         }
-                        let style = styles.get(cell.style_index);
+                        // Resolved against the active-sheet mirror the cell was
+                        // just restored into, so the row/column tiers apply.
+                        let effective_style_index = grid.effective_style_index(*row, *col);
+                        let style = styles.get(effective_style_index);
                         let display = format_cell_value(&cell.value, style, &locale);
                         updated_cells.push(CellData {
                             row: *row,
@@ -300,7 +303,7 @@ fn apply_changes(
                             display,
                             display_color: None,
                             formula: cell.formula_string().map(|f| format!("={}", f)),
-                            style_index: cell.style_index,
+                            style_index: effective_style_index,
                             row_span: 1,
                             col_span: 1,
                             sheet_index: None,
@@ -313,13 +316,16 @@ fn apply_changes(
                         if active_sheet < grids.len() {
                             grids[active_sheet].clear_cell(*row, *col);
                         }
+                        // The cell is gone, but a row/column style may still
+                        // give its position an appearance.
+                        let effective_style_index = grid.effective_style_index(*row, *col);
                         updated_cells.push(CellData {
                             row: *row,
                             col: *col,
                             display: String::new(),
                             display_color: None,
                             formula: None,
-                            style_index: 0,
+                            style_index: effective_style_index,
                             row_span: 1,
                             col_span: 1,
                             sheet_index: None,

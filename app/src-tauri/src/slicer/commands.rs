@@ -672,7 +672,7 @@ fn get_table_column_values(state: &State<AppState>, source_id: identity::EntityI
     let mut seen = HashMap::new();
     for row in data_start_row..=table.end_row {
         let value = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
-            let style = style_registry.get(cell.style_index);
+            let style = style_registry.get(grid.effective_style_index(row, abs_col));
             format_cell_value(&cell.value, style, &locale)
         } else {
             String::new()
@@ -743,7 +743,7 @@ fn get_table_available_values(
         // Check if this row passes all sibling filters
         let passes = filter_cols.iter().all(|(col, allowed)| {
             let value = if let Some(cell) = grid.cells.get(&(row, *col)) {
-                let style = style_registry.get(cell.style_index);
+                let style = style_registry.get(grid.effective_style_index(row, *col));
                 format_cell_value(&cell.value, style, &locale)
             } else {
                 String::new()
@@ -754,7 +754,7 @@ fn get_table_available_values(
         if passes {
             // This row passes all sibling filters — record the target column value
             let value = if let Some(cell) = grid.cells.get(&(row, target_abs_col)) {
-                let style = style_registry.get(cell.style_index);
+                let style = style_registry.get(grid.effective_style_index(row, target_abs_col));
                 format_cell_value(&cell.value, style, &locale)
             } else {
                 String::new()

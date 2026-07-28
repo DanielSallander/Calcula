@@ -41,7 +41,9 @@ fn build_cell_data(
     locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(r, c)?;
-    let style = styles.get(cell.style_index);
+    // Row/column style tiers: resolve against the same grid the cell came from.
+    let effective_style_index = grid.effective_style_index(r, c);
+    let style = styles.get(effective_style_index);
     let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
@@ -58,7 +60,7 @@ fn build_cell_data(
         display,
         display_color: None,
         formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: cell.style_index,
+        style_index: effective_style_index,
         row_span,
         col_span,
         sheet_index: None,
@@ -183,7 +185,8 @@ fn apply_set_ops_and_recalc(
                 display: String::new(),
                 display_color: None,
                 formula: None,
-                style_index: 0,
+                // Now-empty cell: a row/column style still applies to it.
+                style_index: grids[sheet_idx].effective_style_index(r, c),
                 row_span: 1,
                 col_span: 1,
                 sheet_index: None,

@@ -25,7 +25,7 @@ fn cell_is_error(grid: &Grid, row: u32, col: u32) -> bool {
 /// Get the display string for a cell (used for tooltips).
 fn cell_display(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, locale: &engine::LocaleSettings) -> String {
     if let Some(cell) = grid.cells.get(&(row, col)) {
-        let style = styles.get(cell.style_index);
+        let style = styles.get(grid.effective_style_index(row, col));
         format_cell_value(&cell.value, style, locale)
     } else {
         String::new()

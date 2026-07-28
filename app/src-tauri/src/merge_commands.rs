@@ -74,7 +74,10 @@ pub fn merge_cells(
 
     // Get the master cell content (top-left)
     let master_cell = grid.get_cell(min_row, min_col).cloned();
-    let master_style_index = master_cell.as_ref().map(|c| c.style_index).unwrap_or(0);
+    // Display-only: this index is formatted and handed back to the frontend as
+    // CellData.style_index, so it must honour the row/column tiers. Resolved
+    // before the grid is mutably borrowed below.
+    let master_style_index = grid.effective_style_index(min_row, min_col);
 
     // Record undo: save slave cells that will be cleared + the merge region being added
     let opened_transaction = !undo_stack.has_open_transaction();
@@ -188,7 +191,7 @@ pub fn unmerge_cells(
 
         // Return the master cell with span reset to 1
         let master_cell = grid.get_cell(region.start_row, region.start_col).cloned();
-        let master_style_index = master_cell.as_ref().map(|c| c.style_index).unwrap_or(0);
+        let master_style_index = grid.effective_style_index(region.start_row, region.start_col);
         let style = styles.get(master_style_index);
         let display = master_cell
             .as_ref()

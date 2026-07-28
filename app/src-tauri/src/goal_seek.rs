@@ -443,7 +443,9 @@ fn finalize_result(
     // Helper to build CellData
     let build_cell_data = |g: &Grid, r: u32, c: u32| -> Option<CellData> {
         let cell = g.get_cell(r, c)?;
-        let style = styles.get(cell.style_index);
+        // Resolve against `g` - the same grid the cell was read from.
+        let effective_style_index = g.effective_style_index(r, c);
+        let style = styles.get(effective_style_index);
         let display = format_cell_value(&cell.value, style, &locale);
 
         let merge = merged_regions.iter().find(|m| m.start_row == r && m.start_col == c);
@@ -458,7 +460,7 @@ fn finalize_result(
             display,
             display_color: None,
             formula: cell.formula_string().map(|f| format!("={}", f)),
-            style_index: cell.style_index,
+            style_index: effective_style_index,
             row_span,
             col_span,
             sheet_index: None,

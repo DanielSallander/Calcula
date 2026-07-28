@@ -145,7 +145,10 @@ pub fn apply_named_style(
             // Record undo
             undo_stack.record_cell_change(row, col, previous_cell);
 
-            let cell_style = styles.get(style_index);
+            // Display resolution honours the row/column tiers (the cell was just
+            // written above, so this reflects the newly applied named style).
+            let effective_style_index = grid.effective_style_index(row, col);
+            let cell_style = styles.get(effective_style_index);
             let fmt_result = format_cell_value_with_color(&updated_cell.value, cell_style, &locale);
             let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
                 symbol: a.symbol,
@@ -167,7 +170,7 @@ pub fn apply_named_style(
                 display: fmt_result.text,
                 display_color: fmt_result.color,
                 formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-                style_index,
+                style_index: effective_style_index,
                 row_span,
                 col_span,
                 sheet_index: None,

@@ -281,12 +281,21 @@ pub fn get_viewport_cells(
 
             let cell = grid.get_cell(row, col);
 
-            if cell.is_none() && row_span == 1 && col_span == 1 {
+            // The style that actually applies here, honouring the row/column
+            // tiers. Resolved once and used for BOTH value formatting and the
+            // index handed to the frontend, so the renderer needs no knowledge
+            // of the tiers at all.
+            let effective_style_index = grid.effective_style_index(row, col);
+
+            // An empty cell is still worth sending when a row or column style
+            // gives it an appearance — otherwise a styled column would be
+            // invisible everywhere it has no data.
+            if cell.is_none() && row_span == 1 && col_span == 1 && effective_style_index == 0 {
                 continue;
             }
 
             let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
-                let style = styles.get(c.style_index);
+                let style = styles.get(effective_style_index);
                 let result = crate::format_cell_value_with_color(&c.value, style, &locale);
                 let rt = c.rich_text.as_ref().map(|runs| {
                     crate::api_types::rich_text_runs_to_data(runs)
@@ -296,9 +305,9 @@ pub fn get_viewport_cells(
                     symbol_before: a.symbol_before,
                     value: a.value,
                 });
-                (result.text, result.color, formula_display(&c, &locale), c.style_index, rt, acct)
+                (result.text, result.color, formula_display(&c, &locale), effective_style_index, rt, acct)
             } else {
-                (String::new(), None, None, 0, None, None)
+                (String::new(), None, None, effective_style_index, None, None)
             };
 
             cells.push(CellData {
@@ -365,7 +374,7 @@ pub fn get_watch_cells(
         locale: &engine::LocaleSettings,
     ) -> Option<CellData> {
         grid.get_cell(row, col).map(|c| {
-            let style = styles.get(c.style_index);
+            let style = styles.get(grid.effective_style_index(row, col));
             let r = crate::format_cell_value_with_color(&c.value, style, locale);
             CellData {
                 row,
@@ -373,7 +382,7 @@ pub fn get_watch_cells(
                 display: r.text,
                 display_color: r.color,
                 formula: formula_display(&c, locale),
-                style_index: c.style_index,
+                style_index: grid.effective_style_index(row, col),
                 row_span: 1,
                 col_span: 1,
                 sheet_index: Some(sheet_index),
@@ -584,7 +593,7 @@ pub fn get_collection_texts(
 #[allow(dead_code)]
 fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, locale: &engine::LocaleSettings) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
-    let style = styles.get(cell.style_index);
+    let style = styles.get(grid.effective_style_index(row, col));
     let display = format_cell_value(&cell.value, style, locale);
 
     Some(CellData {
@@ -593,7 +602,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, lo
         display,
         display_color: None,
         formula: formula_display(&cell, locale),
-        style_index: cell.style_index,
+        style_index: grid.effective_style_index(row, col),
         row_span: 1,
         col_span: 1,
         sheet_index: None,
@@ -1104,7 +1113,9 @@ fn update_cell_impl(
                                 grids[active_sheet].set_cell(target_r, target_c, spill_cell);
                             }
 
-                            let style = styles.get(0);
+                            // Spill cells carry style 0 (= inherit), so the row/
+                            // column tiers decide how they are displayed.
+                            let style = styles.get(grid.effective_style_index(target_r, target_c));
                             let display = format_cell_value(&cv, style, &locale);
                             updated_cells.push(CellData {
                                 row: target_r, col: target_c, display,
@@ -1173,7 +1184,7 @@ fn update_cell_impl(
     }
 
     // Get the display value
-    let style = styles.get(cell.style_index);
+    let style = styles.get(grid.effective_style_index(row, col));
     let display = format_cell_value(&cell.value, style, &locale);
     let perf_t3_stored = Instant::now();
 
@@ -1196,7 +1207,7 @@ fn update_cell_impl(
         display,
         display_color: None,
         formula: formula_display(&cell, &locale),
-        style_index: cell.style_index,
+        style_index: grid.effective_style_index(row, col),
         row_span,
         col_span,
         sheet_index: None, // Current active sheet
@@ -1627,7 +1638,9 @@ pub(crate) fn reevaluate_formula_cell(
                     grids[active_sheet].set_cell(target_r, target_c, spill_cell);
                 }
 
-                let style = styles.get(0);
+                // Spill cells carry style 0 (= inherit), so the row/column
+                // tiers decide how they are displayed.
+                let style = styles.get(grid.effective_style_index(target_r, target_c));
                 let display = format_cell_value(cv, style, locale);
                 updated_cells.push(CellData {
                     row: target_r, col: target_c, display,
@@ -1661,7 +1674,7 @@ pub(crate) fn reevaluate_formula_cell(
         grids[active_sheet].set_cell(dep_row, dep_col, updated_dep.clone());
     }
 
-    let dep_style = styles.get(updated_dep.style_index);
+    let dep_style = styles.get(grid.effective_style_index(dep_row, dep_col));
     let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
 
     let (dep_row_span, dep_col_span) =
@@ -1684,7 +1697,7 @@ pub(crate) fn reevaluate_formula_cell(
         } else {
             None
         },
-        style_index: updated_dep.style_index,
+        style_index: grid.effective_style_index(dep_row, dep_col),
         row_span: dep_row_span,
         col_span: dep_col_span,
         sheet_index: None,
@@ -1803,7 +1816,10 @@ pub(crate) fn cascade_cross_sheet_dependents(
                             }
 
                             // Format the display value and add to updated_cells
-                            let dep_style = styles.get(updated_dep.style_index);
+                            // (resolve the tiers on the dependent's OWN sheet)
+                            let dep_style = styles.get(
+                                grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
+                            );
                             let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
 
                             // Same-sheet deps: use merge span info and sheet_index=None
@@ -1834,7 +1850,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
                                 } else {
                                     None
                                 },
-                                style_index: updated_dep.style_index,
+                                style_index: grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
                                 sheet_index: dep_sheet_index,
@@ -1911,7 +1927,10 @@ pub(crate) fn cascade_cross_sheet_dependents(
                             );
 
                             // Format the display value and add to updated_cells
-                            let dep_style = styles.get(updated_dep.style_index);
+                            // (resolve the tiers on the dependent's OWN sheet)
+                            let dep_style = styles.get(
+                                grids[source_sheet_idx].effective_style_index(ss_dep_row, ss_dep_col),
+                            );
                             let dep_display = format_cell_value(&updated_dep.value, dep_style, locale);
 
                             updated_cells.push(CellData {
@@ -1924,7 +1943,7 @@ pub(crate) fn cascade_cross_sheet_dependents(
                                 } else {
                                     None
                                 },
-                                style_index: updated_dep.style_index,
+                                style_index: grids[source_sheet_idx].effective_style_index(ss_dep_row, ss_dep_col),
                                 row_span: 1,
                                 col_span: 1,
                                 sheet_index: Some(source_sheet_idx),
@@ -2480,7 +2499,10 @@ pub(crate) fn update_cells_batch_with_controls(
                                     grids[active_sheet].set_cell(target_r, target_c, spill_cell);
                                 }
 
-                                let spill_style = styles.get(0);
+                                // Spill cells carry style 0 (= inherit), so the
+                                // row/column tiers decide how they display.
+                                let spill_style =
+                                    styles.get(grid.effective_style_index(target_r, target_c));
                                 let display = format_cell_value(&cv, spill_style, &locale);
                                 updated_cells.push(CellData {
                                     row: target_r, col: target_c, display,
@@ -2543,7 +2565,7 @@ pub(crate) fn update_cells_batch_with_controls(
         }
 
         // Get the display value
-        let style = styles.get(cell.style_index);
+        let style = styles.get(grid.effective_style_index(row, col));
         let display = format_cell_value(&cell.value, style, &locale);
 
         let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(row, col)) {
@@ -2561,7 +2583,7 @@ pub(crate) fn update_cells_batch_with_controls(
             display,
             display_color: None,
             formula: formula_display(&cell, &locale),
-            style_index: cell.style_index,
+            style_index: grid.effective_style_index(row, col),
             row_span,
             col_span,
             sheet_index: None,
@@ -2668,7 +2690,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                 grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
                             }
 
-                            let dep_style = styles.get(updated_with_ast.style_index);
+                            let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
                             let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
 
                             let (dep_row_span, dep_col_span) =
@@ -2687,7 +2709,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                 display: dep_display,
                                 display_color: None,
                                 formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
-                                style_index: updated_with_ast.style_index,
+                                style_index: grid.effective_style_index(*dep_row, *dep_col),
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
                                 sheet_index: None,
@@ -2707,7 +2729,7 @@ pub(crate) fn update_cells_batch_with_controls(
                         grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
                     }
 
-                    let dep_style = styles.get(updated_dep.style_index);
+                    let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
                     let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                     let (dep_row_span, dep_col_span) =
@@ -2726,7 +2748,7 @@ pub(crate) fn update_cells_batch_with_controls(
                         display: dep_display,
                         display_color: None,
                         formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                        style_index: updated_dep.style_index,
+                        style_index: grid.effective_style_index(*dep_row, *dep_col),
                         row_span: dep_row_span,
                         col_span: dep_col_span,
                         sheet_index: None,
@@ -2797,7 +2819,11 @@ pub(crate) fn update_cells_batch_with_controls(
                                     updated_dep.clone(),
                                 );
 
-                                let dep_style = styles.get(updated_dep.style_index);
+                                // Cross-sheet dependent: resolve the tiers on its
+                                // own sheet's grid, not the active one.
+                                let dep_style = styles.get(
+                                    grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
+                                );
                                 let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                                 updated_cells.push(CellData {
@@ -2806,7 +2832,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                     display: dep_display,
                                     display_color: None,
                                     formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                                    style_index: updated_dep.style_index,
+                                    style_index: grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
                                     row_span: 1,
                                     col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx),
@@ -3335,7 +3361,9 @@ pub fn clear_range_with_options(
                         grids[active_sheet].set_cell(row, col, new_cell);
                     }
 
-                    let default_style = style_registry.get(0);
+                    // The cell's own style is cleared, but a row/column style
+                    // still applies to it.
+                    let default_style = style_registry.get(grid.effective_style_index(row, col));
                     let display = format_cell_value(&cell.value, default_style, &locale);
 
                     // Get merge span info
@@ -3381,7 +3409,9 @@ pub fn clear_range_with_options(
                             grids[active_sheet].set_cell(row, col, new_cell);
                         }
 
-                        let default_style = style_registry.get(0);
+                        // The cell's own style is cleared, but a row/column
+                        // style still applies to it.
+                        let default_style = style_registry.get(grid.effective_style_index(row, col));
                         let display = format_cell_value(&cell.value, default_style, &locale);
 
                         // Get merge span info
@@ -3596,7 +3626,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             grids[active_sheet].set_cell(target_row, target_col, cell.clone());
                         }
 
-                        let style = styles.get(cell.style_index);
+                        let style = styles.get(grid.effective_style_index(target_row, target_col));
                         let display = format_cell_value(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
@@ -3605,7 +3635,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             display,
                             display_color: None,
                             formula: formula_display(&cell, &locale),
-                            style_index: cell.style_index,
+                            style_index: grid.effective_style_index(target_row, target_col),
                             row_span: 1,
                             col_span: 1,
                             sheet_index: None,
@@ -3725,7 +3755,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             grids[active_sheet].set_cell(target_row, target_col, cell.clone());
                         }
 
-                        let style = styles.get(cell.style_index);
+                        let style = styles.get(grid.effective_style_index(target_row, target_col));
                         let display = format_cell_value(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
@@ -3734,7 +3764,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                             display,
                             display_color: None,
                             formula: formula_display(&cell, &locale),
-                            style_index: cell.style_index,
+                            style_index: grid.effective_style_index(target_row, target_col),
                             row_span: 1,
                             col_span: 1,
                             sheet_index: None,
@@ -4383,7 +4413,7 @@ pub fn remove_duplicates(
                     grids[active_sheet].set_cell(target_row, target_col, cell.clone());
                 }
 
-                let style = styles.get(cell.style_index);
+                let style = styles.get(grid.effective_style_index(target_row, target_col));
                 let display = format_cell_value(&cell.value, style, &locale);
 
                 updated_cells.push(CellData {
@@ -4392,7 +4422,7 @@ pub fn remove_duplicates(
                     display,
                     display_color: None,
                     formula: formula_display(&cell, &locale),
-                    style_index: cell.style_index,
+                    style_index: grid.effective_style_index(target_row, target_col),
                     row_span: 1,
                     col_span: 1,
                     sheet_index: None,
@@ -4951,7 +4981,7 @@ pub fn fill_range(
                 }
 
                 // Build CellData for the response
-                let style = styles.get(new_cell.style_index);
+                let style = styles.get(grid.effective_style_index(tr, tc));
                 let display = format_cell_value(&new_cell.value, style, &locale);
 
                 let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(tr, tc)) {
@@ -4969,7 +4999,7 @@ pub fn fill_range(
                     display,
                     display_color: None,
                     formula: formula_display(&new_cell, &locale),
-                    style_index: new_cell.style_index,
+                    style_index: grid.effective_style_index(tr, tc),
                     row_span,
                     col_span,
                     sheet_index: None,
@@ -5123,7 +5153,7 @@ pub fn fill_range(
                             if active_sheet < grids.len() {
                                 grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
                             }
-                            let dep_style = styles.get(updated_with_ast.style_index);
+                            let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
                             let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
                             let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
                                 (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
@@ -5134,7 +5164,7 @@ pub fn fill_range(
                                 row: *dep_row, col: *dep_col, display: dep_display,
                                 display_color: None,
                                 formula: if include_cascade_formulas { formula_display(&updated_with_ast, &locale) } else { None },
-                                style_index: updated_with_ast.style_index,
+                                style_index: grid.effective_style_index(*dep_row, *dep_col),
                                 row_span: drspan, col_span: dcspan,
                                 sheet_index: None, rich_text: None, accounting_layout: None,
                             });
@@ -5149,7 +5179,7 @@ pub fn fill_range(
                     if active_sheet < grids.len() {
                         grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
                     }
-                    let dep_style = styles.get(updated_dep.style_index);
+                    let dep_style = styles.get(grid.effective_style_index(*dep_row, *dep_col));
                     let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
                     let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
                         (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
@@ -5160,7 +5190,7 @@ pub fn fill_range(
                         row: *dep_row, col: *dep_col, display: dep_display,
                         display_color: None,
                         formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                        style_index: updated_dep.style_index,
+                        style_index: grid.effective_style_index(*dep_row, *dep_col),
                         row_span: drspan, col_span: dcspan,
                         sheet_index: None, rich_text: None, accounting_layout: None,
                     });
@@ -5206,13 +5236,17 @@ pub fn fill_range(
                                 let mut updated_dep = dep_cell.clone();
                                 updated_dep.value = result;
                                 grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
-                                let dep_style = styles.get(updated_dep.style_index);
+                                // Cross-sheet dependent: resolve the tiers on its
+                                // own sheet's grid, not the active one.
+                                let dep_style = styles.get(
+                                    grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
+                                );
                                 let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
                                 updated_cells.push(CellData {
                                     row: *dep_row, col: *dep_col, display: dep_display,
                                     display_color: None,
                                     formula: if include_cascade_formulas { formula_display(&updated_dep, &locale) } else { None },
-                                    style_index: updated_dep.style_index,
+                                    style_index: grids[*dep_sheet_idx].effective_style_index(*dep_row, *dep_col),
                                     row_span: 1, col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx), rich_text: None, accounting_layout: None,
                                 });

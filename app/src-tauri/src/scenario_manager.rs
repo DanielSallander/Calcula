@@ -30,7 +30,9 @@ fn build_cell_data(
     locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(r, c)?;
-    let style = styles.get(cell.style_index);
+    // Honour the row/column style tiers for display and for the index we hand out.
+    let effective_style_index = grid.effective_style_index(r, c);
+    let style = styles.get(effective_style_index);
     let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
@@ -47,7 +49,7 @@ fn build_cell_data(
         display,
         display_color: None,
         formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: cell.style_index,
+        style_index: effective_style_index,
         row_span,
         col_span,
         sheet_index: None,
@@ -398,10 +400,11 @@ pub fn scenario_summary(
     // Get current display values for all cells
     let mut current_changing_values: Vec<String> = Vec::new();
     for &(r, c) in &changing_cell_positions {
+        let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
         let val = grids[sheet_idx]
             .get_cell(r, c)
             .map(|cell| {
-                let style = styles.get(cell.style_index);
+                let style = styles.get(effective_style_index);
                 format_cell_value(&cell.value, style, &locale)
             })
             .unwrap_or_default();
@@ -410,10 +413,11 @@ pub fn scenario_summary(
 
     let mut current_result_values: Vec<String> = Vec::new();
     for &(r, c) in &result_positions {
+        let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
         let val = grids[sheet_idx]
             .get_cell(r, c)
             .map(|cell| {
-                let style = styles.get(cell.style_index);
+                let style = styles.get(effective_style_index);
                 format_cell_value(&cell.value, style, &locale)
             })
             .unwrap_or_default();
@@ -489,10 +493,11 @@ pub fn scenario_summary(
         // Collect result cell values
         let mut result_vals = Vec::new();
         for &(r, c) in &result_positions {
+            let effective_style_index = grids[sheet_idx].effective_style_index(r, c);
             let val = grids[sheet_idx]
                 .get_cell(r, c)
                 .map(|cell| {
-                    let style = styles.get(cell.style_index);
+                    let style = styles.get(effective_style_index);
                     format_cell_value(&cell.value, style, &locale)
                 })
                 .unwrap_or_default();

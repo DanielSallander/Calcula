@@ -65,7 +65,9 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     // Collect all cells with display values
     let mut cells = Vec::new();
     for (&(row, col), cell) in &grid.cells {
-        let style = styles.get(cell.style_index);
+        // Printed appearance honours the row/column style tiers.
+        let effective_style_index = grid.effective_style_index(row, col);
+        let style = styles.get(effective_style_index);
         let display = format_cell_value(&cell.value, style, &locale);
         if display.is_empty() && !cell.has_formula() {
             continue; // Skip truly empty cells
@@ -90,7 +92,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
             display,
             display_color: None,
             formula: cell.formula_string().map(|f| format!("={}", f)),
-            style_index: cell.style_index,
+            style_index: effective_style_index,
             row_span,
             col_span,
             sheet_index: None,

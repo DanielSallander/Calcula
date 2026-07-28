@@ -416,7 +416,10 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 grids[active_sheet].set_cell(*row, *col, updated.clone());
             }
 
-            let style = styles.get(updated.style_index);
+            // Row/column tiers apply to what is displayed and to the index the
+            // renderer gets; the stored cell keeps its own (inherit) index.
+            let effective_style_index = grid.effective_style_index(*row, *col);
+            let style = styles.get(effective_style_index);
             let display = format_cell_value(&updated.value, style, &locale);
             updated_cells.push(CellData {
                 row: *row,
@@ -424,7 +427,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 display,
                 display_color: None,
                 formula: updated.formula_string().map(|f| format!("={}", f)),
-                style_index: updated.style_index,
+                style_index: effective_style_index,
                 row_span: 1,
                 col_span: 1,
                 sheet_index: None,
@@ -447,7 +450,8 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         grids[active_sheet].set_cell(*row, *col, updated.clone());
                     }
 
-                    let style = styles.get(updated.style_index);
+                    let effective_style_index = grid.effective_style_index(*row, *col);
+                    let style = styles.get(effective_style_index);
                     let display = format_cell_value(&updated.value, style, &locale);
                     updated_cells.push(CellData {
                         row: *row,
@@ -455,7 +459,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         display,
                         display_color: None,
                         formula: updated.formula_string().map(|f| format!("={}", f)),
-                        style_index: updated.style_index,
+                        style_index: effective_style_index,
                         row_span: 1,
                         col_span: 1,
                         sheet_index: None,
@@ -514,7 +518,8 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             // Collect final values for all cells in the group
             for (row, col, _formula) in group {
                 if let Some(cell) = grid.get_cell(*row, *col) {
-                    let style = styles.get(cell.style_index);
+                    let effective_style_index = grid.effective_style_index(*row, *col);
+                    let style = styles.get(effective_style_index);
                     let display = format_cell_value(&cell.value, style, &locale);
                     updated_cells.push(CellData {
                         row: *row,
@@ -522,7 +527,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                         display,
                         display_color: None,
                         formula: cell.formula_string().map(|f| format!("={}", f)),
-                        style_index: cell.style_index,
+                        style_index: effective_style_index,
                         row_span: 1,
                         col_span: 1,
                         sheet_index: None,

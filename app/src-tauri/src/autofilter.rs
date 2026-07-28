@@ -433,7 +433,7 @@ pub struct UniqueValue {
 /// Get the display value of a cell for filtering purposes.
 fn get_cell_filter_value(grid: &Grid, row: u32, col: u32, style_registry: &engine::StyleRegistry, locale: &engine::LocaleSettings) -> String {
     if let Some(cell) = grid.cells.get(&(row, col)) {
-        let style = style_registry.get(cell.style_index);
+        let style = style_registry.get(grid.effective_style_index(row, col));
         format_cell_value(&cell.value, style, locale)
     } else {
         String::new()
@@ -835,8 +835,8 @@ fn should_row_be_visible(
             FilterOn::CellColor => {
                 if let Some(target_color) = &criteria.color {
                     let target_css = target_color.to_lowercase();
-                    let cell_bg_css = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
-                        let style = style_registry.get(cell.style_index);
+                    let cell_bg_css = if let Some(_cell) = grid.cells.get(&(row, abs_col)) {
+                        let style = style_registry.get(grid.effective_style_index(row, abs_col));
                         style.fill.background_color().to_css(theme).to_lowercase()
                     } else {
                         // Empty cell uses default background
@@ -850,8 +850,8 @@ fn should_row_be_visible(
             FilterOn::FontColor => {
                 if let Some(target_color) = &criteria.color {
                     let target_css = target_color.to_lowercase();
-                    let cell_font_css = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
-                        let style = style_registry.get(cell.style_index);
+                    let cell_font_css = if let Some(_cell) = grid.cells.get(&(row, abs_col)) {
+                        let style = style_registry.get(grid.effective_style_index(row, abs_col));
                         style.font.color.to_css(theme).to_lowercase()
                     } else {
                         // Empty cell uses default text color

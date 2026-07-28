@@ -32,13 +32,19 @@ pub(crate) fn get_cell_internal_with_merge(
     // For cells that don't exist but are masters of empty merges, return empty display
     let cell = grid.get_cell(row, col);
 
-    if cell.is_none() && row_span == 1 && col_span == 1 {
-        // No cell and not a merge master - return None
+    // The style that actually applies here, honouring the row/column tiers.
+    // Resolved once and used for BOTH value formatting and the index handed to
+    // the frontend, so callers stay unaware of the tiers.
+    let effective_style_index = grid.effective_style_index(row, col);
+
+    if cell.is_none() && row_span == 1 && col_span == 1 && effective_style_index == 0 {
+        // No cell, not a merge master, and no row/column style gives it an
+        // appearance - return None
         return None;
     }
 
     let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
-        let style = styles.get(c.style_index);
+        let style = styles.get(effective_style_index);
         let result = format_cell_value_with_color(&c.value, style, locale);
         let rt = c
             .rich_text
@@ -50,10 +56,10 @@ pub(crate) fn get_cell_internal_with_merge(
             value: a.value,
         });
         let localized_formula = c.formula_string().map(|f| format!("={}", localize_formula(&f, locale)));
-        (result.text, result.color, localized_formula, c.style_index, rt, acct)
+        (result.text, result.color, localized_formula, effective_style_index, rt, acct)
     } else {
-        // Empty merge master
-        (String::new(), None, None, 0, None, None)
+        // Empty merge master, or an empty cell that a row/column style reaches
+        (String::new(), None, None, effective_style_index, None, None)
     };
 
     Some(CellData {

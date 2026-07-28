@@ -81,7 +81,10 @@ pub fn set_cell_style(
         // Record undo
         undo_stack.record_cell_change(row, col, previous_cell);
 
-        let style = styles.get(style_index);
+        // The cell keeps its OWN index (written above); what is DISPLAYED is the
+        // resolved one, so an index of 0 falls back to the row/column tier.
+        let effective_style_index = grid.effective_style_index(row, col);
+        let style = styles.get(effective_style_index);
         let result = format_cell_value_with_color(&updated_cell.value, style, &locale);
 
         let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
@@ -99,7 +102,7 @@ pub fn set_cell_style(
             display: result.text,
             display_color: result.color,
             formula: updated_cell.formula_string().map(|f| format!("={}", f)),
-            style_index,
+            style_index: effective_style_index,
             row_span,
             col_span,
             sheet_index: None,
@@ -126,13 +129,17 @@ pub fn set_cell_style(
         // Mark workbook as dirty
         if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
+        // Displayed index resolves the row/column tiers; the cell above keeps
+        // the caller's explicit index.
+        let effective_style_index = grid.effective_style_index(row, col);
+
         Some(CellData {
             row,
             col,
             display: String::new(),
             display_color: None,
             formula: None,
-            style_index,
+            style_index: effective_style_index,
             row_span,
             col_span,
             sheet_index: None,
@@ -984,7 +991,8 @@ pub fn set_cell_rich_text(
 
     // Build response
     let cell = grid.get_cell(row, col)?;
-    let style = styles.get(cell.style_index);
+    let effective_style_index = grid.effective_style_index(row, col);
+    let style = styles.get(effective_style_index);
     let result = format_cell_value_with_color(&cell.value, style, &locale);
     let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
         symbol: a.symbol,
@@ -1008,7 +1016,7 @@ pub fn set_cell_rich_text(
         display: result.text,
         display_color: result.color,
         formula: cell.formula_string().map(|f| format!("={}", f)),
-        style_index: cell.style_index,
+        style_index: effective_style_index,
         row_span,
         col_span,
         sheet_index: None,

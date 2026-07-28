@@ -204,8 +204,11 @@ pub fn replace_all(
                     grids[active_sheet].set_cell(row, col, new_cell.clone());
                 }
 
-                // Get display value for frontend
-                let style = styles.get(new_cell.style_index);
+                // Get display value for frontend. Resolved against the active
+                // grid (the one just written) so row/column tiers apply; the
+                // cell itself keeps its own index.
+                let effective_style_index = grid.effective_style_index(row, col);
+                let style = styles.get(effective_style_index);
                 let display = format_cell_value(&new_cell.value, style, &locale);
 
                 // Get merge span info
@@ -222,7 +225,7 @@ pub fn replace_all(
                     display,
                     display_color: None,
                     formula: new_cell.formula_string().map(|f| format!("={}", f)),
-                    style_index: new_cell.style_index,
+                    style_index: effective_style_index,
                     row_span,
                     col_span,
                     sheet_index: None,
@@ -359,7 +362,8 @@ pub fn replace_single(
                 grids[active_sheet].set_cell(row, col, new_cell.clone());
             }
 
-            let style = styles.get(new_cell.style_index);
+            let effective_style_index = grid.effective_style_index(row, col);
+            let style = styles.get(effective_style_index);
             let display = format_cell_value(&new_cell.value, style, &locale);
 
             // Get merge span info
@@ -376,7 +380,7 @@ pub fn replace_single(
                 display,
                 display_color: None,
                 formula: new_cell.formula_string().map(|f| format!("={}", f)),
-                style_index: new_cell.style_index,
+                style_index: effective_style_index,
                 row_span,
                 col_span,
                 sheet_index: None,
