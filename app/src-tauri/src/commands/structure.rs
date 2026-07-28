@@ -1369,6 +1369,14 @@ pub fn insert_rows(
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count });
     undo_stack.commit_transaction();
 
+    // Sheet names: an unqualified reference means the sheet the formula LIVES
+    // on, so the rewrite needs both that and the edited sheet's name.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+    let edited_sheet_name = sheet_names_snapshot
+        .get(active_sheet)
+        .cloned()
+        .unwrap_or_default();
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
@@ -1376,7 +1384,7 @@ pub fn insert_rows(
     
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
-            let updated_formula = shift_formula_row_references(&formula, row, count as i32);
+            let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, count as i32);
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
@@ -1384,6 +1392,19 @@ pub fn insert_rows(
             }
         }
     }
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
+    // in-command loop above only walks this sheet, so without this those
+    // references silently go stale.
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
 
     // Collect all cells that need to be moved (from row onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -1649,13 +1670,21 @@ pub fn insert_columns(
     undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
+    // Sheet names: an unqualified reference means the sheet the formula LIVES
+    // on, so the rewrite needs both that and the edited sheet name.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+    let edited_sheet_name = sheet_names_snapshot
+        .get(active_sheet)
+        .cloned()
+        .unwrap_or_default();
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
     
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
-            let updated_formula = shift_formula_col_references(&formula, col, count as i32);
+            let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, count as i32);
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
@@ -1663,6 +1692,19 @@ pub fn insert_columns(
             }
         }
     }
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
+    // in-command loop above only walks this sheet, so without this those
+    // references silently go stale.
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
 
     // Collect all cells that need to be moved (from col onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -2412,13 +2454,21 @@ pub fn delete_rows(
     }
     
     // Update formula references in remaining cells (shift up = negative delta)
+    // Sheet names: an unqualified reference means the sheet the formula LIVES
+    // on, so the rewrite needs both that and the edited sheet name.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+    let edited_sheet_name = sheet_names_snapshot
+        .get(active_sheet)
+        .cloned()
+        .unwrap_or_default();
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
     
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
-            let updated_formula = shift_formula_row_references(&formula, row, -(count as i32));
+            let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, -(count as i32));
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
@@ -2426,6 +2476,19 @@ pub fn delete_rows(
             }
         }
     }
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
+    // in-command loop above only walks this sheet, so without this those
+    // references silently go stale.
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
 
     // Move remaining cells up
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -2744,13 +2807,21 @@ pub fn delete_columns(
     }
     
     // Update formula references in remaining cells (shift left = negative delta)
+    // Sheet names: an unqualified reference means the sheet the formula LIVES
+    // on, so the rewrite needs both that and the edited sheet name.
+    let sheet_names_snapshot: Vec<String> =
+        state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+    let edited_sheet_name = sheet_names_snapshot
+        .get(active_sheet)
+        .cloned()
+        .unwrap_or_default();
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
     
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
-            let updated_formula = shift_formula_col_references(&formula, col, -(count as i32));
+            let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, -(count as i32));
             if updated_formula != formula {
                 let mut updated_cell = cell.clone();
                 updated_cell.ast = parser::parse(&updated_formula).ok().map(Box::new);
@@ -2758,6 +2829,19 @@ pub fn delete_columns(
             }
         }
     }
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
+    // in-command loop above only walks this sheet, so without this those
+    // references silently go stale.
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
 
     // Move remaining cells left
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -3559,5 +3643,293 @@ mod range_string_shift_tests {
         // Print areas are commonly written absolute; the structural rule
         // ignores `$` (see structural_formula_shift_tests).
         assert_eq!(shift_formula_row_references("$A$1:$D$10", 4, 1), "$A$1:$D$11");
+    }
+}
+
+// ============================================================================
+// SHEET-AWARE FORMULA SHIFTING
+// ============================================================================
+
+/// A cell reference WITH its optional sheet qualifier.
+///
+/// Consuming the qualifier as part of the match is the whole point. The older
+/// `CELL_REF_RE` starts at the column letters, so in `Sheet1!A5` it matches
+/// `Sheet1` as column "Sheet" + row 1 and RENUMBERS THE SHEET NAME — a row
+/// insert rewrote `=Sheet1!A5` to `=Sheet2!A6`, silently re-pointing the
+/// formula at a different sheet. Matching the qualifier first makes that
+/// impossible.
+///
+/// The column is limited to 1-3 letters because Excel's last column is XFD.
+/// That is also what stops a defined name like `Q1` from being mangled: a name
+/// that looks like a cell reference is not a legal name in the first place.
+///
+/// Group 1 is a captured LEADING DELIMITER, re-emitted verbatim. Rust's regex
+/// engine has no lookbehind, and without this guard the pattern still matches a
+/// SUBSTRING: in a bare `Sheet1` it finds `eet1` (column "eet", row 1) and
+/// renumbers it. Requiring a non-identifier character before the reference is
+/// what makes the 1-3 letter column cap actually bite.
+static QUALIFIED_REF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(^|[^A-Za-z0-9_.])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3})(\$?)(\d+)",
+    )
+    .unwrap()
+});
+
+/// Shift the row part of every reference in `formula` that targets `edited_sheet`.
+///
+/// `formula_sheet` is the sheet the formula LIVES on, which is what an
+/// unqualified reference means. A qualified reference names its own target.
+/// References to any other sheet are left exactly as they are — that is the
+/// difference between this and the sheet-blind version, and the reason this can
+/// safely run over every sheet in the workbook rather than only the active one.
+pub(crate) fn shift_formula_rows_sheet_aware(
+    formula: &str,
+    formula_sheet: &str,
+    edited_sheet: &str,
+    from_row: u32,
+    delta: i32,
+) -> String {
+    QUALIFIED_REF_RE
+        .replace_all(formula, |caps: &regex::Captures| {
+            let lead = &caps[1];
+            let quoted = caps.get(2).map(|m| m.as_str().to_string());
+            let bare = caps.get(3).map(|m| m.as_str().to_string());
+            let qualifier = quoted.clone().or(bare.clone());
+            let col_abs = &caps[4];
+            let col_letters = &caps[5];
+            let row_abs = &caps[6];
+            let row_num: u32 = caps[7].parse().unwrap_or(0);
+
+            let target = qualifier.as_deref().unwrap_or(formula_sheet);
+            let applies = target.eq_ignore_ascii_case(edited_sheet);
+
+            // Absolute markers do not prevent a STRUCTURAL shift (see
+            // structural_formula_shift_tests) but are preserved in the output.
+            let new_row = if applies && row_num > from_row {
+                ((row_num as i32) + delta).max(1) as u32
+            } else {
+                row_num
+            };
+
+            let prefix = match (&quoted, &bare) {
+                (Some(q), _) => format!("'{}'!", q),
+                (None, Some(b)) => format!("{}!", b),
+                _ => String::new(),
+            };
+            format!("{}{}{}{}{}{}", lead, prefix, col_abs, col_letters, row_abs, new_row)
+        })
+        .to_string()
+}
+
+/// Column twin of [`shift_formula_rows_sheet_aware`].
+pub(crate) fn shift_formula_cols_sheet_aware(
+    formula: &str,
+    formula_sheet: &str,
+    edited_sheet: &str,
+    from_col: u32,
+    delta: i32,
+) -> String {
+    fn col_to_index(col: &str) -> u32 {
+        let mut index: u32 = 0;
+        for ch in col.to_uppercase().chars() {
+            index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+        }
+        index.saturating_sub(1)
+    }
+    fn index_to_col(mut index: u32) -> String {
+        let mut out = String::new();
+        index += 1;
+        while index > 0 {
+            let rem = ((index - 1) % 26) as u8;
+            out.insert(0, (b'A' + rem) as char);
+            index = (index - 1) / 26;
+        }
+        out
+    }
+
+    QUALIFIED_REF_RE
+        .replace_all(formula, |caps: &regex::Captures| {
+            let lead = &caps[1];
+            let quoted = caps.get(2).map(|m| m.as_str().to_string());
+            let bare = caps.get(3).map(|m| m.as_str().to_string());
+            let qualifier = quoted.clone().or(bare.clone());
+            let col_abs = &caps[4];
+            let col_letters = &caps[5];
+            let row_abs = &caps[6];
+            let row_num = &caps[7];
+
+            let target = qualifier.as_deref().unwrap_or(formula_sheet);
+            let applies = target.eq_ignore_ascii_case(edited_sheet);
+
+            let col_index = col_to_index(col_letters);
+            let new_col = if applies && col_index >= from_col {
+                index_to_col(((col_index as i32) + delta).max(0) as u32)
+            } else {
+                col_letters.to_string()
+            };
+
+            let prefix = match (&quoted, &bare) {
+                (Some(q), _) => format!("'{}'!", q),
+                (None, Some(b)) => format!("{}!", b),
+                _ => String::new(),
+            };
+            format!("{}{}{}{}{}{}", lead, prefix, col_abs, new_col, row_abs, row_num)
+        })
+        .to_string()
+}
+
+#[cfg(test)]
+mod sheet_aware_shift_tests {
+    use super::{shift_formula_cols_sheet_aware, shift_formula_rows_sheet_aware};
+
+    // REGRESSION: the sheet-blind shift matched "Sheet1" as column "Sheet" plus
+    // row 1 and renumbered it, so inserting a row rewrote =Sheet1!A5 to
+    // =Sheet2!A6 — silently re-pointing the formula at a DIFFERENT SHEET.
+    #[test]
+    fn a_sheet_qualifier_is_never_renumbered() {
+        let out = shift_formula_rows_sheet_aware("=Sheet1!A5", "Sheet2", "Sheet1", 0, 1);
+        assert!(out.starts_with("=Sheet1!"), "sheet name must survive: {out}");
+        assert_eq!(out, "=Sheet1!A6");
+    }
+
+    #[test]
+    fn a_reference_to_another_sheet_is_left_alone() {
+        // Editing Sheet1 must not touch a reference aimed at Sheet2.
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=Sheet2!A5", "Sheet1", "Sheet1", 0, 1),
+            "=Sheet2!A5"
+        );
+    }
+
+    #[test]
+    fn an_unqualified_reference_belongs_to_the_formulas_own_sheet() {
+        // On the edited sheet it shifts...
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=A5", "Sheet1", "Sheet1", 0, 1),
+            "=A6"
+        );
+        // ...on a different sheet it does not, because it means that sheet's A5.
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=A5", "Sheet2", "Sheet1", 0, 1),
+            "=A5"
+        );
+    }
+
+    #[test]
+    fn a_cross_sheet_reference_updates_when_its_target_is_edited() {
+        // The bug this whole change is about: a formula on Sheet2 pointing at
+        // Sheet1 must follow Sheet1's rows.
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=Sheet1!$A$5", "Sheet2", "Sheet1", 0, 1),
+            "=Sheet1!$A$6"
+        );
+    }
+
+    #[test]
+    fn quoted_sheet_names_round_trip() {
+        assert_eq!(
+            shift_formula_rows_sheet_aware("='My Sheet'!A5", "Other", "My Sheet", 0, 1),
+            "='My Sheet'!A6"
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_valid_column_is_not_treated_as_a_reference() {
+        // "Sheet" is 5 letters; Excel's last column is XFD, so the column part
+        // is capped at 3. This is what keeps defined names from being mangled.
+        let out = shift_formula_rows_sheet_aware("=Sheet1", "Sheet1", "Sheet1", 0, 1);
+        assert_eq!(out, "=Sheet1", "a bare name must not be renumbered");
+    }
+
+    #[test]
+    fn columns_shift_only_for_the_edited_sheet() {
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=Sheet1!$C$5", "Sheet2", "Sheet1", 1, 1),
+            "=Sheet1!$D$5"
+        );
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=Sheet2!$C$5", "Sheet2", "Sheet1", 1, 1),
+            "=Sheet2!$C$5"
+        );
+    }
+}
+
+/// Rewrite formulas on EVERY OTHER SHEET that reference the edited sheet.
+///
+/// The in-command rewrite only ever walked the active sheet's cells, so a
+/// formula on Sheet2 reading `Sheet1!A5` kept pointing at the old row after a
+/// Sheet1 insert — ordinary formulas, silently reading the wrong data, in any
+/// multi-sheet workbook.
+///
+/// Running the OLD sheet-blind shift over other sheets would have been worse
+/// than the bug: it would also have moved each sheet's own local references,
+/// and it renumbered sheet NAMES (`Sheet1!A5` -> `Sheet2!A6`). This uses the
+/// sheet-aware form, which touches only references whose target is the edited
+/// sheet.
+///
+/// Records one `obj_cross_sheet_formulas` entry per affected sheet; the active
+/// sheet is already covered by the caller's `GridSnapshot`.
+fn shift_cross_sheet_formulas(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    grids: &mut [engine::Grid],
+    active_sheet: usize,
+    edited_sheet_name: &str,
+    sheet_names: &[String],
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::StructuralEdit as SE;
+
+    for (idx, grid) in grids.iter_mut().enumerate() {
+        if idx == active_sheet {
+            continue; // Handled in-command against `state.grid`.
+        }
+        let Some(this_sheet) = sheet_names.get(idx) else { continue };
+
+        let candidates: Vec<((u32, u32), engine::Cell)> = grid
+            .cells
+            .iter()
+            .filter(|(_, c)| c.ast.is_some())
+            .map(|(&pos, c)| (pos, c.clone()))
+            .collect();
+
+        let mut previous: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
+        for ((r, c), cell) in candidates {
+            let Some(formula) = cell.formula_string() else { continue };
+            let updated = match edit {
+                SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, count as i32,
+                ),
+                SE::RowDelete { at, count } => shift_formula_rows_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, -(count as i32),
+                ),
+                SE::ColInsert { at, count } => shift_formula_cols_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, count as i32,
+                ),
+                SE::ColDelete { at, count } => shift_formula_cols_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, -(count as i32),
+                ),
+            };
+            if updated == formula {
+                continue;
+            }
+            // Only replace the AST when the rewrite still parses — a formula we
+            // cannot re-parse is left exactly as it was rather than being
+            // silently blanked.
+            if let Ok(ast) = parser::parse(&updated) {
+                previous.push(((r, c), Some(cell.clone())));
+                let mut next = cell;
+                next.ast = Some(Box::new(ast));
+                grid.set_cell(r, c, next);
+            }
+        }
+
+        if !previous.is_empty() {
+            undo_stack.record_custom_restore(
+                "obj_cross_sheet_formulas".to_string(),
+                crate::undo_commands::cross_sheet_formulas_snapshot_bytes(idx, previous),
+                "Shift cross-sheet formulas",
+            );
+        }
     }
 }

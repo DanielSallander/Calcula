@@ -677,6 +677,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
         "obj_coord_stores", "obj_named_ranges", "obj_range_strings",
+        "obj_cross_sheet_formulas",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2374,6 +2375,27 @@ fn apply_object_swap_restore(
                 previous: current,
             });
         }
+        "obj_cross_sheet_formulas" => {
+            let snap: CrossSheetFormulasObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_cross_sheet_formulas snapshot: {}", e); return; }
+            };
+            let mut grids = state.grids.lock().unwrap();
+            let mut current: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
+            if let Some(grid) = grids.get_mut(snap.sheet_index) {
+                for ((row, col), restore_to) in snap.previous {
+                    current.push(((row, col), grid.get_cell(row, col).cloned()));
+                    match restore_to {
+                        Some(cell) => grid.set_cell(row, col, cell),
+                        None => grid.clear_cell(row, col),
+                    }
+                }
+            }
+            push_obj_inverse(inverse_transaction, kind, &CrossSheetFormulasObjSnapshot {
+                sheet_index: snap.sheet_index,
+                previous: current,
+            });
+        }
         "obj_range_strings" => {
             let snap: RangeStringsObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2832,6 +2854,7 @@ mod restore_registry_tests {
             ("obj_coord_stores", true, CustomRestoreKind::Objects),
             ("obj_named_ranges", true, CustomRestoreKind::Objects),
             ("obj_range_strings", true, CustomRestoreKind::Objects),
+            ("obj_cross_sheet_formulas", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -2946,5 +2969,27 @@ pub(crate) fn range_strings_snapshot_bytes(
     scroll_area: Option<String>,
 ) -> Vec<u8> {
     serde_json::to_vec(&RangeStringsObjSnapshot { sheet_index, print_area, scroll_area })
+        .unwrap_or_default()
+}
+
+/// Snapshot for the "obj_cross_sheet_formulas" CustomRestore — the cells on a
+/// NON-ACTIVE sheet whose formulas were rewritten because the edited sheet's
+/// rows/columns moved under them.
+///
+/// The active sheet is already covered by `GridSnapshot`; this exists because
+/// that snapshot only captures one sheet, and a structural edit now rewrites
+/// references on every sheet that points at the edited one.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CrossSheetFormulasObjSnapshot {
+    sheet_index: usize,
+    previous: Vec<((u32, u32), Option<engine::Cell>)>,
+}
+
+/// Serialized "obj_cross_sheet_formulas" snapshot bytes.
+pub(crate) fn cross_sheet_formulas_snapshot_bytes(
+    sheet_index: usize,
+    previous: Vec<((u32, u32), Option<engine::Cell>)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&CrossSheetFormulasObjSnapshot { sheet_index, previous })
         .unwrap_or_default()
 }
