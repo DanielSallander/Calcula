@@ -77,6 +77,13 @@ pub enum AuditEvent {
     /// bi.query, bi.sql, storage, ui.html, formula.udf, …) — success or denial.
     /// The specific capability + outcome live in the entry's `extra`.
     CapabilityCall,
+    /// Sheet or workbook protection was turned on, turned off, or reconfigured.
+    ///
+    /// Protection is what a workbook author relies on to state "these cells are
+    /// not yours to change". A change to that boundary is exactly the kind of
+    /// event the Transparency pillar exists for — without it, a user reopening a
+    /// shared workbook has no way to learn that a script unprotected a sheet.
+    ProtectionChanged,
 }
 
 impl AuditEvent {
@@ -106,6 +113,10 @@ impl AuditEvent {
                 | AuditEvent::WritebackSubmitted
                 | AuditEvent::WritebackReviewed
                 | AuditEvent::WritebackInvalidated
+                // Protection changes are a security boundary moving; recording
+                // them only when distribution auditing happens to be on would
+                // make the trail useless exactly when it matters.
+                | AuditEvent::ProtectionChanged
         )
     }
 }

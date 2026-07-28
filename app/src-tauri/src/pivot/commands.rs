@@ -186,6 +186,16 @@ pub fn create_pivot_inner(
         request.destination_sheet
     );
 
+    // allowPivotTables option gate, on the ACTIVE sheet (the pivot is created
+    // from the current selection context; the destination sheet is resolved
+    // below and is gated by the per-cell write gates that follow).
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_action(
+            &state, active_sheet, "pivotTables", "create or change pivot tables",
+        )?;
+    }
+
     // Parse ranges
     let (source_start, mut source_end) = parse_range(&request.source_range)?;
     let destination = parse_cell_ref(&request.destination_cell)?;

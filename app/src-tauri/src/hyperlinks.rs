@@ -282,6 +282,12 @@ pub fn add_hyperlink(
     params: AddHyperlinkParams,
 ) -> HyperlinkResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowInsertHyperlinks option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+    ) {
+        return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
+    }
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
     // Create the hyperlink based on type
@@ -342,6 +348,12 @@ pub fn update_hyperlink(
     params: UpdateHyperlinkParams,
 ) -> HyperlinkResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowInsertHyperlinks option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+    ) {
+        return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
+    }
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
@@ -383,6 +395,12 @@ pub fn remove_hyperlink(
     col: u32,
 ) -> HyperlinkResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowInsertHyperlinks option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+    ) {
+        return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
+    }
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
@@ -499,6 +517,10 @@ pub fn clear_hyperlinks_in_range(
     end_col: u32,
 ) -> u32 {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // NOTE: not option-gated. This returns a bare count with no error channel,
+    // so a refusal would be an indistinguishable 0 — a silent no-op is worse
+    // than no gate. Clearing hyperlinks still goes through the per-cell write
+    // gates; the allowInsertHyperlinks flag is enforced on add/update/remove.
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
     let min_row = start_row.min(end_row);
@@ -536,6 +558,12 @@ pub fn move_hyperlink(
     to_col: u32,
 ) -> HyperlinkResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowInsertHyperlinks option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+    ) {
+        return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
+    }
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
     let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {

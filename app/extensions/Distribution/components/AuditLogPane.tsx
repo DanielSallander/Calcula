@@ -18,7 +18,7 @@ import {
   type AuditEntry,
 } from "@api/distribution";
 
-type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "other";
+type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "other";
 
 /** Event id (snake_case, mirrors Rust AuditEvent) -> label + category. */
 const EVENT_META: Record<string, { label: string; category: Category }> = {
@@ -41,6 +41,10 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   // Broker-mediated capability use (net.fetch / bi.query / bi.sql / storage / …),
   // success or denial — always recorded; the capability + outcome are in `extra`.
   capability_call: { label: "Capability call", category: "capability" },
+  // Sheet/workbook protection turned on, off, or reconfigured — always
+  // recorded. A security boundary moving is exactly what a user needs to be
+  // able to find later.
+  protection_changed: { label: "Protection changed", category: "protection" },
 };
 
 const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
@@ -48,6 +52,7 @@ const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
   override: { bg: "#fef7e0", fg: "#b06000" },
   writeback: { bg: "#e6f4ea", fg: "#137333" },
   publish: { bg: "#f3e8fd", fg: "#8430ce" },
+  protection: { bg: "#fce8e6", fg: "#c5221f" },
   script: { bg: "#fce8e6", fg: "#c5221f" },
   capability: { bg: "#e8eaed", fg: "#3c4043" },
   other: { bg: "#f1f3f4", fg: "#5f6368" },

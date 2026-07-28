@@ -973,6 +973,12 @@ pub fn apply_auto_filter(
     params: ApplyAutoFilterParams,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -1057,6 +1063,12 @@ pub fn clear_column_criteria(
     column_index: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -1140,6 +1152,12 @@ pub fn reapply_auto_filter(
     state: State<AppState>,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -1395,6 +1413,12 @@ pub fn set_column_filter_values(
     include_blanks: bool,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -1462,6 +1486,12 @@ pub fn set_column_custom_filter(
     operator: Option<FilterOperator>,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -1524,6 +1554,12 @@ pub fn set_column_top_bottom_filter(
     value: u32,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -2149,6 +2185,12 @@ pub fn set_column_dynamic_filter(
     dynamic_criteria: DynamicFilterCriteria,
 ) -> AutoFilterResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // allowAutoFilter option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, active_sheet, "autoFilter", "use AutoFilter",
+    ) {
+        return AutoFilterResult { success: false, auto_filter: None, error: Some(e), hidden_rows: Vec::new(), visible_rows: Vec::new() };
+    }
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();

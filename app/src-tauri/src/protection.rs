@@ -795,6 +795,35 @@ fn record_protection_undo(
         description,
     );
     crate::persistence::mark_workbook_modified(file_state);
+    record_protection_audit(state, description, Some(sheet_index));
+}
+
+/// Record a protection change in the per-workbook audit trail.
+///
+/// Every mutating protection command funnels through here (via
+/// `record_protection_undo` / `record_workbook_protection_undo`), so the trail
+/// cannot miss one by omission at a call site. `ProtectionChanged` is
+/// always-recorded: a security boundary moving is precisely what a user needs to
+/// be able to see later, and gating it on distribution auditing would switch it
+/// off in the cases that matter most.
+fn record_protection_audit(state: &AppState, description: &str, sheet_index: Option<usize>) {
+    use serde_json::json;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut extra: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    if let Some(idx) = sheet_index {
+        extra.insert("sheet".into(), json!(idx));
+    }
+    extra.insert("scope".into(), json!(if sheet_index.is_some() { "sheet" } else { "workbook" }));
+    if let Ok(mut audit) = state.audit_log.lock() {
+        audit.record_with_extra(
+            calp::audit::AuditEvent::ProtectionChanged,
+            description,
+            "local",
+            &now,
+            extra,
+        );
+    }
 }
 
 /// Protect the current sheet
@@ -1458,6 +1487,7 @@ fn record_workbook_protection_undo(
 ) {
     crate::undo_commands::record_workbook_protection_undo(state, previous, description);
     crate::persistence::mark_workbook_modified(file_state);
+    record_protection_audit(state, description, None);
 }
 
 /// Protect the workbook structure
