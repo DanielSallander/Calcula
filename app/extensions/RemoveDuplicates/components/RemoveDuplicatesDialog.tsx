@@ -199,7 +199,13 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
   const [region, setRegion] = useState<DataRegion | null>(null);
   const [headerNames, setHeaderNames] = useState<string[]>([]);
-  const [summary, setSummary] = useState<{ removed: number; remaining: number } | null>(null);
+  // `error` carries the backend's reason. remove_duplicates reports refusals
+  // (e.g. a protected sheet) through result.error rather than a rejected
+  // promise, and throwing that text away left users with a bare
+  // "An error occurred" for a completely actionable problem.
+  const [summary, setSummary] = useState<
+    { removed: number; remaining: number; error?: string } | null
+  >(null);
 
   // Load data region and column headers on mount
   useEffect(() => {
@@ -338,8 +344,8 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
         remaining: result.uniqueRemaining,
       });
     } else {
-      // Show error in summary
-      setSummary({ removed: -1, remaining: -1 });
+      // Show the backend's reason, not a generic message.
+      setSummary({ removed: -1, remaining: -1, error: result.error ?? undefined });
     }
   }, [region, columns, hasHeaders]);
 
@@ -369,7 +375,7 @@ export function RemoveDuplicatesDialog(props: DialogProps): React.ReactElement |
           <div>
             {summary.removed >= 0
               ? `${summary.removed} duplicate values found and removed; ${summary.remaining} unique values remain.`
-              : "An error occurred while removing duplicates."}
+              : summary.error || "An error occurred while removing duplicates."}
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button

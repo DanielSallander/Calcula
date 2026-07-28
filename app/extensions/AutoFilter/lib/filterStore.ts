@@ -39,6 +39,7 @@ import {
   setColumnCustomFilter,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
 } from "@api/lib";
 import { FilterEvents } from "./filterEvents";
 
@@ -322,9 +323,18 @@ export async function sortByColumn(absoluteCol: number, ascending: boolean): Pro
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       // Reapply filter since row order changed
       await reapplyFilter();
+    } else if (result.error) {
+      alert(result.error);
     }
   } catch (err) {
+    // sort_range now rejects when the range is protected, so this is a routine
+    // outcome rather than an internal error. Cancel the transaction (the commit
+    // above is skipped on throw, leaving it open for later edits to join) and
+    // tell the user why the click did nothing.
+    await cancelUndoTransaction().catch(() => {});
     console.error("[AutoFilter] Sort failed:", err);
+    const msg = typeof err === "string" ? err : (err as Error)?.message;
+    if (msg) alert(msg);
   }
 }
 
@@ -358,9 +368,15 @@ export async function sortByColor(
     if (result.success) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       await reapplyFilter();
+    } else if (result.error) {
+      alert(result.error);
     }
   } catch (err) {
+    // Same as sortByColumn: a protected range now rejects here.
+    await cancelUndoTransaction().catch(() => {});
     console.error("[AutoFilter] Sort by color failed:", err);
+    const msg = typeof err === "string" ? err : (err as Error)?.message;
+    if (msg) alert(msg);
   }
 }
 

@@ -224,8 +224,12 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         fill: buildFillParam(store),
       });
 
-      // Apply protection
-      await setCellProtection({
+      // Apply protection. Sent on every OK, so the common case is a no-op that
+      // the backend accepts even on a protected sheet; only a REAL change is
+      // refused there. Report that refusal rather than closing as if the whole
+      // dialog had applied — the formatting above did apply, so the user needs
+      // to know which half did not.
+      const protResult = await setCellProtection({
         startRow,
         startCol,
         endRow,
@@ -233,6 +237,11 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         locked: store.locked,
         formulaHidden: store.formulaHidden,
       });
+      if (!protResult.success && protResult.error) {
+        alert(
+          `Formatting was applied, but the cell locking change was not:\n\n${protResult.error}`
+        );
+      }
 
       // Emit cell change events for each updated cell
       for (const cell of result.cells) {

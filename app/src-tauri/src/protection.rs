@@ -338,29 +338,38 @@ pub struct SetCellProtectionParams {
 // PASSWORD HASHING
 // ============================================================================
 
-/// Simple hash function for password (in production, use bcrypt or argon2)
+// Argon2id, via the same crate that backs .cala whole-file encryption. This
+// used to be `DefaultHasher` (SipHash-1-3, 64-bit, not memory-hard) over a salt
+// built from `SystemTime::now().as_nanos()` — the file's own timestamps narrowed
+// the salt to a guessable range, and the digest itself was brute-forceable at
+// enormous rates. The code's own comment said "in production, use bcrypt or
+// argon2"; argon2 was already a dependency one crate over.
+//
+// See `calcula_crypto::hash_verifier` for why these parameters are deliberately
+// lighter than the file-encryption KDF.
+
+/// Hash a protection password under `salt`.
+///
+/// Returns an empty string if hashing fails, which `verify_password` can never
+/// match — a password that could not be hashed must not become a password that
+/// anything satisfies.
 fn hash_password(password: &str, salt: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    password.hash(&mut hasher);
-    salt.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    calcula_crypto::hash_verifier(password, salt).unwrap_or_default()
 }
 
-/// Generate a random salt
+/// Generate a cryptographically random salt.
 fn generate_salt() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:016x}", duration.as_nanos())
+    calcula_crypto::generate_verifier_salt()
 }
 
-/// Verify a password against stored hash
+/// Verify a password against a stored hash.
 fn verify_password(password: &str, salt: &str, hash: &str) -> bool {
-    hash_password(password, salt) == hash
+    // An empty stored hash means hashing failed when the password was set;
+    // refuse rather than accept anything against it.
+    if hash.is_empty() {
+        return false;
+    }
+    calcula_crypto::verify_verifier(password, salt, hash)
 }
 
 // ============================================================================

@@ -122,9 +122,19 @@ async function executeFlashFill(): Promise<void> {
     return;
   }
 
-  // Commit as undoable batch
+  // Commit as undoable batch. The batch can now be REFUSED (sheet protection),
+  // and neither call site awaits this function, so an unguarded throw would
+  // surface as an unhandled rejection AND leave the transaction open for later
+  // edits to join.
   await beginUndoTransaction("Flash Fill");
-  await updateCellsBatch(updates);
+  try {
+    await updateCellsBatch(updates);
+  } catch (err) {
+    await cancelUndoTransaction().catch(() => {});
+    const msg = typeof err === "string" ? err : (err as Error)?.message || String(err);
+    showToast(msg, { variant: "error" });
+    return;
+  }
   await commitUndoTransaction();
 
   emitAppEvent(AppEvents.GRID_REFRESH);

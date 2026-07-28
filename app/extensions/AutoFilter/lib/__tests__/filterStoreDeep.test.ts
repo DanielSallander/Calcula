@@ -57,6 +57,8 @@ vi.mock("@api/lib", () => ({
   setColumnCustomFilter: (...args: unknown[]) => mockSetColumnCustomFilter(...args),
   beginUndoTransaction: vi.fn().mockResolvedValue(undefined),
   commitUndoTransaction: vi.fn().mockResolvedValue(undefined),
+  // Sort failures now cancel rather than leaking an open transaction.
+  cancelUndoTransaction: vi.fn().mockResolvedValue(undefined),
 }));
 
 import {

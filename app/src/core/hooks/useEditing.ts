@@ -1499,7 +1499,17 @@ export function useEditing(): UseEditingReturn {
             await updateCellOnSheets(otherSheets, editing.row, editing.col, valueToCommit);
             console.log("[commitEdit] Replicated to grouped sheets:", otherSheets);
           } catch (err) {
+            // update_cell_on_sheets refuses the WHOLE call if any grouped sheet
+            // protects this cell — deliberately, so a group edit never applies
+            // to part of the group. The active sheet has already been written
+            // at this point, so staying silent would leave the group quietly
+            // divergent, which is the one outcome grouping exists to prevent.
             console.error("[commitEdit] Failed to replicate to grouped sheets:", err);
+            const msg = typeof err === "string" ? err : (err as Error)?.message;
+            alert(
+              `The edit was applied to this sheet but NOT to the other grouped sheets.` +
+                (msg ? `\n\n${msg}` : "")
+            );
           }
         }
       }

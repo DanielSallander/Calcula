@@ -25,6 +25,8 @@ parser = { path = "../../core/parser" }
 persistence = { path = "../../core/persistence" }
 identity = { path = "../../core/identity" }
 calcula-format = { path = "../../core/calcula-format" }
+# Argon2id verifiers for sheet/workbook protection passwords (protection.rs).
+calcula-crypto = { path = "../../core/calcula-crypto" }
 calp = { path = "../../core/calp" }
 pivot-engine = { path = "../../core/pivot-engine" }
 script-engine = { path = "../../core/script-engine" }

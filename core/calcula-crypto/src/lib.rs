@@ -203,6 +203,74 @@ pub fn decrypt(container: &[u8], passphrase: &[u8]) -> Result<Vec<u8>, CryptoErr
         .map_err(|_| CryptoError::Auth)
 }
 
+// ============================================================================
+// Password VERIFIERS (not key derivation)
+// ============================================================================
+//
+// For secrets that gate an action rather than unlock ciphertext — sheet and
+// workbook protection passwords. Nothing is encrypted under these, so the stored
+// value only ever has to answer "did the user type the right thing?".
+//
+// They still deserve a real KDF. The previous implementation hashed with
+// `DefaultHasher` (SipHash-1-3, 64 bits) over a salt built from the wall clock
+// in nanoseconds: brute-forceable at enormous rates, and the salt was guessable
+// from the file's own timestamps, so one precomputation covered every workbook.
+//
+// Deliberately CHEAPER than `derive_key` above: `t_cost = 1` and 19 MiB instead
+// of 64 MiB. A protection password is a speed bump against casual tampering,
+// not a confidentiality boundary (an attacker holding the file can read every
+// cell regardless — protection is not encryption), and these run synchronously
+// on the UI thread. The floor still puts a GPU attacker in a completely
+// different cost regime than a 64-bit non-memory-hard hash.
+
+const VERIFIER_M_COST: u32 = MIN_M_COST; // 19 MiB
+const VERIFIER_T_COST: u32 = 1;
+const VERIFIER_LEN: usize = 32;
+
+/// Fresh, cryptographically random salt, hex-encoded.
+pub fn generate_verifier_salt() -> String {
+    let mut salt = [0u8; SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    salt.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Argon2id verifier for `secret` under `salt` (as produced by
+/// [`generate_verifier_salt`]), hex-encoded. Returns `None` if the parameters
+/// are rejected, which callers should treat as "cannot set a password".
+pub fn hash_verifier(secret: &str, salt: &str) -> Option<String> {
+    let params = argon2::Params::new(
+        VERIFIER_M_COST,
+        VERIFIER_T_COST,
+        DEF_P,
+        Some(VERIFIER_LEN),
+    )
+    .ok()?;
+    let argon2 =
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut out = [0u8; VERIFIER_LEN];
+    argon2
+        .hash_password_into(secret.as_bytes(), salt.as_bytes(), &mut out)
+        .ok()?;
+    Some(out.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+/// Constant-time-ish comparison of a candidate secret against a stored
+/// verifier. Compares the full derived bytes without early exit so a caller
+/// cannot learn the prefix from timing.
+pub fn verify_verifier(secret: &str, salt: &str, stored: &str) -> bool {
+    let Some(candidate) = hash_verifier(secret, salt) else {
+        return false;
+    };
+    if candidate.len() != stored.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (a, b) in candidate.bytes().zip(stored.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +366,52 @@ mod tests {
         // ...and both still decrypt.
         assert_eq!(decrypt(&a, PW).unwrap(), b"same plaintext");
         assert_eq!(decrypt(&b, PW).unwrap(), b"same plaintext");
+    }
+
+    // --- Password verifiers (sheet/workbook protection) ---
+
+    #[test]
+    fn verifier_accepts_the_right_secret_and_rejects_others() {
+        let salt = generate_verifier_salt();
+        let stored = hash_verifier("hunter2", &salt).expect("hash");
+        assert!(verify_verifier("hunter2", &salt, &stored));
+        assert!(!verify_verifier("hunter3", &salt, &stored));
+        assert!(!verify_verifier("", &salt, &stored));
+    }
+
+    #[test]
+    fn verifier_salts_are_random_not_clock_derived() {
+        // The old salt was SystemTime::now().as_nanos(), so two salts taken
+        // back to back shared a long prefix and were guessable from the file's
+        // timestamps. These must be independent.
+        let a = generate_verifier_salt();
+        let b = generate_verifier_salt();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), SALT_LEN * 2, "hex-encoded 16 bytes");
+        assert_ne!(a[..8], b[..8], "salts share a leading run");
+    }
+
+    #[test]
+    fn the_same_secret_under_different_salts_gives_different_verifiers() {
+        // Guards against a precomputed table covering every workbook.
+        let a = hash_verifier("hunter2", &generate_verifier_salt()).unwrap();
+        let b = hash_verifier("hunter2", &generate_verifier_salt()).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn verifier_is_deterministic_for_a_fixed_salt() {
+        let salt = generate_verifier_salt();
+        assert_eq!(hash_verifier("pw", &salt), hash_verifier("pw", &salt));
+    }
+
+    #[test]
+    fn verify_rejects_a_malformed_or_empty_stored_value() {
+        let salt = generate_verifier_salt();
+        assert!(!verify_verifier("pw", &salt, ""));
+        assert!(!verify_verifier("pw", &salt, "deadbeef"));
+        // A stored value of the right length but wrong content still fails.
+        let wrong = "0".repeat(VERIFIER_LEN * 2);
+        assert!(!verify_verifier("pw", &salt, &wrong));
     }
 }

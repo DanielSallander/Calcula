@@ -118,6 +118,7 @@ dependencies = [
  "arrow",
  "axum",
  "bi-engine",
+ "calcula-crypto",
  "calcula-format",
  "calp",
  "chrono",

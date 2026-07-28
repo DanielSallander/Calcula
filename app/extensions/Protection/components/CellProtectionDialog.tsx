@@ -136,7 +136,12 @@ export function CellProtectionDialog(props: DialogProps) {
     setIsSubmitting(true);
 
     try {
-      await setCellProtection({
+      // set_cell_protection returns ProtectionResult and never throws, so a
+      // refusal (changing cell locking while the sheet is protected — Excel's
+      // rule, and what stops a script silently unlocking a protected sheet)
+      // resolves normally. Closing without checking `success` told the user the
+      // change had been applied when it had not.
+      const result = await setCellProtection({
         startRow: Math.min(startRow, endRow),
         startCol: Math.min(startCol, endCol),
         endRow: Math.max(startRow, endRow),
@@ -144,9 +149,15 @@ export function CellProtectionDialog(props: DialogProps) {
         locked,
         formulaHidden,
       });
+      if (!result.success) {
+        alert(result.error || "Could not change cell protection.");
+        return;
+      }
       onClose();
     } catch (err) {
       console.error("[Protection] Failed to set cell protection:", err);
+      const msg = typeof err === "string" ? err : (err as Error)?.message;
+      if (msg) alert(msg);
     } finally {
       setIsSubmitting(false);
     }
