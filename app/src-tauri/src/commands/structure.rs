@@ -1325,6 +1325,14 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // Outline groups, scenario cells, computed-property keys and
+    // advanced-filter hidden rows are position-keyed too.
+    shift_misc_coordinate_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1568,6 +1576,14 @@ pub fn insert_columns(
     shift_style_tiers(
         &mut grid,
         &mut grids,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // Outline groups, scenario cells, computed-property keys and
+    // advanced-filter hidden rows are position-keyed too.
+    shift_misc_coordinate_stores(
+        &state,
+        &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColInsert { at: col, count },
     );
@@ -2283,6 +2299,14 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // Outline groups, scenario cells, computed-property keys and
+    // advanced-filter hidden rows are position-keyed too.
+    shift_misc_coordinate_stores(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2579,6 +2603,14 @@ pub fn delete_columns(
     shift_style_tiers(
         &mut grid,
         &mut grids,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // Outline groups, scenario cells, computed-property keys and
+    // advanced-filter hidden rows are position-keyed too.
+    shift_misc_coordinate_stores(
+        &state,
+        &mut undo_stack,
         active_sheet,
         calp::writeback::StructuralEdit::ColDelete { at: col, count },
     );
@@ -3007,4 +3039,169 @@ pub fn relocate_cell_references(
     }
 
     Ok(result)
+}
+/// Shift the per-sheet stores that are keyed by row/column POSITION but live
+/// outside the grid: outline groups, scenario changing-cells, computed-property
+/// row/column/cell keys, and advanced-filter hidden rows.
+///
+/// These were the last coordinate-anchored stores a structural edit ignored.
+/// Each drifts in its own visible way: an outline bracket ends up around the
+/// wrong rows, a scenario writes its value into a neighbouring cell, a computed
+/// column property decorates the wrong column, and hidden rows hide the wrong
+/// data after an insert.
+///
+/// Records ONE `obj_coord_stores` undo entry covering all four, since a single
+/// edit shifts them together and they should undo together.
+fn shift_misc_coordinate_stores(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::{interval_delete, interval_insert, StructuralEdit as SE};
+    use crate::commands::coord_shift::shift_cell;
+
+    let row_edit = matches!(edit, SE::RowInsert { .. } | SE::RowDelete { .. });
+    let (at, count, inserting) = match edit {
+        SE::RowInsert { at, count } | SE::ColInsert { at, count } => (at, count, true),
+        SE::RowDelete { at, count } | SE::ColDelete { at, count } => (at, count, false),
+    };
+    // Shift a single index, or None when the row/column itself was deleted.
+    let shift_index = |i: u32| -> Option<u32> {
+        if inserting {
+            Some(interval_insert(i, i, at, count).0)
+        } else {
+            interval_delete(i, i, at, count).map(|(s, _)| s)
+        }
+    };
+
+    let mut changed = false;
+
+    // --- Outline groups: row groups move on row edits, column groups on column
+    //     edits. A group whose whole span is deleted goes with it. ---
+    let prev_outline = {
+        let mut store = match state.outlines.lock() { Ok(s) => s, Err(_) => return };
+        let before = store.get(&sheet_index).cloned();
+        if let Some(outline) = store.get_mut(&sheet_index) {
+            if row_edit {
+                outline.row_groups.retain_mut(|g| {
+                    let moved = if inserting {
+                        Some(interval_insert(g.start_row, g.end_row, at, count))
+                    } else {
+                        interval_delete(g.start_row, g.end_row, at, count)
+                    };
+                    match moved {
+                        Some((s, e)) => {
+                            if (s, e) != (g.start_row, g.end_row) { changed = true; }
+                            g.start_row = s;
+                            g.end_row = e;
+                            true
+                        }
+                        None => { changed = true; false }
+                    }
+                });
+            } else {
+                outline.column_groups.retain_mut(|g| {
+                    let moved = if inserting {
+                        Some(interval_insert(g.start_col, g.end_col, at, count))
+                    } else {
+                        interval_delete(g.start_col, g.end_col, at, count)
+                    };
+                    match moved {
+                        Some((s, e)) => {
+                            if (s, e) != (g.start_col, g.end_col) { changed = true; }
+                            g.start_col = s;
+                            g.end_col = e;
+                            true
+                        }
+                        None => { changed = true; false }
+                    }
+                });
+            }
+        }
+        before
+    };
+
+    // --- Scenario changing-cells: a cell whose row/column was deleted drops out
+    //     of the scenario rather than silently pointing at a different cell. ---
+    let prev_scenarios = {
+        let mut store = match state.scenarios.lock() { Ok(s) => s, Err(_) => return };
+        let before = store.get(&sheet_index).cloned();
+        if let Some(list) = store.get_mut(&sheet_index) {
+            for scenario in list.iter_mut() {
+                scenario.changing_cells.retain_mut(|c| match shift_cell(c.row, c.col, edit) {
+                    Some((r, col)) => {
+                        if (r, col) != (c.row, c.col) { changed = true; }
+                        c.row = r;
+                        c.col = col;
+                        true
+                    }
+                    None => { changed = true; false }
+                });
+            }
+        }
+        before
+    };
+
+    // --- Computed properties: three maps, keyed by column, row, and cell. ---
+    let prev_computed = {
+        let mut store = match state.computed_properties.lock() { Ok(s) => s, Err(_) => return };
+        let before = store.get(&sheet_index).cloned();
+        if let Some(props) = store.get_mut(&sheet_index) {
+            if !row_edit {
+                let old = std::mem::take(&mut props.column_props);
+                for (col, v) in old {
+                    if let Some(c) = shift_index(col) {
+                        if c != col { changed = true; }
+                        props.column_props.insert(c, v);
+                    } else { changed = true; }
+                }
+            } else {
+                let old = std::mem::take(&mut props.row_props);
+                for (row, v) in old {
+                    if let Some(r) = shift_index(row) {
+                        if r != row { changed = true; }
+                        props.row_props.insert(r, v);
+                    } else { changed = true; }
+                }
+            }
+            let old_cells = std::mem::take(&mut props.cell_props);
+            for ((row, col), v) in old_cells {
+                if let Some((r, c)) = shift_cell(row, col, edit) {
+                    if (r, c) != (row, col) { changed = true; }
+                    props.cell_props.insert((r, c), v);
+                } else { changed = true; }
+            }
+        }
+        before
+    };
+
+    // --- Advanced-filter hidden rows: row indices only. ---
+    let prev_hidden = {
+        let mut store = match state.advanced_filter_hidden_rows.lock() { Ok(s) => s, Err(_) => return };
+        let before = store.get(&sheet_index).cloned();
+        if row_edit {
+            if let Some(rows) = store.get_mut(&sheet_index) {
+                let old = std::mem::take(rows);
+                for r in old {
+                    if let Some(n) = shift_index(r) {
+                        if n != r { changed = true; }
+                        rows.push(n);
+                    } else { changed = true; }
+                }
+                rows.sort_unstable();
+            }
+        }
+        before
+    };
+
+    if changed {
+        undo_stack.record_custom_restore(
+            "obj_coord_stores".to_string(),
+            crate::undo_commands::coord_stores_snapshot_bytes(
+                sheet_index, prev_outline, prev_scenarios, prev_computed, prev_hidden,
+            ),
+            "Shift positional stores",
+        );
+    }
 }

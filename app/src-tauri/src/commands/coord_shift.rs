@@ -586,3 +586,21 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod interval_rule_tests {
+    use calp::writeback::{interval_delete, interval_insert};
+
+    /// The positional stores outside the grid — outline groups, scenario cells,
+    /// computed-property keys, advanced-filter hidden rows — all renumber with
+    /// this same 1-D interval math. Pinning the degenerate single-index case
+    /// keeps them from drifting apart from the cell and range shifts.
+    #[test]
+    fn single_index_shifting_follows_the_shared_interval_rule() {
+        assert_eq!(interval_insert(5, 5, 5, 2), (7, 7), "insert AT the index shifts it");
+        assert_eq!(interval_insert(5, 5, 6, 2), (5, 5), "insert below is inert");
+        assert_eq!(interval_delete(5, 5, 5, 1), None, "deleting the index drops it");
+        assert_eq!(interval_delete(7, 7, 5, 2), Some((5, 5)), "delete above pulls it up");
+        assert_eq!(interval_delete(3, 3, 5, 2), Some((3, 3)), "delete below is inert");
+    }
+}

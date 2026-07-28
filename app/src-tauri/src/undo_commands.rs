@@ -676,6 +676,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
+        "obj_coord_stores",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2373,6 +2374,42 @@ fn apply_object_swap_restore(
                 previous: current,
             });
         }
+        "obj_coord_stores" => {
+            let snap: CoordStoresObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_coord_stores snapshot: {}", e); return; }
+            };
+            let idx = snap.sheet_index;
+            // Swap each store, capturing the CURRENT value as the inverse so
+            // redo re-applies the shift.
+            let cur_outline = state.outlines.lock().ok().and_then(|mut m| {
+                let prev = m.remove(&idx);
+                if let Some(v) = snap.outline.clone() { m.insert(idx, v); }
+                prev
+            });
+            let cur_scenarios = state.scenarios.lock().ok().and_then(|mut m| {
+                let prev = m.remove(&idx);
+                if let Some(v) = snap.scenarios.clone() { m.insert(idx, v); }
+                prev
+            });
+            let cur_computed = state.computed_properties.lock().ok().and_then(|mut m| {
+                let prev = m.remove(&idx);
+                if let Some(v) = snap.computed.clone() { m.insert(idx, v); }
+                prev
+            });
+            let cur_hidden = state.advanced_filter_hidden_rows.lock().ok().and_then(|mut m| {
+                let prev = m.remove(&idx);
+                if let Some(v) = snap.hidden_rows.clone() { m.insert(idx, v); }
+                prev
+            });
+            push_obj_inverse(inverse_transaction, kind, &CoordStoresObjSnapshot {
+                sheet_index: idx,
+                outline: cur_outline,
+                scenarios: cur_scenarios,
+                computed: cur_computed,
+                hidden_rows: cur_hidden,
+            });
+        }
         "obj_sheet_protection_record" => {
             let snap: SheetProtectionRecordSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2754,6 +2791,7 @@ mod restore_registry_tests {
             ("obj_conditional_formats", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection_record", true, CustomRestoreKind::Objects),
+            ("obj_coord_stores", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -2797,4 +2835,39 @@ mod restore_registry_tests {
     fn unknown_kind_has_no_spec() {
         assert!(restore_spec("totally_unknown_kind").is_none());
     }
+}
+
+/// Snapshot for the "obj_coord_stores" CustomRestore — the per-sheet stores
+/// that are keyed by row/column position but live outside the grid.
+///
+/// One kind rather than four, because they are only ever shifted together (by
+/// the same structural edit) and restoring them together keeps a single undo
+/// step. Each field is the WHOLE per-sheet value before the shift; these are
+/// small (a handful of groups / scenarios / hidden rows per sheet), so a
+/// whole-value swap is cheaper than tracking individual deltas.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CoordStoresObjSnapshot {
+    sheet_index: usize,
+    outline: Option<crate::grouping::SheetOutline>,
+    scenarios: Option<Vec<crate::api_types::Scenario>>,
+    computed: Option<crate::computed_properties::SheetComputedProperties>,
+    hidden_rows: Option<Vec<u32>>,
+}
+
+/// Serialized "obj_coord_stores" snapshot bytes (in-open-transaction contract).
+pub(crate) fn coord_stores_snapshot_bytes(
+    sheet_index: usize,
+    outline: Option<crate::grouping::SheetOutline>,
+    scenarios: Option<Vec<crate::api_types::Scenario>>,
+    computed: Option<crate::computed_properties::SheetComputedProperties>,
+    hidden_rows: Option<Vec<u32>>,
+) -> Vec<u8> {
+    serde_json::to_vec(&CoordStoresObjSnapshot {
+        sheet_index,
+        outline,
+        scenarios,
+        computed,
+        hidden_rows,
+    })
+    .unwrap_or_default()
 }

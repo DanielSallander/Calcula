@@ -14,7 +14,7 @@ use crate::{evaluate_formula_with_context, AppState};
 // ============================================================================
 
 /// A single computed property attached to a column, row, or cell.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComputedProperty {
     pub id: u64,
     pub attribute: String,
@@ -26,7 +26,9 @@ pub struct ComputedProperty {
 }
 
 /// All computed properties for a single sheet, grouped by target type.
-#[derive(Debug, Clone, Default)]
+// Serialize/Deserialize so a structural shift can snapshot this store into an
+// undo entry (obj_coord_stores) — the row/column/cell keys move with the edit.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SheetComputedProperties {
     /// Column properties: col_index (0-based) -> list of properties
     pub column_props: HashMap<u32, Vec<ComputedProperty>>,

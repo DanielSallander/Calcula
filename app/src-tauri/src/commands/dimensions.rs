@@ -8,7 +8,13 @@ use tauri::State;
 
 /// Set a column width.
 #[tauri::command]
-pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, col: u32, width: f64) {
+pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, col: u32, width: f64) -> Result<(), String> {
+    // allowFormatColumns option gate. Returns Result (it used to return unit) so
+    // a refusal can reach the user instead of the resize silently not happening.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_action(&state, active_sheet, "formatColumns", "resize columns")?;
+    }
     let mut widths = state.column_widths.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -26,6 +32,7 @@ pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, co
 
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    Ok(())
 }
 
 /// Get a column width.
@@ -47,7 +54,12 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
 
 /// Set a row height.
 #[tauri::command]
-pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row: u32, height: f64) {
+pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row: u32, height: f64) -> Result<(), String> {
+    // allowFormatRows option gate; see set_column_width for the Result change.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_action(&state, active_sheet, "formatRows", "resize rows")?;
+    }
     let mut heights = state.row_heights.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -65,6 +77,7 @@ pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row:
 
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    Ok(())
 }
 
 /// Get a row height.
