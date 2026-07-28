@@ -226,6 +226,34 @@ async fn run_cell_internal(
                 let active_grid_clone = modified_grids.get(active_sheet).cloned();
 
                 let mut app_grids = app_state.grids.lock().map_err(|e| e.to_string())?;
+                // SHEET PROTECTION, decided for every sheet BEFORE the swap.
+                //
+                // This path installs the post-script grids wholesale
+                // (`*app_grids = modified_grids`), which consults nothing — so
+                // without this a notebook cell could rewrite every cell of a
+                // protected sheet. Deciding before the swap makes a refusal
+                // atomic: nothing has been replaced yet.
+                //
+                // Borrowed gate form: `grids` is held here and std::sync::Mutex
+                // is not reentrant. Canonical order grids -> styles -> protection.
+                {
+                    let styles = app_state.style_registry.lock().map_err(|e| e.to_string())?;
+                    let protection = app_state.sheet_protection.lock().map_err(|e| e.to_string())?;
+                    for (idx, after_grid) in modified_grids.iter().enumerate() {
+                        let Some(before) = app_grids.get(idx) else { continue };
+                        let diff = crate::scripting::commands::diff_grids_to_updates(before, after_grid);
+                        if diff.is_empty() {
+                            continue;
+                        }
+                        crate::protection::check_sheet_protection_cells_in(
+                            &protection,
+                            before,
+                            &styles,
+                            idx,
+                            diff.iter().map(|u| (u.row, u.col)),
+                        )?;
+                    }
+                }
                 *app_grids = modified_grids;
                 drop(app_grids);
 
@@ -454,6 +482,12 @@ async fn notebook_rewind_internal(
     }
 
     // 2. Restore the snapshot to AppState
+    //
+    // DELIBERATELY NOT protection-gated. This restores state the workbook
+    // already held, so it is the undo of the notebook's own writes — gating it
+    // would strand the user with the notebook's output if the sheet were
+    // protected in between. Same reasoning as `solver_revert`; see the
+    // exempt-paths block in protection.rs.
     let active_sheet = *app_state.active_sheet.lock().map_err(|e| e.to_string())?;
     {
         let active_grid_clone = snapshot_grids.get(active_sheet).cloned();

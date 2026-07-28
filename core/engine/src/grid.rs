@@ -435,6 +435,31 @@ mod tests {
     }
 
     #[test]
+    fn clearing_formats_returns_a_cell_to_its_tier_not_to_the_workbook_default() {
+        // Clear Formats sets style_index = 0, which under "0 means inherit"
+        // falls back to the row/column tier. Excel behaves the same way. The
+        // consequence worth knowing: because lock state is a style attribute,
+        // Clear Formats also drops a per-cell LOCK override.
+        let mut grid = Grid::new();
+        grid.set_column_style(1, 5); // e.g. an unlocked input column
+        let mut overridden = Cell::new();
+        overridden.style_index = 9; // cell-level override, e.g. re-locked
+        grid.set_cell(2, 1, overridden);
+        assert_eq!(grid.effective_style_index(2, 1), 9);
+
+        // Clear Formats
+        let mut cleared = grid.get_cell(2, 1).unwrap().clone();
+        cleared.style_index = 0;
+        grid.set_cell(2, 1, cleared);
+
+        assert_eq!(
+            grid.effective_style_index(2, 1),
+            5,
+            "falls back to the column tier, not to 0"
+        );
+    }
+
+    #[test]
     fn tiers_are_index_keyed_so_a_structural_edit_must_renumber_them() {
         // Pins WHY commands/structure.rs shifts these. A column style is stored
         // against a column INDEX, so inserting a column to its left leaves the

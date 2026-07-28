@@ -3353,8 +3353,13 @@ pub fn clear_range_with_options(
                 if let Some(ref cell) = previous_cell {
                     undo_stack.record_cell_change(row, col, previous_cell.clone());
 
+                    // Index 0 = INHERIT, so this returns the cell to its
+                    // row/column style tier rather than to the workbook default.
+                    // That is Excel's behaviour, and it means Clear Formats also
+                    // clears any per-cell LOCK override — the cell falls back to
+                    // whatever its row/column (or the default: locked) says.
                     let mut new_cell = cell.clone();
-                    new_cell.style_index = 0; // Reset to default style
+                    new_cell.style_index = 0;
 
                     grid.set_cell(row, col, new_cell.clone());
                     if active_sheet < grids.len() {
@@ -3401,8 +3406,9 @@ pub fn clear_range_with_options(
                     if apply_to == ClearApplyTo::RemoveHyperlinks {
                         undo_stack.record_cell_change(row, col, previous_cell.clone());
 
+                        // Index 0 = INHERIT; see the note in the Formats branch.
                         let mut new_cell = cell.clone();
-                        new_cell.style_index = 0; // Reset formatting
+                        new_cell.style_index = 0;
 
                         grid.set_cell(row, col, new_cell.clone());
                         if active_sheet < grids.len() {
@@ -3470,12 +3476,11 @@ pub fn clear_range_with_options(
 /// - Row or column orientation
 #[tauri::command]
 pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> Result<SortRangeResult, String> {
-    // Sheet protection: a sort rewrites every cell in the range, so a single
-    // locked cell refuses the whole sort. (Excel gates this on allowSort too,
-    // but that option is not enforced anywhere yet — see the enforcement notes
-    // in protection.rs.)
+    // Sheet protection, BOTH axes: the allowSort option must permit sorting at
+    // all, and every cell in the range must be writable (a sort rewrites them).
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_action(&state, active_sheet, "sort", "sort")?;
         crate::protection::check_sheet_protection_range(
             &state, active_sheet,
             params.start_row.min(params.end_row), params.start_col.min(params.end_col),

@@ -167,6 +167,9 @@ pub fn apply_formatting(
     // would be an ungated way to unlock a protected sheet and then write freely.
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
+        // The allowFormatCells option gates formatting as a KIND of operation;
+        // the per-cell gate below then checks each target cell.
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
         crate::protection::check_sheet_protection_cells(
             &state,
             active_sheet,

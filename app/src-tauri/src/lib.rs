@@ -150,7 +150,7 @@ pub use hyperlinks::{
 pub use protection::{
     SheetProtection, SheetProtectionOptions, AllowEditRange, CellProtection,
     ProtectionResult, ProtectionCheckResult, ProtectionStatus,
-    ProtectionStorage, CellProtectionStorage,
+    ProtectionStorage,
     ProtectSheetParams, AddAllowEditRangeParams, SetCellProtectionParams,
     WorkbookProtection, WorkbookProtectionResult, WorkbookProtectionStatus,
 };
@@ -274,8 +274,6 @@ pub struct AppState {
     pub hyperlinks: Mutex<hyperlinks::HyperlinkStorage>,
     /// Sheet protection settings per sheet
     pub sheet_protection: Mutex<protection::ProtectionStorage>,
-    /// Cell-level protection per sheet: sheet_index -> (row, col) -> CellProtection
-    pub cell_protection: Mutex<protection::CellProtectionStorage>,
     /// Workbook-level structural protection (prevents add/delete/rename/move sheets)
     pub workbook_protection: Mutex<protection::WorkbookProtection>,
     /// Row/column grouping (outlines) per sheet
@@ -467,7 +465,6 @@ pub fn create_app_state() -> AppState {
         auto_filters: Mutex::new(HashMap::new()),
         hyperlinks: Mutex::new(HashMap::new()),
         sheet_protection: Mutex::new(HashMap::new()),
-        cell_protection: Mutex::new(HashMap::new()),
         workbook_protection: Mutex::new(protection::WorkbookProtection::default()),
         outlines: Mutex::new(HashMap::new()),
         conditional_formats: Mutex::new(HashMap::new()),

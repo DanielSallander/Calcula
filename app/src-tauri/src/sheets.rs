@@ -184,7 +184,6 @@ fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<us
     // — and now that protection persists, a stale index serializes under a
     // freshly-minted bogus SheetId and reattaches to sheet 0 on reopen.
     remap_indexed_map(&mut state.sheet_protection.lock().unwrap(), &remap);
-    remap_indexed_map(&mut state.cell_protection.lock().unwrap(), &remap);
     // AutoFilters are sheet-index-keyed too and were the one store missing
     // here: deleting or moving a sheet left every filter attached to the wrong
     // index, so its criteria hid rows on an unrelated sheet and the owning
@@ -335,6 +334,7 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
 
 #[tauri::command]
 pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "add a sheet")?;
     let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -442,6 +442,7 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
 
 #[tauri::command]
 pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, index: usize) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "delete a sheet")?;
     let result = {
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -729,6 +730,7 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
 
 #[tauri::command]
 pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "rename a sheet")?;
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
@@ -867,6 +869,7 @@ pub fn move_sheet(
     from_index: usize,
     to_index: usize,
 ) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "move a sheet")?;
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -1048,6 +1051,7 @@ pub fn copy_sheet(
     source_index: usize,
     new_name: Option<String>,
 ) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "copy a sheet")?;
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -1218,6 +1222,7 @@ pub fn hide_sheet(
     index: usize,
     level: Option<String>,
 ) -> Result<SheetsResult, String> {
+    crate::protection::check_workbook_structure(&state, "hide a sheet")?;
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();

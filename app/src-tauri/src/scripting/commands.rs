@@ -56,7 +56,7 @@ fn cell_input_string(cell: &Cell) -> String {
 /// carry `invariant = true` so the edit pipeline does not re-localize them.
 ///
 /// Pure function (no Tauri State) so it is unit-testable without a running app.
-fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpdateInput> {
+pub(crate) fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpdateInput> {
     use std::collections::HashSet;
 
     // Union of populated coordinates in both grids.

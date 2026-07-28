@@ -674,7 +674,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_cell_types", "obj_cell_behaviors", "obj_writeback_regions",
         "obj_object_scripts",
         // Per-sheet cell-keyed stores moved by a structural edit.
-        "obj_comments", "obj_notes", "obj_hyperlinks", "obj_cell_protection",
+        "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
         "obj_workbook_protection",
     ] {
@@ -2053,24 +2053,6 @@ pub(crate) fn record_workbook_protection_undo(
     record_object_undo(state, "obj_workbook_protection", data, description);
 }
 
-/// Record undo for a command that rewrites one sheet's cell-protection map.
-///
-/// Reuses the `obj_cell_protection` kind that the structural-shift path already
-/// registers — until now that kind was recorded ONLY by the shift, so
-/// `set_cell_protection` itself (locking/unlocking a range) was not undoable.
-///
-/// Call AFTER dropping the `cell_protection` guard; the recorder takes the
-/// undo-stack lock.
-pub(crate) fn record_cell_protection_undo(
-    state: &AppState,
-    sheet_index: usize,
-    previous: Vec<((u32, u32), crate::protection::CellProtection)>,
-    description: &str,
-) {
-    let data = sheet_cell_map_snapshot_bytes(sheet_index, previous);
-    record_object_undo(state, "obj_cell_protection", data, description);
-}
-
 /// Swap one sheet's cell-keyed store with a snapshot, pushing the CURRENT
 /// contents as the symmetric inverse so redo re-applies the shift.
 fn apply_sheet_cell_map_restore<T>(
@@ -2433,10 +2415,6 @@ fn apply_object_swap_restore(
             let mut store = state.hyperlinks.lock().unwrap();
             apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
         }
-        "obj_cell_protection" => {
-            let mut store = state.cell_protection.lock().unwrap();
-            apply_sheet_cell_map_restore(&mut store, kind, data, inverse_transaction);
-        }
         "obj_object_scripts" => {
             let snap: ObjectScriptsObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2773,7 +2751,6 @@ mod restore_registry_tests {
             ("obj_comments", true, CustomRestoreKind::Objects),
             ("obj_notes", true, CustomRestoreKind::Objects),
             ("obj_hyperlinks", true, CustomRestoreKind::Objects),
-            ("obj_cell_protection", true, CustomRestoreKind::Objects),
             ("obj_conditional_formats", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection", true, CustomRestoreKind::Objects),
             ("obj_sheet_protection_record", true, CustomRestoreKind::Objects),

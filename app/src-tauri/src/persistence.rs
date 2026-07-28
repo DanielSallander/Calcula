@@ -2683,7 +2683,6 @@ pub fn new_file(
 
     // Clear sheet protection and cell protection
     state.sheet_protection.lock().map_err(|e| e.to_string())?.clear();
-    state.cell_protection.lock().map_err(|e| e.to_string())?.clear();
     // Workbook structure protection must reset too — without this a File>New
     // after opening a structure-protected workbook inherits the old password
     // (and, now that protection persists, would even SAVE the old hash into

@@ -489,9 +489,14 @@ fn compute_publish_report(
         item(&mut excluded, "comments", comment_threads,
             "comments stay private unless 'Include comments' is checked");
     }
+    // SHEET-level protection only. Cell LOCK state is a CellStyle attribute now
+    // and therefore already travels inside the published styles.json — claiming
+    // otherwise here would be a false statement in the fidelity report, which is
+    // exactly the kind of drift this report exists to prevent.
     let protected = state.sheet_protection.lock().map(|p| p.len()).unwrap_or(0);
     item(&mut excluded, "protection", protected,
-        "sheet/cell protection is not carried (protection policy is a governance feature, not yet distributed)");
+        "sheet protection policy is not carried (a governance feature, not yet distributed); \
+         per-cell locked/hidden DO travel, as cell formatting");
     let doc_props = [
         &wb.properties.title,
         &wb.properties.author,

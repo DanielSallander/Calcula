@@ -231,7 +231,6 @@ pub type ProtectionStorage = HashMap<usize, SheetProtection>;
 
 /// Storage for cell-level protection: sheet_index -> (row, col) -> CellProtection
 /// Only stores non-default values (cells that differ from default locked state)
-pub type CellProtectionStorage = HashMap<usize, HashMap<(u32, u32), CellProtection>>;
 
 // ============================================================================
 // RESULT TYPES
@@ -674,6 +673,35 @@ pub(crate) fn check_sheet_protection_range_in(
         }
     }
     Ok(())
+}
+
+/// Reject an ACTION that a protected sheet's options disallow.
+///
+/// The per-cell gates above answer "may this cell be written?". This answers the
+/// second, independent question Excel asks: "is this KIND of operation allowed
+/// at all while the sheet is protected?" — sorting, inserting rows, formatting,
+/// and so on. The two are additive: an operation must pass both.
+///
+/// `action` uses the same names as `SheetProtection::is_action_allowed`, which
+/// is the single mapping from option flag to action.
+pub(crate) fn check_sheet_action(
+    state: &AppState,
+    sheet_index: usize,
+    action: &str,
+    what: &str,
+) -> Result<(), String> {
+    let protection_storage = state.sheet_protection.lock().unwrap();
+    let Some(protection) = protection_storage.get(&sheet_index) else {
+        return Ok(());
+    };
+    if protection.is_action_allowed(action) {
+        return Ok(());
+    }
+    Err(format!(
+        "Cannot {} on a protected sheet. Unprotect the sheet first \
+         (Review > Unprotect Sheet), or allow it in the protection options.",
+        what
+    ))
 }
 
 /// Reject a change to the PROTECTION SETTINGS of a sheet that is protected.
@@ -1757,6 +1785,46 @@ mod tests {
     }
 
 
+    // --- Option flags: the second, independent axis ---
+    //
+    // Per-cell locking answers "may this cell be written?". These answer "is
+    // this KIND of operation allowed at all?" — the Protect Sheet checkboxes.
+    // Both must pass. Until now all 15 were inert on both sides of the bridge.
+
+    #[test]
+    fn options_are_inert_until_the_sheet_is_protected() {
+        let mut p = SheetProtection::default(); // protected: false
+        p.options.allow_sort = false;
+        assert!(p.is_action_allowed("sort"), "unprotected allows everything");
+    }
+
+    #[test]
+    fn a_disallowed_action_is_refused_on_a_protected_sheet() {
+        let mut p = protected_with(vec![]);
+        p.options.allow_sort = false;
+        p.options.allow_insert_rows = true;
+        assert!(!p.is_action_allowed("sort"));
+        assert!(p.is_action_allowed("insertRows"), "other flags unaffected");
+    }
+
+    #[test]
+    fn an_unknown_action_name_is_refused_not_allowed() {
+        // Fail-safe: a typo in a call site must not silently grant permission.
+        let p = protected_with(vec![]);
+        assert!(!p.is_action_allowed("notARealAction"));
+    }
+
+    #[test]
+    fn the_action_axis_is_independent_of_cell_locking() {
+        // A sheet can allow sorting yet still refuse it because a target cell is
+        // locked, and vice versa — which is why both gates run.
+        let mut p = protected_with(vec![]);
+        p.options.allow_sort = true;
+        assert!(p.is_action_allowed("sort"), "action permitted");
+        // ...while a locked cell still refuses the write.
+        assert!(!p.can_edit_cell(0, 0, true), "cell still locked");
+    }
+
     // --- What the save path must keep ---
     //
     // These pin the predicate in `persistence::collect_protection_for_save`.
@@ -2012,4 +2080,25 @@ mod tests {
         assert!(wb.password_hash.is_none());
         assert!(wb.password_salt.is_none());
     }
+}
+
+/// Reject a WORKBOOK-STRUCTURE change while the workbook is protected.
+///
+/// Workbook protection guards the shape of the workbook — adding, deleting,
+/// renaming, moving, copying or hiding sheets — as distinct from sheet
+/// protection, which guards cell contents. It was enforced nowhere in the
+/// backend: the only guard was a frontend handler that greys out three sheet-tab
+/// context-menu items, so every one of these operations went straight through
+/// from a script, an MCP tool, a keyboard shortcut, or any surface that did not
+/// route via that menu.
+pub(crate) fn check_workbook_structure(state: &AppState, what: &str) -> Result<(), String> {
+    let wb = state.workbook_protection.lock().unwrap();
+    if !wb.protected {
+        return Ok(());
+    }
+    Err(format!(
+        "Cannot {} while the workbook structure is protected. \
+         Unprotect the workbook first (Review > Unprotect Workbook).",
+        what
+    ))
 }

@@ -121,8 +121,9 @@ pub struct WorkbookStateDigest {
     pub computed_properties: BTreeMap<String, Value>,
     /// Sheet index -> SheetProtection.
     pub sheet_protection: BTreeMap<String, Value>,
-    /// "sheet:row:col" -> CellProtection.
-    pub cell_protection: BTreeMap<String, Value>,
+    // NOTE: no `cell_protection` field. Cell lock state is a CellStyle
+    // attribute now, so it is already captured per cell via `used_styles`
+    // (see digest_cells); a separate map would be a second, divergable copy.
     pub workbook_protection: Value,
     /// Sheet index -> hidden row indices (advanced filter), sorted.
     pub advanced_filter_hidden_rows: BTreeMap<String, Vec<u32>>,
@@ -353,7 +354,6 @@ pub fn get_workbook_state_digest(
         controls: BTreeMap::new(),
         computed_properties: BTreeMap::new(),
         sheet_protection: BTreeMap::new(),
-        cell_protection: BTreeMap::new(),
         workbook_protection: Value::Null,
         advanced_filter_hidden_rows: BTreeMap::new(),
         protected_regions: Vec::new(),
@@ -562,15 +562,6 @@ pub fn get_workbook_state_digest(
             digest
                 .sheet_protection
                 .insert(sheet.to_string(), to_value_or_null(p));
-        }
-    }
-    if let Ok(cell_protection) = state.cell_protection.lock() {
-        for (sheet, sheet_cells) in cell_protection.iter() {
-            for ((row, col), p) in sheet_cells.iter() {
-                digest
-                    .cell_protection
-                    .insert(sheet_cell_key(*sheet, *row, *col), to_value_or_null(p));
-            }
         }
     }
     if let Ok(wp) = state.workbook_protection.lock() {

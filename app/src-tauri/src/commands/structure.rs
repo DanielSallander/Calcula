@@ -1241,6 +1241,13 @@ pub fn insert_rows(
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
+    // whether the sheet allows this KIND of structural change at all, which is
+    // what the Protect Sheet dialog's checkboxes control.
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_action(&state, active_sheet, "insertRows", "insert rows")?;
+    }
     // Capture snapshot BEFORE acquiring other locks (helper acquires its own locks)
     let snapshot = capture_grid_snapshot(&state);
 
@@ -1483,6 +1490,13 @@ pub fn insert_columns(
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
+    // whether the sheet allows this KIND of structural change at all, which is
+    // what the Protect Sheet dialog's checkboxes control.
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_action(&state, active_sheet, "insertColumns", "insert columns")?;
+    }
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
@@ -2155,6 +2169,13 @@ pub fn delete_rows(
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
+    // whether the sheet allows this KIND of structural change at all, which is
+    // what the Protect Sheet dialog's checkboxes control.
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_action(&state, active_sheet, "deleteRows", "delete rows")?;
+    }
     // Check if any spill range would be broken by this row deletion.
     // Block if any spill range has cells both inside and outside the deleted rows.
     {
@@ -2451,6 +2472,13 @@ pub fn delete_columns(
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
+    // whether the sheet allows this KIND of structural change at all, which is
+    // what the Protect Sheet dialog's checkboxes control.
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_action(&state, active_sheet, "deleteColumns", "delete columns")?;
+    }
     // Check if any spill range would be broken by this column deletion.
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
