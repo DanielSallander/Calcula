@@ -140,6 +140,15 @@ pub struct SheetMeta {
     pub column_widths: HashMap<u32, f64>,
     /// Custom row heights keyed by 0-based row index (in pixels, converted from Excel points)
     pub row_heights: HashMap<u32, f64>,
+    /// `<col s="..">` — the column's default style, as a RAW xlsx xf index.
+    ///
+    /// Kept raw because the xf -> Calcula style-registry mapping is not built
+    /// until the whole style table has been parsed; the caller translates these
+    /// through the same `xf_to_calcula` map it uses for cells. Translating here
+    /// would either duplicate that dedup logic or map to the wrong style.
+    pub column_style_xf: HashMap<u32, u32>,
+    /// `<row s="..">` — the row's default style, as a RAW xlsx xf index.
+    pub row_style_xf: HashMap<u32, u32>,
     /// Freeze pane position (frozen_rows, frozen_cols)
     pub freeze_pane: Option<(u32, u32)>,
     /// Hidden columns (0-based)
@@ -995,6 +1004,17 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         if get_attr(e, "hidden").map(|v| v == "1" || v == "true").unwrap_or(false) {
                             meta.hidden_rows.push(current_row);
                         }
+                        // <row s=".."> — the row's default style, honoured only
+                        // when customFormat says the author set it (same rule
+                        // Excel applies, and the same one <col> uses above).
+                        if get_attr(e, "customFormat")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false)
+                        {
+                            if let Some(xf) = get_attr(e, "s").and_then(|v| v.parse::<u32>().ok()) {
+                                meta.row_style_xf.insert(current_row, xf);
+                            }
+                        }
                     }
                     "c" if in_sheet_data => {
                         // Cell element: <c r="B3" s="5" t="s">
@@ -1037,6 +1057,19 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         if hidden {
                             for c in min..=max {
                                 meta.hidden_columns.push(c - 1);
+                            }
+                        }
+                        // <col s=".."> — the column's default style. Excel only
+                        // honours it when customFormat is set, mirroring the
+                        // customWidth rule above.
+                        let custom_format = get_attr(e, "customFormat")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        if custom_format {
+                            if let Some(xf) = get_attr(e, "s").and_then(|v| v.parse::<u32>().ok()) {
+                                for c in min..=max {
+                                    meta.column_style_xf.insert(c - 1, xf); // 0-based
+                                }
                             }
                         }
                     }

@@ -95,6 +95,29 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
             worksheet.set_row_height(*row, *height)?;
         }
 
+        // ---- Row / column default-style tiers ----
+        //
+        // These are Excel's own `<row s="..">` / `<col s="..">`, so they export
+        // as a format on the row or column rather than being flattened onto
+        // every cell. Flattening would be the wrong shape twice over: it would
+        // materialise up to a million cells per styled column, and Excel would
+        // no longer recognise the column as formatted as a unit.
+        //
+        // Emitted BEFORE cell writes so a per-cell format still wins where one
+        // exists — matching the cell > row > column precedence the resolver uses.
+        for (col, style_index) in &sheet.column_styles {
+            if let Some(style) = sheet.styles.get(*style_index) {
+                let format = convert_style_to_format(style);
+                worksheet.set_column_format(*col as u16, &format)?;
+            }
+        }
+        for (row, style_index) in &sheet.row_styles {
+            if let Some(style) = sheet.styles.get(*style_index) {
+                let format = convert_style_to_format(style);
+                worksheet.set_row_format(*row, &format)?;
+            }
+        }
+
         // ---- Hidden rows ----
         for row in &sheet.hidden_rows {
             worksheet.set_row_hidden(*row)?;

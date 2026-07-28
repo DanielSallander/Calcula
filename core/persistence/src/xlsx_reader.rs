@@ -276,12 +276,32 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             hyperlinks,
             page_setup,
             show_gridlines,
-            // xlsx <row s=".."> / <col s=".."> are not read yet — see
-            // xlsx_style_reader, which parses no protection or default-style
-            // attributes. Empty means every cell resolves through its own
-            // style, i.e. exactly the pre-tier behaviour.
-            row_styles: HashMap::new(),
-            column_styles: HashMap::new(),
+            // <row s=".."> / <col s=".."> translated from RAW xlsx xf indices
+            // through the same map the cells use, so a column that Excel styled
+            // wholesale stays one entry here instead of becoming a style on
+            // every cell. An xf that maps to 0 is the default style, which at
+            // the tier level means "no tier" — skip it rather than storing a
+            // sentinel the resolver would ignore anyway.
+            row_styles: sheet_meta
+                .map(|m| {
+                    m.row_style_xf
+                        .iter()
+                        .filter_map(|(&r, xf)| {
+                            xf_to_calcula.get(xf).copied().filter(|&i| i != 0).map(|i| (r, i))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            column_styles: sheet_meta
+                .map(|m| {
+                    m.column_style_xf
+                        .iter()
+                        .filter_map(|(&c, xf)| {
+                            xf_to_calcula.get(xf).copied().filter(|&i| i != 0).map(|i| (c, i))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
 
