@@ -87,6 +87,12 @@ pub fn scenario_add(
     state: State<AppState>,
     params: ScenarioAddParams,
 ) -> ScenarioResult {
+    // allowEditScenarios option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, params.sheet_index, "editScenarios", "add or change scenarios",
+    ) {
+        return ScenarioResult { success: false, error: Some(e) };
+    }
     crate::log_info!(
         "SCENARIO",
         "Adding scenario '{}' for sheet {}",
@@ -147,6 +153,12 @@ pub fn scenario_delete(
     state: State<AppState>,
     params: ScenarioDeleteParams,
 ) -> ScenarioResult {
+    // allowEditScenarios option gate.
+    if let Err(e) = crate::protection::check_sheet_action(
+        &state, params.sheet_index, "editScenarios", "delete scenarios",
+    ) {
+        return ScenarioResult { success: false, error: Some(e) };
+    }
     crate::log_info!(
         "SCENARIO",
         "Deleting scenario '{}' from sheet {}",

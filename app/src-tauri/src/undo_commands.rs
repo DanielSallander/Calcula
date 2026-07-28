@@ -676,7 +676,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         // Per-sheet cell-keyed stores moved by a structural edit.
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
-        "obj_coord_stores", "obj_named_ranges",
+        "obj_coord_stores", "obj_named_ranges", "obj_range_strings",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2374,6 +2374,30 @@ fn apply_object_swap_restore(
                 previous: current,
             });
         }
+        "obj_range_strings" => {
+            let snap: RangeStringsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_range_strings snapshot: {}", e); return; }
+            };
+            let idx = snap.sheet_index;
+            let cur_print = state.page_setups.lock().ok().and_then(|mut v| {
+                let ps = v.get_mut(idx)?;
+                let prev = ps.print_area.clone();
+                ps.print_area = snap.print_area.clone().unwrap_or_default();
+                Some(prev)
+            });
+            let cur_scroll = state.scroll_areas.lock().ok().and_then(|mut v| {
+                let slot = v.get_mut(idx)?;
+                let prev = slot.clone();
+                *slot = snap.scroll_area.clone();
+                Some(prev)
+            }).flatten();
+            push_obj_inverse(inverse_transaction, kind, &RangeStringsObjSnapshot {
+                sheet_index: idx,
+                print_area: cur_print,
+                scroll_area: cur_scroll,
+            });
+        }
         "obj_named_ranges" => {
             let snap: NamedRangesObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2807,6 +2831,7 @@ mod restore_registry_tests {
             ("obj_sheet_protection_record", true, CustomRestoreKind::Objects),
             ("obj_coord_stores", true, CustomRestoreKind::Objects),
             ("obj_named_ranges", true, CustomRestoreKind::Objects),
+            ("obj_range_strings", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -2903,4 +2928,23 @@ pub(crate) fn named_ranges_snapshot_bytes(
     previous: Vec<(String, crate::named_ranges::NamedRange)>,
 ) -> Vec<u8> {
     serde_json::to_vec(&NamedRangesObjSnapshot { previous }).unwrap_or_default()
+}
+
+/// Snapshot for the "obj_range_strings" CustomRestore — one sheet's A1 range
+/// STRINGS (print area, scroll area) before a structural edit rewrote them.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RangeStringsObjSnapshot {
+    sheet_index: usize,
+    print_area: Option<String>,
+    scroll_area: Option<String>,
+}
+
+/// Serialized "obj_range_strings" snapshot bytes (in-open-transaction contract).
+pub(crate) fn range_strings_snapshot_bytes(
+    sheet_index: usize,
+    print_area: Option<String>,
+    scroll_area: Option<String>,
+) -> Vec<u8> {
+    serde_json::to_vec(&RangeStringsObjSnapshot { sheet_index, print_area, scroll_area })
+        .unwrap_or_default()
 }

@@ -1351,6 +1351,13 @@ pub fn insert_rows(
             calp::writeback::StructuralEdit::RowInsert { at: row, count },
         );
     }
+    // Print area and scroll area are A1 range STRINGS on this sheet.
+    shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1623,6 +1630,13 @@ pub fn insert_columns(
             calp::writeback::StructuralEdit::ColInsert { at: col, count },
         );
     }
+    // Print area and scroll area are A1 range STRINGS on this sheet.
+    shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2369,6 +2383,13 @@ pub fn delete_rows(
             calp::writeback::StructuralEdit::RowDelete { at: row, count },
         );
     }
+    // Print area and scroll area are A1 range STRINGS on this sheet.
+    shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2694,6 +2715,13 @@ pub fn delete_columns(
             calp::writeback::StructuralEdit::ColDelete { at: col, count },
         );
     }
+    // Print area and scroll area are A1 range STRINGS on this sheet.
+    shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -3425,5 +3453,111 @@ mod structural_formula_shift_tests {
         // The `$` must still be there afterwards — it still governs copy/fill.
         let out = shift_formula_row_references("=$A$5", 4, 1);
         assert!(out.contains("$A$"), "absolute markers preserved: {out}");
+    }
+}
+
+/// Shift the per-sheet A1 RANGE STRINGS: the print area and the scroll area.
+///
+/// Both are stored as text ("A1:D10") rather than coordinates, which is why
+/// they were missed by every coordinate-shift pass. Unshifted, a print area
+/// silently prints the wrong rows after an insert, and a scroll area fences the
+/// user out of the wrong region.
+///
+/// Simpler than named ranges: these live in a per-sheet `Vec`, so a definition
+/// always belongs to its own sheet and there is no qualifier to disambiguate.
+///
+/// Records one `obj_range_strings` undo entry when either moved.
+fn shift_sheet_range_strings(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::StructuralEdit as SE;
+
+    let shift = |text: &str| -> String {
+        match edit {
+            SE::RowInsert { at, count } => shift_formula_row_references(text, at, count as i32),
+            SE::RowDelete { at, count } => shift_formula_row_references(text, at, -(count as i32)),
+            SE::ColInsert { at, count } => shift_formula_col_references(text, at, count as i32),
+            SE::ColDelete { at, count } => shift_formula_col_references(text, at, -(count as i32)),
+        }
+    };
+
+    let mut changed = false;
+
+    let prev_print = {
+        let mut setups = match state.page_setups.lock() { Ok(s) => s, Err(_) => return };
+        let before = setups.get(sheet_index).map(|s| s.print_area.clone());
+        if let Some(ps) = setups.get_mut(sheet_index) {
+            if !ps.print_area.is_empty() {
+                let next = shift(&ps.print_area);
+                if next != ps.print_area {
+                    ps.print_area = next;
+                    changed = true;
+                }
+            }
+        }
+        before
+    };
+
+    let prev_scroll = {
+        let mut areas = match state.scroll_areas.lock() { Ok(s) => s, Err(_) => return };
+        let before = areas.get(sheet_index).cloned().flatten();
+        if let Some(Some(area)) = areas.get_mut(sheet_index) {
+            let next = shift(area);
+            if &next != area {
+                *area = next;
+                changed = true;
+            }
+        }
+        before
+    };
+
+    if changed {
+        undo_stack.record_custom_restore(
+            "obj_range_strings".to_string(),
+            crate::undo_commands::range_strings_snapshot_bytes(
+                sheet_index, prev_print, prev_scroll,
+            ),
+            "Shift print / scroll areas",
+        );
+    }
+}
+
+#[cfg(test)]
+mod range_string_shift_tests {
+    use super::{shift_formula_col_references, shift_formula_row_references};
+
+    // Print areas and scroll areas are stored as A1 range TEXT rather than
+    // coordinates, which is why they were missed by the coordinate-shift passes.
+    // They go through the same functions as cell formulas, so these pin the
+    // bare-range (no leading '=') form those stores actually hold.
+
+    #[test]
+    fn a_print_area_grows_when_a_row_is_inserted_inside_it() {
+        assert_eq!(shift_formula_row_references("A1:D10", 4, 1), "A1:D11");
+    }
+
+    #[test]
+    fn a_print_area_below_the_insertion_point_moves_wholesale() {
+        assert_eq!(shift_formula_row_references("A20:D30", 4, 1), "A21:D31");
+    }
+
+    #[test]
+    fn a_print_area_above_the_insertion_point_is_untouched() {
+        assert_eq!(shift_formula_row_references("A1:D3", 4, 1), "A1:D3");
+    }
+
+    #[test]
+    fn deleting_columns_pulls_a_scroll_area_left() {
+        assert_eq!(shift_formula_col_references("C1:F10", 1, -1), "B1:E10");
+    }
+
+    #[test]
+    fn an_absolute_print_area_shifts_too() {
+        // Print areas are commonly written absolute; the structural rule
+        // ignores `$` (see structural_formula_shift_tests).
+        assert_eq!(shift_formula_row_references("$A$1:$D$10", 4, 1), "$A$1:$D$11");
     }
 }

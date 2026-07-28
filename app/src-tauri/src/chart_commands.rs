@@ -36,6 +36,10 @@ pub fn save_chart(state: State<AppState>, entry: ChartEntry) -> Result<(), Strin
 /// Update an existing chart entry.
 #[tauri::command]
 pub fn update_chart(state: State<AppState>, entry: ChartEntry) -> Result<(), String> {
+    // allowEditObjects option gate — charts are the "objects" the flag names.
+    crate::protection::check_sheet_action(
+        &state, entry.sheet_index, "editObjects", "edit objects",
+    )?;
     let previous = {
         let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
         let previous = charts.iter().find(|c| c.id == entry.id).cloned();
@@ -53,6 +57,15 @@ pub fn update_chart(state: State<AppState>, entry: ChartEntry) -> Result<(), Str
 /// Delete a chart entry by ID.
 #[tauri::command]
 pub fn delete_chart(state: State<AppState>, id: identity::EntityId) -> Result<(), String> {
+    // allowEditObjects option gate. The sheet comes from the chart itself, so
+    // this is resolved before any mutation.
+    {
+        let sheet = state.charts.lock().map_err(|e| e.to_string())?
+            .iter().find(|c| c.id == id).map(|c| c.sheet_index);
+        if let Some(sheet_index) = sheet {
+            crate::protection::check_sheet_action(&state, sheet_index, "editObjects", "delete objects")?;
+        }
+    }
     let previous = {
         let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
         let previous = charts.iter().find(|c| c.id == id).cloned();
