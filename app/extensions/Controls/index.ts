@@ -18,6 +18,7 @@ import {
   IconImage,
   IconDesignMode,
 } from "@api";
+import { getActiveSheet } from "@api/lib";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
 import {
@@ -89,6 +90,7 @@ import {
   groupControls,
   ungroupControls,
   moveGroupControls,
+  reanchorFloatingControls,
 } from "./lib/floatingStore";
 import {
   getDesignMode,
@@ -427,6 +429,83 @@ function activate(context: ExtensionContext): void {
     emitAppEvent(AppEvents.GRID_REFRESH);
   });
   cleanupFns.push(unregNamedRangesChanged);
+
+  // 6c. STRUCTURAL EDITS. Controls are anchored to a cell, and the backend
+  //     shifts that anchor when rows/columns are inserted or deleted — but this
+  //     extension had NO structural subscription at all, so the floating store
+  //     and its render caches kept the OLD anchors. The store's ids
+  //     (`control-<sheet>-<row>-<col>`) then disagreed with the backend about
+  //     which control is which.
+  //
+  //     Placement decides what moves, mirroring the backend rule: a control
+  //     marked `free` holds its pixel position and its anchor; anything else
+  //     follows the grid.
+  const shiftForEvent = (
+    kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete",
+    at: number,
+    count: number,
+  ) => (row: number, col: number): { row: number; col: number } | null => {
+    switch (kind) {
+      case "rowInsert":
+        return { row: row >= at ? row + count : row, col };
+      case "colInsert":
+        return { row, col: col >= at ? col + count : col };
+      case "rowDelete":
+        if (row >= at + count) return { row: row - count, col };
+        if (row >= at) return null; // The anchor row itself was deleted.
+        return { row, col };
+      case "colDelete":
+        if (col >= at + count) return { row, col: col - count };
+        if (col >= at) return null;
+        return { row, col };
+    }
+  };
+
+  // Mirrors controls::moves_with_cells — absent means "moves", so every control
+  // authored before placement existed keeps its behaviour.
+  const movesWithCells = (ctrl: { placement?: string }): boolean =>
+    ctrl.placement !== "free";
+
+  const onStructuralEdit = (
+    kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete",
+  ) => async (detail: unknown) => {
+    const d = (detail ?? {}) as { startRow?: number; startCol?: number; count?: number };
+    // The structural events carry no sheet index — these commands always act on
+    // the active sheet — so it is resolved here.
+    const at = kind.startsWith("row") ? d.startRow : d.startCol;
+    const count = d.count;
+    if (at === undefined || count === undefined) return;
+
+    const sheetIndex = await getActiveSheet();
+    reanchorFloatingControls(sheetIndex, shiftForEvent(kind, at, count), movesWithCells);
+
+    invalidateAllFloatingButtonCaches();
+    invalidateAllShapeCaches();
+    invalidateAllImageCaches();
+    syncFloatingControlRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+
+  for (const [evt, kind] of [
+    [AppEvents.ROWS_INSERTED, "rowInsert"],
+    [AppEvents.ROWS_DELETED, "rowDelete"],
+    [AppEvents.COLUMNS_INSERTED, "colInsert"],
+    [AppEvents.COLUMNS_DELETED, "colDelete"],
+  ] as const) {
+    cleanupFns.push(context.events.on(evt, onStructuralEdit(kind)));
+  }
+
+  // Undo of a structural edit carries no coordinates, so the only correct
+  // response is to re-read the anchors from the backend.
+  cleanupFns.push(
+    context.events.on(AppEvents.STRUCTURAL_UNDO, () => {
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      invalidateAllImageCaches();
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }),
+  );
 
   // 7. Register Properties Pane as a task pane
   context.ui.taskPanes.register({

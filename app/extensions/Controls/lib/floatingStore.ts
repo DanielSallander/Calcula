@@ -22,6 +22,13 @@ export interface FloatingControl {
   row: number;
   /** Anchor cell column (for metadata lookup) */
   col: number;
+  /**
+   * Placement relative to the grid, mirroring the backend's
+   * `controls::PLACEMENT_PROPERTY`. Absent means "moves with cells", so every
+   * control created before this existed keeps its behaviour. "free" pins the
+   * control to its pixel position and leaves its anchor alone.
+   */
+  placement?: string;
   /** X position in sheet pixels (relative to cell A1 top-left) */
   x: number;
   /** Y position in sheet pixels */
@@ -117,6 +124,62 @@ export function resizeFloatingControl(
     ctrl.width = width;
     ctrl.height = height;
   }
+}
+
+/**
+ * Re-anchor floating controls after a structural grid edit.
+ *
+ * A control's identity is its anchor cell — its id is
+ * `control-<sheet>-<row>-<col>` — so when the backend shifts the anchor, the
+ * frontend id must follow or the store and the backend disagree about which
+ * control is which. Group membership is re-keyed with it.
+ *
+ * `shouldMove` decides per control, mirroring the backend's placement rule: a
+ * FREE floating control holds its pixel position and keeps its anchor, while a
+ * pinned or in-cell one moves. Returning `null` from `shift` means the control's
+ * row/column was deleted, so it goes with it.
+ *
+ * The pixel x/y are deliberately NOT adjusted here: a pinned control's geometry
+ * is recomputed from its anchor at render time, and a free one must not move.
+ */
+export function reanchorFloatingControls(
+  sheetIndex: number,
+  shift: (row: number, col: number) => { row: number; col: number } | null,
+  shouldMove: (ctrl: FloatingControl) => boolean,
+): boolean {
+  let changed = false;
+  const survivors: FloatingControl[] = [];
+
+  for (const ctrl of floatingControls) {
+    if (ctrl.sheetIndex !== sheetIndex || !shouldMove(ctrl)) {
+      survivors.push(ctrl);
+      continue;
+    }
+    const moved = shift(ctrl.row, ctrl.col);
+    if (moved === null) {
+      // Anchor row/column deleted — drop the control and its group membership.
+      removeControlFromGroups(ctrl.id);
+      changed = true;
+      continue;
+    }
+    if (moved.row === ctrl.row && moved.col === ctrl.col) {
+      survivors.push(ctrl);
+      continue;
+    }
+    const newId = makeFloatingControlId(sheetIndex, moved.row, moved.col);
+    const groupId = controlToGroup.get(ctrl.id);
+    if (groupId) {
+      removeControlFromGroups(ctrl.id);
+      controlToGroup.set(newId, groupId);
+      const group = controlGroups.get(groupId);
+      if (group) group.memberIds = [...group.memberIds, newId];
+    }
+    survivors.push({ ...ctrl, id: newId, row: moved.row, col: moved.col });
+    changed = true;
+  }
+
+  floatingControls = survivors;
+  return changed;
 }
 
 /** Reset the entire floating store (used during extension deactivation). */
