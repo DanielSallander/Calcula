@@ -443,16 +443,10 @@ fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count:
 /// Records no undo entry: the spill maps are session-only derived state
 /// (persistence clears them on load and nothing rebuilds them from disk).
 ///
-/// ON-GRID CONTROLS ARE DELIBERATELY NOT SHIFTED HERE. They look like the same
-/// shape — `HashMap<(sheet, row, col), ControlMetadata>` — but their cell key is
-/// only one of three places their position lives: FLOATING controls keep pixel
-/// x/y/width/height inside `properties`, and an attached object script is keyed
-/// by the coordinate-derived instance id `control-<sheet>-<row>-<col>`. Moving
-/// the key alone renames the control out from under its script and leaves the
-/// pixel geometry behind, and the Controls extension caches per-controlId render
-/// state that nothing invalidates on a structural edit. Shifting controls needs
-/// all four moved together plus an undo entry (the store is persisted and
-/// user-authored); doing the key in isolation breaks more than it fixes.
+/// ON-GRID CONTROLS ARE NOT SHIFTED HERE — they are handled by
+/// `shift_controls`, which moves the cell key and the object-script instance id
+/// together. Doing the key alone here would rename a control out from under its
+/// script, which is why this function skipped them.
 fn shift_flat_cell_stores(
     state: &AppState,
     sheet_index: usize,
@@ -1358,6 +1352,13 @@ pub fn insert_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowInsert { at: row, count },
     );
+    // On-grid controls: cell key AND object-script binding move together.
+    shift_controls(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -1653,6 +1654,13 @@ pub fn insert_columns(
     }
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    // On-grid controls: cell key AND object-script binding move together.
+    shift_controls(
         &state,
         &mut undo_stack,
         active_sheet,
@@ -2432,6 +2440,13 @@ pub fn delete_rows(
         active_sheet,
         calp::writeback::StructuralEdit::RowDelete { at: row, count },
     );
+    // On-grid controls: cell key AND object-script binding move together.
+    shift_controls(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
     // Conditional formats and data validations are RANGE-keyed.
     shift_per_sheet_range_stores(
         &state,
@@ -2780,6 +2795,13 @@ pub fn delete_columns(
     }
     // Print area and scroll area are A1 range STRINGS on this sheet.
     shift_sheet_range_strings(
+        &state,
+        &mut undo_stack,
+        active_sheet,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    // On-grid controls: cell key AND object-script binding move together.
+    shift_controls(
         &state,
         &mut undo_stack,
         active_sheet,
@@ -3931,5 +3953,136 @@ fn shift_cross_sheet_formulas(
                 "Shift cross-sheet formulas",
             );
         }
+    }
+}
+
+/// Shift on-grid controls, moving their cell key and their object-script
+/// binding TOGETHER.
+///
+/// This is why the key was previously left alone (see the note on
+/// `shift_flat_cell_stores`). A control's identity IS its coordinate: the store
+/// is keyed by `(sheet, row, col)`, and an attached object script is bound by
+/// the derived instance id `control-<sheet>-<row>-<col>`. Moving the key on its
+/// own renames the control out from under its script, which breaks more than
+/// the drift it fixes — so both move here, in one undo entry.
+///
+/// A control whose row or column was deleted is dropped, and its script binding
+/// is cleared rather than left pointing at a control that no longer exists.
+///
+/// NOT handled here, deliberately: a FLOATING control's pixel x/y. That
+/// geometry lives only in the frontend `floatingStore` (the backend stores no
+/// pixel position), and whether a floating control should slide by the inserted
+/// row's height is a presentation decision, not a data one. The anchor cell —
+/// which is what this shifts — remains the source of truth.
+fn shift_controls(
+    state: &AppState,
+    undo_stack: &mut engine::UndoStack,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    use crate::commands::coord_shift::shift_cell;
+
+    let previous_controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)> = {
+        let store = match state.controls.lock() { Ok(s) => s, Err(_) => return };
+        if store.is_empty() {
+            return;
+        }
+        store.iter().map(|(k, v)| (*k, v.clone())).collect()
+    };
+
+    // Decide the whole move first: old id -> new id (None = control deleted).
+    let mut id_moves: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut rebuilt: crate::controls::ControlStorage = std::collections::HashMap::new();
+    let mut changed = false;
+
+    for ((sheet, row, col), meta) in previous_controls.iter().cloned() {
+        if sheet != sheet_index {
+            rebuilt.insert((sheet, row, col), meta);
+            continue;
+        }
+        let old_id = format!("control-{}-{}-{}", sheet, row, col);
+        match shift_cell(row, col, edit) {
+            Some((new_row, new_col)) => {
+                if (new_row, new_col) != (row, col) {
+                    changed = true;
+                    id_moves.insert(
+                        old_id,
+                        Some(format!("control-{}-{}-{}", sheet, new_row, new_col)),
+                    );
+                }
+                rebuilt.insert((sheet, new_row, new_col), meta);
+            }
+            None => {
+                changed = true;
+                id_moves.insert(old_id, None);
+            }
+        }
+    }
+
+    if !changed {
+        return;
+    }
+
+    // Re-key the object-script bindings that name these controls.
+    let previous_ids = {
+        let mut scripts = match state.object_scripts.lock() { Ok(s) => s, Err(_) => return };
+        let mut prev = Vec::new();
+        for (idx, script) in scripts.iter_mut().enumerate() {
+            let Some(current) = script.instance_id.clone() else { continue };
+            if let Some(moved_to) = id_moves.get(&current) {
+                prev.push((idx, Some(current)));
+                script.instance_id = moved_to.clone();
+            }
+        }
+        prev
+    };
+
+    if let Ok(mut store) = state.controls.lock() {
+        *store = rebuilt;
+    }
+
+    undo_stack.record_custom_restore(
+        "obj_controls".to_string(),
+        crate::undo_commands::controls_snapshot_bytes(previous_controls, previous_ids),
+        "Shift controls",
+    );
+}
+
+#[cfg(test)]
+mod control_identity_tests {
+    use crate::commands::coord_shift::{shift_cell, StructuralEdit};
+
+    /// Mirror of the id derivation in `shift_controls` and the frontend's
+    /// `makeFloatingControlId`. A control's identity IS its coordinate, which is
+    /// exactly why the key and the script binding cannot move independently.
+    fn control_id(sheet: usize, row: u32, col: u32) -> String {
+        format!("control-{}-{}-{}", sheet, row, col)
+    }
+
+    #[test]
+    fn a_shifted_control_gets_a_new_id_that_matches_its_new_cell() {
+        let (row, col) = (5u32, 2u32);
+        let before = control_id(0, row, col);
+        let (nr, nc) = shift_cell(row, col, StructuralEdit::RowInsert { at: 0, count: 2 })
+            .expect("cell survives");
+        let after = control_id(0, nr, nc);
+
+        assert_eq!(before, "control-0-5-2");
+        assert_eq!(after, "control-0-7-2");
+        assert_ne!(before, after, "the binding id must move with the key");
+    }
+
+    #[test]
+    fn a_deleted_control_has_no_new_id_to_rebind_to() {
+        // Its script binding is cleared rather than left pointing at a control
+        // that no longer exists.
+        assert!(shift_cell(5, 2, StructuralEdit::RowDelete { at: 5, count: 1 }).is_none());
+    }
+
+    #[test]
+    fn a_control_above_the_edit_keeps_its_identity() {
+        let (nr, nc) = shift_cell(1, 2, StructuralEdit::RowInsert { at: 5, count: 3 }).unwrap();
+        assert_eq!(control_id(0, nr, nc), control_id(0, 1, 2), "unchanged");
     }
 }

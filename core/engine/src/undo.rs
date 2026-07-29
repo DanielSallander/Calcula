@@ -329,6 +329,33 @@ impl UndoStack {
     }
 
     /// Clear all history.
+    /// Visit every queued `CustomRestore` payload, in both stacks and any open
+    /// transaction, so the host can rewrite payloads that have become stale.
+    ///
+    /// Exists for ONE reason: those payloads identify their target sheet by
+    /// INDEX, and deleting or moving a sheet renumbers every index after it.
+    /// The live stores are remapped at that moment, but queued undo entries are
+    /// not — so undoing past a sheet delete used to replay a restore into
+    /// whatever sheet had since taken that index, silently corrupting it.
+    ///
+    /// Deliberately a visitor rather than a public accessor: the stacks stay
+    /// private, and the host cannot reorder or drop history through this.
+    pub fn visit_custom_restores(&mut self, mut visit: impl FnMut(&str, &mut Vec<u8>)) {
+        let open = self.current_transaction.iter_mut();
+        for transaction in self
+            .undo_stack
+            .iter_mut()
+            .chain(self.redo_stack.iter_mut())
+            .chain(open)
+        {
+            for change in transaction.changes.iter_mut() {
+                if let CellChange::CustomRestore { kind, data } = change {
+                    visit(kind, data);
+                }
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -457,5 +484,48 @@ mod tests {
         
         assert!(stack.can_redo()); // Redo should still be available
         assert!(stack.can_undo());
+    }
+}
+#[cfg(test)]
+mod visit_custom_restores_tests {
+    use super::*;
+
+    fn payload(sheet: usize) -> Vec<u8> {
+        format!("{{\"sheet_index\":{},\"data\":\"x\"}}", sheet).into_bytes()
+    }
+
+    #[test]
+    fn the_visitor_reaches_both_stacks_and_the_open_transaction() {
+        // All three matter: a sheet delete can happen with entries queued for
+        // undo, entries queued for redo, and a transaction still open.
+        let mut stack = UndoStack::new();
+
+        stack.begin_transaction("committed");
+        stack.record_custom_restore("obj_x".into(), payload(3), "a");
+        stack.commit_transaction();
+
+        // Move it to the redo stack.
+        let popped = stack.pop_undo().expect("one transaction");
+        stack.push_redo(popped);
+
+        stack.begin_transaction("still open");
+        stack.record_custom_restore("obj_y".into(), payload(3), "b");
+
+        let mut seen = 0;
+        stack.visit_custom_restores(|_kind, data| {
+            seen += 1;
+            // Rewrite sheet 3 -> 1, the way a sheet delete would.
+            let s = String::from_utf8(data.clone()).unwrap();
+            *data = s.replace("\"sheet_index\":3", "\"sheet_index\":1").into_bytes();
+        });
+        assert_eq!(seen, 2, "redo-stack and open-transaction payloads both visited");
+
+        let mut rewritten = 0;
+        stack.visit_custom_restores(|_kind, data| {
+            let s = String::from_utf8(data.clone()).unwrap();
+            assert!(s.contains("\"sheet_index\":1"), "payload not rewritten: {s}");
+            rewritten += 1;
+        });
+        assert_eq!(rewritten, 2);
     }
 }

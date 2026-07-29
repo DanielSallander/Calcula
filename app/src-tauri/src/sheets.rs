@@ -144,6 +144,44 @@ fn remap_cell_keyed_map<V>(
 /// re-stamp load_file performs when it materializes them). Takes each store's
 /// lock briefly, one at a time; callers must not hold any of these locks.
 fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<usize>) {
+    // QUEUED UNDO ENTRIES FIRST.
+    //
+    // Every `obj_*` CustomRestore payload identifies its target sheet by INDEX,
+    // and this function is called precisely when those indices are renumbered.
+    // The live stores below were always remapped; the undo stack never was, so
+    // undoing past a sheet delete replayed a restore into whatever sheet had
+    // since taken that index — silently corrupting it, with no error and
+    // nothing to see.
+    //
+    // Done generically over the JSON rather than per-kind: every snapshot spells
+    // the field `sheet_index` at the top level, so one rewrite covers all of
+    // them and any kind added later. A payload whose sheet is GONE is replaced
+    // with a no-op empty object: dropping the change would desynchronise the
+    // transaction's inverse, and leaving it would let it fire on the wrong sheet.
+    if let Ok(mut undo) = state.undo_stack.lock() {
+        undo.visit_custom_restores(|_kind, data| {
+            let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(data) else {
+                return; // Not JSON we understand; leave it untouched.
+            };
+            let Some(obj) = value.as_object_mut() else { return };
+            let Some(old) = obj.get("sheet_index").and_then(|v| v.as_u64()) else { return };
+            match remap(old as usize) {
+                Some(new_index) => {
+                    obj.insert("sheet_index".into(), serde_json::json!(new_index));
+                }
+                None => {
+                    // Sheet deleted: neutralise the payload. The restore arm
+                    // fails to deserialize it, logs, and returns without
+                    // touching any store.
+                    *obj = serde_json::Map::new();
+                }
+            }
+            if let Ok(bytes) = serde_json::to_vec(&value) {
+                *data = bytes;
+            }
+        });
+    }
+
     {
         let mut comments = state.comments.lock().unwrap();
         remap_indexed_map(&mut comments, &remap);

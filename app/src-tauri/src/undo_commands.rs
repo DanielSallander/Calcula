@@ -677,7 +677,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
         "obj_coord_stores", "obj_named_ranges", "obj_range_strings",
-        "obj_cross_sheet_formulas",
+        "obj_cross_sheet_formulas", "obj_controls",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2375,6 +2375,36 @@ fn apply_object_swap_restore(
                 previous: current,
             });
         }
+        "obj_controls" => {
+            let snap: ControlsObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_controls snapshot: {}", e); return; }
+            };
+            let current_controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)> = {
+                let mut store = state.controls.lock().unwrap();
+                let current = store.iter().map(|(k, v)| (*k, v.clone())).collect();
+                store.clear();
+                for (k, v) in snap.controls {
+                    store.insert(k, v);
+                }
+                current
+            };
+            let current_ids = {
+                let mut scripts = state.object_scripts.lock().unwrap();
+                let mut prev = Vec::new();
+                for (idx, restore_to) in snap.script_instance_ids {
+                    if let Some(script) = scripts.get_mut(idx) {
+                        prev.push((idx, script.instance_id.clone()));
+                        script.instance_id = restore_to;
+                    }
+                }
+                prev
+            };
+            push_obj_inverse(inverse_transaction, kind, &ControlsObjSnapshot {
+                controls: current_controls,
+                script_instance_ids: current_ids,
+            });
+        }
         "obj_cross_sheet_formulas" => {
             let snap: CrossSheetFormulasObjSnapshot = match serde_json::from_slice(data) {
                 Ok(s) => s,
@@ -2855,6 +2885,7 @@ mod restore_registry_tests {
             ("obj_named_ranges", true, CustomRestoreKind::Objects),
             ("obj_range_strings", true, CustomRestoreKind::Objects),
             ("obj_cross_sheet_formulas", true, CustomRestoreKind::Objects),
+            ("obj_controls", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -2991,5 +3022,30 @@ pub(crate) fn cross_sheet_formulas_snapshot_bytes(
     previous: Vec<((u32, u32), Option<engine::Cell>)>,
 ) -> Vec<u8> {
     serde_json::to_vec(&CrossSheetFormulasObjSnapshot { sheet_index, previous })
+        .unwrap_or_default()
+}
+
+/// Snapshot for the "obj_controls" CustomRestore — the on-grid control store
+/// and the object-script instance ids that name those controls.
+///
+/// BOTH in one snapshot, deliberately. A control's identity is its cell
+/// coordinate: the store is keyed by `(sheet, row, col)` and any attached
+/// object script is bound by the derived id `control-<sheet>-<row>-<col>`.
+/// Restoring one without the other would leave a script bound to a control that
+/// no longer exists, which is the same breakage that made shifting the key alone
+/// a bad trade.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ControlsObjSnapshot {
+    controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
+    /// (script index, previous instance_id) for every binding that was re-keyed.
+    script_instance_ids: Vec<(usize, Option<String>)>,
+}
+
+/// Serialized "obj_controls" snapshot bytes (in-open-transaction contract).
+pub(crate) fn controls_snapshot_bytes(
+    controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
+    script_instance_ids: Vec<(usize, Option<String>)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&ControlsObjSnapshot { controls, script_instance_ids })
         .unwrap_or_default()
 }
