@@ -31,6 +31,18 @@ export interface FloatingControl {
    * snap-to-grid meaningful for it.
    */
   pinToGrid?: boolean;
+  /**
+   * For a PINNED control: its offset in pixels from the top-left of its anchor
+   * cell. The rendered position is anchorOrigin + offset, recomputed whenever
+   * row heights or column widths change — which is what makes a pinned control
+   * follow a row RESIZE and not only an insert or delete.
+   *
+   * The ANCHOR never changes on drag: the control's id is derived from it, so
+   * re-anchoring would rename the control and break its script binding.
+   * Dragging a pinned control adjusts this offset instead.
+   */
+  offsetX?: number;
+  offsetY?: number;
   /** X position in sheet pixels (relative to cell A1 top-left) */
   x: number;
   /** Y position in sheet pixels */
@@ -140,6 +152,54 @@ function snapIfPinned(
   if (ctrl.pinToGrid !== true || !snapToCellOrigin) return { x, y };
   return snapToCellOrigin(x, y);
 }
+/**
+ * Recompute every pinned control's pixel position from its anchor cell.
+ *
+ * Called when row heights or column widths change. Insert/delete is handled by
+ * re-anchoring (the anchor row/col moves); a RESIZE moves no anchors at all, so
+ * without this a pinned control sits at a stale pixel position the moment a row
+ * above it grows or shrinks.
+ *
+ * The caller supplies cellOrigin because the extension owns grid geometry, not
+ * this store. Unpinned controls are never touched — their pixels are the user's.
+ */
+export function repositionPinnedControls(
+  sheetIndex: number,
+  cellOrigin: (row: number, col: number) => { x: number; y: number },
+): boolean {
+  let changed = false;
+  for (const ctrl of floatingControls) {
+    if (ctrl.sheetIndex !== sheetIndex || ctrl.pinToGrid !== true) continue;
+    const origin = cellOrigin(ctrl.row, ctrl.col);
+    const nx = origin.x + (ctrl.offsetX ?? 0);
+    const ny = origin.y + (ctrl.offsetY ?? 0);
+    if (nx !== ctrl.x || ny !== ctrl.y) {
+      ctrl.x = nx;
+      ctrl.y = ny;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Record a pinned control's offset from its anchor cell.
+ *
+ * Called after a drag and when a control is first pinned, so the offset that
+ * repositionPinnedControls later replays reflects where the user actually put
+ * it. A control snapped to a cell boundary ends up with a zero offset.
+ */
+export function recalcPinnedOffset(
+  id: string,
+  cellOrigin: (row: number, col: number) => { x: number; y: number },
+): void {
+  const ctrl = floatingControls.find((c) => c.id === id);
+  if (!ctrl || ctrl.pinToGrid !== true) return;
+  const origin = cellOrigin(ctrl.row, ctrl.col);
+  ctrl.offsetX = ctrl.x - origin.x;
+  ctrl.offsetY = ctrl.y - origin.y;
+}
+
 
 /** Resize a floating control (full bounds update for all-corner resize). */
 export function resizeFloatingControl(

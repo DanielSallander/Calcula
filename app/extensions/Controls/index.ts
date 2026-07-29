@@ -96,6 +96,8 @@ import {
   ungroupControls,
   moveGroupControls,
   reanchorFloatingControls,
+  repositionPinnedControls,
+  recalcPinnedOffset,
   setSnapResolver,
 } from "./lib/floatingStore";
 import {
@@ -436,7 +438,29 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregNamedRangesChanged);
 
-  // 6b-2. SNAP TO GRID for pinned controls.
+    // 6b-4. Pinned controls follow a row/column RESIZE too.
+  //
+  //     Insert and delete are handled by re-anchoring — the anchor row/col
+  //     moves. A resize moves no anchors at all, so without this a pinned
+  //     control keeps a stale pixel position the moment a row above it grows.
+  //     Position is replayed as anchorOrigin + offset, so a control the user
+  //     nudged off the boundary keeps that relationship.
+  const onGridResized = () => {
+    void (async () => {
+      const sheetIndex = await getActiveSheet();
+      if (!repositionPinnedControls(sheetIndex, cellOriginPixels)) return;
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      invalidateAllImageCaches();
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    })();
+  };
+  for (const evt of [AppEvents.ROW_RESIZED, AppEvents.COLUMN_RESIZED] as const) {
+    cleanupFns.push(context.events.on(evt, onGridResized));
+  }
+
+// 6b-2. SNAP TO GRID for pinned controls.
   //
   //     Pinning and snapping are the same idea at two different moments: a
   //     pinned control follows its cells when the grid changes, so it should
@@ -478,8 +502,13 @@ function activate(context: ExtensionContext): void {
     const d = (e as CustomEvent).detail as {
       sheetIndex: number; row: number; col: number; pinned: boolean;
     };
-    const ctrl = getFloatingControl(makeFloatingControlId(d.sheetIndex, d.row, d.col));
-    if (ctrl) ctrl.pinToGrid = d.pinned;
+    const id = makeFloatingControlId(d.sheetIndex, d.row, d.col);
+    const ctrl = getFloatingControl(id);
+    if (!ctrl) return;
+    ctrl.pinToGrid = d.pinned;
+    // Capture where it sits relative to its anchor AT THE MOMENT of pinning,
+    // so turning the toggle on never makes the control jump.
+    if (d.pinned) recalcPinnedOffset(id, cellOriginPixels);
   };
   window.addEventListener("controls:pin-changed", onPinChanged);
   cleanupFns.push(() => window.removeEventListener("controls:pin-changed", onPinChanged));
@@ -1082,6 +1111,28 @@ function activate(context: ExtensionContext): void {
 // ============================================================================
 
 /**
+ * Top-left pixel of a cell, in sheet coordinates (no scroll offset).
+ *
+ * Shared by the snap resolver and the pinned-control reposition pass so the two
+ * can never disagree about where a cell starts. Walks per-column/per-row rather
+ * than multiplying, because custom widths and heights make the grid irregular.
+ */
+function cellOriginPixels(row: number, col: number): { x: number; y: number } {
+  const gridState = getGridStateSnapshot();
+  if (!gridState) return { x: 0, y: 0 };
+  const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
+  const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
+  const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
+  const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
+
+  let x = 0;
+  for (let c = 0; c < col; c++) x += getColumnWidthSync(c, defaultCellWidth, columnWidths);
+  let y = 0;
+  for (let r = 0; r < row; r++) y += getRowHeightSync(r, defaultCellHeight, rowHeights);
+  return { x, y };
+}
+
+/**
  * Insert a button control on the current selection.
  * Creates a floating button positioned at the selected cell's location.
  */
@@ -1611,6 +1662,9 @@ function setupFloatingObjectEvents(): void {
 
     // Move the dragged control
     moveFloatingControl(controlId, newX, newY);
+    // Re-derive the offset from the anchor so a later row/column resize
+    // replays where the user actually put it, not a stale value.
+    recalcPinnedOffset(controlId, cellOriginPixels);
 
     // Move all other selected/grouped controls by the same delta
     const idsToMove = getCoMovingControlIds(controlId);
@@ -1619,6 +1673,7 @@ function setupFloatingObjectEvents(): void {
       const otherCtrl = getFloatingControl(otherId);
       if (otherCtrl) {
         moveFloatingControl(otherId, Math.max(0, otherCtrl.x + deltaX), Math.max(0, otherCtrl.y + deltaY));
+        recalcPinnedOffset(otherId, cellOriginPixels);
       }
     }
 

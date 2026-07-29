@@ -11,6 +11,8 @@ import {
   getAllFloatingControls,
   moveFloatingControl,
   reanchorFloatingControls,
+  repositionPinnedControls,
+  recalcPinnedOffset,
   resetFloatingStore,
   setSnapResolver,
   makeFloatingControlId,
@@ -122,6 +124,69 @@ describe("pin to grid", () => {
       const changed = reanchorFloatingControls(0, shiftRowsDownBy(0, 2), movesWithCells);
       expect(changed).toBe(false);
       expect(getFloatingControl(makeFloatingControlId(1, 5, 1))).not.toBeNull();
+    });
+  });
+
+  describe("following a row/column resize", () => {
+    // Insert/delete moves the ANCHOR; a resize moves no anchors at all, so a
+    // pinned control only follows it if its pixels are re-derived.
+    const originAfter = (rowHeight: number) =>
+      (row: number, col: number) => ({ x: col * 100, y: row * rowHeight });
+
+    it("moves a pinned control when a row above it grows", () => {
+      const c = ctrl(5, 1, true);
+      c.x = 100;
+      c.y = 100; // row 5 at 20px rows
+      c.offsetX = 0;
+      c.offsetY = 0;
+      addFloatingControl(c);
+
+      const changed = repositionPinnedControls(0, originAfter(30));
+      expect(changed).toBe(true);
+      expect(getFloatingControl(c.id)!.y).toBe(150);
+    });
+
+    it("leaves an unpinned control where the user put it", () => {
+      const c = ctrl(5, 1, false);
+      c.x = 100;
+      c.y = 100;
+      addFloatingControl(c);
+
+      expect(repositionPinnedControls(0, originAfter(30))).toBe(false);
+      expect(getFloatingControl(c.id)!.y).toBe(100);
+    });
+
+    it("preserves an offset the user nudged the control by", () => {
+      // Pinning does not mean "glued to the corner" — it means the control
+      // keeps its RELATIONSHIP to the anchor cell.
+      const c = ctrl(5, 1, true);
+      c.x = 107;
+      c.y = 103;
+      c.offsetX = 7;
+      c.offsetY = 3;
+      addFloatingControl(c);
+
+      repositionPinnedControls(0, originAfter(30));
+      const moved = getFloatingControl(c.id)!;
+      expect({ x: moved.x, y: moved.y }).toEqual({ x: 107, y: 153 });
+    });
+
+    it("recalcPinnedOffset captures the current relationship to the anchor", () => {
+      const c = ctrl(5, 1, true);
+      c.x = 107;
+      c.y = 103;
+      addFloatingControl(c);
+
+      recalcPinnedOffset(c.id, originAfter(20));
+      const after = getFloatingControl(c.id)!;
+      expect({ x: after.offsetX, y: after.offsetY }).toEqual({ x: 7, y: 3 });
+    });
+
+    it("recalcPinnedOffset ignores unpinned controls", () => {
+      const c = ctrl(5, 1, false);
+      addFloatingControl(c);
+      recalcPinnedOffset(c.id, originAfter(20));
+      expect(getFloatingControl(c.id)!.offsetX).toBeUndefined();
     });
   });
 });
