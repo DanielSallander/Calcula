@@ -46,6 +46,7 @@ import {
   getWritebackCellState,
   getRegionForCell,
 } from "./lib/writebackStore";
+import { openPackageInspectorWindow } from "./lib/openPackageInspectorWindow";
 import { registerCommitGuard } from "@api/commitGuards";
 import { runWritebackValidator } from "@api/writebackValidators";
 import {
@@ -219,6 +220,12 @@ function activate(context: ExtensionContext): void {
         label: "Package Explorer",
         icon: IconPackage,
         action: () => context.ui.panels.open(PACKAGE_EXPLORER_PANEL_ID),
+      },
+      {
+        id: "externalData:distribution:packageInspector",
+        label: "Package Inspector...",
+        icon: IconPackage,
+        action: () => void openPackageInspectorWindow(),
       },
       {
         id: "externalData:distribution:collectedResponses",

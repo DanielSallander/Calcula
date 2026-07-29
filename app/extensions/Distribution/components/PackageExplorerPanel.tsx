@@ -20,6 +20,7 @@ import type {
   PublishReport,
   PublishPreviewResponse,
 } from "@api";
+import { openPackageInspectorWindow } from "../lib/openPackageInspectorWindow";
 
 const KIND_LABELS: Record<string, string> = {
   table: "Tables",
@@ -142,7 +143,25 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
         <div key={pkg.packageName} style={{ marginBottom: "10px" }}>
           <div style={pkgHeaderStyle}>
             {pkg.packageName}{" "}
-            <span style={{ ...mutedStyle, fontWeight: 400 }}>v{pkg.resolvedVersion}</span>
+            <span style={{ ...mutedStyle, fontWeight: 400 }}>v{pkg.resolvedVersion}</span>{" "}
+            <a
+              style={{
+                fontWeight: 400,
+                fontSize: "11px",
+                cursor: "pointer",
+                textDecoration: "underline",
+              }}
+              title="Open this package in the standalone Package Inspector window"
+              onClick={() =>
+                void openPackageInspectorWindow({
+                  registryPath: pkg.registryUrl,
+                  packageName: pkg.packageName,
+                  versionPin: pkg.resolvedVersion,
+                })
+              }
+            >
+              Inspect…
+            </a>
           </div>
 
           <div style={groupLabelStyle}>Sheets</div>

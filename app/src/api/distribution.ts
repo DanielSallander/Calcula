@@ -938,3 +938,535 @@ export function saveDataSourceConfig(
 export function getDataSources(): Promise<DataSourceInfo[]> {
   return invokeBackend("calp_get_data_sources");
 }
+
+// ============================================================================
+// Package Inspector (standalone window) — read-only deep inspection of a
+// published package version. Nothing is subscribed or materialized; every
+// call re-verifies the manifest signature + TOFU pin, and artifacts are only
+// readable via the signed manifest's checksum keys.
+// ============================================================================
+
+export interface InspectorVersionEntry {
+  version: string;
+  publishedAt: string;
+  publishedBy: string;
+}
+
+export interface InspectorPackageInfo {
+  name: string;
+  description: string;
+  kind: string;
+  author: string;
+  created: string;
+  versions: InspectorVersionEntry[];
+}
+
+export interface InspectorManifestInfo {
+  formatVersion: number;
+  kind: string;
+  publishedAt: string;
+  publishedBy: string;
+  publisherName: string;
+  /** Lowercase hex Ed25519 public key of the verified signer. */
+  publisherKey: string;
+  minAppVersion: string;
+  /** "firstUse" | "verified" (TOFU outcome for this inspection). */
+  trustStatus: string;
+  /** Whether THIS machine holds the publisher signing key. */
+  isPublisher: boolean;
+  artifactCount: number;
+}
+
+export interface InspectorSheetSummary {
+  sheetId: string;
+  name: string;
+  description: string;
+  cellCount: number;
+  formulaCount: number;
+  mergedCount: number;
+  noteCount: number;
+  hyperlinkCount: number;
+  hiddenRowCount: number;
+  hiddenColCount: number;
+  hasFreeze: boolean;
+  tabColor: string;
+  visibility: string;
+  hasPageSetup: boolean;
+  showGridlines: boolean;
+}
+
+export interface InspectorTableInfo {
+  id: string;
+  name: string;
+  sheetName: string;
+  range: string;
+  columns: string[];
+}
+
+export interface InspectorNamedRangeInfo {
+  name: string;
+  refersTo: string;
+  sheetName: string | null;
+}
+
+export interface InspectorChartInfo {
+  id: string;
+  sheetName: string;
+  title: string | null;
+}
+
+export interface InspectorPivotInfo {
+  id: string;
+  sourceType: string;
+  name: string | null;
+}
+
+export interface InspectorSlicerInfo {
+  name: string;
+  sheetName: string;
+  fieldName: string;
+}
+
+export interface InspectorPaneControlInfo {
+  id: string;
+  name: string;
+  controlType: string;
+}
+
+export interface InspectorRibbonFilterInfo {
+  name: string;
+  fieldName: string;
+}
+
+export interface InspectorPivotLayoutInfo {
+  name: string;
+  sourceType: string;
+  description: string | null;
+}
+
+export interface InspectorCustomObjectInfo {
+  kind: string;
+  id: string;
+  name: string;
+  sheetName: string | null;
+  payloadPath: string;
+}
+
+export interface InspectorObjectScriptInfo {
+  id: string;
+  name: string;
+  objectType: string;
+  instanceId: string | null;
+  description: string | null;
+  /** R19 declared-capability ceiling from the SIGNED manifest. */
+  capabilities: string[];
+}
+
+export interface InspectorModuleScriptInfo {
+  id: string;
+  name: string;
+  scope: string;
+  description: string | null;
+}
+
+export interface InspectorNotebookInfo {
+  id: string;
+  name: string;
+  cellCount: number;
+}
+
+export interface InspectorBindingInfo {
+  modelTable: string;
+  schema: string;
+  sourceTable: string;
+  hasQuery: boolean;
+}
+
+export interface InspectorSnapshotRef {
+  table: string;
+  path: string;
+}
+
+export interface InspectorDataSourceInfo {
+  id: string;
+  name: string;
+  connectionType: string;
+  server: string;
+  database: string;
+  modelPath: string;
+  bindings: InspectorBindingInfo[];
+  calculatedTableSnapshots: InspectorSnapshotRef[];
+  hasWritebackHistory: boolean;
+}
+
+export interface InspectorArtifactEntry {
+  path: string;
+  sha256: string;
+}
+
+export interface InspectorOverview {
+  package: InspectorPackageInfo;
+  resolvedVersion: string;
+  manifest: InspectorManifestInfo;
+  sheets: InspectorSheetSummary[];
+  tables: InspectorTableInfo[];
+  namedRanges: InspectorNamedRangeInfo[];
+  charts: InspectorChartInfo[];
+  sparklineSheets: string[];
+  pivots: InspectorPivotInfo[];
+  slicers: InspectorSlicerInfo[];
+  paneControls: InspectorPaneControlInfo[];
+  ribbonFilters: InspectorRibbonFilterInfo[];
+  pivotLayouts: InspectorPivotLayoutInfo[];
+  conditionalFormatSheets: string[];
+  dataValidationSheets: string[];
+  controlSheets: string[];
+  commentSheets: string[];
+  scenarioSheets: string[];
+  outlineSheets: string[];
+  hasTheme: boolean;
+  themeName: string | null;
+  extensionDataKeys: string[];
+  customObjects: InspectorCustomObjectInfo[];
+  objectScripts: InspectorObjectScriptInfo[];
+  /** Excludes the reserved Custom Functions library module (see
+   * customFunctionCount). */
+  moduleScripts: InspectorModuleScriptInfo[];
+  notebooks: InspectorNotebookInfo[];
+  /** Functions in the reserved Custom Functions library, 0 when absent. */
+  customFunctionCount: number;
+  dataSources: InspectorDataSourceInfo[];
+  writebackRegionCount: number;
+  modelWritebackCount: number;
+  lockedSheetCount: number;
+  lockedCellCount: number;
+  artifacts: InspectorArtifactEntry[];
+}
+
+export interface InspectorCell {
+  a1: string;
+  row: number;
+  col: number;
+  /** "s" | "n" | "b" | "e" | "l" | "d" | "x". */
+  cellType: string;
+  display: string;
+  /** Formula WITHOUT the leading '='. */
+  formula: string | null;
+  styleIndex: number | null;
+  hasRichText: boolean;
+}
+
+export interface InspectorUsedRange {
+  minRow: number;
+  maxRow: number;
+  minCol: number;
+  maxCol: number;
+}
+
+export interface InspectorMergedRegion {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+export interface InspectorSheetMetadata {
+  mergedRegions: InspectorMergedRegion[];
+  freezeRow: number | null;
+  freezeCol: number | null;
+  hiddenRowCount: number;
+  hiddenColCount: number;
+  tabColor: string;
+  visibility: string;
+  noteCount: number;
+  hyperlinkCount: number;
+  hasPageSetup: boolean;
+  showGridlines: boolean;
+}
+
+export interface InspectorSheetDetail {
+  sheetId: string;
+  name: string;
+  cells: InspectorCell[];
+  totalCellCount: number;
+  formulaCount: number;
+  truncated: boolean;
+  usedRange: InspectorUsedRange | null;
+  columnWidths: Record<string, number>;
+  rowHeights: Record<string, number>;
+  styleCount: number;
+  styledCellCount: number;
+  metadata: InspectorSheetMetadata;
+}
+
+export interface InspectorObjectScriptDetail {
+  id: string;
+  name: string;
+  objectType: string;
+  instanceId: string | null;
+  description: string | null;
+  capabilities: string[];
+  source: string;
+}
+
+export interface InspectorModuleScriptDetail {
+  id: string;
+  name: string;
+  scope: string;
+  description: string | null;
+  source: string;
+}
+
+export interface InspectorNotebookCell {
+  id: string;
+  source: string;
+}
+
+export interface InspectorNotebookDetail {
+  id: string;
+  name: string;
+  cells: InspectorNotebookCell[];
+}
+
+export interface InspectorCustomFunctions {
+  functionNames: string[];
+  capabilities: string[];
+}
+
+export interface InspectorScripts {
+  objectScripts: InspectorObjectScriptDetail[];
+  moduleScripts: InspectorModuleScriptDetail[];
+  notebooks: InspectorNotebookDetail[];
+  customFunctions: InspectorCustomFunctions | null;
+}
+
+export interface InspectorModelColumn {
+  name: string;
+  dataType: string;
+}
+
+export interface InspectorModelTable {
+  name: string;
+  columns: InspectorModelColumn[];
+}
+
+export interface InspectorModelMeasure {
+  name: string;
+  /** Measure group, when the model organizes measures into groups. */
+  group: string | null;
+  expression: string;
+}
+
+export interface InspectorModelRelationship {
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+}
+
+export interface InspectorSnapshotDetail {
+  table: string;
+  path: string;
+  sizeBytes: number;
+}
+
+export interface InspectorModel {
+  dataSourceId: string;
+  name: string;
+  modelFormatVersion: number | null;
+  tables: InspectorModelTable[];
+  measures: InspectorModelMeasure[];
+  relationships: InspectorModelRelationship[];
+  calculatedColumnCount: number;
+  hierarchyCount: number;
+  calculationGroupCount: number;
+  kpiCount: number;
+  securityRoleCount: number;
+  globalVariableCount: number;
+  scriptFunctionCount: number;
+  contextCount: number;
+  dateTable: string | null;
+  calculatedTableSnapshots: InspectorSnapshotDetail[];
+  hasWritebackHistory: boolean;
+}
+
+export interface InspectorWritebackRegion {
+  id: string;
+  sheetName: string;
+  range: string;
+  mode: string | null;
+  valueType: string | null;
+  visibility: string | null;
+  submissionPolicy: string | null;
+  versionBinding: string | null;
+  lifecycle: string | null;
+  aggregationHint: string | null;
+  expectedRespondents: string[];
+}
+
+export interface InspectorModelWriteback {
+  id: string;
+  dataSourceId: string;
+  table: string;
+  column: string;
+  keyColumns: string[];
+  kind: string;
+  valueType: string | null;
+  allowedEditors: string[];
+  submissionPolicy: string | null;
+}
+
+export interface InspectorRegionStats {
+  regionId: string;
+  submissionCount: number;
+  submitterCount: number;
+  approved: number;
+  rejected: number;
+  pending: number;
+}
+
+export interface InspectorSubmissionDetail {
+  regionId: string;
+  submitterName: string;
+  cellRow: number;
+  cellCol: number;
+  modelKey: string[] | null;
+  valueDisplay: string;
+  valueKind: string;
+  state: string;
+  updatedAt: string;
+  /** Publisher's approve/reject feedback, when a decision exists. */
+  reviewReason: string | null;
+  reviewedBy: string | null;
+}
+
+export interface InspectorWriteback {
+  regions: InspectorWritebackRegion[];
+  modelWritebacks: InspectorModelWriteback[];
+  /** Response activity (stats, counts, values, rollup) is PUBLISHER-ONLY —
+   * even aggregates would bypass a region's visibility policy. Empty/zero
+   * unless this machine holds the signing key. */
+  regionStats: InspectorRegionStats[];
+  totalSubmissions: number;
+  reviewEventCount: number;
+  isPublisher: boolean;
+  submissions: InspectorSubmissionDetail[];
+  /** Derived Parquet rollup at submissions/_rollup.parquet (publisher-only). */
+  rollupPresent: boolean;
+  rollupSizeBytes: number | null;
+}
+
+export interface InspectorArtifact {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  expectedSha256: string;
+  verified: boolean;
+  /** "json" | "text" | "binary". */
+  contentKind: string;
+  text: string | null;
+  truncated: boolean;
+}
+
+export interface InspectorArtifactVerification {
+  path: string;
+  /** "ok" | "mismatch" | "missing". */
+  status: string;
+  sizeBytes: number;
+}
+
+export interface InspectorVerifyReport {
+  signatureOk: boolean;
+  trustStatus: string;
+  publisherName: string;
+  artifacts: InspectorArtifactVerification[];
+  unlisted: string[];
+  allOk: boolean;
+}
+
+/** Deep overview of a package version (Package Inspector landing payload). */
+export function inspectorOverview(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+): Promise<InspectorOverview> {
+  return invokeBackend("calp_inspector_overview", { registryPath, packageName, versionPin });
+}
+
+/** Full cell-level view of one published sheet. */
+export function inspectorSheet(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+  sheetId: string,
+  maxCells?: number,
+): Promise<InspectorSheetDetail> {
+  return invokeBackend("calp_inspector_sheet", {
+    registryPath,
+    packageName,
+    versionPin,
+    sheetId,
+    maxCells: maxCells ?? null,
+  });
+}
+
+/** Every line of code the package carries, with full source. */
+export function inspectorScripts(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+): Promise<InspectorScripts> {
+  return invokeBackend("calp_inspector_scripts", { registryPath, packageName, versionPin });
+}
+
+/** Summary of one embedded BI model (schema only, never credentials). */
+export function inspectorModel(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+  dataSourceId: string,
+): Promise<InspectorModel> {
+  return invokeBackend("calp_inspector_model", {
+    registryPath,
+    packageName,
+    versionPin,
+    dataSourceId,
+  });
+}
+
+/** Writeback declarations + folded post-publish response activity. */
+export function inspectorWriteback(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+): Promise<InspectorWriteback> {
+  return invokeBackend("calp_inspector_writeback", { registryPath, packageName, versionPin });
+}
+
+/** Raw view of one signed artifact (pretty JSON / text / binary summary). */
+export function inspectorArtifact(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+  artifactPath: string,
+): Promise<InspectorArtifact> {
+  return invokeBackend("calp_inspector_artifact", {
+    registryPath,
+    packageName,
+    versionPin,
+    artifactPath,
+  });
+}
+
+/** Full integrity audit: per-artifact hash verification report. */
+export function inspectorVerifyArtifacts(
+  registryPath: string,
+  packageName: string,
+  versionPin: string,
+): Promise<InspectorVerifyReport> {
+  return invokeBackend("calp_inspector_verify_artifacts", {
+    registryPath,
+    packageName,
+    versionPin,
+  });
+}

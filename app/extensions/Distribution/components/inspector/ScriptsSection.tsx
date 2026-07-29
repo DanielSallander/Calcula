@@ -1,0 +1,200 @@
+// FILENAME: app/extensions/Distribution/components/inspector/ScriptsSection.tsx
+// PURPOSE: Full-source transparency for every line of code the package
+//          carries: object scripts (with the SIGNED capability ceiling),
+//          module scripts, notebooks, and the Custom Functions library.
+
+import React, { useEffect, useState } from "react";
+import {
+  inspectorScripts,
+  type InspectorOverview,
+  type InspectorScripts,
+} from "@api/distribution";
+import type { InspectorContext } from "./PackageInspectorApp";
+import {
+  Badge,
+  StatusLine,
+  WARN_AMBER,
+  cardHeaderStyle,
+  cardStyle,
+  mutedStyle,
+  preStyle,
+  sectionTitleStyle,
+} from "./shared";
+
+/** Short human phrase for a declared capability id (R19). */
+const CAPABILITY_PHRASE: Record<string, string> = {
+  "net.fetch": "fetch data from the web",
+  "bi.query": "run read-only BI queries",
+  "bi.sql": "run BI SQL",
+  "bi.model": "read the BI model",
+  storage: "store data on this device",
+  "ui.html": "render custom HTML UI",
+  "formula.udf": "define formula functions",
+};
+
+function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {
+  if (capabilities.length === 0)
+    return <span style={{ ...mutedStyle, fontSize: 11 }}>no capabilities — grid access only</span>;
+  return (
+    <span>
+      {capabilities.map((c) => (
+        <Badge key={c} color={WARN_AMBER}>
+          {c}
+          {CAPABILITY_PHRASE[c] ? ` — ${CAPABILITY_PHRASE[c]}` : ""}
+        </Badge>
+      ))}
+    </span>
+  );
+}
+
+function SourceBlock({ source }: { source: string }): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const lines = source.split("\n").length;
+  return (
+    <div style={{ marginTop: 6 }}>
+      <a
+        style={{ fontSize: 12, color: "#0f6cbd", cursor: "pointer", textDecoration: "underline" }}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? "Hide source" : `Show source (${lines} lines)`}
+      </a>
+      {open && <pre style={preStyle}>{source || "(empty)"}</pre>}
+    </div>
+  );
+}
+
+export function ScriptsSection({
+  ctx,
+  overview,
+}: {
+  ctx: InspectorContext;
+  overview: InspectorOverview;
+}): React.ReactElement {
+  const [data, setData] = useState<InspectorScripts | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const hasAny =
+    overview.objectScripts.length +
+      overview.moduleScripts.length +
+      overview.notebooks.length +
+      overview.customFunctionCount >
+    0;
+
+  useEffect(() => {
+    if (!hasAny) return;
+    inspectorScripts(ctx.registryPath, ctx.packageName, ctx.version)
+      .then(setData)
+      .catch((err) => setError(String(err)));
+  }, [ctx, hasAny]);
+
+  if (!hasAny) {
+    return (
+      <div>
+        <h2 style={sectionTitleStyle}>Scripts &amp; Code</h2>
+        <StatusLine empty emptyText="This package carries no scripts, notebooks, or custom functions." />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h2 style={sectionTitleStyle}>Scripts &amp; Code</h2>
+      <StatusLine error={error} loading={!data && !error} />
+      {data && (
+        <>
+          {data.objectScripts.length > 0 && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>Object scripts ({data.objectScripts.length})</div>
+              <div style={{ ...mutedStyle, fontSize: 11, marginBottom: 8 }}>
+                Pulled scripts always run Restricted and consent-gated; their capability
+                ceiling comes from the signed manifest shown here, never from the source.
+              </div>
+              {data.objectScripts.map((s) => (
+                <div key={s.id} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 13 }}>
+                    <b>{s.name}</b>{" "}
+                    <span style={mutedStyle}>
+                      on {s.objectType}
+                      {s.instanceId ? ` (${s.instanceId})` : ""}
+                    </span>
+                  </div>
+                  {s.description && (
+                    <div style={{ ...mutedStyle, fontSize: 12 }}>{s.description}</div>
+                  )}
+                  <div style={{ marginTop: 4 }}>
+                    <CapabilityBadges capabilities={s.capabilities} />
+                  </div>
+                  <SourceBlock source={s.source} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {data.moduleScripts.length > 0 && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>Module scripts ({data.moduleScripts.length})</div>
+              <div style={{ ...mutedStyle, fontSize: 11, marginBottom: 8 }}>
+                Inert data — never auto-executed; they run only on explicit user action in
+                the sandboxed interpreter.
+              </div>
+              {data.moduleScripts.map((s) => (
+                <div key={s.id} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 13 }}>
+                    <b>{s.name}</b> <span style={mutedStyle}>scope: {s.scope}</span>
+                  </div>
+                  {s.description && (
+                    <div style={{ ...mutedStyle, fontSize: 12 }}>{s.description}</div>
+                  )}
+                  <SourceBlock source={s.source} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {data.notebooks.length > 0 && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>Notebooks ({data.notebooks.length})</div>
+              <div style={{ ...mutedStyle, fontSize: 11, marginBottom: 8 }}>
+                Source only — execution outputs are stripped at publish.
+              </div>
+              {data.notebooks.map((n) => (
+                <div key={n.id} style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 13 }}>
+                    <b>{n.name}</b>{" "}
+                    <span style={mutedStyle}>({n.cells.length} cells)</span>
+                  </div>
+                  <SourceBlock
+                    source={n.cells
+                      .map((c, i) => `// --- cell ${i + 1} ---\n${c.source}`)
+                      .join("\n\n")}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {data.customFunctions && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>
+                Custom Functions library ({data.customFunctions.functionNames.length})
+              </div>
+              <div style={{ fontSize: 12 }}>
+                Functions:{" "}
+                <span style={{ fontFamily: "Consolas, monospace", fontSize: 11 }}>
+                  {data.customFunctions.functionNames.join(", ") || "(none)"}
+                </span>
+              </div>
+              <div style={{ marginTop: 4 }}>
+                <CapabilityBadges capabilities={data.customFunctions.capabilities} />
+              </div>
+              <div style={{ ...mutedStyle, fontSize: 11, marginTop: 4 }}>
+                Merged per-function at pull; a package can never widen the subscriber&apos;s
+                capability ceiling. Full library JSON: Artifacts &amp; Integrity.
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

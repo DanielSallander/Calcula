@@ -110,6 +110,7 @@ pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
+pub mod calp_inspector;
 pub mod calp_registry;
 pub mod managed_policy;
 pub mod state_digest;
@@ -4715,6 +4716,14 @@ pub fn run() {
             calp_registry::calp_add_registry,
             calp_registry::calp_remove_registry,
             calp_commands::calp_inspect_package,
+            // Package Inspector window (read-only deep inspection)
+            calp_inspector::calp_inspector_overview,
+            calp_inspector::calp_inspector_sheet,
+            calp_inspector::calp_inspector_scripts,
+            calp_inspector::calp_inspector_model,
+            calp_inspector::calp_inspector_writeback,
+            calp_inspector::calp_inspector_artifact,
+            calp_inspector::calp_inspector_verify_artifacts,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_get_package_objects,
             calp_commands::calp_get_overrides,

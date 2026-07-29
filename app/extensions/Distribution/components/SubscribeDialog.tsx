@@ -17,6 +17,7 @@ import {
 } from "@api/distributionRegistries";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useDialogWindow } from "@api/dialogWindow";
+import { openPackageInspectorWindow } from "../lib/openPackageInspectorWindow";
 import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { pivot } from "@api/pivot";
@@ -590,6 +591,19 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         ) : (
           <>
             <button onClick={onClose}>Cancel</button>
+            <button
+              title="Deep-inspect this package in the standalone Package Inspector window"
+              disabled={!registryPath.trim() || !packageName.trim()}
+              onClick={() =>
+                void openPackageInspectorWindow({
+                  registryPath: registryPath.trim(),
+                  packageName: packageName.trim(),
+                  versionPin: versionPin.trim() || "latest",
+                })
+              }
+            >
+              Open in Inspector
+            </button>
             <button onClick={handleReview} style={{ fontWeight: 600 }}>Review Contents...</button>
           </>
         )}

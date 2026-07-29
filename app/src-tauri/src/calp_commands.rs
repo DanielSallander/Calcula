@@ -2519,7 +2519,11 @@ pub fn calp_browse_registry(
     registry_path: String,
     window: tauri::Window,
 ) -> Result<Vec<PackageInfo>, String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    // Also callable from the Package Inspector window (its registry picker).
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_PACKAGE_INSPECTOR,
+    )?;
     let registry = crate::calp_registry::open_registry(&registry_path)
         .map_err(|e| e.to_string())?;
 

@@ -38,6 +38,8 @@ export default defineConfig({
         objectScript: path.resolve(__dirname, 'objectScript.html'),
         // eslint-disable-next-line @typescript-eslint/naming-convention
         modelEditor: path.resolve(__dirname, 'modelEditor.html'),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        packageInspector: path.resolve(__dirname, 'packageInspector.html'),
       },
     },
   },

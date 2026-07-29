@@ -20,7 +20,9 @@
 
 mod error;
 mod manifest;
-mod cell_ref;
+// Public: hosts parse the A1 keys of `sheet_data` maps directly (e.g. the
+// .calp Package Inspector rendering published cell data read-only).
+pub mod cell_ref;
 pub mod sheet_data;
 pub mod sheet_styles;
 pub mod sheet_layout;

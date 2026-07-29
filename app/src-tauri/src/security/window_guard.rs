@@ -26,6 +26,10 @@ pub const MAIN_AND_OBJECT_SCRIPT_EDITOR: &[&str] = &["main", "object-script-edit
 /// authoring UI.
 pub const MAIN_AND_MODEL_EDITOR: &[&str] = &["main", "model-editor"];
 
+/// The standalone Package Inspector window browses registries and runs the
+/// read-only calp_inspector_* commands (plus calp_browse_registry) itself.
+pub const MAIN_AND_PACKAGE_INSPECTOR: &[&str] = &["main", "package-inspector"];
+
 /// Reject the call unless the invoking window's label is in `allowed`.
 /// First line of every guarded command:
 /// `crate::security::window_guard::require_label(&window, window_guard::MAIN)?;`
