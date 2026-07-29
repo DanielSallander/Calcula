@@ -389,6 +389,15 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           window.dispatchEvent(new CustomEvent("styles:refresh"));
         }
 
+        // Pinning is store state as well as metadata: the floating store keeps
+        // its own copy so the structural-edit re-anchor can decide synchronously
+        // without a backend round-trip.
+        if (key === "pinToGrid") {
+          window.dispatchEvent(new CustomEvent("controls:pin-changed", {
+            detail: { sheetIndex, row, col, pinned: value === "true" },
+          }));
+        }
+
         // For size properties, notify the floating store so the overlay updates
         if (["width", "height"].includes(key)) {
           window.dispatchEvent(new CustomEvent("controls:bounds-changed", {

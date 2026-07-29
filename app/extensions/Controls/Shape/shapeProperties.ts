@@ -202,4 +202,14 @@ export const SHAPE_PROPERTIES: PropertyDefinition[] = [
     group: "Size",
     inline: true,
   },
+  {
+    key: "pinToGrid",
+    label: "Pin to grid",
+    inputType: "boolean",
+    // Shapes and images are always floating, so they hold a pixel position by
+    // default and only follow the grid when the user pins them.
+    defaultValue: "false",
+    supportsFormula: false,
+    group: "Layout",
+  },
 ];

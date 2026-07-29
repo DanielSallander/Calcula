@@ -133,6 +133,17 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     group: "Layout",
   },
   {
+    key: "pinToGrid",
+    label: "Pin to grid",
+    inputType: "boolean",
+    // Floating controls are created with this false (they hold a pixel
+    // position). In-cell controls have no stored value and default to pinned,
+    // because an in-cell control's position simply IS its anchor cell.
+    defaultValue: "false",
+    supportsFormula: false,
+    group: "Layout",
+  },
+  {
     key: "onSelect",
     label: "OnSelect",
     inputType: "code",

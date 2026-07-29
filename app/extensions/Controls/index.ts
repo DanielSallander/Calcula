@@ -19,6 +19,11 @@ import {
   IconDesignMode,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
+import { getGridStateSnapshot } from "@api/grid";
+import {
+  getColumnWidth as getColumnWidthSync,
+  getRowHeight as getRowHeightSync,
+} from "@api/dimensions";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
 import {
@@ -91,6 +96,7 @@ import {
   ungroupControls,
   moveGroupControls,
   reanchorFloatingControls,
+  setSnapResolver,
 } from "./lib/floatingStore";
 import {
   getDesignMode,
@@ -430,6 +436,54 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unregNamedRangesChanged);
 
+  // 6b-2. SNAP TO GRID for pinned controls.
+  //
+  //     Pinning and snapping are the same idea at two different moments: a
+  //     pinned control follows its cells when the grid changes, so it should
+  //     also LAND on a cell boundary when dragged. Unpinned controls are never
+  //     snapped — nudging one by a single pixel has to stay possible.
+  //
+  //     The store owns no pixel geometry, so it calls back here for the nearest
+  //     cell origin.
+  setSnapResolver((x, y) => {
+    const gridState = getGridStateSnapshot();
+    if (!gridState) return { x, y };
+    const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
+    const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
+    const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
+    const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
+
+    // Walk to the last boundary at or before the drop point. Columns and rows
+    // can each have custom sizes, so this cannot be a modulo.
+    let snappedX = 0;
+    for (let c = 0; snappedX <= x; c++) {
+      const next = snappedX + getColumnWidthSync(c, defaultCellWidth, columnWidths);
+      if (next > x) break;
+      snappedX = next;
+    }
+    let snappedY = 0;
+    for (let r = 0; snappedY <= y; r++) {
+      const next = snappedY + getRowHeightSync(r, defaultCellHeight, rowHeights);
+      if (next > y) break;
+      snappedY = next;
+    }
+    return { x: snappedX, y: snappedY };
+  });
+  cleanupFns.push(() => setSnapResolver(null));
+
+  // 6b-3. Keep the floating store's pin flag in step with the metadata the
+  //     Properties Pane just wrote, so the re-anchor above can read it
+  //     synchronously during a structural edit.
+  const onPinChanged = (e: Event) => {
+    const d = (e as CustomEvent).detail as {
+      sheetIndex: number; row: number; col: number; pinned: boolean;
+    };
+    const ctrl = getFloatingControl(makeFloatingControlId(d.sheetIndex, d.row, d.col));
+    if (ctrl) ctrl.pinToGrid = d.pinned;
+  };
+  window.addEventListener("controls:pin-changed", onPinChanged);
+  cleanupFns.push(() => window.removeEventListener("controls:pin-changed", onPinChanged));
+
   // 6c. STRUCTURAL EDITS. Controls are anchored to a cell, and the backend
   //     shifts that anchor when rows/columns are inserted or deleted — but this
   //     extension had NO structural subscription at all, so the floating store
@@ -461,10 +515,10 @@ function activate(context: ExtensionContext): void {
     }
   };
 
-  // Mirrors controls::moves_with_cells — absent means "moves", so every control
-  // authored before placement existed keeps its behaviour.
-  const movesWithCells = (ctrl: { placement?: string }): boolean =>
-    ctrl.placement !== "free";
+  // Mirrors controls::moves_with_cells. A floating control only follows the
+  // grid when the user has pinned it; in-cell controls are not in this store.
+  const movesWithCells = (ctrl: { pinToGrid?: boolean }): boolean =>
+    ctrl.pinToGrid === true;
 
   const onStructuralEdit = (
     kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete",

@@ -23,12 +23,14 @@ export interface FloatingControl {
   /** Anchor cell column (for metadata lookup) */
   col: number;
   /**
-   * Placement relative to the grid, mirroring the backend's
-   * `controls::PLACEMENT_PROPERTY`. Absent means "moves with cells", so every
-   * control created before this existed keeps its behaviour. "free" pins the
-   * control to its pixel position and leaves its anchor alone.
+   * Pinned to the grid? Mirrors the backend's `controls::PIN_TO_GRID_PROPERTY`.
+   *
+   * A floating control defaults to UNPINNED — it holds the pixel position the
+   * user dragged it to, and the grid moving underneath must not drag it along.
+   * Pinning makes it follow its anchor cell instead, which is also what makes
+   * snap-to-grid meaningful for it.
    */
-  placement?: string;
+  pinToGrid?: boolean;
   /** X position in sheet pixels (relative to cell A1 top-left) */
   x: number;
   /** Y position in sheet pixels */
@@ -104,9 +106,39 @@ export function getFloatingControlsForSheet(sheetIndex: number): FloatingControl
 export function moveFloatingControl(id: string, x: number, y: number): void {
   const ctrl = floatingControls.find((c) => c.id === id);
   if (ctrl) {
-    ctrl.x = x;
-    ctrl.y = y;
+    const snapped = snapIfPinned(ctrl, x, y);
+    ctrl.x = snapped.x;
+    ctrl.y = snapped.y;
   }
+}
+
+/**
+ * Snap a drag to cell boundaries when the control is pinned to the grid.
+ *
+ * Pinning and snapping are the same idea at two moments: a pinned control
+ * follows its cells when the grid changes, so it should also LAND on a cell
+ * boundary when dragged. An unpinned control is free pixel geometry and is
+ * never snapped — nudging it by one pixel has to stay possible.
+ *
+ * `snapToCellOrigin` is supplied by the extension, which owns the row/column
+ * geometry; the store deliberately knows nothing about pixel layout.
+ */
+let snapToCellOrigin: ((x: number, y: number) => { x: number; y: number }) | null = null;
+
+/** Install the grid-snapping resolver (called once at extension activation). */
+export function setSnapResolver(
+  resolver: ((x: number, y: number) => { x: number; y: number }) | null,
+): void {
+  snapToCellOrigin = resolver;
+}
+
+function snapIfPinned(
+  ctrl: FloatingControl,
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  if (ctrl.pinToGrid !== true || !snapToCellOrigin) return { x, y };
+  return snapToCellOrigin(x, y);
 }
 
 /** Resize a floating control (full bounds update for all-corner resize). */
@@ -134,9 +166,9 @@ export function resizeFloatingControl(
  * frontend id must follow or the store and the backend disagree about which
  * control is which. Group membership is re-keyed with it.
  *
- * `shouldMove` decides per control, mirroring the backend's placement rule: a
- * FREE floating control holds its pixel position and keeps its anchor, while a
- * pinned or in-cell one moves. Returning `null` from `shift` means the control's
+ * `shouldMove` decides per control, mirroring the backend rule: an UNPINNED
+ * floating control holds its pixel position and keeps its anchor, while a
+ * pinned one moves with its cells. Returning `null` from `shift` means the control's
  * row/column was deleted, so it goes with it.
  *
  * The pixel x/y are deliberately NOT adjusted here: a pinned control's geometry

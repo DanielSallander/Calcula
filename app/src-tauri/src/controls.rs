@@ -39,32 +39,30 @@ pub struct ControlMetadata {
     pub properties: HashMap<String, ControlPropertyValue>,
 }
 
-/// Well-known property name for a control's PLACEMENT relative to the grid.
+/// Well-known property: is this control PINNED TO THE GRID?
 ///
-/// Mirrors Excel's Format Object -> Properties, which is the proven vocabulary
-/// for this: an object either moves with the cells under it or holds a fixed
-/// pixel position. Stored as an ordinary property so it persists, travels in a
-/// .calp package and is script-visible without a schema change.
-pub const PLACEMENT_PROPERTY: &str = "placement";
-
-/// Anchored to its cell — the control moves when rows/columns are inserted or
-/// deleted above/left of it. The default for IN-CELL controls, whose position
-/// simply IS their anchor cell.
-pub const PLACEMENT_MOVE_WITH_CELLS: &str = "moveWithCells";
-
-/// Fixed pixel position — the control stays put when the grid shifts under it.
-/// Only meaningful for FLOATING controls, which carry their own x/y.
-pub const PLACEMENT_FREE: &str = "free";
+/// Excel's Format Object -> Properties expresses the same idea ("Move with
+/// cells" vs "Don't move or size with cells"). A boolean rather than an enum
+/// because Calcula has only the two behaviours today, and boolean is the
+/// vocabulary a user reaches for — "pin this to the grid".
+///
+/// Stored as an ordinary property, so it persists, travels in a .calp package
+/// and is script-visible with no schema change.
+pub const PIN_TO_GRID_PROPERTY: &str = "pinToGrid";
 
 /// Does this control move when the grid shifts under it?
 ///
-/// Absent property = move, which keeps every existing control (all of them
-/// in-cell) behaving exactly as before. Only a control explicitly marked
-/// `free` opts out.
+/// * Absent -> YES. Every control authored before this existed is IN-CELL, and
+///   an in-cell control's position simply IS its anchor cell, so they all keep
+///   behaving exactly as before.
+/// * `false` -> no. Floating controls are created with this set explicitly,
+///   because a floating control holds a pixel position and should stay put.
+/// * Anything unparseable -> YES, failing toward the historical behaviour
+///   rather than silently freezing controls in place.
 pub fn moves_with_cells(meta: &ControlMetadata) -> bool {
     meta.properties
-        .get(PLACEMENT_PROPERTY)
-        .map(|p| p.value != PLACEMENT_FREE)
+        .get(PIN_TO_GRID_PROPERTY)
+        .map(|p| p.value.parse::<bool>().unwrap_or(true))
         .unwrap_or(true)
 }
 
@@ -450,11 +448,11 @@ pub fn resolve_control_properties(
 mod placement_tests {
     use super::*;
 
-    fn control_with(placement: Option<&str>) -> ControlMetadata {
+    fn control_with(pin: Option<&str>) -> ControlMetadata {
         let mut properties = HashMap::new();
-        if let Some(p) = placement {
+        if let Some(p) = pin {
             properties.insert(
-                PLACEMENT_PROPERTY.to_string(),
+                PIN_TO_GRID_PROPERTY.to_string(),
                 ControlPropertyValue { value_type: "static".into(), value: p.into() },
             );
         }
@@ -463,26 +461,26 @@ mod placement_tests {
 
     #[test]
     fn a_control_without_the_property_moves_with_cells() {
-        // Every control authored before placement existed is in-cell, and an
+        // Every control authored before pinToGrid existed is in-cell, and an
         // in-cell control's position simply IS its anchor. Defaulting to "move"
         // keeps them all behaving exactly as before.
         assert!(moves_with_cells(&control_with(None)));
     }
 
     #[test]
-    fn a_free_control_holds_its_pixel_position() {
-        assert!(!moves_with_cells(&control_with(Some(PLACEMENT_FREE))));
+    fn an_unpinned_control_holds_its_pixel_position() {
+        assert!(!moves_with_cells(&control_with(Some("false"))));
     }
 
     #[test]
     fn a_pinned_floating_control_moves_with_cells() {
         // "Pin to grid": the floating control follows the rows under it, which
         // is Excel's "Move but don't size with cells".
-        assert!(moves_with_cells(&control_with(Some(PLACEMENT_MOVE_WITH_CELLS))));
+        assert!(moves_with_cells(&control_with(Some("true"))));
     }
 
     #[test]
-    fn an_unrecognised_placement_moves_rather_than_freezing() {
+    fn an_unparseable_value_moves_rather_than_freezing() {
         // Fail toward the historical behaviour: a typo or a value from a newer
         // version must not silently pin controls in place.
         assert!(moves_with_cells(&control_with(Some("somethingElse"))));
