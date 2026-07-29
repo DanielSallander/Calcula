@@ -39,6 +39,35 @@ pub struct ControlMetadata {
     pub properties: HashMap<String, ControlPropertyValue>,
 }
 
+/// Well-known property name for a control's PLACEMENT relative to the grid.
+///
+/// Mirrors Excel's Format Object -> Properties, which is the proven vocabulary
+/// for this: an object either moves with the cells under it or holds a fixed
+/// pixel position. Stored as an ordinary property so it persists, travels in a
+/// .calp package and is script-visible without a schema change.
+pub const PLACEMENT_PROPERTY: &str = "placement";
+
+/// Anchored to its cell — the control moves when rows/columns are inserted or
+/// deleted above/left of it. The default for IN-CELL controls, whose position
+/// simply IS their anchor cell.
+pub const PLACEMENT_MOVE_WITH_CELLS: &str = "moveWithCells";
+
+/// Fixed pixel position — the control stays put when the grid shifts under it.
+/// Only meaningful for FLOATING controls, which carry their own x/y.
+pub const PLACEMENT_FREE: &str = "free";
+
+/// Does this control move when the grid shifts under it?
+///
+/// Absent property = move, which keeps every existing control (all of them
+/// in-cell) behaving exactly as before. Only a control explicitly marked
+/// `free` opts out.
+pub fn moves_with_cells(meta: &ControlMetadata) -> bool {
+    meta.properties
+        .get(PLACEMENT_PROPERTY)
+        .map(|p| p.value != PLACEMENT_FREE)
+        .unwrap_or(true)
+}
+
 /// Location key for a control: (sheet_index, row, col)
 type ControlKey = (usize, u32, u32);
 
@@ -415,4 +444,47 @@ pub fn resolve_control_properties(
     }
 
     resolved
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn control_with(placement: Option<&str>) -> ControlMetadata {
+        let mut properties = HashMap::new();
+        if let Some(p) = placement {
+            properties.insert(
+                PLACEMENT_PROPERTY.to_string(),
+                ControlPropertyValue { value_type: "static".into(), value: p.into() },
+            );
+        }
+        ControlMetadata { control_type: "button".into(), properties }
+    }
+
+    #[test]
+    fn a_control_without_the_property_moves_with_cells() {
+        // Every control authored before placement existed is in-cell, and an
+        // in-cell control's position simply IS its anchor. Defaulting to "move"
+        // keeps them all behaving exactly as before.
+        assert!(moves_with_cells(&control_with(None)));
+    }
+
+    #[test]
+    fn a_free_control_holds_its_pixel_position() {
+        assert!(!moves_with_cells(&control_with(Some(PLACEMENT_FREE))));
+    }
+
+    #[test]
+    fn a_pinned_floating_control_moves_with_cells() {
+        // "Pin to grid": the floating control follows the rows under it, which
+        // is Excel's "Move but don't size with cells".
+        assert!(moves_with_cells(&control_with(Some(PLACEMENT_MOVE_WITH_CELLS))));
+    }
+
+    #[test]
+    fn an_unrecognised_placement_moves_rather_than_freezing() {
+        // Fail toward the historical behaviour: a typo or a value from a newer
+        // version must not silently pin controls in place.
+        assert!(moves_with_cells(&control_with(Some("somethingElse"))));
+    }
 }

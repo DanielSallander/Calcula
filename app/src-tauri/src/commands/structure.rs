@@ -3969,11 +3969,14 @@ fn shift_cross_sheet_formulas(
 /// A control whose row or column was deleted is dropped, and its script binding
 /// is cleared rather than left pointing at a control that no longer exists.
 ///
-/// NOT handled here, deliberately: a FLOATING control's pixel x/y. That
-/// geometry lives only in the frontend `floatingStore` (the backend stores no
-/// pixel position), and whether a floating control should slide by the inserted
-/// row's height is a presentation decision, not a data one. The anchor cell —
-/// which is what this shifts — remains the source of truth.
+/// PLACEMENT decides whether a control moves at all. Mirroring Excel's Format
+/// Object -> Properties, a control marked `free` (fixed pixel position) is left
+/// exactly where it is; anything else — every in-cell control, and any floating
+/// control pinned to the grid — moves with its anchor. See
+/// `controls::PLACEMENT_PROPERTY`.
+///
+/// The pixel x/y of a pinned floating control is recomputed by the frontend
+/// from the anchor this shifts; the backend stores no pixel geometry.
 fn shift_controls(
     state: &AppState,
     undo_stack: &mut engine::UndoStack,
@@ -3998,6 +4001,16 @@ fn shift_controls(
 
     for ((sheet, row, col), meta) in previous_controls.iter().cloned() {
         if sheet != sheet_index {
+            rebuilt.insert((sheet, row, col), meta);
+            continue;
+        }
+        // A FREE-placed floating control holds a fixed pixel position, so the
+        // grid moving under it must not move the control. Re-anchoring it would
+        // be worse than leaving it: the metadata would claim a cell the control
+        // does not render over, and its script binding would be renamed for a
+        // control the user sees in the same place. Absent property = moves,
+        // which is what every in-cell control wants.
+        if !crate::controls::moves_with_cells(&meta) {
             rebuilt.insert((sheet, row, col), meta);
             continue;
         }
