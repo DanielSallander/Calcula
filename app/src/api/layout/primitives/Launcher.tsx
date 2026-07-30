@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom";
 import { css } from "@emotion/css";
 import { SurfaceLayoutProvider, popoverLayout } from "../context";
+import { DropdownChevron } from "./Button";
 import {
   FONT_FAMILY,
   LAUNCHER_MIN_WIDTH,
@@ -162,7 +163,10 @@ export function Launcher({
       >
         <span className={styles.icon}>{icon ?? "☰"}</span>
         <span className={styles.label}>
-          {label} <span className={styles.arrow}>{"▼"}</span>
+          {label}{" "}
+          <span className={styles.arrow} style={{ display: "inline-flex", verticalAlign: "middle" }}>
+            <DropdownChevron />
+          </span>
         </span>
       </button>
 

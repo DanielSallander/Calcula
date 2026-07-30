@@ -8,6 +8,7 @@
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import type { RibbonContext } from "@api/extensions";
+import { RibbonIcon } from "@api";
 import { registerPanel, unregisterPanel, DialogExtensions } from "@api/ui";
 import type { PanelSection, PanelSectionProps } from "@api/uiTypes";
 import { useGridState } from "@api/state";
@@ -34,15 +35,24 @@ let layoutChangedHandler: (() => void) | null = null;
 // Group Definitions
 // ============================================================================
 
-/** Icons per group (shown on launcher buttons when a section is demoted) */
-const GROUP_ICONS: Record<string, string> = {
-  clipboard: "\u2702",
+/** Icons per group (shown on launcher buttons when a section is demoted).
+ *  SVGs from the shared ribbon set so collapsed groups match the inline
+ *  buttons; "font" stays a typographic "A" like its in-group buttons. */
+const LAUNCHER_ICON_SIZE = 20;
+const GROUP_ICONS: Record<string, React.ReactNode> = {
+  clipboard: React.createElement(RibbonIcon.Paste, { size: LAUNCHER_ICON_SIZE }),
   font: "A",
-  alignment: "\u2261",
-  number: "#",
-  styles: "\u2728",
-  editing: "\u270E",
+  alignment: React.createElement(RibbonIcon.AlignLeft, { size: LAUNCHER_ICON_SIZE }),
+  number: React.createElement(RibbonIcon.NumberFormat, { size: LAUNCHER_ICON_SIZE }),
+  styles: React.createElement(RibbonIcon.CellStyles, { size: LAUNCHER_ICON_SIZE }),
+  cells: React.createElement(RibbonIcon.InsertRow, { size: LAUNCHER_ICON_SIZE }),
+  editing: React.createElement(RibbonIcon.Find, { size: LAUNCHER_ICON_SIZE }),
 };
+
+/** Fallback launcher icon for user-created custom groups. */
+const GROUP_ICON_FALLBACK: React.ReactNode = React.createElement(RibbonIcon.FormatCells, {
+  size: LAUNCHER_ICON_SIZE,
+});
 
 /** Collapse priority per group (lower = collapses to a launcher first) */
 const GROUP_ORDER: Record<string, number> = {
@@ -83,7 +93,7 @@ function buildSections(): PanelSection[] {
   return layout.groups.map((group) => ({
     id: `${HOME_TAB_ID}.${group.id}`,
     label: group.label,
-    icon: GROUP_ICONS[group.id] ?? "\u2630",
+    icon: GROUP_ICONS[group.id] ?? GROUP_ICON_FALLBACK,
     component: makeSectionComponent(group.items),
     ribbonPresentation: "inline" as const,
     collapsePriority: GROUP_ORDER[group.id] ?? 99,

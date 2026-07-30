@@ -24,6 +24,12 @@ import { ITEMS_BY_ID } from "../homeTabConfig";
 import { CellStylesGallery } from "../../../_shared/components/CellStylesGallery";
 import { FONT_LIST, FONT_SIZES } from "../../../_shared/lib/fontList";
 import { useHomeTabState } from "./useHomeTabState";
+import { homeTabIcon } from "./homeTabIcons";
+
+/** Icon size for full-height hero commands (Paste, Cell Styles) in the ribbon
+ *  band only — in panel/popover surfaces CommandButton renders a standard-height
+ *  inline button, where heroes use the 16px default like every other icon. */
+const HERO_ICON_SIZE = 26;
 
 // Excel-style quick number formats for the Number group dropdown.
 const NUMBER_FORMATS: Array<{ label: string; value: string }> = [
@@ -256,13 +262,15 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
             title={item.tooltip}
             onClick={() => setOpenColorPicker(openColorPicker === item.id ? null : item.id)}
           >
-            <span style={{
-              fontWeight: item.id === "textColor" ? 700 : 400,
-              fontSize: item.id === "textColor" ? "13px" : "11px",
-              lineHeight: 1,
-            }}>
-              {item.icon}
-            </span>
+            {item.id === "textColor" ? (
+              <span style={{ fontWeight: 700, fontSize: "13px", lineHeight: 1 }}>
+                {item.icon}
+              </span>
+            ) : (
+              homeTabIcon(item.id, 13) ?? (
+                <span style={{ fontSize: "11px", lineHeight: 1 }}>{item.icon}</span>
+              )
+            )}
             <span style={{
               display: "block", width: "18px", height: "3px",
               backgroundColor: color, borderRadius: "1px", marginTop: "-1px",
@@ -306,7 +314,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
           onClick={() => state.handleItemClick(item)}
           style={itemStyle}
         >
-          {item.icon}
+          {homeTabIcon(item.id) ?? item.icon}
         </ToggleButton>
       );
     }
@@ -320,7 +328,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
         onClick={() => state.handleItemClick(item)}
         style={itemStyle}
       >
-        {item.icon}
+        {homeTabIcon(item.id) ?? item.icon}
       </Button>
     );
   };
@@ -343,7 +351,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
       return (
         <div key={item.id} ref={cellStylesAnchorRef} style={{ display: "flex" }}>
           <CommandButton
-            icon={item.icon}
+            icon={homeTabIcon(item.id, band ? HERO_ICON_SIZE : undefined) ?? item.icon}
             label={item.shortLabel ?? item.label}
             chevron
             title={item.tooltip}
@@ -367,7 +375,7 @@ export function HomeTabGroupComponent({ itemIds }: HomeTabGroupComponentProps): 
     return (
       <CommandButton
         key={item.id}
-        icon={item.icon}
+        icon={homeTabIcon(item.id, band ? HERO_ICON_SIZE : undefined) ?? item.icon}
         label={item.shortLabel ?? item.label}
         title={item.tooltip}
         data-testid={`fmt-${item.id}`}

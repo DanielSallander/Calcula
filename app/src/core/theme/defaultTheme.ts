@@ -150,4 +150,8 @@ export const defaultTheme: Record<string, string> = {
   // overrides cascade to toggle states without retuning these.
   [THEME_TOKENS.BUTTON_PRESSED_BG]: 'color-mix(in srgb, var(--accent-primary) 14%, transparent)',
   [THEME_TOKENS.BUTTON_PRESSED_BORDER]: 'color-mix(in srgb, var(--accent-primary) 45%, transparent)',
+
+  // --- Ribbon icon accents (@api ribbonIcons) ---
+  [THEME_TOKENS.ICON_ACCENT]: 'var(--accent-primary)',
+  [THEME_TOKENS.ICON_DANGER]: '#c42b1c',
 };

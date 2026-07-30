@@ -49,7 +49,7 @@ export type { FieldProps, FieldGridProps } from "./primitives/fields";
 export { ItemList, Tall, Gallery } from "./primitives/blocks";
 export type { ItemListProps, TallProps, GalleryProps } from "./primitives/blocks";
 
-export { Button, ToggleButton, CommandButton } from "./primitives/Button";
+export { Button, ToggleButton, CommandButton, DropdownChevron } from "./primitives/Button";
 export type {
   LayoutButtonProps,
   ToggleButtonProps,

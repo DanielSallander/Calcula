@@ -21,6 +21,7 @@ import {
   SurfaceLayoutProvider,
   panelLayout,
   LAUNCHER_BAND_WIDTH,
+  DropdownChevron,
 } from "../../api/layout";
 import { SectionCell, type SectionCellForm } from "./SectionCell";
 import { computeWidthDemotions, type WidthDemotionInput } from "./useSectionFit";
@@ -339,13 +340,12 @@ export function SectionSidebarRenderer({
                 >
                   <span
                     style={{
-                      fontSize: "8px",
                       transition: "transform 0.15s",
                       transform: isCollapsed ? "rotate(-90deg)" : "rotate(0deg)",
-                      display: "inline-block",
+                      display: "inline-flex",
                     }}
                   >
-                    {"▼"}
+                    <DropdownChevron size={8} />
                   </span>
                   {section.label}
                 </button>

@@ -16,6 +16,7 @@ import {
   type HomeTabLayout,
   type HomeTabGroup,
 } from "../homeTabConfig";
+import { homeTabIcon } from "./homeTabIcons";
 
 // ============================================================================
 // Styles
@@ -489,7 +490,9 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                         >
                           {"<"}
                         </button>
-                        <span style={{ fontSize: "12px" }}>{item.icon}</span>
+                        <span style={{ fontSize: "12px", display: "inline-flex", alignItems: "center" }}>
+                          {homeTabIcon(item.id, 12) ?? item.icon}
+                        </span>
                         {item.label}
                         <button
                           className={smallBtn}
@@ -576,7 +579,9 @@ export function HomeTabCustomizeDialog(props: DialogProps): React.ReactElement |
                           }}
                           title={isUsed ? "Already in a group" : `Add to ${layout.groups.find((g) => g.id === addToGroupId)?.label ?? "group"}`}
                         >
-                          <span>{item.icon}</span>
+                          <span style={{ display: "inline-flex", alignItems: "center" }}>
+                            {homeTabIcon(item.id, 12) ?? item.icon}
+                          </span>
                           {item.label}
                         </button>
                       );

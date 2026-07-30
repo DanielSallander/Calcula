@@ -968,6 +968,11 @@ export {
   IconManageRules,
 } from "./menuIcons";
 
+// Ribbon button icons (two-tone SVG set for ribbon tabs; namespaced so the
+// individual icon names never collide with the menu icon exports above).
+export { RibbonIcon } from "./ribbonIcons";
+export type { RibbonIconProps } from "./ribbonIcons";
+
 // ============================================================================
 // File Format API (Custom Importers/Exporters)
 // ============================================================================

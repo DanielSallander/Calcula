@@ -149,4 +149,8 @@ export const THEME_TOKENS = {
   BUTTON_ACTIVE_BG: '--button-active-bg',
   BUTTON_PRESSED_BG: '--button-pressed-bg',
   BUTTON_PRESSED_BORDER: '--button-pressed-border',
+
+  // --- Ribbon icon accents (@api ribbonIcons two-tone set) ---
+  ICON_ACCENT: '--icon-accent',
+  ICON_DANGER: '--icon-danger',
 } as const;

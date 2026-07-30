@@ -9,6 +9,7 @@ import {
   updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   registerMenuItem,
   emitAppEvent,
   AppEvents,

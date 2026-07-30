@@ -134,6 +134,27 @@ const heroBand = css`
   padding: 4px 10px;
 `;
 
+/** Small SVG dropdown chevron — replaces the old "▼" text glyph so menu
+ *  affordances match the ribbon's SVG icon language. */
+export function DropdownChevron({ size = 7 }: { size?: number }): React.ReactElement {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 10 10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ display: "block", flex: "none" }}
+      aria-hidden
+    >
+      <polyline points="1.8,3.2 5,6.8 8.2,3.2" />
+    </svg>
+  );
+}
+
 export interface CommandButtonProps
   extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   /** Icon shown above the label in the band, inline before it elsewhere. */
@@ -158,8 +179,8 @@ export function CommandButton({
 }: CommandButtonProps): React.ReactElement {
   const layout = useSurfaceLayout();
   const chevronGlyph = (
-    <span style={{ fontSize: 8, color: "var(--text-tertiary, #888)" }} aria-hidden>
-      {"▼"}
+    <span style={{ color: "var(--text-tertiary, #888)", display: "inline-flex" }} aria-hidden>
+      <DropdownChevron />
     </span>
   );
 
