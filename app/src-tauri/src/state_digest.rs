@@ -66,6 +66,13 @@ pub struct SheetDigest {
     pub freeze_col: Option<u32>,
     pub col_widths: BTreeMap<u32, f64>,
     pub row_heights: BTreeMap<u32, f64>,
+    /// Row/column style tiers (`Grid.row_styles` / `Grid.column_styles`).
+    /// Without these the round-trip oracles were structurally blind to tier
+    /// loss — a whole-column lock or format change produced an identical
+    /// digest, which is exactly how two tier-dropping bugs stayed green.
+    /// Indices resolve through `used_styles` like cell style indices do.
+    pub row_styles: BTreeMap<u32, usize>,
+    pub column_styles: BTreeMap<u32, usize>,
     pub tab_color: String,
     pub visibility: String,
     pub show_gridlines: bool,
@@ -257,6 +264,8 @@ pub fn get_workbook_state_digest(
                     freeze_col: None,
                     col_widths: BTreeMap::new(),
                     row_heights: BTreeMap::new(),
+                    row_styles: BTreeMap::new(),
+                    column_styles: BTreeMap::new(),
                     tab_color: String::new(),
                     visibility: String::new(),
                     show_gridlines: true,
@@ -301,6 +310,19 @@ pub fn get_workbook_state_digest(
                     .unwrap_or_default()
             };
 
+            // Row/column style tiers, with their styles registered in
+            // used_styles so the saveReload profile can compare content
+            // (indices are not stable across save/reload).
+            let row_styles: BTreeMap<u32, usize> =
+                grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect();
+            let column_styles: BTreeMap<u32, usize> =
+                grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect();
+            for &idx in row_styles.values().chain(column_styles.values()) {
+                used_styles
+                    .entry(idx)
+                    .or_insert_with(|| to_value_or_null(&styles.get(idx)));
+            }
+
             let fc = freeze_configs.get(i);
             sheets.push(SheetDigest {
                 name: sheet_names.get(i).cloned().unwrap_or_default(),
@@ -310,6 +332,8 @@ pub fn get_workbook_state_digest(
                 freeze_col: fc.and_then(|f| f.freeze_col),
                 col_widths,
                 row_heights,
+                row_styles,
+                column_styles,
                 tab_color: tab_colors.get(i).cloned().unwrap_or_default(),
                 visibility: visibility
                     .get(i)

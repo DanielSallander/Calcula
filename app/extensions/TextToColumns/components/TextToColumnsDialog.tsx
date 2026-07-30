@@ -11,6 +11,7 @@ import {
   updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
 } from "@api";
 import type { CellUpdateInput } from "@api";
 import {
@@ -572,7 +573,11 @@ export function TextToColumnsDialog(props: DialogProps): React.ReactElement | nu
       onClose();
     } catch (err) {
       console.error("[TextToColumns] Execution error:", err);
-      setError("An error occurred while splitting the data.");
+      // Close the transaction — left open, later edits silently join it —
+      // and show the BACKEND's reason, which names the refusing cell; a
+      // generic message hid exactly the part the user can act on.
+      try { await cancelUndoTransaction(); } catch { /* already closed */ }
+      setError(err instanceof Error ? err.message : String(err));
     }
   }, [source, config, confirmOverwrite, onClose]);
 

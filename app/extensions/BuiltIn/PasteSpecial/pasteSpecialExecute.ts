@@ -16,6 +16,7 @@ import {
   setColumnWidth,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   shiftFormulasBatch,
   indexToCol,
   addComment,
@@ -179,6 +180,8 @@ export async function executePasteSpecial(
   const cellCount = actualPasteHeight * actualPasteWidth;
   await beginUndoTransaction(`Paste Special (${pasteAttribute}) ${cellCount} cells`);
 
+  let failedCells = 0;
+  let firstFailure: string | null = null;
   try {
     for (let pr = 0; pr < actualPasteHeight; pr++) {
       for (let pc = 0; pc < actualPasteWidth; pc++) {
@@ -202,7 +205,7 @@ export async function executePasteSpecial(
         // Grid bounds check
         if (destRow >= totalRows || destCol >= totalCols) continue;
 
-        await pasteSingleCell(
+        const failure = await pasteSingleCell(
           sourceCell,
           destRow,
           destCol,
@@ -213,18 +216,31 @@ export async function executePasteSpecial(
           shiftedFormulaMap,
           clipboard,
         );
+        if (failure !== null) {
+          failedCells++;
+          firstFailure = firstFailure ?? failure;
+        }
       }
     }
 
+    // Commit whatever applied (an all-refused paste commits an empty
+    // transaction, which is a no-op) so a partial paste stays undoable.
     await commitUndoTransaction();
 
     // Refresh grid
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
-    console.error("[PasteSpecial] Failed:", error);
-    // Transaction will be left open; next operation will auto-commit or user can undo
+    // Close the transaction — left open, every subsequent edit silently joins
+    // it and collapses into one giant Ctrl+Z step.
+    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    alert(error instanceof Error ? error.message : String(error));
     throw error;
+  }
+  if (failedCells > 0) {
+    alert(
+      `Paste Special skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
+    );
   }
 }
 
@@ -256,6 +272,8 @@ export async function executePasteLink(
 
   await beginUndoTransaction(`Paste Link ${actualPasteHeight * actualPasteWidth} cells`);
 
+  let failedCells = 0;
+  let firstFailure: string | null = null;
   try {
     for (let r = 0; r < actualPasteHeight; r++) {
       for (let c = 0; c < actualPasteWidth; c++) {
@@ -283,6 +301,8 @@ export async function executePasteLink(
           }
         } catch (err) {
           console.error(`[PasteSpecial] Failed to paste link (${destRow}, ${destCol}):`, err);
+          failedCells++;
+          firstFailure = firstFailure ?? (err instanceof Error ? err.message : String(err));
         }
       }
     }
@@ -292,8 +312,14 @@ export async function executePasteLink(
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
-    console.error("[PasteSpecial] Paste Link failed:", error);
+    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    alert(error instanceof Error ? error.message : String(error));
     throw error;
+  }
+  if (failedCells > 0) {
+    alert(
+      `Paste Link skipped ${failedCells} cell(s):\n${firstFailure ?? "unknown error"}`,
+    );
   }
 }
 
@@ -314,7 +340,7 @@ async function pasteSingleCell(
   operation: PasteOperation,
   shiftedFormulaMap: Map<string, string>,
   clipboard: ClipboardData,
-): Promise<void> {
+): Promise<string | null> {
   try {
     switch (pasteAttribute) {
       case "all":
@@ -346,8 +372,13 @@ async function pasteSingleCell(
         break;
     }
   } catch (err) {
+    // Per-cell failure (most commonly a sheet-protection refusal): report it
+    // to the caller so the OPERATION can tell the user, instead of swallowing
+    // every refusal and finishing as a silent no-op.
     console.error(`[PasteSpecial] Failed to paste cell (${destRow}, ${destCol}):`, err);
+    return err instanceof Error ? err.message : String(err);
   }
+  return null;
 }
 
 /**
@@ -762,6 +793,8 @@ async function pasteColumnWidths(
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
     console.error("[PasteSpecial] Column widths paste failed:", error);
+    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    alert(error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

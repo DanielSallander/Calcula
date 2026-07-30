@@ -238,6 +238,12 @@ export function reanchorFloatingControls(
   sheetIndex: number,
   shift: (row: number, col: number) => { row: number; col: number } | null,
   shouldMove: (ctrl: FloatingControl) => boolean,
+  hooks?: {
+    /** A control's id was renamed (anchor moved) — migrate id-keyed side state. */
+    onRename?: (oldId: string, newId: string) => void;
+    /** A control was dropped (its row/column was deleted) — release side state. */
+    onRemove?: (id: string) => void;
+  },
 ): boolean {
   let changed = false;
   const survivors: FloatingControl[] = [];
@@ -251,6 +257,7 @@ export function reanchorFloatingControls(
     if (moved === null) {
       // Anchor row/column deleted — drop the control and its group membership.
       removeControlFromGroups(ctrl.id);
+      hooks?.onRemove?.(ctrl.id);
       changed = true;
       continue;
     }
@@ -259,19 +266,40 @@ export function reanchorFloatingControls(
       continue;
     }
     const newId = makeFloatingControlId(sheetIndex, moved.row, moved.col);
+    // RENAME the member in place. Going through removeControlFromGroups would
+    // dissolve a two-member group (membership momentarily drops to 1) and then
+    // point newId at a group that no longer exists.
     const groupId = controlToGroup.get(ctrl.id);
     if (groupId) {
-      removeControlFromGroups(ctrl.id);
+      controlToGroup.delete(ctrl.id);
       controlToGroup.set(newId, groupId);
       const group = controlGroups.get(groupId);
-      if (group) group.memberIds = [...group.memberIds, newId];
+      if (group) {
+        group.memberIds = group.memberIds.map((id) => (id === ctrl.id ? newId : id));
+      }
     }
+    hooks?.onRename?.(ctrl.id, newId);
     survivors.push({ ...ctrl, id: newId, row: moved.row, col: moved.col });
     changed = true;
   }
 
   floatingControls = survivors;
   return changed;
+}
+
+/**
+ * Remove every floating control of one sheet from the store (group membership
+ * included). Used before re-reading the sheet's controls from the backend —
+ * structural UNDO carries no coordinates, so re-anchoring cannot be replayed
+ * and the anchors must be re-read wholesale.
+ */
+export function removeFloatingControlsForSheet(sheetIndex: number): void {
+  for (const ctrl of floatingControls) {
+    if (ctrl.sheetIndex === sheetIndex) {
+      removeControlFromGroups(ctrl.id);
+    }
+  }
+  floatingControls = floatingControls.filter((c) => c.sheetIndex !== sheetIndex);
 }
 
 /** Reset the entire floating store (used during extension deactivation). */

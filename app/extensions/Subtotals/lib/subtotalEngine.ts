@@ -140,7 +140,10 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
     emitAppEvent(AppEvents.GRID_REFRESH);
   } catch (err) {
     console.error("[Subtotals] Error applying subtotals:", err);
+    // Commit closes the transaction so the partial result stays undoable;
+    // the alert tells the user why it stopped (sheet protection, usually).
     await commitUndoTransaction();
+    alert(err instanceof Error ? err.message : String(err));
   }
 }
 

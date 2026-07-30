@@ -708,6 +708,11 @@ pub fn delete_table(
     table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -832,6 +837,11 @@ pub fn rename_table(
     }
 
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -991,6 +1001,11 @@ pub fn update_table_style(
     params: UpdateTableStyleParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -1022,6 +1037,11 @@ pub fn add_table_column(
     position: Option<usize>,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -1102,6 +1122,11 @@ pub fn rename_table_column(
     new_name: String,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -1141,6 +1166,11 @@ pub fn set_totals_row_function(
     params: SetTotalsRowFunctionParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -1207,6 +1237,11 @@ pub fn toggle_totals_row(
     show: bool,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -1272,6 +1307,11 @@ pub fn resize_table(
     params: ResizeTableParams,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
@@ -1598,6 +1638,11 @@ pub fn convert_to_range(
     table_id: identity::EntityId,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -2001,6 +2046,11 @@ pub fn set_calculated_column(
         &state, &pane_control_state, &ribbon_filter_state,
     );
     let active_sheet = *state.active_sheet.lock().unwrap();
+    // Tables are not editable while the sheet is protected (Excel greys the
+    // whole table surface out). One rule for every table mutation.
+    if let Err(e) = crate::protection::require_sheet_unprotected(&state, active_sheet, "the table") {
+        return TableResult::err(&e);
+    }
     let mut tables = state.tables.lock().unwrap();
 
     let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {

@@ -394,8 +394,14 @@ export function registerCoreGridContextMenu(): void {
         currentPx,
         rangeLabel,
         onResult: async (newPx) => {
-          for (let col = startCol; col <= endCol; col++) {
-            await setColumnWidth(col, newPx);
+          try {
+            for (let col = startCol; col <= endCol; col++) {
+              await setColumnWidth(col, newPx);
+            }
+          } catch (err) {
+            // A backend refusal (sheet protection) was an unhandled promise
+            // rejection and a silent no-op — the dialog just closed.
+            alert(err instanceof Error ? err.message : String(err));
           }
           window.dispatchEvent(new CustomEvent("dimensions:refresh"));
           window.dispatchEvent(new CustomEvent("grid:refresh"));
@@ -432,8 +438,12 @@ export function registerCoreGridContextMenu(): void {
         currentPx,
         rangeLabel,
         onResult: async (newPx) => {
-          for (let row = startRow; row <= endRow; row++) {
-            await setRowHeight(row, newPx);
+          try {
+            for (let row = startRow; row <= endRow; row++) {
+              await setRowHeight(row, newPx);
+            }
+          } catch (err) {
+            alert(err instanceof Error ? err.message : String(err));
           }
           window.dispatchEvent(new CustomEvent("dimensions:refresh"));
           window.dispatchEvent(new CustomEvent("grid:refresh"));

@@ -130,6 +130,38 @@ export function removeShapeHtmlOverlay(instanceId: string): void {
 }
 
 /**
+ * Migrate every id-keyed piece of shape state to a control's NEW id.
+ *
+ * A structural edit re-keys a pinned control (its id derives from its anchor
+ * cell). Without migrating, a scripted shape lost its canvas renderer and HTML
+ * content and leaked its iframe under the old id. The content hash moves too so
+ * the existing iframe is reused rather than reloaded.
+ */
+export function migrateShapeInstanceId(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const renderer = customCanvasRenderers.get(oldId);
+  if (renderer !== undefined) {
+    customCanvasRenderers.delete(oldId);
+    customCanvasRenderers.set(newId, renderer);
+  }
+  const html = customHtmlContent.get(oldId);
+  if (html !== undefined) {
+    customHtmlContent.delete(oldId);
+    customHtmlContent.set(newId, html);
+  }
+  const frame = htmlOverlayElements.get(oldId);
+  if (frame !== undefined) {
+    htmlOverlayElements.delete(oldId);
+    htmlOverlayElements.set(newId, frame);
+  }
+  const hash = overlayContentHash.get(oldId);
+  if (hash !== undefined) {
+    overlayContentHash.delete(oldId);
+    overlayContentHash.set(newId, hash);
+  }
+}
+
+/**
  * Build the full srcdoc HTML for the iframe, injecting the postMessage bridge.
  */
 function buildIframeSrcDoc(controlId: string, userHtml: string): string {

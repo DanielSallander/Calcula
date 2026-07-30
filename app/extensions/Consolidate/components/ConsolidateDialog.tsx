@@ -12,6 +12,7 @@ import {
   letterToColumn,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   restoreFocusToGrid,
 } from "@api";
 import type { ConsolidationFunction } from "@api";
@@ -463,6 +464,9 @@ export function ConsolidateDialog(
       restoreFocusToGrid();
       onClose();
     } catch (err) {
+      // Close the transaction opened above — left open, every subsequent edit
+      // silently joins it and collapses into one Ctrl+Z step.
+      try { await cancelUndoTransaction(); } catch { /* already closed */ }
       setValidationError(`Consolidation failed: ${err}`);
     } finally {
       setIsLoading(false);

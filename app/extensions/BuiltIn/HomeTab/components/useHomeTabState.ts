@@ -112,6 +112,7 @@ export function useHomeTabState() {
   // Handle item click
   const handleItemClick = useCallback(
     async (item: HomeTabItem) => {
+      try {
       switch (item.id) {
         case "cut": await CommandRegistry.execute(CoreCommands.CUT); break;
         case "copy": await CommandRegistry.execute(CoreCommands.COPY); break;
@@ -202,6 +203,11 @@ export function useHomeTabState() {
         case "insertColumn": await CommandRegistry.execute(CoreCommands.INSERT_COLUMN); break;
         case "deleteRow": await CommandRegistry.execute(CoreCommands.DELETE_ROW); break;
         case "deleteColumn": await CommandRegistry.execute(CoreCommands.DELETE_COLUMN); break;
+      }
+      } catch (err) {
+        // Backend refusals (sheet protection, most commonly) must reach the
+        // user, not the console — the message says which cell and why.
+        alert(err instanceof Error ? err.message : String(err));
       }
     },
     [applyFormat, currentStyle, gridState.selection]

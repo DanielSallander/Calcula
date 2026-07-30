@@ -611,6 +611,10 @@ function SpreadsheetContent({
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
+      // Delete Row/Column already alerts; a silent insert refusal reads as a
+      // dead button. Surface the backend's reason (protection, usually).
+      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+      alert(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 
@@ -648,6 +652,8 @@ function SpreadsheetContent({
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
+      const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
+      alert(msg);
     }
   }, [selection, canvasRef, refreshDimensions, gridState.sheetContext.activeSheetIndex]);
 

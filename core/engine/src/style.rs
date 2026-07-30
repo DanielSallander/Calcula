@@ -463,6 +463,11 @@ pub struct StyleRegistry {
     /// Reverse lookup: style hash -> index for deduplication.
     #[serde(skip)]
     style_to_index: HashMap<CellStyle, usize>,
+    /// Memoized index of the explicit duplicate of the default style, created
+    /// by [`get_or_create_explicit`]. One duplicate serves every caller — this
+    /// is what stops N explicit-default requests from appending N entries.
+    #[serde(skip)]
+    explicit_default: Option<usize>,
 }
 
 impl StyleRegistry {
@@ -475,7 +480,35 @@ impl StyleRegistry {
         StyleRegistry {
             styles: vec![default_style],
             style_to_index,
+            explicit_default: None,
         }
+    }
+
+    /// Reconstruct a registry from a saved style vector, PRESERVING INDICES.
+    ///
+    /// This is the load-path counterpart of `all_styles()`. It must not intern:
+    /// `get_or_create` dedupes, and the saved vector legitimately contains a
+    /// duplicate of the default style whenever `get_or_create_explicit` ran
+    /// before the save. Interning would collapse that duplicate and shift every
+    /// later index down by one — silently re-styling (and re-locking) every
+    /// cell whose index landed after it. Cells reference these indices verbatim,
+    /// so the vector is installed verbatim.
+    ///
+    /// The dedup map keeps the FIRST occurrence of each style, which reproduces
+    /// exactly the map `get_or_create`/`get_or_create_explicit` had built before
+    /// the save: the default maps to 0, and the duplicate is only reachable
+    /// through `explicit_default`.
+    pub fn from_styles(styles: Vec<CellStyle>) -> Self {
+        if styles.is_empty() {
+            return StyleRegistry::new();
+        }
+        let mut registry = StyleRegistry {
+            styles,
+            style_to_index: HashMap::new(),
+            explicit_default: None,
+        };
+        registry.rebuild_index();
+        registry
     }
 
     /// Get or create a style index for the given style.
@@ -512,10 +545,17 @@ impl StyleRegistry {
         if index != 0 {
             return index;
         }
+        // One duplicate is enough for every caller; without this memo a
+        // per-cell loop (lock a whole column, say) would append one entry per
+        // cell, and the registry is persisted and shipped over IPC whole.
+        if let Some(explicit) = self.explicit_default {
+            return explicit;
+        }
         // Deliberately NOT recorded in `style_to_index`: that map must keep
         // pointing the default at 0 so ordinary interning still dedupes.
         let explicit = self.styles.len();
         self.styles.push(style);
+        self.explicit_default = Some(explicit);
         explicit
     }
 
@@ -541,16 +581,51 @@ impl StyleRegistry {
     }
 
     /// Rebuild the reverse lookup map after deserialization.
+    ///
+    /// FIRST occurrence wins. A blind insert would let a later duplicate of the
+    /// default (from `get_or_create_explicit`) overwrite the default's map
+    /// entry, after which ordinary interning of the default would return the
+    /// duplicate's index instead of 0 — flipping "inherit" cells to "explicit".
     pub fn rebuild_index(&mut self) {
         self.style_to_index.clear();
+        self.explicit_default = None;
         for (index, style) in self.styles.iter().enumerate() {
-            self.style_to_index.insert(style.clone(), index);
+            if !self.style_to_index.contains_key(style) {
+                self.style_to_index.insert(style.clone(), index);
+            } else if index != 0 && self.explicit_default.is_none() && *style == self.styles[0] {
+                // Recover the memo so post-load explicit interning reuses the
+                // persisted duplicate instead of appending another.
+                self.explicit_default = Some(index);
+            }
         }
     }
 
     /// Get all styles (for serialization/debugging).
     pub fn all_styles(&self) -> &[CellStyle] {
         &self.styles
+    }
+
+    /// Merge every style of `local` into this registry and return the remap
+    /// table (`local index -> index here`).
+    ///
+    /// A NON-ZERO local index whose style equals the default is the explicit
+    /// duplicate `get_or_create_explicit` creates ("locked but otherwise
+    /// default"). Plain interning would collapse it to 0 — which on a cell
+    /// means "inherit the row/column tier" — so it is re-interned explicitly.
+    pub fn merge_remap(&mut self, local: &StyleRegistry) -> Vec<usize> {
+        let default_style = CellStyle::new();
+        local
+            .styles
+            .iter()
+            .enumerate()
+            .map(|(i, style)| {
+                if i != 0 && *style == default_style {
+                    self.get_or_create_explicit(style.clone())
+                } else {
+                    self.get_or_create(style.clone())
+                }
+            })
+            .collect()
     }
 }
 
@@ -621,6 +696,54 @@ mod tests {
         let default = registry.get(0);
         assert!(!default.font.bold);
         assert!(!default.font.italic);
+    }
+
+    // REGRESSION: get_or_create_explicit's duplicate default collapsed when the
+    // load path re-interned the saved vector, shifting every later style index
+    // down by one — silently re-styling (and re-locking) cells after a reload.
+    #[test]
+    fn from_styles_preserves_indices_verbatim_including_explicit_duplicates() {
+        let mut registry = StyleRegistry::new();
+        let mut bold = CellStyle::new();
+        bold.font.bold = true;
+        let bold_idx = registry.get_or_create(bold.clone());
+        let explicit_idx = registry.get_or_create_explicit(CellStyle::new());
+        let mut italic = CellStyle::new();
+        italic.font.italic = true;
+        let italic_idx = registry.get_or_create(italic.clone());
+        assert!(explicit_idx != 0 && italic_idx > explicit_idx);
+
+        // "Save" and "load".
+        let restored = StyleRegistry::from_styles(registry.all_styles().to_vec());
+        assert_eq!(restored.len(), registry.len(), "no dedup collapse on load");
+        assert!(restored.get(bold_idx).font.bold);
+        assert_eq!(*restored.get(explicit_idx), CellStyle::new());
+        assert!(restored.get(italic_idx).font.italic);
+
+        // The dedup map still points the default at 0 (first occurrence wins) …
+        let mut restored = restored;
+        assert_eq!(restored.get_or_create(CellStyle::new()), 0);
+        // … and the explicit-default memo reuses the persisted duplicate.
+        assert_eq!(restored.get_or_create_explicit(CellStyle::new()), explicit_idx);
+    }
+
+    #[test]
+    fn explicit_default_is_memoized_not_appended_per_call() {
+        let mut registry = StyleRegistry::new();
+        let first = registry.get_or_create_explicit(CellStyle::new());
+        let second = registry.get_or_create_explicit(CellStyle::new());
+        assert_eq!(first, second);
+        assert_eq!(registry.len(), 2); // default + ONE duplicate
+    }
+
+    #[test]
+    fn merge_remap_keeps_explicit_defaults_non_zero() {
+        let mut local = StyleRegistry::new();
+        let explicit_local = local.get_or_create_explicit(CellStyle::new());
+        let mut shared = StyleRegistry::new();
+        let remap = shared.merge_remap(&local);
+        assert_eq!(remap[0], 0);
+        assert_ne!(remap[explicit_local], 0, "explicit default must stay explicit");
     }
 
     #[test]

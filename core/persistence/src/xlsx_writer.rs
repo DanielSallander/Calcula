@@ -92,7 +92,11 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
 
         // ---- Row heights ----
         for (row, height) in &sheet.row_heights {
-            worksheet.set_row_height(*row, *height)?;
+            // Stored heights are PIXELS; xlsx wants POINTS. Inverse of the
+            // reader's px = pt * 1.333 (xlsx_style_reader), same as the width
+            // conversion above — without it every custom row height inflates
+            // ~33% per round trip.
+            worksheet.set_row_height(*row, *height / 1.333)?;
         }
 
         // ---- Row / column default-style tiers ----

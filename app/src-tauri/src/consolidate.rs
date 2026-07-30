@@ -477,6 +477,26 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
 
         let dest_sheet = params.dest_sheet_index;
 
+        // Sheet protection on the DESTINATION block, decided before anything is
+        // written. Pure gate form: grid/grids/styles are already held here
+        // (canonical order allows sheet_protection last).
+        if total_rows > 0 && total_cols > 0 {
+            let protection_storage = state.sheet_protection.lock().unwrap();
+            let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
+            if let Err(e) = crate::protection::check_sheet_protection_range_in(
+                &protection_storage,
+                dest_grid,
+                &styles,
+                dest_sheet,
+                params.dest_row,
+                params.dest_col,
+                params.dest_row + total_rows - 1,
+                params.dest_col + total_cols - 1,
+            ) {
+                return error_result(&e);
+            }
+        }
+
         // Write column headers
         if has_col_headers {
             for (c_idx, header) in cat_result.col_headers.iter().enumerate() {
@@ -570,6 +590,24 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
         let num_rows = first.end_row - first.start_row + 1;
         let num_cols = first.end_col - first.start_col + 1;
         let dest_sheet = params.dest_sheet_index;
+
+        // Sheet protection on the destination block, same as category mode.
+        {
+            let protection_storage = state.sheet_protection.lock().unwrap();
+            let dest_grid = if dest_sheet == active_sheet { &*grid } else { &grids[dest_sheet] };
+            if let Err(e) = crate::protection::check_sheet_protection_range_in(
+                &protection_storage,
+                dest_grid,
+                &styles,
+                dest_sheet,
+                params.dest_row,
+                params.dest_col,
+                params.dest_row + num_rows - 1,
+                params.dest_col + num_cols - 1,
+            ) {
+                return error_result(&e);
+            }
+        }
 
         // Write results to destination
         for &(rel_r, rel_c, value) in &pos_results {

@@ -432,7 +432,15 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   const instanceId = row >= 0 && col >= 0 ? `control-${sheetIndex}-${row}-${col}` : undefined;
 
   // Get property definitions for this control type (includes script-declared properties)
-  const propDefs = getPropertyDefinitions(controlType || metadata?.controlType || "", instanceId);
+  const allPropDefs = getPropertyDefinitions(controlType || metadata?.controlType || "", instanceId);
+  // Pin-to-grid only means something for FLOATING controls (their pixels can
+  // diverge from the grid). An embedded control's position IS its cell —
+  // offering the toggle there let the user detach the metadata from the cell
+  // that actually moves.
+  const isEmbeddedControl = metadata?.properties?.embedded?.value === "true";
+  const propDefs = isEmbeddedControl
+    ? allPropDefs.filter((def) => def.key !== "pinToGrid")
+    : allPropDefs;
 
   // Must be before early returns (Rules of Hooks)
   const handleOpenScriptEditor = useCallback(() => {

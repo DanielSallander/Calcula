@@ -253,8 +253,19 @@ export function useSpreadsheetSelection({
   const handleColumnResize = useCallback(
     (col: number, width: number) => {
       dispatch(setColumnWidth(col, width));
-      setColumnWidthApi(col, width).catch((err) => {
+      setColumnWidthApi(col, width).catch(async (err) => {
         console.error("Failed to persist column width:", err);
+        // The optimistic dispatch above already resized the frontend; on a
+        // backend refusal the two would silently diverge until reload. Re-read
+        // the authoritative widths and tell the user why.
+        try {
+          const widths = await getAllColumnWidths();
+          const defaults = await getDefaultDimensions();
+          const actual = widths.find((d) => d.index === col)?.size ?? defaults.defaultColumnWidth;
+          dispatch(setColumnWidth(col, actual));
+          canvasRef.current?.redraw();
+        } catch { /* keep the optimistic value if the re-read fails too */ }
+        alert(err instanceof Error ? err.message : String(err));
       });
       canvasRef.current?.redraw();
       emitAppEvent(AppEvents.COLUMN_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, col, width });
@@ -265,8 +276,16 @@ export function useSpreadsheetSelection({
   const handleRowResize = useCallback(
     (row: number, height: number) => {
       dispatch(setRowHeight(row, height));
-      setRowHeightApi(row, height).catch((err) => {
+      setRowHeightApi(row, height).catch(async (err) => {
         console.error("Failed to persist row height:", err);
+        try {
+          const heights = await getAllRowHeights();
+          const defaults = await getDefaultDimensions();
+          const actual = heights.find((d) => d.index === row)?.size ?? defaults.defaultRowHeight;
+          dispatch(setRowHeight(row, actual));
+          canvasRef.current?.redraw();
+        } catch { /* keep the optimistic value if the re-read fails too */ }
+        alert(err instanceof Error ? err.message : String(err));
       });
       canvasRef.current?.redraw();
       emitAppEvent(AppEvents.ROW_RESIZED, { sheetIndex: sheetContext.activeSheetIndex, row, height });
@@ -442,6 +461,11 @@ export function useSpreadsheetSelection({
         await commitUndoTransaction();
       } catch (err) {
         console.error("Failed to batch resize columns:", err);
+        // Close the transaction (left open, later edits silently join it) and
+        // surface the refusal — the optimistic dispatches above are re-synced
+        // by the redraw path on the next dimension fetch.
+        try { await cancelUndoTransaction(); } catch { /* already closed */ }
+        alert(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
     },
@@ -459,6 +483,8 @@ export function useSpreadsheetSelection({
         await commitUndoTransaction();
       } catch (err) {
         console.error("Failed to batch resize rows:", err);
+        try { await cancelUndoTransaction(); } catch { /* already closed */ }
+        alert(err instanceof Error ? err.message : String(err));
       }
       canvasRef.current?.redraw();
     },
@@ -529,6 +555,10 @@ export function useSpreadsheetSelection({
           console.log("[useSpreadsheetSelection] Replicated clear to grouped sheets");
         } catch (err) {
           console.error("[useSpreadsheetSelection] Failed to replicate clear to grouped sheets:", err);
+          // A grouped sheet refusing (protection) means the sheets have now
+          // DIVERGED: the active sheet cleared, that one did not. Silence here
+          // would leave the user believing the group edit applied everywhere.
+          alert(err instanceof Error ? err.message : String(err));
         }
       }
 

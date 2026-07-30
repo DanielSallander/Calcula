@@ -14,14 +14,22 @@ use std::collections::HashMap;
 use tauri::State;
 
 // Pre-compiled regexes for formula reference shifting (avoids ~2.6ms per Regex::new call)
+// Group 1 in each of these is a captured LEADING DELIMITER (re-emitted by the
+// rewrite closures), and the column part is capped at 3 letters — Excel's last
+// column is XFD. Without both, `Sheet1` matched as column "Sheet" row 1 and
+// `LOG10` as column LOG row 10. The RIGHT edge is guarded non-consumingly by
+// `replace_all_guarded` (13 built-in functions end in digits: LOG10, BIN2DEC,
+// OCT2HEX, ... — `=LOG10(A5)` must not become `=LOG11(A6)` on a fill or shift).
 static CELL_REF_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap());
+    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)(\d+)").unwrap());
 static ROW_RANGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\$?)(\d+):(\$?)(\d+)").unwrap());
+    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.:$])(\$?)(\d+):(\$?)(\d+)").unwrap());
 static COL_RANGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+):(\$?)([A-Za-z]+)").unwrap());
-static CELL_RANGE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+):(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap());
+    Lazy::new(|| Regex::new(r"(^|[^A-Za-z0-9_.:])(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})").unwrap());
+static CELL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(^|[^A-Za-z0-9_.])(\$?)([A-Za-z]{1,3})(\$?)(\d+):(\$?)([A-Za-z]{1,3})(\$?)(\d+)")
+        .unwrap()
+});
 
 /// Capture a snapshot of the current grid state for undo.
 fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
@@ -1368,7 +1376,6 @@ pub fn insert_rows(
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowInsert { at: row, count });
-    undo_stack.commit_transaction();
 
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet's name.
@@ -1378,11 +1385,29 @@ pub fn insert_rows(
         .get(active_sheet)
         .cloned()
         .unwrap_or_default();
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
+    // in-command loop below only walks this sheet, so without this those
+    // references silently go stale. BEFORE commit_transaction, deliberately:
+    // its undo entries must join THIS transaction — recorded after commit they
+    // became their own undo steps, so one Ctrl+Z reverted the cross-sheet
+    // rewrites while the inserted row stayed.
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::RowInsert { at: row, count },
+    );
+    undo_stack.commit_transaction();
+
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
-    
+
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
             let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, count as i32);
@@ -1393,19 +1418,6 @@ pub fn insert_rows(
             }
         }
     }
-
-    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
-    // in-command loop above only walks this sheet, so without this those
-    // references silently go stale.
-    shift_cross_sheet_formulas(
-        &state,
-        &mut undo_stack,
-        &mut grids,
-        active_sheet,
-        &edited_sheet_name,
-        &sheet_names_snapshot,
-        calp::writeback::StructuralEdit::RowInsert { at: row, count },
-    );
 
     // Collect all cells that need to be moved (from row onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -1675,9 +1687,7 @@ pub fn insert_columns(
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColInsert { at: col, count });
-    undo_stack.commit_transaction();
-    
-    // First, update formula references in ALL cells
+
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
@@ -1686,10 +1696,26 @@ pub fn insert_columns(
         .get(active_sheet)
         .cloned()
         .unwrap_or_default();
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
+    // commit_transaction so its undo entries join THIS transaction (see the
+    // row-insert twin).
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::ColInsert { at: col, count },
+    );
+    undo_stack.commit_transaction();
+
+    // First, update formula references in ALL cells
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
-    
+
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
             let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, count as i32);
@@ -1700,19 +1726,6 @@ pub fn insert_columns(
             }
         }
     }
-
-    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
-    // in-command loop above only walks this sheet, so without this those
-    // references silently go stale.
-    shift_cross_sheet_formulas(
-        &state,
-        &mut undo_stack,
-        &mut grids,
-        active_sheet,
-        &edited_sheet_name,
-        &sheet_names_snapshot,
-        calp::writeback::StructuralEdit::ColInsert { at: col, count },
-    );
 
     // Collect all cells that need to be moved (from col onwards)
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -1849,126 +1862,91 @@ pub fn insert_columns(
 /// Shift row references in a formula by a given amount.
 /// Respects $ absolute markers - $5 won't be shifted, but 5 will.
 pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> String {
-    // Handle cell references (e.g., A5, $A$5, A$5, $A5)
-    let result = CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
-        let col_abs = &caps[1];
-        let col_letters = &caps[2];
-        let row_abs = &caps[3];
-        let row_num: u32 = caps[4].parse().unwrap_or(0);
-        
-        // A STRUCTURAL edit shifts absolute references too. `$` protects a
-        // reference from being adjusted when the formula is COPIED — it does not
-        // pin it to a physical row. Insert a row above row 5 and Excel rewrites
-        // =$A$5 to =$A$6; leaving it at $A$5 would silently re-point the formula
-        // at different data. (Contrast shift_formula_row_references_for_fill,
-        // which is the copy/fill path and MUST respect `$`.)
-        // from_row is 0-indexed, row_num is 1-indexed
-        let new_row = if row_num > from_row {
+    // A STRUCTURAL edit shifts absolute references too. `$` protects a
+    // reference from being adjusted when the formula is COPIED — it does not
+    // pin it to a physical row. Insert a row above row 5 and Excel rewrites
+    // =$A$5 to =$A$6; leaving it at $A$5 would silently re-point the formula
+    // at different data. (Contrast shift_formula_row_references_for_fill,
+    // which is the copy/fill path and MUST respect `$`.)
+    // from_row is 0-indexed, row_num is 1-indexed
+    let shift = |row_num: u32| -> u32 {
+        if row_num > from_row {
             ((row_num as i32) + delta).max(1) as u32
         } else {
             row_num
-        };
-        
-        format!("{}{}{}{}", col_abs, col_letters, row_abs, new_row)
-    }).to_string();
-    
-    // Handle row-only references (e.g., 5:5, $2:$10, 2:$10)
-    ROW_RANGE_RE.replace_all(&result, |caps: &regex::Captures| {
-        let start_abs = &caps[1];
-        let start_row: u32 = caps[2].parse().unwrap_or(0);
-        let end_abs = &caps[3];
-        let end_row: u32 = caps[4].parse().unwrap_or(0);
-        
-        // Absolute markers are preserved in the output but do not prevent the
-        // shift — see the note above.
-        let new_start = if start_row > from_row {
-            ((start_row as i32) + delta).max(1) as u32
-        } else {
-            start_row
-        };
-        
-        let new_end = if end_row > from_row {
-            ((end_row as i32) + delta).max(1) as u32
-        } else {
-            end_row
-        };
-        
-        format!("{}{}:{}{}", start_abs, new_start, end_abs, new_end)
-    }).to_string()
+        }
+    };
+    rewrite_outside_strings(formula, |segment| {
+        // Handle cell references (e.g., A5, $A$5, A$5, $A5)
+        let result = replace_all_guarded(&CELL_REF_RE, segment, |caps| {
+            let lead = &caps[1];
+            let col_abs = &caps[2];
+            let col_letters = &caps[3];
+            let row_abs = &caps[4];
+            let row_num: u32 = caps[5].parse().unwrap_or(0);
+            format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, shift(row_num))
+        });
+
+        // Handle row-only references (e.g., 5:5, $2:$10, 2:$10)
+        replace_all_guarded(&ROW_RANGE_RE, &result, |caps| {
+            let lead = &caps[1];
+            let start_abs = &caps[2];
+            let start_row: u32 = caps[3].parse().unwrap_or(0);
+            let end_abs = &caps[4];
+            let end_row: u32 = caps[5].parse().unwrap_or(0);
+            format!(
+                "{}{}{}:{}{}",
+                lead,
+                start_abs,
+                shift(start_row),
+                end_abs,
+                shift(end_row)
+            )
+        })
+    })
 }
 
 /// Shift column references in a formula by a given amount.
 /// Respects $ absolute markers - $A won't be shifted, but A will.
 pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> String {
-    fn col_to_index(col: &str) -> u32 {
-        let mut index: u32 = 0;
-        for ch in col.to_uppercase().chars() {
-            index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+    // Structural edits shift absolute references too; `$` is a copy/fill
+    // marker, not a pin to a physical column. See the row equivalent above.
+    let shift = |letters: &str| -> String {
+        let col_index = shift_col_to_index(letters);
+        if col_index >= from_col {
+            shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
+        } else {
+            letters.to_string()
         }
-        index - 1
-    }
-    
-    fn index_to_col(mut idx: u32) -> String {
-        let mut result = String::new();
-        loop {
-            result.insert(0, (b'A' + (idx % 26) as u8) as char);
-            if idx < 26 {
-                break;
-            }
-            idx = idx / 26 - 1;
-        }
-        result
-    }
-    
-    // Handle cell references (e.g., C5, $C$5, C$5, $C5)
-    let result = CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
-        let col_abs = &caps[1];
-        let col_letters = &caps[2];
-        let row_abs = &caps[3];
-        let row_num = &caps[4];
-        
-        let col_index = col_to_index(col_letters);
-        
-        // Structural edits shift absolute references too; `$` is a copy/fill
-        // marker, not a pin to a physical column. See the row equivalent above.
-        let new_col_index = if col_index >= from_col {
-            ((col_index as i32) + delta).max(0) as u32
-        } else {
-            col_index
-        };
-        
-        let new_col_letters = index_to_col(new_col_index);
-        
-        format!("{}{}{}{}", col_abs, new_col_letters, row_abs, row_num)
-    }).to_string();
-    
-    // Handle column-only references (e.g., B:B, $A:$C, A:$C)
-    COL_RANGE_RE.replace_all(&result, |caps: &regex::Captures| {
-        let start_abs = &caps[1];
-        let start_col = &caps[2];
-        let end_abs = &caps[3];
-        let end_col = &caps[4];
-        
-        let start_index = col_to_index(start_col);
-        let end_index = col_to_index(end_col);
-        
-        let new_start_index = if start_index >= from_col {
-            ((start_index as i32) + delta).max(0) as u32
-        } else {
-            start_index
-        };
-        
-        let new_end_index = if end_index >= from_col {
-            ((end_index as i32) + delta).max(0) as u32
-        } else {
-            end_index
-        };
-        
-        let new_start_col = index_to_col(new_start_index);
-        let new_end_col = index_to_col(new_end_index);
-        
-        format!("{}{}:{}{}", start_abs, new_start_col, end_abs, new_end_col)
-    }).to_string()
+    };
+    rewrite_outside_strings(formula, |segment| {
+        // Handle cell references (e.g., C5, $C$5, C$5, $C5)
+        let result = replace_all_guarded(&CELL_REF_RE, segment, |caps| {
+            let lead = &caps[1];
+            let col_abs = &caps[2];
+            let col_letters = &caps[3];
+            let row_abs = &caps[4];
+            let row_num = &caps[5];
+            format!("{}{}{}{}{}", lead, col_abs, shift(col_letters), row_abs, row_num)
+        });
+
+        // Handle column-only references (e.g., B:B, $A:$C, A:$C)
+        replace_all_guarded(&COL_RANGE_RE, &result, |caps| {
+            let lead = &caps[1];
+            let start_abs = &caps[2];
+            let start_col = &caps[3];
+            let end_abs = &caps[4];
+            let end_col = &caps[5];
+            format!(
+                "{}{}{}:{}{}",
+                lead,
+                start_abs,
+                shift(start_col),
+                end_abs,
+                shift(end_col)
+            )
+        })
+    })
 }
 
 /// Convert a column letter string (e.g., "A", "AA", "AZ") to a 0-based index.
@@ -1994,44 +1972,48 @@ fn col_letters_to_index(col: &str) -> u32 {
 /// The $ (absolute) markers travel with their original reference, preserving
 /// fill semantics for any future operations on the result.
 fn normalize_inverted_ranges(formula: &str) -> String {
-    CELL_RANGE_RE.replace_all(formula, |caps: &regex::Captures| {
-        let s_col_abs = &caps[1];
-        let s_col     = &caps[2];
-        let s_row_abs = &caps[3];
-        let s_row: u32 = caps[4].parse().unwrap_or(0);
+    rewrite_outside_strings(formula, |segment| {
+        replace_all_guarded(&CELL_RANGE_RE, segment, |caps| {
+            let lead = &caps[1];
+            let s_col_abs = &caps[2];
+            let s_col     = &caps[3];
+            let s_row_abs = &caps[4];
+            let s_row: u32 = caps[5].parse().unwrap_or(0);
 
-        let e_col_abs = &caps[5];
-        let e_col     = &caps[6];
-        let e_row_abs = &caps[7];
-        let e_row: u32 = caps[8].parse().unwrap_or(0);
+            let e_col_abs = &caps[6];
+            let e_col     = &caps[7];
+            let e_row_abs = &caps[8];
+            let e_row: u32 = caps[9].parse().unwrap_or(0);
 
-        let s_col_idx = col_letters_to_index(s_col);
-        let e_col_idx = col_letters_to_index(e_col);
+            let s_col_idx = col_letters_to_index(s_col);
+            let e_col_idx = col_letters_to_index(e_col);
 
-        let row_inverted = s_row > e_row;
-        let col_inverted = s_col_idx > e_col_idx;
+            let row_inverted = s_row > e_row;
+            let col_inverted = s_col_idx > e_col_idx;
 
-        if row_inverted || col_inverted {
-            // Swap the entire start and end cell references.
-            //
-            // During fill, only one axis shifts at a time (rows for vertical,
-            // cols for horizontal), so inversion only occurs on one axis while
-            // the other stays equal or correctly ordered.  A full swap is safe
-            // because the non-inverted axis either:
-            //   (a) has identical start/end values (e.g., I:I), or
-            //   (b) was already correctly ordered and stays that way.
-            //
-            // The $ markers travel with their original reference, which is
-            // correct: the fixed (absolute) part becomes the new start, and
-            // the moving (relative) part becomes the new end.
-            format!("{}{}{}{}:{}{}{}{}",
-                e_col_abs, e_col, e_row_abs, e_row,
-                s_col_abs, s_col, s_row_abs, s_row)
-        } else {
-            // Range is correctly ordered -- keep as-is
-            caps[0].to_string()
-        }
-    }).to_string()
+            if row_inverted || col_inverted {
+                // Swap the entire start and end cell references.
+                //
+                // During fill, only one axis shifts at a time (rows for vertical,
+                // cols for horizontal), so inversion only occurs on one axis while
+                // the other stays equal or correctly ordered.  A full swap is safe
+                // because the non-inverted axis either:
+                //   (a) has identical start/end values (e.g., I:I), or
+                //   (b) was already correctly ordered and stays that way.
+                //
+                // The $ markers travel with their original reference, which is
+                // correct: the fixed (absolute) part becomes the new start, and
+                // the moving (relative) part becomes the new end.
+                format!("{}{}{}{}{}:{}{}{}{}",
+                    lead,
+                    e_col_abs, e_col, e_row_abs, e_row,
+                    s_col_abs, s_col, s_row_abs, s_row)
+            } else {
+                // Range is correctly ordered -- keep as-is
+                caps[0].to_string()
+            }
+        })
+    })
 }
 
 /// Shift formula references for fill handle operation.
@@ -2091,64 +2073,48 @@ pub fn shift_formulas_batch(
 
 /// Shift row references for fill operation (all non-absolute refs shift).
 fn shift_formula_row_references_for_fill(formula: &str, delta: i32) -> String {
-    CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
-        let col_abs = &caps[1];
-        let col_letters = &caps[2];
-        let row_abs = &caps[3];
-        let row_num: u32 = caps[4].parse().unwrap_or(0);
-        
-        // Only shift if row is NOT absolute (no $)
-        let new_row = if row_abs.is_empty() {
-            ((row_num as i32) + delta).max(1) as u32
-        } else {
-            row_num
-        };
-        
-        format!("{}{}{}{}", col_abs, col_letters, row_abs, new_row)
-    }).to_string()
+    rewrite_outside_strings(formula, |segment| {
+        replace_all_guarded(&CELL_REF_RE, segment, |caps| {
+            let lead = &caps[1];
+            let col_abs = &caps[2];
+            let col_letters = &caps[3];
+            let row_abs = &caps[4];
+            let row_num: u32 = caps[5].parse().unwrap_or(0);
+
+            // Only shift if row is NOT absolute (no $)
+            let new_row = if row_abs.is_empty() {
+                ((row_num as i32) + delta).max(1) as u32
+            } else {
+                row_num
+            };
+
+            format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, new_row)
+        })
+    })
 }
 
 /// Shift column references for fill operation (all non-absolute refs shift).
 fn shift_formula_col_references_for_fill(formula: &str, delta: i32) -> String {
-    fn col_to_index(col: &str) -> u32 {
-        let mut index: u32 = 0;
-        for ch in col.to_uppercase().chars() {
-            index = index * 26 + (ch as u32 - 'A' as u32 + 1);
-        }
-        index - 1
-    }
-    
-    fn index_to_col(mut idx: u32) -> String {
-        let mut result = String::new();
-        loop {
-            result.insert(0, (b'A' + (idx % 26) as u8) as char);
-            if idx < 26 {
-                break;
-            }
-            idx = idx / 26 - 1;
-        }
-        result
-    }
-    
-    CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
-        let col_abs = &caps[1];
-        let col_letters = &caps[2];
-        let row_abs = &caps[3];
-        let row_num = &caps[4];
+    rewrite_outside_strings(formula, |segment| {
+        replace_all_guarded(&CELL_REF_RE, segment, |caps| {
+            let lead = &caps[1];
+            let col_abs = &caps[2];
+            let col_letters = &caps[3];
+            let row_abs = &caps[4];
+            let row_num = &caps[5];
 
-        let col_index = col_to_index(col_letters);
+            let col_index = shift_col_to_index(col_letters);
 
-        // Only shift if column is NOT absolute (no $)
-        let new_col_index = if col_abs.is_empty() {
-            ((col_index as i32) + delta).max(0) as u32
-        } else {
-            col_index
-        };
-        
-        let new_col_letters = index_to_col(new_col_index);
-        
-        format!("{}{}{}{}", col_abs, new_col_letters, row_abs, row_num)
-    }).to_string()
+            // Only shift if column is NOT absolute (no $)
+            let new_col_letters = if col_abs.is_empty() {
+                shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
+            } else {
+                col_letters.to_string()
+            };
+
+            format!("{}{}{}{}{}", lead, col_abs, new_col_letters, row_abs, row_num)
+        })
+    })
 }
 
 // ============================================================================
@@ -2456,19 +2422,7 @@ pub fn delete_rows(
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::RowDelete { at: row, count });
-    undo_stack.commit_transaction();
-    
-    // First, remove cells in the deleted rows
-    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
-        .filter(|(r, _)| *r >= row && *r < row + count)
-        .cloned()
-        .collect();
-    
-    for pos in cells_to_delete {
-        grid.cells.remove(&pos);
-    }
-    
-    // Update formula references in remaining cells (shift up = negative delta)
+
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
@@ -2477,10 +2431,36 @@ pub fn delete_rows(
         .get(active_sheet)
         .cloned()
         .unwrap_or_default();
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
+    // commit_transaction so its undo entries join THIS transaction (see the
+    // row-insert twin).
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::RowDelete { at: row, count },
+    );
+    undo_stack.commit_transaction();
+
+    // First, remove cells in the deleted rows
+    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
+        .filter(|(r, _)| *r >= row && *r < row + count)
+        .cloned()
+        .collect();
+
+    for pos in cells_to_delete {
+        grid.cells.remove(&pos);
+    }
+
+    // Update formula references in remaining cells (shift up = negative delta)
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
-    
+
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
             let updated_formula = shift_formula_rows_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, row, -(count as i32));
@@ -2491,19 +2471,6 @@ pub fn delete_rows(
             }
         }
     }
-
-    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
-    // in-command loop above only walks this sheet, so without this those
-    // references silently go stale.
-    shift_cross_sheet_formulas(
-        &state,
-        &mut undo_stack,
-        &mut grids,
-        active_sheet,
-        &edited_sheet_name,
-        &sheet_names_snapshot,
-        calp::writeback::StructuralEdit::RowDelete { at: row, count },
-    );
 
     // Move remaining cells up
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -2816,19 +2783,6 @@ pub fn delete_columns(
     );
     // Controls and the spill twin pair are flat (sheet, row, col)-keyed.
     shift_flat_cell_stores(&state, active_sheet, calp::writeback::StructuralEdit::ColDelete { at: col, count });
-    undo_stack.commit_transaction();
-    
-    // First, remove cells in the deleted columns
-    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
-        .filter(|(_, c)| *c >= col && *c < col + count)
-        .cloned()
-        .collect();
-    
-    for pos in cells_to_delete {
-        grid.cells.remove(&pos);
-    }
-    
-    // Update formula references in remaining cells (shift left = negative delta)
     // Sheet names: an unqualified reference means the sheet the formula LIVES
     // on, so the rewrite needs both that and the edited sheet name.
     let sheet_names_snapshot: Vec<String> =
@@ -2837,10 +2791,36 @@ pub fn delete_columns(
         .get(active_sheet)
         .cloned()
         .unwrap_or_default();
+
+    // Every OTHER sheet may hold formulas pointing at the edited sheet. BEFORE
+    // commit_transaction so its undo entries join THIS transaction (see the
+    // row-insert twin).
+    shift_cross_sheet_formulas(
+        &state,
+        &mut undo_stack,
+        &mut grids,
+        active_sheet,
+        &edited_sheet_name,
+        &sheet_names_snapshot,
+        calp::writeback::StructuralEdit::ColDelete { at: col, count },
+    );
+    undo_stack.commit_transaction();
+
+    // First, remove cells in the deleted columns
+    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
+        .filter(|(_, c)| *c >= col && *c < col + count)
+        .cloned()
+        .collect();
+
+    for pos in cells_to_delete {
+        grid.cells.remove(&pos);
+    }
+
+    // Update formula references in remaining cells (shift left = negative delta)
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
-    
+
     for ((r, c), cell) in &all_cells {
         if let Some(formula) = cell.formula_string() {
             let updated_formula = shift_formula_cols_sheet_aware(&formula, &edited_sheet_name, &edited_sheet_name, col, -(count as i32));
@@ -2851,19 +2831,6 @@ pub fn delete_columns(
             }
         }
     }
-
-    // Every OTHER sheet may hold formulas pointing at the edited sheet. The
-    // in-command loop above only walks this sheet, so without this those
-    // references silently go stale.
-    shift_cross_sheet_formulas(
-        &state,
-        &mut undo_stack,
-        &mut grids,
-        active_sheet,
-        &edited_sheet_name,
-        &sheet_names_snapshot,
-        calp::writeback::StructuralEdit::ColDelete { at: col, count },
-    );
 
     // Move remaining cells left
     let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
@@ -3039,63 +3006,68 @@ fn relocate_references_in_formula(
     delta_row: i32,
     delta_col: i32,
 ) -> String {
-    // First pass: cell range references (A1:B5) — must run before single cell refs
-    let result = CELL_RANGE_RE.replace_all(formula, |caps: &regex::Captures| {
-        let s_col_abs = &caps[1];
-        let s_col = &caps[2];
-        let s_row_abs = &caps[3];
-        let s_row: u32 = caps[4].parse().unwrap_or(0);
+    rewrite_outside_strings(formula, |segment| {
+        // First pass: cell range references (A1:B5) — must run before single cell refs
+        let result = replace_all_guarded(&CELL_RANGE_RE, segment, |caps| {
+            let lead = &caps[1];
+            let s_col_abs = &caps[2];
+            let s_col = &caps[3];
+            let s_row_abs = &caps[4];
+            let s_row: u32 = caps[5].parse().unwrap_or(0);
 
-        let e_col_abs = &caps[5];
-        let e_col = &caps[6];
-        let e_row_abs = &caps[7];
-        let e_row: u32 = caps[8].parse().unwrap_or(0);
+            let e_col_abs = &caps[6];
+            let e_col = &caps[7];
+            let e_row_abs = &caps[8];
+            let e_row: u32 = caps[9].parse().unwrap_or(0);
 
-        let s_col_idx = col_letters_to_index(s_col);
-        let e_col_idx = col_letters_to_index(e_col);
+            let s_col_idx = col_letters_to_index(s_col);
+            let e_col_idx = col_letters_to_index(e_col);
 
-        // Check if both corners of the range are inside the source range
-        // Row numbers in formulas are 1-indexed, grid is 0-indexed
-        let s_in_range = s_row >= src_min_row + 1 && s_row <= src_max_row + 1
-            && s_col_idx >= src_min_col && s_col_idx <= src_max_col;
-        let e_in_range = e_row >= src_min_row + 1 && e_row <= src_max_row + 1
-            && e_col_idx >= src_min_col && e_col_idx <= src_max_col;
+            // Check if both corners of the range are inside the source range
+            // Row numbers in formulas are 1-indexed, grid is 0-indexed
+            let s_in_range = s_row >= src_min_row + 1 && s_row <= src_max_row + 1
+                && s_col_idx >= src_min_col && s_col_idx <= src_max_col;
+            let e_in_range = e_row >= src_min_row + 1 && e_row <= src_max_row + 1
+                && e_col_idx >= src_min_col && e_col_idx <= src_max_col;
 
-        let new_s_row = if s_in_range { ((s_row as i32) + delta_row).max(1) as u32 } else { s_row };
-        let new_s_col = if s_in_range { index_to_col_letters(((s_col_idx as i32) + delta_col).max(0) as u32) } else { s_col.to_string() };
-        let new_e_row = if e_in_range { ((e_row as i32) + delta_row).max(1) as u32 } else { e_row };
-        let new_e_col = if e_in_range { index_to_col_letters(((e_col_idx as i32) + delta_col).max(0) as u32) } else { e_col.to_string() };
+            let new_s_row = if s_in_range { ((s_row as i32) + delta_row).max(1) as u32 } else { s_row };
+            let new_s_col = if s_in_range { index_to_col_letters(((s_col_idx as i32) + delta_col).max(0) as u32) } else { s_col.to_string() };
+            let new_e_row = if e_in_range { ((e_row as i32) + delta_row).max(1) as u32 } else { e_row };
+            let new_e_col = if e_in_range { index_to_col_letters(((e_col_idx as i32) + delta_col).max(0) as u32) } else { e_col.to_string() };
 
-        if !s_in_range && !e_in_range {
-            caps[0].to_string()
-        } else {
-            format!("{}{}{}{}:{}{}{}{}",
-                s_col_abs, new_s_col, s_row_abs, new_s_row,
-                e_col_abs, new_e_col, e_row_abs, new_e_row)
-        }
-    }).to_string();
+            if !s_in_range && !e_in_range {
+                caps[0].to_string()
+            } else {
+                format!("{}{}{}{}{}:{}{}{}{}",
+                    lead,
+                    s_col_abs, new_s_col, s_row_abs, new_s_row,
+                    e_col_abs, new_e_col, e_row_abs, new_e_row)
+            }
+        });
 
-    // Second pass: single cell references (A1, $B$5, etc.)
-    CELL_REF_RE.replace_all(&result, |caps: &regex::Captures| {
-        let col_abs = &caps[1];
-        let col_letters = &caps[2];
-        let row_abs = &caps[3];
-        let row_num: u32 = caps[4].parse().unwrap_or(0);
+        // Second pass: single cell references (A1, $B$5, etc.)
+        replace_all_guarded(&CELL_REF_RE, &result, |caps| {
+            let lead = &caps[1];
+            let col_abs = &caps[2];
+            let col_letters = &caps[3];
+            let row_abs = &caps[4];
+            let row_num: u32 = caps[5].parse().unwrap_or(0);
 
-        let col_idx = col_letters_to_index(col_letters);
+            let col_idx = col_letters_to_index(col_letters);
 
-        // Check if this reference is inside the source range (row is 1-indexed)
-        let in_range = row_num >= src_min_row + 1 && row_num <= src_max_row + 1
-            && col_idx >= src_min_col && col_idx <= src_max_col;
+            // Check if this reference is inside the source range (row is 1-indexed)
+            let in_range = row_num >= src_min_row + 1 && row_num <= src_max_row + 1
+                && col_idx >= src_min_col && col_idx <= src_max_col;
 
-        if in_range {
-            let new_row = ((row_num as i32) + delta_row).max(1) as u32;
-            let new_col = index_to_col_letters(((col_idx as i32) + delta_col).max(0) as u32);
-            format!("{}{}{}{}", col_abs, new_col, row_abs, new_row)
-        } else {
-            caps[0].to_string()
-        }
-    }).to_string()
+            if in_range {
+                let new_row = ((row_num as i32) + delta_row).max(1) as u32;
+                let new_col = index_to_col_letters(((col_idx as i32) + delta_col).max(0) as u32);
+                format!("{}{}{}{}{}", lead, col_abs, new_col, row_abs, new_row)
+            } else {
+                caps[0].to_string()
+            }
+        })
+    })
 }
 
 /// Relocate all formula references in the current sheet that point into the
@@ -3457,38 +3429,31 @@ fn shift_named_ranges(
 
     let mut changed = false;
     for nr in store.values_mut() {
-        // Which sheet does this definition point at? Take the qualifier from the
-        // reference itself when present; fall back to the name's own scope.
-        let qualifier = nr
-            .refers_to
-            .trim_start_matches('=')
-            .split('!')
-            .next()
-            .filter(|q| nr.refers_to.contains('!'))
-            .map(|q| q.trim_matches('\'').to_string());
-
-        let targets_this_sheet = match qualifier {
-            Some(q) => q.eq_ignore_ascii_case(sheet_name),
-            // Unqualified: only a sheet-scoped name is unambiguously local.
-            None => nr.sheet_index == Some(sheet_index),
-        };
-        if !targets_this_sheet {
-            continue;
-        }
-
+        // SHEET-AWARE shifting, per reference. The old form decided once per
+        // NAME (from the first qualifier it saw) and then ran the sheet-blind
+        // shifters over the whole refers_to — which renumbered refs to OTHER
+        // sheets whenever a definition mixed targets, and skipped the edited
+        // sheet's refs whenever the first qualifier pointed elsewhere.
+        //
+        // Unqualified refs mean "the name's own scope sheet": pass that as
+        // formula_sheet when this name is scoped to the edited sheet, and a
+        // name that can never match otherwise ("" is not a legal sheet name),
+        // which leaves workbook-scoped unqualified refs untouched — exactly
+        // the old, deliberate behaviour.
+        let formula_sheet: &str = if nr.sheet_index == Some(sheet_index) { sheet_name } else { "" };
         let shifted = match edit {
-            SE::RowInsert { at, count } => {
-                shift_formula_row_references(&nr.refers_to, at, count as i32)
-            }
-            SE::RowDelete { at, count } => {
-                shift_formula_row_references(&nr.refers_to, at, -(count as i32))
-            }
-            SE::ColInsert { at, count } => {
-                shift_formula_col_references(&nr.refers_to, at, count as i32)
-            }
-            SE::ColDelete { at, count } => {
-                shift_formula_col_references(&nr.refers_to, at, -(count as i32))
-            }
+            SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
+                &nr.refers_to, formula_sheet, sheet_name, at, count as i32,
+            ),
+            SE::RowDelete { at, count } => shift_formula_rows_sheet_aware(
+                &nr.refers_to, formula_sheet, sheet_name, at, -(count as i32),
+            ),
+            SE::ColInsert { at, count } => shift_formula_cols_sheet_aware(
+                &nr.refers_to, formula_sheet, sheet_name, at, count as i32,
+            ),
+            SE::ColDelete { at, count } => shift_formula_cols_sheet_aware(
+                &nr.refers_to, formula_sheet, sheet_name, at, -(count as i32),
+            ),
         };
         if shifted != nr.refers_to {
             nr.refers_to = shifted;
@@ -3509,6 +3474,18 @@ fn shift_named_ranges(
 #[cfg(test)]
 mod structural_formula_shift_tests {
     use super::{shift_formula_col_references, shift_formula_row_references};
+
+    // The fill/copy path shares CELL_REF_RE with these shifters — before the
+    // lead+trailing guards it matched LOG10 as column LOG row 10, so filling
+    // =LOG10(A1) down produced =LOG11(A2) (#NAME?).
+    #[test]
+    fn digit_suffixed_function_names_survive_blind_shifts() {
+        assert_eq!(shift_formula_row_references("=LOG10(A5)", 0, 1), "=LOG10(A6)");
+        assert_eq!(
+            shift_formula_col_references("=HEX2DEC(C5)", 0, 1),
+            "=HEX2DEC(D5)"
+        );
+    }
 
     // A STRUCTURAL edit (insert/delete row or column) shifts ABSOLUTE references
     // too. `$` marks a reference as immune to being adjusted when the formula is
@@ -3689,13 +3666,147 @@ mod range_string_shift_tests {
 /// engine has no lookbehind, and without this guard the pattern still matches a
 /// SUBSTRING: in a bare `Sheet1` it finds `eet1` (column "eet", row 1) and
 /// renumbers it. Requiring a non-identifier character before the reference is
-/// what makes the 1-3 letter column cap actually bite.
+/// what makes the 1-3 letter column cap bite on the LEFT edge.
+///
+/// The RIGHT edge needs a guard too, and the lead alone cannot provide it: 13
+/// built-in functions end in digits (LOG10, BIN2DEC, OCT2HEX, ...) and parse as
+/// column+row — `=LOG10(A5)` matched as column LOG, row 10, so a row insert
+/// rewrote it to `=LOG11(A6)` (#NAME?). Rust regex has no lookahead, so the
+/// trailing check lives in [`replace_all_guarded`], which peeks at the byte
+/// after each match WITHOUT consuming it (consuming it would eat the `(` or
+/// `+` that delimits the NEXT reference).
+///
+/// The optional `:endpoint2` tail makes a qualified RANGE one match, so the
+/// qualifier governs BOTH endpoints. Matched separately, `Sheet2!A1:A10` had
+/// its A1 attributed to Sheet2 but its A10 to the formula's own sheet — a
+/// structural edit then shifted one endpoint and not the other, silently
+/// resizing the range.
 static QUALIFIED_REF_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(^|[^A-Za-z0-9_.])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3})(\$?)(\d+)",
+        r"(^|[^A-Za-z0-9_.])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?::(\$?)([A-Za-z]{1,3})(\$?)(\d+))?",
     )
     .unwrap()
 });
+
+/// Whole-COLUMN range (`B:B`, `$A:$C`, `Sheet2!A:A`), optionally qualified.
+/// The old sheet-blind shifter handled these; the first sheet-aware version
+/// forgot them, so `=SUM(B:B)` stopped following column inserts entirely and
+/// silently summed the wrong column. The trailing guard in
+/// [`replace_all_guarded`] is what keeps `Jan:Mar!A1` (a 3-D sheet span, both
+/// names 1-3 letters) from being renumbered as a column range.
+static QUALIFIED_COL_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(^|[^A-Za-z0-9_.:])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)([A-Za-z]{1,3}):(\$?)([A-Za-z]{1,3})",
+    )
+    .unwrap()
+});
+
+/// Whole-ROW range (`3:5`, `$2:$10`, `Sheet2!3:3`), optionally qualified.
+/// Runs AFTER the cell pass, whose rewrites leave no digit:digit pairs behind
+/// (`A1:B2` has already been consumed whole). The lead excludes `$` so the
+/// tail of an already-rewritten `$A$1` cannot seed a bogus match.
+static QUALIFIED_ROW_RANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(^|[^A-Za-z0-9_.:$])(?:(?:'([^']*)'|([A-Za-z_][A-Za-z0-9_.]*))!)?(\$?)(\d+):(\$?)(\d+)",
+    )
+    .unwrap()
+});
+
+/// `replace_all` with a NON-CONSUMING trailing guard.
+///
+/// A match followed by an identifier character, `(`, or `!` is not a reference:
+/// it is the front of a longer identifier (`LOG10` in `LOG10(`, a sheet name in
+/// `Mar!A1`) and is emitted verbatim. The peek must not consume — the very
+/// character that blocks one match (`(`, `+`) is the lead delimiter of the
+/// next.
+fn replace_all_guarded(
+    re: &Regex,
+    input: &str,
+    mut rewrite: impl FnMut(&regex::Captures) -> String,
+) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0;
+    for caps in re.captures_iter(input) {
+        let m = caps.get(0).unwrap();
+        out.push_str(&input[last..m.start()]);
+        let blocked = matches!(
+            input[m.end()..].bytes().next(),
+            Some(b) if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'(' || b == b'!'
+        );
+        if blocked {
+            out.push_str(m.as_str());
+        } else {
+            out.push_str(&rewrite(&caps));
+        }
+        last = m.end();
+    }
+    out.push_str(&input[last..]);
+    out
+}
+
+/// Apply `rewrite` only OUTSIDE double-quoted string literals (`""` escapes a
+/// quote, per Excel). Without this, every shifter rewrote A1-looking text
+/// inside strings: `="see A5"` became `="see A6"` on a row insert.
+fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> String) -> String {
+    let mut out = String::with_capacity(formula.len());
+    let mut seg_start = 0;
+    let bytes = formula.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            // Rewrite the segment before the string, then copy the string
+            // literal (including its closing quote) verbatim.
+            out.push_str(&rewrite(&formula[seg_start..i]));
+            let mut j = i + 1;
+            while j < bytes.len() {
+                if bytes[j] == b'"' {
+                    if bytes.get(j + 1) == Some(&b'"') {
+                        j += 2; // escaped quote, still inside the string
+                        continue;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            let end = (j + 1).min(bytes.len());
+            out.push_str(&formula[i..end]);
+            i = end;
+            seg_start = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&rewrite(&formula[seg_start..]));
+    out
+}
+
+/// Shared 26-adic column letter conversions for the shifters below.
+fn shift_col_to_index(col: &str) -> u32 {
+    let mut index: u32 = 0;
+    for ch in col.to_uppercase().chars() {
+        index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+    }
+    index.saturating_sub(1)
+}
+fn shift_index_to_col(mut index: u32) -> String {
+    let mut out = String::new();
+    index += 1;
+    while index > 0 {
+        let rem = ((index - 1) % 26) as u8;
+        out.insert(0, (b'A' + rem) as char);
+        index = (index - 1) / 26;
+    }
+    out
+}
+
+/// Re-emit a matched sheet qualifier exactly as written.
+fn qualifier_prefix(quoted: &Option<String>, bare: &Option<String>) -> String {
+    match (quoted, bare) {
+        (Some(q), _) => format!("'{}'!", q),
+        (None, Some(b)) => format!("{}!", b),
+        _ => String::new(),
+    }
+}
 
 /// Shift the row part of every reference in `formula` that targets `edited_sheet`.
 ///
@@ -3711,36 +3822,80 @@ pub(crate) fn shift_formula_rows_sheet_aware(
     from_row: u32,
     delta: i32,
 ) -> String {
-    QUALIFIED_REF_RE
-        .replace_all(formula, |caps: &regex::Captures| {
+    // Absolute markers do not prevent a STRUCTURAL shift (see
+    // structural_formula_shift_tests) but are preserved in the output.
+    let shift_row = |row_num: u32| -> u32 {
+        if row_num > from_row {
+            ((row_num as i32) + delta).max(1) as u32
+        } else {
+            row_num
+        }
+    };
+    rewrite_outside_strings(formula, |segment| {
+        // Pass 1: cell refs and cell ranges (one match per range, so the
+        // qualifier governs both endpoints).
+        let pass1 = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
             let lead = &caps[1];
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
             let qualifier = quoted.clone().or(bare.clone());
+            let target = qualifier.as_deref().unwrap_or(formula_sheet);
+            let applies = target.eq_ignore_ascii_case(edited_sheet);
+
             let col_abs = &caps[4];
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num: u32 = caps[7].parse().unwrap_or(0);
-
+            let new_row = if applies { shift_row(row_num) } else { row_num };
+            let mut out = format!(
+                "{}{}{}{}{}{}",
+                lead,
+                qualifier_prefix(&quoted, &bare),
+                col_abs,
+                col_letters,
+                row_abs,
+                new_row
+            );
+            if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
+            {
+                let row2: u32 = rn2.as_str().parse().unwrap_or(0);
+                let new_row2 = if applies { shift_row(row2) } else { row2 };
+                out.push_str(&format!(
+                    ":{}{}{}{}",
+                    ca2.as_str(),
+                    cl2.as_str(),
+                    ra2.as_str(),
+                    new_row2
+                ));
+            }
+            out
+        });
+        // Pass 2: whole-row ranges (3:5).
+        replace_all_guarded(&QUALIFIED_ROW_RANGE_RE, &pass1, |caps| {
+            let lead = &caps[1];
+            let quoted = caps.get(2).map(|m| m.as_str().to_string());
+            let bare = caps.get(3).map(|m| m.as_str().to_string());
+            let qualifier = quoted.clone().or(bare.clone());
             let target = qualifier.as_deref().unwrap_or(formula_sheet);
             let applies = target.eq_ignore_ascii_case(edited_sheet);
 
-            // Absolute markers do not prevent a STRUCTURAL shift (see
-            // structural_formula_shift_tests) but are preserved in the output.
-            let new_row = if applies && row_num > from_row {
-                ((row_num as i32) + delta).max(1) as u32
-            } else {
-                row_num
-            };
-
-            let prefix = match (&quoted, &bare) {
-                (Some(q), _) => format!("'{}'!", q),
-                (None, Some(b)) => format!("{}!", b),
-                _ => String::new(),
-            };
-            format!("{}{}{}{}{}{}", lead, prefix, col_abs, col_letters, row_abs, new_row)
+            let abs1 = &caps[4];
+            let r1: u32 = caps[5].parse().unwrap_or(0);
+            let abs2 = &caps[6];
+            let r2: u32 = caps[7].parse().unwrap_or(0);
+            let (n1, n2) = if applies { (shift_row(r1), shift_row(r2)) } else { (r1, r2) };
+            format!(
+                "{}{}{}{}:{}{}",
+                lead,
+                qualifier_prefix(&quoted, &bare),
+                abs1,
+                n1,
+                abs2,
+                n2
+            )
         })
-        .to_string()
+    })
 }
 
 /// Column twin of [`shift_formula_rows_sheet_aware`].
@@ -3751,53 +3906,86 @@ pub(crate) fn shift_formula_cols_sheet_aware(
     from_col: u32,
     delta: i32,
 ) -> String {
-    fn col_to_index(col: &str) -> u32 {
-        let mut index: u32 = 0;
-        for ch in col.to_uppercase().chars() {
-            index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+    let shift_col = |letters: &str| -> String {
+        let col_index = shift_col_to_index(letters);
+        if col_index >= from_col {
+            shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
+        } else {
+            letters.to_string()
         }
-        index.saturating_sub(1)
-    }
-    fn index_to_col(mut index: u32) -> String {
-        let mut out = String::new();
-        index += 1;
-        while index > 0 {
-            let rem = ((index - 1) % 26) as u8;
-            out.insert(0, (b'A' + rem) as char);
-            index = (index - 1) / 26;
-        }
-        out
-    }
-
-    QUALIFIED_REF_RE
-        .replace_all(formula, |caps: &regex::Captures| {
+    };
+    rewrite_outside_strings(formula, |segment| {
+        // Pass 1: cell refs and cell ranges.
+        let pass1 = replace_all_guarded(&QUALIFIED_REF_RE, segment, |caps| {
             let lead = &caps[1];
             let quoted = caps.get(2).map(|m| m.as_str().to_string());
             let bare = caps.get(3).map(|m| m.as_str().to_string());
             let qualifier = quoted.clone().or(bare.clone());
+            let target = qualifier.as_deref().unwrap_or(formula_sheet);
+            let applies = target.eq_ignore_ascii_case(edited_sheet);
+
             let col_abs = &caps[4];
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num = &caps[7];
-
+            let new_col =
+                if applies { shift_col(col_letters) } else { col_letters.to_string() };
+            let mut out = format!(
+                "{}{}{}{}{}{}",
+                lead,
+                qualifier_prefix(&quoted, &bare),
+                col_abs,
+                new_col,
+                row_abs,
+                row_num
+            );
+            if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
+            {
+                let new_col2 = if applies {
+                    shift_col(cl2.as_str())
+                } else {
+                    cl2.as_str().to_string()
+                };
+                out.push_str(&format!(
+                    ":{}{}{}{}",
+                    ca2.as_str(),
+                    new_col2,
+                    ra2.as_str(),
+                    rn2.as_str()
+                ));
+            }
+            out
+        });
+        // Pass 2: whole-column ranges (B:B, $A:$C).
+        replace_all_guarded(&QUALIFIED_COL_RANGE_RE, &pass1, |caps| {
+            let lead = &caps[1];
+            let quoted = caps.get(2).map(|m| m.as_str().to_string());
+            let bare = caps.get(3).map(|m| m.as_str().to_string());
+            let qualifier = quoted.clone().or(bare.clone());
             let target = qualifier.as_deref().unwrap_or(formula_sheet);
             let applies = target.eq_ignore_ascii_case(edited_sheet);
 
-            let col_index = col_to_index(col_letters);
-            let new_col = if applies && col_index >= from_col {
-                index_to_col(((col_index as i32) + delta).max(0) as u32)
+            let abs1 = &caps[4];
+            let c1 = &caps[5];
+            let abs2 = &caps[6];
+            let c2 = &caps[7];
+            let (n1, n2) = if applies {
+                (shift_col(c1), shift_col(c2))
             } else {
-                col_letters.to_string()
+                (c1.to_string(), c2.to_string())
             };
-
-            let prefix = match (&quoted, &bare) {
-                (Some(q), _) => format!("'{}'!", q),
-                (None, Some(b)) => format!("{}!", b),
-                _ => String::new(),
-            };
-            format!("{}{}{}{}{}{}", lead, prefix, col_abs, new_col, row_abs, row_num)
+            format!(
+                "{}{}{}{}:{}{}",
+                lead,
+                qualifier_prefix(&quoted, &bare),
+                abs1,
+                n1,
+                abs2,
+                n2
+            )
         })
-        .to_string()
+    })
 }
 
 #[cfg(test)]
@@ -3812,6 +4000,97 @@ mod sheet_aware_shift_tests {
         let out = shift_formula_rows_sheet_aware("=Sheet1!A5", "Sheet2", "Sheet1", 0, 1);
         assert!(out.starts_with("=Sheet1!"), "sheet name must survive: {out}");
         assert_eq!(out, "=Sheet1!A6");
+    }
+
+    // REGRESSION: 13 built-in functions end in digits (LOG10, BIN2DEC,
+    // OCT2HEX, ...) and parsed as column+row — a row insert rewrote
+    // =LOG10(A5) to =LOG11(A6), yielding #NAME?. The trailing guard in
+    // replace_all_guarded must reject a "reference" followed by `(`.
+    #[test]
+    fn function_names_ending_in_digits_are_never_renumbered() {
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=LOG10(A5)", "Sheet1", "Sheet1", 0, 1),
+            "=LOG10(A6)"
+        );
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=BIN2DEC(A5)+OCT2HEX(B7)", "Sheet1", "Sheet1", 0, 1),
+            "=BIN2DEC(A6)+OCT2HEX(B8)"
+        );
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=LOG10(C5)", "Sheet1", "Sheet1", 0, 1),
+            "=LOG10(D5)"
+        );
+    }
+
+    // REGRESSION: a qualified RANGE was matched as two references, only the
+    // first carrying the qualifier — so editing the formula's OWN sheet
+    // shifted the second endpoint of Sheet2!A1:A10 and silently resized it.
+    #[test]
+    fn a_qualified_range_shifts_or_holds_as_one_unit() {
+        // Formula lives on Sheet1; Sheet1 is edited; the Sheet2 range must not move at all.
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=SUM(Sheet2!A1:A10)", "Sheet1", "Sheet1", 0, 1),
+            "=SUM(Sheet2!A1:A10)"
+        );
+        // Editing Sheet2 shifts BOTH endpoints.
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=SUM(Sheet2!A1:A10)", "Sheet1", "Sheet2", 0, 1),
+            "=SUM(Sheet2!A2:A11)"
+        );
+    }
+
+    // REGRESSION: whole-column references were handled by the old sheet-blind
+    // shifter but forgotten by the first sheet-aware version — =SUM(B:B)
+    // stopped following column inserts and silently summed the wrong column.
+    #[test]
+    fn whole_column_and_row_ranges_shift() {
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=SUM(B:B)", "Sheet1", "Sheet1", 0, 1),
+            "=SUM(C:C)"
+        );
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=SUM($A:$C)", "Sheet1", "Sheet1", 1, 1),
+            "=SUM($A:$D)"
+        );
+        assert_eq!(
+            shift_formula_rows_sheet_aware("=SUM(3:5)", "Sheet1", "Sheet1", 0, 1),
+            "=SUM(4:6)"
+        );
+        // Qualified col range follows its own sheet, not the formula's.
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=SUM(Sheet2!B:B)", "Sheet1", "Sheet1", 0, 1),
+            "=SUM(Sheet2!B:B)"
+        );
+        assert_eq!(
+            shift_formula_cols_sheet_aware("=SUM(Sheet2!B:B)", "Sheet1", "Sheet2", 0, 1),
+            "=SUM(Sheet2!C:C)"
+        );
+    }
+
+    // A 3-D sheet span (Jan:Mar!A1) must not be renumbered as a column range.
+    #[test]
+    fn three_d_sheet_spans_are_not_column_ranges() {
+        let out = shift_formula_cols_sheet_aware("=SUM(Jan:Mar!A1)", "Sheet1", "Sheet1", 0, 1);
+        assert!(out.starts_with("=SUM(Jan:Mar!"), "3-D span mangled: {out}");
+    }
+
+    // REGRESSION: A1-looking text inside string literals was rewritten —
+    // ="see A5" became ="see A6" on a row insert.
+    #[test]
+    fn string_literals_are_never_rewritten() {
+        assert_eq!(
+            shift_formula_rows_sheet_aware(
+                "=IF(A5>0,\"see A5\",A5)", "Sheet1", "Sheet1", 0, 1
+            ),
+            "=IF(A6>0,\"see A5\",A6)"
+        );
+        // Escaped quotes stay inside the string.
+        assert_eq!(
+            shift_formula_rows_sheet_aware(
+                "=\"say \"\"A5\"\" now\"&A5", "Sheet1", "Sheet1", 0, 1
+            ),
+            "=\"say \"\"A5\"\" now\"&A6"
+        );
     }
 
     #[test]
@@ -3918,6 +4197,13 @@ fn shift_cross_sheet_formulas(
         let mut previous: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
         for ((r, c), cell) in candidates {
             let Some(formula) = cell.formula_string() else { continue };
+            // A formula on ANOTHER sheet can only reach the edited sheet
+            // through a QUALIFIED reference — unqualified refs mean this sheet.
+            // Skipping the '!'-free majority avoids rendering and regex-scanning
+            // every formula in the workbook on every row/column edit.
+            if !formula.contains('!') {
+                continue;
+            }
             let updated = match edit {
                 SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
                     &formula, this_sheet, edited_sheet_name, at, count as i32,
@@ -4037,14 +4323,16 @@ fn shift_controls(
         return;
     }
 
-    // Re-key the object-script bindings that name these controls.
+    // Re-key the object-script bindings that name these controls. Keyed by the
+    // script's own stable id (see ControlsObjSnapshot) so a later script
+    // deletion cannot make the undo payload target the wrong script.
     let previous_ids = {
         let mut scripts = match state.object_scripts.lock() { Ok(s) => s, Err(_) => return };
         let mut prev = Vec::new();
-        for (idx, script) in scripts.iter_mut().enumerate() {
+        for script in scripts.iter_mut() {
             let Some(current) = script.instance_id.clone() else { continue };
             if let Some(moved_to) = id_moves.get(&current) {
-                prev.push((idx, Some(current)));
+                prev.push((script.id.clone(), Some(current)));
                 script.instance_id = moved_to.clone();
             }
         }

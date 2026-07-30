@@ -3599,12 +3599,29 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                 });
             }
 
-            // Collect all rows as vectors of cell data
+            // Collect all rows as vectors of cell data. For COLOR sorts,
+            // materialize the effective style onto each extracted cell: the
+            // rows are flattened here, so the comparator can no longer resolve
+            // row/column tiers — without this, a fill inherited from a tier is
+            // invisible to Sort by Cell Color / Font Color. Materializing also
+            // keeps the visible format travelling with the cell, which is what
+            // Excel does when sort moves cells.
+            let color_sort = fields
+                .iter()
+                .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
             let mut rows: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
             for row in data_start_row..=max_row {
                 let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
                 for col in min_col..=max_col {
-                    row_data.push(grid.get_cell(row, col).cloned());
+                    let mut cell = grid.get_cell(row, col).cloned();
+                    if color_sort {
+                        if let Some(c) = cell.as_mut() {
+                            if c.style_index == 0 {
+                                c.style_index = grid.effective_style_index(row, col);
+                            }
+                        }
+                    }
+                    row_data.push(cell);
                 }
                 rows.push((row, row_data));
             }
@@ -3730,12 +3747,24 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
                 });
             }
 
-            // Collect all columns as vectors of cell data
+            // Collect all columns as vectors of cell data (same tier
+            // materialization rule as the row sort above).
+            let color_sort = fields
+                .iter()
+                .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
             let mut cols: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
             for col in data_start_col..=max_col {
                 let mut col_data: Vec<Option<engine::Cell>> = Vec::new();
                 for row in min_row..=max_row {
-                    col_data.push(grid.get_cell(row, col).cloned());
+                    let mut cell = grid.get_cell(row, col).cloned();
+                    if color_sort {
+                        if let Some(c) = cell.as_mut() {
+                            if c.style_index == 0 {
+                                c.style_index = grid.effective_style_index(row, col);
+                            }
+                        }
+                    }
+                    col_data.push(cell);
                 }
                 cols.push((col, col_data));
             }

@@ -454,6 +454,32 @@ pub(crate) fn formula_is_hidden(
     styles.get(grid.effective_style_index(row, col)).formula_hidden
 }
 
+/// All cells on one sheet whose formulas must be WITHHELD — protected sheet +
+/// `formula_hidden` on the effective style. Pure form over borrowed state for
+/// callers already holding the grid/style locks (the AI context serializer).
+/// Cheap when nothing is hidden: an unprotected sheet returns immediately, and
+/// the scan only touches populated formula cells.
+pub(crate) fn hidden_formula_cells_in(
+    protection_storage: &ProtectionStorage,
+    grid: &engine::Grid,
+    styles: &engine::StyleRegistry,
+    sheet_index: usize,
+) -> std::collections::HashSet<(u32, u32)> {
+    let mut hidden = std::collections::HashSet::new();
+    let Some(protection) = protection_storage.get(&sheet_index) else {
+        return hidden;
+    };
+    if !protection.protected {
+        return hidden;
+    }
+    for (&(row, col), cell) in &grid.cells {
+        if cell.ast.is_some() && styles.get(grid.effective_style_index(row, col)).formula_hidden {
+            hidden.insert((row, col));
+        }
+    }
+    hidden
+}
+
 /// `AppState` form of [`formula_is_hidden`] for callers holding no locks.
 ///
 /// Returns a closure-friendly snapshot: whether the sheet is protected at all,
@@ -665,49 +691,84 @@ pub(crate) fn check_sheet_protection_range_in(
         protection.allow_edit_ranges.iter().any(|r| r.contains(row, col))
     };
     let tier_unlocked = |idx: usize| idx != 0 && !styles.get(idx).locked;
+    let tier_locked = |idx: usize| idx != 0 && styles.get(idx).locked;
 
-    // FAST PATH 1 — every column in the rectangle carries an unlocked column
-    // tier. This is the case the whole tier design exists for: "unlock the input
-    // column, then protect the sheet". O(columns), so a whole-column selection
-    // costs ONE probe rather than a million.
-    let all_cols_unlocked = (start_col..=end_col)
-        .all(|c| grid.column_styles.get(&c).copied().is_some_and(tier_unlocked));
-
-    // FAST PATH 2 — same for rows. Guarded by a row count, because evaluating it
-    // for a tall rectangle would itself be the walk we are avoiding.
-    let row_span = end_row.saturating_sub(start_row) as u64 + 1;
-    let all_rows_unlocked = row_span <= 4096
-        && (start_row..=end_row)
-            .all(|r| grid.row_styles.get(&r).copied().is_some_and(tier_unlocked));
-
-    if all_cols_unlocked || all_rows_unlocked {
-        // The background grants every position. Only a cell with its OWN locked
-        // style can still refuse, and those are sparse — scan the populated
-        // cells, not the rectangle.
-        if let Some((&(row, col), _)) = grid.cells.iter().find(|(&(r, c), cell)| {
-            r >= start_row && r <= end_row && c >= start_col && c <= end_col
-                && cell.style_index != 0
-                && styles.get(cell.style_index).locked
-                && !in_allow_range(r, c)
-        }) {
-            return Err(protection_error(row, col));
-        }
+    // FAST PATH — one allow-edit range contains the whole rectangle. This is
+    // "the users type in A:A" wholesale-granted, and without it a whole-column
+    // Delete would walk a million positions below just to conclude "granted".
+    if protection.allow_edit_ranges.iter().any(|r| {
+        r.contains(start_row, start_col) && r.contains(end_row, end_col)
+    }) {
         return Ok(());
     }
 
-    // Otherwise SOME position has no tier granting it, so the default (locked)
-    // applies there unless an allow-edit range or the cell's own style grants
-    // it. Find the first such position. On a protected sheet this is almost
-    // always the very first cell examined, because "locked" is the default —
-    // the scan only runs long when the author has unlocked a lot of individual
-    // cells, i.e. it is bounded by real authored data rather than by the
-    // address space.
+    // STEP 1 — a cell with its OWN locked style refuses no matter what tier
+    // sits behind it (cell > row > column), unless an allow-edit range grants
+    // it. Populated cells are sparse; scan them, not the rectangle.
+    if let Some((&(row, col), _)) = grid.cells.iter().find(|(&(r, c), cell)| {
+        r >= start_row && r <= end_row && c >= start_col && c <= end_col
+            && cell.style_index != 0
+            && styles.get(cell.style_index).locked
+            && !in_allow_range(r, c)
+    }) {
+        return Err(protection_error(row, col));
+    }
+
+    // STEP 2 — background analysis. After step 1, a position can refuse only
+    // through its BACKGROUND: the tier the resolver falls through to when the
+    // cell has no style of its own (row outranks column — mirror
+    // `Grid::effective_style_index`, which an earlier fast path here famously
+    // did not, treating a locked ROW tier inside unlocked columns as granted).
+    //
+    // Precompute which columns are granted for EVERY row of the range — an
+    // unlocked column tier, or an allow-edit range spanning the full row span.
+    // Rows then divide into three kinds, each cheap:
+    //   unlocked row tier  -> whole row granted (own-locked cells: step 1)
+    //   locked row tier    -> the row-tier background beats even unlocked
+    //                         column tiers; every position needs an allow-range
+    //                         or own-unlocked-cell grant
+    //   no row tier        -> only the not-fully-granted columns need checking
+    let fully_granted_col = |c: u32| {
+        grid.column_styles.get(&c).copied().is_some_and(tier_unlocked)
+            || protection.allow_edit_ranges.iter().any(|r| {
+                r.contains(start_row, c) && r.contains(end_row, c)
+            })
+    };
+    let remaining_cols: Vec<u32> =
+        (start_col..=end_col).filter(|&c| !fully_granted_col(c)).collect();
+
+    // A position with a locked background passes only via an allow-edit range
+    // or a populated cell whose own style is unlocked (own-LOCKED already
+    // refused in step 1).
+    let granted_at = |r: u32, c: u32| {
+        in_allow_range(r, c)
+            || grid
+                .cells
+                .get(&(r, c))
+                .is_some_and(|cell| cell.style_index != 0 && !styles.get(cell.style_index).locked)
+    };
+
     for row in start_row..=end_row {
-        for col in start_col..=end_col {
-            if refusal_reason_for_cell(protection_storage, grid, styles, sheet_index, row, col)
-                .is_some()
-            {
-                return Err(protection_error(row, col));
+        match grid.row_styles.get(&row).copied() {
+            Some(idx) if tier_unlocked(idx) => continue,
+            Some(idx) if tier_locked(idx) => {
+                // Locked row tier overrides column tiers: check the FULL span.
+                for col in start_col..=end_col {
+                    if !granted_at(row, col) {
+                        return Err(protection_error(row, col));
+                    }
+                }
+            }
+            _ => {
+                // No row tier (or a tier at index 0, which means none): the
+                // default-locked background applies wherever the column does
+                // not grant. On a typical protected sheet the very first
+                // position refuses here, so the scan is short in practice.
+                for &col in &remaining_cols {
+                    if !granted_at(row, col) {
+                        return Err(protection_error(row, col));
+                    }
+                }
             }
         }
     }
@@ -755,7 +816,7 @@ pub(crate) fn check_sheet_action(
 /// the sheet is protected. Unprotect first (which DOES verify the password),
 /// change the settings, protect again. That keeps the password check in exactly
 /// one place instead of threading a password through every settings command.
-fn require_sheet_unprotected(state: &AppState, sheet_index: usize, what: &str) -> Result<(), String> {
+pub(crate) fn require_sheet_unprotected(state: &AppState, sheet_index: usize, what: &str) -> Result<(), String> {
     let protection_storage = state.sheet_protection.lock().unwrap();
     match protection_storage.get(&sheet_index) {
         Some(p) if p.protected => Err(format!(
@@ -1223,8 +1284,15 @@ pub fn set_cell_protection(
     };
 
     enum Plan {
-        /// (col_or_row_index, new_style)
-        Tier(Vec<(u32, engine::CellStyle)>, bool /* is_column */),
+        /// Tier entries plus per-cell fixups for tier-intersection positions.
+        Tier {
+            /// (col_or_row_index, new_style)
+            entries: Vec<(u32, engine::CellStyle)>,
+            is_column: bool,
+            /// ((row, col), new_style) — explicit cells written where the OTHER
+            /// tier axis would otherwise swallow or shadow this change.
+            fixups: Vec<((u32, u32), engine::CellStyle)>,
+        },
         /// ((row, col), new_style)
         Cells(Vec<((u32, u32), engine::CellStyle)>),
     }
@@ -1240,20 +1308,88 @@ pub fn set_cell_protection(
             } else {
                 (min_row..=max_row).collect()
             };
-            let mut changes = Vec::new();
-            for idx in range {
+            let mut entries = Vec::new();
+            let mut changed_tier: std::collections::HashMap<u32, engine::CellStyle> =
+                std::collections::HashMap::new();
+            for idx in &range {
                 let current_idx = if is_column {
-                    grid.column_styles.get(&idx).copied().unwrap_or(0)
+                    grid.column_styles.get(idx).copied().unwrap_or(0)
                 } else {
-                    grid.row_styles.get(&idx).copied().unwrap_or(0)
+                    grid.row_styles.get(idx).copied().unwrap_or(0)
                 };
                 let current = styles.get(current_idx);
                 let next = apply_delta(current);
                 if &next != current {
-                    changes.push((idx, next));
+                    changed_tier.insert(*idx, next.clone());
+                    entries.push((*idx, next));
                 }
             }
-            Plan::Tier(changes, is_column)
+
+            // TIER-INTERSECTION FIXUPS. `effective_style_index` resolves
+            // cell > ROW > column, which makes the two whole-axis cases
+            // asymmetric where the axes cross:
+            //
+            //  - Locking whole ROWS across a tier-unlocked (or tier-formatted)
+            //    COLUMN: the row tier this op sets (or declines to set, when the
+            //    result equals the default) must not swallow the column's
+            //    formatting, and the lock must actually reach cells the column
+            //    tier was granting.
+            //  - Locking whole COLUMNS across a row that carries a tier: the
+            //    ROW tier wins at the intersection, so the column change simply
+            //    never lands there.
+            //
+            // Excel materializes per-cell formats in exactly these spots; we do
+            // the same, but ONLY at tier crossings — everywhere else the tier
+            // carries the change. Fixups apply to positions whose cell has no
+            // explicit style of its own (an explicit cell already outranks
+            // every tier and is deliberately left alone).
+            let mut fixups: Vec<((u32, u32), engine::CellStyle)> = Vec::new();
+            let cross_tiers: Vec<(u32, usize)> = if is_column {
+                grid.row_styles.iter().map(|(k, v)| (*k, *v)).filter(|(_, v)| *v != 0).collect()
+            } else {
+                grid.column_styles.iter().map(|(k, v)| (*k, *v)).filter(|(_, v)| *v != 0).collect()
+            };
+            // Pathological-product guard: select-all over a sheet whose every
+            // row carries a tier would otherwise plan billions of fixups.
+            if !cross_tiers.is_empty()
+                && (cross_tiers.len() as u64) * (range.len() as u64) <= 250_000
+            {
+                for idx in &range {
+                    for (cross_idx, cross_style_idx) in &cross_tiers {
+                        let (row, col) = if is_column { (*cross_idx, *idx) } else { (*idx, *cross_idx) };
+                        if grid.get_cell(row, col).is_some_and(|c| c.style_index != 0) {
+                            continue;
+                        }
+                        let cross_style = styles.get(*cross_style_idx);
+                        // The style this position resolved to BEFORE the op
+                        // (delta applies on top of it), and the style it will
+                        // resolve to AFTER the tier entries land without a
+                        // fixup. Row outranks column in both directions.
+                        let (desired, effective_after) = if is_column {
+                            // Column op: the crossing ROW tier both defines the
+                            // before-state and survives as the after-state —
+                            // the column change never lands here on its own.
+                            (apply_delta(cross_style), cross_style.clone())
+                        } else {
+                            let row_idx_prev = grid.row_styles.get(idx).copied().unwrap_or(0);
+                            let before: &engine::CellStyle = if row_idx_prev != 0 {
+                                styles.get(row_idx_prev)
+                            } else {
+                                cross_style
+                            };
+                            let after: engine::CellStyle = match changed_tier.get(idx) {
+                                Some(next) => next.clone(),
+                                None => before.clone(),
+                            };
+                            (apply_delta(before), after)
+                        };
+                        if desired != effective_after {
+                            fixups.push(((row, col), desired));
+                        }
+                    }
+                }
+            }
+            Plan::Tier { entries, is_column, fixups }
         } else {
             let mut changes = Vec::new();
             for row in min_row..=max_row {
@@ -1270,7 +1406,7 @@ pub fn set_cell_protection(
     };
 
     let nothing_to_do = match &plan {
-        Plan::Tier(v, _) => v.is_empty(),
+        Plan::Tier { entries, fixups, .. } => entries.is_empty() && fixups.is_empty(),
         Plan::Cells(v) => v.is_empty(),
     };
     if nothing_to_do {
@@ -1294,9 +1430,38 @@ pub fn set_cell_protection(
         undo_stack.begin_transaction("Change cell protection".to_string());
 
         match plan {
-            Plan::Tier(changes, is_column) => {
-                for (idx, style) in changes {
-                    let style_index = styles.get_or_create(style);
+            Plan::Tier { entries, is_column, fixups } => {
+                // Undo: capture every touched tier slot BEFORE mutating. This
+                // path used to record nothing, so Ctrl+Z after "unlock column
+                // B" reverted whatever edit came before it instead.
+                let previous: Vec<(u32, usize)> = entries
+                    .iter()
+                    .map(|(idx, _)| {
+                        let prev = if is_column {
+                            grid.column_styles.get(idx).copied().unwrap_or(0)
+                        } else {
+                            grid.row_styles.get(idx).copied().unwrap_or(0)
+                        };
+                        (*idx, prev)
+                    })
+                    .collect();
+                if !previous.is_empty() {
+                    undo_stack.record_custom_restore(
+                        "obj_style_tiers".to_string(),
+                        crate::undo_commands::style_tiers_snapshot_bytes(
+                            active_sheet,
+                            is_column,
+                            previous,
+                        ),
+                        "Change cell protection",
+                    );
+                }
+                for (idx, style) in entries {
+                    // EXPLICIT: a tier of "locked, otherwise default" IS the
+                    // default style, and plain interning would hand back 0 —
+                    // which set_row_style/set_column_style treat as CLEAR,
+                    // silently deleting the tier instead of locking it.
+                    let style_index = styles.get_or_create_explicit(style);
                     // BOTH mirrors: `state.grid` is authoritative for the active
                     // sheet, but several read paths resolve tiers against
                     // `grids[active_sheet]`. Letting them diverge would make the
@@ -1312,6 +1477,23 @@ pub fn set_cell_protection(
                             grids[active_sheet].set_row_style(idx, style_index);
                         }
                     }
+                }
+                // Tier-crossing fixups: same shape as the Cells arm.
+                for ((row, col), style) in fixups {
+                    let style_index = styles.get_or_create_explicit(style);
+                    let previous_cell = grid.get_cell(row, col).cloned();
+                    let mut cell = previous_cell.clone().unwrap_or_else(|| engine::Cell {
+                        value: engine::CellValue::Empty,
+                        ast: None,
+                        style_index: 0,
+                        rich_text: None,
+                    });
+                    cell.style_index = style_index;
+                    grid.set_cell(row, col, cell.clone());
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(row, col, cell);
+                    }
+                    undo_stack.record_cell_change(row, col, previous_cell);
                 }
             }
             Plan::Cells(changes) => {
@@ -1342,6 +1524,10 @@ pub fn set_cell_protection(
     }
 
     crate::persistence::mark_workbook_modified(&file_state);
+    // The one protection mutation that does not flow through
+    // record_protection_undo — record its audit entry directly, or the
+    // "trail cannot miss one" invariant on record_protection_audit is false.
+    record_protection_audit(&state, "Change cell locking/hidden formulas", Some(active_sheet));
 
     ProtectionResult::ok_empty()
 }

@@ -83,6 +83,11 @@ async function applyTypeToRange(
         await updateCellsBatch(updates);
       }
     }
+  } catch (err) {
+    // Surface backend refusals (sheet protection, most commonly); the commit
+    // in `finally` still closes the transaction so nothing is left open.
+    alert(err instanceof Error ? err.message : String(err));
+    throw err;
   } finally {
     await commitUndoTransaction();
   }

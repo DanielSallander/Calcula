@@ -8,6 +8,7 @@ import {
   setCellStyle,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   setClipboard,
   clearClipboard,
   emitAppEvent,
@@ -118,6 +119,11 @@ export async function applyFormatToTarget(target: Selection): Promise<void> {
     );
   } catch (err) {
     console.error("[FormatPainter] Failed to apply format:", err);
+    // Close the transaction (left open, later edits silently join it) and
+    // tell the user why the paint stopped — a sheet-protection refusal names
+    // the cell and the remedy.
+    try { await cancelUndoTransaction(); } catch { /* already closed */ }
+    alert(err instanceof Error ? err.message : String(err));
   }
 
   // Deactivate in single-use mode

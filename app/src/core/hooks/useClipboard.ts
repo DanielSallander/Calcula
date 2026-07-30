@@ -920,6 +920,8 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Move cells complete");
       } catch (error) {
         console.error("[Clipboard] Move cells failed:", error);
+        await cancelUndoTransaction().catch(() => {});
+        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, config.totalCols, dispatch]
@@ -1053,6 +1055,9 @@ export function useClipboard(): UseClipboardReturn {
 
         console.log("[Clipboard] Move rows complete");
       } catch (error) {
+        // Close the "Move N rows" transaction — left open, every subsequent
+        // edit silently joins it and collapses into one Ctrl+Z step.
+        await cancelUndoTransaction().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
         alert(msg);
       }
@@ -1188,6 +1193,7 @@ export function useClipboard(): UseClipboardReturn {
 
         console.log("[Clipboard] Move columns complete");
       } catch (error) {
+        await cancelUndoTransaction().catch(() => {});
         const msg = typeof error === "string" ? error : (error as Error)?.message || String(error);
         alert(msg);
       }
@@ -1304,6 +1310,8 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy cells (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy cells (drag) failed:", error);
+        await cancelUndoTransaction().catch(() => {});
+        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, config.totalCols, dispatch]
@@ -1387,6 +1395,8 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy rows (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy rows (drag) failed:", error);
+        await cancelUndoTransaction().catch(() => {});
+        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalCols, dispatch]
@@ -1470,6 +1480,8 @@ export function useClipboard(): UseClipboardReturn {
         console.log("[Clipboard] Copy columns (drag) complete");
       } catch (error) {
         console.error("[Clipboard] Copy columns (drag) failed:", error);
+        await cancelUndoTransaction().catch(() => {});
+        alert(typeof error === "string" ? error : (error as Error)?.message || String(error));
       }
     },
     [config.totalRows, dispatch]

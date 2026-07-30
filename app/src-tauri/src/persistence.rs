@@ -1780,19 +1780,13 @@ pub fn open_file(
         for sheet in &workbook.sheets {
             let (mut grid, local_styles) = sheet.to_grid();
 
-            // Build remap table: local style index -> shared style index
-            let local_all = local_styles.all_styles();
-            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-            for style in local_all {
-                remap.push(shared_styles.get_or_create(style.clone()));
-            }
-
-            // Remap style_index on every cell in this grid
-            for (_key, cell) in grid.cells.iter_mut() {
-                if cell.style_index < remap.len() {
-                    cell.style_index = remap[cell.style_index];
-                }
-            }
+            // Remap local style indices (cells AND the row/column tiers, which
+            // this merge used to skip) to the shared registry. merge_remap
+            // preserves the explicit-default duplicates get_or_create_explicit
+            // creates — plain interning collapsed them to 0 ("inherit"), which
+            // shifted every later index and silently re-locked cells.
+            let remap = shared_styles.merge_remap(&local_styles);
+            grid.remap_style_indices(&remap);
 
             all_grids.push(grid);
             all_cw_vec.push(sheet.column_widths.clone());
@@ -3144,7 +3138,9 @@ pub fn get_ai_context(
     let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
 
-    // Build sheet inputs — use stored grids for non-active sheets, active grid for current
+    // Build sheet inputs — use stored grids for non-active sheets, active grid for current.
+    // Hidden formulas are withheld exactly like every other read path.
+    let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
         if i == active_sheet {
@@ -3152,12 +3148,18 @@ pub fn get_ai_context(
                 name,
                 grid: &active_grid,
                 styles: &styles,
+                hidden_formula_cells: crate::protection::hidden_formula_cells_in(
+                    &protection_storage, &active_grid, &styles, i,
+                ),
             });
         } else if let Some(grid) = grids.get(i) {
             sheet_inputs.push(SheetInput {
                 name,
                 grid,
                 styles: &styles,
+                hidden_formula_cells: crate::protection::hidden_formula_cells_in(
+                    &protection_storage, grid, &styles, i,
+                ),
             });
         }
     }

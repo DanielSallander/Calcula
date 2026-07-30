@@ -1059,17 +1059,16 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                                 meta.hidden_columns.push(c - 1);
                             }
                         }
-                        // <col s=".."> — the column's default style. Excel only
-                        // honours it when customFormat is set, mirroring the
-                        // customWidth rule above.
-                        let custom_format = get_attr(e, "customFormat")
-                            .map(|v| v == "1" || v == "true")
-                            .unwrap_or(false);
-                        if custom_format {
-                            if let Some(xf) = get_attr(e, "s").and_then(|v| v.parse::<u32>().ok()) {
-                                for c in min..=max {
-                                    meta.column_style_xf.insert(c - 1, xf); // 0-based
-                                }
+                        // <col style=".."> — the column's default style. Unlike
+                        // <row>, CT_Col has NO customFormat attribute and names
+                        // its style attribute `style`, not `s`; the presence of
+                        // the attribute is itself the author's signal. (An
+                        // earlier version copied the <row> rule verbatim and
+                        // read attributes that never occur on <col>, so column
+                        // tiers silently never imported.)
+                        if let Some(xf) = get_attr(e, "style").and_then(|v| v.parse::<u32>().ok()) {
+                            for c in min..=max {
+                                meta.column_style_xf.insert(c - 1, xf); // 0-based
                             }
                         }
                     }

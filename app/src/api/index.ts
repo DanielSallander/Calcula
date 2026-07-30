@@ -133,6 +133,7 @@ export {
   setCellRichText,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   undo,
   redo,
   removeDuplicates,

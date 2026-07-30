@@ -63,6 +63,12 @@ pub struct SheetInput<'a> {
     pub name: &'a str,
     pub grid: &'a Grid,
     pub styles: &'a StyleRegistry,
+    /// Cells whose formulas must be WITHHELD (protected sheet + formula_hidden
+    /// style). The caller resolves protection state; this module never sees it.
+    /// Empty set = nothing hidden. Without this the AI context serializer was
+    /// the one read path that leaked hidden formulas verbatim — get_cell, the
+    /// viewport and the MCP readers all withhold them.
+    pub hidden_formula_cells: std::collections::HashSet<(u32, u32)>,
 }
 
 /// Serialize one or more sheets into an AI-friendly context string.
@@ -156,7 +162,8 @@ fn serialize_sheet(
 
     // Formula patterns (high value, compact)
     if used < char_budget {
-        let patterns = formula_patterns::detect_formula_patterns(sheet.grid);
+        let patterns =
+            formula_patterns::detect_formula_patterns(sheet.grid, &sheet.hidden_formula_cells);
         let patterns_text = formula_patterns::format_formula_patterns(&patterns);
         if !patterns_text.is_empty() {
             used += patterns_text.len();
@@ -271,6 +278,7 @@ mod tests {
             name: "Sales",
             grid: &grid,
             styles: &styles,
+            hidden_formula_cells: Default::default()
         }];
 
         let options = AiSerializeOptions::default();
@@ -306,11 +314,13 @@ mod tests {
                 name: "Sales",
                 grid: &grid,
                 styles: &styles,
+                hidden_formula_cells: Default::default()
             },
             SheetInput {
                 name: "Summary",
                 grid: &grid2,
                 styles: &styles,
+                hidden_formula_cells: Default::default()
             },
         ];
 
@@ -333,6 +343,7 @@ mod tests {
             name: "Sales",
             grid: &grid,
             styles: &styles,
+            hidden_formula_cells: Default::default()
         }];
 
         // Very small budget — should still produce header + summary
@@ -356,6 +367,7 @@ mod tests {
             name: "Sheet1",
             grid: &grid,
             styles: &styles,
+            hidden_formula_cells: Default::default()
         }];
 
         let result = serialize_for_ai(&sheets, &AiSerializeOptions::default());

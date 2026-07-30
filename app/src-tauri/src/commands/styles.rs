@@ -48,6 +48,9 @@ pub fn set_cell_style(
         crate::protection::check_sheet_protection_range(
             &state, active_sheet, row, col, row, col,
         )?;
+        // The two protection axes are additive: this is FORMATTING, so the
+        // formatCells option flag applies exactly as it does in apply_formatting.
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "format cells")?;
     }
 
     let mut grid = state.grid.lock().unwrap();
@@ -196,10 +199,11 @@ pub fn apply_formatting(
     let cell_count = params.rows.len() * params.cols.len();
     undo_stack.begin_transaction(format!("Format {} cells", cell_count));
 
-    // Optimization: cache computed style index per base style index.
-    // When many cells share the same base style (common case: formatting a selection),
-    // we only compute the new style once per unique base style.
-    let mut style_cache: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    // Optimization: cache computed style index per (base style, needs-explicit)
+    // pair. When many cells share the same base style (common case: formatting a
+    // selection), we only compute the new style once per unique base.
+    let mut style_cache: std::collections::HashMap<(usize, bool), usize> =
+        std::collections::HashMap::new();
 
     // Iterate over all row/col combinations from the params
     for row in &params.rows {
@@ -211,22 +215,30 @@ pub fn apply_formatting(
             let previous_cell = grid.get_cell(row, col).cloned();
 
             // Get or create cell
-            let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
-                (existing.clone(), existing.style_index)
+            let cell = if let Some(existing) = grid.get_cell(row, col) {
+                existing.clone()
             } else {
-                (
-                    Cell {
-                        value: CellValue::Empty,
-                        ast: None,
-                        style_index: 0,
-                        rich_text: None,
-                    },
-                    0,
-                )
+                Cell {
+                    value: CellValue::Empty,
+                    ast: None,
+                    style_index: 0,
+                    rich_text: None,
+                }
             };
 
+            // Base the delta on the EFFECTIVE style: a style-0 cell under a
+            // row/column tier is showing the tier's format (and lock state),
+            // and basing on index 0 would discard the tier — turning "bold this
+            // cell" into "bold + strip the column's fill", or silently
+            // re-locking a cell inside a tier-unlocked column.
+            let old_style_index = grid.effective_style_index(row, col);
+            // Under a tier, the computed style must land on a NON-ZERO index
+            // even when it equals the default — index 0 would mean "inherit"
+            // and resolve straight back to the tier.
+            let needs_explicit = cell.style_index == 0 && old_style_index != 0;
+
             // Check style cache: if we've already computed the new style for this base, reuse it
-            if let Some(&cached_new_index) = style_cache.get(&old_style_index) {
+            if let Some(&cached_new_index) = style_cache.get(&(old_style_index, needs_explicit)) {
                 // Fast path: reuse cached style
                 let mut updated_cell = cell;
                 updated_cell.style_index = cached_new_index;
@@ -380,10 +392,14 @@ pub fn apply_formatting(
                 new_style.formula_hidden = formula_hidden;
             }
 
-            // Get or create style index
-            let new_style_index = styles.get_or_create(new_style.clone());
+            // Get or create style index (explicit under a tier — see above)
+            let new_style_index = if needs_explicit {
+                styles.get_or_create_explicit(new_style.clone())
+            } else {
+                styles.get_or_create(new_style.clone())
+            };
             used_style_indices.insert(new_style_index);
-            style_cache.insert(old_style_index, new_style_index);
+            style_cache.insert((old_style_index, needs_explicit), new_style_index);
 
             // Update cell
             let mut updated_cell = cell;
@@ -475,6 +491,8 @@ pub fn apply_formatting_to_sheets(
                 .iter()
                 .flat_map(|r| params.cols.iter().map(move |c| (*r, *c))),
         )?;
+        // Second protection axis, same as apply_formatting on the active sheet.
+        crate::protection::check_sheet_action(&state, sheet_idx, "formatCells", "format cells")?;
     }
 
     let mut grids = state.grids.lock().unwrap();
@@ -504,21 +522,24 @@ pub fn apply_formatting_to_sheets(
 
                 let previous_cell = grid.get_cell(row, col).cloned();
 
-                let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
-                    (existing.clone(), existing.style_index)
+                let cell = if let Some(existing) = grid.get_cell(row, col) {
+                    existing.clone()
                 } else {
-                    (
-                        Cell {
-                            value: CellValue::Empty,
-                            ast: None,
-                            style_index: 0,
-                            rich_text: None,
-                        },
-                        0,
-                    )
+                    Cell {
+                        value: CellValue::Empty,
+                        ast: None,
+                        style_index: 0,
+                        rich_text: None,
+                    }
                 };
 
-                let mut new_style = styles.get(old_style_index).clone();
+                // Base the delta on the EFFECTIVE style, not the cell's own
+                // index: a cell with style_index 0 under a row/column tier is
+                // showing the tier's format (including its lock state), and
+                // basing on index 0 would silently discard the tier — e.g.
+                // re-locking a cell the tier had unlocked.
+                let effective_index = grid.effective_style_index(row, col);
+                let mut new_style = styles.get(effective_index).clone();
 
                 // Apply all formatting fields (same logic as apply_formatting)
                 if let Some(bold) = params.bold { new_style.font.bold = bold; }
@@ -588,7 +609,14 @@ pub fn apply_formatting_to_sheets(
                 if let Some(locked) = params.locked { new_style.locked = locked; }
                 if let Some(formula_hidden) = params.formula_hidden { new_style.formula_hidden = formula_hidden; }
 
-                let new_style_index = styles.get_or_create(new_style);
+                // Under a tier, a result equal to the default must still land
+                // on a NON-ZERO index — 0 would mean "inherit" and resolve
+                // straight back to the tier the user just formatted away from.
+                let new_style_index = if effective_index != cell.style_index {
+                    styles.get_or_create_explicit(new_style)
+                } else {
+                    styles.get_or_create(new_style)
+                };
 
                 let mut updated_cell = cell;
                 updated_cell.style_index = new_style_index;
@@ -959,6 +987,9 @@ pub fn get_style_count(state: State<AppState>) -> usize {
 
 /// Set rich text runs on a cell.
 /// Replaces any existing rich text. Pass null/empty to clear rich text.
+///
+/// Returns Result (it used to return a bare Option) so a protection refusal
+/// can reach the user instead of silently writing through the gate.
 #[tauri::command]
 pub fn set_cell_rich_text(
     state: State<AppState>,
@@ -966,7 +997,13 @@ pub fn set_cell_rich_text(
     row: u32,
     col: u32,
     runs: Option<Vec<crate::api_types::RichTextRunData>>,
-) -> Option<CellData> {
+) -> Result<Option<CellData>, String> {
+    // Sheet protection, before any lock below. Rich text is cell CONTENT.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_range(&state, active_sheet, row, col, row, col)?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -993,7 +1030,9 @@ pub fn set_cell_rich_text(
     }
 
     // Build response
-    let cell = grid.get_cell(row, col)?;
+    let Some(cell) = grid.get_cell(row, col) else {
+        return Ok(None);
+    };
     let effective_style_index = grid.effective_style_index(row, col);
     let style = styles.get(effective_style_index);
     let result = format_cell_value_with_color(&cell.value, style, &locale);
@@ -1013,7 +1052,7 @@ pub fn set_cell_rich_text(
     // Mark workbook as dirty
     if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
-    Some(CellData {
+    Ok(Some(CellData {
         row,
         col,
         display: result.text,
@@ -1025,7 +1064,7 @@ pub fn set_cell_rich_text(
         sheet_index: None,
         rich_text: cell.rich_text.as_ref().map(|r| crate::api_types::rich_text_runs_to_data(r)),
         accounting_layout,
-    })
+    }))
 }
 
 /// Apply a border preset to a rectangular range.
@@ -1050,6 +1089,21 @@ pub fn apply_border_preset(
     color: String,
     width: u8,
 ) -> Result<FormattingResult, String> {
+    // Sheet protection, before any lock below: per-cell locks AND the
+    // formatCells option flag (borders are formatting), matching apply_formatting.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        crate::protection::check_sheet_protection_range(
+            &state,
+            active_sheet,
+            start_row.min(end_row),
+            start_col.min(end_col),
+            start_row.max(end_row),
+            start_col.max(end_col),
+        )?;
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "apply borders")?;
+    }
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();

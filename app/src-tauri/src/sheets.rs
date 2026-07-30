@@ -125,6 +125,26 @@ fn remap_indexed_map<V>(
     }
 }
 
+/// Rewrite the sheet index inside a `control-<sheet>-<row>-<col>` instance id.
+///
+/// Returns `None` when the string is not a derived control id (leave it alone),
+/// `Some(None)` when its sheet was deleted (the binding is now orphaned), and
+/// `Some(Some(new_id))` with the renumbered sheet otherwise.
+fn remap_control_instance_id(
+    id: &str,
+    remap: &impl Fn(usize) -> Option<usize>,
+) -> Option<Option<String>> {
+    let rest = id.strip_prefix("control-")?;
+    let mut parts = rest.split('-');
+    let sheet: usize = parts.next()?.parse().ok()?;
+    let row: u32 = parts.next()?.parse().ok()?;
+    let col: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(remap(sheet).map(|new_sheet| format!("control-{}-{}-{}", new_sheet, row, col)))
+}
+
 /// Re-key a `(sheet_index, row, col) -> V` store through `remap` (None =
 /// drop the entry).
 fn remap_cell_keyed_map<V>(
@@ -159,11 +179,57 @@ fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<us
     // with a no-op empty object: dropping the change would desynchronise the
     // transaction's inverse, and leaving it would let it fire on the wrong sheet.
     if let Ok(mut undo) = state.undo_stack.lock() {
-        undo.visit_custom_restores(|_kind, data| {
+        undo.visit_custom_restores(|kind, data| {
             let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(data) else {
                 return; // Not JSON we understand; leave it untouched.
             };
             let Some(obj) = value.as_object_mut() else { return };
+
+            // obj_controls is the one kind whose sheet indices do NOT sit in a
+            // top-level `sheet_index`: they live inside every `(sheet,row,col)`
+            // key tuple AND inside `control-<sheet>-<row>-<col>` instance-id
+            // strings. The generic rewrite below would skip it entirely.
+            if kind == "obj_controls" {
+                if let Some(controls) = obj.get_mut("controls").and_then(|v| v.as_array_mut()) {
+                    controls.retain_mut(|entry| {
+                        let Some(key) = entry
+                            .as_array_mut()
+                            .and_then(|pair| pair.first_mut())
+                            .and_then(|k| k.as_array_mut())
+                        else {
+                            return true;
+                        };
+                        let Some(old) = key.first().and_then(|v| v.as_u64()) else {
+                            return true;
+                        };
+                        match remap(old as usize) {
+                            Some(new_index) => {
+                                key[0] = serde_json::json!(new_index);
+                                true
+                            }
+                            None => false, // Sheet deleted: drop the entry.
+                        }
+                    });
+                }
+                if let Some(ids) = obj.get_mut("script_instance_ids").and_then(|v| v.as_array_mut()) {
+                    for entry in ids.iter_mut() {
+                        let Some(prev) = entry.as_array_mut().and_then(|pair| pair.get_mut(1)) else {
+                            continue;
+                        };
+                        let Some(s) = prev.as_str() else { continue };
+                        match remap_control_instance_id(s, &remap) {
+                            Some(Some(new_id)) => *prev = serde_json::json!(new_id),
+                            Some(None) => *prev = serde_json::Value::Null,
+                            None => {}
+                        }
+                    }
+                }
+                if let Ok(bytes) = serde_json::to_vec(&value) {
+                    *data = bytes;
+                }
+                return;
+            }
+
             let Some(old) = obj.get("sheet_index").and_then(|v| v.as_u64()) else { return };
             match remap(old as usize) {
                 Some(new_index) => {
@@ -206,6 +272,18 @@ fn remap_sheet_keyed_stores(state: &AppState, remap: impl Fn(usize) -> Option<us
     remap_cell_keyed_map(&mut state.cell_types.lock().unwrap(), &remap);
     // On-grid controls (buttons/checkboxes) share the cell-type key shape.
     remap_cell_keyed_map(&mut state.controls.lock().unwrap(), &remap);
+    // Object-script bindings name controls by the DERIVED id
+    // `control-<sheet>-<row>-<col>`. The control store above just changed those
+    // coordinates, so the live bindings must be re-keyed in lockstep — exactly
+    // as shift_controls does for row/column edits.
+    if let Ok(mut scripts) = state.object_scripts.lock() {
+        for script in scripts.iter_mut() {
+            let Some(current) = script.instance_id.as_deref() else { continue };
+            if let Some(new_id) = remap_control_instance_id(current, &remap) {
+                script.instance_id = new_id;
+            }
+        }
+    }
     // Advanced-filter hidden rows: per-sheet session state that is never
     // recomputed on sheet ops (and shows up in the state digest).
     remap_indexed_map(&mut state.advanced_filter_hidden_rows.lock().unwrap(), &remap);

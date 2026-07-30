@@ -34,15 +34,38 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     let mut xf_to_calcula: HashMap<u32, usize> = HashMap::new();
 
     if let Some(ref sd) = style_data {
+        // Index of the one explicit duplicate of the default style (mirrors
+        // StyleRegistry::get_or_create_explicit). Created on first need.
+        let mut explicit_default: Option<usize> = None;
         for (xf_idx, xf) in sd.cell_xfs.iter().enumerate() {
             let style =
                 xf_to_cell_style(xf, &sd.fonts, &sd.fills, &sd.borders, &sd.number_formats);
 
-            // Check if this style is the default; if so, map to index 0
             if style == CellStyle::new() {
-                xf_to_calcula.insert(xf_idx as u32, 0);
+                // xf 0 is the file's Normal: a cell referencing it (or carrying
+                // no s= at all) has no explicit format, and 0 — "inherit the
+                // row/column tier" — is exactly right for it.
+                //
+                // Any OTHER xf that parses to the default was explicitly
+                // assigned by the author (formatted then cleared, or locked —
+                // `locked: true` IS the default). Mapping those to 0 would let
+                // a row/column tier override them: an explicitly locked cell in
+                // a tier-unlocked column would import as editable on a
+                // protected sheet. Give them the explicit duplicate instead.
+                if xf_idx == 0 {
+                    xf_to_calcula.insert(xf_idx as u32, 0);
+                } else {
+                    let idx = *explicit_default.get_or_insert_with(|| {
+                        let idx = calcula_styles.len();
+                        calcula_styles.push(style.clone());
+                        idx
+                    });
+                    xf_to_calcula.insert(xf_idx as u32, idx);
+                }
             } else {
-                // Deduplicate: check if we already have this style
+                // Deduplicate: check if we already have this style. Skip the
+                // explicit-default duplicate — position() would never find it
+                // anyway (it only equals the default, handled above).
                 let existing = calcula_styles.iter().position(|s| s == &style);
                 if let Some(idx) = existing {
                     xf_to_calcula.insert(xf_idx as u32, idx);

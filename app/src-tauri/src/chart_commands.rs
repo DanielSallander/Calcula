@@ -17,6 +17,11 @@ pub fn get_charts(state: State<AppState>) -> Vec<ChartEntry> {
 /// Save (create) a new chart entry.
 #[tauri::command]
 pub fn save_chart(state: State<AppState>, entry: ChartEntry) -> Result<(), String> {
+    // allowEditObjects option gate, same as update_chart/delete_chart — this is
+    // an UPSERT, so without it "save" was a full bypass of the other two gates.
+    crate::protection::check_sheet_action(
+        &state, entry.sheet_index, "editObjects", "edit objects",
+    )?;
     let previous = {
         let mut charts = state.charts.lock().map_err(|e| e.to_string())?;
         let previous = charts.iter().find(|c| c.id == entry.id).cloned();

@@ -106,6 +106,28 @@ impl Grid {
         }
     }
 
+    /// Rewrite EVERY style index this grid holds through `remap` (local index
+    /// -> shared index): per-cell indices AND the row/column tiers. Counterpart
+    /// of `StyleRegistry::merge_remap`; forgetting the tiers here was how a
+    /// pulled .calp sheet ended up wearing unrelated host styles.
+    pub fn remap_style_indices(&mut self, remap: &[usize]) {
+        for cell in self.cells.values_mut() {
+            if cell.style_index < remap.len() {
+                cell.style_index = remap[cell.style_index];
+            }
+        }
+        for idx in self.row_styles.values_mut() {
+            if *idx < remap.len() {
+                *idx = remap[*idx];
+            }
+        }
+        for idx in self.column_styles.values_mut() {
+            if *idx < remap.len() {
+                *idx = remap[*idx];
+            }
+        }
+    }
+
     /// Sets a cell at the specified coordinates.
     /// Updates max_row/max_col boundaries automatically.
     pub fn set_cell(&mut self, row: u32, col: u32, cell: Cell) {

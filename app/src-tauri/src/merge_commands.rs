@@ -30,6 +30,24 @@ pub fn merge_cells(
     end_row: u32,
     end_col: u32,
 ) -> Result<MergeResult, String> {
+    // Sheet protection, BEFORE any lock below (the gate takes its own locks).
+    // Merging clears every non-master cell in the range — on a protected sheet
+    // that is a content-destroying write, so it needs the same per-cell gate as
+    // any other write, plus the formatCells option (merge is an alignment
+    // format operation in Excel's taxonomy).
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_protection_range(
+            &state,
+            active_sheet,
+            start_row.min(end_row),
+            start_col.min(end_col),
+            start_row.max(end_row),
+            start_col.max(end_col),
+        )?;
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "merge cells")?;
+    }
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -164,6 +182,13 @@ pub fn unmerge_cells(
     row: u32,
     col: u32,
 ) -> Result<MergeResult, String> {
+    // Same gate as merge_cells: merge structure is a format attribute, and
+    // Excel refuses to change it on a protected sheet without formatCells.
+    {
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "unmerge cells")?;
+    }
+
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;

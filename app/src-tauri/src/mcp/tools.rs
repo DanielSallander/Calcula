@@ -181,6 +181,9 @@ pub fn get_sheet_summary(
         tables_json: None,
     };
 
+    // Hidden formulas are withheld from the AI context exactly like every
+    // other read path. Canonical lock order allows sheet_protection last.
+    let protection_storage = state.sheet_protection.lock().map_err(|e| e.to_string())?;
     let mut sheet_inputs: Vec<SheetInput> = Vec::new();
     for (i, name) in sheet_names.iter().enumerate() {
         if i == active_sheet {
@@ -188,15 +191,22 @@ pub fn get_sheet_summary(
                 name,
                 grid: &active_grid,
                 styles: &styles,
+                hidden_formula_cells: crate::protection::hidden_formula_cells_in(
+                    &protection_storage, &active_grid, &styles, i,
+                ),
             });
         } else if let Some(grid) = grids.get(i) {
             sheet_inputs.push(SheetInput {
                 name,
                 grid,
                 styles: &styles,
+                hidden_formula_cells: crate::protection::hidden_formula_cells_in(
+                    &protection_storage, grid, &styles, i,
+                ),
             });
         }
     }
+    drop(protection_storage);
 
     let mut summary = serialize_for_ai(&sheet_inputs, &options);
     // Release the sheet-data locks before touching the (unrelated) charts lock.

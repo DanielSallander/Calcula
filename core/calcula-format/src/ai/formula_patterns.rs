@@ -20,11 +20,21 @@ pub struct FormulaPattern {
 
 /// Detect formula patterns in a grid.
 /// Groups formulas by column and detects row-relative patterns.
-pub fn detect_formula_patterns(grid: &Grid) -> Vec<FormulaPattern> {
+///
+/// `hidden` names cells whose formulas are WITHHELD (protected sheet +
+/// formula_hidden) — they are skipped entirely, exactly like the other read
+/// paths withhold them.
+pub fn detect_formula_patterns(
+    grid: &Grid,
+    hidden: &std::collections::HashSet<(u32, u32)>,
+) -> Vec<FormulaPattern> {
     // Collect formulas by column
     let mut col_formulas: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
 
     for (&(row, col), cell) in &grid.cells {
+        if hidden.contains(&(row, col)) {
+            continue;
+        }
         if let Some(formula) = cell.formula_string() {
             let display = format!("={}", formula);
             col_formulas
@@ -197,10 +207,17 @@ mod tests {
         // Column C has a single formula
         grid.set_cell(1, 2, make_formula_cell(0.0, "=SUM(B2:B11)"));
 
-        let patterns = detect_formula_patterns(&grid);
+        let patterns = detect_formula_patterns(&grid, &Default::default());
 
         // Should find 2 patterns: the range in B and the single in C
         assert_eq!(patterns.len(), 2);
+
+        // A hidden cell's formula is withheld: hide the single C formula and it
+        // disappears from the patterns entirely.
+        let hidden: std::collections::HashSet<(u32, u32)> = [(1, 2)].into_iter().collect();
+        let redacted = detect_formula_patterns(&grid, &hidden);
+        assert_eq!(redacted.len(), 1);
+        assert!(redacted.iter().all(|p| p.col == 1));
 
         let b_pattern = patterns.iter().find(|p| p.col == 1).unwrap();
         assert_eq!(b_pattern.count, 10);

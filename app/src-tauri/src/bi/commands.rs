@@ -2774,6 +2774,17 @@ pub async fn bi_insert_result(
     let end_row = start_row + total_rows - 1;
     let end_col = start_col + num_cols - 1;
 
+    // Sheet protection on the destination block, before any write. The gate
+    // takes its own locks, so it runs before the style/grid locks below.
+    crate::protection::check_sheet_protection_range(
+        &state,
+        request.sheet_index,
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+    )?;
+
     // Create bold style for headers
     let bold_style_idx = {
         let mut styles = state.style_registry.lock().unwrap();

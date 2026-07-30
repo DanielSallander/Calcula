@@ -92,6 +92,8 @@ pub fn apply_named_style(
             active_sheet,
             rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
         )?;
+        // Second protection axis, same as apply_formatting.
+        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "apply a named style")?;
     }
 
     // Look up the named style
@@ -106,7 +108,7 @@ pub fn apply_named_style(
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
@@ -133,9 +135,19 @@ pub fn apply_named_style(
                 }
             };
 
-            // Update cell with the named style's style_index
+            // Update cell with the named style's style_index. "Normal" maps to
+            // index 0, which on a cell means INHERIT — under a row/column tier
+            // that would be a silent no-op (the cell keeps showing the tier).
+            // Applying Normal is an explicit act; give it the explicit
+            // duplicate of the default so it actually overrides the tier.
+            let under_tier = grid.row_styles.get(&row).copied().unwrap_or(0) != 0
+                || grid.column_styles.get(&col).copied().unwrap_or(0) != 0;
             let mut updated_cell = cell;
-            updated_cell.style_index = style_index;
+            updated_cell.style_index = if style_index == 0 && under_tier {
+                styles.get_or_create_explicit(engine::style::CellStyle::new())
+            } else {
+                style_index
+            };
             grid.set_cell(row, col, updated_cell.clone());
 
             if active_sheet < grids.len() {

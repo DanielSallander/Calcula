@@ -152,13 +152,17 @@ export const undoMultiStepSuite: TestSuite = {
       run: async (ctx) => {
         await beginUndoTransaction("batch test");
 
-        await ctx.setCells([
-          { row: A.row, col: A.col, value: "One" },
-          { row: A.row + 1, col: A.col, value: "Two" },
-          { row: A.row + 2, col: A.col, value: "Three" },
-        ]);
-
-        await commitUndoTransaction();
+        // finally-commit: a failing setCells must not leave the transaction
+        // open — every later test's edits would silently join it.
+        try {
+          await ctx.setCells([
+            { row: A.row, col: A.col, value: "One" },
+            { row: A.row + 1, col: A.col, value: "Two" },
+            { row: A.row + 2, col: A.col, value: "Three" },
+          ]);
+        } finally {
+          await commitUndoTransaction();
+        }
         await ctx.settle();
 
         // All 3 cells should have values

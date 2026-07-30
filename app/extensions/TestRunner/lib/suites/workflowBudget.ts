@@ -155,14 +155,18 @@ export const workflowBudgetSuite: TestSuite = {
       run: async (ctx) => {
         await beginUndoTransaction("budget creation");
 
-        await ctx.setCells([
-          { row: A.row, col: A.col, value: "Category" },
-          { row: A.row, col: A.col + 1, value: "Budget" },
-          { row: A.row + 1, col: A.col, value: "Rent" },
-          { row: A.row + 1, col: A.col + 1, value: "1000" },
-        ]);
-
-        await commitUndoTransaction();
+        // finally-commit: a failing setCells must not leave the transaction
+        // open — every later test's edits would silently join it.
+        try {
+          await ctx.setCells([
+            { row: A.row, col: A.col, value: "Category" },
+            { row: A.row, col: A.col + 1, value: "Budget" },
+            { row: A.row + 1, col: A.col, value: "Rent" },
+            { row: A.row + 1, col: A.col + 1, value: "1000" },
+          ]);
+        } finally {
+          await commitUndoTransaction();
+        }
         await ctx.settle();
 
         // Verify data exists

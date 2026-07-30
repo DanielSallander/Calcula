@@ -8,6 +8,7 @@ import {
   updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
+  cancelUndoTransaction,
   restoreFocusToGrid,
   showToast,
   addSheet,
@@ -378,6 +379,9 @@ export const CsvImportDialog: React.FC<DialogProps> = ({ onClose }) => {
       restoreFocusToGrid();
       onClose();
     } catch (err) {
+      // Close the "CSV Import" transaction — left open, every subsequent edit
+      // silently joins it and collapses into one Ctrl+Z step.
+      try { await cancelUndoTransaction(); } catch { /* already closed */ }
       showToast(`Import failed: ${err}`, { type: "error", duration: 5000 });
     } finally {
       setImporting(false);

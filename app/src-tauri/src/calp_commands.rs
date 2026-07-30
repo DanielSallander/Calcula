@@ -1964,17 +1964,10 @@ pub fn calp_pull(
         for (i, pulled) in result.sheets.iter().enumerate() {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
-            // Remap local style indices to the shared registry
-            let local_all = local_styles.all_styles();
-            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-            for style in local_all {
-                remap.push(shared_styles.get_or_create(style.clone()));
-            }
-            for (_key, cell) in grid.cells.iter_mut() {
-                if cell.style_index < remap.len() {
-                    cell.style_index = remap[cell.style_index];
-                }
-            }
+            // Remap local style indices (cells AND row/column tiers) to the
+            // shared registry, preserving explicit-default duplicates.
+            let remap = shared_styles.merge_remap(&local_styles);
+            grid.remap_style_indices(&remap);
 
             grids.push(grid);
             sheet_names.push(pulled.name.clone());
@@ -3695,17 +3688,10 @@ pub fn calp_refresh_apply(
             for pulled in &payload.pull_result.sheets {
                 let (mut grid, local_styles) = pulled.sheet.to_grid();
 
-                // Remap local style indices to the shared registry.
-                let local_all = local_styles.all_styles();
-                let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-                for style in local_all {
-                    remap.push(shared_styles.get_or_create(style.clone()));
-                }
-                for (_key, cell) in grid.cells.iter_mut() {
-                    if cell.style_index < remap.len() {
-                        cell.style_index = remap[cell.style_index];
-                    }
-                }
+                // Remap local style indices (cells AND row/column tiers) to the
+                // shared registry, preserving explicit-default duplicates.
+                let remap = shared_styles.merge_remap(&local_styles);
+                grid.remap_style_indices(&remap);
 
                 if old_package_ids.contains(&pulled.package_sheet_id) {
                     // Updated sheet — replace the existing grid in-place.
@@ -4967,16 +4953,10 @@ pub fn calp_dev_subscribe(
         for pulled in &result.sheets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
-            let local_all = local_styles.all_styles();
-            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-            for style in local_all {
-                remap.push(shared_styles.get_or_create(style.clone()));
-            }
-            for (_key, cell) in grid.cells.iter_mut() {
-                if cell.style_index < remap.len() {
-                    cell.style_index = remap[cell.style_index];
-                }
-            }
+            // Remap local style indices (cells AND row/column tiers) to the
+            // shared registry, preserving explicit-default duplicates.
+            let remap = shared_styles.merge_remap(&local_styles);
+            grid.remap_style_indices(&remap);
 
             map.insert(pulled.source_sheet_id, grids.len());
             grids.push(grid);
@@ -5117,16 +5097,10 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         for (i, pulled) in result.sheets.iter().enumerate() {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
 
-            let local_all = local_styles.all_styles();
-            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-            for style in local_all {
-                remap.push(shared_styles.get_or_create(style.clone()));
-            }
-            for (_key, cell) in grid.cells.iter_mut() {
-                if cell.style_index < remap.len() {
-                    cell.style_index = remap[cell.style_index];
-                }
-            }
+            // Remap local style indices (cells AND row/column tiers) to the
+            // shared registry, preserving explicit-default duplicates.
+            let remap = shared_styles.merge_remap(&local_styles);
+            grid.remap_style_indices(&remap);
 
             if let Some(local_sid) = old_sheet_ids.get(i).copied() {
                 // Replace the existing grid in-place.
@@ -10154,16 +10128,10 @@ pub fn calp_reset_subscription(
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
         for (idx, _, pulled) in &targets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
-            let local_all = local_styles.all_styles();
-            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
-            for style in local_all {
-                remap.push(shared_styles.get_or_create(style.clone()));
-            }
-            for (_key, cell) in grid.cells.iter_mut() {
-                if cell.style_index < remap.len() {
-                    cell.style_index = remap[cell.style_index];
-                }
-            }
+            // Remap local style indices (cells AND row/column tiers) to the
+            // shared registry, preserving explicit-default duplicates.
+            let remap = shared_styles.merge_remap(&local_styles);
+            grid.remap_style_indices(&remap);
             if *idx < grids.len() {
                 grids[*idx] = grid;
             }

@@ -677,7 +677,7 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
         "obj_comments", "obj_notes", "obj_hyperlinks",
         "obj_conditional_formats", "obj_sheet_protection", "obj_sheet_protection_record",
         "obj_coord_stores", "obj_named_ranges", "obj_range_strings",
-        "obj_cross_sheet_formulas", "obj_controls",
+        "obj_cross_sheet_formulas", "obj_controls", "obj_style_tiers",
         "obj_workbook_protection",
     ] {
         m.insert(k, RestoreSpec { restore: r_object_swap, change_class: Objects, defer: true });
@@ -2176,6 +2176,28 @@ pub(crate) fn writeback_regions_snapshot_bytes(
     .unwrap_or_default()
 }
 
+/// Snapshot for the "obj_style_tiers" CustomRestore — one sheet's row OR column
+/// style-tier entries before a mutation (set_cell_protection's whole-row/column
+/// path). `previous` holds (index, prior style index); 0 means the tier was
+/// absent, which `set_row_style`/`set_column_style` treat as "clear".
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StyleTiersObjSnapshot {
+    sheet_index: usize,
+    is_column: bool,
+    previous: Vec<(u32, usize)>,
+}
+
+/// Serialized "obj_style_tiers" snapshot bytes (in-open-transaction contract,
+/// same as cell_types_snapshot_bytes — the caller holds the undo-stack lock).
+pub(crate) fn style_tiers_snapshot_bytes(
+    sheet_index: usize,
+    is_column: bool,
+    previous: Vec<(u32, usize)>,
+) -> Vec<u8> {
+    serde_json::to_vec(&StyleTiersObjSnapshot { sheet_index, is_column, previous })
+        .unwrap_or_default()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NamedRangeObjSnapshot {
     /// Uppercase registry key.
@@ -2392,9 +2414,9 @@ fn apply_object_swap_restore(
             let current_ids = {
                 let mut scripts = state.object_scripts.lock().unwrap();
                 let mut prev = Vec::new();
-                for (idx, restore_to) in snap.script_instance_ids {
-                    if let Some(script) = scripts.get_mut(idx) {
-                        prev.push((idx, script.instance_id.clone()));
+                for (script_id, restore_to) in snap.script_instance_ids {
+                    if let Some(script) = scripts.iter_mut().find(|s| s.id == script_id) {
+                        prev.push((script_id, script.instance_id.clone()));
                         script.instance_id = restore_to;
                     }
                 }
@@ -2410,19 +2432,75 @@ fn apply_object_swap_restore(
                 Ok(s) => s,
                 Err(e) => { eprintln!("[undo] bad obj_cross_sheet_formulas snapshot: {}", e); return; }
             };
+            // Canonical lock order: grid (mirror) -> grids -> active_sheet,
+            // same as r_script_grid_cells. The mirror write matters: the user
+            // may have switched to the restored sheet since the edit, and
+            // writing only grids[i] leaves the visible grid stale.
+            let mut mirror = state.grid.lock().unwrap();
             let mut grids = state.grids.lock().unwrap();
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            let is_active = snap.sheet_index == active_sheet;
             let mut current: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
             if let Some(grid) = grids.get_mut(snap.sheet_index) {
-                for ((row, col), restore_to) in snap.previous {
-                    current.push(((row, col), grid.get_cell(row, col).cloned()));
+                for ((row, col), restore_to) in &snap.previous {
+                    current.push(((*row, *col), grid.get_cell(*row, *col).cloned()));
                     match restore_to {
-                        Some(cell) => grid.set_cell(row, col, cell),
-                        None => grid.clear_cell(row, col),
+                        Some(cell) => {
+                            grid.set_cell(*row, *col, cell.clone());
+                            if is_active {
+                                mirror.set_cell(*row, *col, cell.clone());
+                            }
+                        }
+                        None => {
+                            grid.clear_cell(*row, *col);
+                            if is_active {
+                                mirror.clear_cell(*row, *col);
+                            }
+                        }
                     }
                 }
             }
             push_obj_inverse(inverse_transaction, kind, &CrossSheetFormulasObjSnapshot {
                 sheet_index: snap.sheet_index,
+                previous: current,
+            });
+        }
+        "obj_style_tiers" => {
+            let snap: StyleTiersObjSnapshot = match serde_json::from_slice(data) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[undo] bad obj_style_tiers snapshot: {}", e); return; }
+            };
+            // Canonical lock order: grid (mirror) -> grids -> active_sheet.
+            // Both mirrors, same as the forward path in set_cell_protection.
+            let mut mirror = state.grid.lock().unwrap();
+            let mut grids = state.grids.lock().unwrap();
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            let is_active = snap.sheet_index == active_sheet;
+            let mut current: Vec<(u32, usize)> = Vec::new();
+            if let Some(grid) = grids.get_mut(snap.sheet_index) {
+                for (idx, restore_to) in &snap.previous {
+                    let existing = if snap.is_column {
+                        grid.column_styles.get(idx).copied().unwrap_or(0)
+                    } else {
+                        grid.row_styles.get(idx).copied().unwrap_or(0)
+                    };
+                    current.push((*idx, existing));
+                    if snap.is_column {
+                        grid.set_column_style(*idx, *restore_to);
+                        if is_active {
+                            mirror.set_column_style(*idx, *restore_to);
+                        }
+                    } else {
+                        grid.set_row_style(*idx, *restore_to);
+                        if is_active {
+                            mirror.set_row_style(*idx, *restore_to);
+                        }
+                    }
+                }
+            }
+            push_obj_inverse(inverse_transaction, kind, &StyleTiersObjSnapshot {
+                sheet_index: snap.sheet_index,
+                is_column: snap.is_column,
                 previous: current,
             });
         }
@@ -2886,6 +2964,7 @@ mod restore_registry_tests {
             ("obj_range_strings", true, CustomRestoreKind::Objects),
             ("obj_cross_sheet_formulas", true, CustomRestoreKind::Objects),
             ("obj_controls", true, CustomRestoreKind::Objects),
+            ("obj_style_tiers", true, CustomRestoreKind::Objects),
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
@@ -3037,14 +3116,17 @@ pub(crate) fn cross_sheet_formulas_snapshot_bytes(
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ControlsObjSnapshot {
     controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
-    /// (script index, previous instance_id) for every binding that was re-keyed.
-    script_instance_ids: Vec<(usize, Option<String>)>,
+    /// (script id, previous instance_id) for every binding that was re-keyed.
+    /// Keyed by the script's own STABLE id, never its vector index — indices
+    /// shift when a script is deleted, and a stale index would silently rebind
+    /// a control to whichever script now occupies the slot.
+    script_instance_ids: Vec<(String, Option<String>)>,
 }
 
 /// Serialized "obj_controls" snapshot bytes (in-open-transaction contract).
 pub(crate) fn controls_snapshot_bytes(
     controls: Vec<((usize, u32, u32), crate::controls::ControlMetadata)>,
-    script_instance_ids: Vec<(usize, Option<String>)>,
+    script_instance_ids: Vec<(String, Option<String>)>,
 ) -> Vec<u8> {
     serde_json::to_vec(&ControlsObjSnapshot { controls, script_instance_ids })
         .unwrap_or_default()

@@ -59,8 +59,13 @@ import {
   markShapeHasScript,
   unmarkShapeHasScript,
   getShapeOverlayFrame,
+  migrateShapeInstanceId,
 } from "./Shape/shapeRenderer";
-import { setDeclaredProperties, clearDeclaredProperties } from "./Shape/shapeProperties";
+import {
+  setDeclaredProperties,
+  clearDeclaredProperties,
+  migrateDeclaredProperties,
+} from "./Shape/shapeProperties";
 import { getShapeTemplate } from "./Shape/shapeTemplateCatalog";
 import {
   renderFloatingImage,
@@ -97,6 +102,7 @@ import {
   moveGroupControls,
   reanchorFloatingControls,
   repositionPinnedControls,
+  removeFloatingControlsForSheet,
   recalcPinnedOffset,
   setSnapResolver,
 } from "./lib/floatingStore";
@@ -507,8 +513,12 @@ function activate(context: ExtensionContext): void {
     if (!ctrl) return;
     ctrl.pinToGrid = d.pinned;
     // Capture where it sits relative to its anchor AT THE MOMENT of pinning,
-    // so turning the toggle on never makes the control jump.
-    if (d.pinned) recalcPinnedOffset(id, cellOriginPixels);
+    // so turning the toggle on never makes the control jump — and persist the
+    // offsets so the relationship survives a reload.
+    if (d.pinned) {
+      recalcPinnedOffset(id, cellOriginPixels);
+      void persistFloatingPosition(id);
+    }
   };
   window.addEventListener("controls:pin-changed", onPinChanged);
   cleanupFns.push(() => window.removeEventListener("controls:pin-changed", onPinChanged));
@@ -549,9 +559,14 @@ function activate(context: ExtensionContext): void {
   const movesWithCells = (ctrl: { pinToGrid?: boolean }): boolean =>
     ctrl.pinToGrid === true;
 
+  // Structural events are SERIALIZED through this chain: each handler awaits
+  // an IPC round trip (getActiveSheet) before mutating the store, so two rapid
+  // edits could otherwise interleave and apply their shifts out of order.
+  let structuralQueue: Promise<void> = Promise.resolve();
+
   const onStructuralEdit = (
     kind: "rowInsert" | "rowDelete" | "colInsert" | "colDelete",
-  ) => async (detail: unknown) => {
+  ) => (detail: unknown) => {
     const d = (detail ?? {}) as { startRow?: number; startCol?: number; count?: number };
     // The structural events carry no sheet index — these commands always act on
     // the active sheet — so it is resolved here.
@@ -559,14 +574,35 @@ function activate(context: ExtensionContext): void {
     const count = d.count;
     if (at === undefined || count === undefined) return;
 
-    const sheetIndex = await getActiveSheet();
-    reanchorFloatingControls(sheetIndex, shiftForEvent(kind, at, count), movesWithCells);
+    structuralQueue = structuralQueue.then(async () => {
+      const sheetIndex = await getActiveSheet();
+      reanchorFloatingControls(sheetIndex, shiftForEvent(kind, at, count), movesWithCells, {
+        // Migrate id-keyed side state with the re-key: a scripted pinned
+        // shape otherwise loses its renderer/HTML content and leaks its
+        // iframe under the old id.
+        onRename: (oldId, newId) => {
+          migrateShapeInstanceId(oldId, newId);
+          migrateDeclaredProperties(oldId, newId);
+        },
+        onRemove: (id) => {
+          removeShapeHtmlOverlay(id);
+          removeCustomCanvasRenderer(id);
+          clearDeclaredProperties(id);
+        },
+      });
+      // Pinned controls must FOLLOW the edit visually, not merely re-anchor:
+      // the anchor row moved, so anchorOrigin + offset lands on new pixels.
+      // Without this the move only became visible on the next row resize.
+      repositionPinnedControls(sheetIndex, cellOriginPixels);
 
-    invalidateAllFloatingButtonCaches();
-    invalidateAllShapeCaches();
-    invalidateAllImageCaches();
-    syncFloatingControlRegions();
-    emitAppEvent(AppEvents.GRID_REFRESH);
+      invalidateAllFloatingButtonCaches();
+      invalidateAllShapeCaches();
+      invalidateAllImageCaches();
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }).catch((err) => {
+      console.error("[Controls] Structural re-anchor failed:", err);
+    });
   };
 
   for (const [evt, kind] of [
@@ -579,14 +615,25 @@ function activate(context: ExtensionContext): void {
   }
 
   // Undo of a structural edit carries no coordinates, so the only correct
-  // response is to re-read the anchors from the backend.
+  // response is to re-read the anchors from the backend — which is what this
+  // does now: drop the active sheet's store entries and reload them from
+  // metadata (cache invalidation alone left the frontend anchored one row off).
   cleanupFns.push(
     context.events.on(AppEvents.STRUCTURAL_UNDO, () => {
-      invalidateAllFloatingButtonCaches();
-      invalidateAllShapeCaches();
-      invalidateAllImageCaches();
-      syncFloatingControlRegions();
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      structuralQueue = structuralQueue.then(async () => {
+        const sheetIndex = await getActiveSheet();
+        removeFloatingControlsForSheet(sheetIndex);
+        await loadFloatingControls();
+        repositionPinnedControls(sheetIndex, cellOriginPixels);
+
+        invalidateAllFloatingButtonCaches();
+        invalidateAllShapeCaches();
+        invalidateAllImageCaches();
+        syncFloatingControlRegions();
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      }).catch((err) => {
+        console.error("[Controls] Structural-undo reload failed:", err);
+      });
     }),
   );
 
@@ -1184,6 +1231,12 @@ async function insertButton(): Promise<void> {
       borderColor: { valueType: "static", value: "#999999" },
       fontSize: { valueType: "static", value: "11" },
       embedded: { valueType: "static", value: "false" },
+      // Explicit: floating controls default UNPINNED, and the backend's
+      // moves_with_cells defaults an ABSENT property to "moves" (the right
+      // default for in-cell controls). Without writing it, the backend
+      // shifted this control's anchor on row inserts while the frontend held
+      // its pixels — divergence on the very first structural edit.
+      pinToGrid: { valueType: "static", value: "false" },
       x: { valueType: "static", value: String(cellX) },
       y: { valueType: "static", value: String(cellY) },
       width: { valueType: "static", value: String(btnWidth) },
@@ -1280,6 +1333,8 @@ async function insertShape(shapeType: string): Promise<void> {
       textAlign: { valueType: "static", value: "center" },
       opacity: { valueType: "static", value: "1" },
       rotation: { valueType: "static", value: "0" },
+      // Explicit unpinned — see the floating-button creation above.
+      pinToGrid: { valueType: "static", value: "false" },
       x: { valueType: "static", value: String(cellX) },
       y: { valueType: "static", value: String(cellY) },
       width: { valueType: "static", value: String(shapeWidth) },
@@ -1376,6 +1431,8 @@ async function insertImage(): Promise<void> {
       src: { valueType: "static", value: dataUrl },
       opacity: { valueType: "static", value: "1" },
       rotation: { valueType: "static", value: "0" },
+      // Explicit unpinned — see the floating-button creation above.
+      pinToGrid: { valueType: "static", value: "false" },
       x: { valueType: "static", value: String(cellX) },
       y: { valueType: "static", value: String(cellY) },
       width: { valueType: "static", value: String(imgWidth) },
@@ -1657,14 +1714,21 @@ function setupFloatingObjectEvents(): void {
     const draggedCtrl = getFloatingControl(controlId);
     if (!draggedCtrl) return;
 
-    const deltaX = newX - draggedCtrl.x;
-    const deltaY = newY - draggedCtrl.y;
+    // Delta from the lead's EFFECTIVE movement, measured after snapping.
+    // A pinned lead snaps to cell boundaries, so raw-pointer deltas differ
+    // from how far it actually moved — co-selected controls accumulated that
+    // difference every frame and ran away from the group.
+    const prevX = draggedCtrl.x;
+    const prevY = draggedCtrl.y;
 
     // Move the dragged control
     moveFloatingControl(controlId, newX, newY);
     // Re-derive the offset from the anchor so a later row/column resize
     // replays where the user actually put it, not a stale value.
     recalcPinnedOffset(controlId, cellOriginPixels);
+    const draggedAfter = getFloatingControl(controlId);
+    const deltaX = (draggedAfter?.x ?? newX) - prevX;
+    const deltaY = (draggedAfter?.y ?? newY) - prevY;
 
     // Move all other selected/grouped controls by the same delta
     const idsToMove = getCoMovingControlIds(controlId);
@@ -1696,11 +1760,16 @@ function setupFloatingObjectEvents(): void {
     const draggedCtrl = getFloatingControl(controlId);
     if (!draggedCtrl) return;
 
-    const deltaX = newX - draggedCtrl.x;
-    const deltaY = newY - draggedCtrl.y;
+    // Same post-snap delta rule as the move preview above.
+    const prevX = draggedCtrl.x;
+    const prevY = draggedCtrl.y;
 
     // Move the dragged control
     moveFloatingControl(controlId, newX, newY);
+    recalcPinnedOffset(controlId, cellOriginPixels);
+    const draggedAfter = getFloatingControl(controlId);
+    const deltaX = (draggedAfter?.x ?? newX) - prevX;
+    const deltaY = (draggedAfter?.y ?? newY) - prevY;
 
     // Move all other selected/grouped controls by the same delta
     const idsToMove = getCoMovingControlIds(controlId);
@@ -1836,6 +1905,13 @@ async function persistFloatingPosition(controlId: string): Promise<void> {
   await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "y", "static", String(Math.round(ctrl.y)));
   await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "width", "static", String(Math.round(ctrl.width)));
   await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "height", "static", String(Math.round(ctrl.height)));
+  // A pinned control's geometry is anchorOrigin + offset; persisting only the
+  // pixel position regressed the offsets to zero on reload, snapping the
+  // control onto its anchor's corner.
+  if (ctrl.pinToGrid === true) {
+    await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "offsetX", "static", String(Math.round(ctrl.offsetX ?? 0)));
+    await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "offsetY", "static", String(Math.round(ctrl.offsetY ?? 0)));
+  }
 
   // Notify PropertiesPane to re-read metadata (e.g., after drag-resize)
   window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
@@ -2002,6 +2078,10 @@ async function handleEmbeddedToggle(
         await removeControlMetadata(sheetIndex, row, col);
       }
     }
+    // An in-cell control's position IS its anchor: it must move with the grid.
+    // Clear the floating-era pinToGrid=false or the backend would hold the
+    // anchor still while the cell moves out from under it.
+    await setControlProperty(sheetIndex, targetRow, targetCol, "button", "pinToGrid", "static", "true");
 
     // Remove from floating store
     removeFloatingControl(controlId);
@@ -2050,11 +2130,14 @@ async function handleEmbeddedToggle(
     await applyFormatting([row], [col], { button: false });
     await updateCell(row, col, "");
 
-    // Update metadata with floating position
+    // Update metadata with floating position. pinToGrid becomes explicit here:
+    // a newly-floating control is UNPINNED (see the creation sites), while the
+    // backend treats an absent property as "moves with cells".
     await setControlProperty(sheetIndex, row, col, "button", "x", "static", String(cellX));
     await setControlProperty(sheetIndex, row, col, "button", "y", "static", String(cellY));
     await setControlProperty(sheetIndex, row, col, "button", "width", "static", String(btnWidth));
     await setControlProperty(sheetIndex, row, col, "button", "height", "static", String(btnHeight));
+    await setControlProperty(sheetIndex, row, col, "button", "pinToGrid", "static", "false");
 
     // Add to floating store
     addFloatingControl({
@@ -2114,18 +2197,36 @@ async function loadFloatingControls(): Promise<void> {
         const y = parseFloat(props.y?.value ?? "0");
         const width = parseFloat(props.width?.value ?? "80");
         const height = parseFloat(props.height?.value ?? "28");
+        // Pinning survives reload: the metadata property is authoritative.
+        // Without restoring it (and the anchor offsets) here, every pinned
+        // control came back unpinned and stopped following the grid.
+        const pinToGrid = props.pinToGrid?.value === "true";
+        const offsetX = props.offsetX ? parseFloat(props.offsetX.value) : undefined;
+        const offsetY = props.offsetY ? parseFloat(props.offsetY.value) : undefined;
 
         addFloatingControl({
           id: makeFloatingControlId(entry.sheetIndex, entry.row, entry.col),
           sheetIndex: entry.sheetIndex,
           row: entry.row,
           col: entry.col,
+          pinToGrid,
+          offsetX: Number.isFinite(offsetX) ? offsetX : undefined,
+          offsetY: Number.isFinite(offsetY) ? offsetY : undefined,
           x,
           y,
           width,
           height,
           controlType: entry.metadata.controlType,
         });
+        if (pinToGrid && offsetX === undefined && offsetY === undefined) {
+          // Older pinned controls have no stored offsets — derive them from
+          // the loaded pixel position so the first resize doesn't snap the
+          // control to its anchor origin.
+          recalcPinnedOffset(
+            makeFloatingControlId(entry.sheetIndex, entry.row, entry.col),
+            cellOriginPixels,
+          );
+        }
       }
     }
 

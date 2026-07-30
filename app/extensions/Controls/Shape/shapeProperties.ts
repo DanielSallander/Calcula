@@ -27,6 +27,16 @@ export function clearDeclaredProperties(instanceId: string): void {
   declaredPropertiesMap.delete(instanceId);
 }
 
+/** Migrate declared properties to a control's NEW id (structural re-key). */
+export function migrateDeclaredProperties(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const props = declaredPropertiesMap.get(oldId);
+  if (props !== undefined) {
+    declaredPropertiesMap.delete(oldId);
+    declaredPropertiesMap.set(newId, props);
+  }
+}
+
 /**
  * Get shape properties with any script-declared properties merged in.
  * Declared properties appear in a "Custom" group at the end.

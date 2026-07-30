@@ -666,12 +666,14 @@ impl Sheet {
 
     pub fn to_grid(&self) -> (Grid, StyleRegistry) {
         let mut grid = Grid::new();
-        let mut style_registry = StyleRegistry::new();
 
-        // Rebuild styles
-        for style in &self.styles[1..] {
-            style_registry.get_or_create(style.clone());
-        }
+        // Rebuild styles VERBATIM. Cells reference saved indices directly, so
+        // the vector must be installed as-is: interning each style through
+        // `get_or_create` would dedupe, and the saved vector legitimately
+        // contains a duplicate of the default whenever `get_or_create_explicit`
+        // ran before the save — collapsing it shifts every later index down by
+        // one and silently re-styles (and re-locks) the cells that used them.
+        let style_registry = StyleRegistry::from_styles(self.styles.clone());
 
         // Rebuild cells
         for ((row, col), saved_cell) in &self.cells {
