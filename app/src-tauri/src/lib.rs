@@ -4717,6 +4717,7 @@ pub fn run() {
             calp_registry::calp_remove_registry,
             calp_commands::calp_inspect_package,
             // Package Inspector window (read-only deep inspection)
+            calp_inspector::calp_inspector_resolve_location,
             calp_inspector::calp_inspector_overview,
             calp_inspector::calp_inspector_sheet,
             calp_inspector::calp_inspector_scripts,

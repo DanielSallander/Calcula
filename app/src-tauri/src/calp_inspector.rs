@@ -158,6 +158,91 @@ fn submission_value_display(value: &SubmissionValue) -> (String, String) {
 }
 
 // ============================================================================
+// Location resolution (browse ergonomics)
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedRegistryLocation {
+    /// The registry ROOT to browse (walked up from whatever was picked).
+    pub registry_path: String,
+    /// Set when the picked folder was a package (or version) directory.
+    pub package_name: Option<String>,
+    /// Set when the picked folder was a specific version directory.
+    pub version: Option<String>,
+}
+
+/// Users naturally browse INTO the thing they want to inspect —
+/// `C:\reg\sales-report\1.0.0` — but a registry location is the ROOT folder
+/// (`C:\reg`), so a raw browse finds nothing. Recognize a package directory
+/// (contains calp-manifest.json) or a version directory (its parent does) and
+/// walk up to the root, remembering what was picked so the UI can pre-select
+/// it. Purely local probing; anything unrecognized passes through unchanged.
+#[tauri::command]
+pub fn calp_inspector_resolve_location(
+    path: String,
+    window: tauri::Window,
+) -> Result<ResolvedRegistryLocation, String> {
+    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+
+    // HTTP registries have no local directory structure to probe.
+    if crate::calp_registry::is_http_location(&path) {
+        return Ok(ResolvedRegistryLocation {
+            registry_path: path,
+            package_name: None,
+            version: None,
+        });
+    }
+
+    let raw = path.strip_prefix("file://").unwrap_or(&path).to_string();
+    let picked = std::path::PathBuf::from(&raw);
+
+    // The package name comes from the manifest (authoritative), not the
+    // directory name.
+    let manifest_name = |dir: &std::path::Path| -> Option<String> {
+        let bytes = std::fs::read(dir.join("calp-manifest.json")).ok()?;
+        serde_json::from_slice::<calp::manifest::PackageManifest>(&bytes)
+            .ok()
+            .map(|m| m.name)
+    };
+
+    // Picked the PACKAGE directory: registry is its parent.
+    if let Some(name) = manifest_name(&picked) {
+        if let Some(registry) = picked.parent() {
+            return Ok(ResolvedRegistryLocation {
+                registry_path: registry.display().to_string(),
+                package_name: Some(name),
+                version: None,
+            });
+        }
+    }
+
+    // Picked a VERSION directory: its parent is the package directory.
+    if let Some(pkg_dir) = picked.parent() {
+        if let Some(name) = manifest_name(pkg_dir) {
+            if let Some(registry) = pkg_dir.parent() {
+                let version = picked
+                    .join(calp::integrity::VERSION_MANIFEST_FILE)
+                    .is_file()
+                    .then(|| picked.file_name().map(|s| s.to_string_lossy().to_string()))
+                    .flatten();
+                return Ok(ResolvedRegistryLocation {
+                    registry_path: registry.display().to_string(),
+                    package_name: Some(name),
+                    version,
+                });
+            }
+        }
+    }
+
+    Ok(ResolvedRegistryLocation {
+        registry_path: raw,
+        package_name: None,
+        version: None,
+    })
+}
+
+// ============================================================================
 // Overview
 // ============================================================================
 

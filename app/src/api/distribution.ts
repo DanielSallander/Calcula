@@ -1384,6 +1384,21 @@ export interface InspectorVerifyReport {
   allOk: boolean;
 }
 
+export interface ResolvedRegistryLocation {
+  /** The registry ROOT to browse (walked up from whatever was picked). */
+  registryPath: string;
+  /** Set when the picked folder was a package (or version) directory. */
+  packageName: string | null;
+  /** Set when the picked folder was a specific version directory. */
+  version: string | null;
+}
+
+/** Walk a picked folder up to its registry root (package/version dirs are
+ * recognized and pre-selected). Unrecognized paths pass through unchanged. */
+export function inspectorResolveLocation(path: string): Promise<ResolvedRegistryLocation> {
+  return invokeBackend("calp_inspector_resolve_location", { path });
+}
+
 /** Deep overview of a package version (Package Inspector landing payload). */
 export function inspectorOverview(
   registryPath: string,

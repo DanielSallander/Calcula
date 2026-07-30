@@ -10,6 +10,7 @@ import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import {
   browseRegistry,
   inspectorOverview,
+  inspectorResolveLocation,
   type InspectorOverview,
   type PackageInfo,
 } from "@api/distribution";
@@ -154,6 +155,43 @@ export function PackageInspectorApp(): React.ReactElement {
     [],
   );
 
+  // One entry point for every user-typed/browsed location: users naturally
+  // pick the package or version FOLDER itself, not the registry root — the
+  // backend walks up and tells us what was actually picked, so we can list
+  // the registry AND jump straight to the picked package/version. An empty
+  // registry must say so — silently rendering nothing reads as a dead button.
+  const resolveAndLoad = useCallback(
+    async (rawPath: string) => {
+      setError(null);
+      setPackages(null);
+      setPackageName("");
+      try {
+        const resolved = await inspectorResolveLocation(rawPath);
+        setRegistryPath(resolved.registryPath);
+        const found = await listPackagesAt(resolved.registryPath);
+        if (found.length === 0) {
+          setError(
+            "No packages found here. Pick the registry folder — the one that contains " +
+              "the package folders — or any package/version folder inside it.",
+          );
+          return;
+        }
+        if (
+          resolved.packageName &&
+          found.some((p) => p.name === resolved.packageName)
+        ) {
+          setPackageName(resolved.packageName);
+          const pin = resolved.version ?? "latest";
+          setVersionPin(pin);
+          void loadOverview(resolved.registryPath, resolved.packageName, pin);
+        }
+      } catch (err: unknown) {
+        setError(String(err));
+      }
+    },
+    [listPackagesAt, loadOverview],
+  );
+
   // Keep the latest loader reachable from the (once-registered) event
   // listener without re-subscribing per render.
   const loadRef = useRef({ listPackagesAt, loadOverview });
@@ -184,18 +222,10 @@ export function PackageInspectorApp(): React.ReactElement {
       const selected = await openNativeDialog({
         directory: true,
         multiple: false,
-        title: "Select Registry Folder",
+        title: "Select Registry, Package, or Version Folder",
       });
       if (selected && typeof selected === "string") {
-        setRegistryPath(selected);
-        setPackages(null);
-        setPackageName("");
-        setError(null);
-        try {
-          await listPackagesAt(selected);
-        } catch (err: unknown) {
-          setError(String(err));
-        }
+        await resolveAndLoad(selected);
       }
     } catch {
       // user cancelled
@@ -207,12 +237,7 @@ export function PackageInspectorApp(): React.ReactElement {
       setError("Choose a registry folder or URL first.");
       return;
     }
-    setError(null);
-    try {
-      await listPackagesAt(registryPath.trim());
-    } catch (err: unknown) {
-      setError(String(err));
-    }
+    await resolveAndLoad(registryPath.trim());
   };
 
   const selectedPackage = packages?.find((p) => p.name === packageName) ?? null;
@@ -227,12 +252,7 @@ export function PackageInspectorApp(): React.ReactElement {
             value=""
             onChange={(e) => {
               const reg = saved.find((r) => r.id === e.target.value);
-              if (reg) {
-                setRegistryPath(reg.location);
-                setPackages(null);
-                setPackageName("");
-                void listPackagesAt(reg.location).catch((err) => setError(String(err)));
-              }
+              if (reg) void resolveAndLoad(reg.location);
             }}
           >
             <option value="">Saved…</option>
@@ -245,7 +265,7 @@ export function PackageInspectorApp(): React.ReactElement {
         )}
         <input
           style={{ ...inputStyle, flex: 1, minWidth: 180 }}
-          placeholder="Registry folder or https:// URL"
+          placeholder="Registry, package, or version folder — or https:// URL"
           value={registryPath}
           onChange={(e) => setRegistryPath(e.target.value)}
           onKeyDown={(e) => {
@@ -332,8 +352,9 @@ export function PackageInspectorApp(): React.ReactElement {
             <div style={{ ...mutedStyle, padding: 24, fontSize: 13 }}>
               {busy
                 ? "Verifying signature and reading the package…"
-                : "Browse to a registry, pick a published package and a version, then Inspect. " +
-                  "Everything is read directly from the registry — nothing is subscribed or changed."}
+                : "Browse to a registry — or directly to a package or version folder inside " +
+                  "one — then Inspect. Everything is read directly from the registry; " +
+                  "nothing is subscribed or changed."}
             </div>
           ) : (
             <>
