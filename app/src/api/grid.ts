@@ -60,6 +60,33 @@ export {
 export type { GridAction, SetSelectionPayload } from "../core/state/gridActions";
 
 // ============================================================================
+// Grid Refresh Signals
+// ============================================================================
+// Core listens for two BARE window events that predate the app: event bus and
+// therefore cannot move onto it (AppEvents values are all `app:`-prefixed, and
+// a stability test pins that). These wrappers exist so no caller has to
+// hardcode the strings: the listener contract lives in exactly one place.
+
+/**
+ * Ask the grid to re-fetch its visible cells from the backend and repaint.
+ * Use after a change that altered CELL CONTENT or STYLE outside the normal
+ * edit pipeline (formatting, structural inserts/deletes, sorts, replaces).
+ * `AppEvents.GRID_REFRESH` only repaints what the canvas already has cached.
+ */
+export function refreshGridData(): void {
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
+}
+
+/**
+ * Ask the grid to re-read row heights / column widths (and the sheet defaults)
+ * from the backend. Use after resizing rows/columns or after a structural
+ * insert/delete, which shifts every dimension override past the change.
+ */
+export function refreshGridDimensions(): void {
+  window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+}
+
+// ============================================================================
 // Freeze Panes Orchestration
 // ============================================================================
 

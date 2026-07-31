@@ -233,6 +233,12 @@ export {
   listWorkbookScripts,
   getWorkbookScript,
   runWorkbookScript,
+  dispatchScriptSideEffects,
+  normalizeDeferredActions,
+  normalizeBookmarkMutations,
+  currentHostViewState,
+  SCRIPT_DEFERRED_ACTIONS_EVENT,
+  SCRIPT_BOOKMARK_MUTATIONS_EVENT,
 } from "./workbookScripts";
 export type {
   ScriptScope,
@@ -241,6 +247,11 @@ export type {
   ScriptRunResult,
   ScriptRunSuccess,
   ScriptRunError,
+  RunWorkbookScriptOptions,
+  ScriptSideEffects,
+  HostViewState,
+  DeferredAction,
+  BookmarkMutation,
 } from "./workbookScripts";
 
 export type {
@@ -353,6 +364,26 @@ export { registerCommitGuard } from "./commitGuards";
 export type { CommitGuardResult, CommitGuardFn } from "./commitGuards";
 
 // ============================================================================
+// Lifecycle Guards (cancellable save / close)
+// ============================================================================
+
+export {
+  registerLifecycleGuard,
+  registerLifecycleCancelReporter,
+  checkLifecycleGuards,
+  reportLifecycleCancellation,
+  lifecycleCancelMessage,
+  lifecycleGuardCount,
+} from "./lifecycleGuards";
+export type {
+  LifecycleAction,
+  LifecycleDetail,
+  LifecycleGuardResult,
+  LifecycleGuardFn,
+  LifecycleCancelReporter,
+} from "./lifecycleGuards";
+
+// ============================================================================
 // Cell Click Interceptors
 // ============================================================================
 
@@ -376,7 +407,17 @@ export type { FormulaReferenceOverride, FormulaReferenceInterceptorFn } from "./
 // ============================================================================
 
 export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./events";
-export type { AppEventName, FillCompletedPayload, CellValueChange, CellValuesChangedPayload } from "./events";
+export type {
+  AppEventName,
+  FillCompletedPayload,
+  CellValueChange,
+  CellValuesChangedPayload,
+  SheetAddedPayload,
+  SheetDeletedPayload,
+  SheetRenamedPayload,
+  RecalculationCompletedPayload,
+  PackageUpdatedPayload,
+} from "./events";
 
 // ============================================================================
 // Cross-Window Events (Tauri)
@@ -612,6 +653,7 @@ export type { ContextMenuRequestPayload } from "./contextMenuTypes";
 // Grid API (freeze panes orchestration)
 // ============================================================================
 
+export { refreshGridData, refreshGridDimensions } from "./grid";
 export { freezePanes, loadFreezePanesConfig } from "./grid";
 export { splitWindow, loadSplitWindowConfig, removeSplitWindow } from "./grid";
 export { navigateToCell, navigateToRange } from "./grid";
@@ -1106,9 +1148,20 @@ export {
   executeCustomFunction,
   subscribeToCustomFunctions,
   getCustomFunctionCount,
+  getVolatileCustomFunctionNames,
+  // The cell-error sentinel a UDF returns to produce #N/A / #VALUE! / ... —
+  // exported so extensions authoring UDFs never hand-write { __calculaError }.
+  cellError,
+  asCellErrorSentinel,
+  thrownCellErrorLiteral,
+  normalizeCellErrorLiteral,
+  UDF_ERROR_KEY,
+  CELL_ERROR_LITERALS,
 } from "./formulaFunctions";
 export type {
   CustomFunctionDef,
+  CellErrorLiteral,
+  UdfCellErrorSentinel,
 } from "./formulaFunctions";
 // User-authored JS formula functions (sandboxed): generate library + install.
 export {
@@ -1176,6 +1229,7 @@ export {
   installUdfEvaluation,
   uninstallUdfEvaluation,
   resolveUdfsForEdit,
+  resolveUdfsForEdits,
   type UdfValue,
 } from "./formulaUdf";
 // Unified script-surface taxonomy (Wave 3 / C3): the one queryable source of
@@ -1184,9 +1238,16 @@ export {
   SCRIPT_SURFACES,
   getScriptSurface,
   executableScriptSurfaces,
+  BROKER_AUTO_LOCAL_CAPABILITIES,
+  brokerGatedCapabilities,
+  enforceableCapabilities,
+  auditScriptSurfaceCapabilities,
+  scriptSurfaceCapabilitiesAreComplete,
+  scriptSurfacesReferenceOnlyKnownCapabilities,
   type ScriptSurface,
   type ScriptSurfaceId,
   type ScriptRuntime,
+  type ScriptSurfaceCapabilityAudit,
 } from "./scriptSurfaces";
 
 // ============================================================================
@@ -1960,6 +2021,18 @@ export type {
   IObjectScriptAPI,
   UnlockedAPI,
   ScriptProvenance,
+  // Workbook-object surface (B3)
+  ScriptObjectRef,
+  ScriptPivotArea,
+  ScriptAggregation,
+  ScriptPivotLayoutDirective,
+  ScriptPivotFieldSpec,
+  ScriptChartHandle,
+  ScriptTableHandle,
+  ScriptPivotHandle,
+  ScriptSlicerHandle,
+  ScriptShapeHandle,
+  ScriptNamedRangeHandle,
 } from "./scriptableObjects";
 
 // ============================================================================
@@ -1967,6 +2040,27 @@ export type {
 // ============================================================================
 
 export { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS } from "./scriptHost/allowlist";
+// Workbook-object enumeration + the pivot-layout vocabulary a script speaks
+// (B3). The vocabulary is exported so the Pivot Layout DSL's own tests can PIN
+// the api-side twin against the DSL's constant sets — the facade may not import
+// an extension, so drift has to be caught from the extension side.
+export {
+  SCRIPT_OBJECT_KINDS,
+  a1Rect,
+  colLetters,
+  controlInstanceId,
+} from "./scriptHost/objectInventory";
+export type { ScriptObjectKind } from "./scriptHost/objectInventory";
+export {
+  PIVOT_AREAS,
+  PIVOT_AGGREGATIONS,
+  PIVOT_LAYOUT_DIRECTIVES,
+  areaToAxis,
+  axisToArea,
+  aggregationToFunction,
+  layoutDirectivesToConfig,
+} from "./scriptHost/pivotLayoutVocabulary";
+export type { PivotArea } from "./scriptHost/pivotLayoutVocabulary";
 export type { MethodPolicy, Tier as ScriptTierName, CapabilityId, MethodClass } from "./scriptHost/allowlist";
 export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./scriptHost/auditRing";
 export type { AuditEntry } from "./scriptHost/auditRing";
@@ -1987,6 +2081,33 @@ export type { SandboxHitGeometry, SandboxHitRect } from "./scriptHost/protocol";
 export { resolveCapabilityRequest, getGrantedOrigins, getScriptGrants, revokeCapability, recordCapabilityGrant, describeCapability } from "./scriptHost/capabilities";
 export type { CapabilityRequestPayload, CapabilityDecision } from "./scriptHost/capabilities";
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./scriptHost/capabilities";
+// ui.dialog (B4): the trusted modal a script uses to ask the user something.
+// The renderer lives in the ScriptableObjects extension, so it reaches the
+// pending-request registry through @api like everything else.
+export {
+  resolveScriptDialog,
+  dismissScriptDialog,
+  getActiveScriptDialog,
+  isScriptDialogMuted,
+  resetScriptDialogs,
+  MAX_CONSECUTIVE_DISMISSALS,
+  SCRIPT_DIALOG_REQUEST_EVENT,
+  SCRIPT_DIALOG_CANCELLED_EVENT,
+} from "./scriptHost/scriptDialogs";
+export type {
+  ScriptDialogRequestPayload,
+  ScriptDialogAnswer,
+  ScriptDialogKind,
+} from "./scriptHost/scriptDialogs";
+export { DIALOG_FIELD_TYPES, MAX_DIALOG_FIELDS, normalizeDialogOption } from "./scriptHost/scriptDialogSpec";
+export type {
+  ScriptDialogField,
+  ScriptDialogFieldType,
+  ScriptDialogFormSpec,
+  ScriptDialogOption,
+  ScriptDialogPromptOptions,
+  ScriptDialogTextOptions,
+} from "./scriptHost/scriptDialogSpec";
 // Distributed-script consent store (promoted from ScriptableObjects so the Charts
 // sandboxed transform/mark libraries reuse the SAME store + file, not a parallel one).
 export {
@@ -2019,11 +2140,13 @@ export {
   registerChartStoreService,
   registerPivotStoreService,
   registerBiConnectionService,
+  registerControlStoreService,
   getSlicerStoreService,
   getTimelineStoreService,
   getChartStoreService,
   getPivotStoreService,
   getBiConnectionService,
+  getControlStoreService,
 } from "./componentStoreRegistry";
 
 export type {
@@ -2032,6 +2155,8 @@ export type {
   IChartStoreService,
   IPivotStoreService,
   IBiConnectionService,
+  IControlStoreService,
+  ChartPlacement,
 } from "./componentStoreRegistry";
 
 // ============================================================================

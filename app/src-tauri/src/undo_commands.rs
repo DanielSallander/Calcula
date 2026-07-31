@@ -63,6 +63,11 @@ pub struct UndoState {
     pub undo_depth: usize,
     /// Number of transactions available to redo (used by test oracles).
     pub redo_depth: usize,
+    /// Whether an undo transaction is currently OPEN (begin without commit).
+    /// Callers that want to group their own writes into one undo entry must
+    /// probe this first: `begin_transaction` is a no-op while a transaction is
+    /// open, so an unconditional commit would close SOMEONE ELSE'S group early.
+    pub transaction_open: bool,
 }
 
 /// Convert engine::UndoMergeRegion to api_types::MergedRegion
@@ -220,6 +225,7 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
         redo_description: undo_stack.redo_description().map(String::from),
         undo_depth: undo_stack.undo_depth(),
         redo_depth: undo_stack.redo_depth(),
+        transaction_open: undo_stack.has_open_transaction(),
     }
 }
 
@@ -2127,11 +2133,31 @@ pub(crate) fn autofilter_snapshot_bytes(
 
 /// Serialized "script_grid_cells" snapshot bytes (same in-open-transaction
 /// contract as `table_snapshot_bytes`).
+///
+/// A serialization failure here means the undo entry restores NOTHING, so it is
+/// logged at error level rather than swallowed. Callers record the payload after
+/// their mutation already landed and cannot roll it back, so returning empty is
+/// the only option left — it must at least be visible in the log. (Every
+/// `engine::Cell` shape is representable since `parser::ast::Value` became
+/// adjacently tagged; this is a tripwire, not an expected path.)
 pub(crate) fn script_grid_cells_snapshot_bytes(
     sheet_index: usize,
     cells: Vec<(u32, u32, Option<engine::Cell>)>,
 ) -> Vec<u8> {
-    serde_json::to_vec(&ScriptGridCellsSnapshot { sheet_index, cells }).unwrap_or_default()
+    let cell_count = cells.len();
+    match serde_json::to_vec(&ScriptGridCellsSnapshot { sheet_index, cells }) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            crate::log_error!(
+                "UNDO",
+                "script_grid_cells snapshot for sheet {} ({} cell(s)) could not be serialized ({}); this undo entry will restore nothing",
+                sheet_index + 1,
+                cell_count,
+                e
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Snapshot for the "obj_writeback_regions" CustomRestore — the author-side

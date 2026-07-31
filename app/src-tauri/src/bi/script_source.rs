@@ -300,7 +300,7 @@ pub async fn bi_script_source(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     // Authoritative grant re-check for the OWNING script.
-    if !cap_store.is_bi_granted(&script_id, "bi.connector") {
+    if !cap_store.is_granted(&script_id, "bi.connector") {
         crate::log_warn!(
             "SECURITY",
             "bi_script_source DENIED (bi.connector not granted): script={} op={}",

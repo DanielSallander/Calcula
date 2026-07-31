@@ -20,9 +20,6 @@ pub struct FindResult {
 pub struct ReplaceResult {
     pub updated_cells: Vec<CellData>,
     pub replacement_count: usize,
-    /// Number of cells skipped because they are in writeback regions.
-    #[serde(default)]
-    pub skipped_writeback: usize,
 }
 
 /// Find all cells matching the query.
@@ -64,6 +61,25 @@ pub fn replace_all(
     case_sensitive: bool,
     match_entire_cell: bool,
 ) -> Result<ReplaceResult, String> {
+    // The match list is needed by BOTH gates below, so it is computed under a
+    // short-lived read lock and the writeback guard runs with no other lock
+    // held (it takes writeback_index / active_sheet / sheet_ids of its own).
+    let matches = {
+        let grid = state.grid.lock().unwrap();
+        grid.find_all(&search, case_sensitive, match_entire_cell, false)
+    };
+
+    // WRITEBACK CLAIM GUARD. Replace All rewrote matched cells straight through
+    // `grid.set_cell`, never touching `update_cell_impl`. It used to SKIP
+    // claimed cells and report a count nobody surfaces, which is a partial
+    // mutation dressed up as success: the user is told "42 replaced" and never
+    // learns which cells were left alone or why. Refused for the whole gesture
+    // instead, naming the region — the same policy the sheet-protection gate
+    // below already applies, and for the same reason (Replace All is ONE user
+    // action). Checked against the MATCH LIST, not a bounding box, so a replace
+    // that never lands in the form still runs.
+    crate::calp_commands::ensure_cells_unclaimed(&state, "replace all here", &matches)?;
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -71,14 +87,6 @@ pub fn replace_all(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
-    let writeback_index = state.writeback_index.lock().unwrap();
-    let sheet_ids = state.sheet_ids.lock().unwrap();
-
-    // Resolve the active sheet's stable SheetId for writeback lookups
-    let active_sheet_id = sheet_ids.get(active_sheet).copied();
-
-    // Find all matching cells first
-    let matches = grid.find_all(&search, case_sensitive, match_entire_cell, false);
 
     // Sheet protection over the cells this replace would actually touch. Whole
     // gesture rejected, matching the batch-write policy: Replace All is one user
@@ -106,7 +114,6 @@ pub fn replace_all(
         return Ok(ReplaceResult {
             updated_cells: Vec::new(),
             replacement_count: 0,
-            skipped_writeback: 0,
         });
     }
 
@@ -124,17 +131,10 @@ pub fn replace_all(
 
     let mut updated_cells = Vec::new();
     let mut replacement_count = 0;
-    let mut skipped_writeback = 0;
 
+    // No per-cell writeback lookup in this loop: `ensure_cells_unclaimed` above
+    // already answered for the whole match list, once, before any lock.
     for (row, col) in matches {
-        // Skip cells in writeback regions
-        if let Some(sid) = active_sheet_id {
-            if writeback_index.contains(sid, row, col) {
-                skipped_writeback += 1;
-                continue;
-            }
-        }
-
         // Record previous state for undo
         let previous_cell = grid.get_cell(row, col).cloned();
 
@@ -255,7 +255,6 @@ pub fn replace_all(
     Ok(ReplaceResult {
         updated_cells,
         replacement_count,
-        skipped_writeback,
     })
 }
 
@@ -290,6 +289,14 @@ pub fn replace_single(
     replacement: String,
     case_sensitive: bool,
 ) -> Result<Option<CellData>, String> {
+    // WRITEBACK CLAIM GUARD, before any lock. This used to return `Ok(None)`,
+    // which is ALSO the "no match here" answer — so Replace Next walking into
+    // the form looked exactly like a cell that simply did not match, and the
+    // user was never told why their replacement did not happen. A replace is
+    // not a drafted value-entry, so the range guard (which ignores drafts)
+    // applies rather than the single-cell draft guard.
+    crate::calp_commands::ensure_range_unclaimed(&state, "replace in this cell", row, col, row, col)?;
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -305,17 +312,6 @@ pub fn replace_single(
         crate::protection::check_sheet_protection_range_in(
             &protection_storage, &grid, &styles, active_sheet, row, col, row, col,
         )?;
-    }
-
-    // Skip cells in writeback regions
-    {
-        let writeback_index = state.writeback_index.lock().unwrap();
-        let sheet_ids = state.sheet_ids.lock().unwrap();
-        if let Some(&sid) = sheet_ids.get(active_sheet) {
-            if writeback_index.contains(sid, row, col) {
-                return Ok(None); // Silently skip — cell is writeback-protected
-            }
-        }
     }
 
     let previous_cell = grid.get_cell(row, col).cloned();

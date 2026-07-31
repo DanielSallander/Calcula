@@ -10,6 +10,13 @@
 //   marks in one install batch yield one confirm). Extracted into its own light
 //   module (depends only on @api/scriptSecurity) so the gate decision is
 //   unit-testable without host.ts's heavy worker/render/broker import graph.
+//   PERSISTENT TRUST: under "prompt", ensureScriptsAllowed first consults the
+//   per-workbook trust store — a workbook the user trusted, whose local code is
+//   byte-identical to what they approved, mounts with NO prompt at all, across
+//   restarts. That trust is local-machine state and covers RUNNING only; a
+//   distributed (.calp) script still needs its own package consent, and every
+//   capability (net.fetch, bi.sql, distribution.writeback, ...) is still consented
+//   separately. See @api/scriptSecurity.
 //   NOTE: distributed (installed) 3rd-party EXTENSIONS run in a SEPARATE worker
 //   realm (extensionWorkerHost) and are gated by the same setting at their own
 //   chokepoint — ExtensionManager.loadExtension ("disabled" blocks them too;

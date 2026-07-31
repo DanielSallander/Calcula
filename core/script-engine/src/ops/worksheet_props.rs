@@ -72,7 +72,7 @@ pub fn register_worksheet_props_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> bool {
-            sc.borrow().display_zeros
+            sc.borrow().host.display_zeros
         })
         .map_err(|e| format!("Failed to create getDisplayZeros: {}", e))?;
         calcula
@@ -85,7 +85,7 @@ pub fn register_worksheet_props_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |value: bool| {
             let mut ctx = sc.borrow_mut();
-            ctx.display_zeros = value;
+            ctx.host.display_zeros = value;
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetDisplayZeros { value });
@@ -100,7 +100,7 @@ pub fn register_worksheet_props_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> bool {
-            sc.borrow().is_dirty
+            sc.borrow().host.is_dirty
         })
         .map_err(|e| format!("Failed to create isDirty: {}", e))?;
         calcula

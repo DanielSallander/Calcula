@@ -2,6 +2,8 @@
 // PURPOSE: TypeScript types for the notebook system.
 // CONTEXT: Mirrors Rust types in app/src-tauri/src/scripting/types.rs.
 
+import type { DeferredAction } from "@api/workbookScripts";
+
 /** A notebook document containing ordered cells for sequential execution. */
 export interface NotebookDocument {
   id: string;
@@ -57,11 +59,13 @@ export interface RewindNotebookRequest {
   targetCellId: string;
 }
 
-/** A deferred action from Application object methods/properties. */
-export type DeferredAction =
-  | { action: "goto"; row: number; col: number; sheetIndex: number; select?: boolean }
-  | { action: "calculate" }
-  | { action: "setStatusBar"; message: string | null };
+/**
+ * A deferred action from Application object methods/properties.
+ * The canonical union lives in @api so every script surface (notebook cells,
+ * `run_script` from a button, bookmark scripts) speaks one shape; re-exported
+ * here because the notebook response embeds it.
+ */
+export type { DeferredAction };
 
 /** Response from notebook cell execution. */
 export type NotebookCellResponse =

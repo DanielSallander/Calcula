@@ -64,6 +64,10 @@ export interface ObjectScriptDefinition {
   provenance?: ScriptProvenance;
   /** For distributed scripts: the package name it came from. */
   packageName?: string;
+  /** For distributed scripts: the resolved package VERSION it was pulled from.
+   *  Set by the .calp pull (server-authoritative) and persisted in the .cala;
+   *  surfaced read-only to the script as `context.package.version`. */
+  packageVersion?: string;
   /** Minimum required API version (semver). Checked on mount. */
   requiredApiVersion?: string;
   /**
@@ -93,9 +97,38 @@ export type EventHandler<T = void> = (detail: T) => void | Promise<void>;
 /** Cleanup function returned by event subscriptions. */
 export type CleanupFn = () => void;
 
+/**
+ * What a CANCELLABLE Before* handler may return to stop the operation.
+ * `undefined` (the common "I only did some work" case) always allows.
+ */
+export type LifecycleVerdictReply =
+  | void
+  | undefined
+  | false
+  | "cancel"
+  | { cancel: true; reason?: string };
+
+/** Handler signature for the cancellable workbook Before* hooks. */
+export type BeforeLifecycleHandler<T = void> = (
+  detail: T,
+) => LifecycleVerdictReply | Promise<LifecycleVerdictReply>;
+
 // ============================================================================
 // Base Object Context (shared by all object types)
 // ============================================================================
+
+/**
+ * Where a distributed script came from, mirrored read-only into
+ * `context.package`. Host-supplied at mount; scripts cannot forge it.
+ */
+export interface ScriptPackageInfo {
+  /** The .calp package name. */
+  readonly name: string;
+  /** Resolved semver of the version this script was pulled from, or null when
+   *  the package predates version stamping on scripts. */
+  readonly version: string | null;
+  readonly provenance: "distributed";
+}
 
 /** Base context available to all scriptable objects (restricted mode). */
 export interface BaseObjectContext {
@@ -104,6 +137,15 @@ export interface BaseObjectContext {
 
   /** The script access level */
   readonly accessLevel: ScriptAccessLevel;
+
+  /**
+   * The .calp package this script shipped in, or `null` for a locally authored
+   * script. Read-only and host-supplied — a distributed script can branch on
+   * its own package/version (feature-gate against an older report, warn when
+   * the host workbook is newer than the package it came from) without being
+   * able to claim a provenance it does not have.
+   */
+  readonly package: ScriptPackageInfo | null;
 
   /**
    * Expose a custom method that other scripts or extensions can call.
@@ -146,6 +188,226 @@ export interface BaseObjectContext {
   readonly api: UnlockedAPI | null;
 }
 
+/**
+ * A cell READ WITH ITS TYPE (B1) — what `getData()` / `getCellData()` return.
+ *
+ * The display string alone cannot tell the number 5 from the text "5", an error
+ * cell from a cell containing "#DIV/0!", or a formula from its rendered result.
+ * Reading display strings and writing them back therefore REPLACES EVERY
+ * FORMULA WITH ITS TEXT — use this shape (and write `formula` back) whenever a
+ * script round-trips cells.
+ *
+ * Mirrors Rust `TypedCellData` and the worker-realm `ScriptCell`.
+ */
+export interface ScriptCell {
+  /** number | string | boolean | null (null = an empty cell). An error cell
+   *  carries its Excel literal, e.g. "#DIV/0!". */
+  value: string | number | boolean | null;
+  /** The formatted text the grid shows. */
+  display: string;
+  /** The cell's formula ("=A1+B1"); absent when it has none (or a protected
+   *  sheet hides it). */
+  formula?: string;
+  type: "number" | "text" | "boolean" | "empty" | "error";
+}
+
+/** One border edge of a cell format (B2). */
+export interface ScriptBorderSide {
+  style: "none" | "thin" | "medium" | "thick" | "dashed" | "dotted" | "double";
+  /** "#RRGGBB" or "#RRGGBBAA". */
+  color: string;
+}
+
+/**
+ * A PARTIAL cell format (B2) — what `range.format()` / `setRangeFormat()` take.
+ *
+ * Only the properties you SET change; everything else is left alone, so
+ * `format({ bold: true })` never resets the number format or the fill. An
+ * unknown property is REJECTED by the broker (with the accepted list) rather
+ * than silently ignored, so a typo fails loudly.
+ *
+ * Protection attributes (locked / formulaHidden) and the checkbox/button cell
+ * controls are deliberately NOT here: they are separate surfaces with their own
+ * governance, not formatting.
+ *
+ * Mirrors the worker-realm `ScriptFormat` and a strict subset of the backend's
+ * FormattingOptions.
+ */
+export interface ScriptFormat {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: "none" | "single" | "double" | "singleAccounting" | "doubleAccounting";
+  strikethrough?: boolean;
+  /** Font size in POINTS (1-409). */
+  fontSize?: number;
+  fontFamily?: string;
+  /** "#RRGGBB" or "#RRGGBBAA". */
+  textColor?: string;
+  backgroundColor?: string;
+  textAlign?: "left" | "center" | "right" | "general";
+  verticalAlign?: "top" | "middle" | "bottom";
+  /** An Excel number-format code, e.g. "#,##0.00", "0.0%", "General". */
+  numberFormat?: string;
+  wrapText?: boolean;
+  textRotation?: "none" | "rotate90" | "rotate270";
+  /** Indent steps (0-250). */
+  indent?: number;
+  shrinkToFit?: boolean;
+  borderTop?: ScriptBorderSide;
+  borderRight?: ScriptBorderSide;
+  borderBottom?: ScriptBorderSide;
+  borderLeft?: ScriptBorderSide;
+  borderDiagonalDown?: ScriptBorderSide;
+  borderDiagonalUp?: ScriptBorderSide;
+}
+
+/** A sort criterion for `api.sortRange` (mirrors @api SortField). */
+export interface ScriptSortField {
+  /** 0-based offset of the sort column FROM THE RANGE START (not an absolute
+   *  column index). */
+  key: number;
+  /** Default true. */
+  ascending?: boolean;
+  sortOn?: "value" | "cellColor" | "fontColor" | "icon";
+  /** The colour to sort on when sortOn is cellColor / fontColor. */
+  color?: string;
+  dataOption?: "normal" | "textAsNumber";
+  subField?: string;
+  /** A built-in list name ("weekdays", "months", ...) or a comma-separated
+   *  custom order. */
+  customOrder?: string;
+}
+
+/** A cell matched by `api.findAll`. */
+export interface ScriptFindMatch {
+  row: number;
+  col: number;
+}
+
+// ============================================================================
+// Workbook objects (B3) — enumeration, creation, cross-instance handles
+// ============================================================================
+// Mirrors scriptHost/objectInventory.ts (the host's ScriptObjectRef) and the
+// worker-realm handles in scriptHost/worker/contextShims.ts.
+
+/**
+ * One object found by `api.charts()` / `api.tables()` / `api.pivots()` /
+ * `api.namedRanges()` / `api.slicers()` / `api.shapes()`.
+ *
+ * `id` is the handle every other object method takes. Enumeration answers
+ * "what is in this workbook", never "what is inside this object".
+ */
+export interface ScriptObjectRef {
+  kind: "chart" | "table" | "pivot" | "namedRange" | "slicer" | "shape";
+  id: string;
+  name: string;
+  /** null for a workbook-scoped object. */
+  sheetIndex: number | null;
+  range?: string;
+  sourceRange?: string;
+  refersTo?: string;
+  kindDetail?: string;
+  fieldName?: string;
+  rowCount?: number;
+  columnCount?: number;
+}
+
+/** A pivot layout area, named as the Pivot Layout DSL names it. */
+export type ScriptPivotArea = "rows" | "columns" | "values" | "filters";
+
+/** An aggregation, in the Pivot Layout DSL's spelling (its VALUES clause). */
+export type ScriptAggregation =
+  | "sum" | "count" | "average" | "min" | "max"
+  | "countnumbers" | "stddev" | "stddevp" | "var" | "varp" | "product";
+
+/** A LAYOUT directive, in the Pivot Layout DSL's spelling (its LAYOUT clause). */
+export type ScriptPivotLayoutDirective =
+  | "compact" | "outline" | "tabular"
+  | "repeat-labels" | "no-repeat-labels"
+  | "grand-totals" | "no-grand-totals"
+  | "row-totals" | "no-row-totals"
+  | "column-totals" | "no-column-totals"
+  | "show-empty-rows" | "show-empty-cols"
+  | "values-on-rows" | "values-on-columns"
+  | "auto-fit"
+  | "subtotals-top" | "subtotals-bottom" | "subtotals-off";
+
+/** A handle on ANOTHER chart in the workbook (`api.chart(id)`). */
+export interface ScriptChartHandle {
+  readonly id: string;
+  /** Async: only the script's OWN object has a live worker-local mirror. */
+  getSpec(): Promise<Record<string, unknown>>;
+  updateSpec(patch: Record<string, unknown>): Promise<void>;
+  replaceSpec(fullSpec: Record<string, unknown>): Promise<void>;
+  setStyleProperty(name: string, value: string): Promise<void>;
+  delete(): Promise<void>;
+}
+
+/** A handle on ANOTHER table (`api.table(id)`). Coordinates are TABLE-RELATIVE
+ *  and clamped to the table body, exactly as inside that table's own script. */
+export interface ScriptTableHandle {
+  readonly id: string;
+  getCellValue(row: number, colIndex: number): Promise<string>;
+  setCellValue(row: number, colIndex: number, value: string): Promise<void>;
+  addRow(): Promise<void>;
+  range(address: string): ScriptRange;
+  cell(row: number, colIndex: number): ScriptRange;
+  delete(): Promise<void>;
+}
+
+/** A handle on ANOTHER pivot table (`api.pivot(id)`). */
+export interface ScriptPivotHandle {
+  readonly id: string;
+  getFields(): Promise<{ rows: string[]; columns: string[]; values: string[]; filters: string[] }>;
+  refresh(): Promise<void>;
+  addField(
+    field: string,
+    area: ScriptPivotArea,
+    position?: number,
+    aggregation?: ScriptAggregation,
+  ): Promise<void>;
+  moveField(field: string, area: ScriptPivotArea, position?: number): Promise<void>;
+  removeField(field: string, area?: ScriptPivotArea): Promise<void>;
+  setAggregation(field: string, aggregation: ScriptAggregation): Promise<void>;
+  setLayout(directives: ScriptPivotLayoutDirective[]): Promise<void>;
+  delete(): Promise<void>;
+}
+
+/** A handle on ANOTHER slicer (`api.slicer(id)`). */
+export interface ScriptSlicerHandle {
+  readonly id: string;
+  getSelectedItems(): Promise<string[]>;
+  /** null selects ALL items; [] clears the selection. */
+  setSelectedItems(items: string[] | null): Promise<void>;
+  clearSelection(): Promise<void>;
+  selectAll(): Promise<void>;
+  setStyleProperty(name: string, value: string): Promise<void>;
+}
+
+/** A handle on ANOTHER form control / shape (`api.shape(id)`). */
+export interface ScriptShapeHandle {
+  readonly id: string;
+  setProperty(key: string, value: string): Promise<void>;
+  getCellValue(cellRef: string): Promise<string>;
+  sendMessage(type: string, data?: unknown): Promise<void>;
+}
+
+/** A handle on ANOTHER named range (`api.namedRange(name)`). */
+export interface ScriptNamedRangeHandle {
+  readonly name: string;
+  getValues(): Promise<string[][]>;
+  setValues(values: string[][]): Promise<void>;
+  delete(): Promise<void>;
+}
+
+/** The `fields` argument of `api.createPivot`, in the DSL's areas. */
+export interface ScriptPivotFieldSpec {
+  rows?: string[];
+  columns?: string[];
+  filters?: string[];
+  values: Array<string | { field: string; aggregation?: ScriptAggregation }>;
+}
+
 /** A worksheet facet of the canonical model (C3) — the navigation level above a
  *  ScriptRange. Reached via the unlocked `api.workbook`. */
 export interface ScriptSheet {
@@ -178,12 +440,26 @@ export interface UnlockedAPI {
    * s.range("A1:B5").setValues(...)`. Cross-sheet reach (unlocked tier only).
    */
   readonly workbook: ScriptWorkbook;
-  /** Read a cell value by row/col (active sheet). */
+  /** Read a cell value by row/col (active sheet) as a DISPLAY STRING. */
   getCellValue(row: number, col: number): Promise<string>;
   /** Write a cell value by row/col (active sheet). */
   setCellValue(row: number, col: number, value: string): Promise<void>;
-  /** Batch-update multiple cells. */
+  /** Batch-update multiple cells (one undo step). */
   updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void>;
+  /** Read one cell WITH its type and formula (any sheet; defaults to active). */
+  getCellData(row: number, col: number, sheetIndex?: number): Promise<ScriptCell>;
+  /**
+   * Read a whole rectangle in ONE call as typed cells (max 100 000 cells).
+   * Prefer this over looping getCellValue: a 100x100 block is one round trip
+   * instead of 10 000, and the cells keep their types + formulas.
+   */
+  getRangeValues(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    sheetIndex?: number,
+  ): Promise<ScriptCell[][]>;
   /** Get all sheet names. */
   getSheetNames(): Promise<string[]>;
   /** Get the active sheet index. */
@@ -209,6 +485,177 @@ export interface UnlockedAPI {
   commitBatch(): Promise<void>;
   /** Cancel the current batch, discarding all changes since beginBatch(). */
   cancelBatch(): Promise<void>;
+
+  // ---- Formatting (B2) ----
+
+  /**
+   * Apply a PARTIAL format to a rectangle (max 100 000 cells) — one call, one
+   * undo step. Only the properties you set change. Works on ANY sheet.
+   */
+  setRangeFormat(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    format: ScriptFormat,
+    sheetIndex?: number,
+  ): Promise<void>;
+  /** Remove ALL formatting from a rectangle, keeping the values. ACTIVE SHEET
+   *  only — switch with setActiveSheet() first. */
+  clearRangeFormat(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    sheetIndex?: number,
+  ): Promise<void>;
+
+  // ---- Structure (B2) ----
+  // NOTE: every method in this block acts on the ACTIVE sheet. Passing a
+  // `sheetIndex` that names another sheet REJECTS (it does not silently retarget)
+  // — call setActiveSheet() first. Only formatting is genuinely sheet-scoped.
+
+  /** Insert `count` rows at `startRow`, shifting everything below down. */
+  insertRows(startRow: number, count: number, sheetIndex?: number): Promise<void>;
+  /** Delete `count` rows from `startRow` (their contents are lost). */
+  deleteRows(startRow: number, count: number, sheetIndex?: number): Promise<void>;
+  /** Insert `count` columns at `startCol`, shifting everything right. */
+  insertColumns(startCol: number, count: number, sheetIndex?: number): Promise<void>;
+  /** Delete `count` columns from `startCol` (their contents are lost). */
+  deleteColumns(startCol: number, count: number, sheetIndex?: number): Promise<void>;
+  /** Merge a rectangle into one cell (only the top-left value survives). */
+  mergeCells(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    sheetIndex?: number,
+  ): Promise<void>;
+  /** Split the merged region containing (row, col) back into single cells. */
+  unmergeCells(row: number, col: number, sheetIndex?: number): Promise<void>;
+  /** Set a row's height in pixels (0 restores the sheet default). */
+  setRowHeight(row: number, height: number, sheetIndex?: number): Promise<void>;
+  /** Set a column's width in pixels (0 restores the sheet default). */
+  setColumnWidth(col: number, width: number, sheetIndex?: number): Promise<void>;
+  /**
+   * Freeze rows/columns so they stay on screen while scrolling. `freezeRow` is
+   * the number of rows to freeze from the top; null unfreezes that axis.
+   */
+  freezePanes(freezeRow: number | null, freezeCol: number | null): Promise<void>;
+
+  // ---- Sheets (B2) ----
+
+  /** Add a sheet (and make it active). Rejects a name that already exists. */
+  addSheet(name?: string): Promise<{ index: number; name: string }>;
+  /** Delete a sheet and everything on it. Rejects on the last remaining sheet. */
+  deleteSheet(index: number): Promise<void>;
+  /** Rename a sheet. Rejects a name that already exists. */
+  renameSheet(index: number, newName: string): Promise<void>;
+  /** Show or hide a sheet. Rejects hiding the last visible one. */
+  setSheetVisibility(index: number, visibility: "visible" | "hidden" | "veryHidden"): Promise<void>;
+
+  // ---- Sort + find/replace (B2) ----
+
+  /**
+   * Sort a rectangle by one or more criteria (ACTIVE SHEET). Field `key` is an
+   * offset FROM THE RANGE START, so sorting A1:C10 by column B uses key 1.
+   * Resolves to the number of rows (or columns) moved.
+   */
+  sortRange(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    fields: ScriptSortField[],
+    options?: { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" },
+    sheetIndex?: number,
+  ): Promise<number>;
+  /** Find every matching cell on the active sheet, in reading order. */
+  findAll(
+    query: string,
+    options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean },
+  ): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
+  /** Replace everywhere on the active sheet (one undo step). */
+  replaceAll(
+    search: string,
+    replacement: string,
+    options?: { caseSensitive?: boolean; matchEntireCell?: boolean },
+  ): Promise<{ replacementCount: number; skippedWriteback: number }>;
+
+  // ---- Workbook objects: enumerate (B3) ----
+  // Identity and position only — never an object's contents.
+
+  /** Every chart in the workbook. */
+  charts(): Promise<ScriptObjectRef[]>;
+  /** Every structured table in the workbook. */
+  tables(): Promise<ScriptObjectRef[]>;
+  /** Every pivot table in the workbook. */
+  pivots(): Promise<ScriptObjectRef[]>;
+  /** Every named range in the workbook. */
+  namedRanges(): Promise<ScriptObjectRef[]>;
+  /** Every slicer in the workbook. */
+  slicers(): Promise<ScriptObjectRef[]>;
+  /** Every cell-anchored form control / shape in the workbook. */
+  shapes(): Promise<ScriptObjectRef[]>;
+
+  // ---- Workbook objects: create / delete (B3) ----
+
+  /** Add a chart from a full ChartSpec (schema-validated — REJECTS rather than
+   *  creating a broken chart). Resolves to the new chart's id. */
+  createChart(
+    spec: Record<string, unknown>,
+    options?: { name?: string; sheetIndex?: number; x?: number; y?: number; width?: number; height?: number },
+  ): Promise<string>;
+  /** Delete a chart by id. */
+  deleteChart(chartId: string): Promise<void>;
+  /** Turn a block of cells into a table. Always on the ACTIVE SHEET (header
+   *  names are read from the live grid) — call setActiveSheet() first for
+   *  another sheet. */
+  createTable(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    options?: { name?: string; hasHeaders?: boolean },
+  ): Promise<ScriptObjectRef>;
+  /** Delete a table (its cells and values are kept). ACTIVE SHEET only. */
+  deleteTable(tableId: string): Promise<void>;
+  /** Create a named range. Omit `sheetIndex` (or pass null) for workbook scope. */
+  createNamedRange(
+    name: string,
+    refersTo: string,
+    options?: { sheetIndex?: number | null; comment?: string },
+  ): Promise<void>;
+  /** Delete a named range (formulas using the name will break). */
+  deleteNamedRange(name: string): Promise<void>;
+  /** Create a pivot table and lay out its fields in one call. Field names are
+   *  the SOURCE COLUMN names; areas use the Pivot Layout DSL's vocabulary. */
+  createPivot(
+    sourceRange: string,
+    destinationCell: string,
+    fields: ScriptPivotFieldSpec,
+    options?: { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean },
+  ): Promise<ScriptObjectRef>;
+  /** Delete a pivot table. */
+  deletePivot(pivotId: string): Promise<void>;
+
+  // ---- Workbook objects: address ANOTHER instance (B3) ----
+  // A script is pinned to ONE object at mount. These handles reach any OTHER
+  // object in the workbook by id, through the SAME host aspect executors that
+  // object's own script uses. Unlocked tier only.
+
+  /** A handle on any chart. */
+  chart(chartId: string): ScriptChartHandle;
+  /** A handle on any table (table-relative coordinates, clamped to its body). */
+  table(tableId: string): ScriptTableHandle;
+  /** A handle on any pivot table, including its field layout. */
+  pivot(pivotId: string): ScriptPivotHandle;
+  /** A handle on any slicer's selection and style. */
+  slicer(slicerId: string): ScriptSlicerHandle;
+  /** A handle on any form control / shape. */
+  shape(shapeId: string): ScriptShapeHandle;
+  /** A handle on any named range. */
+  namedRange(name: string): ScriptNamedRangeHandle;
 }
 
 // ============================================================================
@@ -293,14 +740,21 @@ export interface WorkbookContext extends BaseObjectContext {
   /** Called when the workbook is opened. */
   onOpen(handler: EventHandler): CleanupFn;
 
-  /** Called before the workbook is saved. */
-  onBeforeSave(handler: EventHandler): CleanupFn;
+  /**
+   * Called before the workbook is saved — CANCELLABLE. Return
+   * {@link LifecycleVerdictReply} (`false`, `"cancel"` or `{ cancel: true,
+   * reason }`) to stop the save; anything else (including nothing) allows it.
+   * The verdict must arrive inside the host's deadline; a late one is ignored
+   * and the save proceeds, so a hung script can never block Ctrl+S.
+   */
+  onBeforeSave(handler: BeforeLifecycleHandler<{ path?: string }>): CleanupFn;
 
   /** Called after the workbook is saved. */
   onAfterSave(handler: EventHandler): CleanupFn;
 
-  /** Called before the workbook is closed. */
-  onBeforeClose(handler: EventHandler): CleanupFn;
+  /** Called before the workbook is closed — CANCELLABLE, exactly like
+   *  {@link WorkbookContext.onBeforeSave}. */
+  onBeforeClose(handler: BeforeLifecycleHandler): CleanupFn;
 
   /** Called when the active sheet changes. */
   onSheetChange(handler: EventHandler<{ sheetIndex: number; sheetName: string }>): CleanupFn;
@@ -341,12 +795,28 @@ export interface ScriptRange {
   getCell(rowOffset: number, colOffset: number): ScriptRange;
   /** The top-left cell's display value. */
   getValue(): Promise<string>;
-  /** All values as a rows x cols grid of display strings. */
+  /**
+   * All values as a rows x cols grid of display strings — ONE round trip.
+   * These are FORMATTED strings: do NOT write them back (every formula would
+   * become its rendered text, and "1 234,50 kr" is not a number). Use
+   * getData() when you need types or formulas.
+   */
   getValues(): Promise<string[][]>;
+  /** All cells with value, type and formula — ONE round trip. The safe read
+   *  for a read/modify/write round-trip. */
+  getData(): Promise<ScriptCell[][]>;
+  /** All formulas as a rows x cols grid ("" where a cell has none). */
+  getFormulas(): Promise<string[][]>;
   /** Set the top-left cell's value. */
   setValue(value: string): Promise<void>;
-  /** Set values from a 2D array (clamped to the range's dimensions). */
+  /** Set values from a 2D array (clamped to the range's dimensions) — ONE call,
+   *  one undo step. */
   setValues(values: string[][]): Promise<void>;
+  /** Apply a PARTIAL format to every cell in the range — ONE call, one undo
+   *  step. Absent properties are left alone. */
+  format(format: ScriptFormat): Promise<void>;
+  /** Remove ALL formatting from the range, keeping the values. */
+  clearFormat(): Promise<void>;
 }
 
 /** Context for Sheet-level scripts (applies to all sheets). */
@@ -374,11 +844,40 @@ export interface SheetContext extends BaseObjectContext {
     changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }>;
   }>): CleanupFn;
 
-  /** Read a cell value from the specified (or active) sheet. */
+  /** Read a cell's DISPLAY STRING from the specified (or active) sheet. */
   getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
 
   /** Write a cell value. */
   setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
+
+  /**
+   * Read one cell WITH its type and formula. Restricted scripts may only name
+   * their own (active) sheet.
+   */
+  getCellData(row: number, col: number, sheetIndex?: number): Promise<ScriptCell>;
+
+  /**
+   * Apply a PARTIAL format to a rectangle on this sheet (B2) — one call, one
+   * undo step. Only the properties you set change. Restricted scripts may only
+   * name their own (active) sheet.
+   */
+  setRangeFormat(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    format: ScriptFormat,
+    sheetIndex?: number,
+  ): Promise<void>;
+
+  /** Remove ALL formatting from a rectangle on this sheet, keeping the values. */
+  clearRangeFormat(
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number,
+    sheetIndex?: number,
+  ): Promise<void>;
 
   /**
    * A range on THIS sheet by A1 address ("A1", "A1:B5") — the canonical model
@@ -612,11 +1111,35 @@ export interface PivotContext extends BaseObjectContext {
    */
   onDrillThrough(handler: EventHandler<PivotDrillContext>): CleanupFn;
 
-  /** Get current pivot field configuration. */
+  /** Get current pivot field configuration (sync, seeded from the mount
+   *  snapshot and refreshed after every layout change below). */
   getFields(): { rows: string[]; columns: string[]; values: string[]; filters: string[] };
 
   /** Refresh the pivot table data. */
   refresh(): Promise<void>;
+
+  // ---- Layout mutation (B3) ----
+  // The vocabulary is the Pivot Layout DSL's (extensions/_shared/dsl/
+  // pivotLayout), so a script and the DSL editor describe the same pivot with
+  // the same words. `field` is the SOURCE COLUMN name; naming a column that
+  // does not exist rejects with the list of the ones that do.
+
+  /** Place a source field in an area. `position` inserts at an index (default:
+   *  append); `aggregation` applies to the "values" area (default: sum). */
+  addField(
+    field: string,
+    area: ScriptPivotArea,
+    position?: number,
+    aggregation?: ScriptAggregation,
+  ): Promise<void>;
+  /** Move an already-placed field to another area (or another position). */
+  moveField(field: string, area: ScriptPivotArea, position?: number): Promise<void>;
+  /** Remove a placed field. Omit `area` to remove it from wherever it sits. */
+  removeField(field: string, area?: ScriptPivotArea): Promise<void>;
+  /** Change how a VALUE field is summarized. */
+  setAggregation(field: string, aggregation: ScriptAggregation): Promise<void>;
+  /** Apply LAYOUT directives, left to right (a later directive wins). */
+  setLayout(directives: ScriptPivotLayoutDirective[]): Promise<void>;
 }
 
 // ============================================================================
@@ -1070,6 +1593,7 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         accessLevel: definition.accessLevel,
         provenance: definition.provenance,
         packageName: definition.packageName,
+        packageVersion: definition.packageVersion,
         declaredCapabilities: definition.declaredCapabilities,
         apiVersion: SCRIPT_API_VERSION,
       });

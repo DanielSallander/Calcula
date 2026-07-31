@@ -47,12 +47,18 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { openPackageInspectorWindow } from "./lib/openPackageInspectorWindow";
+import {
+  syncWritebackValidators,
+  resetWritebackValidators,
+  WRITEBACK_VALIDATORS_CHANGED_EVENT,
+} from "./lib/writebackValidatorSync";
 import { registerCommitGuard } from "@api/commitGuards";
 import { runWritebackValidator } from "@api/writebackValidators";
 import {
   saveWritebackDraft,
   refreshData,
   getSheetIdForIndex,
+  WRITEBACK_INDEX_CHANGED_EVENT,
   type SubmissionValue,
 } from "@api/distribution";
 import { emitAppEvent } from "@api/events";
@@ -531,8 +537,28 @@ function activate(context: ExtensionContext): void {
 
   // Wrap snapshot refresh to also update interceptor registration
   async function refreshAndUpdateInterceptor(): Promise<void> {
-    await refreshWritebackSnapshot();
+    const regions = await refreshWritebackSnapshot();
     updateStyleInterceptor();
+    // Publisher-shipped custom validators. The AUTHORITATIVE run is Rust-side
+    // at submit (same body, out of the Ed25519-verified manifest, in the
+    // embedded QuickJS realm) and it fails CLOSED without the user's consent —
+    // so this pass exists to (a) collect the consent the backend demands and
+    // (b) mount approved bodies for advisory as-you-type feedback. Never
+    // allowed to break the refresh: an unreachable backend must not stop the
+    // style interceptor or the index event.
+    void syncWritebackValidators(regions)
+      .catch((err) => {
+        console.warn("[Distribution] writeback validator sync failed:", err);
+      })
+      .finally(() => {
+        emitAppEvent(WRITEBACK_VALIDATORS_CHANGED_EVENT, {});
+      });
+    // The script host keeps its OWN copy of the region index, so a script grid
+    // write can be routed into the same validated draft path this extension's
+    // commit guard uses without paying one IPC per cell. Tell it the index
+    // moved. (Its copy is an optimization only: a stale one fails CLOSED, in
+    // Rust's ensure_writeback_draft_before_write.)
+    emitAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, { regionCount: regions.length });
   }
 
   cleanupFns.push(() => {
@@ -541,6 +567,9 @@ function activate(context: ExtensionContext): void {
       unregStyleInterceptor = null;
     }
   });
+
+  // Tear down every mounted advisory validator worker on deactivate.
+  cleanupFns.push(() => resetWritebackValidators());
 
   // Initial snapshot load (in case subscriptions already exist at startup)
   refreshAndUpdateInterceptor();

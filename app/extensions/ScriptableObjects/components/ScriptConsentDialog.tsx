@@ -201,6 +201,8 @@ const CAP_ICON: Record<CapabilityId, string> = {
   "formula.udf": "fx",
   "bi.model": "M",
   "bi.connector": "->M",
+  "ui.dialog": "[?]",
+  "distribution.writeback": "->P",
 };
 
 const footerStyle: React.CSSProperties = {

@@ -520,6 +520,10 @@ pub fn pull(
             // the script cannot masquerade as locally-authored.
             script.provenance = persistence::ScriptProvenance::Distributed;
             script.package_name = Some(request.package_name.clone());
+            // The RESOLVED version (not the pin) — this is what the script sees
+            // as context.package.version, so it must name the exact revision the
+            // source came from.
+            script.package_version = Some(version_str.clone());
             // R19 SECURITY: the declared-capability ceiling is server-
             // authoritative — it comes from the package MANIFEST, never from
             // the (tamperable) script source. A tampered source can therefore

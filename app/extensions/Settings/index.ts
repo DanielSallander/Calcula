@@ -4,7 +4,8 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { SettingsView } from "./SettingsView";
+import { SettingsView, SETTINGS_SHOW_TAB_EVENT } from "./SettingsView";
+import type { SettingsTab } from "./SettingsView";
 
 const cleanupFns: Array<() => void> = [];
 
@@ -44,6 +45,27 @@ function activate(context: ExtensionContext): void {
     context.ui.activityBar.toggle("settings");
   });
   cleanupFns.push(() => context.commands.unregister("settings.toggle"));
+
+  // Deep-link into one Settings tab. `settings.showScriptSecurity` is the
+  // destination every script-security prompt names ("Settings > Script
+  // Security"); a prompt that points at a place the user cannot reach is a bug.
+  context.commands.register("settings.showTab", (tab?: unknown) => {
+    context.ui.activityBar.open("settings");
+    window.dispatchEvent(
+      new CustomEvent<SettingsTab>(SETTINGS_SHOW_TAB_EVENT, {
+        detail: (typeof tab === "string" ? tab : "general") as SettingsTab,
+      }),
+    );
+  });
+  cleanupFns.push(() => context.commands.unregister("settings.showTab"));
+
+  context.commands.register("settings.showScriptSecurity", () => {
+    context.ui.activityBar.open("settings");
+    window.dispatchEvent(
+      new CustomEvent<SettingsTab>(SETTINGS_SHOW_TAB_EVENT, { detail: "scriptSecurity" }),
+    );
+  });
+  cleanupFns.push(() => context.commands.unregister("settings.showScriptSecurity"));
 
   console.log("[Settings] Extension activated");
 }

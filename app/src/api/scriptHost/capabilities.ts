@@ -127,34 +127,45 @@ export async function syncNetOriginsToBackend(scriptId: string): Promise<void> {
   }
 }
 
-/** The BI-family capabilities whose authoritative gate lives in the Rust
- *  CapabilityStore (bi_query / script_bi_sql / script_bi_model / the
- *  connector host re-check it per call). Grants for these are mirrored to
- *  Rust on grant, on mount, and on reconcile. */
-export const RUST_MIRRORED_BI_CAPS: ReadonlySet<CapabilityId> = new Set([
+/** The capabilities whose authoritative gate lives in the Rust CapabilityStore
+ *  (bi_query / script_bi_sql / script_bi_model / the connector host /
+ *  script_writeback re-check it per call). Grants for these are mirrored to
+ *  Rust on grant, on mount, and on reconcile.
+ *
+ *  MUST stay a subset of the backend's GRANTABLE_CAPABILITIES allowlist
+ *  (app/src-tauri/src/scripting/writeback_gateway.rs) — an id the backend does
+ *  not accept fails the mirror, and the script's next call is denied there. */
+export const RUST_MIRRORED_CAPABILITIES: ReadonlySet<CapabilityId> = new Set([
   "bi.query",
   "bi.sql",
   "bi.model",
   "bi.connector",
+  "distribution.writeback",
+  // The scheduler re-checks this grant on EVERY firing (script_scheduler
+  // "due"), which is the whole point: a revoke has to stop a job that is
+  // already persisted in the workbook, not merely block new registrations.
+  "schedule",
 ] as CapabilityId[]);
 
-/** Mirror one granted BI capability to the Rust store (called immediately on
- *  grant). The Rust gates re-check the store authoritatively per call. */
-export async function grantBiCapability(
+/** Mirror one consent-granted capability to the Rust store (called immediately
+ *  on grant). The Rust gates re-check the store authoritatively per call.
+ *  `grant_script_capability` is the GENERIC mirror — it replaced the bi-only
+ *  `grant_script_bi`, whose id check rejected everything outside `bi.*`. */
+export async function grantBackendCapability(
   scriptId: string,
   cap: CapabilityId,
 ): Promise<void> {
-  await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+  await invokeBackend("grant_script_capability", { scriptId, capability: cap });
 }
 
-/** Re-push a script's session-granted BI capabilities to Rust (mount), so they
- *  survive an unmount/remount within the session — parallel to net origins. */
-export async function syncBiGrantsToBackend(scriptId: string): Promise<void> {
+/** Re-push a script's session-granted backend capabilities to Rust (mount), so
+ *  they survive an unmount/remount within the session — parallel to net origins. */
+export async function syncBackendGrants(scriptId: string): Promise<void> {
   const { caps } = getScriptGrants(scriptId);
   for (const cap of caps) {
-    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
+    if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
       try {
-        await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+        await grantBackendCapability(scriptId, cap);
       } catch {
         /* best-effort; the script JIT-reprompts if Rust lacks the grant */
       }
@@ -174,13 +185,28 @@ export async function reconcileBackendGrants(scriptId: string): Promise<void> {
       await invokeBackend("grant_script_net_origin", { scriptId, origin });
     }
     for (const cap of caps) {
-      if (RUST_MIRRORED_BI_CAPS.has(cap)) {
-        await invokeBackend("grant_script_bi", { scriptId, capability: cap });
+      if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
+        await grantBackendCapability(scriptId, cap);
       }
     }
   } catch {
     /* best-effort; the script JIT-reprompts / re-syncs if Rust lacks a grant */
   }
+}
+
+/**
+ * Read a script's CURRENT backend grants. The only way to see what a
+ * Rust-QuickJS surface (a notebook) may touch: its JIT consent grants live in
+ * the Rust CapabilityStore and are never mirrored into `grantState` here.
+ * Read-only; used by the "Code in This File" transparency inventory.
+ *
+ * The Rust store holds ONE capability set, so this returns EVERY granted id
+ * (bi.* AND distribution.writeback) — which is the honest answer to "what can
+ * this script touch?".
+ */
+export async function listBackendCapabilityGrants(scriptId: string): Promise<CapabilityId[]> {
+  const caps = await invokeBackend<string[]>("list_script_capability_grants", { scriptId });
+  return caps as CapabilityId[];
 }
 
 /** Drop a script's Rust-side grants (called on unmount). */
@@ -216,7 +242,7 @@ export async function revokeCapability(scriptId: string, cap: CapabilityId): Pro
   // reconcile the authoritative store to the now-reduced live grant set rather
   // than coarse-dropping the whole entry — so revoking one cap leaves the
   // script's other grants intact in Rust.
-  if (cap === "net.fetch" || RUST_MIRRORED_BI_CAPS.has(cap)) {
+  if (cap === "net.fetch" || RUST_MIRRORED_CAPABILITIES.has(cap)) {
     await reconcileBackendGrants(scriptId);
   }
 }
@@ -249,6 +275,15 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "formula.udf": "evaluate worksheet formulas (user-defined functions)",
   "bi.model": "modify your BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
   "bi.connector": "feed external data into your BI model as a data connector",
+  "ui.dialog": "show you a dialog and receive what you enter",
+  "distribution.writeback":
+    "fill in the input cells of a subscribed package and send your answers to its publisher (and, if it can sign the package, read and approve everyone else's)",
+  // Honest on both counts: it starts ITSELF (that is the novel authority), and
+  // it only does so while the app is open (that is the honest limit). Naming
+  // the limit is not a hedge — a user who reads "on a schedule" and imagines a
+  // service that emails them at 3am has been misled.
+  schedule:
+    "run on a schedule while Calcula is open, without you starting it (saved in this workbook, so it resumes next time you open it)",
 };
 
 /** One-line description of a capability id, for transparency UI (extension

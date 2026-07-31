@@ -3,6 +3,7 @@ import { tracedInvoke } from '../../utils/bridge';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { CellData } from '../types/types';
 import { emitAppEvent, AppEvents } from './events';
+import { checkLifecycleGuards } from './lifecycleGuards';
 
 const CALCULA_FILTER = {
   name: 'Calcula Workbook',
@@ -126,6 +127,11 @@ export async function saveFileAs(password?: string): Promise<string | null> {
           if (!ok) return null;
         }
       }
+      // Cancellable Before-Save. Guards run BEFORE the BEFORE_SAVE broadcast so
+      // a cancelled save never makes subscribers do save-prep work for a save
+      // that will not happen. checkLifecycleGuards reports the cancellation to
+      // the user (attributed to the script by name) — never a silent no-op.
+      if (await checkLifecycleGuards('save', { path })) return null;
       emitAppEvent(AppEvents.BEFORE_SAVE, { path });
       await tracedInvoke('save_file', { path, password });
       emitAppEvent(AppEvents.AFTER_SAVE, { path });
@@ -150,6 +156,9 @@ export async function saveFile(password?: string): Promise<string | null> {
     const currentPath = await getCurrentFilePath();
 
     if (currentPath) {
+      // Cancellable Before-Save (see saveFileAs). Returning null means "not
+      // saved", which every caller already handles as the user-cancelled case.
+      if (await checkLifecycleGuards('save', { path: currentPath })) return null;
       emitAppEvent(AppEvents.BEFORE_SAVE, { path: currentPath });
       await tracedInvoke('save_file', { path: currentPath, password });
       emitAppEvent(AppEvents.AFTER_SAVE, { path: currentPath });

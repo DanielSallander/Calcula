@@ -76,19 +76,24 @@ export async function loadConsents(): Promise<ConsentRecord[]> {
 }
 
 /**
- * The deduped, sorted set of capability ids declared across a package's
- * scripts (the union of every script's `// @capability` pragmas). Used to
- * compare currently-declared caps against what was consented, so a capability
- * EXPANSION re-prompts exactly like a source change does. Origins are not part
- * of this comparison: a source change that adds an origin already changes the
- * source hash and re-prompts.
+ * The deduped, SORTED union of capability ids declared across a set of script
+ * sources (every script's `// @capability` pragmas). Exported because the
+ * per-workbook trust store (@api/scriptSecurity) compares the same way: a
+ * capability EXPANSION must re-prompt exactly like a source change does, and
+ * two independent implementations of "what does this code declare?" would drift.
+ * Origins are deliberately not part of this set: a source change that adds an
+ * origin already changes the source hash and re-prompts.
  */
-function declaredCapKey(sources: string[]): string {
+export function declaredCapabilitySet(sources: string[]): CapabilityId[] {
   const caps = new Set<CapabilityId>();
   for (const source of sources) {
     for (const cap of parseDeclaredCapabilities(source).caps) caps.add(cap);
   }
-  return [...caps].sort().join(",");
+  return [...caps].sort();
+}
+
+function declaredCapKey(sources: string[]): string {
+  return declaredCapabilitySet(sources).join(",");
 }
 
 /** The deduped, sorted capability-id set of a stored consent record. */
@@ -193,11 +198,35 @@ export interface ChangedScript {
 }
 
 /**
+ * The scripts whose source CHANGED between a previously-approved set and the
+ * current one — each with the previously-approved source and the new one — so a
+ * re-consent UI can show a DIFF instead of asking for a blind re-approval. Only
+ * scripts that (a) appear in `prior`, (b) whose source actually differs, and
+ * (c) whose old source was retained are returned.
+ *
+ * Exported as a standalone helper (rather than living inside getChangedScripts)
+ * because per-workbook run-trust (@api/scriptSecurity) needs the SAME diff over
+ * a differently-stored record. One implementation, two callers.
+ */
+export async function diffScriptSets(
+  prior: ConsentedScript[],
+  current: Array<{ id: string; source: string }>,
+): Promise<ChangedScript[]> {
+  const changed: ChangedScript[] = [];
+  for (const script of current) {
+    const before = prior.find((s) => s.id === script.id);
+    if (!before || before.source === undefined) continue;
+    const hash = await sha256Hex(script.source);
+    if (hash !== before.sourceHash) {
+      changed.push({ id: script.id, oldSource: before.source, newSource: script.source });
+    }
+  }
+  return changed;
+}
+
+/**
  * For a re-consent prompt: the scripts whose source CHANGED since the user last
- * approved this package — each with the previously-approved source and the new
- * one — so the consent UI can show a diff instead of a blind re-approval. Only
- * scripts that (a) have a prior consent record, (b) whose source actually
- * differs, and (c) whose old source was retained are returned.
+ * approved this package.
  */
 export async function getChangedScripts(
   consents: ConsentRecord[],
@@ -206,14 +235,5 @@ export async function getChangedScripts(
 ): Promise<ChangedScript[]> {
   const record = consents.find((c) => c.packageName === packageName);
   if (!record) return [];
-  const changed: ChangedScript[] = [];
-  for (const script of scripts) {
-    const prior = record.scripts.find((s) => s.id === script.id);
-    if (!prior || prior.source === undefined) continue;
-    const hash = await sha256Hex(script.source);
-    if (hash !== prior.sourceHash) {
-      changed.push({ id: script.id, oldSource: prior.source, newSource: script.source });
-    }
-  }
-  return changed;
+  return diffScriptSets(record.scripts, scripts);
 }

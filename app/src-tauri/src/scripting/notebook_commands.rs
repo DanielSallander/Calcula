@@ -140,6 +140,7 @@ async fn run_cell_internal(
     notebook_id: &str,
     cell_id: &str,
     source: &str,
+    view_state: Option<&crate::scripting::types::HostViewState>,
 ) -> Result<NotebookCellResponse, String> {
     // Notebook cells are script execution — same security gate as run_script.
     super::commands::check_script_security(script_state)?;
@@ -189,6 +190,7 @@ async fn run_cell_internal(
             sheet_names,
             active_sheet,
             format!("notebook:{}", notebook_id),
+            view_state.cloned(),
             Some(super::notebook_executor::ProviderSeed {
                 app: app.clone(),
                 rt: tokio::runtime::Handle::current(),
@@ -206,69 +208,35 @@ async fn run_cell_internal(
         runtime.execution_counter
     };
 
-    // 7. Apply modified grids back to AppState (if cells were modified)
-    match &result {
-        script_engine::ScriptResult::Success { cells_modified, .. } => {
-            if *cells_modified > 0 && !modified_grids.is_empty() {
-                let active_grid_clone = modified_grids.get(active_sheet).cloned();
-
-                let mut app_grids = app_state.grids.lock().map_err(|e| e.to_string())?;
-                // SHEET PROTECTION, decided for every sheet BEFORE the swap.
-                //
-                // This path installs the post-script grids wholesale
-                // (`*app_grids = modified_grids`), which consults nothing — so
-                // without this a notebook cell could rewrite every cell of a
-                // protected sheet. Deciding before the swap makes a refusal
-                // atomic: nothing has been replaced yet.
-                //
-                // Borrowed gate form: `grids` is held here and std::sync::Mutex
-                // is not reentrant. Canonical order grids -> styles -> protection.
-                {
-                    let styles = app_state.style_registry.lock().map_err(|e| e.to_string())?;
-                    let protection = app_state.sheet_protection.lock().map_err(|e| e.to_string())?;
-                    for (idx, after_grid) in modified_grids.iter().enumerate() {
-                        let Some(before) = app_grids.get(idx) else { continue };
-                        let diff = crate::scripting::commands::diff_grids_to_updates(before, after_grid);
-                        if diff.is_empty() {
-                            continue;
-                        }
-                        crate::protection::check_sheet_protection_cells_in(
-                            &protection,
-                            before,
-                            &styles,
-                            idx,
-                            diff.iter().map(|u| (u.row, u.col)),
-                        )?;
-                    }
-                }
-                *app_grids = modified_grids;
-                drop(app_grids);
-
-                if let Some(grid) = active_grid_clone {
-                    let mut app_grid = app_state.grid.lock().map_err(|e| e.to_string())?;
-                    *app_grid = grid;
-                }
-
-                // Audit (unified Rust-QuickJS trail): record the notebook cell's
-                // grid mutation through the shared sink so all QuickJS surfaces
-                // produce one consistent, always-on, structured audit entry.
-                // Notebooks apply wholesale (no diff), so no mutated range is
-                // attached — just the surface, notebook:cell id, sheet, and count.
-                //
-                // AFTER the protection gate and the swap, deliberately: an
-                // entry recorded before the gate would assert a mutation that
-                // was refused and never happened — a false audit trail.
-                crate::scripting::commands::record_script_grid_mutation(
-                    app_state,
-                    "notebook",
-                    &format!("{}:{}", notebook_id, cell_id),
-                    active_sheet,
-                    *cells_modified,
-                    &[],
-                );
-            }
-        }
-        _ => {}
+    // 7. Apply everything the cell produced back into AppState through the
+    //    SHARED script apply path (the same one run_script and the MCP script
+    //    tool use). This replaced a wholesale `*app_grids = modified_grids`
+    //    swap, which had no undo entry (Ctrl+Z could not revert a notebook cell)
+    //    and no recalculation (formulas depending on written cells went stale).
+    //
+    //    The shared path performs the whole-workbook protection pre-pass, opens
+    //    ONE undo transaction, replays the active-sheet diff through
+    //    update_cells_batch (parse + dependency maps + recalc), installs the
+    //    other written sheets with their formula strings parsed and evaluates
+    //    them, marks the workbook dirty, persists the script's workbook-property
+    //    writes, and records the per-sheet audit entries — so a notebook cell is
+    //    now audited with the same surface/id/sheet/range shape AND the same
+    //    effective-change counts as every other script surface.
+    if let script_engine::ScriptResult::Success {
+        cells_modified,
+        workbook_properties_changed,
+        ..
+    } = &result
+    {
+        crate::scripting::commands::apply_script_result_via_handle(
+            app,
+            &modified_grids,
+            active_sheet,
+            *cells_modified,
+            workbook_properties_changed,
+            "notebook",
+            &format!("{}:{}", notebook_id, cell_id),
+        )?;
     }
 
     // 8. Update the notebook document's cell with execution results
@@ -353,7 +321,8 @@ async fn reset_runtime_internal(script_state: &ScriptState) -> Result<(), String
 /// 1. Ensures a NotebookSession exists (creates one if needed)
 /// 2. Captures a grid snapshot (checkpoint) before execution
 /// 3. Executes the cell in the persistent QuickJS runtime
-/// 4. Applies modified grids back to AppState
+/// 4. Applies the cell's writes back to AppState through the shared script apply
+///    path (undoable, parsed, recalculated, audited — see `run_cell_internal`)
 /// 5. Returns the execution result
 #[tauri::command]
 pub async fn notebook_run_cell(
@@ -365,7 +334,16 @@ pub async fn notebook_run_cell(
 ) -> Result<NotebookCellResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let _exec = script_state.notebook_exec_lock.lock().await;
-    run_cell_internal(&app, &state, &script_state, &request.notebook_id, &request.cell_id, &request.source).await
+    run_cell_internal(
+        &app,
+        &state,
+        &script_state,
+        &request.notebook_id,
+        &request.cell_id,
+        &request.source,
+        request.view_state.as_ref(),
+    )
+    .await
 }
 
 /// Run all notebook cells sequentially from the top.
@@ -376,6 +354,7 @@ pub async fn notebook_run_all(
     state: State<'_, AppState>,
     script_state: State<'_, ScriptState>,
     notebook_id: String,
+    view_state: Option<crate::scripting::types::HostViewState>,
     window: tauri::Window,
 ) -> Result<Vec<NotebookCellResponse>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
@@ -402,7 +381,16 @@ pub async fn notebook_run_all(
     let mut results = Vec::new();
 
     for (cell_id, source) in cell_sources {
-        let response = run_cell_internal(&app, &state, &script_state, &notebook_id, &cell_id, &source).await?;
+        let response = run_cell_internal(
+            &app,
+            &state,
+            &script_state,
+            &notebook_id,
+            &cell_id,
+            &source,
+            view_state.as_ref(),
+        )
+        .await?;
 
         // Stop on error
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });
@@ -553,6 +541,7 @@ async fn notebook_rewind_internal(
             &request.notebook_id,
             &cell_id,
             &source,
+            request.view_state.as_ref(),
         )
         .await?;
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });
@@ -619,6 +608,7 @@ pub async fn notebook_run_from(
             &request.notebook_id,
             &cell_id,
             &source,
+            request.view_state.as_ref(),
         )
         .await?;
         let is_error = matches!(&response, NotebookCellResponse::Error { .. });

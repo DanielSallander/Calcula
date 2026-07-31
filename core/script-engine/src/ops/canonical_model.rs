@@ -21,7 +21,9 @@ use std::rc::Rc;
 use engine::cell::Cell;
 use engine::coord::{col_to_index, index_to_col};
 
-use crate::types::{cell_value_to_string, string_to_cell_value, ScriptContext};
+use crate::types::{
+    cell_value_to_string, string_to_cell_value, write_is_effective, ScriptContext,
+};
 
 /// An inclusive 0-based cell box, the geometry behind a Range.
 #[derive(Clone, Copy)]
@@ -284,18 +286,24 @@ fn read_cell(ctx: &ScriptContext, sheet_index: usize, row: u32, col: u32) -> Str
 }
 
 /// Write a value into a grid cell, preserving the existing style index and
-/// bumping the cells-modified counter (mirrors the flat setCellValue op).
+/// bumping the cells-modified counter for EFFECTIVE changes only (mirrors the
+/// flat setCellValue op, so the audit number means the same thing on both).
 fn write_cell(ctx: &mut ScriptContext, sheet_index: usize, row: u32, col: u32, value: &str) {
     if let Some(grid) = ctx.grids.get_mut(sheet_index) {
-        let style_index = grid.get_cell(row, col).map(|c| c.style_index).unwrap_or(0);
+        let new_value = string_to_cell_value(value);
+        let existing = grid.get_cell(row, col);
+        let style_index = existing.map(|c| c.style_index).unwrap_or(0);
+        let effective = write_is_effective(existing, &new_value);
         let cell = Cell {
             ast: None,
-            value: string_to_cell_value(value),
+            value: new_value,
             style_index,
             rich_text: None,
         };
         grid.set_cell(row, col, cell);
-        *ctx.cells_modified.borrow_mut() += 1;
+        if effective {
+            *ctx.cells_modified.borrow_mut() += 1;
+        }
     }
 }
 

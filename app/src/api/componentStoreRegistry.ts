@@ -14,6 +14,9 @@ import type { ConnectionInfo, UpdateConnectionRequest } from "./backend";
 
 export interface ISlicerStoreService {
   getSlicerById(id: string): { name: string; selectedItems: string[] | null; fieldName: string; sourceType: string; columns: number } | undefined;
+  /** Every slicer in the workbook, as identity-only rows (B3 enumeration).
+   *  Never the cached ITEMS — that is data, and reading it is a separate call. */
+  listSlicers(): Array<{ id: string; name: string; sheetIndex: number; fieldName: string; sourceType: string }>;
   getSelectedItems(slicerId: string): string[];
   setSelectedItems(slicerId: string, items: string[] | null): Promise<void>;
   getCachedItems(slicerId: string): Array<{ text: string; hasData: boolean }> | undefined;
@@ -52,8 +55,32 @@ export interface ITimelineStoreService {
 // Chart Store Interface
 // ============================================================================
 
+/** Where a newly created chart is placed on its sheet (pixels, sheet-relative).
+ *  Every field is optional — the Charts extension supplies its insert defaults
+ *  for whatever the caller omits. */
+export interface ChartPlacement {
+  name?: string;
+  sheetIndex?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface IChartStoreService {
   getChartById(id: string): { specJson: string } | null;
+  /** Every chart in the workbook, with its STORED definition JSON (B3
+   *  enumeration). The spec stays opaque here — the ChartSpec schema lives in
+   *  the Charts extension, so the caller only parses what it needs. */
+  listCharts(): Array<{ chartId: string; name: string; sheetIndex: number; specJson: string }>;
+  /** Create a chart from a full ChartSpec and place it. Validates the spec
+   *  against the ChartSpec schema (throws on a violation), registers the grid
+   *  region and announces the new chart exactly as the Insert Chart dialog
+   *  does. Returns the new chart's stable id. */
+  createChart(fullSpec: Record<string, unknown>, placement?: ChartPlacement): string;
+  /** Delete a chart (undoable through the extension's own delete trash).
+   *  Returns false when no chart has that id. */
+  deleteChart(chartId: string): boolean;
   /** Deep-merge a partial patch into the chart's spec. Validates the merged
    *  result against the ChartSpec schema; throws on a schema violation. */
   updateChartSpec(chartId: string, specUpdates: Record<string, unknown>): void;
@@ -97,6 +124,25 @@ export interface IBiConnectionService {
 // Pane Control Store Interface
 // ============================================================================
 
+/**
+ * Access to CELL-ANCHORED form controls (buttons, checkboxes, shapes),
+ * registered by the Controls extension. These are the objects an object script
+ * mounts as objectType "shape"/"button" (instanceId "control-{sheet}-{row}-{col}"),
+ * so this is what api.listObjects("shape") enumerates. Read-only: creating a
+ * control is a canvas-placement gesture, not a data operation.
+ */
+export interface IControlStoreService {
+  /** Every control on ONE sheet, as identity + anchor rows. Never the property
+   *  VALUES (those can be formulas over the user's data — a separate read). */
+  listControls(sheetIndex: number): Promise<Array<{
+    sheetIndex: number;
+    row: number;
+    col: number;
+    controlType: string;
+    name?: string;
+  }>>;
+}
+
 /** Access to pane controls (Controls pane), registered by the ControlsPane
  *  extension. Lets the script host seed a pane-hosted custom control's shape
  *  script with its declared properties (instanceId "pane-{controlId}") without
@@ -116,6 +162,7 @@ let timelineStore: ITimelineStoreService | null = null;
 let chartStore: IChartStoreService | null = null;
 let pivotStore: IPivotStoreService | null = null;
 let biConnectionService: IBiConnectionService | null = null;
+let controlStore: IControlStoreService | null = null;
 let paneControlStore: IPaneControlStoreService | null = null;
 
 export function registerSlicerStoreService(service: ISlicerStoreService): void {
@@ -156,6 +203,14 @@ export function getPivotStoreService(): IPivotStoreService | null {
 
 export function getBiConnectionService(): IBiConnectionService | null {
   return biConnectionService;
+}
+
+export function registerControlStoreService(service: IControlStoreService | null): void {
+  controlStore = service;
+}
+
+export function getControlStoreService(): IControlStoreService | null {
+  return controlStore;
 }
 
 export function registerPaneControlStoreService(service: IPaneControlStoreService | null): void {

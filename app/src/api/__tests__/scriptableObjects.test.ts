@@ -19,7 +19,7 @@ import type {
   ObjectScriptDefinition,
   ScriptableObjectType,
 } from "../scriptableObjects";
-import { buildHandleFromDefinition, registerExposed } from "../scriptHost/broker";
+import { buildHandleFromDefinition, registerExposed, unregisterExposed } from "../scriptHost/broker";
 
 // ============================================================================
 // Helpers
@@ -151,6 +151,40 @@ describe("ObjectScriptManager", () => {
 
       cleanup();
       expect(callExposedMethod("workbook", null, "myMethod")).toBeUndefined();
+    });
+
+    // base.unexpose: the broker-side half of `context.expose()`'s cleanup being
+    // called while the script is STILL MOUNTED. Until the Wave B integration
+    // sweep the method had no ALLOWLIST row, so the call was rejected with
+    // UnknownMethod and the host went on relaying to a handler the worker had
+    // already dropped.
+    it("unregisterExposed withdraws the owner's own method", () => {
+      const handle = buildHandleFromDefinition(makeScript("workbook", ""));
+      registerExposed(handle, "withdrawMe", () => 7, false);
+      expect(callExposedMethod("workbook", null, "withdrawMe")).toBe(7);
+
+      expect(unregisterExposed(handle, "withdrawMe")).toBe(true);
+      expect(callExposedMethod("workbook", null, "withdrawMe")).toBeUndefined();
+      // Idempotent: withdrawing twice is not an error.
+      expect(unregisterExposed(handle, "withdrawMe")).toBe(false);
+    });
+
+    it("unregisterExposed cannot delete a REMOUNTED successor's registration", () => {
+      // The race the owner check exists for: an old mount's cleanup arriving
+      // after a remount already re-registered the same key must not silently
+      // unhook the live script.
+      const oldHandle = buildHandleFromDefinition(makeScript("workbook", ""));
+      registerExposed(oldHandle, "shared", () => "old", false);
+
+      const newHandle = buildHandleFromDefinition(makeScript("workbook", ""));
+      registerExposed(newHandle, "shared", () => "new", false);
+      expect(callExposedMethod("workbook", null, "shared")).toBe("new");
+
+      expect(unregisterExposed(oldHandle, "shared")).toBe(false);
+      expect(callExposedMethod("workbook", null, "shared")).toBe("new");
+
+      expect(unregisterExposed(newHandle, "shared")).toBe(true);
+      expect(callExposedMethod("workbook", null, "shared")).toBeUndefined();
     });
   });
 });

@@ -7,7 +7,7 @@ use rquickjs::{Function, Object};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::types::ScriptContext;
+use crate::types::{DeferredAction, ScriptContext};
 
 /// Register sheet operations on the Calcula object.
 pub fn register_sheet_ops<'js>(
@@ -52,12 +52,22 @@ pub fn register_sheet_ops<'js>(
     }
 
     // setActiveSheet(index)
+    //
+    // Retargets the script's own reads/writes AND queues the activation so the
+    // host follows. Mutating `active_sheet` alone left the UI on the old sheet:
+    // the context is discarded after the run, so "switch the active sheet" was
+    // only ever true inside the script.
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |index: i32| {
             let mut ctx = sc.borrow_mut();
-            if (index as usize) < ctx.grids.len() {
+            if index >= 0 && (index as usize) < ctx.grids.len() {
                 ctx.active_sheet = index as usize;
+                ctx.deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::ActivateSheet {
+                        sheet_index: index as usize,
+                    });
             }
         })
         .map_err(|e| format!("Failed to create setActiveSheet: {}", e))?;

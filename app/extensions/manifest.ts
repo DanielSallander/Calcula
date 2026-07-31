@@ -69,6 +69,7 @@ import GroupingExtension from "./Grouping";
 import PrintExtension from "./Print";
 import ScriptNotebookExtension from "./ScriptNotebook";
 import ScriptableObjectsExtension from "./ScriptableObjects";
+import MacroRecorderExtension from "./MacroRecorder";
 
 // Batch 4: Complex extensions (migrated from Path B)
 import ChartExtension from "./Charts";
@@ -193,6 +194,9 @@ export const builtInExtensions: ExtensionModule[] = [
   PrintExtension,
   ScriptNotebookExtension,
   ScriptableObjectsExtension,
+  // Macro Recorder — contributes to the Developer menu ScriptNotebook owns, so
+  // it must load after it.
+  MacroRecorderExtension,
   // Complex extensions
   ChartExtension,
   // Animation / Simulation playback — integrates with Charts, loads after it

@@ -40,7 +40,10 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "notebook_run_from",
     "grant_script_session_approval",
     "grant_script_net_origin",
-    "grant_script_bi",
+    // The ONE capability grant mirror (it replaced the bi-only
+    // `grant_script_bi` outright). Handing a script a capability grant is
+    // handing it authority, so it is denylisted like every other grant door.
+    "grant_script_capability",
     "set_script_security_level",
     "script_http_fetch",
     "script_bi_sql",
@@ -129,6 +132,12 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // consent-gated methods (cap.biModel* / cap.connector*); the Rust gates
     // re-check the grants authoritatively.
     "script_bi_model",
+    // The .calp writeback gateway. Reachable by scripts ONLY through the
+    // broker's consent-gated cap.writeback* methods; Rust re-checks the
+    // distribution.writeback grant, gates the two publisher actions on Ed25519
+    // key possession, and rate-limits per bucket. A direct call would hand a
+    // non-trusted extension every respondent's submitted answers.
+    "script_writeback",
     "bi_script_source",
     "bi_model_function_catalog",
     "bi_model_function_docs",

@@ -18,12 +18,14 @@ export {
   getViewportCells,
   getCell,
   getWatchCells,
+  getRangeCellsTyped,
   getCellsInCols,
   getCellCollection,
   getCollectionTexts,
   updateCell,
   updateCellsBatch,
-  setCellRecorderHook,
+  setGridRecorderHook,
+  isGridRecorderActive,
   clearCell,
   clearRange,
   clearRangeWithOptions,
@@ -254,6 +256,47 @@ export type {
   IterationSettings,
   AutoRecoverSettings,
 } from "../core/lib/tauri-api";
+
+// ============================================================================
+// Macro recorder
+// ============================================================================
+// The bridge-level observation contract (installed by the MacroRecorder
+// extension while recording) plus the cross-extension hand-off channel that
+// delivers generated source to a notebook cell. The channel is an app event,
+// not an import: MacroRecorder and ScriptNotebook are siblings and may not see
+// each other's internals, so — exactly like NOTEBOOK_OPEN_EVENT in
+// @api/notebookBackend — the contract lives in the facade and both sides speak
+// it through the window event bus.
+
+export type {
+  RecordedCellWrite,
+  RecordedGridEvent,
+  GridRecorderHook,
+} from "../core/lib/tauri-api";
+
+/** App-event channel: "put this recorded source into a notebook cell". */
+export const MACRO_TO_NOTEBOOK_EVENT = "calcula:macro-to-notebook";
+
+/** Payload of {@link MACRO_TO_NOTEBOOK_EVENT}. */
+export interface MacroToNotebookDetail {
+  /** The generated script source (targets the QuickJS notebook runtime). */
+  source: string;
+  /** Macro name, used to name a notebook when one has to be created. */
+  name: string;
+}
+
+/**
+ * Ask the notebook surface to append a cell containing `source`.
+ * Emitters dispatch; the ScriptNotebook extension listens.
+ */
+export function requestMacroToNotebook(detail: MacroToNotebookDetail): void {
+  window.dispatchEvent(
+    new CustomEvent(MACRO_TO_NOTEBOOK_EVENT, { detail }),
+  );
+}
+
+// Typed (value-preserving) cell reads
+export type { TypedCellData, CellValueType } from "../core/types";
 
 // Named range type exports
 export type {

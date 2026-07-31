@@ -187,12 +187,17 @@ export function createChart(
     y: number;
     width: number;
     height: number;
+    /** Display name; omitted (or blank) auto-numbers as "Chart N". */
+    name?: string;
   },
 ): ChartDefinition {
   const id = crypto.randomUUID();
+  // The auto-number is consumed either way, so a later rename of an explicitly
+  // named chart can never collide with the next auto-named one.
+  const autoName = `Chart ${nextChartNumber++}`;
   const chart: ChartDefinition = {
     chartId: id,
-    name: `Chart ${nextChartNumber++}`,
+    name: placement.name?.trim() || autoName,
     sheetIndex: placement.sheetIndex,
     x: placement.x,
     y: placement.y,

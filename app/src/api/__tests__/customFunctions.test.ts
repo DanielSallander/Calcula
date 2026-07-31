@@ -76,6 +76,22 @@ describe("generateLibrarySource", () => {
     ).toThrow();
   });
 
+  it("binds cellError so a body can return a SPECIFIC spreadsheet error", () => {
+    // The sentinel object is the only error channel that survives structured
+    // clone across the worker boundary (a thrown object does not).
+    const src = generateLibrarySource([
+      { name: "safeDiv", params: ["a", "b"], body: 'return b === 0 ? cellError("#DIV/0!") : a / b;' },
+    ]);
+    expect(src).toContain("const cellError = (code) => ({ __calculaError: String(code) });");
+    expect(src).toContain('cellError("#DIV/0!")');
+  });
+
+  it("throws on a parameter that shadows the cellError binding", () => {
+    expect(() =>
+      generateLibrarySource([{ name: "h", params: ["cellError"], body: "return 1;" }]),
+    ).toThrow();
+  });
+
   it("throws on an invalid function name", () => {
     expect(() =>
       generateLibrarySource([{ name: "has space", params: [], body: "return 1;" }]),

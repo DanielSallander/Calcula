@@ -6,8 +6,15 @@
 // the shared ConnectSourceDialog credentials window (no window.prompt).
 
 import React, { useState, useEffect } from "react";
-import type { DialogProps, ConnectionInfo } from "@api";
-import { pullPackage, emitAppEvent, AppEvents, getSheets, setActiveSheetApi } from "@api";
+import type { DialogProps, ConnectionInfo, CapabilityId } from "@api";
+import {
+  pullPackage,
+  emitAppEvent,
+  AppEvents,
+  getSheets,
+  setActiveSheetApi,
+  type PackageUpdatedPayload,
+} from "@api";
 import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
 import {
   listRegistries,
@@ -22,16 +29,31 @@ import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { pivot } from "@api/pivot";
 
-/** Short human phrase for a declared capability id (R19), for the review box. */
-const CAPABILITY_PHRASE: Record<string, string> = {
+/**
+ * Short human phrase for a declared capability id (R19), for the review box —
+ * the LAST screen before the user agrees to run somebody else's code.
+ *
+ * Typed `Record<CapabilityId, string>` on purpose: adding a capability to
+ * ALL_CAPABILITY_IDS without writing its consent phrase must fail the BUILD,
+ * not silently fall back to the raw id here. (It did exactly that until this
+ * map went stale by five ids.)
+ */
+const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "net.fetch": "fetch data from the web",
   "bi.query": "run read-only BI queries",
+  "bi.sql": "run raw read-only SQL against your BI database",
   storage: "store data on this device",
   "ui.html": "render custom HTML UI",
+  "formula.udf": "define formula functions you can use in cells",
+  "bi.model": "change your BI model definitions (measures, relationships, ...)",
+  "bi.connector": "feed external data into your BI model",
+  "ui.dialog": "interrupt you with a dialog and read your answer",
+  "distribution.writeback":
+    "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
 };
 
 function capabilityPhrase(id: string): string {
-  return CAPABILITY_PHRASE[id] ?? id;
+  return CAPABILITY_PHRASE[id as CapabilityId] ?? id;
 }
 
 export function SubscribeDialog({ onClose }: DialogProps) {
@@ -227,11 +249,19 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       // paneControl mutation domain out as).
       window.dispatchEvent(new CustomEvent("controlspane:controls-refreshed"));
 
-      // Let the ScriptableObjects extension register the pulled scripts and
-      // run the consent flow in this session (not only after save/reopen).
-      if (result.scriptsPulled > 0) {
-        emitAppEvent("calp:scripts-pulled", { packageName: result.packageName });
-      }
+      // Announce the distribution lifecycle. This is what makes the
+      // ScriptableObjects extension register the pulled scripts and run the
+      // consent flow in this session (not only after save/reopen), reloads
+      // chart libraries, and refreshes the Package Explorer. Fired even when the
+      // package carried no scripts — sheets/objects changed either way — and
+      // reachable by user scripts as a THINNED { packageName, version }.
+      emitAppEvent(AppEvents.PACKAGE_UPDATED, {
+        packageName: result.packageName,
+        version: result.resolvedVersion,
+        kind: "subscribe",
+        sheetsPulled: result.sheetsPulled,
+        scriptsPulled: result.scriptsPulled,
+      } satisfies PackageUpdatedPayload);
 
       setStatus(
         `Pulled ${result.packageName} v${result.resolvedVersion}: ` +

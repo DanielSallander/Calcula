@@ -13,6 +13,7 @@ import {
   buildHandleFromDefinition,
   callExposed,
   registerExposed,
+  unregisterExposed,
   registerMountedHandle,
   scriptEmitEventName,
   scriptSubscribeEventName,
@@ -41,22 +42,44 @@ import {
   sanitizeSandboxGeometry,
 } from "./renderCache";
 import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
+import { MAX_RANGE_CELLS } from "./validators";
+import type { ScriptCell } from "../scriptableObjects";
+import type { TypedCellData } from "../lib";
+import type { CellData, FormattingOptions } from "../types";
 import {
   fetchOriginOf,
-  grantBiCapability,
+  grantBackendCapability,
   grantNetOrigin,
   hasFetchOrigin,
   recordCapabilityGrant,
   requestCapabilityGrant,
   resetAllGrants,
   revokeBackendCapabilities,
-  RUST_MIRRORED_BI_CAPS,
-  syncBiGrantsToBackend,
+  RUST_MIRRORED_CAPABILITIES,
+  syncBackendGrants,
   syncNetOriginsToBackend,
   wasDeniedThisSession,
 } from "./capabilities";
+import {
+  captureWritebackWrite,
+  captureWritebackWrites,
+  workbookHasWritebackRegions,
+} from "./writebackWriteGuard";
+import { requestScriptDialog, resetScriptDialogs, revokeScriptDialogs } from "./scriptDialogs";
+import type {
+  ScriptDialogFormSpec,
+  ScriptDialogPromptOptions,
+  ScriptDialogTextOptions,
+} from "./scriptDialogSpec";
 import { AppEvents, emitAppEvent, onAppEvent } from "../events";
 import {
+  registerLifecycleGuard,
+  type LifecycleAction,
+  type LifecycleDetail,
+  type LifecycleGuardResult,
+} from "../../core/lib/lifecycleGuards";
+import {
+  rectRowsCols,
   tableCellCoord,
   tableDataRowCount,
   tableHeaders,
@@ -69,7 +92,26 @@ import {
 import { showToast } from "../notifications";
 import { getCellBehaviorById } from "../cellBehaviors";
 import { ExtensionRegistry } from "../extensionRegistry";
-import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService } from "../componentStoreRegistry";
+import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService, getControlStoreService } from "../componentStoreRegistry";
+import type { ChartPlacement } from "../componentStoreRegistry";
+import {
+  chartToRef,
+  namedRangeToRef,
+  pivotToRef,
+  shapeToRef,
+  slicerToRef,
+  tableToRef,
+  type ScriptObjectKind,
+  type ScriptObjectRef,
+} from "./objectInventory";
+import {
+  aggregationToFunction,
+  areaToAxis,
+  layoutDirectivesToConfig,
+  PIVOT_AREAS,
+  type PivotArea,
+} from "./pivotLayoutVocabulary";
+import type { AggregationFunction, PivotApi, PivotAxis } from "../pivotTypes";
 import type { IStyleOverride } from "../styleInterceptors";
 
 type CleanupFn = () => void;
@@ -182,6 +224,9 @@ export interface HostMountDefinition {
   accessLevel: string;
   provenance?: string;
   packageName?: string;
+  /** For distributed scripts: the resolved package version they were pulled
+   *  from. Seeds the read-only `context.package` mirror. */
+  packageVersion?: string;
   /** The R19 declared-capability ceiling (authoritative). Passed to
    *  buildHandleFromDefinition; the broker denies any cap not in this set. */
   declaredCapabilities?: string[];
@@ -301,7 +346,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
   // Re-establish this script's net.fetch origins in the Rust store (a remount
   // within the session keeps session grants; first mount pushes nothing).
   void syncNetOriginsToBackend(definition.id);
-  void syncBiGrantsToBackend(definition.id);
+  void syncBackendGrants(definition.id);
 
   const snapshot = await buildSnapshot(definition, mw);
   if (snapshot.properties) {
@@ -320,6 +365,17 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     apiVersion: definition.apiVersion,
     source: definition.source,
     scriptName: definition.name,
+    // Provenance mirror (B5): a distributed script can finally ask which package
+    // and version it shipped in. Built from the AUTHORITATIVE definition here,
+    // never from the worker, and omitted entirely for local scripts.
+    packageInfo:
+      definition.provenance === "distributed"
+        ? {
+            name: definition.packageName || "(unknown package)",
+            version: definition.packageVersion ?? null,
+            provenance: "distributed",
+          }
+        : undefined,
     snapshot,
   };
 
@@ -380,6 +436,10 @@ export function hostUnmountScript(scriptId: string): void {
   // Drop the script's Rust-side net.fetch grants so an unmounted script can
   // never fetch (session grants in capabilities.ts survive for a remount).
   void revokeBackendCapabilities(scriptId);
+  // Dismiss any modal this script had on screen. The worker is already gone, so
+  // nothing is waiting on the answer — but the DIALOG would otherwise stay up,
+  // asking on behalf of code that no longer exists.
+  revokeScriptDialogs(scriptId);
   mounted.delete(scriptId);
 }
 
@@ -394,6 +454,9 @@ export function hostResetAll(): void {
   faulted.clear();
   // Workbook reset = fresh session: forget all capability grants.
   resetAllGrants();
+  // ...and every dialog mute / dismissal streak, so the next workbook's scripts
+  // are not judged by the previous one's behavior.
+  resetScriptDialogs();
 }
 
 /** Faulted scripts (crashed twice within 30s) with their last error. */
@@ -630,10 +693,32 @@ async function maybeRequestCapabilityGrant(
     recordCapabilityGrant(handle.scriptId, cap);
     // Mirror BI-family grants to the authoritative Rust store (the Rust gates
     // re-check it per call).
-    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
-      await grantBiCapability(handle.scriptId, cap);
+    if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
+      await grantBackendCapability(handle.scriptId, cap);
     }
   }
+}
+
+/**
+ * The AUTHORITATIVE owner identity for a scheduled job.
+ *
+ * Derived from the mount definition alone. A scheduled job outlives the session
+ * that created it, so the identity recorded with it is what a later revoke, a
+ * later audit entry and the transparency panel's "who scheduled this?" all
+ * resolve against — it must never be script-supplied.
+ */
+function scheduleOwnerOf(definition: HostMountDefinition): {
+  scriptId: string;
+  surface: string;
+  objectType: string;
+  instanceId: string | null;
+} {
+  return {
+    scriptId: definition.id,
+    surface: definition.provenance === "distributed" ? "extension-worker" : "object-script",
+    objectType: definition.objectType,
+    instanceId: definition.instanceId,
+  };
 }
 
 /** The IMPL table (design §5): today's context-builder bodies, minus closures. */
@@ -661,9 +746,14 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
     case "base.unexpose": {
-      // Cleanup happens via the registered cleanup on unmount; explicit
-      // unexpose re-registers a tombstone-free state by running the cleanup
-      // now (registerExposed cleanups are idempotent and successor-safe).
+      // The cleanup returned by context.expose() being called while the script
+      // is still mounted. Until the integration sweep this method had NO
+      // ALLOWLIST row, so the broker rejected it with UnknownMethod before it
+      // ever reached here and the host kept relaying to a handler the worker
+      // had already dropped. Owner-checked in the broker so it cannot delete a
+      // remounted successor's registration.
+      const [name] = args as [string];
+      unregisterExposed(handle, name);
       return undefined;
     }
     case "base.callMethod": {
@@ -688,18 +778,51 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "api.setCellValue": {
       const [row, col, value] = args as [number, number, string];
       const lib = await getLib();
-      recordScriptWrite(definition.id, activeSheetIndexForEvents, row, col);
+      const sheetIndex = await activeSheetForWriteGuard(lib);
+      recordScriptWrite(definition.id, sheetIndex, row, col);
+      // A .calp writeback cell is the publisher's input form: capture it as a
+      // schema-validated draft first, exactly like a human keystroke, and only
+      // then let the grid show the value. A rejection throws and nothing is
+      // written. See writebackWriteGuard.ts.
+      await captureWritebackWrite(definition.id, { sheetIndex, row, col, value });
       await lib.updateCell(row, col, value);
       return undefined;
     }
     case "api.updateCellsBatch": {
       const [updates] = args as [Array<{ row: number; col: number; value: string }>];
       const lib = await getLib();
+      const sheetIndex = await activeSheetForWriteGuard(lib);
       for (const u of updates) {
-        recordScriptWrite(definition.id, activeSheetIndexForEvents, u.row, u.col);
+        recordScriptWrite(definition.id, sheetIndex, u.row, u.col);
       }
-      await lib.updateCellsBatch(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+      const { plain, drafted } = await captureWritebackWrites(
+        definition.id,
+        updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
+      );
+      if (plain.length > 0) {
+        await lib.updateCellsBatch(plain.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+      }
+      // update_cells_batch DROPS writeback cells (partial-success semantics in
+      // commands/data.rs), so a cell whose draft was just saved has to be
+      // written on its own or the grid would show nothing at all.
+      for (const u of drafted) {
+        await lib.updateCell(u.row, u.col, u.value);
+      }
       return undefined;
+    }
+    case "api.getCellData": {
+      // Typed single-cell read (any sheet). Unlike api.getCellValue this keeps
+      // the value's type and the cell's formula.
+      const [row, col, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      return readTypedCell(lib, sheetIndex, row, col);
+    }
+    case "api.getRangeValues": {
+      // ONE round trip for a whole rectangle, on any sheet.
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      return readTypedRange(lib, sheetIndex, startRow, startCol, endRow, endCol);
     }
     case "api.getSheetNames": {
       const lib = await getLib();
@@ -750,6 +873,328 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
 
+    // ---- unlocked: formatting (B2) ----
+    case "api.setRangeFormat": {
+      const [startRow, startCol, endRow, endCol, format, sheetIndex] = args as
+        [number, number, number, number, FormattingOptions, number?];
+      const lib = await getLib();
+      await applyRangeFormat(lib, sheetIndex, startRow, startCol, endRow, endCol, format);
+      return undefined;
+    }
+    case "api.clearRangeFormat": {
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      await clearRangeFormat(lib, sheetIndex, startRow, startCol, endRow, endCol);
+      return undefined;
+    }
+
+    // ---- unlocked: structure (B2) ----
+    // Every backend command below acts on the ACTIVE sheet, so an explicit
+    // sheetIndex that names another one is REFUSED with an actionable message
+    // rather than silently applied to the wrong sheet (assertActiveSheet).
+    case "api.insertRows": {
+      const [start, count, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "insertRows");
+      await lib.insertRows(start, count);
+      await afterStructuralChange();
+      return undefined;
+    }
+    case "api.deleteRows": {
+      const [start, count, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "deleteRows");
+      await lib.deleteRows(start, count);
+      await afterStructuralChange();
+      return undefined;
+    }
+    case "api.insertColumns": {
+      const [start, count, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "insertColumns");
+      await lib.insertColumns(start, count);
+      await afterStructuralChange();
+      return undefined;
+    }
+    case "api.deleteColumns": {
+      const [start, count, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "deleteColumns");
+      await lib.deleteColumns(start, count);
+      await afterStructuralChange();
+      return undefined;
+    }
+    case "api.mergeCells": {
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      const active = await assertActiveSheet(lib, sheetIndex, "mergeCells");
+      const result = await lib.mergeCells(startRow, startCol, endRow, endCol);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", "mergeCells was refused (the range overlaps an existing merge)");
+      }
+      for (const cell of result.updatedCells) {
+        recordScriptWrite(definition.id, active, cell.row, cell.col);
+      }
+      await afterCellDataChange(result.updatedCells);
+      return undefined;
+    }
+    case "api.unmergeCells": {
+      const [row, col, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "unmergeCells");
+      const result = await lib.unmergeCells(row, col);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", `No merged region at row=${row} col=${col}`);
+      }
+      await afterCellDataChange(result.updatedCells);
+      return undefined;
+    }
+    case "api.setRowHeight": {
+      const [row, height, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "setRowHeight");
+      await lib.setRowHeight(row, height);
+      await syncDimensionToGrid("row", row, height);
+      return undefined;
+    }
+    case "api.setColumnWidth": {
+      const [col, width, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetIndex, "setColumnWidth");
+      await lib.setColumnWidth(col, width);
+      await syncDimensionToGrid("column", col, width);
+      return undefined;
+    }
+    case "api.freezePanes": {
+      // The @api orchestrator persists AND emits FREEZE_CHANGED, which the
+      // Shell bridges into Core's freeze config — same path the View ribbon uses.
+      const [freezeRow, freezeCol] = args as [number | null, number | null];
+      const grid = await import("../grid");
+      await grid.freezePanes(freezeRow ?? null, freezeCol ?? null);
+      return undefined;
+    }
+
+    // ---- unlocked: sheet CRUD (B2) ----
+    case "api.addSheet": {
+      const [name] = args as [string?];
+      const lib = await getLib();
+      if (name !== undefined && name !== null) {
+        await assertSheetNameFree(lib, name, null);
+      }
+      const result = await lib.addSheet(name ?? undefined);
+      await announceSheetsChanged(result);
+      // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
+      // by array position (the two diverge once a sheet has been deleted).
+      const added = result.sheets.find((s) => s.index === result.activeIndex);
+      return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
+    }
+    case "api.deleteSheet": {
+      const [index] = args as [number];
+      const lib = await getLib();
+      const before = await lib.getSheets();
+      if (!before.sheets.some((s) => s.index === index)) {
+        throw new BrokerError("ValidationError", `No sheet with index ${index}`);
+      }
+      if (before.sheets.length <= 1) {
+        throw new BrokerError("ValidationError", "Cannot delete the last remaining sheet");
+      }
+      const result = await lib.deleteSheet(index);
+      await announceSheetsChanged(result);
+      return undefined;
+    }
+    case "api.renameSheet": {
+      const [index, newName] = args as [number, string];
+      const lib = await getLib();
+      await assertSheetNameFree(lib, newName, index);
+      const result = await lib.renameSheet(index, newName);
+      await announceSheetsChanged(result);
+      return undefined;
+    }
+    case "api.setSheetVisibility": {
+      const [index, visibility] = args as [number, "visible" | "hidden" | "veryHidden"];
+      const lib = await getLib();
+      const before = await lib.getSheets();
+      if (!before.sheets.some((s) => s.index === index)) {
+        throw new BrokerError("ValidationError", `No sheet with index ${index}`);
+      }
+      if (visibility !== "visible" && before.sheets.filter((s) => s.visibility === "visible").length <= 1) {
+        throw new BrokerError("ValidationError", "Cannot hide the last visible sheet");
+      }
+      const result =
+        visibility === "visible"
+          ? await lib.unhideSheet(index)
+          : await lib.hideSheet(index, visibility);
+      await announceSheetsChanged(result);
+      return undefined;
+    }
+
+    // ---- unlocked: sort + find/replace (B2) ----
+    case "api.sortRange": {
+      // vSortRange already enforced the field shape (key/ascending/sortOn/...),
+      // so the cast lands on a validated payload.
+      const [startRow, startCol, endRow, endCol, fields, options, sheetIndex] = args as [
+        number, number, number, number,
+        Parameters<Awaited<ReturnType<typeof getLib>>["sortRange"]>[4],
+        { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" } | undefined,
+        number?,
+      ];
+      const lib = await getLib();
+      const active = await assertActiveSheet(lib, sheetIndex, "sortRange");
+      const result = await lib.sortRange<SortRangeResultLike>(
+        startRow, startCol, endRow, endCol,
+        fields,
+        options ?? undefined,
+      );
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || "sortRange failed");
+      }
+      for (const cell of result.updatedCells) {
+        recordScriptWrite(definition.id, active, cell.row, cell.col);
+      }
+      await afterCellDataChange(result.updatedCells);
+      return result.sortedCount;
+    }
+    case "api.findAll": {
+      const [query, options] = args as [string, Record<string, boolean> | undefined];
+      const lib = await getLib();
+      const result = await lib.findAll(query, options ?? {});
+      // Reshape the backend's [row, col] tuples into named fields — a script
+      // reading `m.row` cannot silently swap the two the way `m[0]` can.
+      return {
+        matches: result.matches.map(([row, col]) => ({ row, col })),
+        totalCount: result.totalCount,
+      };
+    }
+    case "api.replaceAll": {
+      const [search, replacement, options] = args as
+        [string, string, Record<string, boolean> | undefined];
+      const lib = await getLib();
+      const active = await lib.getActiveSheet();
+      const result = await lib.replaceAll(search, replacement, options ?? {});
+      for (const cell of result.updatedCells) {
+        recordScriptWrite(definition.id, active, cell.row, cell.col);
+      }
+      await afterCellDataChange(result.updatedCells);
+      return {
+        replacementCount: result.replacementCount,
+        skippedWriteback: result.skippedWriteback ?? 0,
+      };
+    }
+
+    // ---- unlocked: workbook objects (B3) ----
+    case "api.listObjects": {
+      const [kind] = args as [ScriptObjectKind];
+      return listWorkbookObjects(kind);
+    }
+    case "api.createChart": {
+      const [spec, options] = args as [Record<string, unknown>, ChartCreateOptions?];
+      const store = requireChartStore();
+      // The extension validates the spec against the ChartSpec schema and
+      // throws on a violation -> brokerCall audits ok:false and the script's
+      // awaited createChart() rejects with the schema complaint.
+      return store.createChart(spec, options);
+    }
+    case "api.deleteChart": {
+      const [chartId] = args as [string];
+      const store = requireChartStore();
+      if (!store.deleteChart(chartId)) {
+        throw new BrokerError("ValidationError", `No chart with id "${chartId}"`);
+      }
+      return undefined;
+    }
+    case "api.createTable": {
+      const [startRow, startCol, endRow, endCol, options] = args as
+        [number, number, number, number, { name?: string; hasHeaders?: boolean }?];
+      // create_table resolves the ACTIVE sheet internally (it reads the header
+      // text straight off the live grid), so there is no sheetIndex to pass and
+      // none to refuse — the rectangle is always on the sheet the user is on.
+      // Call api.setActiveSheet(n) first to build a table on another sheet.
+      const backend = await import("../backend");
+      const result = await backend.createTable({
+        name: options?.name ?? "", // "" => the backend auto-names ("Table1", ...)
+        startRow,
+        startCol,
+        endRow,
+        endCol,
+        hasHeaders: options?.hasHeaders ?? true,
+      });
+      if (!result.success || !result.table) {
+        throw new BrokerError("ValidationError", result.error || "createTable failed");
+      }
+      await announceObjectsChanged();
+      emitAppEvent(AppEvents.TABLE_CREATED, { tableId: result.table.id });
+      return tableToRef(result.table);
+    }
+    case "api.deleteTable": {
+      const [tableId] = args as [string];
+      const lib = await getLib();
+      const table = (await lib.getTableById(tableId)) as TableLike | null;
+      if (!table) throw new BrokerError("ValidationError", `No table with id "${tableId}"`);
+      await assertActiveSheet(lib, table.sheetIndex, "deleteTable");
+      const backend = await import("../backend");
+      const result = await backend.deleteTable(tableId);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || "deleteTable failed");
+      }
+      await announceObjectsChanged();
+      return undefined;
+    }
+    case "api.createNamedRange": {
+      const [name, refersTo, options] = args as
+        [string, string, { sheetIndex?: number | null; comment?: string }?];
+      const lib = await getLib();
+      const result = await lib.createNamedRange(
+        name,
+        options?.sheetIndex ?? null, // null = workbook scope (the common case)
+        refersTo,
+        options?.comment,
+      );
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || "createNamedRange failed");
+      }
+      emitAppEvent(AppEvents.NAMED_RANGES_CHANGED, {});
+      return undefined;
+    }
+    case "api.deleteNamedRange": {
+      const [name] = args as [string];
+      const lib = await getLib();
+      const result = await lib.deleteNamedRange(name);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || `No named range "${name}"`);
+      }
+      emitAppEvent(AppEvents.NAMED_RANGES_CHANGED, {});
+      return undefined;
+    }
+    case "api.createPivot": {
+      const [sourceRange, destinationCell, fields, options] = args as [
+        string,
+        string,
+        ScriptPivotFields,
+        { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean } | undefined,
+      ];
+      return createPivotFromScript(sourceRange, destinationCell, fields, options);
+    }
+    case "api.deletePivot": {
+      const [pivotId] = args as [string];
+      const api = await requirePivotApi();
+      await api.delete(pivotId);
+      announcePivotChanged();
+      return undefined;
+    }
+    case "api.objectGetState": {
+      // Cross-instance READ. The aspect executors are the SAME ones the
+      // own-object door uses — only the instance id differs, and only the
+      // unlocked tier can supply it (the allowlist row enforces that).
+      const [, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
+      return executeGetState(targetId, aspect, aspectArgs ?? []);
+    }
+    case "api.objectSetState": {
+      const [, targetId, aspect, aspectArgs] = args as [string, string, string, unknown[]];
+      return executeSetState(mw, targetId, aspect, aspectArgs ?? []);
+    }
+
     // ---- sheet scope ----
     case "sheet.getCellValue": {
       const [row, col, sheetIndex] = args as [number, number, number?];
@@ -767,19 +1212,94 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const cellData = await lib.getCell(row, col);
       return cellData?.display ?? "";
     }
+    case "sheet.getCellData": {
+      // Typed single-cell read, clamped to the script's own sheet (an explicit
+      // OTHER sheetIndex is unlocked-tier reach — same rule as getCellValue).
+      const [row, col, sheetIndex] = args as [number, number, number?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      return readTypedCell(lib, target, row, col);
+    }
+    case "sheet.getRangeValues": {
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      return readTypedRange(lib, target, startRow, startCol, endRow, endCol);
+    }
+    case "sheet.setRangeValues": {
+      // Bulk own-sheet write: same reach as N sheet.setCellValue calls, one RPC,
+      // and ONE undo step. `values` is anchored at (startRow, startCol); an
+      // undefined/null entry leaves that cell untouched.
+      const [startRow, startCol, values, sheetIndex] = args as
+        [number, number, Array<Array<string | null | undefined>>, number?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const active = await lib.getActiveSheet();
+      const targetSheet = target ?? active;
+      const updates: Array<{ row: number; col: number; value: string }> = [];
+      for (let r = 0; r < values.length; r++) {
+        const row = values[r];
+        for (let c = 0; c < row.length; c++) {
+          const v = row[c];
+          if (v === undefined || v === null) continue;
+          const gridRow = startRow + r;
+          const gridCol = startCol + c;
+          recordScriptWrite(definition.id, targetSheet, gridRow, gridCol);
+          updates.push({ row: gridRow, col: gridCol, value: String(v) });
+        }
+      }
+      if (updates.length > MAX_RANGE_CELLS) {
+        throw new BrokerError(
+          "ValidationError",
+          `range too large: ${updates.length} cells (max ${MAX_RANGE_CELLS})`,
+        );
+      }
+      await writeCellsOnSheet(lib, definition.id, targetSheet, active, updates);
+      return undefined;
+    }
+    case "sheet.setRangeFormat": {
+      // Own-sheet formatting: identical reach to sheet.setRangeValues (clamped
+      // to the script's sheet), appearance instead of content.
+      const [startRow, startCol, endRow, endCol, format, sheetIndex] = args as
+        [number, number, number, number, FormattingOptions, number?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      await applyRangeFormat(lib, target, startRow, startCol, endRow, endCol, format);
+      return undefined;
+    }
+    case "sheet.clearRangeFormat": {
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      await clearRangeFormat(lib, target, startRow, startCol, endRow, endCol);
+      return undefined;
+    }
     case "sheet.setCellValue": {
       const [row, col, value, sheetIndex] = args as [number, number, string, number?];
       const lib = await getLib();
-      recordScriptWrite(definition.id, sheetIndex ?? activeSheetIndexForEvents, row, col);
+      // The TIER check runs first: a restricted script must be refused for
+      // naming another sheet BEFORE anything of its value is drafted there.
+      let offSheet = false;
+      let target: number;
       if (sheetIndex !== undefined) {
+        target = sheetIndex;
         const active = await lib.getActiveSheet();
         if (sheetIndex !== active) {
           if (handle.tier !== "unlocked") {
             throw new BrokerError("PermissionDenied", "Restricted sheet scripts can only access their own sheet");
           }
-          await lib.updateCellOnSheets([sheetIndex], row, col, value);
-          return undefined;
+          offSheet = true;
         }
+      } else {
+        target = await activeSheetForWriteGuard(lib);
+      }
+      recordScriptWrite(definition.id, target, row, col);
+      await captureWritebackWrite(definition.id, { sheetIndex: target, row, col, value });
+      if (offSheet) {
+        await lib.updateCellOnSheets([sheetIndex as number], row, col, value);
+        return undefined;
       }
       await lib.updateCell(row, col, value);
       return undefined;
@@ -839,6 +1359,64 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
           secretHeader: init?.secretHeader ?? null,
         },
       });
+    }
+    // ---- ui.dialog: ask the user, await the answer ----
+    // Identity is HOST-supplied on every one of these: scriptName and origin
+    // come from the mount handle, never from args, so a script cannot present
+    // its dialog as somebody else's (or as the app's). The guards — one dialog
+    // per script, one app-wide, and a dismissal-streak mute — live in
+    // scriptDialogs.ts, and every "no answer" path (Cancel, Escape, overlay,
+    // close, deadline, unmount) lands on `dismissed`, so these never hang.
+    case "cap.dialogAlert": {
+      const [message, options] = args as [string, ScriptDialogTextOptions | undefined];
+      await requestScriptDialog({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        scriptOrigin: handle.origin,
+        kind: "alert",
+        message,
+        textOptions: options,
+      });
+      return undefined;
+    }
+    case "cap.dialogConfirm": {
+      const [message, options] = args as [string, ScriptDialogTextOptions | undefined];
+      const answer = await requestScriptDialog({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        scriptOrigin: handle.origin,
+        kind: "confirm",
+        message,
+        textOptions: options,
+      });
+      // Dismissal is a NO. Anything else than an explicit confirm must not read
+      // as consent — that is the whole point of asking.
+      return answer.dismissed === false;
+    }
+    case "cap.dialogPrompt": {
+      const [message, options] = args as [string, ScriptDialogPromptOptions | undefined];
+      const answer = await requestScriptDialog({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        scriptOrigin: handle.origin,
+        kind: "prompt",
+        message,
+        promptOptions: options,
+      });
+      if (answer.dismissed) return null;
+      return typeof answer.value === "string" ? answer.value : null;
+    }
+    case "cap.dialogForm": {
+      const [spec] = args as [ScriptDialogFormSpec];
+      const answer = await requestScriptDialog({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        scriptOrigin: handle.origin,
+        kind: "form",
+        form: spec,
+      });
+      if (answer.dismissed) return null;
+      return answer.value !== null && typeof answer.value === "object" ? answer.value : null;
     }
     case "cap.storageGet": {
       // The broker already enforced `storage` is declared (R19 ceiling) and
@@ -916,6 +1494,104 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         payload: payload ?? null,
       });
     }
+    case "cap.biModelValidate":
+    case "cap.biModelLineage": {
+      // Read-only diagnostics on the SAME gateway (its own 120/min Rust rate
+      // bucket, so a spent mutation budget can never block the call that
+      // explains why an edit failed). Every answer is rebuilt field-by-field
+      // Rust-side and its error text scrubbed, so a validation message can
+      // never leak a security role, source id, host or database name.
+      const [connectionId, action, payload] = args as [string, string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId: definition.id,
+        action,
+        kind: null,
+        payload: payload ?? null,
+      });
+    }
+    case "cap.biModelBatch": {
+      // Atomic multi-edit: many model changes, ONE undo entry. Ownership is
+      // enforced Rust-side (only the opening script may end/cancel) and an
+      // abandoned batch is reclaimed by a wall-clock deadline and ROLLED BACK,
+      // so a crashed script cannot wedge the model half-edited.
+      const [connectionId, action] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId: definition.id,
+        action,
+        kind: null,
+        payload: null,
+      });
+    }
+    // ---- distribution.writeback: the .calp collection loop, automated ----
+    // Everything routes through ONE Rust gateway (script_writeback) which
+    // re-checks the grant, gates the two publisher actions on Ed25519 key
+    // possession, rate-limits per bucket, and dispatches into the very same
+    // calp_* commands the interactive UI calls.
+    case "cap.writebackListRegions":
+    case "cap.writebackGetLayer": {
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId: definition.id,
+        action: method === "cap.writebackListRegions" ? "listRegions" : "getLayer",
+        payload: {},
+      });
+    }
+    case "cap.writebackSaveDraft": {
+      const [regionId, sheetId, row, col, value] = args as
+        [string, string, number, number, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId: definition.id,
+        action: "saveDraft",
+        payload: { regionId, sheetId, row, col, value },
+      });
+    }
+    case "cap.writebackSubmit": {
+      const [regionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      const result = await invokeBackend<{ submitted: number }>("script_writeback", {
+        scriptId: definition.id,
+        action: "submitRegion",
+        payload: { regionId },
+      });
+      return result?.submitted ?? 0;
+    }
+    case "cap.writebackPreview": {
+      const [regionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId: definition.id,
+        action: "previewSubmission",
+        payload: { regionId },
+      });
+    }
+    case "cap.writebackListSubmissions": {
+      // PUBLISHER ONLY (Rust require_publisher). The payload is forwarded
+      // whole: its regionId/writebackId key is what selects the grid-region or
+      // model-column surface, and the validator already proved exactly one.
+      const [target] = args as [Record<string, unknown>];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId: definition.id,
+        action: "listSubmissions",
+        payload: target,
+      });
+    }
+    case "cap.writebackReview": {
+      // PUBLISHER ONLY (Rust require_publisher).
+      const [decision] = args as [Record<string, unknown>];
+      const { invokeBackend } = await import("../backend");
+      await invokeBackend("script_writeback", {
+        scriptId: definition.id,
+        action: "setSubmissionState",
+        payload: decision,
+      });
+      return undefined;
+    }
     case "cap.connectorRegister": {
       // The connector host records the AUTHORITATIVE script identity (from the
       // definition, never from args), installs via the Rust gate, runs the
@@ -935,6 +1611,42 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { removeScriptConnectorForScript } = await import("../scriptConnectors");
       await removeScriptConnectorForScript(definition.id, connectionId, sourceId);
       return undefined;
+    }
+    // ---- schedule: persistent recurring jobs. The OWNER identity below comes
+    // from the authoritative definition, never from args — a script cannot
+    // schedule work on another script's behalf or under another script's name,
+    // which is what keeps the audit trail and the revoke check meaningful.
+    case "cap.scheduleEvery": {
+      const [intervalSecs, handler, options] = args as [
+        number,
+        string,
+        { label?: string } | undefined,
+      ];
+      const { scheduleEvery } = await import("./scheduler");
+      return scheduleEvery(
+        scheduleOwnerOf(definition),
+        intervalSecs,
+        handler,
+        options?.label,
+      );
+    }
+    case "cap.scheduleAt": {
+      const [timeOfDay, handler, options] = args as [
+        string,
+        string,
+        { label?: string } | undefined,
+      ];
+      const { scheduleAt } = await import("./scheduler");
+      return scheduleAt(scheduleOwnerOf(definition), timeOfDay, handler, options?.label);
+    }
+    case "cap.scheduleList": {
+      const { listScheduledJobsForScript } = await import("./scheduler");
+      return listScheduledJobsForScript(definition.id);
+    }
+    case "cap.scheduleCancel": {
+      const [jobId] = args as [string];
+      const { cancelScheduledJobForScript } = await import("./scheduler");
+      return cancelScheduledJobForScript(definition.id, jobId);
     }
     case "cap.cubeValue": {
       // CUBE convenience over the bi.query trust class: a measure sliced by member
@@ -959,7 +1671,19 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
   }
 }
 
+/**
+ * Dispatch ONE state-changing aspect at `instanceId`.
+ *
+ * Two doors reach this: `object.setState` (restricted, instance PINNED to the
+ * mount handle) and `api.objectSetState` (unlocked, an explicit target id). The
+ * executors are deliberately shared — an aspect must behave identically however
+ * it was addressed — but the HOST-SIDE MIRRORS must not be: a mirror is this
+ * script's view of ITS OWN object, so pushing another instance's state into it
+ * would make `chart.getSpec()` start returning a stranger's spec. Hence
+ * `isOwnInstance` gates every mirror push and the shapeProps cache below.
+ */
 async function executeSetState(mw: MountedWorker, instanceId: string, aspect: string, args: unknown[]): Promise<unknown> {
+  const isOwnInstance = instanceId === (mw.definition.instanceId || "");
   switch (aspect) {
     case "slicer.setSelectedItems": {
       const [items] = args as [string[] | null];
@@ -989,7 +1713,7 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
         // Throws on a schema violation -> brokerCall audits ok:false + the
         // script's awaited updateSpec() rejects. Mirror only on success.
         store.updateChartSpec(instanceId, patch);
-        pushChartSpecMirror(mw, instanceId);
+        if (isOwnInstance) pushChartSpecMirror(mw, instanceId);
       }
       return undefined;
     }
@@ -998,7 +1722,7 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       const store = getChartStoreService();
       if (store) {
         store.replaceChartSpec(instanceId, fullSpec);
-        pushChartSpecMirror(mw, instanceId);
+        if (isOwnInstance) pushChartSpecMirror(mw, instanceId);
       }
       return undefined;
     }
@@ -1011,14 +1735,33 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       const store = getPivotStoreService();
       if (store) {
         await store.refreshPivot(instanceId);
-        pushPivotFieldsMirror(mw, instanceId);
+        if (isOwnInstance) pushPivotFieldsMirror(mw, instanceId);
       }
+      return undefined;
+    }
+    // ---- pivot LAYOUT mutation (B3 §4) ----
+    // The vocabulary is the Pivot Layout DSL's (rows/columns/values/filters,
+    // sum/count/average/..., compact/tabular/values-on-rows/...), so a script
+    // and the DSL editor describe the same pivot with the same words. Each of
+    // these is ONE backend command that recalculates the pivot and rewrites its
+    // destination cells; the refresh announcement is the feature-neutral
+    // MUTATION_REFRESH the Pivot extension already listens to.
+    case "pivot.addField":
+    case "pivot.moveField":
+    case "pivot.removeField":
+    case "pivot.setAggregation":
+    case "pivot.setLayout": {
+      await executePivotLayoutAspect(instanceId, aspect, args);
+      if (isOwnInstance) pushPivotFieldsMirror(mw, instanceId);
+      announcePivotChanged();
       return undefined;
     }
     case "shape.setProperty": {
       const [key, value] = args as [string, string];
-      const oldValue = mw.shapeProps.get(key) || "";
-      mw.shapeProps.set(key, value);
+      // The shapeProps cache is this script's OWN mirror; a cross-instance write
+      // must not poison it (and cannot read a meaningful oldValue from it).
+      const oldValue = isOwnInstance ? mw.shapeProps.get(key) || "" : "";
+      if (isOwnInstance) mw.shapeProps.set(key, value);
       emitAppEvent("shape:setProperty", { instanceId, key, value, oldValue });
       return undefined;
     }
@@ -1041,15 +1784,81 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       if (!coord) {
         throw new BrokerError("ValidationError", `Table cell out of range: row=${row} col=${colIndex}`);
       }
-      await writeCellOnSheet(lib, coord.sheetIndex, coord.row, coord.col, String(value));
+      await writeCellOnSheet(lib, mw.definition.id, coord.sheetIndex, coord.row, coord.col, String(value));
       emitAppEvent("table:dataChanged", { tableId: instanceId });
+      return undefined;
+    }
+    case "table.setRangeValues": {
+      // Bulk own-object table write in TABLE-RELATIVE coordinates. Every target
+      // is resolved through tableCellCoord, so the write stays inside the
+      // table's body exactly like table.setCellValue — one RPC, one undo step.
+      const [startRow, startCol, values] = args as
+        [number, number, Array<Array<string | null | undefined>>];
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as TableLike | null;
+      if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
+      const updates: Array<{ row: number; col: number; value: string }> = [];
+      let sheetIndex = -1;
+      for (let r = 0; r < values.length; r++) {
+        const row = values[r];
+        for (let c = 0; c < row.length; c++) {
+          const v = row[c];
+          if (v === undefined || v === null) continue;
+          const coord = tableCellCoord(table, startRow + r, startCol + c);
+          if (!coord) {
+            throw new BrokerError(
+              "ValidationError",
+              `Table cell out of range: row=${startRow + r} col=${startCol + c}`,
+            );
+          }
+          sheetIndex = coord.sheetIndex;
+          recordScriptWrite(mw.definition.id, coord.sheetIndex, coord.row, coord.col);
+          updates.push({ row: coord.row, col: coord.col, value: String(v) });
+        }
+      }
+      if (updates.length === 0) return undefined;
+      if (updates.length > MAX_RANGE_CELLS) {
+        throw new BrokerError(
+          "ValidationError",
+          `range too large: ${updates.length} cells (max ${MAX_RANGE_CELLS})`,
+        );
+      }
+      const active = await lib.getActiveSheet();
+      await writeCellsOnSheet(lib, mw.definition.id, sheetIndex, active, updates);
+      emitAppEvent("table:dataChanged", { tableId: instanceId });
+      return undefined;
+    }
+    case "table.setRangeFormat":
+    case "table.clearRangeFormat": {
+      // Own-object formatting in TABLE-RELATIVE coordinates. Both corners are
+      // resolved through tableCellCoord, so the change cannot escape the
+      // table's body — exactly like table.setRangeValues.
+      const [startRow, startCol, endRow, endCol, format] = args as
+        [number, number, number, number, FormattingOptions?];
+      assertRangeSize(startRow, startCol, endRow, endCol);
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as TableLike | null;
+      if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
+      const first = tableCellCoord(table, startRow, startCol);
+      const last = tableCellCoord(table, endRow, endCol);
+      if (!first || !last) {
+        throw new BrokerError(
+          "ValidationError",
+          `Table range out of bounds: (${startRow},${startCol})-(${endRow},${endCol})`,
+        );
+      }
+      if (aspect === "table.setRangeFormat") {
+        await applyRangeFormat(lib, first.sheetIndex, first.row, first.col, last.row, last.col, format ?? {});
+      } else {
+        await clearRangeFormat(lib, first.sheetIndex, first.row, first.col, last.row, last.col);
+      }
       return undefined;
     }
     case "table.addRow": {
       const lib = await getLib();
       await lib.addTableRow(instanceId);
       emitAppEvent("table:dataChanged", { tableId: instanceId });
-      pushTableMirror(mw, instanceId);
+      if (isOwnInstance) pushTableMirror(mw, instanceId);
       return undefined;
     }
     case "namedRange.setValues": {
@@ -1064,18 +1873,16 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
         for (let c = 0; c < cols; c++) {
           const v = values?.[r]?.[c];
           if (v === undefined) continue;
-          const gridRow = coords.startRow + r;
-          const gridCol = coords.startCol + c;
-          if (coords.sheetIndex === active) {
-            updates.push({ row: gridRow, col: gridCol, value: String(v) });
-          } else {
-            await lib.updateCellOnSheets([coords.sheetIndex], gridRow, gridCol, String(v));
-          }
+          updates.push({
+            row: coords.startRow + r,
+            col: coords.startCol + c,
+            value: String(v),
+          });
         }
       }
-      if (updates.length > 0) {
-        await lib.updateCellsBatch(updates);
-      }
+      // One undo step whether the name resolves to the active sheet or not
+      // (the off-sheet path has no batch command, so it batches host-side).
+      await writeCellsOnSheet(lib, mw.definition.id, coords.sheetIndex, active, updates);
       emitAppEvent("namedRange:changed", { name: instanceId });
       return undefined;
     }
@@ -1097,16 +1904,11 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
           const gridRow = b.startRow + r;
           const gridCol = b.startCol + c;
           recordScriptWrite(mw.definition.id, b.sheetIndex, gridRow, gridCol);
-          if (b.sheetIndex === active) {
-            updates.push({ row: gridRow, col: gridCol, value: String(v) });
-          } else {
-            await lib.updateCellOnSheets([b.sheetIndex], gridRow, gridCol, String(v));
-          }
+          updates.push({ row: gridRow, col: gridCol, value: String(v) });
         }
       }
-      if (updates.length > 0) {
-        await lib.updateCellsBatch(updates);
-      }
+      // One undo step, on or off the active sheet.
+      await writeCellsOnSheet(lib, mw.definition.id, b.sheetIndex, active, updates);
       return undefined;
     }
     case "range.setCellType": {
@@ -1166,6 +1968,38 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
 
 async function executeGetState(instanceId: string, aspect: string, args: unknown[]): Promise<unknown> {
   switch (aspect) {
+    // ---- cross-instance READS (B3) ----
+    // A script's OWN object is read from a worker-local mirror (sync getters);
+    // another object has no mirror, so these aspects are the async read path
+    // behind api.chart(id).getSpec(), api.slicer(id).getSelectedItems(), etc.
+    // They are pure reads of state the same script could already mutate.
+    case "chart.getSpec": {
+      const chart = getChartStoreService()?.getChartById(instanceId);
+      if (!chart) throw new BrokerError("ValidationError", `No chart with id "${instanceId}"`);
+      try {
+        return JSON.parse(chart.specJson);
+      } catch {
+        throw new BrokerError("HostError", `Chart "${instanceId}" has an unreadable spec`);
+      }
+    }
+    case "slicer.getSelectedItems": {
+      const store = getSlicerStoreService();
+      if (!store) throw new BrokerError("HostError", "The Slicer extension is not loaded");
+      if (!store.getSlicerById(instanceId)) {
+        throw new BrokerError("ValidationError", `No slicer with id "${instanceId}"`);
+      }
+      return store.getSelectedItems(instanceId);
+    }
+    case "pivot.getFields": {
+      const store = getPivotStoreService();
+      if (!store) throw new BrokerError("HostError", "The Pivot extension is not loaded");
+      return store.getPivotFields(instanceId);
+    }
+    case "namedRange.getValues": {
+      const lib = await getLib();
+      const coords = (await lib.resolveNamedRangeCoords(instanceId)) as NamedRangeCoordsLike;
+      return readRangeValues(lib, coords);
+    }
     case "shape.cellValue": {
       const [cellRef] = args as [string];
       const parsed = parseCellRef(cellRef);
@@ -1183,9 +2017,740 @@ async function executeGetState(instanceId: string, aspect: string, args: unknown
       if (!coord) return "";
       return readCellOnSheet(lib, coord.sheetIndex, coord.row, coord.col);
     }
+    case "table.getRangeData": {
+      // Bulk TYPED read of the table's own body, in table-relative coordinates.
+      // The body is contiguous on one sheet, so the two corners resolved through
+      // tableCellCoord define the grid rectangle — own-object reach, one RPC.
+      const [startRow, startCol, endRow, endCol] = args as [number, number, number, number];
+      assertRangeSize(startRow, startCol, endRow, endCol);
+      const lib = await getLib();
+      const table = (await lib.getTableById(instanceId)) as TableLike | null;
+      if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
+      const first = tableCellCoord(table, startRow, startCol);
+      const last = tableCellCoord(table, endRow, endCol);
+      if (!first || !last) {
+        throw new BrokerError(
+          "ValidationError",
+          `Table range out of bounds: (${startRow},${startCol})-(${endRow},${endCol})`,
+        );
+      }
+      return readTypedRange(lib, first.sheetIndex, first.row, first.col, last.row, last.col);
+    }
     default:
       throw new BrokerError("ValidationError", `Unknown getState aspect: ${aspect}`);
   }
+}
+
+// ============================================================================
+// Typed + bulk range I/O (B1)
+// ============================================================================
+// The display-string reads above answer "what does this cell LOOK like". They
+// cannot answer "is this a number, a formula, an error" — so a script that read
+// a block and wrote it back replaced every formula with its rendered text. The
+// helpers below back the typed/bulk broker methods: ONE round trip per
+// rectangle, values with their engine type, and each cell's formula.
+
+/** A never-shared empty cell (callers may mutate the grid they get back). */
+function emptyScriptCell(): ScriptCell {
+  return { value: null, display: "", type: "empty" };
+}
+
+function typedToScriptCell(c: TypedCellData): ScriptCell {
+  const cell: ScriptCell = { value: c.value, display: c.display, type: c.type };
+  // `formula` is absent (not null) when the cell has none — so
+  // `if (cell.formula)` reads naturally in script code.
+  if (c.formula) cell.formula = c.formula;
+  return cell;
+}
+
+/** Host-side re-check of the bulk ceiling. The validator already rejected an
+ *  oversized rectangle; this is the belt-and-braces check for any host caller
+ *  that reaches an executor without passing through it. */
+function assertRangeSize(startRow: number, startCol: number, endRow: number, endCol: number): void {
+  if (endRow < startRow || endCol < startCol) {
+    throw new BrokerError("ValidationError", "invalid range: end before start");
+  }
+  const cells = (endRow - startRow + 1) * (endCol - startCol + 1);
+  if (cells > MAX_RANGE_CELLS) {
+    throw new BrokerError("ValidationError", `range too large: ${cells} cells (max ${MAX_RANGE_CELLS})`);
+  }
+}
+
+/**
+ * Read a rectangle as a DENSE rows x cols grid of typed cells in ONE backend
+ * call. The backend answers sparsely (only cells that exist); the rectangle is
+ * filled here so scripts can index it positionally.
+ */
+async function readTypedRange(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<ScriptCell[][]> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  const sparse = await lib.getRangeCellsTyped(startRow, startCol, endRow, endCol, sheetIndex);
+  const rows = endRow - startRow + 1;
+  const cols = endCol - startCol + 1;
+  const grid: ScriptCell[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row: ScriptCell[] = [];
+    for (let c = 0; c < cols; c++) row.push(emptyScriptCell());
+    grid.push(row);
+  }
+  for (const c of sparse) {
+    const r = c.row - startRow;
+    const k = c.col - startCol;
+    if (r >= 0 && r < rows && k >= 0 && k < cols) {
+      grid[r][k] = typedToScriptCell(c);
+    }
+  }
+  return grid;
+}
+
+/** Read ONE cell as a typed cell (same source as readTypedRange). */
+async function readTypedCell(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  row: number,
+  col: number,
+): Promise<ScriptCell> {
+  const grid = await readTypedRange(lib, sheetIndex, row, col, row, col);
+  return grid[0][0];
+}
+
+/**
+ * Resolve the sheet a sheet-scoped call may touch. `undefined` means "the
+ * active sheet". Naming another sheet is unlocked-tier reach — the same clamp
+ * sheet.getCellValue / sheet.setCellValue apply.
+ */
+async function clampSheetIndex(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  handle: ScriptHandle,
+  sheetIndex: number | undefined,
+): Promise<number | undefined> {
+  if (sheetIndex === undefined || sheetIndex === null) return undefined;
+  const active = await lib.getActiveSheet();
+  if (sheetIndex !== active && handle.tier !== "unlocked") {
+    throw new BrokerError("PermissionDenied", "Restricted sheet scripts can only access their own sheet");
+  }
+  return sheetIndex;
+}
+
+/**
+ * Run `fn`'s writes inside ONE undo transaction — but only if nobody else's
+ * transaction is already open. `begin_transaction` is a no-op while one is
+ * open, so an unconditional commit here would close the app's group early
+ * (e.g. a cut+paste that spans several backend calls).
+ *
+ * WHY THIS EXISTS (B1 §5): api.beginBatch/commitBatch/cancelBatch stay
+ * UNLOCKED-tier. Handing a restricted script an OPEN-ENDED transaction is not
+ * the same reach as letting it write its own cells: an unbalanced begin (or a
+ * script that faults between begin and commit) leaves a workbook-wide
+ * transaction open, and every later UI edit is swallowed into the script's
+ * group — an ambient effect on the user's undo stack, well outside the
+ * script's own object. Instead every multi-cell path batches INTERNALLY, so a
+ * restricted script's block write is already one Ctrl+Z with no way to leak an
+ * open transaction.
+ */
+async function withScriptUndoBatch(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  description: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const alreadyOpen = (await lib.getUndoState()).transactionOpen;
+  if (alreadyOpen) {
+    await fn();
+    return;
+  }
+  await lib.beginUndoTransaction(description);
+  try {
+    await fn();
+  } catch (err) {
+    await lib.cancelUndoTransaction();
+    throw err;
+  }
+  await lib.commitUndoTransaction();
+}
+
+/**
+ * The sheet index a sheet-less script write lands on, for the writeback guard.
+ * Only pays for the `getActiveSheet` round trip when the workbook ACTUALLY has
+ * .calp writeback regions to check against; otherwise it reuses the cached
+ * index the event forwarders already track.
+ */
+async function activeSheetForWriteGuard(
+  lib: Awaited<ReturnType<typeof getLib>>,
+): Promise<number> {
+  if (!(await workbookHasWritebackRegions())) return activeSheetIndexForEvents;
+  return lib.getActiveSheet();
+}
+
+/**
+ * Write many cells on ONE sheet as a single undo step. The active sheet takes
+ * the batch command (which opens its own transaction); another sheet has no
+ * batch command, so the per-cell writes are wrapped in one transaction here.
+ *
+ * Every target passes the .calp writeback draft gate first (writebackWriteGuard
+ * .ts): a cell claimed by a writeback region is drafted through the same
+ * authoritative path a human keystroke takes, or the whole call throws.
+ */
+async function writeCellsOnSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  sheetIndex: number,
+  activeSheet: number,
+  updates: Array<{ row: number; col: number; value: string }>,
+): Promise<void> {
+  if (updates.length === 0) return;
+  const { plain, drafted } = await captureWritebackWrites(
+    scriptId,
+    updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
+  );
+  if (sheetIndex === activeSheet) {
+    if (plain.length > 0) {
+      await lib.updateCellsBatch(plain.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+    }
+    // updateCellsBatch drops writeback cells, so drafted ones go singly.
+    for (const u of drafted) {
+      await lib.updateCell(u.row, u.col, u.value);
+    }
+    return;
+  }
+  await withScriptUndoBatch(lib, `Script write (${updates.length} cells)`, async () => {
+    for (const u of updates) {
+      await lib.updateCellOnSheets([sheetIndex], u.row, u.col, u.value);
+    }
+  });
+}
+
+// ============================================================================
+// Formatting + structural operations (B2)
+// ============================================================================
+// Everything below is WIRING over the trusted @api facade — the same functions
+// the Home tab, the Format Cells dialog and the sheet-tab bar call. No new
+// backend command, no new capability: whole-workbook reach is what the UNLOCKED
+// tier already means (api.setCellValue sets that bar), and the own-sheet
+// formatting rows are clamped exactly like sheet.setCellValue.
+//
+// THE ACTIVE-SHEET CONSTRAINT (why the structural methods take a sheetIndex
+// they then insist on): every structural / dimension / merge / sort /
+// find-replace Tauri command resolves `state.active_sheet` internally and has
+// no sheet parameter. Silently applying an off-sheet request to the ACTIVE
+// sheet would corrupt the wrong data, and switching the active sheet under the
+// user is a visible side effect (and would still not be atomic). So the host
+// refuses with a message that names the fix. Formatting has no such limit —
+// apply_formatting_to_sheets is genuinely sheet-scoped.
+//
+// UNDO GRANULARITY: one broker call is already ONE undo entry — every backend
+// command here opens and commits its own transaction (apply_formatting groups
+// "Format N cells", the structural ones snapshot the grid, sort/replaceAll are
+// atomic). They must therefore NOT be wrapped in withScriptUndoBatch: the Rust
+// undo stack does not nest (begin_transaction is a no-op while one is open, and
+// the command's own commit would close the outer group early), so wrapping
+// would SPLIT the entry instead of merging it.
+
+/** The subset of sort_range's result the executor needs (mirrors SortRangeResult). */
+interface SortRangeResultLike {
+  success: boolean;
+  sortedCount: number;
+  updatedCells: CellData[];
+  error: string | null;
+}
+
+/**
+ * Resolve the sheet an ACTIVE-SHEET-ONLY backend command may touch. `undefined`
+ * means "the active sheet"; naming another one is refused with the fix spelled
+ * out. Returns the active sheet index (for write attribution).
+ */
+async function assertActiveSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  method: string,
+): Promise<number> {
+  const active = await lib.getActiveSheet();
+  if (sheetIndex === undefined || sheetIndex === null || sheetIndex === active) return active;
+  throw new BrokerError(
+    "ValidationError",
+    `${method} can only target the active sheet (currently ${active}); ` +
+      `call api.setActiveSheet(${sheetIndex}) first`,
+  );
+}
+
+/** Push a batch of changed cells to the grid + style caches (the same refresh
+ *  choreography the Home tab performs after applyFormatting). */
+async function afterCellDataChange(cells: CellData[]): Promise<void> {
+  if (cells.length > 0) {
+    const { cellEvents, cellToChange } = await import("../../core/lib/cellEvents");
+    cellEvents.emitBatch(cells.map(cellToChange), "script");
+  }
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+  (await import("../grid")).refreshGridData();
+}
+
+/** Rows/columns moved: the canvas must re-fetch cells AND re-read dimensions
+ *  (every height/width override past the change shifted with it). */
+async function afterStructuralChange(): Promise<void> {
+  const grid = await import("../grid");
+  grid.refreshGridDimensions();
+  grid.refreshGridData();
+}
+
+/** Mirror a persisted row height / column width into Core's grid state and
+ *  announce it, so the canvas resizes without waiting for a reload. */
+async function syncDimensionToGrid(
+  kind: "row" | "column",
+  index: number,
+  size: number,
+): Promise<void> {
+  const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
+  dispatchMod.dispatchGridAction(
+    kind === "row" ? gridApi.setRowHeight(index, size) : gridApi.setColumnWidth(index, size),
+  );
+  const sheetIndex = await (await getLib()).getActiveSheet();
+  emitAppEvent(
+    kind === "row" ? AppEvents.ROW_RESIZED : AppEvents.COLUMN_RESIZED,
+    kind === "row" ? { sheetIndex, row: index, height: size } : { sheetIndex, col: index, width: size },
+  );
+  // A size of 0 removed the override — re-read the authoritative map rather
+  // than leaving the optimistic 0 in Core's state.
+  if (size <= 0) gridApi.refreshGridDimensions();
+  gridApi.refreshGridData();
+}
+
+/** Sheet list changed (add / delete / rename / visibility): sync Core's sheet
+ *  context and fire the one event the tab bar + extensions already listen to
+ *  (SheetTabs reloads its list from SHEET_CHANGED). */
+async function announceSheetsChanged(
+  result: { sheets: Array<{ index: number; name: string }>; activeIndex: number },
+): Promise<void> {
+  const active = result.sheets.find((s) => s.index === result.activeIndex) ?? result.sheets[0];
+  const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
+  if (active) {
+    dispatchMod.dispatchGridAction(gridApi.setActiveSheet(active.index, active.name));
+  }
+  emitAppEvent(AppEvents.SHEET_CHANGED, {
+    sheetIndex: active?.index ?? result.activeIndex,
+    sheetName: active?.name ?? "",
+  });
+  gridApi.refreshGridDimensions();
+  gridApi.refreshGridData();
+}
+
+/** Reject a duplicate sheet name BEFORE the backend does, so the script gets a
+ *  ValidationError naming the clash instead of a raw command string. */
+async function assertSheetNameFree(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  name: string,
+  ignoreIndex: number | null,
+): Promise<void> {
+  const { sheets } = await lib.getSheets();
+  const clash = sheets.find(
+    (s) => s.index !== ignoreIndex && s.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (clash) {
+    throw new BrokerError("ValidationError", `A sheet named "${clash.name}" already exists`);
+  }
+}
+
+/**
+ * Apply a PARTIAL format to a rectangle. Absent properties are left alone, so a
+ * script can bold a block without resetting its number format. The active sheet
+ * takes apply_formatting (which also replicates to a grouped sheet selection,
+ * exactly as a ribbon click would); another sheet takes the sheet-scoped
+ * apply_formatting_to_sheets. Both are undoable as ONE step, backend-side.
+ */
+async function applyRangeFormat(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  format: FormattingOptions,
+): Promise<void> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  const active = await lib.getActiveSheet();
+  const target = sheetIndex ?? active;
+  const { rows, cols } = rectRowsCols(startRow, startCol, endRow, endCol);
+  if (target === active) {
+    const result = await lib.applyFormatting(rows, cols, format);
+    await afterCellDataChange(result.cells);
+    return;
+  }
+  await lib.applyFormattingToSheets([target], rows, cols, format);
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+}
+
+/**
+ * Strip ALL formatting from a rectangle, keeping the values. Backed by
+ * clear_range_with_options(applyTo: "formats") — an ACTIVE-SHEET command, so an
+ * off-sheet target is refused rather than silently clearing the wrong sheet.
+ */
+async function clearRangeFormat(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<void> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  await assertActiveSheet(lib, sheetIndex, "clearRangeFormat");
+  await lib.clearRangeWithOptions(startRow, startCol, endRow, endCol, "formats");
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+  (await import("../grid")).refreshGridData();
+}
+
+// ============================================================================
+// Workbook objects: enumeration, creation, deletion, layout (B3)
+// ============================================================================
+// Everything below is WIRING over the trusted @api facade — the store services
+// the Charts/Slicer/Controls extensions register (IoC), the typed @api/backend
+// table wrappers, the @api/lib named-range wrappers, and the @api/pivot facade.
+// No new backend command and no new capability: charts, tables, pivots, names,
+// slicers and form controls all live INSIDE the document, which is exactly the
+// reach the UNLOCKED tier already means (api.setCellValue sets that bar).
+//
+// The semantics deliberately mirror the MCP/AI tools that have had this reach
+// since C1 (create_chart_from_spec / create_table / create_pivot /
+// create_named_range + the list_* readers, app/src-tauri/src/mcp/tools.rs) —
+// but through the FRONTEND path, so the extension that owns each object also
+// gets to run its own post-create choreography (region sync, cache refresh).
+
+/** Placement options for api.createChart (mirrors ChartPlacement). */
+type ChartCreateOptions = ChartPlacement;
+
+/** The `fields` argument of api.createPivot, in the Pivot Layout DSL's areas. */
+interface ScriptPivotFields {
+  rows?: string[];
+  columns?: string[];
+  filters?: string[];
+  values: Array<string | { field: string; aggregation?: string }>;
+}
+
+/** The Charts extension's store service, or an actionable error. */
+function requireChartStore(): NonNullable<ReturnType<typeof getChartStoreService>> {
+  const store = getChartStoreService();
+  if (!store) {
+    throw new BrokerError("HostError", "The Charts extension is not loaded, so charts are unavailable");
+  }
+  return store;
+}
+
+/**
+ * The @api/pivot facade, or an actionable error. The facade is a Proxy that
+ * THROWS on property access until the Pivot extension registers its
+ * implementation, so the probe below is how "not loaded" is detected without
+ * the API layer importing the extension.
+ */
+async function requirePivotApi(): Promise<PivotApi> {
+  const mod = await import("../pivot");
+  try {
+    void mod.pivot.getAll;
+  } catch {
+    throw new BrokerError("HostError", "The Pivot extension is not loaded, so pivot tables are unavailable");
+  }
+  return mod.pivot;
+}
+
+/** A workbook object was created/deleted: fan out through the feature-neutral
+ *  MUTATION_REFRESH "objects" domain (the Shell translates it to charts:refresh,
+ *  the table-definitions event and grid:refresh) so no extension is named here. */
+async function announceObjectsChanged(): Promise<void> {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["objects"] });
+  (await import("../grid")).refreshGridData();
+}
+
+/** A pivot's shape changed: the "pivot" domain reaches the Pivot extension's
+ *  own refresh, which re-reads the view and repaints the destination cells. */
+function announcePivotChanged(): void {
+  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["pivot"] });
+}
+
+/**
+ * Enumerate one kind of workbook object as safe descriptors (id + identity +
+ * position, never contents). An object kind whose owning extension is not
+ * loaded returns an EMPTY list rather than throwing — "this workbook has no
+ * slicers" and "the Slicer extension is off" are the same answer to a script,
+ * and failing the whole call would break a dashboard builder that merely asked.
+ */
+async function listWorkbookObjects(kind: ScriptObjectKind): Promise<ScriptObjectRef[]> {
+  switch (kind) {
+    case "chart":
+      return (getChartStoreService()?.listCharts() ?? []).map(chartToRef);
+    case "table": {
+      const backend = await import("../backend");
+      const tables = await backend.getAllTables();
+      return tables.map(tableToRef);
+    }
+    case "pivot": {
+      const api = await requirePivotApi();
+      const pivots = await api.getAll();
+      return pivots.map((p) => pivotToRef({
+        id: p.pivotId ?? p.id,
+        name: p.name,
+        sourceRange: p.sourceRange,
+        destination: p.destination,
+      }));
+    }
+    case "namedRange": {
+      const lib = await getLib();
+      const names = await lib.getAllNamedRanges();
+      return names.map(namedRangeToRef);
+    }
+    case "slicer":
+      return (getSlicerStoreService()?.listSlicers() ?? []).map(slicerToRef);
+    case "shape": {
+      // Controls are stored per sheet and anchored to a cell, so the whole-
+      // workbook view is the union over every sheet.
+      const store = getControlStoreService();
+      if (!store) return [];
+      const lib = await getLib();
+      const { sheets } = await lib.getSheets();
+      const refs: ScriptObjectRef[] = [];
+      for (const sheet of sheets) {
+        const controls = await store.listControls(sheet.index);
+        for (const c of controls) refs.push(shapeToRef(c));
+      }
+      return refs;
+    }
+    default:
+      // vObjectKind already rejected anything else; this keeps the switch total.
+      throw new BrokerError("ValidationError", `Unknown object kind: ${String(kind)}`);
+  }
+}
+
+/**
+ * Create a pivot table and lay its fields out, mirroring the UI's own two-step
+ * flow (create_pivot, then update_pivot_fields — the Insert dialog creates the
+ * pivot and the editor pane configures it). Field NAMES are resolved to source
+ * column indices against the freshly built cache, so a script names columns the
+ * way a user does instead of counting columns.
+ */
+async function createPivotFromScript(
+  sourceRange: string,
+  destinationCell: string,
+  fields: ScriptPivotFields,
+  options: { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean } | undefined,
+): Promise<ScriptObjectRef> {
+  const api = await requirePivotApi();
+  const created = await api.create({
+    sourceRange,
+    destinationCell,
+    sourceSheet: options?.sourceSheet,
+    destinationSheet: options?.destinationSheet,
+    hasHeaders: options?.hasHeaders ?? true,
+    name: options?.name,
+  });
+  const pivotId = created.pivotId;
+
+  const hierarchies = await api.getHierarchies(pivotId);
+  const sourceFields = hierarchies.hierarchies;
+  const toFieldConfig = (name: string) => {
+    const source = resolveSourceField(sourceFields, name);
+    return api.createFieldConfig(source.index, source.name);
+  };
+  const valueFields = fields.values.map((v) => {
+    const name = typeof v === "string" ? v : v.field;
+    const aggregation = typeof v === "string" ? undefined : v.aggregation;
+    const source = resolveSourceField(sourceFields, name);
+    // The DSL's aggregation words and the pivot API's AggregationType share the
+    // sum/count/average/... spelling for the create path (only the Excel-shaped
+    // AggregationFunction used by setAggregation differs), so the word passes
+    // through; the validator already restricted it to the known set.
+    return api.createValueFieldConfig(
+      source.index,
+      source.name,
+      (aggregation ?? (source.isNumeric ? "sum" : "count")) as Parameters<PivotApi["createValueFieldConfig"]>[2],
+    );
+  });
+
+  await api.updateFields({
+    pivotId,
+    rowFields: (fields.rows ?? []).map(toFieldConfig),
+    columnFields: (fields.columns ?? []).map(toFieldConfig),
+    filterFields: (fields.filters ?? []).map(toFieldConfig),
+    valueFields,
+  });
+  announcePivotChanged();
+
+  const info = await api.getInfo(pivotId);
+  return pivotToRef({
+    id: pivotId,
+    name: info.name,
+    sourceRange: info.sourceRange,
+    destination: info.destination,
+  });
+}
+
+/** A source column of a pivot's cache, matched by name (case-insensitive). */
+interface SourceFieldLike {
+  index: number;
+  name: string;
+  isNumeric: boolean;
+}
+
+/** Resolve a field NAME to its source column, listing the real names on a miss —
+ *  a silent no-op here is the classic "my script did nothing" bug. */
+function resolveSourceField(sourceFields: SourceFieldLike[], name: string): SourceFieldLike {
+  const wanted = name.trim().toLowerCase();
+  const match = sourceFields.find((f) => f.name.trim().toLowerCase() === wanted);
+  if (!match) {
+    const available = sourceFields.map((f) => f.name).join(", ") || "(none)";
+    throw new BrokerError(
+      "ValidationError",
+      `No source field named "${name}" in this pivot. Available fields: ${available}`,
+    );
+  }
+  return match;
+}
+
+/** One placed field of a pivot axis (mirrors RowColumnHierarchyInfo). */
+interface PlacedFieldLike {
+  name: string;
+  fieldIndex: number;
+  position: number;
+}
+
+/**
+ * Find a PLACED field on one axis by name. Matches the placed name first (which
+ * may be a display alias like "Sum of Sales") and falls back to the SOURCE
+ * column's name, so `removeField("Sales", "values")` works whichever the pivot
+ * happens to be storing.
+ */
+function findPlacedField(
+  placed: PlacedFieldLike[],
+  sourceFields: SourceFieldLike[],
+  name: string,
+): PlacedFieldLike | undefined {
+  const wanted = name.trim().toLowerCase();
+  const direct = placed.find((p) => p.name.trim().toLowerCase() === wanted);
+  if (direct) return direct;
+  return placed.find((p) => {
+    const source = sourceFields.find((f) => f.index === p.fieldIndex);
+    return source?.name.trim().toLowerCase() === wanted;
+  });
+}
+
+/** The four DSL areas mapped onto a hierarchies snapshot's four field lists. */
+function placedFieldsByArea(
+  hierarchies: { rowHierarchies: PlacedFieldLike[]; columnHierarchies: PlacedFieldLike[]; dataHierarchies: PlacedFieldLike[]; filterHierarchies: PlacedFieldLike[] },
+): Record<PivotArea, PlacedFieldLike[]> {
+  return {
+    rows: hierarchies.rowHierarchies,
+    columns: hierarchies.columnHierarchies,
+    values: hierarchies.dataHierarchies,
+    filters: hierarchies.filterHierarchies,
+  };
+}
+
+/**
+ * Execute one pivot LAYOUT aspect. Reached from BOTH the own-object door
+ * (object.setState on a pivot script) and the cross-instance door
+ * (api.objectSetState), so the reach difference lives entirely in the allowlist
+ * tier, never here.
+ */
+async function executePivotLayoutAspect(pivotId: string, aspect: string, args: unknown[]): Promise<void> {
+  const api = await requirePivotApi();
+  const hierarchies = await api.getHierarchies(pivotId);
+  const sourceFields = hierarchies.hierarchies as SourceFieldLike[];
+
+  switch (aspect) {
+    case "pivot.addField": {
+      const [field, area, position, aggregation] = args as [string, PivotArea, number?, string?];
+      const source = resolveSourceField(sourceFields, field);
+      await api.addHierarchy({
+        pivotId,
+        fieldIndex: source.index,
+        axis: requireAxis(area),
+        position: position ?? undefined,
+        aggregation: aggregation ? requireAggregation(aggregation) : undefined,
+      });
+      return;
+    }
+    case "pivot.moveField": {
+      const [field, area, position] = args as [string, PivotArea, number?];
+      const source = resolveSourceField(sourceFields, field);
+      await api.moveField({
+        pivotId,
+        fieldIndex: source.index,
+        targetAxis: requireAxis(area),
+        position: position ?? undefined,
+      });
+      return;
+    }
+    case "pivot.removeField": {
+      const [field, area] = args as [string, PivotArea?];
+      const byArea = placedFieldsByArea(hierarchies);
+      const areas: PivotArea[] = area ? [area] : ([...PIVOT_AREAS] as PivotArea[]);
+      for (const candidate of areas) {
+        const placed = findPlacedField(byArea[candidate], sourceFields, field);
+        if (!placed) continue;
+        await api.removeHierarchy({
+          pivotId,
+          axis: requireAxis(candidate),
+          position: placed.position,
+        });
+        return;
+      }
+      throw new BrokerError(
+        "ValidationError",
+        `Field "${field}" is not placed in ${area ? `the ${area} area` : "this pivot"}`,
+      );
+    }
+    case "pivot.setAggregation": {
+      const [field, aggregation] = args as [string, string];
+      const placed = findPlacedField(hierarchies.dataHierarchies, sourceFields, field);
+      if (!placed) {
+        const placedNames = hierarchies.dataHierarchies.map((d) => d.name).join(", ") || "(none)";
+        throw new BrokerError(
+          "ValidationError",
+          `Field "${field}" is not a value field of this pivot. Value fields: ${placedNames}`,
+        );
+      }
+      // value_field_index is the POSITION in the pivot's value-field list, which
+      // is exactly what getHierarchies reports as `position`.
+      await api.setAggregation({
+        pivotId,
+        valueFieldIndex: placed.position,
+        summarizeBy: requireAggregation(aggregation),
+      });
+      return;
+    }
+    case "pivot.setLayout": {
+      const [directives] = args as [string[]];
+      const { layout, unknown } = layoutDirectivesToConfig(directives);
+      if (unknown.length > 0) {
+        // The validator already enumerated the accepted directives, so reaching
+        // here means the two lists drifted — fail loudly rather than half-apply.
+        throw new BrokerError("ValidationError", `Unknown layout directive(s): ${unknown.join(", ")}`);
+      }
+      await api.updateLayout({ pivotId, layout });
+      return;
+    }
+    default:
+      throw new BrokerError("ValidationError", `Unknown pivot layout aspect: ${aspect}`);
+  }
+}
+
+/** DSL area -> PivotAxis, with the accepted list on a miss. */
+function requireAxis(area: string): PivotAxis {
+  const axis = areaToAxis(area);
+  if (!axis) {
+    throw new BrokerError("ValidationError", `area must be one of: ${[...PIVOT_AREAS].join(", ")}`);
+  }
+  return axis;
+}
+
+/** DSL aggregation word -> AggregationFunction, with the accepted list on a miss. */
+function requireAggregation(aggregation: string): AggregationFunction {
+  const fn = aggregationToFunction(aggregation);
+  if (!fn) {
+    throw new BrokerError("ValidationError", `Unknown aggregation "${aggregation}"`);
+  }
+  return fn;
 }
 
 /**
@@ -1211,14 +2776,17 @@ async function readCellOnSheet(
 /**
  * Write a single cell on a specific sheet, recalc + undoable. Uses updateCell
  * on the active sheet, otherwise updateCellOnSheets for a non-active sheet.
+ * Passes the .calp writeback draft gate first, like every other script write.
  */
 async function writeCellOnSheet(
   lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
   sheetIndex: number,
   row: number,
   col: number,
   value: string,
 ): Promise<void> {
+  await captureWritebackWrite(scriptId, { sheetIndex, row, col, value });
   const active = await lib.getActiveSheet();
   if (sheetIndex === active) {
     await lib.updateCell(row, col, value);
@@ -1295,6 +2863,133 @@ export async function callRangeBeforeCommit(
   } catch {
     return null; // handler threw — allow (error already surfaced via console)
   }
+}
+
+// ============================================================================
+// Workbook onBeforeSave / onBeforeClose (B5): cancellable lifecycle verdicts
+// ============================================================================
+
+/**
+ * Hard deadline for a script's save/close verdict.
+ *
+ * Generous compared to the 1.5s commit deadline because these handlers legitimately
+ * do work — stamping a version cell, validating a block of inputs — each of which is
+ * a broker round trip. It is still a HARD ceiling: saving and closing are the two
+ * operations a user must never lose control of.
+ */
+const BEFORE_LIFECYCLE_DEADLINE_MS = 3000;
+
+const BEFORE_LIFECYCLE_TIMEOUT = Symbol("beforeLifecycleTimeout");
+
+/** The relayed method name for each cancellable workbook hook. */
+const LIFECYCLE_RELAY: Record<LifecycleAction, string> = {
+  save: "__workbook_onBeforeSave",
+  close: "__workbook_onBeforeClose",
+};
+
+/** Verdict a workbook script's onBeforeSave / onBeforeClose may return. */
+export interface WorkbookLifecycleVerdict {
+  cancel: boolean;
+  /** Shown to the user alongside the script's name. */
+  reason?: string;
+}
+
+/**
+ * Normalize whatever a handler returned into a verdict.
+ *
+ * Accepted cancel forms: `false`, `"cancel"`, `{ cancel: true, reason? }`.
+ * EVERYTHING ELSE — including `undefined` from a handler that just did some
+ * work — allows. A handler that forgets to return must not cancel the user's save.
+ */
+export function normalizeLifecycleVerdict(result: unknown): WorkbookLifecycleVerdict | null {
+  if (result === false || result === "cancel") return { cancel: true };
+  if (result && typeof result === "object") {
+    const v = result as { cancel?: unknown; reason?: unknown };
+    if (v.cancel === true) {
+      return { cancel: true, reason: typeof v.reason === "string" ? v.reason : undefined };
+    }
+  }
+  return null;
+}
+
+/**
+ * Race one script's verdict against the deadline.
+ *
+ * DEFAULT-ALLOW on timeout and on a thrown handler — the same policy
+ * range.onBeforeCommit uses, and for the same reason applied to the two
+ * highest-stakes operations there are: a hung or crashed script must NEVER be
+ * able to hold Ctrl+S (or the window's close button) hostage. Default-DENY would
+ * mean one broken third-party script could make a workbook unsaveable and the app
+ * unclosable, with no way out but killing the process and losing the work — a
+ * strictly worse outcome than ignoring a veto the script failed to deliver in time.
+ * The veto is therefore an ADVISORY that a script must answer promptly to exercise.
+ *
+ * Exported (with an injectable relay + deadline) so the default-allow behaviour
+ * is directly testable without spawning a worker.
+ */
+export async function raceLifecycleVerdict(
+  relay: () => Promise<unknown>,
+  scriptName: string,
+  action: LifecycleAction,
+  deadlineMs: number = BEFORE_LIFECYCLE_DEADLINE_MS,
+): Promise<WorkbookLifecycleVerdict | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      relay(),
+      new Promise<typeof BEFORE_LIFECYCLE_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(BEFORE_LIFECYCLE_TIMEOUT), deadlineMs);
+      }),
+    ]);
+    if (result === BEFORE_LIFECYCLE_TIMEOUT) {
+      console.warn(
+        `[ScriptHost] onBefore${action === "save" ? "Save" : "Close"} of "${scriptName}" ` +
+          `exceeded ${deadlineMs}ms — allowing the ${action}`,
+      );
+      return null;
+    }
+    return normalizeLifecycleVerdict(result);
+  } catch {
+    return null; // handler threw — allow (the error already surfaced on the console)
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Ask ONE mounted script for a save/close verdict. An unmounted script cannot
+ * object (returns null = allow).
+ */
+export async function callWorkbookBeforeLifecycle(
+  scriptId: string,
+  action: LifecycleAction,
+  detail: LifecycleDetail,
+): Promise<WorkbookLifecycleVerdict | null> {
+  const mw = mounted.get(scriptId);
+  if (!mw) return null;
+  return raceLifecycleVerdict(
+    () => relayMethodCall(mw, LIFECYCLE_RELAY[action], [detail]),
+    mw.definition.name,
+    action,
+  );
+}
+
+/**
+ * Wire a cancellable workbook hook: register a lifecycle guard that pulls this
+ * script's verdict when a save or close is attempted. Returned cleanup is stored
+ * as the hook's forwarder, so unmount removes the guard with it (an unmounted
+ * script can never veto).
+ */
+function wireLifecycleGuardForwarder(mw: MountedWorker, action: LifecycleAction): CleanupFn {
+  const scriptId = mw.definition.id;
+  return registerLifecycleGuard(
+    async (a, detail): Promise<LifecycleGuardResult | null> => {
+      if (a !== action) return null;
+      const verdict = await callWorkbookBeforeLifecycle(scriptId, action, detail);
+      if (!verdict?.cancel) return null;
+      return { by: mw.definition.name, reason: verdict.reason };
+    },
+  );
 }
 
 /** Relay a callMethod from another script INTO this worker (5s deadline). */
@@ -1399,14 +3094,19 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         forwardEvent(mw, hook, d);
       }));
       break;
+    // onBeforeSave / onBeforeClose are REPLYING hooks (B5): no event forwarder —
+    // the SAVE and CLOSE paths pull a verdict through the lifecycle-guard
+    // registry and await it. Registering the guard as this hook's "forwarder"
+    // means unmount tears it down like any other, so a script that is gone can
+    // neither be asked nor block anything.
     case "workbook.onBeforeSave":
-      wireAppEventForwarder(mw, hook, AppEvents.BEFORE_SAVE);
+      addForwarder(mw, hook, wireLifecycleGuardForwarder(mw, "save"));
       break;
     case "workbook.onAfterSave":
       wireAppEventForwarder(mw, hook, AppEvents.AFTER_SAVE);
       break;
     case "workbook.onBeforeClose":
-      wireAppEventForwarder(mw, hook, AppEvents.BEFORE_CLOSE);
+      addForwarder(mw, hook, wireLifecycleGuardForwarder(mw, "close"));
       break;
     case "workbook.onSheetChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.SHEET_CHANGED, (d) => {

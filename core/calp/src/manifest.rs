@@ -218,7 +218,7 @@ pub struct PublishedObjectScript {
     /// This is the publisher's authoritative declaration of what the package's
     /// scripts may use; the subscriber sets each pulled script's ceiling from
     /// THIS list, never from the (tamperable) source. Recognized ids:
-    /// net.fetch, bi.query, storage, ui.html.
+    /// persistence::KNOWN_CAPABILITY_IDS.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
 }

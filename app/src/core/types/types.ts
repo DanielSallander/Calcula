@@ -318,6 +318,30 @@ export interface CellData {
   accountingLayout?: AccountingLayout;
 }
 
+/** The value type of a cell as the engine knows it (never inferred from text). */
+export type CellValueType = "number" | "text" | "boolean" | "empty" | "error";
+
+/**
+ * A cell read with its VALUE TYPE preserved (mirrors Rust `TypedCellData`).
+ * `CellData` carries only the formatted `display` string, so a consumer cannot
+ * tell the number 5 from the text "5", nor an error cell from a cell literally
+ * containing "#DIV/0!". This shape keeps the engine's own typing.
+ *
+ * - `value`: number | string | boolean | null (null = empty; an error cell
+ *   carries its Excel literal, e.g. "#DIV/0!"). List/Dict cells report type
+ *   "text" with their display text as the value.
+ * - `formula`: the localized formula ("=A1+B1"), null when the cell has none or
+ *   when a protected sheet hides it.
+ */
+export interface TypedCellData {
+  row: number;
+  col: number;
+  value: number | string | boolean | null;
+  display: string;
+  formula: string | null;
+  type: CellValueType;
+}
+
 /** Bounding box of all non-empty cells in the active sheet. */
 export interface UsedRangeResult {
   startRow: number;

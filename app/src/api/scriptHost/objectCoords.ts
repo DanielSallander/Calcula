@@ -63,6 +63,33 @@ export function tableHeaders(table: TableLike): string[] {
   return table.columns.map((c) => c.name);
 }
 
+/**
+ * Expand a rectangle into the DISTINCT row and column index lists the backend's
+ * `apply_formatting` / `apply_formatting_to_sheets` take. Those commands apply
+ * the CROSS PRODUCT rows x cols, so the lists must hold each index once —
+ * passing coordinate PAIRS (the shape a naive caller reaches for) still covers
+ * the rectangle but formats every cell rowCount x colCount times.
+ *
+ * The corners are normalized, so an inverted rectangle still yields the same
+ * (non-empty) lists rather than empty ones.
+ */
+export function rectRowsCols(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): { rows: number[]; cols: number[] } {
+  const firstRow = Math.min(startRow, endRow);
+  const lastRow = Math.max(startRow, endRow);
+  const firstCol = Math.min(startCol, endCol);
+  const lastCol = Math.max(startCol, endCol);
+  const rows: number[] = [];
+  const cols: number[] = [];
+  for (let r = firstRow; r <= lastRow; r++) rows.push(r);
+  for (let c = firstCol; c <= lastCol; c++) cols.push(c);
+  return { rows, cols };
+}
+
 /** Resolved named-range coordinates (mirrors backend.ts NamedRangeCoords). */
 export interface NamedRangeCoordsLike {
   sheetIndex: number;

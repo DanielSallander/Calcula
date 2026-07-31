@@ -17,13 +17,22 @@ import {
   getScaffoldTemplate,
   showToast,
   resolveCapabilityRequest,
+  resolveScriptDialog,
+  dismissScriptDialog,
+  SCRIPT_DIALOG_REQUEST_EVENT,
   parseDeclaredCapabilities,
   applyConsentedCapabilities,
   IconScript,
   IconTemplate,
   IconMarketplace,
 } from "@api";
-import type { CapabilityRequestPayload, CapabilityDecision, CapabilityId } from "@api";
+import type {
+  CapabilityRequestPayload,
+  CapabilityDecision,
+  CapabilityId,
+  ScriptDialogAnswer,
+  ScriptDialogRequestPayload,
+} from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
 import { loadConsents, recordConsent, isConsentCurrent, getChangedScripts } from "./lib/consentStore";
 import type { CapabilityGrant } from "./lib/consentStore";
@@ -39,6 +48,9 @@ import {
 import { CodeInThisFileSection } from "./components/CodeInThisFilePanel";
 import ScriptConsentDialog from "./components/ScriptConsentDialog";
 import CapabilityRequestDialog from "./components/CapabilityRequestDialog";
+import ScriptDialogPrompt, {
+  SCRIPT_DIALOG_ANSWERED_EVENT,
+} from "./components/ScriptDialogPrompt";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import type { DialogProps } from "@api/uiTypes";
@@ -139,6 +151,9 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "formula.udf": "Evaluate its functions in worksheet formulas",
   "bi.model": "Modify this workbook's BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
   "bi.connector": "Feed external data into this workbook's BI model as a data connector",
+  "ui.dialog": "Interrupt you with a dialog box and read what you answer",
+  "distribution.writeback":
+    "Fill in and send the input cells of a subscribed package — and, for a package this workbook can sign, read and approve everyone else's answers",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */
@@ -425,6 +440,75 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
+  // ---- ui.dialog: the script-asks-the-user modal ----
+  // The host (scriptHost/scriptDialogs.ts) emits SCRIPT_DIALOG_REQUEST_EVENT and
+  // awaits an answer. The abuse guards (one dialog per script, one app-wide, the
+  // dismissal-streak mute) are enforced host-side BEFORE the event is emitted, so
+  // there is deliberately no queue here: at most one request can ever be live,
+  // and a request that arrives while one is showing was already rejected.
+  //
+  // The invariant this wiring exists to keep: EVERY close resolves. The dialog
+  // emits an explicit answer for OK/Cancel/Escape; if it closes having emitted
+  // nothing (the dialog manager closed it, the window went away), the close
+  // watcher below resolves the request as dismissed. A script awaiting a dialog
+  // must never be left hanging.
+  const SCRIPT_DIALOG_ID = "scriptable-objects.scriptDialog";
+  context.ui.dialogs.register({
+    id: SCRIPT_DIALOG_ID,
+    title: "Script dialog",
+    component: ScriptDialogPrompt,
+    width: 460,
+    height: 300,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(SCRIPT_DIALOG_ID));
+
+  let activeScriptDialog: ScriptDialogRequestPayload | null = null;
+  let activeScriptDialogAnswered = false;
+
+  cleanupFunctions.push(
+    onAppEvent(SCRIPT_DIALOG_REQUEST_EVENT, (detail) => {
+      const request = detail as ScriptDialogRequestPayload;
+      if (activeScriptDialog !== null) {
+        // Should be unreachable (the host's one-at-a-time guard runs first);
+        // if it ever happens, refuse rather than silently drop the request —
+        // dropping it would hang the awaiting script.
+        dismissScriptDialog(request.requestId);
+        return;
+      }
+      activeScriptDialog = request;
+      activeScriptDialogAnswered = false;
+      context.ui.dialogs.show(SCRIPT_DIALOG_ID, request as unknown as Record<string, unknown>);
+    }),
+  );
+
+  cleanupFunctions.push(
+    onAppEvent(SCRIPT_DIALOG_ANSWERED_EVENT, (detail) => {
+      const { requestId, answer } = detail as { requestId: string; answer: ScriptDialogAnswer };
+      if (activeScriptDialog?.requestId === requestId) {
+        activeScriptDialogAnswered = true;
+      }
+      resolveScriptDialog(requestId, answer);
+    }),
+  );
+
+  cleanupFunctions.push(
+    DialogExtensions.onChange(() => {
+      if (activeScriptDialog === null) return;
+      const stillOpen = DialogExtensions.getVisibleDialogs()
+        .some((d) => d.definition.id === SCRIPT_DIALOG_ID);
+      if (stillOpen) return;
+      const closed = activeScriptDialog;
+      const answered = activeScriptDialogAnswered;
+      activeScriptDialog = null;
+      activeScriptDialogAnswered = false;
+      if (!answered) {
+        // Closed without an answer — dismissal is the only safe reading, and
+        // resolving is mandatory (a hung await is worse than a "no").
+        dismissScriptDialog(closed.requestId);
+      }
+    }),
+  );
+
   // ---- Load object scripts from backend on startup ----
   try {
     await loadAndMountScripts();
@@ -451,7 +535,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   // Without this, freshly pulled distributed scripts would not appear (or
   // prompt for consent) until the workbook is saved and reopened.
   cleanupFunctions.push(
-    onAppEvent("calp:scripts-pulled", async () => {
+    onAppEvent(AppEvents.PACKAGE_UPDATED, async () => {
       try {
         await loadAndMountScripts();
       } catch (e) {

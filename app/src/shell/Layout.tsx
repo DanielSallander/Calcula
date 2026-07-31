@@ -35,6 +35,7 @@ import {
   AppEvents,
   onAppEvent,
   emitAppEvent,
+  checkLifecycleGuards,
 } from "../api";
 import { updateWindowTitle, isFileModified, saveFile } from "../core/lib/file-api";
 import { invoke } from "@tauri-apps/api/core";
@@ -255,12 +256,24 @@ function LayoutInner(): React.ReactElement {
     return () => cleanups.forEach((fn) => fn());
   }, []);
 
-  // Window close handler: emit BEFORE_CLOSE and prompt for unsaved changes.
+  // Window close handler: ask the lifecycle guards, emit BEFORE_CLOSE, then
+  // prompt for unsaved changes.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
     getCurrentWindow()
       .onCloseRequested(async (event) => {
+        // Cancellable Before-Close. This MUST come first: BEFORE_CLOSE is what
+        // tears the script realm down (ScriptableObjects unmounts every script
+        // on it), so a script asked after the broadcast could never answer.
+        // A guard that hangs or crashes cannot trap the user in the app — the
+        // script host bounds each verdict and defaults to ALLOW.
+        // checkLifecycleGuards reports the cancellation to the user itself.
+        if (await checkLifecycleGuards("close")) {
+          event.preventDefault();
+          return;
+        }
+
         // Emit BEFORE_CLOSE so extensions can prepare (e.g., persist state)
         emitAppEvent(AppEvents.BEFORE_CLOSE);
 

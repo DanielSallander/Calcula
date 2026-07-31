@@ -135,6 +135,30 @@ fn default_span() -> u32 {
     1
 }
 
+/// A cell read with its VALUE TYPE preserved — the payload of a bulk, typed
+/// range read (`get_range_cells_typed`). `CellData` carries only the formatted
+/// `display` string, so a consumer cannot tell the number 5 from the text "5",
+/// nor an error from a cell literally containing "#DIV/0!". This shape keeps the
+/// engine's own typing:
+///   - `value` is the JSON-native value: number | string | boolean | null
+///     (null = empty; an error cell carries its Excel literal, e.g. "#DIV/0!").
+///   - `display` is the same formatted text `CellData.display` carries.
+///   - `formula` is the localized formula ("=A1+B1"), withheld exactly where
+///     `get_cell` withholds it (protected sheet + hidden-formula style).
+///   - `r#type` serializes as "type": number|text|boolean|empty|error.
+/// List/Dict cells have no JSON scalar form; they report type "text" with their
+/// display text as the value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypedCellData {
+    pub row: u32,
+    pub col: u32,
+    pub value: serde_json::Value,
+    pub display: String,
+    pub formula: Option<String>,
+    pub r#type: String,
+}
+
 /// Represents a single item in a collection preview (List or Dict).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

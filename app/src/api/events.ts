@@ -34,8 +34,29 @@ export const AppEvents = {
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",
 
-  // Sheet events
+  // Sheet events.
+  //
+  // SHEET_CHANGED is "the ACTIVE sheet changed". The three below are the sheet
+  // COLLECTION changing, which until now nothing on the bus reported — a script
+  // or extension could not react to a sheet appearing, disappearing or being
+  // renamed. Emitted by the tauri-api sheet wrappers themselves, so every caller
+  // announces the change (toolbar, sheet tabs, scripts, .calp pull). Payloads:
+  //   SHEET_ADDED   { sheetIndex, sheetName, source }
+  //   SHEET_DELETED { sheetIndex, sheetName }
+  //   SHEET_RENAMED { sheetIndex, oldName, newName }
+  // These payloads are visible to user scripts (scriptHost allowlist), so treat
+  // their shape as public.
   SHEET_CHANGED: "app:sheet-changed",
+  SHEET_ADDED: "app:sheet-added",
+  SHEET_DELETED: "app:sheet-deleted",
+  SHEET_RENAMED: "app:sheet-renamed",
+
+  // Recalculation finished (an EXPLICIT recalc pass: Calculate Now / F9 /
+  // Calculate Sheet / a post-model-change refresh). The incremental recalc that
+  // follows a single edit is already reported by CELL_VALUES_CHANGED; this event
+  // is the "the workbook is settled now" signal a script needs before reading
+  // derived values in bulk.
+  RECALCULATION_COMPLETED: "app:recalculation-completed",
 
   // Data events
   DATA_CHANGED: "app:data-changed",
@@ -149,6 +170,16 @@ export const AppEvents = {
   // thinAppEventForScripts).
   BI_MODEL_CHANGED: "app:bi-model-changed",
   BI_REFRESH_COMPLETED: "app:bi-refresh-completed",
+
+  // Report-distribution lifecycle (.calp). Emitted after a subscribe-pull or a
+  // refresh-apply lands, so anything holding package-derived state (scripts,
+  // chart libraries, the Package Explorer) can re-read. This replaced the
+  // untyped, script-invisible "calp:scripts-pulled" window event: it carries a
+  // proper app: id, so a script CAN subscribe to it — with a THINNED payload
+  // (package name + version only; see scriptHost/allowlist.ts
+  // thinAppEventForScripts), because the counts describe the subscriber's
+  // workbook, not the package.
+  PACKAGE_UPDATED: "app:package-updated",
 } as const;
 
 /**
@@ -225,6 +256,57 @@ export interface BiRefreshCompletedPayload {
   connectionId: string;
   tables: Array<{ name: string; ok: boolean; error?: string }>;
   durationMs: number;
+}
+
+/** Payload of AppEvents.SHEET_ADDED. */
+export interface SheetAddedPayload {
+  sheetIndex: number;
+  sheetName: string;
+  /** "new" for an empty sheet, "copy" when it was duplicated from another. */
+  source: "new" | "copy";
+}
+
+/** Payload of AppEvents.SHEET_DELETED. */
+export interface SheetDeletedPayload {
+  /** The index the sheet occupied BEFORE it was removed. */
+  sheetIndex: number;
+  sheetName: string;
+}
+
+/** Payload of AppEvents.SHEET_RENAMED. */
+export interface SheetRenamedPayload {
+  sheetIndex: number;
+  oldName: string;
+  newName: string;
+}
+
+/** Payload of AppEvents.RECALCULATION_COMPLETED. */
+export interface RecalculationCompletedPayload {
+  /** "workbook" = calculate_now (F9), "sheet" = calculate_sheet. */
+  scope: "workbook" | "sheet";
+  /** How many cells the engine reported as changed. */
+  cellsUpdated: number;
+  durationMs: number;
+}
+
+/**
+ * Payload of AppEvents.PACKAGE_UPDATED (trusted subscribers). Sandboxed script
+ * subscribers receive only { packageName, version } — see thinAppEventForScripts.
+ */
+export interface PackageUpdatedPayload {
+  packageName: string;
+  /** Resolved semver of the version now installed; null when a refresh touched
+   *  several subscriptions at once and no single version applies. */
+  version: string | null;
+  /** How the update happened. */
+  kind: "subscribe" | "refresh";
+  /** Sheets this update materialized into the workbook. */
+  sheetsPulled: number;
+  /** Object scripts this update materialized or replaced; `null` when the
+   *  backend does not break the count out per package (the refresh path
+   *  reports totals, not per-subscription counts). Subscribers must reload
+   *  package-derived state regardless of the count. */
+  scriptsPulled: number | null;
 }
 
 /** Payload emitted with FILL_COMPLETED event. */

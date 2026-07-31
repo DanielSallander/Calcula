@@ -13,10 +13,14 @@ import {
 } from "@api/locale";
 import { KeybindingsPage } from "./components/KeybindingsPage";
 import { AppearancePage } from "./components/AppearancePage";
+import { ScriptSecurityPage } from "./components/ScriptSecurityPage";
 
 const h = React.createElement;
 
-type SettingsTab = "general" | "appearance" | "keybindings";
+export type SettingsTab = "general" | "appearance" | "keybindings" | "scriptSecurity";
+
+/** Window event that selects a Settings tab (detail = SettingsTab). */
+export const SETTINGS_SHOW_TAB_EVENT = "calcula:settings-show-tab";
 
 // ============================================================================
 // Settings Storage
@@ -50,6 +54,18 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     const handler = () => setSettings(getSettings());
     window.addEventListener("calcula:settings-changed", handler);
     return () => window.removeEventListener("calcula:settings-changed", handler);
+  }, []);
+
+  // Deep-link: `settings.showTab` (see index.ts) selects a tab so a script
+  // prompt's "change it in Settings > Script Security" can actually take the
+  // user there instead of leaving them to find it.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const tab = (e as CustomEvent<SettingsTab>).detail;
+      if (tab) setActiveTab(tab);
+    };
+    window.addEventListener(SETTINGS_SHOW_TAB_EVENT, handler);
+    return () => window.removeEventListener(SETTINGS_SHOW_TAB_EVENT, handler);
   }, []);
 
   // Load locale settings
@@ -86,6 +102,10 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
         style: activeTab === "keybindings" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
         onClick: () => setActiveTab("keybindings"),
       }, "Keyboard Shortcuts"),
+      h("button", {
+        style: activeTab === "scriptSecurity" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
+        onClick: () => setActiveTab("scriptSecurity"),
+      }, "Script Security"),
     ),
 
     // Appearance tab
@@ -93,6 +113,9 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
 
     // Keybindings tab
     activeTab === "keybindings" && h(KeybindingsPage, null),
+
+    // Script Security tab (the destination every script prompt points at)
+    activeTab === "scriptSecurity" && h(ScriptSecurityPage, null),
 
     // General tab
     activeTab === "general" && h("div", { style: styles.generalContent },

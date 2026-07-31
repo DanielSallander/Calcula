@@ -40,6 +40,8 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "formula.udf": "Worksheet fn",
   "bi.model": "BI model edit",
   "bi.connector": "BI connector",
+  "ui.dialog": "Ask you",
+  "distribution.writeback": "Package writeback",
 };
 
 const capLabel = (c: CapabilityId): string => CAP_LABEL[c] ?? c;

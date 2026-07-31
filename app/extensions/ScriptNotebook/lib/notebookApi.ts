@@ -2,6 +2,8 @@
 // PURPOSE: TypeScript bindings for the Tauri notebook commands.
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
+import { currentHostViewState } from "@api/workbookScripts";
+import type { HostViewState } from "@api/workbookScripts";
 import { notebookBackend } from "./notebookBackend";
 import type {
   NotebookDocument,
@@ -75,12 +77,27 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Attach the frontend-owned view state (zoom / view mode / zero + heading
+ * display) to a run request. The backend has no authoritative copy, and a
+ * notebook SESSION outlives any single cell — so it is re-sent per call rather
+ * than captured once, or `Calcula.getZoom()` answers with whatever was true
+ * when the session started.
+ */
+function withViewState<T extends object>(
+  request: T,
+): T & { viewState: HostViewState | undefined } {
+  return { ...request, viewState: currentHostViewState() };
+}
+
 /** Run a single notebook cell. */
 export async function runNotebookCell(
   request: RunNotebookCellRequest,
 ): Promise<NotebookCellResponse> {
   return withScriptSecurityPrompt(() =>
-    notebookBackend.invoke<NotebookCellResponse>("notebook_run_cell", { request }),
+    notebookBackend.invoke<NotebookCellResponse>("notebook_run_cell", {
+      request: withViewState(request),
+    }),
   );
 }
 
@@ -91,6 +108,7 @@ export async function runAllCells(
   return withScriptSecurityPrompt(() =>
     notebookBackend.invoke<NotebookCellResponse[]>("notebook_run_all", {
       notebookId,
+      viewState: currentHostViewState(),
     }),
   );
 }
@@ -99,7 +117,9 @@ export async function runAllCells(
 export async function rewindNotebook(
   request: RewindNotebookRequest,
 ): Promise<NotebookCellResponse[]> {
-  return notebookBackend.invoke<NotebookCellResponse[]>("notebook_rewind", { request });
+  return notebookBackend.invoke<NotebookCellResponse[]>("notebook_rewind", {
+    request: withViewState(request),
+  });
 }
 
 /** Rewind to a cell and run from it onwards. */
@@ -108,7 +128,7 @@ export async function runFromCell(
 ): Promise<NotebookCellResponse[]> {
   return withScriptSecurityPrompt(() =>
     notebookBackend.invoke<NotebookCellResponse[]>("notebook_run_from", {
-      request,
+      request: withViewState(request),
     }),
   );
 }
@@ -122,12 +142,16 @@ export async function resetNotebookRuntime(): Promise<void> {
  * Mirror a session grant of a BI capability ("bi.query" / "bi.sql") for a
  * notebook surface into the authoritative backend CapabilityStore — the same
  * store the model.* provider re-checks per call. Session-scoped (in-memory).
+ *
+ * Goes through the ONE generic grant mirror (`grant_script_capability`), which
+ * validates the id against the backend's single allowlist; the bi-only
+ * `grant_script_bi` it replaced is gone.
  */
 export async function grantNotebookBiCapability(
   notebookId: string,
   capability: string,
 ): Promise<void> {
-  return notebookBackend.invoke<void>("grant_script_bi", {
+  return notebookBackend.invoke<void>("grant_script_capability", {
     scriptId: `notebook:${notebookId}`,
     capability,
   });

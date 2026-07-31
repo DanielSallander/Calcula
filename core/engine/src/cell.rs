@@ -4,8 +4,12 @@
 //! It separates the user's input (formula) from the calculated result (value).
 //! It is designed to be lightweight as millions of these instances may exist.
 //!
-//! PERFORMANCE: Cells with formulas can cache their parsed AST to avoid
-//! re-parsing on every recalculation. The cached AST is not serialized.
+//! PERFORMANCE: The AST is the canonical formula storage — it is parsed once
+//! and never re-parsed on recalculation. It IS serialized: `Cell` derives
+//! Serialize/Deserialize with no `skip` on `ast`, which is what lets the
+//! AST-carrying undo snapshots (`script_grid_cells`) restore a formula exactly.
+//! The `.cala` writer stores the rendered formula STRING instead and re-parses
+//! on load, so the on-disk format does not depend on the AST's JSON shape.
 
 use serde::{Deserialize, Serialize};
 use crate::dependency_extractor::Expression;

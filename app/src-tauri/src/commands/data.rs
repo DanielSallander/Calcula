@@ -377,6 +377,129 @@ pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> 
     )
 }
 
+/// Maximum cells one typed range read may cover. Mirrors the script broker's
+/// `api.updateCellsBatch` ceiling so bulk read and bulk write share one limit.
+pub const MAX_TYPED_RANGE_CELLS: usize = 100_000;
+
+/// Map an engine `CellValue` to the (type, JSON value) pair of `TypedCellData`.
+/// `display` is only consulted for collection cells, which have no JSON scalar
+/// form. A non-finite number (NaN / infinity) has no JSON representation either
+/// and surfaces as type "number" with a null value.
+fn typed_cell_value(
+    value: &engine::CellValue,
+    display: &str,
+) -> (&'static str, serde_json::Value) {
+    match value {
+        engine::CellValue::Empty => ("empty", serde_json::Value::Null),
+        engine::CellValue::Number(n) => (
+            "number",
+            serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        engine::CellValue::Text(s) => ("text", serde_json::Value::String(s.clone())),
+        engine::CellValue::Boolean(b) => ("boolean", serde_json::Value::Bool(*b)),
+        engine::CellValue::Error(e) => (
+            "error",
+            serde_json::Value::String(
+                crate::scripting::udf::cell_error_to_str(e).to_string(),
+            ),
+        ),
+        engine::CellValue::List(_) | engine::CellValue::Dict(_) => {
+            ("text", serde_json::Value::String(display.to_string()))
+        }
+    }
+}
+
+/// Read a rectangle of cells with their VALUE TYPES preserved, in ONE call.
+///
+/// This is the typed counterpart of `get_viewport_cells`: scripts and other
+/// bulk consumers need to tell the number 5 from the text "5", read a formula
+/// without clobbering it on write-back, and detect an error as an error — none
+/// of which the display-string shape can express.
+///
+/// SPARSE: only cells that exist in the grid are returned; the caller fills the
+/// rectangle. `sheet_index` defaults to the active sheet (whose live grid is
+/// `state.grid` — `grids[active_sheet]` is stale). Formula hiding on a protected
+/// sheet applies exactly as it does in `get_cell`.
+#[tauri::command]
+pub fn get_range_cells_typed(
+    state: State<AppState>,
+    sheet_index: Option<usize>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<Vec<crate::api_types::TypedCellData>, String> {
+    if end_row < start_row || end_col < start_col {
+        return Err("invalid range: end before start".to_string());
+    }
+    let rows = (end_row - start_row) as usize + 1;
+    let cols = (end_col - start_col) as usize + 1;
+    let count = rows.saturating_mul(cols);
+    if count > MAX_TYPED_RANGE_CELLS {
+        return Err(format!(
+            "range too large: {} cells (max {})",
+            count, MAX_TYPED_RANGE_CELLS
+        ));
+    }
+
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = sheet_index.unwrap_or(active_sheet);
+    let grids = state.grids.lock().unwrap();
+    let active_grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let protection = state.sheet_protection.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+
+    let grid: &Grid = if target_sheet == active_sheet {
+        &active_grid
+    } else if target_sheet < grids.len() {
+        &grids[target_sheet]
+    } else {
+        return Err(format!("sheet index out of range: {}", target_sheet));
+    };
+
+    let mut out: Vec<crate::api_types::TypedCellData> = Vec::new();
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            let Some(cell) = grid.get_cell(row, col) else {
+                continue;
+            };
+            let style = styles.get(grid.effective_style_index(row, col));
+            let display = format_cell_value(&cell.value, style, &locale);
+            let (kind, value) = typed_cell_value(&cell.value, &display);
+            let hide = crate::protection::formula_is_hidden(
+                &protection,
+                grid,
+                &styles,
+                target_sheet,
+                row,
+                col,
+            );
+            let formula = if hide {
+                None
+            } else {
+                formula_display(cell, &locale)
+            };
+            // A style-only cell (no value, no formula) adds nothing the caller's
+            // empty fill does not already say — keep the payload sparse.
+            if kind == "empty" && formula.is_none() && display.is_empty() {
+                continue;
+            }
+            out.push(crate::api_types::TypedCellData {
+                row,
+                col,
+                value,
+                display,
+                formula,
+                r#type: kind.to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Batch-get cell display values from arbitrary sheets (for Watch Window).
 /// Takes a list of (sheetIndex, row, col) and returns parallel list of results.
 /// Note: grids[active_sheet] is stale; we use state.grid for the active sheet.
@@ -666,6 +789,7 @@ pub fn update_cell(
     col: u32,
     value: String,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
     cube_results: Option<engine::CubePrefetch>,
 ) -> Result<UpdateCellResult, String> {
     // Anchor probe BEFORE the edit (the name lives in the control's
@@ -685,6 +809,7 @@ pub fn update_cell(
         col,
         value,
         udf_results,
+        udf_volatile_cells,
         cube_results,
     )?;
 
@@ -730,8 +855,19 @@ fn update_cell_impl(
     col: u32,
     value: String,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
     cube_results: Option<engine::CubePrefetch>,
 ) -> Result<UpdateCellResult, String> {
+    // WRITEBACK ANTI-BYPASS (authoritative backstop). A cell claimed by a
+    // PUBLISHED .calp writeback region is the publisher's input form: its value
+    // must pass `calp_save_writeback_draft` (schema + lifecycle + one-shot
+    // rules) before it may appear in the grid. The interactive editor's commit
+    // guard drafts first and only then commits, so it passes here; a script
+    // reaching `update_cell` directly does not, unless it went through
+    // `script_writeback` action `cellGuard`. Short-circuits on an empty
+    // writeback index, so a normal workbook pays one lock.
+    crate::calp_commands::ensure_writeback_draft_before_write(state, row, col)?;
+
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
     use std::time::Instant;
@@ -1272,12 +1408,25 @@ fn update_cell_impl(
 
         // Also get column/row dependents (formulas with column or row references)
         // Use a set for O(1) lookup instead of O(n) Vec::contains
-        let recalc_set: crate::CoordSet = recalc_order.iter().copied().collect();
+        let mut recalc_set: crate::CoordSet = recalc_order.iter().copied().collect();
         let col_row_deps =
             get_column_row_dependents((row, col), &column_dependents_map, &row_dependents_map);
         for dep in col_row_deps {
-            if !recalc_set.contains(&dep) {
+            if recalc_set.insert(dep) {
                 recalc_order.push(dep);
+            }
+        }
+        // VOLATILE UDF cells (Excel's Application.Volatile): cells calling a
+        // function the author marked volatile recalculate on every edit even
+        // though no dependency edge reaches them. `collect_udf_calls` found
+        // them and already resolved their calls into `udf_results`, so the
+        // resolver below can serve them. Empty (usually None) for every
+        // workbook without a volatile UDF, so the hot path is untouched.
+        if let Some(volatile) = &udf_volatile_cells {
+            for v in volatile {
+                if (v.row, v.col) != (row, col) && recalc_set.insert((v.row, v.col)) {
+                    recalc_order.push((v.row, v.col));
+                }
             }
         }
         let perf_t4_recalc_order = Instant::now();
@@ -2011,6 +2160,7 @@ pub fn update_cells_batch(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
 ) -> Result<Vec<CellData>, String> {
     // Protected-region guard (paste / fill / multi-edit): reject the WHOLE
     // batch before any mutation when a target cell sits inside a pivot/report
@@ -2062,13 +2212,14 @@ pub fn update_cells_batch(
     let pane_ref = pane_control_state.inner();
     let ribbon_ref = ribbon_filter_state.inner();
 
-    let mut cells = update_cells_batch_with_controls(
+    let mut cells = update_cells_batch_core(
         state,
         file_state,
         user_files_state,
         pivot_state,
         updates,
         udf_results,
+        udf_volatile_cells,
         Some(control_values),
     )?;
 
@@ -2095,6 +2246,9 @@ pub fn update_cells_batch(
 /// reach the pane-control/ribbon-filter states (the script apply path is also
 /// invoked from mcp/tools.rs, owned by a parallel workstream).
 /// `control_values: None` => GET.CONTROLVALUE evaluates to #N/A in this pass (v1).
+///
+/// Rust-side callers have no UDF pre-fetch (they cannot run JS off-thread), so
+/// they get no volatile-UDF splice either — exactly as before.
 pub(crate) fn update_cells_batch_with_controls(
     state: State<AppState>,
     file_state: State<FileState>,
@@ -2102,6 +2256,33 @@ pub(crate) fn update_cells_batch_with_controls(
     pivot_state: State<'_, crate::pivot::PivotState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
     udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
+) -> Result<Vec<CellData>, String> {
+    update_cells_batch_core(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        updates,
+        udf_results,
+        None,
+        control_values,
+    )
+}
+
+/// The batch body. Split from `update_cells_batch_with_controls` so the Tauri
+/// command can pass the volatile-UDF cell list the frontend's pre-fetch found
+/// without changing the signature Rust-side callers (script apply / MCP tools)
+/// already use.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_cells_batch_core(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    updates: Vec<crate::api_types::CellUpdateInput>,
+    udf_results: Option<std::collections::HashMap<String, crate::scripting::udf::UdfValue>>,
+    udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
     control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
@@ -2651,6 +2832,17 @@ pub(crate) fn update_cells_batch_with_controls(
             }
         }
 
+        // VOLATILE UDF cells: recalculate on every batch even without a
+        // dependency edge (see the same splice in update_cell_impl). None for
+        // every workbook with no volatile UDF, and for Rust-side callers.
+        if let Some(volatile) = &udf_volatile_cells {
+            for v in volatile {
+                if recalc_set.insert((v.row, v.col)) {
+                    all_recalc_order.push((v.row, v.col));
+                }
+            }
+        }
+
         // Lock table state for cascade recalculation
         let batch_tables = state.tables.lock().unwrap();
         let batch_table_names = state.table_names.lock().unwrap();
@@ -2658,6 +2850,16 @@ pub(crate) fn update_cells_batch_with_controls(
 
         // PERF-20: skip per-dependent formula render + IPC payload for wide cascades.
         let include_cascade_formulas = all_recalc_order.len() <= CASCADE_FORMULA_LIMIT;
+
+        // The same-sheet cascade evaluates UDF-bearing dependents WITH the
+        // pre-fetched resolver. Without it every such cell took the
+        // no-resolver branch, and because this evaluator carries no
+        // current_row/current_col, `preserved_udf_value` had nothing to
+        // preserve and returned #NAME? — the paste/fill corruption. The
+        // collect pass covers exactly this recalc order (same seeds, same
+        // helpers), so every cell reached here has an entry to serve.
+        let batch_udf: Option<&dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>> =
+            udf_resolver.as_ref().map(|r| r as &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>);
 
         // Recalculate all dependents
         for (dep_row, dep_col) in &all_recalc_order {
@@ -2670,7 +2872,7 @@ pub(crate) fn update_cells_batch_with_controls(
                             active_sheet,
                             cached_ast,
                             &user_files,
-                            None,
+                            batch_udf,
                             None,
                             Some(control_values.clone()),
                         ).to_cell_value()
@@ -2704,7 +2906,7 @@ pub(crate) fn update_cells_batch_with_controls(
                                 active_sheet,
                                 &engine_ast,
                                 &user_files,
-                                None,
+                                batch_udf,
                                 None,
                                 Some(control_values.clone()),
                             ).to_cell_value();
@@ -2929,6 +3131,13 @@ pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32
     // Object-output protection (clearing a pivot/report cell).
     check_region_range_protection(&state, active_sheet, row, col, row, col)?;
 
+    // WRITEBACK CLAIM GUARD. `clear_cell` bypasses `update_cell_impl`
+    // entirely, so erasing a respondent's answer would leave the writeback
+    // layer still asserting it. Deleting an answer is a writeback-form action,
+    // not a grid action — hence the range guard (which ignores drafts) rather
+    // than the single-cell draft guard.
+    crate::calp_commands::ensure_range_unclaimed(&state, "clear this cell", row, col, row, col)?;
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -3023,6 +3232,11 @@ pub fn clear_range(
 
     // Object-output protection (delete-key clear over a pivot/report region).
     check_region_range_protection(&state, active_sheet, start_row, start_col, end_row, end_col)?;
+
+    // WRITEBACK CLAIM GUARD (see clear_cell / calp_commands.rs policy note).
+    crate::calp_commands::ensure_range_unclaimed(
+        &state, "clear this range", start_row, start_col, end_row, end_col,
+    )?;
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -3158,6 +3372,15 @@ pub fn clear_range_with_options(
         // Object-output protection: content clears cannot touch a pivot/report
         // region (format-only clears stay allowed, matching Excel).
         check_region_range_protection(&state, active_sheet, min_row, min_col, max_row, max_col)?;
+        // WRITEBACK CLAIM GUARD, scoped to the same `if` for the same reason:
+        // a FORMAT-only clear cannot destroy a value. Writeback drafts carry
+        // typed values, not styles, so restyling a claimed cell changes nothing
+        // the respondent is answerable for — that is the deliberate answer to
+        // "should range formatting be guarded too?": only when it can destroy
+        // content, which is exactly the non-Formats branch.
+        crate::calp_commands::ensure_range_unclaimed(
+            &state, "clear this range", min_row, min_col, max_row, max_col,
+        )?;
     }
 
     let mut grid = state.grid.lock().unwrap();
@@ -3524,6 +3747,22 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
             params.end_row, params.end_col,
         )?;
     }
+
+    // WRITEBACK CLAIM GUARD. A sort rewrites every cell of the range in a
+    // permuted order without ever touching `update_cell_impl`, so nothing else
+    // stands between a script's `api.sortRange` and a published writeback
+    // region. Refused for the whole range before any lock or transaction is
+    // taken — a permutation cannot be applied "partially" and the drafts are
+    // keyed by (row, col), so sorting would silently re-point every answer at
+    // a different respondent's cell. See the policy note in calp_commands.rs.
+    crate::calp_commands::ensure_range_unclaimed(
+        &state,
+        "sort this range",
+        params.start_row,
+        params.start_col,
+        params.end_row,
+        params.end_col,
+    )?;
 
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -4599,6 +4838,18 @@ pub fn update_cell_on_sheets(
         )?;
     }
 
+    // WRITEBACK ANTI-BYPASS, off-sheet half. The active-sheet guard in
+    // `update_cell_impl` cannot see these sheets, and the writeback index is
+    // keyed by SheetId — so every targeted sheet is asked individually. Refused
+    // for the whole group (like protection above): a partial group edit is
+    // exactly the silent divergence this guard exists to prevent.
+    crate::calp_commands::ensure_writeback_draft_before_write_on_sheets(
+        &state,
+        &sheet_indices,
+        row,
+        col,
+    )?;
+
     let locale = state.locale.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -4698,6 +4949,15 @@ pub fn clear_range_on_sheets(
         check_region_range_protection(&state, sheet_idx, start_row, start_col, end_row, end_col)?;
     }
 
+    // WRITEBACK CLAIM GUARD, off-sheet half. The index is keyed by SheetId and
+    // this command never consults the active sheet, so each targeted sheet is
+    // asked individually. Refused for the whole group, like protection above:
+    // a group clear that skipped one sheet is the silent partial mutation the
+    // guard exists to prevent.
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        &state, "clear this range", &sheet_indices, start_row, start_col, end_row, end_col,
+    )?;
+
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
@@ -4791,25 +5051,18 @@ pub fn fill_range(
         )?;
     }
 
-    // Check if target range overlaps any writeback region
-    {
-        let wb_index = state.writeback_index.lock().unwrap();
-        if !wb_index.is_empty() {
-            let active = *state.active_sheet.lock().unwrap();
-            let sheet_ids = state.sheet_ids.lock().unwrap();
-            if let Some(&sid) = sheet_ids.get(active) {
-                let query = calp::writeback::PositionalRange {
-                    row_start: target_start_row,
-                    row_end: target_end_row,
-                    col_start: target_start_col,
-                    col_end: target_end_col,
-                };
-                if !wb_index.regions_overlapping(sid, &query).is_empty() {
-                    return Err("Fill target overlaps a writeback region. Those cells are reserved for input in a future version.".to_string());
-                }
-            }
-        }
-    }
+    // WRITEBACK CLAIM GUARD over the FILL TARGET (the source is only read).
+    // This was the first range guard in the codebase and is now the shared one,
+    // so sort/clear/merge/replace/insert/delete all refuse identically and the
+    // message actually names the region and its A1 rectangle.
+    crate::calp_commands::ensure_range_unclaimed(
+        &state,
+        "fill into this range",
+        target_start_row,
+        target_start_col,
+        target_end_row,
+        target_end_col,
+    )?;
 
     // Acquire all locks once
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -5364,4 +5617,173 @@ pub fn fill_range(
     );
 
     Ok(updated_cells)
+}
+
+#[cfg(test)]
+mod typed_range_tests {
+    use super::typed_cell_value;
+    use engine::{CellError, CellValue};
+
+    #[test]
+    fn maps_every_scalar_kind_to_its_json_value() {
+        let (k, v) = typed_cell_value(&CellValue::Number(5.0), "5,00 kr");
+        assert_eq!(k, "number");
+        assert_eq!(v, serde_json::json!(5.0));
+
+        let (k, v) = typed_cell_value(&CellValue::Text("5".into()), "5");
+        assert_eq!(k, "text");
+        assert_eq!(v, serde_json::json!("5"));
+
+        let (k, v) = typed_cell_value(&CellValue::Boolean(true), "TRUE");
+        assert_eq!(k, "boolean");
+        assert_eq!(v, serde_json::json!(true));
+
+        let (k, v) = typed_cell_value(&CellValue::Empty, "");
+        assert_eq!(k, "empty");
+        assert_eq!(v, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn errors_carry_their_excel_literal_not_the_display_text() {
+        let (k, v) = typed_cell_value(&CellValue::Error(CellError::Div0), "#DIV0");
+        assert_eq!(k, "error");
+        assert_eq!(v, serde_json::json!("#DIV/0!"));
+    }
+
+    #[test]
+    fn collections_surface_as_text_with_their_display() {
+        let list = CellValue::List(Box::new(vec![CellValue::Number(1.0)]));
+        let (k, v) = typed_cell_value(&list, "{1}");
+        assert_eq!(k, "text");
+        assert_eq!(v, serde_json::json!("{1}"));
+    }
+
+    #[test]
+    fn non_finite_numbers_have_no_json_form_and_report_null() {
+        let (k, v) = typed_cell_value(&CellValue::Number(f64::NAN), "NaN");
+        assert_eq!(k, "number");
+        assert_eq!(v, serde_json::Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod writeback_range_guard_wiring_tests {
+    //! WIRING proof for the range-level writeback claim guard.
+    //!
+    //! The guard's POLICY is unit-tested next to its definition
+    //! (`calp_commands::writeback_claim_tests`). What cannot be tested there is
+    //! that every grid-mutating command actually calls it: these are
+    //! `#[tauri::command]` functions taking `State<AppState>`, and `tauri::State`
+    //! has no constructor available to a unit test — there is no way to invoke
+    //! `sort_range` or `delete_rows` in-process.
+    //!
+    //! So the wiring is asserted against the SOURCE. This is not a substitute
+    //! for behaviour coverage; it is a tripwire for the one regression that
+    //! actually happened before — a grid-mutating path shipped with no writeback
+    //! check at all — and it fails loudly the moment someone deletes a guard
+    //! call or adds a lock/undo transaction ahead of one.
+
+    const DATA_RS: &str = include_str!("data.rs");
+    const STRUCTURE_RS: &str = include_str!("structure.rs");
+    const SEARCH_RS: &str = include_str!("search.rs");
+    const MERGE_RS: &str = include_str!("../merge_commands.rs");
+
+    /// The body of `pub fn {name}` up to the start of the next item.
+    fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
+        let needle = format!("pub fn {}(", name);
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no `pub fn {}(` in source", name));
+        let rest = &source[start + needle.len()..];
+        let end = rest
+            .find("\n#[tauri::command]")
+            .into_iter()
+            .chain(rest.find("\npub fn "))
+            .chain(rest.find("\n#[cfg(test)]"))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Every grid-mutating command that can touch a rectangle without going
+    /// through `update_cell_impl`, with the guard it must call.
+    fn guarded_commands() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            // (source, command, required guard call)
+            (DATA_RS, "sort_range", "ensure_range_unclaimed("),
+            (DATA_RS, "clear_cell", "ensure_range_unclaimed("),
+            (DATA_RS, "clear_range", "ensure_range_unclaimed("),
+            (DATA_RS, "clear_range_with_options", "ensure_range_unclaimed("),
+            (DATA_RS, "clear_range_on_sheets", "ensure_range_unclaimed_on_sheets("),
+            (DATA_RS, "fill_range", "ensure_range_unclaimed("),
+            (STRUCTURE_RS, "insert_rows", "ensure_row_shift_unclaimed("),
+            (STRUCTURE_RS, "delete_rows", "ensure_row_shift_unclaimed("),
+            (STRUCTURE_RS, "insert_columns", "ensure_col_shift_unclaimed("),
+            (STRUCTURE_RS, "delete_columns", "ensure_col_shift_unclaimed("),
+            (SEARCH_RS, "replace_all", "ensure_cells_unclaimed("),
+            (SEARCH_RS, "replace_single", "ensure_range_unclaimed("),
+            (MERGE_RS, "merge_cells", "ensure_range_unclaimed("),
+            (MERGE_RS, "unmerge_cells", "ensure_range_unclaimed("),
+        ]
+    }
+
+    #[test]
+    fn every_range_mutating_command_calls_the_writeback_claim_guard() {
+        for (source, command, guard) in guarded_commands() {
+            let body = body_of(source, command);
+            assert!(
+                body.contains(guard),
+                "`{}` mutates a range of the grid without calling `{}` — a script, \
+                 the AI or any other caller could destroy a published writeback \
+                 region through it",
+                command,
+                guard,
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_runs_before_the_undo_transaction_is_opened() {
+        // A refusal must be a clean no-op: never a half-applied mutation, never
+        // a dangling open transaction. That holds only if the guard precedes
+        // `begin_transaction` in the command body.
+        for (source, command, guard) in guarded_commands() {
+            let body = body_of(source, command);
+            let Some(txn) = body.find("begin_transaction") else {
+                continue; // this command opens none
+            };
+            let guard_at = body.find(guard).expect("wiring test asserts presence");
+            assert!(
+                guard_at < txn,
+                "`{}` opens its undo transaction before calling `{}` — a refusal \
+                 would leave the transaction dangling",
+                command,
+                guard,
+            );
+        }
+    }
+
+    #[test]
+    fn no_guarded_command_still_carries_the_old_silent_skip() {
+        // The pre-fix behaviour of `replace_all` / `replace_single` was to skip
+        // claimed cells and say nothing actionable about it. Both now refuse the
+        // whole gesture, so neither may reach into the index by hand again.
+        for command in ["replace_all", "replace_single"] {
+            let body = body_of(SEARCH_RS, command);
+            assert!(
+                !body.contains("state.writeback_index"),
+                "`{}` reaches into the writeback index directly instead of using \
+                 the shared guard — that is how the silent-skip behaviour came back",
+                command,
+            );
+        }
+        // `fill_range`'s hand-rolled guard was the original; it must stay folded
+        // into the shared one so all these commands refuse identically.
+        let fill = body_of(DATA_RS, "fill_range");
+        assert!(
+            !fill.contains("regions_overlapping"),
+            "`fill_range` re-grew its own writeback check instead of using the \
+             shared guard",
+        );
+    }
 }

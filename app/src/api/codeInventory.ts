@@ -12,10 +12,13 @@
 //          joined from the broker's mounted handles where available.
 //
 //          Design notes:
-//          - The two Rust-QuickJS surfaces are grid-only BY CONSTRUCTION (their
-//            ScriptSurface declares no capabilities), so their "what can it
-//            touch" answer is a hard [] — they cannot reach network/BI/storage.
-//            Only object scripts carry a real R19 declared-capability ceiling.
+//          - The Rust-QuickJS surfaces declare NO capability ceiling, but only
+//            the one-off/module surface is grid-only by construction (no model
+//            provider is installed for it). A NOTEBOOK can be granted bi.query /
+//            bi.sql just-in-time, and that grant is recorded only in the Rust
+//            CapabilityStore — so notebook reach is read live from there rather
+//            than assumed to be []. Object scripts carry the R19 declared
+//            ceiling, the only surface where reach is known before it runs.
 //          - We deliberately do NOT enumerate getAllCustomFunctions(): that
 //            registry is dominated by built-in extension functions (PMT, NPV,
 //            STDEV, ...) which are app code, not "code in THIS file"; listing
@@ -38,9 +41,11 @@ import {
 } from "./moduleScriptBackend";
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
+import { listBackendCapabilityGrants } from "./scriptHost/capabilities";
 import { loadPersistedLibrary, CUSTOM_FUNCTIONS_SCRIPT_ID } from "./customFunctions";
 import { loadPersistedTransformLibraryWithProvenance, CHART_TRANSFORMS_SCRIPT_ID } from "./chartTransformScripts";
 import { loadPersistedMarkLibraryWithProvenance, markScriptId } from "./chartMarkScripts";
+import { mountedWritebackValidators } from "./writebackValidators";
 
 /** One normalized code unit residing in the open workbook. */
 export interface CodeUnit {
@@ -57,11 +62,13 @@ export interface CodeUnit {
   /** The .calp package this came from, when distributed; else null. */
   sourcePackage: string | null;
   /** The R19 declared-capability CEILING — the MOST this code may ever touch.
-   *  Empty for the grid-only Rust-QuickJS surfaces (they cannot be granted any
-   *  privileged capability). */
+   *  Empty on surfaces that declare nothing up front: the Rust-QuickJS
+   *  surfaces grant capabilities JUST IN TIME instead, so their reach shows up
+   *  in `liveGrants`, not here. */
   declaredCapabilities: CapabilityId[];
-  /** Capabilities GRANTED right now, when the script is live/mounted via the
-   *  broker; null when not applicable (grid-only surfaces) or not mounted. */
+  /** Capabilities GRANTED right now: from the broker for worker-realm scripts,
+   *  from the Rust CapabilityStore for notebooks (their only grant record).
+   *  null when the surface has no grant concept or nothing is mounted. */
   liveGrants: CapabilityId[] | null;
   /** restricted = own-object reach only; unlocked = cross-object. null when the
    *  surface has no tier concept. */
@@ -87,10 +94,14 @@ export interface CodeInventorySummary {
   bySurface: { surfaceId: ScriptSurfaceId; units: CodeUnit[] }[];
 }
 
-/** True iff a unit's declared ceiling lets it reach outside grid state
- *  (network, BI, storage, host HTML). Grid-only surfaces are always false. */
+/** True iff a unit can reach outside grid state (network, BI, storage, host
+ *  HTML, a modal that interrupts you) — either through its declared ceiling or
+ *  through a capability granted
+ *  to it right now. Both matter: a notebook declares NOTHING and is granted
+ *  bi.query/bi.sql at run time, so a declared-only test called it "grid-only"
+ *  while it was querying the BI model. */
 export function codeUnitReachesBeyondGrid(unit: CodeUnit): boolean {
-  return unit.declaredCapabilities.length > 0;
+  return unit.declaredCapabilities.length > 0 || (unit.liveGrants?.length ?? 0) > 0;
 }
 
 const lineCount = (source: string): number =>
@@ -177,7 +188,9 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       residence: `Module — ${describeModuleScriptScope(summary.scope)}`,
       provenance: pkg ? "distributed" : "local",
       sourcePackage: pkg,
-      declaredCapabilities: [], // grid-only surface
+      // The one-off surface installs no model provider at all
+      // (script-engine model_provider.rs), so it is grid-only by construction.
+      declaredCapabilities: [],
       liveGrants: null,
       tier: null,
       mounted: false,
@@ -186,7 +199,7 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
     });
   }
 
-  // ---- Notebooks (Rust QuickJS; grid-only) ---------------------------------
+  // ---- Notebooks (Rust QuickJS; grid + JIT-granted BI reach) ---------------
   const notebooks = await Promise.all(
     notebookSummaries.map(async (n) => {
       try {
@@ -194,6 +207,18 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       } catch (e) {
         console.warn(`[codeInventory] notebook "${n.name}" source unavailable:`, e);
         return null;
+      }
+    }),
+  );
+  // A notebook's consent grants live ONLY in the Rust CapabilityStore, keyed by
+  // the surface id the provider checks ("notebook:<id>"). Best-effort: a window
+  // without the backend wired reports "nothing granted" rather than failing.
+  const notebookGrants = await Promise.all(
+    notebookSummaries.map(async (n) => {
+      try {
+        return await listBackendCapabilityGrants(`notebook:${n.id}`);
+      } catch {
+        return [] as CapabilityId[];
       }
     }),
   );
@@ -217,8 +242,11 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       }`,
       provenance: pkg ? "distributed" : "local",
       sourcePackage: pkg,
-      declaredCapabilities: [], // grid-only surface
-      liveGrants: null,
+      // A notebook declares no ceiling: bi.query / bi.sql are granted JIT and
+      // recorded ONLY in the Rust CapabilityStore, so the live grants (read
+      // above) are the whole truth about its reach.
+      declaredCapabilities: [],
+      liveGrants: notebookGrants[i],
       tier: null,
       mounted: false,
       source,
@@ -312,7 +340,12 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
         residence: "Chart mark — worker-realm sandbox (paint-only)",
         provenance: sourcePackage ? "distributed" : "local",
         sourcePackage,
-        declaredCapabilities: [], // paint-only surface
+        // The mount declares [] (paint-only). The broker still auto-grants
+        // ui.html to every non-distributed worker script, which is why a local
+        // mark's liveGrants below is not empty — see
+        // BROKER_AUTO_LOCAL_CAPABILITIES in scriptSurfaces.ts. It is inert on
+        // this surface: render.setHtml addresses a shape instance.
+        declaredCapabilities: [],
         liveGrants: handle ? ([...handle.grants] as CapabilityId[]) : null,
         tier: handle ? handle.tier : "restricted",
         mounted: !!handle,
@@ -322,16 +355,53 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
     }
   }
 
+  // ---- Writeback validators (publisher-authored; Rust QuickJS is the gate) ---
+  // The user APPROVED this code, so it will run: the Rust submit path evaluates
+  // it out of the Ed25519-verified manifest before any registry write. Hiding it
+  // would leave publisher code executing on the user's machine with no entry in
+  // the answer to "where does code reside?". Listed once per (package,
+  // validator) — several regions commonly share one predicate.
+  const seenValidators = new Set<string>();
+  for (const v of mountedWritebackValidators()) {
+    const key = `${v.packageName}::${v.name}`;
+    if (seenValidators.has(key)) continue;
+    seenValidators.add(key);
+    units.push({
+      surfaceId: "writeback-validator",
+      id: key,
+      name: `${v.name} (writeback check)`,
+      residence:
+        "Writeback validator — runs in the embedded Rust QuickJS realm at submit (advisory copy in a worker realm)",
+      provenance: "distributed",
+      sourcePackage: v.packageName,
+      // A pure predicate: empty ceiling in the worker realm, and every host
+      // global deleted in the QuickJS realm.
+      declaredCapabilities: [],
+      liveGrants: [],
+      tier: "restricted",
+      mounted: true,
+      source: v.source,
+      lineCount: lineCount(v.source),
+    });
+  }
+
   return units;
 }
 
 /** Canonical surface ordering for the inspector (object scripts first — they
- *  carry the only real reach — then the grid-only surfaces). */
+ *  carry the only real reach — then the grid-only surfaces).
+ *
+ *  `extension-worker` is deliberately absent: a sandboxed distributed extension
+ *  is a script SURFACE (it has a taxonomy row) but its code lives in
+ *  %APPDATA%/extensions, not in the open workbook, so it is not "code in this
+ *  file". Listing it here would promise per-file provenance this inventory
+ *  cannot honor. */
 const SURFACE_ORDER: ScriptSurfaceId[] = [
   "object-script",
   "formula-udf",
   "chart-transform-sandbox",
   "chart-mark",
+  "writeback-validator",
   "one-off-script",
   "notebook-cell",
   "chart-transform",

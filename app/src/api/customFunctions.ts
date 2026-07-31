@@ -12,7 +12,7 @@
 // limited to the library's declaredCapabilities (e.g. "bi.query" for cube.*).
 
 import { invoke } from "@tauri-apps/api/core";
-import { registerFunction } from "./formulaFunctions";
+import { registerFunction, UDF_ERROR_KEY } from "./formulaFunctions";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
 import { callExposedMethod } from "./scriptableObjects";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
@@ -23,10 +23,14 @@ export interface CustomFunctionUdf {
   name: string;
   /** Parameter names (positional). */
   params: string[];
-  /** JS body. Has `cube` (caps.cube), the params, and may `return` a value. */
+  /** JS body. Has `cube` (caps.cube), `cellError`, the params, and may
+   *  `return` a value (a scalar, an array to spill, or `cellError("#N/A")`). */
   body: string;
   /** Help text shown in autocomplete. */
   description?: string;
+  /** Recalculate on every edit (Excel's Application.Volatile). Default false:
+   *  the cell recalculates only when one of its arguments changes. */
+  volatile?: boolean;
 }
 
 /** A library of custom functions sharing one sandbox + capability set. */
@@ -51,7 +55,7 @@ const normalizeName = (n: string): string => n.trim().toUpperCase();
 /** A valid JS identifier (function name / parameter). */
 const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 /** Names bound in the generated set() scope that a parameter must not shadow. */
-const RESERVED_PARAMS = new Set(["cube", "caps", "context", "setup"]);
+const RESERVED_PARAMS = new Set(["cube", "caps", "context", "setup", "cellError"]);
 
 export function validateFunctionName(name: string): string | null {
   const up = normalizeName(name);
@@ -85,8 +89,11 @@ function indent(body: string): string {
  * pre-fetch via callExposedMethod) can invoke it — a peer sandboxed script
  * cannot reach it via context.callMethod and borrow the library's capabilities.
  * `cube` is bound from the capability shim so a body can `return await
- * cube.value(...)`. Pure + exported for tests; THROWS on an invalid name/param
- * (so a crafted token cannot break out of the generated structure).
+ * cube.value(...)`; `cellError` is bound so a body can return a SPECIFIC
+ * spreadsheet error (the sentinel object survives structured clone across the
+ * worker boundary, which a thrown object would not). Pure + exported for tests;
+ * THROWS on an invalid name/param (so a crafted token cannot break out of the
+ * generated structure).
  */
 export function generateLibrarySource(defs: CustomFunctionUdf[]): string {
   const exposes = defs
@@ -111,6 +118,8 @@ export function generateLibrarySource(defs: CustomFunctionUdf[]): string {
     `function setup(context) {\n` +
     `  const caps = context.caps || {};\n` +
     `  const cube = caps.cube;\n` +
+    `  // return cellError("#N/A") to put a specific error in the cell.\n` +
+    `  const cellError = (code) => ({ ${UDF_ERROR_KEY}: String(code) });\n` +
     `${exposes}\n` +
     `}\n`
   );
@@ -155,6 +164,7 @@ async function rawInstall(lib: CustomFunctionLibrary, source: string): Promise<v
       category: "Custom",
       minArgs: arity,
       maxArgs: arity,
+      volatile: d.volatile === true,
       implementation: (...args: unknown[]) =>
         callExposedMethod(LIB_OBJECT_TYPE, LIB_INSTANCE_ID, upper, ...args),
     });

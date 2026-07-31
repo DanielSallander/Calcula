@@ -2542,8 +2542,16 @@ impl FunctionMeta {
 }
 
 /// Literal values that can appear in formulas.
+///
+/// ADJACENTLY tagged (`type` + `value`), not internally tagged: serde cannot
+/// serialize an internally-tagged newtype variant that wraps a primitive, so
+/// `#[serde(tag = "type")]` made every literal-bearing AST — "=A1*10",
+/// "=IF(A1>0,\"y\",\"n\")" — fail `serde_json::to_vec` at runtime. That silently
+/// emptied the AST-carrying undo snapshots (see
+/// `undo_commands::script_grid_cells_snapshot_bytes`). The `node` tag on
+/// `Expression` stays internal; only the leaf literal needs the content field.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "value")]
 pub enum Value {
     #[serde(rename = "number")]
     Number(f64),
@@ -2616,5 +2624,48 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Boolean(b) => write!(f, "{}", if *b { "TRUE" } else { "FALSE" }),
         }
+    }
+}
+#[cfg(test)]
+mod literal_serde_tests {
+    use super::{Expression, Value};
+
+    /// Regression: an internally-tagged `Value` could not be serialized at all
+    /// (serde rejects internally-tagged newtype variants wrapping primitives),
+    /// which broke every JSON snapshot that carries a formula AST.
+    #[test]
+    fn literal_bearing_expressions_round_trip_through_json() {
+        let cases = vec![
+            Expression::Literal(Value::Number(10.5)),
+            Expression::Literal(Value::String("y".to_string())),
+            Expression::Literal(Value::Boolean(true)),
+            Expression::BinaryOp {
+                left: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
+                }),
+                op: super::BinaryOperator::Multiply,
+                right: Box::new(Expression::Literal(Value::Number(10.0))),
+            },
+        ];
+        for expr in cases {
+            let bytes = serde_json::to_vec(&expr).expect("literal AST must serialize");
+            let back: Expression =
+                serde_json::from_slice(&bytes).expect("literal AST must deserialize");
+            assert_eq!(back, expr);
+        }
+    }
+
+    /// The on-disk shape is stable and explicit: `{"type":"number","value":10}`.
+    #[test]
+    fn the_literal_wire_shape_carries_type_and_value() {
+        let json = serde_json::to_string(&Expression::Literal(Value::Number(10.0))).unwrap();
+        assert!(json.contains("\"node\":\"literal\""), "got {}", json);
+        assert!(json.contains("\"type\":\"number\""), "got {}", json);
+        assert!(json.contains("\"value\":10"), "got {}", json);
     }
 }

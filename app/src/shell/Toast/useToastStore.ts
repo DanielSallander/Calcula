@@ -4,6 +4,10 @@
 
 import { create } from "zustand";
 import { registerToastSink } from "@api/notifications";
+import {
+  lifecycleCancelMessage,
+  registerLifecycleCancelReporter,
+} from "@api/lifecycleGuards";
 
 export interface ToastItem {
   id: string;
@@ -46,3 +50,14 @@ export const useToastStore = create<ToastState>((set) => ({
 // renderer, the API owns the contract (registerToastSink). Registered at module
 // load (the ToastContainer in Layout imports this store at app startup).
 registerToastSink((toast) => useToastStore.getState().addToast(toast));
+
+// A script that cancels a save or a close must be VISIBLE — otherwise Ctrl+S
+// looks broken. Core owns the veto choke point but cannot render; the Shell
+// supplies the renderer here, the same inversion registerToastSink uses.
+registerLifecycleCancelReporter((action, result) => {
+  useToastStore.getState().addToast({
+    message: lifecycleCancelMessage(action, result),
+    variant: "warning",
+    duration: 8000,
+  });
+});

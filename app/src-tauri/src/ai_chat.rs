@@ -280,7 +280,9 @@ pub async fn ai_chat_run_tool(
         "run_script" => {
             let p: crate::mcp::server::RunScriptParams =
                 serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
-            tools::execute_script(&handle, &p.code)
+            // Async now: the script surface runs on a dedicated thread so the
+            // read-only model.* API can bridge to the async BI internals.
+            tools::execute_script(&handle, &p.code).await
         }
         "get_chart" => {
             let p: crate::mcp::server::GetChartParams =

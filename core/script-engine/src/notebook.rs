@@ -12,8 +12,55 @@ use std::time::Instant;
 use engine::grid::Grid;
 use engine::style::StyleRegistry;
 
+use crate::limits::{self, Deadline, ScriptLimits};
 use crate::ops;
-use crate::types::{ScriptContext, ScriptResult};
+use crate::types::{AppInfo, HostState, ScriptContext, ScriptResult};
+
+/// Everything the host feeds into ONE cell run.
+///
+/// The workbook data AND the live host state are re-supplied on every run: a
+/// notebook session outlives any single cell, so the locale, calculation mode,
+/// named styles and view state it sees must be re-read each time or the session
+/// answers with whatever was true when it was created.
+pub struct CellRunInput {
+    /// Cloned grids (one per sheet) for this run.
+    pub grids: Vec<Grid>,
+    /// Cloned style registry for this run.
+    pub style_registry: StyleRegistry,
+    /// Sheet names for this run.
+    pub sheet_names: Vec<String>,
+    /// Active sheet index.
+    pub active_sheet: usize,
+    /// Script-surface id attributing provider calls ("notebook:nb-123").
+    pub surface_id: String,
+    /// Application metadata (version, locale separators, calculation mode).
+    pub app_info: AppInfo,
+    /// Live workbook/view state backing the `Calcula.*` getters.
+    pub host_state: HostState,
+}
+
+impl CellRunInput {
+    /// A minimal input carrying only workbook data — application metadata and
+    /// host state fall back to engine defaults. For tests and for hosts that
+    /// have no state to feed.
+    pub fn new(
+        grids: Vec<Grid>,
+        style_registry: StyleRegistry,
+        sheet_names: Vec<String>,
+        active_sheet: usize,
+        surface_id: impl Into<String>,
+    ) -> Self {
+        CellRunInput {
+            grids,
+            style_registry,
+            sheet_names,
+            active_sheet,
+            surface_id: surface_id.into(),
+            app_info: AppInfo::default(),
+            host_state: HostState::default(),
+        }
+    }
+}
 
 /// A persistent notebook session that keeps the QuickJS runtime alive
 /// across multiple cell executions. JavaScript variables defined in one
@@ -34,59 +81,45 @@ pub struct NotebookSession {
     /// Before each cell execution, the inner ScriptContext is replaced with
     /// fresh grid data. After execution, modified grids are extracted.
     shared_ctx: Rc<RefCell<ScriptContext>>,
+    /// Wall-clock deadline shared with the runtime's interrupt handler. The
+    /// handler is installed once for the session; this is RE-ARMED per cell so
+    /// the budget is per EXECUTION, not per session.
+    deadline: Rc<Deadline>,
+    /// Limits profile in force for this session (notebook profile by default).
+    limits: ScriptLimits,
 }
 
 impl NotebookSession {
     /// Create a new notebook session with an initialized QuickJS runtime.
     ///
-    /// The runtime is set up with Calcula.* and console.* APIs. The initial
-    /// ScriptContext contains the provided grid data, which will be swapped
-    /// before each cell execution. `model_provider` (host-injected) enables
-    /// the read-only `model.*` API; None leaves it raising a clear
-    /// "not available" error.
+    /// The runtime is set up with Calcula.* and console.* APIs, and with the
+    /// memory/stack ceilings + interrupt handler from `limits`. The initial
+    /// ScriptContext is seeded from `initial`, and replaced before each cell
+    /// execution. `model_provider` (host-injected) enables the read-only
+    /// `model.*` API; None leaves it raising a clear "not available" error.
     pub fn new(
-        grids: Vec<Grid>,
-        style_registry: StyleRegistry,
-        sheet_names: Vec<String>,
-        active_sheet: usize,
         model_provider: Option<Rc<dyn crate::model_provider::ModelDataProvider>>,
+        limits: ScriptLimits,
+        initial: CellRunInput,
     ) -> Result<Self, String> {
         let runtime = Runtime::new()
             .map_err(|e| format!("Failed to create QuickJS runtime: {}", e))?;
+        // Ceilings + interrupt handler installed before any code runs. The
+        // deadline starts disarmed; run_cell arms it per execution.
+        let deadline = limits::install(&runtime, limits);
         let context = Context::full(&runtime)
             .map_err(|e| format!("Failed to create QuickJS context: {}", e))?;
 
-        let initial_ctx = ScriptContext {
-            grids,
-            style_registry,
-            sheet_names,
-            active_sheet,
-            console_output: RefCell::new(Vec::new()),
-            cells_modified: RefCell::new(0),
-            cell_bookmarks_json: "[]".to_string(),
-            view_bookmarks_json: "[]".to_string(),
-            bookmark_mutations: RefCell::new(Vec::new()),
-            app_info: crate::types::AppInfo::default(),
-            screen_updating: RefCell::new(true),
-            enable_events: RefCell::new(true),
-            deferred_actions: RefCell::new(Vec::new()),
-            display_zeros: true,
-            is_dirty: false,
-            view_mode: "normal".to_string(),
-            zoom: 1.0,
-            reference_style: "A1".to_string(),
-            sheet_visibility: Vec::new(),
-            workbook_properties: std::collections::HashMap::new(),
-            named_style_names: Vec::new(),
-            iteration_enabled: false,
-            iteration_max_count: 100,
-            iteration_max_change: 0.001,
-            scroll_area: None,
-            display_gridlines: true,
-            display_headings: true,
-            model_provider,
-            surface_id: String::new(),
-        };
+        let mut initial_ctx = ScriptContext::new(
+            initial.grids,
+            initial.style_registry,
+            initial.sheet_names,
+            initial.active_sheet,
+            initial.app_info,
+            initial.host_state,
+        )
+        .with_model_provider(model_provider);
+        initial_ctx.surface_id = initial.surface_id;
 
         let shared_ctx = Rc::new(RefCell::new(initial_ctx));
 
@@ -106,46 +139,46 @@ impl NotebookSession {
             runtime,
             context,
             shared_ctx,
+            deadline,
+            limits,
         })
     }
 
     /// Execute a single notebook cell.
     ///
-    /// Before execution, the shared ScriptContext is updated with the provided
-    /// grid data (so the cell sees the current spreadsheet state). After execution,
-    /// the modified grids are extracted and returned.
+    /// Before execution the shared ScriptContext is refreshed from `input`:
+    /// grid data (so the cell sees the current spreadsheet state) AND the live
+    /// host state + application info (so a locale, calculation-mode or named-
+    /// style change made mid-session is picked up on the very next cell). After
+    /// execution the modified grids are extracted and returned.
     ///
     /// JavaScript global variables from previous cells remain accessible.
-    /// `surface_id` attributes model-provider calls (capability grants +
-    /// audit) to the calling notebook, e.g. "notebook:nb-123".
-    pub fn run_cell(
-        &self,
-        source: &str,
-        grids: Vec<Grid>,
-        style_registry: StyleRegistry,
-        sheet_names: Vec<String>,
-        active_sheet: usize,
-        surface_id: &str,
-    ) -> (ScriptResult, Vec<Grid>) {
+    pub fn run_cell(&self, source: &str, input: CellRunInput) -> (ScriptResult, Vec<Grid>) {
         let start = Instant::now();
 
-        // Swap in fresh grid data for this cell execution
+        // Swap in fresh grid data + host state for this cell execution
         {
             let mut ctx = self.shared_ctx.borrow_mut();
-            ctx.grids = grids;
-            ctx.style_registry = style_registry;
-            ctx.sheet_names = sheet_names;
-            ctx.active_sheet = active_sheet;
-            ctx.surface_id = surface_id.to_string();
+            ctx.grids = input.grids;
+            ctx.style_registry = input.style_registry;
+            ctx.sheet_names = input.sheet_names;
+            ctx.active_sheet = input.active_sheet;
+            ctx.surface_id = input.surface_id;
+            ctx.app_info = input.app_info;
+            ctx.host = input.host_state;
             // Reset per-cell counters
             *ctx.console_output.borrow_mut() = Vec::new();
             *ctx.cells_modified.borrow_mut() = 0;
             *ctx.deferred_actions.borrow_mut() = Vec::new();
+            *ctx.bookmark_mutations.borrow_mut() = Vec::new();
+            *ctx.workbook_properties_changed.borrow_mut() = std::collections::HashMap::new();
         }
 
-        // Execute the cell source in the persistent JS context.
+        // Execute the cell source in the persistent JS context, under a FRESH
+        // wall-clock budget (the session is long-lived; the budget is not).
         // Like a REPL / Jupyter notebook, the value of the last expression is
         // captured and displayed as output (unless it is undefined).
+        self.deadline.arm(self.limits.timeout_ms);
         let eval_result = self
             .context
             .with(|ctx| -> Result<Option<crate::types::ScriptOutputItem>, String> {
@@ -155,20 +188,10 @@ impl NotebookSession {
                     let repr = value_to_display_item(&ctx, &val);
                     Ok(repr)
                 }
-                Err(e) => {
-                    let caught = ctx.catch();
-                    if let Some(exc) = caught.as_exception() {
-                        let msg = exc.message().unwrap_or_default();
-                        let stack = exc.stack().unwrap_or_default();
-                        if stack.is_empty() {
-                            return Err(msg);
-                        }
-                        return Err(format!("{}\n{}", msg, stack));
-                    }
-                    Err(format!("Script error: {}", e))
-                }
+                Err(e) => Err(crate::runtime::describe_error(&ctx, e, &self.deadline)),
             }
         });
+        self.deadline.disarm();
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -184,6 +207,7 @@ impl NotebookSession {
                 let grids = ctx.grids.clone();
                 let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
                 let deferred_actions = ctx.deferred_actions.borrow().clone();
+                let workbook_properties_changed = ctx.workbook_properties_changed.borrow().clone();
                 let screen_updating = *ctx.screen_updating.borrow();
                 let enable_events = *ctx.enable_events.borrow();
                 let result = ScriptResult::Success {
@@ -192,6 +216,7 @@ impl NotebookSession {
                     duration_ms,
                     bookmark_mutations,
                     deferred_actions,
+                    workbook_properties_changed,
                     screen_updating,
                     enable_events,
                 };
@@ -209,26 +234,6 @@ impl NotebookSession {
                 (result, grids)
             }
         }
-    }
-
-    /// Reset the JS runtime — clears all global variables.
-    /// This is used when rewinding: after restoring a snapshot, we reset
-    /// the runtime and replay cells 1..N-1 to rebuild JS variable state.
-    ///
-    /// Returns a new NotebookSession (since we must recreate the runtime).
-    pub fn reset(
-        self,
-        grids: Vec<Grid>,
-        style_registry: StyleRegistry,
-        sheet_names: Vec<String>,
-        active_sheet: usize,
-    ) -> Result<NotebookSession, String> {
-        // Carry the host-injected provider over to the fresh session.
-        let model_provider = self.shared_ctx.borrow().model_provider.clone();
-        // Drop the old session (runtime + context + closures)
-        drop(self);
-        // Create a fresh one
-        NotebookSession::new(grids, style_registry, sheet_names, active_sheet, model_provider)
     }
 }
 
@@ -248,6 +253,14 @@ fn register_calcula_api<'js>(
     ops::cells::register_cell_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::sheets::register_sheet_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::utility::register_utility_ops(ctx, &calcula, shared_ctx.clone())?;
+    // NOT registered here, deliberately: ops::bookmarks. Bookmarks are frontend
+    // state owned by the CellBookmarks extension — the one-off surface only sees
+    // them because `run_script`'s caller serializes its collections into the
+    // request. The notebook host has no such caller (cells run from the
+    // notebook panel), so `Calcula.bookmarks.list()` would answer "[]" and
+    // every mutation would be dropped on the floor. An ABSENT API beats one
+    // that silently does nothing; wiring it needs an @api bookmark accessor
+    // first, then `bookmark_mutations` on NotebookCellResponse.
     ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::extended::register_extended_ops(ctx, &calcula, shared_ctx.clone())?;
 
@@ -380,17 +393,29 @@ fn register_console<'js>(
 
 #[cfg(test)]
 mod tests {
-    use super::NotebookSession;
+    use super::{CellRunInput, NotebookSession};
+    use crate::limits::ScriptLimits;
     use crate::model_provider::{
         ModelDataProvider, ModelProviderError, ModelProviderErrorKind, ModelQuerySpec, ModelTable,
     };
-    use crate::types::{cell_value_to_string, ScriptOutputItem, ScriptResult};
+    use crate::types::{cell_value_to_string, AppInfo, HostState, ScriptOutputItem, ScriptResult};
     use engine::grid::Grid;
     use engine::style::StyleRegistry;
     use std::rc::Rc;
 
     fn fixture() -> (Vec<Grid>, StyleRegistry, Vec<String>) {
         (vec![Grid::new()], StyleRegistry::new(), vec!["Sheet1".to_string()])
+    }
+
+    /// A default cell input over the standard one-sheet fixture.
+    fn input() -> CellRunInput {
+        let (grids, reg, names) = fixture();
+        CellRunInput::new(grids, reg, names, 0, "notebook:test-nb")
+    }
+
+    /// A session over the fixture with the given provider and notebook limits.
+    fn session(provider: Option<Rc<dyn ModelDataProvider>>) -> NotebookSession {
+        NotebookSession::new(provider, ScriptLimits::notebook(), input()).expect("session")
     }
 
     /// Canned provider: query returns a 2x2 table (with a null), value returns
@@ -481,16 +506,13 @@ mod tests {
     }
 
     fn run(session: &NotebookSession, src: &str) -> (ScriptResult, Vec<Grid>) {
-        let (grids, reg, names) = fixture();
-        session.run_cell(src, grids, reg, names, 0, "notebook:test-nb")
+        session.run_cell(src, input())
     }
 
     #[test]
     fn model_query_result_reaches_js_and_autorenders_as_table() {
-        let (grids, reg, names) = fixture();
         let provider = Rc::new(MockProvider::new(true));
-        let session =
-            NotebookSession::new(grids, reg, names, 0, Some(provider.clone())).expect("session");
+        let session = session(Some(provider.clone()));
 
         let (result, _) = run(&session, "model.query('Sales', {measures: ['Revenue']})");
         match result {
@@ -519,10 +541,7 @@ mod tests {
 
     #[test]
     fn model_result_objects_and_togrid_mutate_cloned_grids() {
-        let (grids, reg, names) = fixture();
-        let session =
-            NotebookSession::new(grids, reg, names, 0, Some(Rc::new(MockProvider::new(true))))
-                .expect("session");
+        let session = session(Some(Rc::new(MockProvider::new(true))));
 
         let (result, out_grids) = run(
             &session,
@@ -552,10 +571,7 @@ mod tests {
 
     #[test]
     fn consent_required_propagates_the_sentinel() {
-        let (grids, reg, names) = fixture();
-        let session =
-            NotebookSession::new(grids, reg, names, 0, Some(Rc::new(MockProvider::new(false))))
-                .expect("session");
+        let session = session(Some(Rc::new(MockProvider::new(false))));
 
         let (result, _) = run(&session, "model.query('Sales', {measures: ['x']})");
         match result {
@@ -572,8 +588,7 @@ mod tests {
 
     #[test]
     fn absent_provider_gives_clear_surface_error() {
-        let (grids, reg, names) = fixture();
-        let session = NotebookSession::new(grids, reg, names, 0, None).expect("session");
+        let session = session(None);
         let (result, _) = run(&session, "model.connections()");
         match result {
             ScriptResult::Error { message, .. } => {
@@ -589,10 +604,7 @@ mod tests {
 
     #[test]
     fn cube_parity_helpers_round_trip() {
-        let (grids, reg, names) = fixture();
-        let session =
-            NotebookSession::new(grids, reg, names, 0, Some(Rc::new(MockProvider::new(true))))
-                .expect("session");
+        let session = session(Some(Rc::new(MockProvider::new(true))));
         let (result, _) = run(
             &session,
             "model.value('Sales', '[Revenue]') + '|' + model.members('Sales', 'Geo[Country]').join(',') + '|' + model.kpi('Sales', 'Margin', 3)",
@@ -604,6 +616,284 @@ mod tests {
                     Some("\"42|Sweden,Norway|null\"".to_string())
                 );
             }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime safety limits
+    // -----------------------------------------------------------------------
+
+    /// An infinite loop must be aborted by the wall-clock deadline with a clear
+    /// message — not wedge the executor thread forever.
+    #[test]
+    fn runaway_loop_hits_the_time_budget() {
+        let session = NotebookSession::new(None, ScriptLimits::with_timeout_ms(150), input())
+            .expect("session");
+        let started = std::time::Instant::now();
+        let (result, _) = run(&session, "while (true) {}");
+        match result {
+            ScriptResult::Error { message, .. } => {
+                assert!(
+                    message.contains("exceeded its time budget"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!("expected a timeout error, got {:?}", other),
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the deadline did not actually stop the script"
+        );
+    }
+
+    /// The budget is per CELL, not per session: after a cell is killed by the
+    /// deadline, the session is still usable and the next cell gets a fresh
+    /// budget (and JS globals from before the runaway cell survive).
+    #[test]
+    fn time_budget_is_rearmed_per_cell() {
+        let session = NotebookSession::new(None, ScriptLimits::with_timeout_ms(150), input())
+            .expect("session");
+        let (ok, _) = run(&session, "var keep = 7; keep");
+        assert!(matches!(ok, ScriptResult::Success { .. }), "setup cell: {:?}", ok);
+
+        let (killed, _) = run(&session, "for (;;) {}");
+        assert!(matches!(killed, ScriptResult::Error { .. }), "expected abort");
+
+        let (after, _) = run(&session, "keep + 1");
+        match after {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("8"));
+            }
+            other => panic!("session unusable after a timeout: {:?}", other),
+        }
+    }
+
+    /// Output printed before the runaway loop survives the abort — it is the
+    /// only clue the user has about where the cell got stuck.
+    #[test]
+    fn partial_output_survives_a_timeout() {
+        let session = NotebookSession::new(None, ScriptLimits::with_timeout_ms(150), input())
+            .expect("session");
+        let (result, _) = run(&session, "console.log('before the loop'); while (true) {}");
+        match result {
+            ScriptResult::Error { output, .. } => {
+                assert_eq!(
+                    output.first().map(|i| i.to_text()).as_deref(),
+                    Some("before the loop")
+                );
+            }
+            other => panic!("expected error, got {:?}", other),
+        }
+    }
+
+    /// A runaway allocation trips the heap ceiling instead of consuming all
+    /// available memory. The deadline is a backstop so the test cannot hang.
+    #[test]
+    fn allocation_bomb_hits_the_memory_limit() {
+        let limits = ScriptLimits {
+            timeout_ms: 10_000,
+            memory_bytes: 16 * 1024 * 1024,
+            ..ScriptLimits::default()
+        };
+        let session = NotebookSession::new(None, limits, input()).expect("session");
+        let (result, _) = run(
+            &session,
+            "var hold = []; for (;;) { hold.push(new Array(200000).fill(7)); }",
+        );
+        match result {
+            ScriptResult::Error { message, .. } => {
+                let lowered = message.to_lowercase();
+                assert!(
+                    lowered.contains("memory"),
+                    "expected an out-of-memory error, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected the allocation bomb to fail, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Real host state
+    // -----------------------------------------------------------------------
+
+    /// Host state feeds the Calcula getters that used to answer with canned
+    /// defaults regardless of what the app actually held.
+    #[test]
+    fn host_state_backs_the_getters() {
+        let session = session(None);
+        let mut host = HostState::default();
+        host.zoom = 1.75;
+        host.reference_style = "R1C1".to_string();
+        host.named_style_names = vec!["Heading 1".to_string(), "Total".to_string()];
+        host.display_gridlines = false;
+        host.is_dirty = true;
+        host.scroll_area = Some("A1:D10".to_string());
+        host.iteration_enabled = true;
+        host.iteration_max_count = 42;
+        host.workbook_properties
+            .insert("author".to_string(), "Daniel".to_string());
+
+        let mut run_input = input();
+        run_input.host_state = host;
+
+        // console.log (not the REPL value) so the assertion reads as plain text.
+        let (result, _) = session.run_cell(
+            "console.log([Calcula.getZoom(), Calcula.getReferenceStyle(), \
+             Calcula.getNamedStyles(), Calcula.getDisplayGridlines(), Calcula.isDirty(), \
+             Calcula.getScrollArea(), JSON.parse(Calcula.getIterationSettings()).maxIterations, \
+             Calcula.getWorkbookProperty('author')].join('|'))",
+            run_input,
+        );
+        match result {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(
+                    output.first().map(|i| i.to_text()).as_deref(),
+                    Some(r#"1.75|R1C1|["Heading 1","Total"]|false|true|A1:D10|42|Daniel"#)
+                );
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// A locale/calculation-mode change mid-session is picked up on the next
+    /// cell: the Application metadata is read per run, not frozen at session
+    /// creation (a sv-SE user must not see "." as their decimal separator).
+    #[test]
+    fn app_info_is_reapplied_per_cell() {
+        let session = session(None);
+
+        let (first, _) = session.run_cell(
+            "Calcula.application.decimalSeparator + Calcula.application.calculationMode",
+            input(),
+        );
+        match first {
+            ScriptResult::Success { output, .. } => assert_eq!(
+                output.last().map(|i| i.to_text()).as_deref(),
+                Some("\".automatic\"")
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+
+        let mut swedish = input();
+        swedish.app_info = AppInfo {
+            decimal_separator: ",".to_string(),
+            thousands_separator: " ".to_string(),
+            calculation_mode: "manual".to_string(),
+            ..AppInfo::default()
+        };
+        let (second, _) = session.run_cell(
+            "Calcula.application.decimalSeparator + Calcula.application.calculationMode",
+            swedish,
+        );
+        match second {
+            ScriptResult::Success { output, .. } => assert_eq!(
+                output.last().map(|i| i.to_text()).as_deref(),
+                Some("\",manual\"")
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// Host state is likewise re-applied per cell — the second cell must not
+    /// see the first cell's zoom.
+    #[test]
+    fn host_state_is_reapplied_per_cell() {
+        let session = session(None);
+        let mut first = input();
+        first.host_state.zoom = 2.0;
+        let (r1, _) = session.run_cell("Calcula.getZoom()", first);
+        match r1 {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("2"))
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+        let (r2, _) = session.run_cell("Calcula.getZoom()", input());
+        match r2 {
+            ScriptResult::Success { output, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("1"))
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Write-back + effective cells_modified
+    // -----------------------------------------------------------------------
+
+    /// setWorkbookProperty surfaces on the result so the host can persist it,
+    /// and reads back within the same cell.
+    #[test]
+    fn workbook_property_writes_surface_on_the_result() {
+        let session = session(None);
+        let (result, _) = run(
+            &session,
+            "Calcula.setWorkbookProperty('title', 'Q3 Report'); Calcula.getWorkbookProperty('title')",
+        );
+        match result {
+            ScriptResult::Success { output, workbook_properties_changed, .. } => {
+                assert_eq!(
+                    output.last().map(|i| i.to_text()).as_deref(),
+                    Some("\"Q3 Report\"")
+                );
+                assert_eq!(
+                    workbook_properties_changed.get("title").map(String::as_str),
+                    Some("Q3 Report")
+                );
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// The changed-properties map is per CELL: a cell that writes nothing
+    /// reports nothing, even after an earlier cell wrote.
+    #[test]
+    fn workbook_property_changes_reset_between_cells() {
+        let session = session(None);
+        let _ = run(&session, "Calcula.setWorkbookProperty('title', 'first')");
+        let (result, _) = run(&session, "1 + 1");
+        match result {
+            ScriptResult::Success { workbook_properties_changed, .. } => {
+                assert!(
+                    workbook_properties_changed.is_empty(),
+                    "stale writes leaked into the next cell: {:?}",
+                    workbook_properties_changed
+                );
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// cells_modified counts EFFECTIVE changes: rewriting a cell with the value
+    /// it already holds is not a modification.
+    #[test]
+    fn cells_modified_counts_effective_changes_only() {
+        let session = session(None);
+        let (first, grids) = run(&session, "Calcula.setCellValue(0, 0, 'x')");
+        match first {
+            ScriptResult::Success { cells_modified, .. } => assert_eq!(cells_modified, 1),
+            other => panic!("expected success, got {:?}", other),
+        }
+        assert_eq!(
+            cell_value_to_string(&grids[0].get_cell(0, 0).expect("written cell").value),
+            "x"
+        );
+
+        // Feed the mutated grid back in and write the SAME value again.
+        let mut again = input();
+        again.grids = grids;
+        let (second, _) = session.run_cell(
+            "Calcula.setCellValue(0, 0, 'x'); Calcula.setCellValue(0, 1, 'new')",
+            again,
+        );
+        match second {
+            ScriptResult::Success { cells_modified, .. } => assert_eq!(
+                cells_modified, 1,
+                "only the genuinely new value counts"
+            ),
             other => panic!("expected success, got {:?}", other),
         }
     }

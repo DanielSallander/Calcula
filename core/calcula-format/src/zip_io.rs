@@ -1598,6 +1598,7 @@ mod tests {
             description: Some("Test cell script".to_string()),
             provenance: persistence::ScriptProvenance::Local,
             package_name: None,
+            package_version: None,
             declared_capabilities: Vec::new(),
         });
         workbook.object_scripts.push(persistence::SavedObjectScript {
@@ -1610,6 +1611,7 @@ mod tests {
             description: None,
             provenance: persistence::ScriptProvenance::Distributed,
             package_name: Some("test-pkg".to_string()),
+            package_version: Some("1.2.0".to_string()),
             declared_capabilities: Vec::new(),
         });
 

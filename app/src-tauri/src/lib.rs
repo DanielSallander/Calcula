@@ -3992,6 +3992,7 @@ pub fn run() {
             commands::get_spill_ranges,
             commands::get_cell,
             commands::get_watch_cells,
+            commands::get_range_cells_typed,
             commands::get_cell_collection,
             commands::get_collection_texts,
             commands::update_cell,
@@ -4565,10 +4566,20 @@ pub fn run() {
             scripting::delete_object_scripts_for_instance,
             // Script network capability commands (Phase 4 — net.fetch egress)
             net_commands::grant_script_net_origin,
-            net_commands::grant_script_bi,
             net_commands::audit_record_capability,
             net_commands::revoke_script_capabilities,
+            net_commands::list_script_capability_grants,
             net_commands::script_http_fetch,
+            // Writeback / distribution automation gateway (distribution.writeback).
+            // ONE action-multiplexed command on purpose — see the module header:
+            // the debug dispatch frame for ~660 commands nearly exhausts the
+            // 32MB main-thread stack reserve set in build.rs.
+            scripting::grant_script_capability,
+            scripting::script_writeback,
+            // Persistent consented scheduler (the `schedule` capability — the
+            // Application.OnTime replacement). Likewise ONE op-multiplexed
+            // command for the same stack-headroom reason.
+            scripting::script_scheduler,
             // Object template commands (scriptable objects templates)
             scripting::list_object_templates,
             scripting::save_object_template,

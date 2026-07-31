@@ -1334,10 +1334,24 @@ impl Default for ScriptProvenance {
 }
 
 /// The recognized capability ids a script source may declare (R19 ceiling).
-/// Mirrors the frontend KNOWN_CAPABILITY_IDS in capabilities.ts. The origin
-/// argument of a `// @capability net.fetch <origin>` pragma is a runtime grant
-/// hint, not part of the ceiling, so only the cap id set is collected here.
-pub const KNOWN_CAPABILITY_IDS: [&str; 4] = ["net.fetch", "bi.query", "storage", "ui.html"];
+/// MUST mirror ALL_CAPABILITY_IDS in app/src/api/scriptHost/capabilityIds.ts —
+/// this list is the ceiling a LOCAL script actually gets (it is derived here on
+/// save and at .calp publish), so an id missing here is silently STRIPPED and
+/// the script is denied a capability it correctly declared. The origin argument
+/// of a `// @capability net.fetch <origin>` pragma is a runtime grant hint, not
+/// part of the ceiling, so only the cap id set is collected here.
+pub const KNOWN_CAPABILITY_IDS: [&str; 10] = [
+    "net.fetch",
+    "bi.query",
+    "bi.sql",
+    "storage",
+    "ui.html",
+    "formula.udf",
+    "bi.model",
+    "bi.connector",
+    "ui.dialog",
+    "distribution.writeback",
+];
 
 /// Parse a script source for `// @capability <id> [origin]` line-comment
 /// pragmas and return the deduped set of recognized capability ids, in first-
@@ -1387,13 +1401,19 @@ pub struct SavedObjectScript {
     /// For distributed scripts: the package the script arrived from.
     #[serde(default)]
     pub package_name: Option<String>,
+    /// For distributed scripts: the resolved package VERSION the script was
+    /// pulled from. Server-authoritative (set by the .calp pull, never by the
+    /// frontend) and surfaced read-only to the script as
+    /// `context.package.version`, so a distributed script can feature-gate
+    /// against the report revision it shipped in.
+    #[serde(default)]
+    pub package_version: Option<String>,
     /// The AUTHORITATIVE set of capability ids this script is allowed to use
     /// (R19 declared-capabilities ceiling). For local scripts this is derived
     /// from the source `// @capability <id>` pragmas on save. For distributed
     /// scripts this is set from the package manifest at pull time and is NEVER
     /// re-derived from the (tamperable) source, so a distributed script's
-    /// source can never widen its ceiling. Recognized ids: net.fetch, bi.query,
-    /// storage, ui.html.
+    /// source can never widen its ceiling. Recognized ids: KNOWN_CAPABILITY_IDS.
     #[serde(default)]
     pub declared_capabilities: Vec<String>,
 }

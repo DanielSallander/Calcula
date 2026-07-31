@@ -3,11 +3,18 @@
 //! CONTEXT: These commands bridge the frontend Script Editor extension
 //! to the Rust script engine. They follow the same patterns as pivot commands.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use tauri::State;
 
 use crate::AppState;
 use crate::api_types::CellUpdateInput;
+use crate::control_values::ControlValuesMap;
+use crate::pane_control::PaneControlState;
 use crate::persistence::{FileState, UserFilesState};
+use crate::pivot::PivotState;
+use crate::ribbon_filter::RibbonFilterState;
 use crate::log_info;
 use engine::{Cell, CellValue, Grid};
 use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptResponse, WorkbookScript};
@@ -90,6 +97,49 @@ pub(crate) fn diff_grids_to_updates(before: &Grid, after: &Grid) -> Vec<CellUpda
     // for stable behavior and reproducible logs/tests.
     updates.sort_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
     updates
+}
+
+/// Turn the FORMULA STRINGS a script wrote into real formula cells.
+///
+/// The script engine has no parser: every write it makes stores `ast: None`
+/// (see `core/script-engine/src/ops/cells.rs`), so `Calcula.setCellValue(0, 0,
+/// "=A1+B1", 2)` leaves the literal text `=A1+B1` sitting in the grid. The
+/// ACTIVE sheet escapes this because its diff is replayed through
+/// `update_cells_batch`, which parses. Every OTHER sheet used to be installed by
+/// a wholesale grid swap, so its formulas stayed text forever.
+///
+/// This is that missing parse step for the sheets the batch pipeline cannot
+/// reach: for each diffed cell whose input string starts with '=', rebuild the
+/// cell with `parse_cell_input_invariant` (identical parsing to the batch path —
+/// the diff already carries invariant/US-format text) and carry the post-script
+/// style index over. The resulting cell has an AST and an Empty value; the
+/// per-sheet `recalculate_sheet_values` pass that follows evaluates it.
+///
+/// Cells that already hold an AST are left alone (a pre-existing formula the
+/// script did not author), and an unparseable "=..." falls back to text exactly
+/// as `Cell::new_formula` does everywhere else.
+///
+/// Pure function (grid in, grid out) so the parse rule is unit-testable.
+pub(crate) fn parse_script_formula_writes(
+    after: &Grid,
+    diff: &[CellUpdateInput],
+    locale: &engine::LocaleSettings,
+) -> Grid {
+    let mut prepared = after.clone();
+    for update in diff {
+        if !update.value.starts_with('=') {
+            continue;
+        }
+        let existing = prepared.get_cell(update.row, update.col);
+        if existing.map(|c| c.ast.is_some()).unwrap_or(false) {
+            continue;
+        }
+        let style_index = existing.map(|c| c.style_index).unwrap_or(0);
+        let mut cell = crate::parse_cell_input_invariant(&update.value, locale);
+        cell.style_index = style_index;
+        prepared.set_cell(update.row, update.col, cell);
+    }
+    prepared
 }
 
 /// Human label for an audited script surface.
@@ -316,45 +366,92 @@ pub fn grant_script_session_approval(
     Ok(())
 }
 
+/// Serialize the BEFORE cells of an off-active-sheet script write into the
+/// `script_grid_cells` CustomRestore payload undo consumes.
+///
+/// A serialization failure is FATAL for the write, and that is deliberate: this
+/// runs in the PLAN phase, before anything has been mutated, so refusing keeps
+/// the operation atomic. The alternative — recording an empty/partial snapshot —
+/// would leave the script's value sitting where the user's formula was with no
+/// way back.
+///
+/// (Formula ASTs used to be unserializable whenever they carried a literal, so
+/// this had a per-cell salvage fallback. `parser::ast::Value` is adjacently
+/// tagged now and every AST round-trips, so the fallback is gone.)
+fn script_grid_cells_snapshot_bytes(
+    sheet_index: usize,
+    before_cells: Vec<(u32, u32, Option<Cell>)>,
+) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&crate::undo_commands::ScriptGridCellsSnapshot {
+        sheet_index,
+        cells: before_cells,
+    })
+    .map_err(|e| {
+        format!(
+            "Refusing this script's write to sheet {}: its prior contents could not be \
+             captured for undo ({})",
+            sheet_index + 1,
+            e
+        )
+    })
+}
+
+/// How the shared apply path writes the ACTIVE sheet's diff.
+///
+/// Production hands over `update_cells_batch_with_controls` (parse + evaluate +
+/// dependency maps + spill + a single undo entry). It is a closure rather than a
+/// direct call for one reason: that function takes Tauri `State` handles, which
+/// cannot be constructed outside a running app, so the surrounding
+/// transaction/diff/off-sheet logic would otherwise be untestable.
+type ActiveSheetApply<'a> =
+    &'a dyn Fn(Vec<CellUpdateInput>, Arc<ControlValuesMap>) -> Result<(), String>;
+
 /// Apply a script engine's `modified_grids` back into live AppState the
 /// undoable, recalc-tracked, event-visible way (C1a). Shared by the in-app
-/// `run_script` and the MCP `execute_script` so AI writes inherit the exact
-/// same edit-pipeline behavior the in-app twin gets — instead of the wholesale
-/// grid swap MCP used to do (which skipped undo + recalc + events).
+/// `run_script`, the MCP `execute_script` and the NOTEBOOK cell runner, so
+/// every Rust-QuickJS surface inherits the exact same edit-pipeline behavior —
+/// instead of the wholesale grid swap those surfaces used to do (which skipped
+/// undo + parsing + recalc + events).
 ///
-/// The active sheet is diffed before->after and replayed through
-/// `update_cells_batch` (single undo entry + dependency recalc). NON-active sheets
-/// are now first-class too: each changed sheet's BEFORE cells are snapshotted and
-/// recorded as a `script_grid_cells` CustomRestore (joined into the SAME undo
-/// transaction as the active diff), the post-script grid is applied, then the
-/// sheet is recalced (`recalculate_sheet_values`), the workbook is marked dirty,
-/// and a per-sheet audit entry is written. No-ops when nothing changed.
+/// EVERY changed sheet is diffed before->after; no sheet is installed wholesale:
 ///
-/// RESIDUAL (v1): `recalculate_sheet_values` re-evaluates PRE-EXISTING parsed
-/// formula cells on the non-active sheet; a formula a script writes AS A STRING to
-/// a non-active sheet (e.g. "=A1+B1") lands as literal text (the script op stores
-/// `ast: None` and only the active diff is re-parsed by `update_cells_batch`).
-/// And a formula on a THIRD sheet (neither written nor active) that references a
-/// written cell refreshes on next recalc/visit — same class as the single-sheet
-/// dependency-map limitation (BUG-0016). Both are pre-existing engine limits, not
-/// regressions of this path.
+/// * ACTIVE sheet — replayed through `update_cells_batch` (parse + dependency
+///   maps + spill + recalc cascade + one undo entry).
+/// * NON-ACTIVE sheets — the BEFORE cells are snapshotted into a
+///   `script_grid_cells` CustomRestore (joined into the SAME undo transaction as
+///   the active diff), the post-script grid is installed with the script's
+///   formula STRINGS parsed into real formula cells
+///   (`parse_script_formula_writes`), then the sheet is evaluated by
+///   `recalculate_sheet_values`. The workbook is marked dirty and a per-sheet
+///   audit entry is written.
+///
+/// RECALC ORDER: writes to all sheets are installed BEFORE anything is
+/// evaluated, then the sequence [written non-active sheets in index order, then
+/// the active sheet] runs TWICE. One pass would leave a formula stale whenever
+/// the sheet it reads is evaluated after it (e.g. sheet 2 reads a written
+/// formula on sheet 3, or reads an active-sheet formula that itself reads
+/// sheet 3). The second pass settles that hop. Chains longer than two hops
+/// between written sheets refresh on the next recalc — the same class as the
+/// single-sheet dependency-map limitation (BUG-0016).
 ///
 /// LOCK DISCIPLINE: the AppState grid locks are held only to compute the diff and
 /// snapshot/apply the non-active writes, then DROPPED before calling
 /// `update_cells_batch` / `recalculate_sheet_values` (which take their own locks)
 /// to avoid a deadlock.
-pub(crate) fn apply_script_modified_grids(
-    state: &State<AppState>,
-    file_state: &State<FileState>,
-    user_files_state: &State<UserFilesState>,
-    pivot_state: &State<'_, crate::pivot::PivotState>,
-    pane_control_state: &crate::pane_control::PaneControlState,
-    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_script_modified_grids_core(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &PivotState,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
     modified_grids: &[Grid],
     active_sheet: usize,
     cells_modified: u32,
     surface: &str,
     surface_id: &str,
+    apply_active: ActiveSheetApply<'_>,
 ) -> Result<(), String> {
     if cells_modified == 0 || modified_grids.is_empty() {
         return Ok(());
@@ -388,12 +485,12 @@ pub(crate) fn apply_script_modified_grids(
     // at each write:
     //
     //  1. The active sheet is gated inside `update_cells_batch_with_controls`,
-    //     which runs AFTER the non-active grids have already been swapped in
+    //     which runs AFTER the non-active grids have already been installed
     //     below. Without this pre-pass, a refusal on the active sheet would
     //     return early leaving every other sheet's writes applied — and skipped
     //     past their recalc, dirty flag and audit entries.
-    //  2. Non-active sheets are installed by a wholesale `app_grids[idx] =
-    //     after_grid.clone()`, which consults nothing. A script calling
+    //  2. Non-active sheets are installed directly into `app_grids[idx]`, which
+    //     consults nothing. A script calling
     //     `Calcula.workbook.sheets(i).range(...).setValue(...)` on a protected
     //     background sheet would otherwise write straight through it.
     //
@@ -430,20 +527,33 @@ pub(crate) fn apply_script_modified_grids(
         }
     }
 
-    // Apply non-active-sheet writes the undoable + recalc-tracked way (no longer a
-    // silent wholesale swap). For each non-active sheet the script changed, snapshot
-    // its BEFORE cells (the union of populated coords in both grids — each entry
-    // carries the full prior `Cell`, incl. cached value), then apply the post-script
-    // grid. The snapshots drive a single CustomRestore undo entry; recalc + dirty +
-    // audit follow below.
+    // Apply non-active-sheet writes the undoable + parsed + recalc-tracked way,
+    // in two phases under one grids lock:
+    //
+    //   PLAN  — diff each changed sheet, capture its BEFORE cells, SERIALIZE the
+    //           undo snapshot and build the parsed post-script grid. Nothing is
+    //           mutated yet, so any failure here (a protected cell, an
+    //           unrepresentable prior cell) leaves the workbook untouched.
+    //   APPLY — install the planned grids. Cannot fail.
+    //
+    // The snapshot has to be produced BEFORE the install: it used to be
+    // serialized after every grid had already been swapped in, so a serialization
+    // failure returned an error on a workbook that had already been written to,
+    // with no undo entry, no recalc and no dirty flag.
     struct NonActiveWrite {
         sheet_index: usize,
-        before_cells: Vec<(u32, u32, Option<Cell>)>,
+        snapshot_bytes: Vec<u8>,
         diff: Vec<CellUpdateInput>,
+        /// The grid to install; taken during the APPLY phase.
+        prepared: Option<Grid>,
     }
     let mut non_active_writes: Vec<NonActiveWrite> = Vec::new();
     {
         let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
+        // Canonical order inside this block: grids -> locale (the order
+        // update_cells_batch_core acquires them in).
+        let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
+        // --- PLAN ---
         for (idx, after_grid) in modified_grids.iter().enumerate() {
             if idx == active_sheet || idx >= app_grids.len() {
                 continue;
@@ -454,8 +564,10 @@ pub(crate) fn apply_script_modified_grids(
             }
             // Snapshot BEFORE cells for the union of populated coords (a superset of
             // what changed — over-capturing an unchanged cell restores it to itself,
-            // a no-op). This guarantees undo returns the sheet to EXACT prior state,
-            // including formula cells that `recalculate_sheet_values` re-evaluates.
+            // a no-op). This is what lets undo return the sheet to its EXACT prior
+            // state, including formula cells whose cached value
+            // `recalculate_sheet_values` refreshes below. See
+            // `script_grid_cells_snapshot_bytes` for the atomicity contract.
             let before_cells: Vec<(u32, u32, Option<Cell>)> = {
                 let before_grid = &app_grids[idx];
                 let mut coords: std::collections::HashSet<(u32, u32)> =
@@ -469,8 +581,20 @@ pub(crate) fn apply_script_modified_grids(
                 v.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
                 v
             };
-            app_grids[idx] = after_grid.clone();
-            non_active_writes.push(NonActiveWrite { sheet_index: idx, before_cells, diff });
+            let snapshot_bytes = script_grid_cells_snapshot_bytes(idx, before_cells)?;
+            // The parse step the batch pipeline performs for the active sheet —
+            // without it a script's "=A1+B1" stays literal text off-sheet.
+            let prepared = parse_script_formula_writes(after_grid, &diff, &locale);
+            non_active_writes.push(NonActiveWrite {
+                sheet_index: idx,
+                snapshot_bytes,
+                diff,
+                prepared: Some(prepared),
+            });
+        }
+        // --- APPLY ---
+        for w in non_active_writes.iter_mut() {
+            app_grids[w.sheet_index] = w.prepared.take().expect("planned grid");
         }
         drop(app_grids);
     }
@@ -483,14 +607,9 @@ pub(crate) fn apply_script_modified_grids(
         let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
         undo.begin_transaction(format!("{} edit", surface_label(surface)));
         for w in &non_active_writes {
-            let snapshot = crate::undo_commands::ScriptGridCellsSnapshot {
-                sheet_index: w.sheet_index,
-                cells: w.before_cells.clone(),
-            };
-            let data = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
             undo.record_custom_restore(
                 "script_grid_cells".to_string(),
-                data,
+                w.snapshot_bytes.clone(),
                 "Script edit (off-sheet)",
             );
         }
@@ -503,17 +622,9 @@ pub(crate) fn apply_script_modified_grids(
     let active_result: Result<(), String> = if !updates.is_empty() {
         let cell_count = updates.len();
         // Active-sheet audit (transparency): accurate sheet + effective-change count
-        // + range. Recorded before the move into update_cells_batch.
+        // + range. Recorded before the move into the batch.
         record_script_grid_mutation(state, surface, surface_id, active_sheet, cell_count as u32, &updates);
-        let r = crate::commands::data::update_cells_batch_with_controls(
-            state.clone(),
-            file_state.clone(),
-            user_files_state.clone(),
-            pivot_state.clone(),
-            updates,
-            None,
-            Some(control_values),
-        );
+        let r = apply_active(updates, control_values);
         if r.is_ok() {
             log_info!(
                 "SCRIPT",
@@ -521,14 +632,14 @@ pub(crate) fn apply_script_modified_grids(
                 cell_count
             );
         }
-        r.map(|_| ())
+        r
     } else {
         Ok(())
     };
 
     if !has_non_active {
         // No outer transaction we own; just propagate any batch error.
-        return active_result.map(|_| ());
+        return active_result;
     }
 
     {
@@ -541,28 +652,33 @@ pub(crate) fn apply_script_modified_grids(
     active_result?;
 
     {
-        // Recalc each written non-active sheet (its own formula chains), then the
-        // active sheet (active formulas that READ the written cells — the batch
-        // path's cascade is seeded only from active-sheet writes, so it misses
-        // active -> non-active references). Reuses the .calp refresh pattern.
-        // Each pass receives the pane-control/ribbon-filter states so
+        // Evaluate every sheet that changed. Sequence = written non-active sheets
+        // (index order), then the active sheet — the active pass is what refreshes
+        // active formulas that READ the written cells, since the batch path's
+        // cascade is seeded only from active-sheet writes. Run TWICE: writes are
+        // all installed by now, so a second pass propagates one more cross-sheet
+        // hop (sheet 2 reading a written formula on sheet 3, or reading an active
+        // formula that itself reads sheet 3) that a single ordered pass leaves
+        // stale. Each pass receives the pane-control/ribbon-filter states so
         // GET.CONTROLVALUE formulas re-evaluate against the real snapshot.
-        for w in &non_active_writes {
+        for _pass in 0..2 {
+            for w in &non_active_writes {
+                crate::calculation::recalculate_sheet_values(
+                    state,
+                    user_files_state,
+                    pivot_state,
+                    w.sheet_index,
+                    Some((pane_control_state, ribbon_filter_state)),
+                );
+            }
             crate::calculation::recalculate_sheet_values(
                 state,
                 user_files_state,
                 pivot_state,
-                w.sheet_index,
+                active_sheet,
                 Some((pane_control_state, ribbon_filter_state)),
             );
         }
-        crate::calculation::recalculate_sheet_values(
-            state,
-            user_files_state,
-            pivot_state,
-            active_sheet,
-            Some((pane_control_state, ribbon_filter_state)),
-        );
         // Dirty flag (update_cells_batch sets it only when there was an active diff).
         if let Ok(mut modified) = file_state.is_modified.lock() {
             *modified = true;
@@ -576,7 +692,7 @@ pub(crate) fn apply_script_modified_grids(
         }
         log_info!(
             "SCRIPT",
-            "applied {} non-active sheet(s) undoably (snapshot undo + per-sheet recalc + dirty + audit)",
+            "applied {} non-active sheet(s) undoably (snapshot undo + parse + per-sheet recalc + dirty + audit)",
             non_active_writes.len()
         );
     }
@@ -584,14 +700,153 @@ pub(crate) fn apply_script_modified_grids(
     Ok(())
 }
 
+/// `apply_script_modified_grids_core` wired to the real edit pipeline. This is
+/// the entry point every surface with Tauri `State` handles uses (run_script,
+/// MCP execute_script).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_script_modified_grids(
+    state: &State<AppState>,
+    file_state: &State<FileState>,
+    user_files_state: &State<UserFilesState>,
+    pivot_state: &State<'_, PivotState>,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    modified_grids: &[Grid],
+    active_sheet: usize,
+    cells_modified: u32,
+    surface: &str,
+    surface_id: &str,
+) -> Result<(), String> {
+    apply_script_modified_grids_core(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        modified_grids,
+        active_sheet,
+        cells_modified,
+        surface,
+        surface_id,
+        &|updates, control_values| {
+            crate::commands::data::update_cells_batch_with_controls(
+                state.clone(),
+                file_state.clone(),
+                user_files_state.clone(),
+                pivot_state.clone(),
+                updates,
+                None,
+                Some(control_values),
+            )
+            .map(|_| ())
+        },
+    )
+}
+
+/// Persist EVERYTHING a successful script run produced server-side: the grid
+/// writes (see `apply_script_modified_grids`) and the workbook properties the
+/// script set with `Calcula.setWorkbookProperty`.
+///
+/// Document metadata is deliberately NOT a DeferredAction — it is state the
+/// backend owns, so a surface that only forwarded deferred actions to the
+/// frontend (the notebook) used to drop those writes on the floor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_script_result(
+    state: &State<AppState>,
+    file_state: &State<FileState>,
+    user_files_state: &State<UserFilesState>,
+    pivot_state: &State<'_, PivotState>,
+    pane_control_state: &PaneControlState,
+    ribbon_filter_state: &RibbonFilterState,
+    modified_grids: &[Grid],
+    active_sheet: usize,
+    cells_modified: u32,
+    workbook_properties_changed: &HashMap<String, String>,
+    surface: &str,
+    surface_id: &str,
+) -> Result<(), String> {
+    apply_script_modified_grids(
+        state,
+        file_state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        modified_grids,
+        active_sheet,
+        cells_modified,
+        surface,
+        surface_id,
+    )?;
+    // Outside the grid apply on purpose: a script may set only document
+    // properties and touch no cell at all, which short-circuits the grid path.
+    super::types::apply_workbook_property_changes(
+        state,
+        file_state,
+        workbook_properties_changed,
+    )?;
+    Ok(())
+}
+
+/// `apply_script_result` for surfaces that hold an `AppHandle` instead of the
+/// individual `State` handles — the notebook executor path, which runs its cells
+/// on a dedicated thread and only carries the handle.
+pub(crate) fn apply_script_result_via_handle(
+    app: &tauri::AppHandle,
+    modified_grids: &[Grid],
+    active_sheet: usize,
+    cells_modified: u32,
+    workbook_properties_changed: &HashMap<String, String>,
+    surface: &str,
+    surface_id: &str,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState is not managed".to_string())?;
+    let file_state = app
+        .try_state::<FileState>()
+        .ok_or_else(|| "FileState is not managed".to_string())?;
+    let user_files_state = app
+        .try_state::<UserFilesState>()
+        .ok_or_else(|| "UserFilesState is not managed".to_string())?;
+    let pivot_state = app
+        .try_state::<PivotState>()
+        .ok_or_else(|| "PivotState is not managed".to_string())?;
+    let pane_control_state = app
+        .try_state::<PaneControlState>()
+        .ok_or_else(|| "PaneControlState is not managed".to_string())?;
+    let ribbon_filter_state = app
+        .try_state::<RibbonFilterState>()
+        .ok_or_else(|| "RibbonFilterState is not managed".to_string())?;
+
+    apply_script_result(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        modified_grids,
+        active_sheet,
+        cells_modified,
+        workbook_properties_changed,
+        surface,
+        surface_id,
+    )
+}
+
 /// Execute a script against the current spreadsheet state.
 ///
 /// 1. Clones the relevant AppState data (grids, styles, sheet names)
-/// 2. Runs the script in an isolated QuickJS runtime (on a CLONE of the grids)
+/// 2. Runs the script in an isolated QuickJS runtime (on a CLONE of the grids),
+///    fed the real application info + live workbook state and bounded by the
+///    one-off runtime limits
 /// 3. If successful, DIFFS the script's result against the live AppState and
-///    replays the changes through the normal edit pipeline
-///    (`update_cells_batch`) so they get formula parsing, dependency recalc,
-///    and a single undo entry — instead of a wholesale grid swap.
+///    replays the changes through the normal edit pipeline so they get formula
+///    parsing, dependency recalc, and a single undo entry — instead of a
+///    wholesale grid swap — then persists the workbook properties it set
 /// 4. Returns the result to the frontend
 ///
 /// The `file_state`, `user_files_state`, `pivot_state`, `pane_control_state`,
@@ -620,44 +875,47 @@ pub fn run_script(
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
-    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
-    let calculation_mode = state.calculation_mode.lock().map_err(|e| e.to_string())?.clone();
 
-    // Build Application info from current AppState
-    let app_info = script_engine::types::AppInfo {
-        name: "Calcula".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        operating_system: std::env::consts::OS.to_string(),
-        path_separator: std::path::MAIN_SEPARATOR.to_string(),
-        decimal_separator: locale.decimal_separator.to_string(),
-        thousands_separator: locale.thousands_separator.to_string(),
-        calculation_mode,
+    // 2. Run the script with the REAL application info + live workbook state,
+    //    under the one-off runtime limits (memory + stack + wall-clock budget).
+    let options = script_engine::ScriptRunOptions {
+        app_info: super::types::build_app_info(&state),
+        host_state: super::types::build_host_state(
+            &state,
+            Some(&file_state),
+            active_sheet,
+            request.view_state.as_ref(),
+        ),
+        cell_bookmarks_json: request.cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        view_bookmarks_json: request.view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        limits: script_engine::ScriptLimits::default(),
     };
-
-    // 2. Run the script in the engine
-    let (result, modified_grids) = script_engine::ScriptEngine::run_with_bookmarks(
+    let (result, modified_grids) = script_engine::ScriptEngine::run_with_options(
         &request.source,
         &request.filename,
         grids,
         style_registry,
         sheet_names,
         active_sheet,
-        request.cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
-        request.view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
-        app_info,
+        options,
     );
 
-    // 3. If successful and grids were modified, route the changes through the
-    //    edit pipeline so they get parsed, recalculated, and made undoable.
+    // 3. If successful, route everything the run produced back into AppState:
+    //    cell writes through the edit pipeline (parsed, recalculated, undoable)
+    //    and the workbook properties the script set.
     //
     //    The engine ran on a CLONE; AppState still holds the ORIGINAL grids, so
-    //    AppState IS the "before". We diff the active sheet before -> after and
-    //    replay it via update_cells_batch (single undo entry + recalc). Writes to
-    //    non-active sheets are snapshot-undoable + per-sheet recalced + audited too
-    //    (one combined transaction); see apply_script_modified_grids for residual
-    //    cross-sheet limits.
-    if let script_engine::ScriptResult::Success { cells_modified, .. } = &result {
-        apply_script_modified_grids(
+    //    AppState IS the "before". Every changed sheet is diffed and replayed —
+    //    the active one via update_cells_batch, the rest snapshot-undoable +
+    //    parsed + per-sheet recalced + audited (one combined transaction). See
+    //    apply_script_modified_grids_core for the recalc-order reasoning.
+    if let script_engine::ScriptResult::Success {
+        cells_modified,
+        workbook_properties_changed,
+        ..
+    } = &result
+    {
+        apply_script_result(
             &state,
             &file_state,
             &user_files_state,
@@ -667,6 +925,7 @@ pub fn run_script(
             &modified_grids,
             active_sheet,
             *cells_modified,
+            workbook_properties_changed,
             "run_script",
             &request.filename,
         )?;
@@ -681,6 +940,8 @@ pub fn run_script(
             duration_ms,
             bookmark_mutations,
             deferred_actions,
+            // Persisted server-side in step 3 — not part of the IPC response.
+            workbook_properties_changed: _,
             screen_updating,
             enable_events,
         } => Ok(RunScriptResponse::Success {
@@ -1193,5 +1454,447 @@ mod tests {
         assert_eq!(updates[0].row, 3);
         assert_eq!(updates[0].col, 4);
         assert_eq!(updates[0].value, "TRUE");
+    }
+}
+
+// ============================================================================
+// Script apply-path tests
+// ============================================================================
+//
+// These drive `apply_script_modified_grids_core` — the single path every Rust
+// QuickJS surface (run_script, MCP, notebook cells) now writes through — against
+// a real `AppState`. The active-sheet leg is handed to the caller as a closure
+// (see `ActiveSheetApply`) because `update_cells_batch_with_controls` takes
+// Tauri `State` handles, which cannot exist outside a running app; the tests
+// therefore exercise the OFF-active-sheet leg end to end (snapshot undo, parse,
+// evaluate, dirty, audit) and assert structurally on what the active leg is
+// handed and when.
+
+#[cfg(test)]
+mod script_apply_tests {
+    use super::*;
+    use crate::pane_control::PaneControlState;
+    use crate::persistence::{FileState, UserFilesState};
+    use crate::pivot::PivotState;
+    use crate::ribbon_filter::RibbonFilterState;
+    use engine::{Cell, CellValue, Grid};
+    use std::cell::RefCell;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Mutex;
+
+    /// The managed-state set the apply path needs, owned by the test.
+    struct Harness {
+        state: AppState,
+        file_state: FileState,
+        user_files: UserFilesState,
+        pivot: PivotState,
+        pane: PaneControlState,
+        ribbon: RibbonFilterState,
+    }
+
+    /// A two-sheet workbook with sheet 0 active. Sheet 1 is the NON-active sheet
+    /// the batch pipeline cannot reach — the leg these tests own.
+    fn harness(sheet1: Grid) -> Harness {
+        let state = crate::create_app_state();
+        // Deterministic parsing/rendering regardless of the machine's locale.
+        *state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
+        state.grids.lock().unwrap().push(sheet1);
+        state.sheet_names.lock().unwrap().push("Sheet2".to_string());
+        state.sheet_visibility.lock().unwrap().push("visible".to_string());
+        state.all_column_widths.lock().unwrap().push(Default::default());
+        state.all_row_heights.lock().unwrap().push(Default::default());
+        state.show_gridlines.lock().unwrap().push(true);
+        Harness {
+            state,
+            file_state: FileState {
+                current_path: Mutex::new(None),
+                is_modified: Mutex::new(false),
+                session_password: Mutex::new(None),
+                is_encrypted: Mutex::new(false),
+            },
+            user_files: UserFilesState {
+                files: Mutex::new(StdHashMap::new()),
+            },
+            pivot: PivotState::new(),
+            pane: PaneControlState::new(),
+            ribbon: RibbonFilterState::new(),
+        }
+    }
+
+    /// The post-script grids for a workbook whose sheet 0 is untouched.
+    fn modified(h: &Harness, sheet1_after: Grid) -> Vec<Grid> {
+        let sheet0 = h.state.grids.lock().unwrap()[0].clone();
+        vec![sheet0, sheet1_after]
+    }
+
+    /// Run the shared apply path, recording what the active-sheet leg received.
+    /// Returns (updates handed over, was an undo transaction open at that
+    /// moment) for each call.
+    fn apply(
+        h: &Harness,
+        modified_grids: &[Grid],
+        cells_modified: u32,
+        surface: &str,
+        surface_id: &str,
+    ) -> (Result<(), String>, Vec<(Vec<CellUpdateInput>, bool)>) {
+        let calls: RefCell<Vec<(Vec<CellUpdateInput>, bool)>> = RefCell::new(Vec::new());
+        let active = |updates: Vec<CellUpdateInput>, _cv: Arc<ControlValuesMap>| {
+            let in_transaction = h.state.undo_stack.lock().unwrap().has_open_transaction();
+            calls.borrow_mut().push((updates, in_transaction));
+            Ok(())
+        };
+        let result = apply_script_modified_grids_core(
+            &h.state,
+            &h.file_state,
+            &h.user_files,
+            &h.pivot,
+            &h.pane,
+            &h.ribbon,
+            modified_grids,
+            0,
+            cells_modified,
+            surface,
+            surface_id,
+            &active,
+        );
+        let recorded = calls.borrow().clone();
+        (result, recorded)
+    }
+
+    /// The cell shape a script write produces: a value with NO ast, because the
+    /// script engine has no parser (core/script-engine/src/ops/cells.rs).
+    fn script_wrote(value: CellValue) -> Cell {
+        Cell {
+            ast: None,
+            value,
+            style_index: 0,
+            rich_text: None,
+        }
+    }
+
+    fn value_at(h: &Harness, sheet: usize, row: u32, col: u32) -> CellValue {
+        h.state.grids.lock().unwrap()[sheet]
+            .get_cell(row, col)
+            .map(|c| c.value.clone())
+            .unwrap_or(CellValue::Empty)
+    }
+
+    // --- DEFECT 2: formula strings written off the active sheet ------------
+
+    /// Pure parse rule: a diffed "=..." write becomes a real formula cell,
+    /// keeping the style the script left on it.
+    #[test]
+    fn formula_writes_are_parsed_and_keep_their_style() {
+        let mut after = Grid::new();
+        let mut written = script_wrote(CellValue::Text("=A1+B1".to_string()));
+        written.style_index = 7;
+        after.set_cell(0, 2, written);
+        after.set_cell(0, 3, script_wrote(CellValue::Text("plain".to_string())));
+
+        let diff = diff_grids_to_updates(&Grid::new(), &after);
+        let prepared = parse_script_formula_writes(&after, &diff, &engine::LocaleSettings::invariant());
+
+        let formula_cell = prepared.get_cell(0, 2).expect("C1 present");
+        assert!(formula_cell.has_formula(), "the '=' write must become a formula");
+        assert_eq!(formula_cell.style_index, 7, "style survives the re-parse");
+        // A literal is left exactly as the script wrote it.
+        assert_eq!(
+            prepared.get_cell(0, 3).map(|c| c.value.clone()),
+            Some(CellValue::Text("plain".to_string()))
+        );
+    }
+
+    /// THE regression: `Calcula.setCellValue(0, 2, "=A1+B1", 1)` on a NON-active
+    /// sheet used to leave the literal text "=A1+B1" in the grid forever,
+    /// because only the active sheet's diff was replayed through the parser.
+    /// It must now parse AND evaluate.
+    #[test]
+    fn formula_string_written_to_a_non_active_sheet_evaluates() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(2.0));
+        sheet1.set_cell(0, 1, Cell::new_number(3.0));
+        let h = harness(sheet1.clone());
+
+        let mut after = sheet1;
+        after.set_cell(0, 2, script_wrote(CellValue::Text("=A1+B1".to_string())));
+        let grids = modified(&h, after);
+
+        let (result, active_calls) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert!(active_calls.is_empty(), "sheet 0 was untouched");
+
+        let cell = h.state.grids.lock().unwrap()[1]
+            .get_cell(0, 2)
+            .cloned()
+            .expect("C1 present");
+        assert!(cell.has_formula(), "must be stored as a formula, not text");
+        assert_eq!(cell.value, CellValue::Number(5.0), "and must be evaluated");
+    }
+
+    // --- DEFECT 1: undo + recalculation for notebook writes ----------------
+
+    /// A notebook cell's write is undoable: it lands in ONE committed
+    /// transaction carrying the exact prior cells, so Ctrl+Z can revert it.
+    /// The old wholesale `*app_grids = modified_grids` swap recorded nothing.
+    #[test]
+    fn a_notebook_write_is_undoable() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(5.0));
+        let h = harness(sheet1.clone());
+
+        let mut after = sheet1;
+        after.set_cell(0, 0, script_wrote(CellValue::Number(42.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(value_at(&h, 1, 0, 0), CellValue::Number(42.0));
+
+        let mut undo = h.state.undo_stack.lock().unwrap();
+        assert_eq!(undo.undo_depth(), 1, "exactly one undoable action");
+        let transaction = undo.pop_undo().expect("a transaction to undo");
+        let restores: Vec<&Vec<u8>> = transaction
+            .changes
+            .iter()
+            .filter_map(|c| match c {
+                engine::undo::CellChange::CustomRestore { kind, data }
+                    if kind == "script_grid_cells" =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restores.len(), 1, "one snapshot for the one written sheet");
+
+        let snapshot: crate::undo_commands::ScriptGridCellsSnapshot =
+            serde_json::from_slice(restores[0]).expect("snapshot deserializes");
+        assert_eq!(snapshot.sheet_index, 1);
+        let prior = snapshot
+            .cells
+            .iter()
+            .find(|(r, c, _)| *r == 0 && *c == 0)
+            .expect("A1 captured");
+        assert_eq!(
+            prior.2.as_ref().map(|c| c.value.clone()),
+            Some(CellValue::Number(5.0)),
+            "undo restores the value that was there before the cell ran"
+        );
+    }
+
+    /// A formula that DEPENDS on a cell the notebook wrote is re-evaluated.
+    /// The wholesale swap left it displaying its stale cached value until the
+    /// user forced a recalculation.
+    #[test]
+    fn a_dependent_formula_recalculates_after_a_notebook_write() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(1.0));
+        let mut dependent = Cell::new_formula("A1*10".to_string());
+        dependent.value = CellValue::Number(10.0); // cached result of 1*10
+        sheet1.set_cell(0, 1, dependent);
+        let h = harness(sheet1.clone());
+
+        let mut after = sheet1;
+        after.set_cell(0, 0, script_wrote(CellValue::Number(5.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(
+            value_at(&h, 1, 0, 1),
+            CellValue::Number(50.0),
+            "the dependent formula must not keep its stale cached value"
+        );
+    }
+
+    /// The workbook is marked dirty, so the write survives to the .cala.
+    #[test]
+    fn an_off_sheet_write_dirties_the_document() {
+        let h = harness(Grid::new());
+        let mut after = Grid::new();
+        after.set_cell(0, 0, script_wrote(CellValue::Number(1.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert!(*h.file_state.is_modified.lock().unwrap());
+    }
+
+    /// The ACTIVE sheet's writes are handed to the edit pipeline (parse +
+    /// dependency maps + recalc cascade) as an invariant diff, and that happens
+    /// INSIDE the transaction the off-sheet snapshots opened — so the whole
+    /// cell is one undoable action rather than two.
+    #[test]
+    fn active_sheet_writes_reach_the_edit_pipeline_inside_one_transaction() {
+        let h = harness(Grid::new());
+        let mut sheet0 = Grid::new();
+        sheet0.set_cell(0, 0, script_wrote(CellValue::Text("=1+1".to_string())));
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(3, 3, script_wrote(CellValue::Number(7.0)));
+        let grids = vec![sheet0, sheet1];
+
+        let (result, active_calls) = apply(&h, &grids, 2, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(active_calls.len(), 1, "the active diff is replayed once");
+        let (updates, in_transaction) = &active_calls[0];
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].value, "=1+1");
+        assert_eq!(
+            updates[0].invariant,
+            Some(true),
+            "the pipeline must not re-localize a script diff"
+        );
+        assert!(
+            in_transaction,
+            "the active replay must join the off-sheet transaction"
+        );
+        assert_eq!(
+            h.state.undo_stack.lock().unwrap().undo_depth(),
+            1,
+            "one undoable action for the whole cell"
+        );
+    }
+
+    // --- Undo snapshots of formula ASTs ------------------------------------
+
+    /// Every formula AST is JSON-representable, literals included. This used to
+    /// be false (`parser::ast::Value` was internally tagged, which serde cannot
+    /// serialize for a newtype variant wrapping a primitive) and forced a
+    /// per-cell salvage fallback in `script_grid_cells_snapshot_bytes`.
+    #[test]
+    fn formula_cells_serialize_for_undo_literals_included() {
+        for formula in ["A1+B1", "A1*10", "IF(A1>0,\"y\",\"n\")", "SUM(A1:A10)"] {
+            let cell = Cell::new_formula(formula.to_string());
+            let bytes = serde_json::to_vec(&cell)
+                .unwrap_or_else(|e| panic!("={} must serialize for undo: {}", formula, e));
+            let back: Cell = serde_json::from_slice(&bytes).expect("and deserialize");
+            assert_eq!(back.formula_string(), cell.formula_string(), "={}", formula);
+        }
+    }
+
+    /// A script overwriting a literal-bearing formula on a non-active sheet is
+    /// applied AND fully undoable: the snapshot carries the original AST back.
+    #[test]
+    fn overwriting_a_literal_bearing_formula_stays_undoable() {
+        let mut sheet1 = Grid::new();
+        let mut existing = Cell::new_formula("A1*10".to_string());
+        existing.value = CellValue::Number(10.0);
+        sheet1.set_cell(0, 1, existing);
+        let h = harness(sheet1.clone());
+
+        let mut after = sheet1;
+        after.set_cell(0, 1, script_wrote(CellValue::Number(99.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(
+            h.state.grids.lock().unwrap()[1]
+                .get_cell(0, 1)
+                .map(|c| c.value.clone()),
+            Some(CellValue::Number(99.0)),
+            "the write lands"
+        );
+
+        let transaction = h
+            .state
+            .undo_stack
+            .lock()
+            .unwrap()
+            .pop_undo()
+            .expect("a transaction");
+        let data = transaction
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                engine::undo::CellChange::CustomRestore { kind, data }
+                    if kind == "script_grid_cells" =>
+                {
+                    Some(data.clone())
+                }
+                _ => None,
+            })
+            .expect("a snapshot");
+        let snapshot: crate::undo_commands::ScriptGridCellsSnapshot =
+            serde_json::from_slice(&data).expect("snapshot deserializes");
+        let (_, _, before) = snapshot
+            .cells
+            .iter()
+            .find(|(r, c, _)| *r == 0 && *c == 1)
+            .expect("B1 captured");
+        let before = before.as_ref().expect("B1 had contents");
+        assert!(before.has_formula(), "the original formula survives in undo");
+        assert_eq!(before.formula_string(), Some("A1*10".to_string()));
+    }
+
+    // --- Audit semantics ---------------------------------------------------
+
+    /// Both surfaces record the TRUE diff size, not the engine's raw write
+    /// counter, and the entry still carries surface + id + sheet + range.
+    /// The notebook used to log the raw counter with no range at all.
+    #[test]
+    fn audit_records_the_true_diff_size_with_surface_id_sheet_and_range() {
+        let h = harness(Grid::new());
+        let mut after = Grid::new();
+        after.set_cell(2, 1, script_wrote(CellValue::Number(1.0)));
+        after.set_cell(4, 3, script_wrote(CellValue::Number(2.0)));
+        let grids = modified(&h, after);
+
+        // A deliberately inflated engine counter: the audit must not echo it.
+        let (result, _) = apply(&h, &grids, 999, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+
+        let audit = h.state.audit_log.lock().unwrap();
+        let entry = audit
+            .entries
+            .iter()
+            .find(|e| e.extra.get("surface").and_then(|v| v.as_str()) == Some("notebook"))
+            .expect("a notebook audit entry");
+        assert_eq!(
+            entry.extra.get("surfaceId").and_then(|v| v.as_str()),
+            Some("nb-1:cell-1")
+        );
+        assert_eq!(entry.extra.get("sheet").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            entry.extra.get("cellsModified").and_then(|v| v.as_u64()),
+            Some(2),
+            "the diff size, not the raw engine counter"
+        );
+        assert_eq!(entry.extra.get("firstRow").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(entry.extra.get("lastRow").and_then(|v| v.as_u64()), Some(4));
+        assert_eq!(entry.extra.get("firstCol").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(entry.extra.get("lastCol").and_then(|v| v.as_u64()), Some(3));
+    }
+
+    // --- Protection is still decided before anything is written ------------
+
+    /// A protected target sheet refuses the whole cell, and refuses it BEFORE
+    /// any grid is touched — nothing to roll back.
+    #[test]
+    fn a_protected_target_sheet_refuses_before_any_write_lands() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(0, 0, Cell::new_number(5.0));
+        let h = harness(sheet1.clone());
+        h.state.sheet_protection.lock().unwrap().insert(
+            1,
+            crate::protection::SheetProtection {
+                protected: true,
+                ..Default::default()
+            },
+        );
+
+        let mut after = sheet1;
+        after.set_cell(0, 0, script_wrote(CellValue::Number(42.0)));
+        let grids = modified(&h, after);
+
+        let (result, active_calls) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_err(), "a protected sheet must refuse the write");
+        assert!(active_calls.is_empty(), "nothing reached the edit pipeline");
+        assert_eq!(
+            value_at(&h, 1, 0, 0),
+            CellValue::Number(5.0),
+            "the grid is untouched"
+        );
+        assert_eq!(h.state.undo_stack.lock().unwrap().undo_depth(), 0);
     }
 }

@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CellData,
+  TypedCellData,
   RichTextRun,
   StyleData,
   DimensionData,
@@ -50,27 +51,72 @@ function emitStructuralEvent(
 // User-defined formula functions (UDFs) have JS implementations, but the Rust
 // recalc is synchronous and holds a state lock, so it can never call a JS UDF
 // back mid-evaluation. Instead the @api UDF layer installs a resolver here that
-// runs BEFORE update_cell: it asks the backend which UDF calls the edit will
-// trigger (collect), resolves their JS results off-thread, and returns a
+// runs BEFORE the write: it asks the backend which UDF calls the pending edits
+// will trigger (collect), resolves their JS results off-thread, and returns a
 // pre-fetched results table the backend's evaluator then serves. Core stays
 // ignorant of @api and of the UDF mechanism — it only invokes the hook when one
 // is installed. When no UDFs are registered the hook returns undefined and the
 // fast path (no extra IPC) is preserved.
+//
+// The hook takes a LIST of pending writes because BOTH write paths need it:
+// update_cell (one cell) and update_cells_batch (paste, fill handle, multi-cell
+// edit). The batch path used to skip pre-resolution entirely, so a freshly
+// pasted or filled UDF formula had no pre-fetched result and no stored value to
+// preserve — it landed as #NAME?.
 // ============================================================================
 
-/** A resolver returning the pre-fetched UDF results table (opaque to Core) for
- *  a pending single-cell edit, or undefined when there is nothing to resolve. */
+/** One pending cell write handed to the UDF resolve hook. */
+export interface UdfPendingEdit {
+  row: number;
+  col: number;
+  value: string;
+  /** When true, the value is already in invariant (US) format (see CellUpdateInput). */
+  invariant?: boolean;
+}
+
+/** What the resolver hands back: the pre-fetched results table (opaque to Core)
+ *  plus the cells calling a VOLATILE UDF, which the backend splices into its
+ *  recalc order so they really do recompute. */
+export interface UdfResolveResult {
+  results: Record<string, unknown>;
+  volatileCells: Array<{ row: number; col: number }>;
+}
+
+/** A resolver for a set of pending writes, or undefined when there is nothing
+ *  to resolve (no UDFs registered, or none reached). */
 export type UdfResolveHook = (
-  row: number,
-  col: number,
-  value: string,
-) => Promise<Record<string, unknown> | undefined>;
+  edits: UdfPendingEdit[],
+) => Promise<UdfResolveResult | undefined>;
 
 let udfResolveHook: UdfResolveHook | null = null;
 
 /** Installed by the @api UDF layer; pass null to uninstall. */
 export function setUdfResolveHook(hook: UdfResolveHook | null): void {
   udfResolveHook = hook;
+}
+
+/** Run the installed hook for `edits`. Best-effort by contract: a hook failure
+ *  must never block the write (the UDF cells just keep their last value). */
+async function resolveUdfsFor(
+  edits: UdfPendingEdit[],
+): Promise<UdfResolveResult | undefined> {
+  if (!udfResolveHook) return undefined;
+  try {
+    return await udfResolveHook(edits);
+  } catch (e) {
+    console.warn("[udf] resolve hook failed; proceeding without UDF results", e);
+    return undefined;
+  }
+}
+
+/** Attach the resolver's output to an invoke argument bag (no-op when empty). */
+function applyUdfArgs(
+  args: Record<string, unknown>,
+  resolved: UdfResolveResult | undefined,
+): void {
+  if (!resolved) return;
+  if (Object.keys(resolved.results).length > 0) args.udfResults = resolved.results;
+  if (resolved.volatileCells.length > 0) args.udfVolatileCells = resolved.volatileCells;
 }
 
 // ============================================================================
@@ -113,31 +159,135 @@ function shouldPrefetchCube(input: string): boolean {
   return sessionHasCube;
 }
 
+// ============================================================================
+// Macro-recorder observation hook (Inversion of Control)
+// ----------------------------------------------------------------------------
+// The macro recorder is an EXTENSION, and Core may never import one. So Core
+// exposes a settable observer — the same shape as setUdfResolveHook above — that
+// the recorder installs while it is recording and uninstalls when it stops.
+// When no hook is installed every call site short-circuits on a null check, so
+// the not-recording path costs one comparison.
+//
+// WHY THE BRIDGE AND NOT THE COMMAND LAYER: the UI commands that drive these
+// operations act on the AMBIENT SELECTION ("insert a row" = "insert a row where
+// the cursor is"). A macro replayed later has a different selection, so a
+// recording taken at the command layer replays somewhere else. Every operation
+// below arrives HERE with explicit coordinates, which is exactly what a
+// generated script needs. The command layer (api/commands.ts) is observed too,
+// but only for actions that never reach this bridge with arguments.
+//
+// The events are deliberately STRUCTURAL, not textual: Core does not know what
+// a "macro" is or which script runtime the recorder will target. It reports
+// what happened; the recorder's codegen decides how to say it.
+// ============================================================================
+
 /** A cell write observed at the bridge, surfaced to the macro recorder. */
 export interface RecordedCellWrite {
   row: number;
   col: number;
   value: string;
+  /**
+   * True when `value` is already in invariant (US) format rather than the
+   * user's locale — the batch path's `invariant` flag. The recorder needs this:
+   * replaying "1.5" verbatim in a comma-decimal locale would not parse back to
+   * the same number, so the generator re-localizes such values.
+   */
+  invariant?: boolean;
 }
 
-/** Best-effort observer of cell writes for the macro recorder. At most one is
- *  installed (by the recorder while recording); pass null to uninstall. A
- *  failing hook never blocks the edit. */
-export type CellRecorderHook = (writes: RecordedCellWrite[]) => void;
+/**
+ * One workbook mutation observed at the IPC bridge, with the arguments the
+ * backend actually received. `kind` is the discriminant.
+ */
+export type RecordedGridEvent =
+  | { kind: "cellWrites"; writes: RecordedCellWrite[] }
+  | {
+      kind: "formatting";
+      rows: number[];
+      cols: number[];
+      formatting: FormattingOptions;
+    }
+  | {
+      kind: "borderPreset";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      preset: string;
+      style: string;
+      color: string;
+      width: number;
+    }
+  | {
+      kind: "clearRange";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      applyTo: ClearApplyTo;
+    }
+  | {
+      kind: "fillRange";
+      sourceStartRow: number;
+      sourceStartCol: number;
+      sourceEndRow: number;
+      sourceEndCol: number;
+      targetStartRow: number;
+      targetStartCol: number;
+      targetEndRow: number;
+      targetEndCol: number;
+    }
+  | { kind: "insertRows"; startRow: number; count: number }
+  | { kind: "deleteRows"; startRow: number; count: number }
+  | { kind: "insertColumns"; startCol: number; count: number }
+  | { kind: "deleteColumns"; startCol: number; count: number }
+  | {
+      kind: "mergeCells";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+    }
+  | { kind: "unmergeCells"; row: number; col: number }
+  | { kind: "rowHeight"; row: number; height: number }
+  | { kind: "columnWidth"; col: number; width: number }
+  | { kind: "freezePanes"; freezeRow: number | null; freezeCol: number | null }
+  | {
+      kind: "replaceAll";
+      search: string;
+      replacement: string;
+      caseSensitive: boolean;
+      matchEntireCell: boolean;
+    }
+  | { kind: "activateSheet"; index: number }
+  | { kind: "addSheet"; index: number; name: string }
+  | { kind: "deleteSheet"; index: number }
+  | { kind: "renameSheet"; index: number; newName: string };
 
-let cellRecorderHook: CellRecorderHook | null = null;
+/** Best-effort observer of workbook mutations for the macro recorder. At most
+ *  one is installed (by the recorder while recording); pass null to uninstall.
+ *  A failing hook never blocks the operation. */
+export type GridRecorderHook = (event: RecordedGridEvent) => void;
+
+let gridRecorderHook: GridRecorderHook | null = null;
 
 /** Installed by the macro recorder while recording; pass null to uninstall. */
-export function setCellRecorderHook(hook: CellRecorderHook | null): void {
-  cellRecorderHook = hook;
+export function setGridRecorderHook(hook: GridRecorderHook | null): void {
+  gridRecorderHook = hook;
 }
 
-function recordCellWrites(writes: RecordedCellWrite[]): void {
-  if (!cellRecorderHook) return;
+/** Whether a recorder is currently observing (lets call sites skip building an
+ *  event payload they would only throw away). */
+export function isGridRecorderActive(): boolean {
+  return gridRecorderHook !== null;
+}
+
+function recordGridEvent(event: RecordedGridEvent): void {
+  if (!gridRecorderHook) return;
   try {
-    cellRecorderHook(writes);
+    gridRecorderHook(event);
   } catch (e) {
-    console.warn("[recorder] cell-write hook failed; ignoring", e);
+    console.warn("[recorder] grid hook failed; ignoring", e);
   }
 }
 
@@ -190,6 +340,34 @@ export async function getWatchCells(
   return invoke<(CellData | null)[]>("get_watch_cells", { requests });
 }
 
+/**
+ * Read a rectangle of cells with their VALUE TYPES preserved, in ONE call.
+ *
+ * The typed counterpart of getViewportCells: the result distinguishes the
+ * number 5 from the text "5", surfaces errors as errors, and carries each
+ * cell's formula — so a read/modify/write round-trip cannot silently replace a
+ * formula with its display text.
+ *
+ * SPARSE: only cells that exist in the grid come back (callers fill the
+ * rectangle themselves). Capped at 100_000 cells per call (backend rejects
+ * more). `sheetIndex` defaults to the active sheet.
+ */
+export async function getRangeCellsTyped(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sheetIndex?: number,
+): Promise<TypedCellData[]> {
+  return invoke<TypedCellData[]>("get_range_cells_typed", {
+    sheetIndex: sheetIndex ?? null,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
 export async function getCell(row: number, col: number): Promise<CellData | null> {
   const t0 = performance.now();
   const result = await invoke<CellData | null>("get_cell", { row, col });
@@ -239,15 +417,7 @@ export async function updateCell(
   const t0 = performance.now();
   // Pre-resolve any user-defined formula functions the edit will trigger, so the
   // synchronous backend recalc can serve their results (see setUdfResolveHook).
-  // Best-effort: a hook failure must not block a normal edit.
-  let udfResults: Record<string, unknown> | undefined;
-  if (udfResolveHook) {
-    try {
-      udfResults = await udfResolveHook(row, col, input);
-    } catch (e) {
-      console.warn("[udf] resolve hook failed; proceeding without UDF results", e);
-    }
-  }
+  const udf = await resolveUdfsFor([{ row, col, value: input }]);
   // Pre-resolve any CUBE formulas the edit affects so the synchronous backend
   // recalc can serve their BI-model results. Best-effort: failure must not block
   // the edit (the cube cells just show #N/A until data is available).
@@ -261,12 +431,12 @@ export async function updateCell(
   }
   // FIXED: Mapped 'input' to 'value' to match Rust command signature
   const args: Record<string, unknown> = { row, col, value: input };
-  if (udfResults) args.udfResults = udfResults;
+  applyUdfArgs(args, udf);
   if (cubeResults) args.cubeResults = cubeResults;
   const result = await invoke<UpdateCellResult>("update_cell", args);
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
-  recordCellWrites([{ row, col, value: input }]);
+  recordGridEvent({ kind: "cellWrites", writes: [{ row, col, value: input }] });
   return result;
 }
 
@@ -287,6 +457,13 @@ export interface CellUpdateInput {
  * Batch update multiple cells in a single operation.
  * This is significantly faster than calling updateCell multiple times
  * because it sends all updates in a single IPC call.
+ *
+ * Runs the SAME UDF pre-resolution pass as `updateCell` — paste, fill handle
+ * and multi-cell edits all land here, and without the pass every pasted UDF
+ * formula evaluated to #NAME? (nothing pre-fetched, and nothing stored to
+ * preserve). The hook itself fast-paths to `undefined` when the workbook has no
+ * custom functions, so an ordinary paste costs no extra IPC.
+ *
  * @param updates - Array of cell updates with row, col, and value
  * @returns Array of all updated cells (including dependents)
  */
@@ -294,10 +471,23 @@ export async function updateCellsBatch(
   updates: CellUpdateInput[]
 ): Promise<CellData[]> {
   const t0 = performance.now();
-  const result = await invoke<CellData[]>("update_cells_batch", { updates });
+  const udf = await resolveUdfsFor(
+    updates.map((u) => ({ row: u.row, col: u.col, value: u.value, invariant: u.invariant })),
+  );
+  const args: Record<string, unknown> = { updates };
+  applyUdfArgs(args, udf);
+  const result = await invoke<CellData[]>("update_cells_batch", args);
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] updateCellsBatch(${updates.length}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
-  recordCellWrites(updates.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+  recordGridEvent({
+    kind: "cellWrites",
+    writes: updates.map((u) => ({
+      row: u.row,
+      col: u.col,
+      value: u.value,
+      invariant: u.invariant,
+    })),
+  });
   return result;
 }
 
@@ -311,12 +501,21 @@ export async function clearRange(
   endRow: number,
   endCol: number
 ): Promise<number> {
-  return invoke<number>("clear_range", {
+  const result = await invoke<number>("clear_range", {
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  recordGridEvent({
+    kind: "clearRange",
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    applyTo: "contents",
+  });
+  return result;
 }
 
 // ClearApplyTo is imported from ../types
@@ -331,7 +530,7 @@ export async function clearRangeWithOptions(
   endCol: number,
   applyTo: ClearApplyTo = "all"
 ): Promise<unknown> {
-  return invoke("clear_range_with_options", {
+  const result = await invoke("clear_range_with_options", {
     params: {
       startRow,
       startCol,
@@ -340,6 +539,8 @@ export async function clearRangeWithOptions(
       applyTo,
     },
   });
+  recordGridEvent({ kind: "clearRange", startRow, startCol, endRow, endCol, applyTo });
+  return result;
 }
 
 /**
@@ -492,7 +693,8 @@ export async function getCurrentRegion(
 // ============================================================================
 
 export async function setColumnWidth(col: number, width: number): Promise<void> {
-  return invoke<void>("set_column_width", { col, width });
+  await invoke<void>("set_column_width", { col, width });
+  recordGridEvent({ kind: "columnWidth", col, width });
 }
 
 export async function getColumnWidth(col: number): Promise<number | null> {
@@ -504,7 +706,8 @@ export async function getAllColumnWidths(): Promise<DimensionData[]> {
 }
 
 export async function setRowHeight(row: number, height: number): Promise<void> {
-  return invoke<void>("set_row_height", { row, height });
+  await invoke<void>("set_row_height", { row, height });
+  recordGridEvent({ kind: "rowHeight", row, height });
 }
 
 export async function getRowHeight(row: number): Promise<number | null> {
@@ -620,6 +823,7 @@ export async function applyFormatting(
     "styles=",
     result.styles.length
   );
+  recordGridEvent({ kind: "formatting", rows, cols, formatting });
 
   // Sheet grouping: replicate formatting to all grouped (non-active) sheets
   if (isSheetGroupingActive()) {
@@ -664,7 +868,7 @@ export async function applyBorderPreset(
   color: string,
   width: number
 ): Promise<FormattingResult> {
-  return invoke<FormattingResult>("apply_border_preset", {
+  const result = await invoke<FormattingResult>("apply_border_preset", {
     startRow,
     startCol,
     endRow,
@@ -674,6 +878,18 @@ export async function applyBorderPreset(
     color,
     width,
   });
+  recordGridEvent({
+    kind: "borderPreset",
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    preset,
+    style,
+    color,
+    width,
+  });
+  return result;
 }
 
 // ============================================================================
@@ -798,6 +1014,26 @@ export async function getCalculationState(): Promise<string> {
   return invoke<string>("get_calculation_state");
 }
 
+/**
+ * Announce that an explicit recalculation pass finished.
+ *
+ * Emitted HERE, next to the invoke, so every caller of Calculate Now /
+ * Calculate Sheet announces it — the same reasoning as the row/column
+ * announcements above. This is the "the workbook is settled" signal; the
+ * incremental per-edit recalc is already reported by CELL_VALUES_CHANGED.
+ */
+function announceRecalcCompleted(
+  scope: "workbook" | "sheet",
+  cellsUpdated: number,
+  startedAt: number,
+): void {
+  emitAppEvent(AppEvents.RECALCULATION_COMPLETED, {
+    scope,
+    cellsUpdated,
+    durationMs: Math.round(performance.now() - startedAt),
+  });
+}
+
 async function recalcAll(forceCube: boolean): Promise<CellData[]> {
   // Pre-resolve cube formulas across the sheet so a full recalc refreshes them
   // against current model data (e.g. after a calculated measure changes, or F9).
@@ -811,7 +1047,10 @@ async function recalcAll(forceCube: boolean): Promise<CellData[]> {
       console.warn("[cube] full prefetch failed; cube cells keep last values", e);
     }
   }
-  return invoke<CellData[]>("calculate_now", cubeResults ? { cubeResults } : {});
+  const startedAt = performance.now();
+  const cells = await invoke<CellData[]>("calculate_now", cubeResults ? { cubeResults } : {});
+  announceRecalcCompleted("workbook", cells.length, startedAt);
+  return cells;
 }
 
 export async function calculateNow(): Promise<CellData[]> {
@@ -829,8 +1068,10 @@ export async function recalcWithCube(): Promise<CellData[]> {
 
 export async function calculateSheet(): Promise<CellData[]> {
   console.log("[tauri-api] calculateSheet - recalculating current sheet");
+  const startedAt = performance.now();
   const result = await invoke<CellData[]>("calculate_sheet");
   console.log(`[tauri-api] calculateSheet returned ${result.length} updated cells`);
+  announceRecalcCompleted("sheet", result.length, startedAt);
   return result;
 }
 
@@ -928,19 +1169,83 @@ export async function getActiveSheet(): Promise<number> {
 }
 
 export async function setActiveSheet(index: number): Promise<SheetsResult> {
-  return invoke<SheetsResult>("set_active_sheet", { index });
+  const result = await invoke<SheetsResult>("set_active_sheet", { index });
+  recordGridEvent({ kind: "activateSheet", index });
+  return result;
+}
+
+/**
+ * Read the sheet list without failing the caller.
+ *
+ * The sheet-collection events below need the names as they were BEFORE the
+ * mutation (a delete's result no longer contains the deleted sheet; a rename's
+ * result no longer contains the old name). A failed pre-read must never fail the
+ * operation itself, so it degrades to "no previous names known" and the event
+ * still fires with whatever is resolvable.
+ */
+async function sheetNamesBefore(): Promise<SheetInfo[]> {
+  try {
+    return (await getSheets()).sheets;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Announce a sheet ADDED. Which entry is new is resolved by diffing against the
+ * pre-read names rather than trusting activeIndex — add_sheet activates the new
+ * sheet today, but a caller that adds without activating must still announce the
+ * right one. Sheet names are unique within a workbook, so the diff is exact.
+ */
+function announceSheetAdded(
+  before: SheetInfo[],
+  after: SheetsResult,
+  source: "new" | "copy",
+): void {
+  const known = new Set(before.map((s) => s.name));
+  const added = after.sheets.find((s) => !known.has(s.name));
+  if (!added) return;
+  emitAppEvent(AppEvents.SHEET_ADDED, {
+    sheetIndex: added.index,
+    sheetName: added.name,
+    source,
+  });
 }
 
 export async function addSheet(name?: string): Promise<SheetsResult> {
-  return invoke<SheetsResult>("add_sheet", { name: name ?? null });
+  const before = await sheetNamesBefore();
+  const result = await invoke<SheetsResult>("add_sheet", { name: name ?? null });
+  announceSheetAdded(before, result, "new");
+  // Recorded with the RESOLVED name/index: add_sheet auto-names when the caller
+  // passes none, and a macro that replays "add a sheet called undefined" is
+  // useless. Same name-diff the announcement uses (sheet names are unique).
+  const known = new Set(before.map((s) => s.name));
+  const added = result.sheets.find((s) => !known.has(s.name));
+  if (added) {
+    recordGridEvent({ kind: "addSheet", index: added.index, name: added.name });
+  }
+  return result;
 }
 
 export async function deleteSheet(index: number): Promise<SheetsResult> {
-  return invoke<SheetsResult>("delete_sheet", { index });
+  const before = await sheetNamesBefore();
+  const removed = before.find((s) => s.index === index);
+  const result = await invoke<SheetsResult>("delete_sheet", { index });
+  emitAppEvent(AppEvents.SHEET_DELETED, {
+    sheetIndex: index,
+    sheetName: removed?.name ?? "",
+  });
+  recordGridEvent({ kind: "deleteSheet", index });
+  return result;
 }
 
 export async function renameSheet(index: number, newName: string): Promise<SheetsResult> {
-  return invoke<SheetsResult>("rename_sheet", { index, newName });
+  const before = await sheetNamesBefore();
+  const oldName = before.find((s) => s.index === index)?.name ?? "";
+  const result = await invoke<SheetsResult>("rename_sheet", { index, newName });
+  emitAppEvent(AppEvents.SHEET_RENAMED, { sheetIndex: index, oldName, newName });
+  recordGridEvent({ kind: "renameSheet", index, newName });
+  return result;
 }
 
 export async function moveSheet(fromIndex: number, toIndex: number): Promise<SheetsResult> {
@@ -948,7 +1253,13 @@ export async function moveSheet(fromIndex: number, toIndex: number): Promise<She
 }
 
 export async function copySheet(sourceIndex: number, newName?: string): Promise<SheetsResult> {
-  return invoke<SheetsResult>("copy_sheet", { sourceIndex, newName: newName ?? null });
+  const before = await sheetNamesBefore();
+  const result = await invoke<SheetsResult>("copy_sheet", {
+    sourceIndex,
+    newName: newName ?? null,
+  });
+  announceSheetAdded(before, result, "copy");
+  return result;
 }
 
 export async function hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult> {
@@ -981,6 +1292,7 @@ export async function insertRows(row: number, count: number): Promise<CellData[]
   const result = await invoke<CellData[]>("insert_rows", { row, count });
   console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_INSERTED, { startRow: row, count });
+  recordGridEvent({ kind: "insertRows", startRow: row, count });
   return result;
 }
 
@@ -994,6 +1306,7 @@ export async function insertColumns(col: number, count: number): Promise<CellDat
   const result = await invoke<CellData[]>("insert_columns", { col, count });
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_INSERTED, { startCol: col, count });
+  recordGridEvent({ kind: "insertColumns", startCol: col, count });
   return result;
 }
 
@@ -1007,6 +1320,7 @@ export async function deleteRows(row: number, count: number): Promise<CellData[]
   const result = await invoke<CellData[]>("delete_rows", { row, count });
   console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_DELETED, { startRow: row, count });
+  recordGridEvent({ kind: "deleteRows", startRow: row, count });
   return result;
 }
 
@@ -1020,6 +1334,7 @@ export async function deleteColumns(col: number, count: number): Promise<CellDat
   const result = await invoke<CellData[]>("delete_columns", { col, count });
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
+  recordGridEvent({ kind: "deleteColumns", startCol: col, count });
   return result;
 }
 
@@ -1036,6 +1351,13 @@ export interface UndoState {
   undoDepth: number;
   /** Number of transactions available to redo (used by test oracles). */
   redoDepth: number;
+  /**
+   * Whether an undo transaction is currently OPEN (begin without commit).
+   * Probe this before grouping your own writes: beginUndoTransaction is a
+   * no-op while a transaction is open, so an unconditional commit would close
+   * someone else's group early.
+   */
+  transactionOpen: boolean;
 }
 
 export interface UndoResult {
@@ -1197,6 +1519,13 @@ export async function replaceAll(
     `[tauri-api] replaceAll completed: ${result.replacementCount} replacements`
   );
 
+  recordGridEvent({
+    kind: "replaceAll",
+    search,
+    replacement,
+    caseSensitive,
+    matchEntireCell,
+  });
   return result;
 }
 
@@ -1236,6 +1565,7 @@ export async function setFreezePanes(
   console.log('[tauri-api] setFreezePanes called with:', { freezeRow, freezeCol });
   const result = await invoke<SheetsResult>("set_freeze_panes", { freezeRow, freezeCol });
   console.log('[tauri-api] setFreezePanes result:', result);
+  recordGridEvent({ kind: "freezePanes", freezeRow, freezeCol });
   return result;
 }
 
@@ -1333,6 +1663,7 @@ export async function mergeCells(
     endCol,
   });
   console.log(`[tauri-api] mergeCells result:`, result);
+  recordGridEvent({ kind: "mergeCells", startRow, startCol, endRow, endCol });
   return result;
 }
 
@@ -1343,6 +1674,7 @@ export async function unmergeCells(row: number, col: number): Promise<MergeResul
   console.log(`[tauri-api] unmergeCells(${row}, ${col})`);
   const result = await invoke<MergeResult>("unmerge_cells", { row, col });
   console.log(`[tauri-api] unmergeCells result:`, result);
+  recordGridEvent({ kind: "unmergeCells", row, col });
   return result;
 }
 
@@ -1438,6 +1770,17 @@ export async function fillRange(
     `[PERF][bridge] fillRange src=(${sourceStartRow},${sourceStartCol})-(${sourceEndRow},${sourceEndCol}) ` +
     `tgt=(${targetStartRow},${targetStartCol})-(${targetEndRow},${targetEndCol}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`
   );
+  recordGridEvent({
+    kind: "fillRange",
+    sourceStartRow,
+    sourceStartCol,
+    sourceEndRow,
+    sourceEndCol,
+    targetStartRow,
+    targetStartCol,
+    targetEndRow,
+    targetEndCol,
+  });
   return result;
 }
 

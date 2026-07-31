@@ -1,12 +1,20 @@
 //! FILENAME: app/src-tauri/src/scripting/capability_store.rs
-//! PURPOSE: Authoritative, session-scoped backend store of per-script network
-//!          capability grants + rate-limit state for `script_http_fetch`.
+//! PURPOSE: Authoritative, session-scoped backend store of per-script
+//!          capability grants (any capability id) + net.fetch rate-limit state.
 //! CONTEXT: docs/design/script-sandbox-architecture.md §8 (R9, the `net.fetch`
 //!          enforcement row) and §11 (Phase 4). net.fetch origin grants are
 //!          mirrored here on consent-grant from the main window, and re-checked
 //!          in Rust on every request. This store NEVER trusts frontend-supplied
 //!          permission and is the single source of truth for whether a script
 //!          may reach a given origin.
+//!
+//! CAPABILITY SET (generalized): the granted-id set started life BI-only
+//! (`bi_caps`), but the ids it holds were always plain strings and every gate
+//! does an exact-match lookup. It is now `capabilities` — ONE set that any
+//! capability id uses (`bi.query`, `bi.sql`, `bi.model`, `bi.connector`,
+//! `distribution.writeback`, …). There is deliberately no second, parallel
+//! store: a script's authoritative grants must have exactly one home, or a
+//! revoke would have to remember to visit all of them.
 //!
 //! Persistence lives frontend-side (the consent / .cala store). This store is
 //! in-memory only: it does NOT read or write disk. On unmount/revoke the
@@ -30,10 +38,13 @@ struct ScriptCaps {
     net_origins: HashSet<String>,
     /// Recent fetch timestamps used for the rolling per-minute rate limit.
     fetch_calls: VecDeque<Instant>,
-    /// Granted BI capability ids ("bi.query" / "bi.sql"), mirrored from the
-    /// broker on consent-grant and re-checked authoritatively in bi_query /
-    /// script_bi_sql (defense in depth: the renderer may be compromised).
-    bi_caps: HashSet<String>,
+    /// Granted capability ids ("bi.query", "bi.sql", "bi.model",
+    /// "bi.connector", "distribution.writeback", …), mirrored from the broker
+    /// on consent-grant and re-checked authoritatively inside each Rust gate
+    /// (defense in depth: the renderer may be compromised). Exact-match only —
+    /// sharing one set never widens a grant, because no gate ever asks a
+    /// prefix/wildcard question.
+    capabilities: HashSet<String>,
 }
 
 /// Authoritative in-memory store of per-script network grants and rate state.
@@ -71,20 +82,38 @@ impl CapabilityStore {
             .unwrap_or(false)
     }
 
-    /// Grant a BI capability ("bi.query" / "bi.sql") to `script_id`. Mirrored
-    /// from the broker on consent-grant. Creates the entry if needed.
-    pub fn grant_bi(&self, script_id: &str, capability: &str) {
+    /// Grant a capability id to `script_id`. Mirrored from the broker on
+    /// consent-grant. Creates the entry if needed. The CALLER validates the id
+    /// against the known set — this store deliberately holds whatever the
+    /// (main-window-only) grant command accepted.
+    pub fn grant(&self, script_id: &str, capability: &str) {
         let mut scripts = self.scripts.lock().unwrap();
         let caps = scripts.entry(script_id.to_string()).or_default();
-        caps.bi_caps.insert(capability.to_string());
+        caps.capabilities.insert(capability.to_string());
     }
 
-    /// Whether `script_id` has been granted the BI `capability`.
-    pub fn is_bi_granted(&self, script_id: &str, capability: &str) -> bool {
+    /// Every capability currently granted to `script_id`, sorted.
+    ///
+    /// Read-only view for the transparency surfaces ("Code in This File"): the
+    /// Rust-QuickJS surfaces (notebooks) hold their grants HERE and nowhere
+    /// else — there is no frontend mirror for them — so without this an audited
+    /// notebook that can query the BI model reads as "grid-only".
+    pub fn granted_capabilities(&self, script_id: &str) -> Vec<String> {
+        let scripts = self.scripts.lock().unwrap();
+        let mut caps: Vec<String> = scripts
+            .get(script_id)
+            .map(|c| c.capabilities.iter().cloned().collect())
+            .unwrap_or_default();
+        caps.sort();
+        caps
+    }
+
+    /// Whether `script_id` has been granted `capability` (exact match).
+    pub fn is_granted(&self, script_id: &str, capability: &str) -> bool {
         let scripts = self.scripts.lock().unwrap();
         scripts
             .get(script_id)
-            .map(|c| c.bi_caps.contains(capability))
+            .map(|c| c.capabilities.contains(capability))
             .unwrap_or(false)
     }
 
@@ -237,40 +266,86 @@ mod tests {
     fn bi_grant_is_per_script_and_per_capability() {
         let store = CapabilityStore::new();
         // Deny-by-default: nothing granted.
-        assert!(!store.is_bi_granted("s1", "bi.query"));
-        assert!(!store.is_bi_granted("s1", "bi.sql"));
+        assert!(!store.is_granted("s1", "bi.query"));
+        assert!(!store.is_granted("s1", "bi.sql"));
 
-        store.grant_bi("s1", "bi.query");
-        assert!(store.is_bi_granted("s1", "bi.query"));
+        store.grant("s1", "bi.query");
+        assert!(store.is_granted("s1", "bi.query"));
         // A grant is capability-specific...
-        assert!(!store.is_bi_granted("s1", "bi.sql"));
+        assert!(!store.is_granted("s1", "bi.sql"));
         // ...and script-specific.
-        assert!(!store.is_bi_granted("s2", "bi.query"));
+        assert!(!store.is_granted("s2", "bi.query"));
 
-        store.grant_bi("s1", "bi.sql");
-        assert!(store.is_bi_granted("s1", "bi.sql"));
+        store.grant("s1", "bi.sql");
+        assert!(store.is_granted("s1", "bi.sql"));
     }
 
     #[test]
     fn revoke_script_clears_bi_grants_and_net_origins() {
         let store = CapabilityStore::new();
-        store.grant_bi("s1", "bi.query");
+        store.grant("s1", "bi.query");
         store.grant_net_origin("s1", "https://example.com");
-        assert!(store.is_bi_granted("s1", "bi.query"));
+        assert!(store.is_granted("s1", "bi.query"));
         assert!(store.is_net_origin_granted("s1", "https://example.com"));
 
         store.revoke_script("s1");
-        assert!(!store.is_bi_granted("s1", "bi.query"));
+        assert!(!store.is_granted("s1", "bi.query"));
         assert!(!store.is_net_origin_granted("s1", "https://example.com"));
+    }
+
+    #[test]
+    fn generic_grants_are_exact_match_and_per_script() {
+        let store = CapabilityStore::new();
+        // Deny by default.
+        assert!(!store.is_granted("s1", "distribution.writeback"));
+
+        store.grant("s1", "distribution.writeback");
+        assert!(store.is_granted("s1", "distribution.writeback"));
+        // Exact match only — no prefix/namespace widening.
+        assert!(!store.is_granted("s1", "distribution"));
+        assert!(!store.is_granted("s1", "distribution.writeback.submit"));
+        // Script-specific.
+        assert!(!store.is_granted("s2", "distribution.writeback"));
+    }
+
+    #[test]
+    fn writeback_grant_does_not_imply_any_bi_grant() {
+        // The generalized set is ONE HashSet — this is the regression guard
+        // that sharing it never leaks one capability into another's gate.
+        let store = CapabilityStore::new();
+        store.grant("s1", "distribution.writeback");
+        assert!(!store.is_granted("s1", "bi.query"));
+        assert!(!store.is_granted("s1", "bi.sql"));
+        assert!(!store.is_granted("s1", "bi.model"));
+        assert!(!store.is_granted("s1", "bi.connector"));
+
+        store.grant("s1", "bi.query");
+        assert!(!store.is_granted("s1", "distribution.writeback.other"));
+        assert!(store.is_granted("s1", "distribution.writeback"));
+        assert_eq!(
+            store.granted_capabilities("s1"),
+            vec!["bi.query".to_string(), "distribution.writeback".to_string()]
+        );
+    }
+
+    #[test]
+    fn revoke_script_clears_every_capability_id() {
+        let store = CapabilityStore::new();
+        store.grant("s1", "distribution.writeback");
+        store.grant("s1", "bi.model");
+        store.revoke_script("s1");
+        assert!(!store.is_granted("s1", "distribution.writeback"));
+        assert!(!store.is_granted("s1", "bi.model"));
+        assert!(store.granted_capabilities("s1").is_empty());
     }
 
     #[test]
     fn net_and_bi_grants_coexist_independently() {
         let store = CapabilityStore::new();
         store.grant_net_origin("s1", "https://example.com");
-        store.grant_bi("s1", "bi.query");
+        store.grant("s1", "bi.query");
         // Granting BI must not disturb the net grant, and vice versa.
         assert!(store.is_net_origin_granted("s1", "https://example.com"));
-        assert!(store.is_bi_granted("s1", "bi.query"));
+        assert!(store.is_granted("s1", "bi.query"));
     }
 }

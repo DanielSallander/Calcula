@@ -7,13 +7,20 @@
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { IconNotebook } from "@api";
-import { scrollToCell, setSelection } from "@api/grid";
-import { dispatchGridAction } from "@api/gridDispatch";
+import {
+  SCRIPT_DEFERRED_ACTIONS_EVENT,
+  normalizeDeferredActions,
+} from "@api/workbookScripts";
 import { NotebookPanel } from "./components/NotebookPanel";
 import { NOTEBOOK_OPEN_EVENT } from "@api/notebookBackend";
+import {
+  MACRO_TO_NOTEBOOK_EVENT,
+  type MacroToNotebookDetail,
+} from "@api/lib";
 import { notebookBackend } from "./lib/notebookBackend";
 import { useNotebookStore } from "./lib/useNotebookStore";
-import type { DeferredAction } from "./types";
+import { applyDeferredActions } from "./lib/deferredActions";
+import { liveDeferredActionHost } from "./lib/deferredActionHost";
 
 // ============================================================================
 // Constants
@@ -117,32 +124,20 @@ function activate(context: ExtensionContext): void {
     window.removeEventListener("keydown", handleKeyDown, true),
   );
 
-  // 4. Listen for deferred actions from script execution (goto, calculate, statusBar).
-  //    Scripts emit these via CustomEvent; we translate them into grid actions.
+  // 4. Listen for deferred actions from script execution — the whole
+  //    DeferredAction vocabulary (navigation, view/display toggles, fills,
+  //    named styles, scroll area, iteration settings, sheet visibility).
+  //    Any script surface can raise these; the payload is re-validated here
+  //    because it arrives as an untyped CustomEvent detail.
   const handleDeferredActions = (e: Event) => {
-    const actions = (e as CustomEvent).detail as DeferredAction[];
-    if (!Array.isArray(actions)) return;
-    for (const action of actions) {
-      switch (action.action) {
-        case "goto":
-          if (action.select !== false) {
-            dispatchGridAction(setSelection(action.row, action.col, action.row, action.col));
-          }
-          dispatchGridAction(scrollToCell(action.row, action.col, false));
-          break;
-        case "calculate":
-          window.dispatchEvent(new CustomEvent("grid:refresh"));
-          break;
-        case "setStatusBar":
-          window.dispatchEvent(
-            new CustomEvent("script:status-bar", { detail: action.message })
-          );
-          break;
-      }
-    }
+    const actions = normalizeDeferredActions((e as CustomEvent).detail);
+    if (actions.length === 0) return;
+    void applyDeferredActions(actions, liveDeferredActionHost);
   };
-  window.addEventListener("script:deferred-actions", handleDeferredActions);
-  cleanupFns.push(() => window.removeEventListener("script:deferred-actions", handleDeferredActions));
+  window.addEventListener(SCRIPT_DEFERRED_ACTIONS_EVENT, handleDeferredActions);
+  cleanupFns.push(() =>
+    window.removeEventListener(SCRIPT_DEFERRED_ACTIONS_EVENT, handleDeferredActions),
+  );
 
   // 5. Open a notebook on request from other extensions (e.g. FileExplorer),
   //    which dispatch via @api requestOpenNotebook() instead of importing our store.
@@ -153,6 +148,31 @@ function activate(context: ExtensionContext): void {
   };
   window.addEventListener(NOTEBOOK_OPEN_EVENT, handleOpenNotebook);
   cleanupFns.push(() => window.removeEventListener(NOTEBOOK_OPEN_EVENT, handleOpenNotebook));
+
+  // 6. "Record into a cell": the macro recorder hands us generated source over
+  //    the @api event channel (siblings may not import each other). A notebook
+  //    is created on the fly when none is open, so the recorder never has to
+  //    know anything about notebook lifecycle.
+  const handleMacroSource = (e: Event) => {
+    const detail = (e as CustomEvent).detail as Partial<MacroToNotebookDetail> | undefined;
+    if (!detail || typeof detail.source !== "string" || detail.source.length === 0) return;
+    const name = typeof detail.name === "string" && detail.name ? detail.name : "Recorded macros";
+    void (async () => {
+      try {
+        if (!useNotebookStore.getState().activeNotebook) {
+          await useNotebookStore.getState().createNotebook(name);
+        }
+        useNotebookStore.getState().appendCellWithSource(detail.source as string);
+        context.ui.activityBar.open(VIEW_ID);
+      } catch (err) {
+        console.error("[ScriptNotebook] Failed to add recorded macro cell:", err);
+      }
+    })();
+  };
+  window.addEventListener(MACRO_TO_NOTEBOOK_EVENT, handleMacroSource);
+  cleanupFns.push(() =>
+    window.removeEventListener(MACRO_TO_NOTEBOOK_EVENT, handleMacroSource),
+  );
 
   isActivated = true;
   console.log("[ScriptNotebook] Activated successfully.");

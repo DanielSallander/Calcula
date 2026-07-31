@@ -7,7 +7,9 @@ use rquickjs::{Function, Object};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::types::{ScriptContext, cell_value_to_string, string_to_cell_value};
+use crate::types::{
+    cell_value_to_string, string_to_cell_value, write_is_effective, ScriptContext,
+};
 use engine::cell::Cell;
 
 /// Resolve sheet index: negative means active sheet.
@@ -60,10 +62,11 @@ pub fn register_cell_ops<'js>(
                 let si = resolve_sheet(&ctx, sheet_index.0.unwrap_or(-1));
                 if let Some(grid) = ctx.grids.get_mut(si) {
                     let cell_value = string_to_cell_value(&value);
-                    let style_index = grid
-                        .get_cell(row as u32, col as u32)
-                        .map(|c| c.style_index)
-                        .unwrap_or(0);
+                    let existing = grid.get_cell(row as u32, col as u32);
+                    let style_index = existing.map(|c| c.style_index).unwrap_or(0);
+                    // Count EFFECTIVE changes only: writing the value a cell
+                    // already holds is not a modification.
+                    let effective = write_is_effective(existing, &cell_value);
                     let cell = Cell {
                         ast: None,
                         value: cell_value,
@@ -71,7 +74,9 @@ pub fn register_cell_ops<'js>(
                         rich_text: None,
                     };
                     grid.set_cell(row as u32, col as u32, cell);
-                    *ctx.cells_modified.borrow_mut() += 1;
+                    if effective {
+                        *ctx.cells_modified.borrow_mut() += 1;
+                    }
                 }
             },
         )
@@ -142,8 +147,11 @@ pub fn register_cell_ops<'js>(
                             let r = start_row as u32 + ri as u32;
                             let c = start_col as u32 + ci as u32;
                             let cell_value = string_to_cell_value(val);
-                            let style_index =
-                                grid.get_cell(r, c).map(|cell| cell.style_index).unwrap_or(0);
+                            let existing = grid.get_cell(r, c);
+                            let style_index = existing.map(|cell| cell.style_index).unwrap_or(0);
+                            // Effective-change counting (see setCellValue):
+                            // rewriting a range with identical values reports 0.
+                            let effective = write_is_effective(existing, &cell_value);
                             let cell = Cell {
                                 ast: None,
                                 value: cell_value,
@@ -151,7 +159,9 @@ pub fn register_cell_ops<'js>(
                                 rich_text: None,
                             };
                             grid.set_cell(r, c, cell);
-                            modified_count += 1;
+                            if effective {
+                                modified_count += 1;
+                            }
                         }
                     }
                 }

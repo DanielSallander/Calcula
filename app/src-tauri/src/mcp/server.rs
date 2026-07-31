@@ -31,6 +31,11 @@ use rmcp::transport::streamable_http_server::{
 
 use crate::{log_info, log_warn};
 use super::tools;
+// The edit half of the object tools, and the script-drafting tools. Aliased so
+// every tool body reads `tools*::<fn>` and it is obvious at the call site which
+// module owns the implementation.
+use super::drafts as tools_drafts;
+use super::objects as tools_objects;
 
 // ============================================================================
 // Parameter Structs
@@ -202,6 +207,193 @@ pub struct CreatePivotParams {
     #[schemars(description = "Optional pivot table name.")]
     #[serde(default)]
     pub name: Option<String>,
+}
+
+// ---- Object UPDATE / DELETE (D5) ----
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateChartParams {
+    #[schemars(description = "The chart id (UUID) from list_charts")]
+    pub chart_id: String,
+    #[schemars(description = "Replacement ChartSpec JSON object (same shape as create_chart_from_spec). Omit to keep the current spec. Call get_chart first to see what is there.")]
+    #[serde(default)]
+    pub spec: Option<serde_json::Value>,
+    #[schemars(description = "New display name. Omit to keep the current one.")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[schemars(description = "Move the chart to this sheet index (0-based). Omit to leave it where it is.")]
+    #[serde(default)]
+    pub sheet_index: Option<u32>,
+    #[schemars(description = "New x position in pixels.")]
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[schemars(description = "New y position in pixels.")]
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[schemars(description = "New width in pixels.")]
+    #[serde(default)]
+    pub width: Option<f64>,
+    #[schemars(description = "New height in pixels.")]
+    #[serde(default)]
+    pub height: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteChartParams {
+    #[schemars(description = "The chart id (UUID) from list_charts")]
+    pub chart_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateNamedRangeParams {
+    #[schemars(description = "The existing name (case-insensitive), from list_named_ranges")]
+    pub name: String,
+    #[schemars(description = "Rename the name to this. Omit to keep the current name.")]
+    #[serde(default)]
+    pub new_name: Option<String>,
+    #[schemars(description = "New target, e.g. \"=Sheet1!$A$1:$B$10\" or a constant like \"=0.25\". Omit to keep the current target.")]
+    #[serde(default)]
+    pub refers_to: Option<String>,
+    #[schemars(description = "New comment. Omit to keep the current comment; pass an empty string to clear it.")]
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[schemars(description = "New scope: a sheet index (0-based) for a sheet-scoped name. Omit to keep the current scope.")]
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
+    #[schemars(description = "Set true together with omitting sheet_index to make a sheet-scoped name workbook-scoped.")]
+    #[serde(default)]
+    pub scope_to_workbook: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteNamedRangeParams {
+    #[schemars(description = "The name to delete (case-insensitive), from list_named_ranges")]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateTableParams {
+    #[schemars(description = "The table id (UUID). Tables are listed by name in list_tables; use get_sheet_summary or list_tables to identify the table, then pass its id.")]
+    pub table_id: String,
+    #[schemars(description = "New table name. Must be unique and must not collide with a defined name.")]
+    #[serde(default)]
+    pub new_name: Option<String>,
+    #[schemars(description = "New top row of the table range (0-based, inclusive). Provide all four range fields together to resize.")]
+    #[serde(default)]
+    pub start_row: Option<u32>,
+    #[schemars(description = "New left column of the table range (0-based, inclusive).")]
+    #[serde(default)]
+    pub start_col: Option<u32>,
+    #[schemars(description = "New bottom row of the table range (0-based, inclusive).")]
+    #[serde(default)]
+    pub end_row: Option<u32>,
+    #[schemars(description = "New right column of the table range (0-based, inclusive).")]
+    #[serde(default)]
+    pub end_col: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteTableParams {
+    #[schemars(description = "The table id (UUID) to delete")]
+    pub table_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PivotFieldMoveParam {
+    #[schemars(description = "Source field (column) name, as shown in list_pivots / the pivot's source header row")]
+    pub field: String,
+    #[schemars(description = "Target area: row, column, value, filter, or none (removes the field from every area)")]
+    pub area: String,
+    #[schemars(description = "0-based position within the target area. Omit to append.")]
+    #[serde(default)]
+    pub position: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct PivotAggregationParam {
+    #[schemars(description = "Value-field name as shown in the pivot's values area")]
+    pub field: String,
+    #[schemars(description = "New aggregation: sum, count, average, min, max, product, countNumbers, stdDev, stdDevP, var, varP, or auto")]
+    pub aggregation: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdatePivotParams {
+    #[schemars(description = "The pivot id (UUID) from list_pivots")]
+    pub pivot_id: String,
+    #[schemars(description = "New pivot table name.")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[schemars(description = "Move the pivot's top-left corner to this A1 cell, e.g. \"H2\".")]
+    #[serde(default)]
+    pub destination_cell: Option<String>,
+    #[schemars(description = "Field placements to apply, each {field, area, position}. Areas: row, column, value, filter, none.")]
+    #[serde(default)]
+    pub field_moves: Vec<PivotFieldMoveParam>,
+    #[schemars(description = "Aggregation changes to apply, each {field, aggregation}.")]
+    #[serde(default)]
+    pub aggregations: Vec<PivotAggregationParam>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeletePivotParams {
+    #[schemars(description = "The pivot id (UUID) from list_pivots")]
+    pub pivot_id: String,
+}
+
+// ---- Sheet management (D5) ----
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AddSheetParams {
+    #[schemars(description = "Name for the new sheet. Omit for an auto-generated Sheet<N>.")]
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct RenameSheetParams {
+    #[schemars(description = "Sheet index (0-based) from list_sheets")]
+    pub index: usize,
+    #[schemars(description = "New sheet name. Must be unique in the workbook.")]
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteSheetParams {
+    #[schemars(description = "Sheet index (0-based) from list_sheets")]
+    pub index: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MoveSheetParams {
+    #[schemars(description = "Current sheet index (0-based)")]
+    pub from_index: usize,
+    #[schemars(description = "Target sheet index (0-based)")]
+    pub to_index: usize,
+}
+
+// ---- Script drafting (D5) ----
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DraftObjectScriptParams {
+    #[schemars(description = "Display name for the script, e.g. \"Refresh Sales\"")]
+    pub name: String,
+    #[schemars(description = "Object type the script attaches to: workbook, sheet, cell, row, column, slicer, chart, pivot, button, textbox, timeline, shape, table, namedRange, panel, or range")]
+    pub object_type: String,
+    #[schemars(description = "For component objects (chart, pivot, table, button, ...): the target instance id. Omit for primitive objects like workbook or sheet.")]
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[schemars(description = "Short description of what the script does, shown to the user during review.")]
+    #[serde(default)]
+    pub description: Option<String>,
+    #[schemars(description = "The JavaScript source. Declare any privileged capability the script needs with a `// @capability <id>` line comment (bi.query, bi.sql, net.fetch, storage, ui.html, ui.dialog, formula.udf, bi.model, bi.connector, distribution.writeback) — the reviewer is shown the declared set before they mount it.")]
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GetScriptDraftParams {
+    #[schemars(description = "The draft id from draft_object_script / list_script_drafts")]
+    pub draft_id: String,
 }
 
 // ---- BI / cube (read-only) ----
@@ -413,7 +605,7 @@ impl CalculaMcpServer {
         }
     }
 
-    #[tool(description = "Execute a JavaScript script in the spreadsheet's script engine. The script has access to the Calcula API: Calcula.getCellValue(row, col), Calcula.setCellValue(row, col, value), Calcula.getRange(startRow, startCol, endRow, endCol), Calcula.setRange(startRow, startCol, valuesJson).")]
+    #[tool(description = "Execute a JavaScript script in the spreadsheet's script engine. Grid API: Calcula.getCellValue(row, col), Calcula.setCellValue(row, col, value), Calcula.getRange(startRow, startCol, endRow, endCol), Calcula.setRange(startRow, startCol, valuesJson). Read-only BI model API (same data as run_bi_query, no SQL): model.connections(), model.info(connection), model.query(connection, {measures, groupBy, filters}), model.value(connection, members), model.members(connection, level), model.kpi(connection, kpi, property). Structured output: display.table(rows) returns real columns/rows in structuredContent instead of tab-separated text. Writes are undoable. Requires the AI access level to allow 'script'.")]
     async fn run_script(
         &self,
         params: Parameters<RunScriptParams>,
@@ -425,9 +617,9 @@ impl CalculaMcpServer {
             p.code.len(),
             log_summary(&p.code, 160)
         );
-        let result = tools::execute_script(&self.app_handle, &p.code);
-        match result {
-            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+        // Structured, not flattened: a display.table() keeps its columns/rows.
+        match tools::execute_script_structured(&self.app_handle, &p.code).await {
+            Ok(value) => Ok(CallToolResult::structured(value)),
             Err(e) => {
                 log_warn!("MCP", "Tool error: run_script: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
@@ -587,6 +779,344 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: create_pivot: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    // ---- Object UPDATE / DELETE (D5) ----
+    //
+    // These are the edit half of the create_* tools above. They are all
+    // "mutate" tier: an agent can maintain the objects it created without the
+    // user having to raise the AI access level to "script" (arbitrary JS) for
+    // what is really a rename or a resize.
+
+    #[tool(description = "Edit an EXISTING chart: replace its ChartSpec, rename it, move it to another sheet, and/or change its pixel placement. Pass a chart id from list_charts, plus at least one field to change; omitted fields are left alone. Call get_chart first to see the current spec. Undoable, appears live.")]
+    async fn update_chart(
+        &self,
+        params: Parameters<UpdateChartParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: update_chart {}", log_summary(&p.chart_id, 80));
+        let placement = tools_objects::ChartPlacement {
+            x: p.x,
+            y: p.y,
+            width: p.width,
+            height: p.height,
+        };
+        match tools_objects::update_chart(
+            &self.app_handle,
+            &p.chart_id,
+            p.spec.as_ref(),
+            p.name.as_deref(),
+            p.sheet_index,
+            &placement,
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: update_chart: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Delete a chart by id (from list_charts). Undoable; any object script attached to the chart is removed with it.")]
+    async fn delete_chart(
+        &self,
+        params: Parameters<DeleteChartParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: delete_chart {}", log_summary(&p.chart_id, 80));
+        match tools_objects::delete_chart(&self.app_handle, &p.chart_id) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: delete_chart: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Edit an EXISTING named range: change what it refers to, its comment, its scope, and/or rename it. Pass the current name plus at least one field to change; omitted fields are left alone. Renaming produces two undo steps (the old name is removed and the new one defined). Appears live in the Name Manager.")]
+    async fn update_named_range(
+        &self,
+        params: Parameters<UpdateNamedRangeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: update_named_range {}", log_summary(&p.name, 80));
+        // Scope is tri-state over the wire: absent = keep, a value = sheet
+        // scope, scope_to_workbook = clear it.
+        let scope: Option<Option<usize>> = match (p.sheet_index, p.scope_to_workbook) {
+            (Some(i), _) => Some(Some(i)),
+            (None, true) => Some(None),
+            (None, false) => None,
+        };
+        match tools_objects::update_named_range(
+            &self.app_handle,
+            &p.name,
+            p.new_name.as_deref(),
+            p.refers_to.as_deref(),
+            p.comment.map(Some),
+            scope,
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: update_named_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Delete a named range by name (from list_named_ranges). Undoable; any object script attached to the name is removed with it.")]
+    async fn delete_named_range(
+        &self,
+        params: Parameters<DeleteNamedRangeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: delete_named_range {}", log_summary(&p.name, 80));
+        match tools_objects::delete_named_range(&self.app_handle, &p.name) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: delete_named_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Edit an EXISTING structured table: rename it and/or resize its range. Pass the table id plus new_name and/or all four range fields (start_row, start_col, end_row, end_col; 0-based, inclusive). Each change is its own undo step. Renaming rewrites dependent structured references.")]
+    async fn update_table(
+        &self,
+        params: Parameters<UpdateTableParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: update_table {}", log_summary(&p.table_id, 80));
+        let range = match (p.start_row, p.start_col, p.end_row, p.end_col) {
+            (Some(sr), Some(sc), Some(er), Some(ec)) => Some((sr, sc, er, ec)),
+            (None, None, None, None) => None,
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "To resize a table, provide ALL of start_row, start_col, end_row and end_col.",
+                )]))
+            }
+        };
+        match tools_objects::update_table(&self.app_handle, &p.table_id, p.new_name.as_deref(), range) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: update_table: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Delete a structured table by id. The cell values stay; the table object, its autofilter and any attached object script are removed. Undoable.")]
+    async fn delete_table(
+        &self,
+        params: Parameters<DeleteTableParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: delete_table {}", log_summary(&p.table_id, 80));
+        match tools_objects::delete_table(&self.app_handle, &p.table_id) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: delete_table: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Reconfigure an EXISTING pivot table in one undo step: rename it, move it to another destination cell, move fields between the row/column/value/filter areas, and/or change a value field's aggregation. Pass a pivot id from list_pivots (which also lists the current rows/cols/values) plus at least one change. Field names come from the pivot's source columns.")]
+    async fn update_pivot(
+        &self,
+        params: Parameters<UpdatePivotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: update_pivot {}", log_summary(&p.pivot_id, 80));
+
+        let mut field_moves = Vec::with_capacity(p.field_moves.len());
+        for m in &p.field_moves {
+            match tools_objects::parse_pivot_area(&m.area) {
+                Ok(area) => field_moves.push(tools_objects::PivotFieldMove {
+                    field: m.field.clone(),
+                    area,
+                    position: m.position,
+                }),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        }
+        let mut aggregations = Vec::with_capacity(p.aggregations.len());
+        for a in &p.aggregations {
+            match tools_objects::parse_aggregation_function(&a.aggregation) {
+                Ok(aggregation) => aggregations.push(tools_objects::PivotAggregationChange {
+                    field: a.field.clone(),
+                    aggregation,
+                }),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        }
+
+        match tools_objects::update_pivot(
+            &self.app_handle,
+            &p.pivot_id,
+            p.name.as_deref(),
+            p.destination_cell.as_deref(),
+            field_moves,
+            aggregations,
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: update_pivot: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Delete a pivot table by id (from list_pivots). Its output region is cleared from the grid. Undoable.")]
+    async fn delete_pivot(
+        &self,
+        params: Parameters<DeletePivotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: delete_pivot {}", log_summary(&p.pivot_id, 80));
+        match tools_objects::delete_pivot(&self.app_handle, &p.pivot_id) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: delete_pivot: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    // ---- Sheet management (D5) ----
+
+    #[tool(description = "List the workbook's sheets with their 0-based indices, names, visibility and which one is active. The indices are what add_sheet/rename_sheet/delete_sheet/move_sheet and the sheet_index arguments elsewhere take. Read-only.")]
+    async fn list_sheets(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_sheets");
+        match tools_objects::list_sheets(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_sheets: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Add a new empty sheet at the end of the workbook. NOTE: sheet structure changes are NOT undoable in Calcula (same as the in-app behavior) — confirm with the user before adding sheets in bulk.")]
+    async fn add_sheet(
+        &self,
+        params: Parameters<AddSheetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: add_sheet {:?}", p.name);
+        match tools_objects::add_sheet(&self.app_handle, p.name.as_deref()) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: add_sheet: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Rename a sheet by 0-based index (from list_sheets). Cross-sheet and 3D formula references to the old name are repaired automatically. NOT undoable.")]
+    async fn rename_sheet(
+        &self,
+        params: Parameters<RenameSheetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: rename_sheet {} -> {}", p.index, log_summary(&p.new_name, 60));
+        match tools_objects::rename_sheet(&self.app_handle, p.index, &p.new_name) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: rename_sheet: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Delete a sheet by 0-based index (from list_sheets). DESTRUCTIVE and NOT undoable — the sheet's data is gone. Confirm with the user first.")]
+    async fn delete_sheet(
+        &self,
+        params: Parameters<DeleteSheetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: delete_sheet {}", p.index);
+        match tools_objects::delete_sheet(&self.app_handle, p.index) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: delete_sheet: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Reorder sheets: move the sheet at from_index to to_index (both 0-based, from list_sheets). NOT undoable.")]
+    async fn move_sheet(
+        &self,
+        params: Parameters<MoveSheetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: move_sheet {} -> {}", p.from_index, p.to_index);
+        match tools_objects::move_sheet(&self.app_handle, p.from_index, p.to_index) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: move_sheet: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    // ---- Script drafting (D5) ----
+
+    #[tool(description = "DRAFT an object script (a macro attached to a button, chart, sheet, workbook, ...) and hand it to the user for review. This does NOT save the script into the workbook, does NOT mount it, and does NOT run it — the user reads it in the Object Script Editor and decides whether to mount it. Use this to author automation for the user to approve; use run_script only for something that must execute now. Declare privileged capabilities with `// @capability <id>` comments so the reviewer sees what the code would be allowed to do.")]
+    async fn draft_object_script(
+        &self,
+        params: Parameters<DraftObjectScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: draft_object_script name={} type={} ({} chars)",
+            log_summary(&p.name, 60),
+            log_summary(&p.object_type, 20),
+            p.source.len()
+        );
+        match tools_drafts::draft_object_script(
+            &self.app_handle,
+            &p.name,
+            &p.object_type,
+            p.instance_id.as_deref(),
+            p.description.as_deref(),
+            &p.source,
+        ) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: draft_object_script: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "List the object scripts drafted in this session and awaiting the user's review (id, name, target object, line count, declared capabilities). None of them are mounted or running. Read-only.")]
+    async fn list_script_drafts(&self) -> Result<CallToolResult, ErrorData> {
+        log_info!("MCP", "Tool call: list_script_drafts");
+        match tools_drafts::list_script_drafts(&self.app_handle) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: list_script_drafts: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Get one drafted object script's full record (source, target, declared capabilities) so you can iterate on what you wrote. Read-only; the draft is still not mounted.")]
+    async fn get_script_draft(
+        &self,
+        params: Parameters<GetScriptDraftParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!("MCP", "Tool call: get_script_draft {}", log_summary(&p.draft_id, 80));
+        match tools_drafts::get_script_draft(&self.app_handle, &p.draft_id) {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: get_script_draft: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

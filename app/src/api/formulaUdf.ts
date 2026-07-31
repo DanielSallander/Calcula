@@ -5,14 +5,25 @@
 //          makes them EVALUATE.
 //
 // WHY A PRE-FETCH: the Rust recalc is synchronous and holds a state lock, so it
-// can never call a JS UDF back mid-evaluation. So before update_cell runs we:
-//   1. ask the backend which UDF calls the edit will trigger, with their
-//      already-evaluated arguments (collect_udf_calls — read-only, no commit);
+// can never call a JS UDF back mid-evaluation. So before the write runs we:
+//   1. ask the backend which UDF calls the pending edits will trigger, with
+//      their already-evaluated arguments (collect_udf_calls — read-only);
 //   2. run each UDF's JS implementation off-thread THROUGH THE TIER BROKER, so
 //      the call is tier/capability-checked (formula.udf), R19-ceiling-bounded,
 //      and audited exactly like every other privileged script call;
 //   3. hand the backend a results table its evaluator's udf_fn serves.
 // The loop repeats until no new calls surface (nested UDFs converge), bounded.
+//
+// EVERY write path, not just single-cell edits. The hook is handed a LIST of
+// pending writes, so paste / fill-handle / multi-cell edits (which all route
+// through update_cells_batch) get the same pre-fetch. They previously got none,
+// which is why a pasted UDF formula landed as #NAME?.
+//
+// VOLATILITY: by default a UDF cell is resolved only when the edit can actually
+// reach it (the backend intersects the UDF-mentioning cells with the edit's
+// dependency closure). A function registered with `volatile: true` opts into
+// Excel's Application.Volatile behaviour: its cells are resolved AND spliced
+// into the backend's recalc order on every edit.
 //
 // SECURITY: the JS impl runs under a ScriptHandle that must DECLARE and be
 // GRANTED the formula.udf capability. Extension-registered UDFs are trusted
@@ -32,9 +43,12 @@ import { brokerErrorToCellError } from "./scriptHost/errorMap";
 import {
   getCustomFunction,
   getAllCustomFunctions,
+  getVolatileCustomFunctionNames,
+  asCellErrorSentinel,
+  thrownCellErrorLiteral,
   type CustomFunctionDef,
 } from "./formulaFunctions";
-import { setUdfResolveHook } from "../core/lib/tauri-api";
+import { setUdfResolveHook, type UdfPendingEdit } from "../core/lib/tauri-api";
 
 // ============================================================================
 // Wire format — mirrors the Rust UdfValue (scripting/udf.rs). Tagged union;
@@ -55,6 +69,18 @@ interface UdfCall {
   key: string;
   name: string;
   args: UdfValue[];
+}
+
+/** An active-sheet cell coordinate — mirrors Rust `UdfCellRef`. */
+interface UdfCellRef {
+  row: number;
+  col: number;
+}
+
+/** One collect round's answer — mirrors Rust `UdfCollectResult`. */
+interface UdfCollectResult {
+  calls: UdfCall[];
+  volatileCells: UdfCellRef[];
 }
 
 // ============================================================================
@@ -89,7 +115,14 @@ function jsToUdfValue(x: unknown): UdfValue {
       : { kind: "error", value: "#VALUE!" };
   }
   if (typeof x === "boolean") return { kind: "boolean", value: x };
+  // An explicit cell-error return (VBA's CVErr): the sentinel OBJECT, checked
+  // before the string/array/object branches. A plain string "#N/A" stays TEXT —
+  // a UDF that formats error codes must be able to return one as text.
+  const errorLiteral = asCellErrorSentinel(x);
+  if (errorLiteral !== null) return { kind: "error", value: errorLiteral };
   if (typeof x === "string") return { kind: "text", value: x };
+  // An array return SPILLS (udf_to_eval builds an engine Array, not a List):
+  // [1,2,3] fills three rows, [[1,2],[3,4]] fills a 2x2 block.
   if (Array.isArray(x)) return { kind: "array", value: x.map(jsToUdfValue) };
   // Objects/functions/symbols can't be a cell value; stringify defensively.
   try {
@@ -162,8 +195,40 @@ async function resolveUdfCall(call: UdfCall): Promise<UdfValue> {
     );
     return jsToUdfValue(result);
   } catch (e) {
+    // An author-thrown cell error is a RESULT, not a failure: honour it before
+    // the broker's denial/timeout mapping. (A sandboxed body cannot return an
+    // object across a rejection, so `throw new Error("#N/A")` is its only way
+    // to signal a specific error from inside a catch block.)
+    const thrown = thrownCellErrorLiteral(e);
+    if (thrown !== null) return { kind: "error", value: thrown };
     return { kind: "error", value: brokerErrorToCellError(e) };
   }
+}
+
+/**
+ * Resolve `calls` with bounded parallelism, preserving input order.
+ *
+ * A paste can surface thousands of distinct call sites at once; firing them all
+ * as one Promise.all would queue thousands of concurrent worker round-trips
+ * against a single sandbox realm and push individual calls past the host's
+ * 30s method-call timeout purely through queueing. A small window keeps every
+ * call's own deadline meaningful.
+ */
+const MAX_CONCURRENT_UDF_CALLS = 16;
+
+async function resolveCallsBounded(calls: UdfCall[]): Promise<UdfValue[]> {
+  const out: UdfValue[] = new Array(calls.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= calls.length) return;
+      out[i] = await resolveUdfCall(calls[i]);
+    }
+  };
+  const lanes = Math.min(MAX_CONCURRENT_UDF_CALLS, calls.length);
+  await Promise.all(Array.from({ length: lanes }, () => worker()));
+  return out;
 }
 
 // ============================================================================
@@ -174,44 +239,94 @@ async function resolveUdfCall(call: UdfCall): Promise<UdfValue> {
  *  caps a pathological chain rather than constraining real use). */
 const MAX_ROUNDS = 8;
 
+/** Above this many distinct call sites in one write we log once — a paste that
+ *  big is a real cost the user should be able to see in the console, not a
+ *  silent stall. We still resolve them all: dropping any would corrupt cells. */
+const LARGE_PASS_WARN_THRESHOLD = 500;
+
+/** The resolver's answer for one write. */
+export interface UdfResolution {
+  /** Pre-fetched results table: stable call key -> value. */
+  results: Record<string, UdfValue>;
+  /** Active-sheet cells calling a VOLATILE UDF; the backend splices these into
+   *  its recalc order so they actually recompute. */
+  volatileCells: UdfCellRef[];
+}
+
 /**
- * Resolve every UDF the given single-cell edit will trigger and return the
- * pre-fetched results table (key -> UdfValue), or undefined when there is
- * nothing to resolve (no UDFs registered, or none reached). Installed as the
- * Core updateCell hook.
+ * Resolve every UDF the given pending writes will trigger.
+ *
+ * Returns the pre-fetched results table plus the volatile cells, or undefined
+ * when there is nothing to resolve (no UDFs registered, or none reached).
+ * Installed as the Core write hook and used by BOTH `updateCell` and
+ * `updateCellsBatch` — paste/fill/multi-cell edits carry many pending writes
+ * and used to get no pre-fetch at all.
  */
-export async function resolveUdfsForEdit(
-  row: number,
-  col: number,
-  value: string,
-): Promise<Record<string, UdfValue> | undefined> {
+export async function resolveUdfsForEdits(
+  edits: UdfPendingEdit[],
+): Promise<UdfResolution | undefined> {
   const names = getAllCustomFunctions().map((d) => d.name);
   if (names.length === 0) return undefined; // fast path: no UDFs in the workbook
+  if (edits.length === 0) return undefined;
+  const volatileNames = getVolatileCustomFunctionNames();
 
   const known: Record<string, UdfValue> = {};
+  // Keyed dedup across rounds; the backend reports the same volatile cells each
+  // round, and a cell is identified by its coordinate.
+  const volatileByKey = new Map<string, UdfCellRef>();
+  let totalCalls = 0;
+  let warned = false;
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    let calls: UdfCall[];
+    let collected: UdfCollectResult;
     try {
-      calls = await invokeBackend<UdfCall[]>("collect_udf_calls", {
-        row,
-        col,
-        value,
+      collected = await invokeBackend<UdfCollectResult>("collect_udf_calls", {
+        edits,
         udfNames: names,
+        volatileUdfNames: volatileNames,
         known,
       });
     } catch (e) {
       console.warn("[udf] collect_udf_calls failed; UDFs will show #NAME?", e);
       break;
     }
-    const fresh = calls.filter((c) => !(c.key in known));
+    for (const cell of collected.volatileCells) {
+      volatileByKey.set(`${cell.row}:${cell.col}`, cell);
+    }
+    const fresh = collected.calls.filter((c) => !(c.key in known));
     if (fresh.length === 0) break;
-    const resolved = await Promise.all(fresh.map((c) => resolveUdfCall(c)));
+    totalCalls += fresh.length;
+    if (!warned && totalCalls > LARGE_PASS_WARN_THRESHOLD) {
+      warned = true;
+      console.warn(
+        `[udf] resolving ${totalCalls}+ custom-function calls for ${edits.length} pending cell(s); this write will take a while`,
+      );
+    }
+    const resolved = await resolveCallsBounded(fresh);
     fresh.forEach((c, i) => {
       known[c.key] = resolved[i];
     });
   }
 
-  return Object.keys(known).length > 0 ? known : undefined;
+  const volatileCells = Array.from(volatileByKey.values());
+  if (Object.keys(known).length === 0 && volatileCells.length === 0) {
+    return undefined;
+  }
+  return { results: known, volatileCells };
+}
+
+/**
+ * Single-cell convenience wrapper over `resolveUdfsForEdits` (the shape the
+ * @api facade has always exported).
+ */
+export async function resolveUdfsForEdit(
+  row: number,
+  col: number,
+  value: string,
+): Promise<Record<string, UdfValue> | undefined> {
+  const resolution = await resolveUdfsForEdits([{ row, col, value }]);
+  if (!resolution || Object.keys(resolution.results).length === 0) return undefined;
+  return resolution.results;
 }
 
 // ============================================================================
@@ -220,12 +335,17 @@ export async function resolveUdfsForEdit(
 
 let installed = false;
 
-/** Wire UDF evaluation into Core's updateCell path. Idempotent; call once at
- *  startup (e.g. from the FormulaAutocomplete extension's activate). */
+/** Wire UDF evaluation into Core's write paths (single-cell AND batch).
+ *  Idempotent; call once at startup (e.g. from the FormulaAutocomplete
+ *  extension's activate). */
 export function installUdfEvaluation(): void {
   if (installed) return;
   installed = true;
-  setUdfResolveHook((row, col, value) => resolveUdfsForEdit(row, col, value));
+  setUdfResolveHook(async (edits) => {
+    const resolution = await resolveUdfsForEdits(edits);
+    if (!resolution) return undefined;
+    return { results: resolution.results, volatileCells: resolution.volatileCells };
+  });
 }
 
 /** Remove the hook (tests / teardown). */
@@ -235,4 +355,4 @@ export function uninstallUdfEvaluation(): void {
 }
 
 // Exposed for unit tests of the conversion layer.
-export const __test = { udfValueToJs, jsToUdfValue, resolveUdfCall };
+export const __test = { udfValueToJs, jsToUdfValue, resolveUdfCall, resolveCallsBounded };

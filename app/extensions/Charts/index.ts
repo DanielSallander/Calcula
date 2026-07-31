@@ -71,6 +71,7 @@ import {
   resetChartStore,
   syncChartRegions,
   getAllCharts,
+  createChart as storeCreateChart,
   moveChart,
   resizeChart,
   deleteChart,
@@ -269,6 +270,54 @@ function activate(context: ExtensionContext): void {
       const chart = getChartById(id);
       if (!chart) return null;
       return { specJson: JSON.stringify(chart.spec) };
+    },
+    listCharts() {
+      // Identity + the STORED definition JSON (the same shape the backend
+      // persists), so the script host can render an inventory line without the
+      // API facade ever learning the ChartSpec schema.
+      return getAllCharts().map((c) => ({
+        chartId: c.chartId,
+        name: c.name,
+        sheetIndex: c.sheetIndex,
+        specJson: JSON.stringify({
+          chartId: c.chartId,
+          name: c.name,
+          sheetIndex: c.sheetIndex,
+          spec: c.spec,
+        }),
+      }));
+    },
+    createChart(fullSpec: Record<string, unknown>, placement) {
+      // Same order as the Insert Chart dialog: validate FIRST (an invalid spec
+      // must not reach the store), then create, sync the grid regions and
+      // announce — otherwise the new chart exists but never paints.
+      const violations = validateChartSpec(fullSpec);
+      if (violations.length > 0) {
+        throw new Error(`Invalid chart spec: ${violations.slice(0, 8).join("; ")}`);
+      }
+      const chart = storeCreateChart(fullSpec as unknown as ChartSpec, {
+        sheetIndex: placement?.sheetIndex ?? getActiveSheetIndex(),
+        x: placement?.x ?? 100,
+        y: placement?.y ?? 100,
+        width: placement?.width ?? 600,
+        height: placement?.height ?? 400,
+        name: placement?.name,
+      });
+      syncChartRegions();
+      emitAppEvent(ChartEvents.CHART_CREATED, { chartId: chart.chartId });
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return chart.chartId;
+    },
+    deleteChart(chartId: string) {
+      if (!getChartById(chartId)) return false;
+      // The module-scope store function, NOT a recursive call: an object-literal
+      // method's name is not a binding inside its own body.
+      deleteChart(chartId);
+      invalidateChartCache(chartId);
+      syncChartRegions();
+      emitAppEvent(ChartEvents.CHART_DELETED, { chartId });
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return true;
     },
     updateChartSpec(chartId: string, specUpdates: Record<string, unknown>) {
       // Deep-merge the patch onto the live spec WITHOUT committing, validate the
@@ -1385,7 +1434,7 @@ function activate(context: ExtensionContext): void {
   // the ScriptableObjects object-script consent behavior. (Same workbook → no reset,
   // so an in-flight prompt for the same package is refreshed, not duplicated.)
   cleanupFunctions.push(
-    onAppEvent("calp:scripts-pulled", () => { reloadChartLibraries(); }),
+    onAppEvent(AppEvents.PACKAGE_UPDATED, () => { reloadChartLibraries(); }),
   );
 
   cleanupFunctions.push(

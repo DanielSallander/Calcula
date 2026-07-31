@@ -23,14 +23,20 @@ function setup(workbook) {
   //   workbook.log("Workbook opened!");
   // });
 
-  // workbook.onBeforeSave(() => {
-  //   workbook.log("Saving...");
+  // onBeforeSave can CANCEL the save: return false, "cancel", or
+  // { cancel: true, reason }. Returning nothing lets it through. Answer fast —
+  // a verdict that arrives after a few seconds is ignored and the save proceeds,
+  // so a stuck script can never make the workbook unsaveable.
+  // workbook.onBeforeSave(({ path }) => {
+  //   workbook.log("Saving to", path);
+  //   // return { cancel: true, reason: "Fill in the total in D21 first" };
   // });
 
   // workbook.onAfterSave(() => {
   //   workbook.log("Saved!");
   // });
 
+  // onBeforeClose can cancel the close the same way.
   // workbook.onBeforeClose(() => {
   //   workbook.log("Closing...");
   // });
@@ -44,6 +50,53 @@ function setup(workbook) {
   // workbook.expose("myMethod", () => {
   //   workbook.log("Custom method called!");
   // });
+
+  // == Formatting + structure (UNLOCKED access level only: workbook.api) ==
+  // const api = workbook.api;
+  // if (api) {
+  //   // Formatting is sheet-scoped: pass a sheetIndex for any sheet.
+  //   await api.setRangeFormat(0, 0, 0, 4, { bold: true, backgroundColor: "#EEEEEE" });
+  //   await api.setColumnWidth(0, 180);
+  //   await api.freezePanes(1, null);            // freeze the header row
+  //
+  //   // Structure acts on the ACTIVE sheet — naming another one REJECTS.
+  //   await api.insertRows(5, 2);
+  //   await api.sortRange(1, 0, 100, 3, [{ key: 2, ascending: false }], { hasHeaders: false });
+  //
+  //   // Sheets
+  //   const { index } = await api.addSheet("Report");
+  //   await api.renameSheet(index, "Report 2026");
+  //
+  //   const { matches } = await api.findAll("TODO");
+  //   workbook.log("TODO cells:", matches.length);
+  // }
+
+  // == Build a dashboard from code (UNLOCKED only) ==
+  // const api = workbook.api;
+  // if (api) {
+  //   // What is already here? (ids + positions, never contents)
+  //   for (const c of await api.charts()) workbook.log(c.id, c.name, c.kindDetail);
+  //
+  //   // Create
+  //   const table = await api.createTable(0, 0, 100, 3, { name: "Sales" });
+  //   const pivot = await api.createPivot("A1:D100", "F1", {
+  //     rows: ["Region"],
+  //     values: [{ field: "Revenue", aggregation: "sum" }],
+  //   });
+  //   const chartId = await api.createChart(
+  //     { mark: "bar", data: "Sheet1!F1:G10", series: [{ x: "Region", y: "Revenue" }] },
+  //     { name: "Revenue by region" },
+  //   );
+  //   await api.createNamedRange("Revenue", "=Sheet1!$C$2:$C$100");
+  //
+  //   // Reshape any pivot by id (DSL vocabulary: rows/columns/values/filters)
+  //   await api.pivot(pivot.id).addField("Quarter", "columns");
+  //   await api.pivot(pivot.id).setAggregation("Revenue", "average");
+  //   await api.pivot(pivot.id).setLayout(["tabular", "no-grand-totals"]);
+  //
+  //   // Restyle any chart by id
+  //   await api.chart(chartId).updateSpec({ title: "Q4 revenue" });
+  // }
 }
 `;
 
@@ -71,9 +124,40 @@ function setup(sheet) {
   //   }
   // });
 
-  // == Data Access ==
-  // const value = sheet.getCellValue(0, 0);  // A1
-  // sheet.setCellValue(0, 0, "Hello!");
+  // == Data Access — single cell ==
+  // const text = await sheet.getCellValue(0, 0);   // A1 as a DISPLAY STRING
+  // const cell = await sheet.getCellData(0, 0);    // { value, display, formula, type }
+  // await sheet.setCellValue(0, 0, "Hello!");
+
+  // == Data Access — blocks (ONE round trip; prefer this over looping) ==
+  // const block = sheet.range("A1:C100");
+  // const cells = await block.getData();       // typed: value + type + formula
+  // const shown = await block.getValues();     // display strings only
+  // await block.setValues([["1", "2", "3"]]);  // one call, one undo step
+
+  // ROUND-TRIP WARNING: getValues() returns FORMATTED TEXT. Writing it back
+  // replaces every formula with its rendered result and every formatted number
+  // with a string. Round-trip through getData() instead:
+  //   const cells = await block.getData();
+  //   const out = cells.map(row => row.map(c => {
+  //     if (c.formula) return c.formula;              // keep the formula
+  //     if (c.type === "number") return String(c.value * 2);
+  //     return c.display;
+  //   }));
+  //   await block.setValues(out);
+
+  // == Formatting (PARTIAL — only the properties you set change) ==
+  // await sheet.range("A1:C1").format({
+  //   bold: true,
+  //   backgroundColor: "#EEEEEE",
+  //   textAlign: "center",
+  //   borderBottom: { style: "thin", color: "#808080" },
+  // });
+  // await sheet.range("B2:B50").format({ numberFormat: "#,##0.00" });
+  // await sheet.range("A1:C100").clearFormat();     // values are kept
+  //
+  // An UNKNOWN property is rejected (with the accepted list) rather than
+  // ignored — so a typo fails loudly instead of doing nothing.
 }
 `;
 
@@ -231,6 +315,21 @@ function setup(pivot) {
   // == Data Access ==
   // const fields = pivot.getFields();
   // pivot.refresh();
+
+  // == Layout (the Pivot Layout DSL's words: the same ones the DSL editor uses) ==
+  // Areas:        rows | columns | values | filters
+  // Aggregations: sum | count | average | min | max | countnumbers |
+  //               stddev | stddevp | var | varp | product
+  // The field argument is the SOURCE COLUMN name — naming one that does not
+  // exist rejects with the list of the ones that do (never a silent no-op).
+  //
+  // await pivot.addField("Region", "rows");
+  // await pivot.addField("Quarter", "columns", 0);              // insert first
+  // await pivot.addField("Revenue", "values", undefined, "average");
+  // await pivot.moveField("Region", "filters");
+  // await pivot.removeField("Quarter");                          // any area
+  // await pivot.setAggregation("Revenue", "sum");
+  // await pivot.setLayout(["tabular", "values-on-rows", "no-grand-totals"]);
 }
 `;
 
@@ -277,6 +376,19 @@ function setup(table) {
   // await table.setCellValue(0, 1, "100");
   // await table.addRow();                     // append a new data row
 
+  // == Whole blocks in ONE call (table-relative coordinates) ==
+  // const body = table.range("A1:B10");       // A1 = first data row/column
+  // const cells = await body.getData();       // typed: value + type + formula
+  // await body.setValues([["a", "1"]]);       // one call, one undo step
+  //
+  // ROUND-TRIP WARNING: getValues() returns FORMATTED TEXT — writing it back
+  // turns every formula into its result. Read with getData() and write back
+  // cell.formula when a cell has one.
+
+  // == Formatting the table body (table-relative, PARTIAL) ==
+  // await table.range("A1:B10").format({ numberFormat: "#,##0.00" });
+  // await table.range("A1:B10").clearFormat();
+
   // == Properties (read-only) ==
   // const tableName = table.properties.name;
   // const sheetIndex = table.properties.sheetIndex;
@@ -308,8 +420,13 @@ function setup(namedRange) {
 
   // == Data Access ==
   // const address = namedRange.getAddress();  // e.g. "Sheet1!A1:B10"
-  // const values = namedRange.getValues();    // 2D array of display strings
-  // await namedRange.setValues([["1", "2"], ["3", "4"]]);
+  // const values = namedRange.getValues();    // 2D array of DISPLAY STRINGS
+  // await namedRange.setValues([["1", "2"], ["3", "4"]]);  // one undo step
+  //
+  // ROUND-TRIP WARNING: getValues() is formatted text, so writing it straight
+  // back — setValues(getValues()) — replaces every formula with its result. To
+  // edit cells in place, keep the formula text you want and write only the
+  // cells you actually changed.
 
   // == Properties (read-only) ==
   // const refersTo = namedRange.properties.refersTo;  // "=Sheet1!$A$1:$B$10"
@@ -347,8 +464,12 @@ function setup(range) {
 
   // == Data Access (clamped to the bound range) ==
   // const address = range.getAddress();   // e.g. "Sheet1!B2:B10"
-  // const values = range.getValues();     // 2D array of display strings
-  // await range.setValues([["1", "2"]]);  // undoable
+  // const values = range.getValues();     // 2D array of DISPLAY STRINGS
+  // await range.setValues([["1", "2"]]);  // one call, one undo step
+  //
+  // ROUND-TRIP WARNING: getValues() is formatted text — writing it straight
+  // back replaces every formula with its rendered result. Write only the cells
+  // you actually changed.
 
   // == Cell types (the extension-tier brick, scriptable) ==
   // await range.setCellType("calcula.progress", { max: 100 });
@@ -545,6 +666,39 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
       { name: "log", signature: "log(...args)", description: "Log to script console" },
       { name: "notify", signature: "notify(message, type?)", description: "Show a toast notification" },
       { name: "expose", signature: "expose(name, handler)", description: "Expose a custom method" },
+      {
+        name: "package",
+        signature: "package",
+        description: "The .calp package this script shipped in ({ name, version, provenance }), or null when it was written locally",
+      },
+    ],
+  };
+
+  // Available to EVERY object type (a capability is orthogonal to the object a
+  // script is attached to), so it rides alongside `common` in every branch.
+  const dialogs = {
+    category: "Ask the user (needs // @capability ui.dialog)",
+    methods: [
+      {
+        name: "caps.dialog.alert",
+        signature: "await caps.dialog.alert(message, options?)",
+        description: "Show a message and wait until the user closes it",
+      },
+      {
+        name: "caps.dialog.confirm",
+        signature: "await caps.dialog.confirm(message, options?)",
+        description: "Yes/no question -> true or false (cancel/Escape = false)",
+      },
+      {
+        name: "caps.dialog.prompt",
+        signature: "await caps.dialog.prompt(message, options?)",
+        description: "Ask for one value -> the text, or null if cancelled",
+      },
+      {
+        name: "caps.dialog.form",
+        signature: "await caps.dialog.form({ title, fields })",
+        description: "Ask for several values (text/number/date/select/checkbox) -> answers object, or null",
+      },
     ],
   };
 
@@ -552,13 +706,14 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
     case "workbook":
       return [
         common,
+        dialogs,
         {
           category: "Lifecycle",
           methods: [
             { name: "onOpen", signature: "onOpen(handler)", description: "Called when workbook opens" },
-            { name: "onBeforeSave", signature: "onBeforeSave(handler)", description: "Called before saving" },
+            { name: "onBeforeSave", signature: "onBeforeSave(handler)", description: "Called before saving; return false / { cancel: true, reason } to stop the save" },
             { name: "onAfterSave", signature: "onAfterSave(handler)", description: "Called after saving" },
-            { name: "onBeforeClose", signature: "onBeforeClose(handler)", description: "Called before closing" },
+            { name: "onBeforeClose", signature: "onBeforeClose(handler)", description: "Called before closing; return false / { cancel: true, reason } to stop the close" },
             { name: "onSheetChange", signature: "onSheetChange(handler)", description: "Called when active sheet changes" },
             { name: "onThemeChange", signature: "onThemeChange(handler)", description: "Called when theme changes" },
           ],
@@ -572,11 +727,71 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
             { name: "properties.getSheetNames", signature: "properties.getSheetNames()", description: "Get all sheet names" },
           ],
         },
+        {
+          category: "Workbook objects (unlocked)",
+          methods: [
+            { name: "api.charts", signature: "api.charts()", description: "List every chart (id, name, sheet, mark)" },
+            { name: "api.tables", signature: "api.tables()", description: "List every table (id, name, range, row/column counts)" },
+            { name: "api.pivots", signature: "api.pivots()", description: "List every pivot table (id, name, source, destination)" },
+            { name: "api.namedRanges", signature: "api.namedRanges()", description: "List every named range (name, scope, refersTo)" },
+            { name: "api.slicers", signature: "api.slicers()", description: "List every slicer (id, name, field)" },
+            { name: "api.shapes", signature: "api.shapes()", description: "List every form control / shape (id, type, anchor)" },
+            { name: "api.createChart", signature: "api.createChart(spec, options?)", description: "Add a chart from a ChartSpec; resolves to its id" },
+            { name: "api.createTable", signature: "api.createTable(startRow, startCol, endRow, endCol, options?)", description: "Turn a block of cells into a table (active sheet)" },
+            { name: "api.createPivot", signature: "api.createPivot(sourceRange, destinationCell, fields, options?)", description: "Create a pivot table and lay out its fields" },
+            { name: "api.createNamedRange", signature: "api.createNamedRange(name, refersTo, options?)", description: "Create a named range" },
+            { name: "api.deleteChart", signature: "api.deleteChart(id)", description: "Delete a chart (also api.deleteTable / deletePivot / deleteNamedRange)" },
+            { name: "api.chart", signature: "api.chart(id)", description: "A handle on ANY chart: getSpec / updateSpec / replaceSpec / delete" },
+            { name: "api.table", signature: "api.table(id)", description: "A handle on ANY table: range / cell / addRow / delete (table-relative)" },
+            { name: "api.pivot", signature: "api.pivot(id)", description: "A handle on ANY pivot: addField / moveField / removeField / setAggregation / setLayout" },
+            { name: "api.slicer", signature: "api.slicer(id)", description: "A handle on ANY slicer: getSelectedItems / setSelectedItems / selectAll" },
+            { name: "api.shape", signature: "api.shape(id)", description: "A handle on ANY form control: setProperty / getCellValue / sendMessage" },
+            { name: "api.namedRange", signature: "api.namedRange(name)", description: "A handle on ANY named range: getValues / setValues / delete" },
+          ],
+        },
+      ];
+
+    case "sheet":
+      return [
+        common,
+        dialogs,
+        {
+          category: "Events",
+          methods: [
+            { name: "onActivate", signature: "onActivate(handler)", description: "Called when a sheet is activated" },
+            { name: "onDeactivate", signature: "onDeactivate(handler)", description: "Called when a sheet is deactivated" },
+            { name: "onSelectionChange", signature: "onSelectionChange(handler)", description: "Called when the selection changes" },
+            { name: "onDataChange", signature: "onDataChange(handler)", description: "Called when cells change" },
+          ],
+        },
+        {
+          category: "Data",
+          methods: [
+            { name: "getCellValue", signature: "getCellValue(row, col)", description: "Read one cell as a display string" },
+            { name: "getCellData", signature: "getCellData(row, col)", description: "Read one cell WITH its type and formula" },
+            { name: "setCellValue", signature: "setCellValue(row, col, value)", description: "Write one cell (undoable)" },
+            { name: "range", signature: "range(address)", description: "A block by A1 address, e.g. range(\"A1:C100\")" },
+            { name: "range().getData", signature: "range(a).getData()", description: "Read the whole block in ONE call: value + type + formula per cell" },
+            { name: "range().getValues", signature: "range(a).getValues()", description: "Read the block as display strings (formatted text — do not write back)" },
+            { name: "range().getFormulas", signature: "range(a).getFormulas()", description: "Read the block's formulas (\"\" where a cell has none)" },
+            { name: "range().setValues", signature: "range(a).setValues(values)", description: "Write the block in ONE call, as a single undo step" },
+          ],
+        },
+        {
+          category: "Formatting",
+          methods: [
+            { name: "range().format", signature: "range(a).format({ bold: true })", description: "Apply a PARTIAL format — only the properties you set change" },
+            { name: "range().clearFormat", signature: "range(a).clearFormat()", description: "Remove all formatting from the block (values are kept)" },
+            { name: "setRangeFormat", signature: "setRangeFormat(sr, sc, er, ec, format)", description: "Same, by explicit coordinates" },
+            { name: "clearRangeFormat", signature: "clearRangeFormat(sr, sc, er, ec)", description: "Clear formatting by explicit coordinates" },
+          ],
+        },
       ];
 
     case "cell":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -597,6 +812,7 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
     case "slicer":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -621,9 +837,40 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
         },
       ];
 
+    case "pivot":
+      return [
+        common,
+        dialogs,
+        {
+          category: "Events",
+          methods: [
+            { name: "onRefresh", signature: "onRefresh(handler)", description: "Called when the pivot is recalculated" },
+            { name: "onDrillThrough", signature: "onDrillThrough(handler)", description: "Custom double-click drill (behavior must be set to Script)" },
+          ],
+        },
+        {
+          category: "Data",
+          methods: [
+            { name: "getFields", signature: "getFields()", description: "Current field configuration: { rows, columns, values, filters } (sync)" },
+            { name: "refresh", signature: "refresh()", description: "Recalculate the pivot from its source" },
+          ],
+        },
+        {
+          category: "Layout",
+          methods: [
+            { name: "addField", signature: "addField(field, area, position?, aggregation?)", description: "Place a source field in rows | columns | values | filters" },
+            { name: "moveField", signature: "moveField(field, area, position?)", description: "Move a placed field to another area" },
+            { name: "removeField", signature: "removeField(field, area?)", description: "Remove a placed field (omit area to search all four)" },
+            { name: "setAggregation", signature: "setAggregation(field, aggregation)", description: "sum | count | average | min | max | countnumbers | stddev | stddevp | var | varp | product" },
+            { name: "setLayout", signature: "setLayout(directives)", description: "LAYOUT directives, e.g. ['tabular', 'values-on-rows', 'no-grand-totals']" },
+          ],
+        },
+      ];
+
     case "panel":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -658,6 +905,7 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
     case "shape":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -690,6 +938,7 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
     case "table":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -704,6 +953,16 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
             { name: "getCellValue", signature: "getCellValue(row, colIndex)", description: "Read a table cell (0-based data row + column index)" },
             { name: "setCellValue", signature: "setCellValue(row, colIndex, value)", description: "Write a table cell (undoable)" },
             { name: "addRow", signature: "addRow()", description: "Append a new data row" },
+            { name: "range", signature: "range(address)", description: "A block of the table body in table-relative A1 coordinates" },
+            { name: "range().getData", signature: "range(a).getData()", description: "Read the block in ONE call: value + type + formula per cell" },
+            { name: "range().setValues", signature: "range(a).setValues(values)", description: "Write the block in ONE call, as a single undo step" },
+          ],
+        },
+        {
+          category: "Formatting",
+          methods: [
+            { name: "range().format", signature: "range(a).format({ bold: true })", description: "Apply a PARTIAL format to the block — only the properties you set change" },
+            { name: "range().clearFormat", signature: "range(a).clearFormat()", description: "Remove all formatting from the block (values are kept)" },
           ],
         },
       ];
@@ -711,6 +970,7 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
     case "namedRange":
       return [
         common,
+        dialogs,
         {
           category: "Events",
           methods: [
@@ -728,6 +988,6 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
       ];
 
     default:
-      return [common];
+      return [common, dialogs];
   }
 }

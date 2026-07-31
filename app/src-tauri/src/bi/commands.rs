@@ -2328,7 +2328,7 @@ pub async fn bi_query(
     // call (a built-in feature) carries no script_id and is allowed. The
     // renderer can be compromised, so the broker's TS check is not sufficient.
     if let Some(sid) = script_id.as_deref() {
-        if !cap_store.is_bi_granted(sid, "bi.query") {
+        if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "bi_query DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(&app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"));
             return Err("PermissionDenied: bi.query not granted for this script".to_string());
@@ -2448,7 +2448,7 @@ pub async fn script_bi_sql(
     // trusted main-window direct call carries none. Defense in depth above the
     // TS broker (the renderer may be compromised).
     if let Some(sid) = script_id.as_deref() {
-        if !cap_store.is_bi_granted(sid, "bi.sql") {
+        if !cap_store.is_granted(sid, "bi.sql") {
             crate::log_warn!("SECURITY", "script_bi_sql DENIED (bi.sql not granted): script={}", sid);
             crate::net_commands::record_capability_call(&app_state.audit_log, "bi.sql", sid, false, None, Some("bi.sql not granted"));
             return Err("PermissionDenied: bi.sql not granted for this script".to_string());

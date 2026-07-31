@@ -11,6 +11,7 @@ import {
   tableContains,
   namedRangeCells,
   namedRangeContains,
+  rectRowsCols,
   type TableLike,
   type NamedRangeCoordsLike,
 } from "../objectCoords";
@@ -145,5 +146,26 @@ describe("namedRange helpers", () => {
     expect(namedRangeContains(coords, 1, 1)).toBe(true);
     expect(namedRangeContains(coords, 2, 0)).toBe(false);
     expect(namedRangeContains(coords, 0, 2)).toBe(false);
+  });
+});
+
+describe("rectRowsCols (the apply_formatting cross-product lists)", () => {
+  it("returns each row and column index ONCE, not coordinate pairs", () => {
+    // 3 rows x 2 cols must be [rows=3, cols=2] — pairs would give 6 + 6 and
+    // format every cell six times.
+    expect(rectRowsCols(1, 4, 3, 5)).toEqual({ rows: [1, 2, 3], cols: [4, 5] });
+  });
+
+  it("handles a single cell", () => {
+    expect(rectRowsCols(7, 7, 7, 7)).toEqual({ rows: [7], cols: [7] });
+  });
+
+  it("normalizes an inverted rectangle instead of returning empty lists", () => {
+    expect(rectRowsCols(3, 5, 1, 4)).toEqual({ rows: [1, 2, 3], cols: [4, 5] });
+  });
+
+  it("the cross product covers exactly the rectangle's cells", () => {
+    const { rows, cols } = rectRowsCols(0, 0, 9, 4);
+    expect(rows.length * cols.length).toBe(50);
   });
 });

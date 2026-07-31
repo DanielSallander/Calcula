@@ -3,6 +3,12 @@
 //          runs in a SANDBOXED worker (broker capabilities + audit), exposed as a
 //          formula function (=NAME(args)). Bodies may call cube.value/kpi/members
 //          when "BI model access" is granted. Saved with the workbook.
+// CONTEXT: This dialog is also where the three RETURN/RECALC contracts are
+//          documented for the author — scalar vs array (spills) vs
+//          cellError("#N/A"), and the per-function "Recalculate on every edit"
+//          (volatile) switch. Keep the help text here in lockstep with
+//          @api/formulaFunctions (the sentinel) and @api/customFunctions (the
+//          injected cellError binding).
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -99,6 +105,17 @@ const s: Record<string, React.CSSProperties> = {
   btnPrimary: { padding: "7px 14px", borderRadius: 4, border: "none", background: "var(--accent, #2563eb)", color: "#fff", cursor: "pointer", fontSize: 13 },
   smallBtn: { padding: "2px 8px", borderRadius: 4, border: "1px solid var(--border, #ccc)", cursor: "pointer", fontSize: 12 },
   hint: { fontSize: 11, color: "var(--text-muted, #888)" },
+  helpBox: {
+    marginTop: 6,
+    padding: "8px 10px",
+    borderRadius: 4,
+    border: "1px solid var(--border, #e2e2e2)",
+    background: "var(--surface-alt, rgba(127,127,127,0.07))",
+    fontSize: 11,
+    lineHeight: 1.5,
+    color: "var(--text-muted, #666)",
+  },
+  helpLine: { marginBottom: 3 },
   error: { color: "#c00", fontSize: 12, padding: "0 20px", whiteSpace: "pre-wrap" },
 };
 
@@ -272,8 +289,27 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
                     onChange={(body) => patch({ body })}
                   />
                   <span style={s.hint}>
-                    Available: the parameters, <code>cube</code> (when BI access is on), and standard JS.
+                    Available: the parameters, <code>cube</code> (when BI access is on),{" "}
+                    <code>cellError</code>, and standard JS.
                   </span>
+                  <div style={s.helpBox}>
+                    <div style={s.helpLine}>
+                      <b>Return a value</b> — a number, text or boolean fills the cell.
+                    </div>
+                    <div style={s.helpLine}>
+                      <b>Return an array</b> to spill like a dynamic array:{" "}
+                      <code>return [1, 2, 3]</code> fills three rows,{" "}
+                      <code>return [[1, 2], [3, 4]]</code> fills a 2x2 block.
+                    </div>
+                    <div style={s.helpLine}>
+                      <b>Return an error</b> with <code>cellError</code>:{" "}
+                      <code>return cellError("#N/A")</code> puts a real #N/A in the cell —
+                      returning the plain text <code>"#N/A"</code> stays text. Valid codes:
+                      #N/A, #VALUE!, #REF!, #NAME?, #DIV/0!. You can also{" "}
+                      <code>throw new Error("#N/A")</code> from inside a catch block; any
+                      other thrown error becomes #VALUE!.
+                    </div>
+                  </div>
                 </div>
                 <div style={s.row}>
                   <label style={s.label}>Description (shown in autocomplete)</label>
@@ -282,6 +318,23 @@ export function CustomFunctionsDialog(props: DialogProps): React.ReactElement | 
                     value={current.description ?? ""}
                     onChange={(e) => patch({ description: e.target.value })}
                   />
+                </div>
+                <div style={s.row}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={current.volatile === true}
+                      onChange={(e) => patch({ volatile: e.target.checked })}
+                    />
+                    Recalculate on every edit (volatile)
+                  </label>
+                  <span style={s.hint}>
+                    Off (default): the cell recalculates only when one of its arguments
+                    changes — the cheap, predictable behaviour. Turn it on for functions
+                    whose result can change without the arguments changing (a clock, a
+                    random sample, a live external reading). Volatile functions run on
+                    every single edit in the workbook.
+                  </span>
                 </div>
                 <button style={s.smallBtn} onClick={() => removeFn(selected)}>
                   Delete this function

@@ -3,6 +3,7 @@
 // CONTEXT: Manages the active notebook, cell list, and execution state.
 
 import { create } from "zustand";
+import { dispatchScriptSideEffects } from "@api/workbookScripts";
 import type {
   NotebookDocument,
   NotebookCell,
@@ -64,20 +65,16 @@ function batchNeedsBiConsent(responses: NotebookCellResponse[]): string | null {
   return null;
 }
 
-/** Dispatch deferred actions from the last successful response in a batch. */
-function dispatchBatchDeferredActions(responses: NotebookCellResponse[]): void {
+/** Hand a cell's queued side effects to the extensions that own them. */
+function dispatchCellSideEffects(response: NotebookCellResponse): void {
+  if (response.type !== "success") return;
+  dispatchScriptSideEffects({ deferredActions: response.deferredActions });
+}
+
+/** Dispatch side effects from the last successful response in a batch. */
+function dispatchBatchSideEffects(responses: NotebookCellResponse[]): void {
   const last = responses[responses.length - 1];
-  if (
-    last?.type === "success" &&
-    last.deferredActions &&
-    last.deferredActions.length > 0
-  ) {
-    window.dispatchEvent(
-      new CustomEvent("script:deferred-actions", {
-        detail: last.deferredActions,
-      })
-    );
-  }
+  if (last) dispatchCellSideEffects(last);
 }
 
 interface NotebookState {
@@ -100,6 +97,11 @@ interface NotebookState {
 
   // Cell management
   addCell: (afterCellId?: string) => void;
+  /**
+   * Append a cell that already has source (the macro recorder's "record into a
+   * cell"). Returns the new cell's id, or null when no notebook is open.
+   */
+  appendCellWithSource: (source: string) => string | null;
   removeCell: (cellId: string) => void;
   updateCellSource: (cellId: string, source: string) => void;
   moveCellUp: (cellId: string) => void;
@@ -205,6 +207,19 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ activeNotebook: updated });
     // Save and refresh list so cell count stays in sync
     api.saveNotebook(updated).then(() => get().refreshNotebookList());
+  },
+
+  appendCellWithSource: (source: string) => {
+    const { activeNotebook } = get();
+    if (!activeNotebook) return null;
+
+    const newCell = { ...createEmptyCell(), source };
+    const updated = { ...activeNotebook, cells: [...activeNotebook.cells, newCell] };
+    set({ activeNotebook: updated });
+    // Persisted immediately, like addCell: a recorded macro that vanishes
+    // because the notebook was never saved would defeat the point.
+    api.saveNotebook(updated).then(() => get().refreshNotebookList());
+    return newCell.id;
   },
 
   removeCell: (cellId: string) => {
@@ -324,17 +339,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       }
 
       // Process deferred actions from Application object
-      if (
-        response.type === "success" &&
-        response.deferredActions &&
-        response.deferredActions.length > 0
-      ) {
-        window.dispatchEvent(
-          new CustomEvent("script:deferred-actions", {
-            detail: response.deferredActions,
-          })
-        );
-      }
+      dispatchCellSideEffects(response);
     } catch (err) {
       console.error("[ScriptNotebook] Run cell error:", err);
     } finally {
@@ -366,7 +371,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
-      dispatchBatchDeferredActions(responses);
+      dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run all error:", err);
     } finally {
@@ -403,7 +408,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
-      dispatchBatchDeferredActions(responses);
+      dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Rewind error:", err);
     } finally {
@@ -438,7 +443,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
-      dispatchBatchDeferredActions(responses);
+      dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run from error:", err);
     } finally {

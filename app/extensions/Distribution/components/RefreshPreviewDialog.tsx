@@ -7,7 +7,15 @@
 
 import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
-import { refreshPreview, refreshApply, calculateNow, emitAppEvent, type RefreshPreview } from "@api";
+import {
+  refreshPreview,
+  refreshApply,
+  calculateNow,
+  emitAppEvent,
+  AppEvents,
+  type PackageUpdatedPayload,
+  type RefreshPreview,
+} from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
 
 export function RefreshPreviewDialog({ onClose }: DialogProps) {
@@ -44,10 +52,23 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
         console.error("[Distribution] Recalc after refresh failed:", err);
       }
       window.dispatchEvent(new CustomEvent("grid:refresh"));
-      // The refresh may have replaced distributed scripts with the new
-      // package versions — reload them so changed sources re-prompt for
-      // consent (ScriptableObjects de-dupes unchanged ones by source hash).
-      emitAppEvent("calp:scripts-pulled", {});
+      // Announce the distribution lifecycle: the refresh may have replaced
+      // distributed scripts with new package versions (reload them so changed
+      // sources re-prompt for consent — ScriptableObjects de-dupes unchanged
+      // ones by source hash), swapped chart libraries, or moved sheets. One
+      // event PER refreshed subscription, so a subscriber that only cares about
+      // its own package can filter; scripts see a thinned {packageName, version}.
+      for (const sub of preview?.subscriptionPreviews ?? []) {
+        emitAppEvent(AppEvents.PACKAGE_UPDATED, {
+          packageName: sub.packageName,
+          version: sub.newVersion,
+          kind: "refresh",
+          sheetsPulled: sub.sheetsAdded.length,
+          // A refresh replaces script SOURCES in place and the backend reports
+          // only totals, so there is no honest per-subscription count here.
+          scriptsPulled: null,
+        } satisfies PackageUpdatedPayload);
+      }
       // Pane controls may also have changed — tell the Controls pane to
       // reload (cross-extension window event; same name the shell fans the
       // paneControl mutation domain out as).

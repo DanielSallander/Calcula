@@ -71,9 +71,17 @@ export interface ExtRpcError {
 // Host -> Worker
 // ============================================================================
 
+/** Read-only provenance handed to a sandboxed extension as `context.package`.
+ *  Built host-side from the AUTHORITATIVE (signed, when present) manifest. */
+export interface ExtPackageInfo {
+  name: string;
+  version: string | null;
+  provenance: "distributed";
+}
+
 export type HX2W =
   | { t: "init"; protocolVersion: number; source: string }
-  | { t: "activate"; ceiling: string[] }
+  | { t: "activate"; ceiling: string[]; package: ExtPackageInfo }
   | { t: "invokeHandler"; reqId: number; handlerId: number; args: unknown[] }
   | { t: "appEvent"; handlerId: number; payload: unknown }
   | { t: "callResult"; callId: number; ok: boolean; value?: unknown; error?: ExtRpcError }
@@ -107,9 +115,45 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   "cap.biQuery",
   "cap.biListConnections",
   "cap.biSql",
+  // CUBE convenience over the bi.query capability (same trust class, same
+  // backend commands as cap.biQuery) — exposed as capabilities.cube.* in
+  // extensionWorkerContext.ts.
+  "cap.cubeValue",
+  "cap.cubeKpi",
+  "cap.cubeMembers",
   "cap.biModelInfo",
   "cap.biModelUpsert",
   "cap.biModelDelete",
+  // bi.model diagnostics + atomic batching (same capability, separate Rust
+  // rate buckets; reads are sanitized field-by-field before they cross).
+  "cap.biModelValidate",
+  "cap.biModelLineage",
+  "cap.biModelBatch",
+  // distribution.writeback: a distributed extension IS the natural author of a
+  // data-collection workflow, so the .calp writeback loop is reachable here.
+  // The two publisher-side rows are additionally gated on Ed25519 key
+  // possession in Rust — the capability alone never buys them.
+  "cap.writebackListRegions",
+  "cap.writebackGetLayer",
+  "cap.writebackSaveDraft",
+  "cap.writebackSubmit",
+  "cap.writebackPreview",
+  "cap.writebackListSubmissions",
+  "cap.writebackReview",
+  // schedule: persistent recurring jobs. A sandboxed extension's code lives in
+  // %APPDATA%, but the SCHEDULE it registers lives in the workbook — so the
+  // user sees and cancels it in the same transparency panel as everything else.
+  "cap.scheduleEvery",
+  "cap.scheduleAt",
+  "cap.scheduleList",
+  "cap.scheduleCancel",
+  // ui.dialog: the ONE way a sandboxed extension can reach the user, since it
+  // cannot register UI. The dialog itself is painted by trusted host code from
+  // a data-only spec (scriptDialogSpec.ts).
+  "cap.dialogAlert",
+  "cap.dialogConfirm",
+  "cap.dialogPrompt",
+  "cap.dialogForm",
 ]);
 
 /** Host deadline (ms) for a relayed handler invocation before it is abandoned. */

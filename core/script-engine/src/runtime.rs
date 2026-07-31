@@ -1,24 +1,47 @@
 //! FILENAME: core/script-engine/src/runtime.rs
 //! PURPOSE: QuickJS runtime initialization and script execution via rquickjs.
-//! CONTEXT: Creates a QuickJS Runtime/Context, registers the Calcula API as
-//! global functions, and executes user scripts.
+//! CONTEXT: Creates a QuickJS Runtime/Context, applies the runtime safety
+//! limits (memory / stack / wall-clock deadline — see limits.rs), registers the
+//! Calcula API as global functions, and executes user scripts.
 
 use rquickjs::{Context, Runtime, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::limits::{self, Deadline, ScriptLimits};
 use crate::types::ScriptContext;
 use crate::ops;
 
+/// The outcome of one execution: the (possibly mutated) ScriptContext, plus the
+/// script's error message when it failed.
+///
+/// The context comes back on BOTH paths on purpose — a failed script has still
+/// written console output (and possibly grid cells) that the caller must be
+/// able to show. Only an infrastructure failure (runtime creation, context
+/// recovery) surfaces as `Err` from `execute_script`.
+pub struct ExecutionOutcome {
+    /// The context after execution, with output/counters/queued actions.
+    pub context: ScriptContext,
+    /// The script's error message, or None when it completed normally.
+    pub error: Option<String>,
+}
+
 /// Execute a JavaScript source string in a QuickJS runtime with Calcula API.
 /// The ScriptContext is shared with the runtime so registered functions can access it.
-/// After execution, the (possibly mutated) ScriptContext is returned.
+///
+/// `limits` caps the runtime's heap and JS stack and arms a wall-clock deadline
+/// for the user script (the API-registration evals run BEFORE the deadline is
+/// armed, so setup can never be charged to the script's budget).
 pub fn execute_script(
     js_source: &str,
     _filename: &str,
     context: ScriptContext,
-) -> Result<ScriptContext, String> {
+    limits: ScriptLimits,
+) -> Result<ExecutionOutcome, String> {
     let rt = Runtime::new().map_err(|e| format!("Failed to create QuickJS runtime: {}", e))?;
+    // Memory + stack ceilings and the interrupt handler go on before ANY code
+    // runs in this runtime.
+    let deadline = limits::install(&rt, limits);
     let qjs_context = Context::full(&rt)
         .map_err(|e| format!("Failed to create context: {}", e))?;
 
@@ -42,22 +65,12 @@ pub fn execute_script(
         // "not available on this surface" error when no provider is injected)
         crate::ops::model::register_model_ops(&ctx, &globals, shared_ctx.clone())?;
 
-        // Execute the user script
+        // Execute the user script under the wall-clock budget.
+        deadline.arm(limits.timeout_ms);
         let eval_result: rquickjs::Result<Value> = ctx.eval(js_source);
+        deadline.disarm();
 
-        eval_result.map(|_| ()).map_err(|e| {
-            // Try to get exception details from QuickJS
-            let caught = ctx.catch();
-            if let Some(exc) = caught.as_exception() {
-                let msg = exc.message().unwrap_or_default();
-                let stack = exc.stack().unwrap_or_default();
-                if stack.is_empty() {
-                    return msg;
-                }
-                return format!("{}\n{}", msg, stack);
-            }
-            format!("Script error: {}", e)
-        })
+        eval_result.map(|_| ()).map_err(|e| describe_error(&ctx, e, &deadline))
     });
 
     // Drop the QuickJS context and runtime BEFORE unwrapping the Rc.
@@ -71,7 +84,41 @@ pub fn execute_script(
         .map_err(|_| "Failed to recover script context".to_string())?
         .into_inner();
 
-    result.map(|_| context)
+    Ok(ExecutionOutcome {
+        context,
+        error: result.err(),
+    })
+}
+
+/// Turn a failed `ctx.eval` into a user-facing message.
+///
+/// A deadline abort takes priority: QuickJS reports it as an UNCATCHABLE
+/// "InternalError: interrupted", which tells the user nothing about what
+/// actually happened, so the deadline's own message replaces it.
+pub(crate) fn describe_error<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    err: rquickjs::Error,
+    deadline: &Deadline,
+) -> String {
+    // Clear the pending exception either way so the runtime is not left holding it.
+    let caught = ctx.catch();
+    if deadline.tripped() {
+        return deadline.timeout_message();
+    }
+    if let Some(exc) = caught.as_exception() {
+        let msg = exc.message().unwrap_or_default();
+        let stack = exc.stack().unwrap_or_default();
+        if msg.is_empty() && stack.is_empty() {
+            // An exception with nothing readable on it (can happen when the
+            // heap is exhausted): fall back to the rquickjs error kind.
+            return format!("Script error: {}", err);
+        }
+        if stack.is_empty() {
+            return msg;
+        }
+        return format!("{}\n{}", msg, stack);
+    }
+    format!("Script error: {}", err)
 }
 
 /// Register the `Calcula` global object with all spreadsheet API methods.

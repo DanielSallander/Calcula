@@ -9,6 +9,7 @@ import {
   type InspectorOverview,
   type InspectorScripts,
 } from "@api/distribution";
+import type { CapabilityId } from "@api";
 import type { InspectorContext } from "./PackageInspectorApp";
 import {
   Badge,
@@ -21,15 +22,28 @@ import {
   sectionTitleStyle,
 } from "./shared";
 
-/** Short human phrase for a declared capability id (R19). */
-const CAPABILITY_PHRASE: Record<string, string> = {
+/**
+ * Short human phrase for a declared capability id (R19). Typed
+ * `Record<CapabilityId, string>` so a new capability that forgets its phrase
+ * fails the build instead of showing the user a bare id.
+ */
+const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "net.fetch": "fetch data from the web",
   "bi.query": "run read-only BI queries",
-  "bi.sql": "run BI SQL",
-  "bi.model": "read the BI model",
+  "bi.sql": "run raw read-only SQL against the BI database",
+  // bi.model is a MUTATION capability (upsert/delete definitions) — reading the
+  // model is what bi.query buys. Saying "read" here understated the reach.
+  "bi.model": "change the BI model definitions (measures, relationships, ...)",
   storage: "store data on this device",
   "ui.html": "render custom HTML UI",
   "formula.udf": "define formula functions",
+  "bi.connector": "feed external data into the BI model",
+  "ui.dialog": "interrupt you with a dialog and read your answer",
+  // Both halves of the .calp collection loop. The publisher half (read
+  // everyone's answers, approve/reject them) additionally needs the package
+  // signing key, but the phrase must not understate what the grant covers.
+  "distribution.writeback":
+    "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
 };
 
 function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {
@@ -40,7 +54,7 @@ function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.R
       {capabilities.map((c) => (
         <Badge key={c} color={WARN_AMBER}>
           {c}
-          {CAPABILITY_PHRASE[c] ? ` — ${CAPABILITY_PHRASE[c]}` : ""}
+          {CAPABILITY_PHRASE[c as CapabilityId] ? ` — ${CAPABILITY_PHRASE[c as CapabilityId]}` : ""}
         </Badge>
       ))}
     </span>

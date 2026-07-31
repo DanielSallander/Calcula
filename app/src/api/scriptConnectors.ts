@@ -14,9 +14,26 @@
 // CONTEXT: design docs/design/model-extensibility.md §7. The live registry is
 //          session-scoped: a connector script re-registers on mount
 //          (idempotent install), which also re-arms its refresh schedule.
+//
+// REFRESH SCHEDULING (changed): `refreshEverySecs` used to arm a renderer-side
+// setInterval that died at unmount — while the SAME number was being persisted
+// into the model's extension_data (bi/script_source.rs), where nothing ever
+// consumed it. The declared schedule and the running schedule were two
+// different things, and only the ephemeral one had any effect.
+//
+// It now drives the persistent scheduler (scriptHost/scheduler.ts + the Rust
+// script_scheduler command), so the persisted number IS the schedule: it
+// survives unmount and reload, the user can see and cancel it in the
+// transparency panel, and every refresh is audited and re-checked against the
+// live grant. The 30s floor is unchanged (and re-applied in Rust).
 
 import { invokeBackend } from "./backend";
 import { callExposedMethod } from "./scriptableObjects";
+import {
+  scheduleEvery,
+  cancelScheduledJobForScript,
+  listScheduledJobsForScript,
+} from "./scriptHost/scheduler";
 
 /** One table a connector feeds (columns are the authoritative schema). */
 export interface ScriptConnectorTableDef {
@@ -44,12 +61,16 @@ interface LiveConnector {
   instanceId: string | null;
   connectionId: string;
   def: ScriptConnectorDef;
-  timer: ReturnType<typeof setInterval> | null;
 }
 
-/** sourceId -> live registration (session-scoped; rebuilt on script mount). */
+/** sourceId -> live registration (session-scoped; rebuilt on script mount).
+ *  The SCHEDULE is no longer session-scoped — only the ability to SERVICE it
+ *  is, which is why the scheduler refuses to fire a job whose script is not
+ *  mounted rather than firing it into an empty registry. */
 const live = new Map<string, LiveConnector>();
 
+/** Floor on connector refresh cadence. Must agree with the scheduler's
+ *  MIN_INTERVAL_SECS (Rust re-applies it regardless). */
 const MIN_REFRESH_SECS = 30;
 
 function validateDef(def: ScriptConnectorDef): void {
@@ -66,10 +87,25 @@ function validateDef(def: ScriptConnectorDef): void {
   }
 }
 
-function clearTimer(lc: LiveConnector | undefined): void {
-  if (lc?.timer != null) {
-    clearInterval(lc.timer);
-    lc.timer = null;
+/**
+ * Drop a connector's persisted refresh job.
+ *
+ * Best-effort: failing to cancel must never fail the connector operation that
+ * asked for it. A job left behind is harmless — the scheduler will not fire it
+ * once the source is gone (the refresh throws, is recorded as a failed run, and
+ * the user can cancel it from the transparency panel).
+ */
+async function cancelRefreshJob(lc: LiveConnector | undefined): Promise<void> {
+  if (!lc) return;
+  try {
+    const jobs = await listScheduledJobsForScript(lc.scriptId);
+    for (const job of jobs) {
+      if (job.surface === "connector" && job.handler === lc.def.sourceId) {
+        await cancelScheduledJobForScript(lc.scriptId, job.id);
+      }
+    }
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -100,8 +136,7 @@ export async function registerScriptConnectorForScript(
     rows: null,
   });
 
-  clearTimer(live.get(def.sourceId));
-  const lc: LiveConnector = { scriptId, objectType, instanceId, connectionId, def, timer: null };
+  const lc: LiveConnector = { scriptId, objectType, instanceId, connectionId, def };
   live.set(def.sourceId, lc);
 
   // Initial feed (errors propagate to the registering script so it can react).
@@ -109,11 +144,38 @@ export async function registerScriptConnectorForScript(
 
   if (def.refreshEverySecs && def.refreshEverySecs > 0) {
     const secs = Math.max(MIN_REFRESH_SECS, Math.floor(def.refreshEverySecs));
-    lc.timer = setInterval(() => {
-      void refreshScriptConnector(def.sourceId).catch((e) => {
-        console.warn(`[scriptConnectors] scheduled refresh of ${def.sourceId} failed:`, e);
-      });
-    }, secs * 1000);
+    // Re-registration is idempotent in the scheduler (same script + surface +
+    // handler + cadence updates the existing job), so a remount re-arms the
+    // one persistent job instead of stacking a second.
+    //
+    // Best-effort on purpose: a connector whose SCHEDULE could not be armed is
+    // still a working connector with a working manual refresh, and failing the
+    // whole registration would be a worse outcome than an unscheduled one. The
+    // usual cause is the script not holding `schedule` — which is exactly the
+    // case where refusing to schedule is the correct behaviour, not an error.
+    try {
+      await scheduleEvery(
+        {
+          scriptId,
+          surface: "connector",
+          objectType,
+          instanceId,
+        },
+        secs,
+        def.sourceId,
+        `Refresh ${def.sourceId}`,
+      );
+    } catch (e) {
+      console.warn(
+        `[scriptConnectors] could not arm the persistent refresh for ${def.sourceId} ` +
+          `(the connector still works; refresh it manually or grant the 'schedule' capability):`,
+        e,
+      );
+    }
+  } else {
+    // Cadence removed on re-registration — drop any job a previous
+    // registration left behind rather than leaving an orphan firing.
+    await cancelRefreshJob(lc);
   }
   return { sourceId: def.sourceId };
 }
@@ -177,7 +239,7 @@ export async function removeScriptConnectorForScript(
     table: null,
     rows: null,
   });
-  clearTimer(live.get(sourceId));
+  await cancelRefreshJob(live.get(sourceId));
   live.delete(sourceId);
 }
 
@@ -198,9 +260,16 @@ export function listScriptConnectors(): Array<{
   }));
 }
 
-/** Disarm every schedule and forget the session registry (workbook close). */
+/**
+ * Forget the session registry (workbook close).
+ *
+ * Deliberately does NOT cancel the scheduled refresh jobs: they are persisted
+ * workbook state, and closing a workbook must not silently erase the schedule
+ * the user consented to. The scheduler's own reset clears the in-memory job
+ * list at workbook close, and the mount check stops anything from firing in
+ * the meantime.
+ */
 export function resetScriptConnectors(): void {
-  for (const lc of live.values()) clearTimer(lc);
   live.clear();
 }
 

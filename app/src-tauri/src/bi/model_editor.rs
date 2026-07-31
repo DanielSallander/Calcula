@@ -688,6 +688,13 @@ where
         &[super::types::CalculatedMeasure],
     ) -> Result<bi_engine::DataModel, String>,
 {
+    // SELF-HEALING CHOKE POINT: a batch opened through the script gateway
+    // whose deadline has passed (crashed, hung, or abandoned script) is rolled
+    // back HERE — before any edit can be silently swallowed into its undo step.
+    // Every model mutation in the app funnels through apply_model_edit, so a
+    // wedged model heals on the user's very next edit without a background task.
+    reclaim_expired_script_batches(bi_state).await;
+
     let engine_arc = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
@@ -2743,25 +2750,24 @@ pub async fn bi_model_delete_calc_column(
     .await
 }
 
-/// Add or update a writeback column (engine v21): a host-fed, per-key input
-/// column on a model table. The engine synthesizes its store tables and
-/// generated lookup column at validate; this command then re-feeds the live
-/// engine so the stores exist and any collected values re-project.
-#[tauri::command]
+/// Parse writeback-column INPUT (the Model Editor dialog's fields, and — since
+/// the `writebackColumn` kind joined the script gateway — a script's payload)
+/// into an engine `WritebackColumn`.
+///
+/// Pure and shared on purpose: a scripted data-collection schema must be
+/// exactly as constrained as a hand-authored one, so both go through this one
+/// parser (unknown kind/projection rejected, expression pre-parsed, blank enum
+/// values and editors dropped) and then through `validate()`.
 #[allow(clippy::too_many_arguments)]
-pub async fn bi_model_upsert_writeback_column(
-    state: State<'_, crate::AppState>,
-    bi_state: State<'_, BiState>,
-    file_state: State<'_, FileState>,
-    connection_id: ConnectionId,
-    original_id: Option<String>,
-    name: String,
-    table: String,
-    data_type: String,
+fn build_writeback_column(
+    id: String,
+    name: &str,
+    table: &str,
+    data_type: &str,
     key_columns: Vec<String>,
-    kind: String,
-    projection_mode: String,
-    projection_expression: Option<String>,
+    kind: &str,
+    projection_mode: &str,
+    projection_expression: Option<&str>,
     required: bool,
     min: Option<f64>,
     max: Option<f64>,
@@ -2770,15 +2776,12 @@ pub async fn bi_model_upsert_writeback_column(
     pattern: Option<String>,
     allowed_editors: Vec<String>,
     expose_history: bool,
-    window: tauri::Window,
-) -> Result<ModelOverview, String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
-
+) -> Result<bi_engine::WritebackColumn, String> {
     let trimmed = name.trim().to_string();
     if trimmed.is_empty() {
         return Err("Column name cannot be empty".to_string());
     }
-    let dt = data_type_from_str(&data_type)?;
+    let dt = data_type_from_str(data_type)?;
     let kind = match kind.trim() {
         "history" | "" => bi_engine::WritebackColumnKind::History,
         "masterData" | "master_data" => bi_engine::WritebackColumnKind::MasterData,
@@ -2789,7 +2792,6 @@ pub async fn bi_model_upsert_writeback_column(
         "latest" | "" => bi_engine::WritebackProjection::Latest,
         "expression" => {
             let text = projection_expression
-                .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or("The expression projection needs an expression")?;
@@ -2823,35 +2825,114 @@ pub async fn bi_model_upsert_writeback_column(
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty())
         .collect();
-    let id = original_id
-        .clone()
-        .unwrap_or_else(|| identity::EntityId::from_bytes(identity::generate_uuid_v7()).to_string().to_lowercase());
+    Ok(
+        bi_engine::WritebackColumn::new(id, trimmed, table.to_string(), dt, key_columns)
+            .with_kind(kind)
+            .with_projection(projection)
+            .with_constraints(constraints)
+            .with_allowed_editors(editors)
+            .with_expose_history(expose_history),
+    )
+}
+
+/// Replace-or-append a writeback column in a base model and re-validate (the
+/// engine synthesizes the store tables + generated lookup column at validate).
+fn upsert_writeback_column_model(
+    base: &bi_engine::DataModel,
+    original_id: Option<&str>,
+    wb: bi_engine::WritebackColumn,
+) -> Result<bi_engine::DataModel, String> {
+    let mut wbs = base.writeback_columns().to_vec();
+    if let Some(orig) = original_id {
+        let before = wbs.len();
+        wbs.retain(|w| w.id() != orig);
+        if wbs.len() == before {
+            return Err(format!("Writeback column '{}' not found", orig));
+        }
+    }
+    wbs.push(wb);
+    let edited = base
+        .with_writeback_columns(wbs)
+        .map_err(|e| format!("{}", e))?;
+    edited.validate().map_err(|e| format!("{}", e))?;
+    Ok(edited)
+}
+
+/// Remove a writeback column by id and re-validate.
+fn delete_writeback_column_model(
+    base: &bi_engine::DataModel,
+    id: &str,
+) -> Result<bi_engine::DataModel, String> {
+    let mut wbs = base.writeback_columns().to_vec();
+    let before = wbs.len();
+    wbs.retain(|w| w.id() != id);
+    if wbs.len() == before {
+        return Err(format!("Writeback column '{}' not found", id));
+    }
+    let edited = base
+        .with_writeback_columns(wbs)
+        .map_err(|e| format!("{}", e))?;
+    edited.validate().map_err(|e| format!("{}", e))?;
+    Ok(edited)
+}
+
+/// Add or update a writeback column (engine v21): a host-fed, per-key input
+/// column on a model table. The engine synthesizes its store tables and
+/// generated lookup column at validate; this command then re-feeds the live
+/// engine so the stores exist and any collected values re-project.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn bi_model_upsert_writeback_column(
+    state: State<'_, crate::AppState>,
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    original_id: Option<String>,
+    name: String,
+    table: String,
+    data_type: String,
+    key_columns: Vec<String>,
+    kind: String,
+    projection_mode: String,
+    projection_expression: Option<String>,
+    required: bool,
+    min: Option<f64>,
+    max: Option<f64>,
+    enum_values: Vec<String>,
+    max_length: Option<usize>,
+    pattern: Option<String>,
+    allowed_editors: Vec<String>,
+    expose_history: bool,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+
+    let id = original_id.clone().unwrap_or_else(|| {
+        identity::EntityId::from_bytes(identity::generate_uuid_v7())
+            .to_string()
+            .to_lowercase()
+    });
+    let wb = build_writeback_column(
+        id,
+        &name,
+        &table,
+        &data_type,
+        key_columns,
+        &kind,
+        &projection_mode,
+        projection_expression.as_deref(),
+        required,
+        min,
+        max,
+        enum_values,
+        max_length,
+        pattern,
+        allowed_editors,
+        expose_history,
+    )?;
 
     let overview = mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
-        let mut wbs = base.writeback_columns().to_vec();
-        if let Some(orig) = &original_id {
-            let before = wbs.len();
-            wbs.retain(|w| w.id() != orig);
-            if wbs.len() == before {
-                return Err(format!("Writeback column '{}' not found", orig));
-            }
-        }
-        let wb = bi_engine::WritebackColumn::new(
-            id.clone(),
-            trimmed.clone(),
-            table.clone(),
-            dt.clone(),
-            key_columns.clone(),
-        )
-        .with_kind(kind)
-        .with_projection(projection.clone())
-        .with_constraints(constraints.clone())
-        .with_allowed_editors(editors.clone())
-        .with_expose_history(expose_history);
-        wbs.push(wb);
-        let edited = base.with_writeback_columns(wbs).map_err(|e| format!("{}", e))?;
-        edited.validate().map_err(|e| format!("{}", e))?;
-        Ok(edited)
+        upsert_writeback_column_model(base, original_id.as_deref(), wb)
     })
     .await?;
 
@@ -2874,15 +2955,7 @@ pub async fn bi_model_delete_writeback_column(
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
     mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
-        let mut wbs = base.writeback_columns().to_vec();
-        let before = wbs.len();
-        wbs.retain(|w| w.id() != id);
-        if wbs.len() == before {
-            return Err(format!("Writeback column '{}' not found", id));
-        }
-        let edited = base.with_writeback_columns(wbs).map_err(|e| format!("{}", e))?;
-        edited.validate().map_err(|e| format!("{}", e))?;
-        Ok(edited)
+        delete_writeback_column_model(base, &id)
     })
     .await
 }
@@ -4799,15 +4872,24 @@ pub async fn bi_model_redo(
 // (all-or-nothing rollback). The frontend brackets script runs / wildcard
 // expansions with begin + end|cancel in a try/finally.
 
-/// Open an atomic batch on the connection's model. Errors if one is already
-/// open for that model.
-#[tauri::command]
-pub fn bi_model_batch_begin(
-    bi_state: State<BiState>,
+/// The connection's model key (the identity the undo stacks and the script
+/// batch registry are keyed by).
+fn model_key_of(
+    bi_state: &BiState,
     connection_id: ConnectionId,
-    window: tauri::Window,
-) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+) -> Result<Option<ModelKey>, String> {
+    let conns = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    Ok(conns
+        .get(&connection_id)
+        .ok_or("Connection not found")?
+        .model_key
+        .clone())
+}
+
+/// Open an atomic batch (gate-free core; shared by the trusted command and the
+/// script gateway). The `in_batch` flag on the model's undo stacks IS the
+/// interlock: a second begin — from a script, the CLI, or the UI — fails here.
+fn begin_model_batch(bi_state: &BiState, connection_id: ConnectionId) -> Result<(), String> {
     let (model_key, current_base) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(&connection_id).ok_or("Connection not found")?;
@@ -4832,25 +4914,13 @@ pub fn bi_model_batch_begin(
     Ok(())
 }
 
-/// Close the open batch, keeping its edits as one undo step. When no edit
-/// actually ran (`had_edits` false) the redundant pre-batch snapshot is
-/// dropped so Undo isn't a visible no-op.
-#[tauri::command]
-pub fn bi_model_batch_end(
-    bi_state: State<BiState>,
+/// Close the open batch (gate-free core).
+fn end_model_batch(
+    bi_state: &BiState,
     connection_id: ConnectionId,
     had_edits: bool,
-    window: tauri::Window,
 ) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
-    let model_key = {
-        let conns = bi_state.connections.lock().unwrap();
-        conns
-            .get(&connection_id)
-            .ok_or("Connection not found")?
-            .model_key
-            .clone()
-    };
+    let model_key = model_key_of(bi_state, connection_id)?;
     let mut store = model_undo_store().lock().map_err(|e| e.to_string())?;
     let stacks = store.entry(model_key).or_default();
     if !stacks.in_batch {
@@ -4863,25 +4933,27 @@ pub fn bi_model_batch_end(
     Ok(())
 }
 
-/// Abort the open batch: reinstall the pre-batch snapshot (rolling back every
-/// edit made inside the batch) and return the restored overview.
-#[tauri::command]
-pub async fn bi_model_batch_cancel(
-    bi_state: State<'_, BiState>,
-    file_state: State<'_, FileState>,
-    connection_id: ConnectionId,
-    window: tauri::Window,
-) -> Result<ModelOverview, String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
-    let (model_key, current_base, bindings) = {
+/// Roll back the open batch (gate-free core): clear the in-batch flag, pop the
+/// pre-batch snapshot, reinstall it on the shared engine, emit the change.
+/// Returns the restored base model. Shared by the explicit cancel command, the
+/// gateway's `batchCancel`, and the expired-batch reclaim.
+///
+/// `script_id` is carried into the lifecycle event so a rollback a SCRIPT
+/// caused (explicit cancel, or a reclaimed dead batch) is attributable — the
+/// event stays `source: "undo"` because that is what it is.
+async fn rollback_model_batch(
+    bi_state: &BiState,
+    connection_id: &ConnectionId,
+    script_id: Option<String>,
+) -> Result<bi_engine::DataModel, String> {
+    let (model_key, current_base) = {
         let conns = bi_state.connections.lock().unwrap();
-        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let conn = conns.get(connection_id).ok_or("Connection not found")?;
         (
             conn.model_key.clone(),
             conn.base_model
                 .clone()
                 .ok_or("This connection has no editable base model")?,
-            conn.bindings.clone(),
         )
     };
     let prev = {
@@ -4896,9 +4968,165 @@ pub async fn bi_model_batch_cancel(
             .pop()
             .ok_or("Batch snapshot missing from the undo stack")?
     };
-    install_base_model(&bi_state, &connection_id, &prev).await?;
-    emit_model_changed(&bi_state, &model_key, &current_base, &prev, "undo", None);
+    install_base_model(bi_state, connection_id, &prev).await?;
+    emit_model_changed(bi_state, &model_key, &current_base, &prev, "undo", script_id);
+    Ok(prev)
+}
+
+// --- Batches opened through the SCRIPT gateway ------------------------------
+//
+// A script batch is a transaction the user did not open, held by code that can
+// crash, hang, or simply never call `batchEnd`. Left open it does real damage:
+// `record_model_undo` suppresses per-edit snapshots while `in_batch` is set, so
+// every LATER edit — the user's included — silently folds into the dead
+// script's undo step, and the Model Editor's own batch_begin fails.
+//
+// CHOSEN GUARD: a wall-clock DEADLINE (`SCRIPT_BATCH_MAX_SECS`), reclaimed
+// lazily at the model-edit choke point and at every trusted batch command,
+// rather than an unmount hook. Reasons: (1) an unmount signal is exactly the
+// thing a crashed or wedged worker fails to deliver, so it cannot be the
+// primary guard; (2) reclaiming from `apply_model_edit` heals the model on the
+// very next edit by ANY writer, with no background task and no reach into the
+// scripting module; (3) the deadline is bounded and explainable — the error the
+// user or script sees names it.
+//
+// A reclaimed batch is ROLLED BACK, not committed: a half-finished multi-step
+// model edit is not a state the script ever asked to keep.
+
+/// Wall-clock ceiling on a batch opened through the script gateway. Long
+/// enough for a legitimate multi-step edit (each step is an in-memory model
+/// rebuild plus an engine install — sub-second), short enough that a wedged
+/// model self-heals inside a user's patience. Combined with the 30 mutations/
+/// minute budget it also bounds a batch at roughly 15 edits.
+const SCRIPT_BATCH_MAX_SECS: u64 = 30;
+
+struct ScriptBatch {
+    /// The script that opened it — only this script may end or cancel it.
+    script_id: String,
+    connection_id: ConnectionId,
+    /// Instant after which the batch is forfeit. NOT extended by activity: the
+    /// deadline bounds the transaction, not the gap between its steps.
+    deadline: std::time::Instant,
+    /// Mutations dispatched inside the batch (drives `had_edits` at end).
+    edits: usize,
+}
+
+fn script_batch_registry() -> &'static Mutex<HashMap<Option<ModelKey>, ScriptBatch>> {
+    static REG: OnceLock<Mutex<HashMap<Option<ModelKey>, ScriptBatch>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Roll back every script batch whose deadline has passed. Returns how many
+/// were reclaimed. Never fails the caller: a batch that cannot be rolled back
+/// (connection gone) is dropped from the registry and logged.
+async fn reclaim_expired_script_batches(bi_state: &BiState) -> usize {
+    let expired: Vec<ScriptBatch> = {
+        let Ok(mut reg) = script_batch_registry().lock() else {
+            return 0;
+        };
+        let now = std::time::Instant::now();
+        let keys: Vec<Option<ModelKey>> = reg
+            .iter()
+            .filter(|(_, b)| b.deadline <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.iter().filter_map(|k| reg.remove(k)).collect()
+    };
+    let mut reclaimed = 0usize;
+    for b in expired {
+        match rollback_model_batch(bi_state, &b.connection_id, Some(b.script_id.clone())).await {
+            Ok(_) => {
+                reclaimed += 1;
+                crate::log_warn!(
+                    "BI",
+                    "reclaimed an expired script model batch (script {}, {}s limit): {} edit(s) rolled back",
+                    b.script_id,
+                    SCRIPT_BATCH_MAX_SECS,
+                    b.edits
+                );
+            }
+            Err(e) => crate::log_warn!(
+                "BI",
+                "could not reclaim the expired script model batch (script {}): {}",
+                b.script_id,
+                e
+            ),
+        }
+    }
+    reclaimed
+}
+
+/// Refuse a trusted end/cancel while a LIVE script batch owns the model:
+/// closing it from the UI would split (or silently roll back) a running
+/// script's transaction. Bounded — the batch expires within
+/// `SCRIPT_BATCH_MAX_SECS` and the next call reclaims it.
+fn guard_no_live_script_batch(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) -> Result<(), String> {
+    let key = model_key_of(bi_state, connection_id)?;
+    let reg = script_batch_registry().lock().map_err(|e| e.to_string())?;
+    match reg.get(&key) {
+        Some(b) => Err(format!(
+            "Script '{}' has an atomic model batch open (it expires within {}s). \
+             Try again once it finishes.",
+            b.script_id, SCRIPT_BATCH_MAX_SECS
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Open an atomic batch on the connection's model. Errors if one is already
+/// open for that model.
+#[tauri::command]
+pub async fn bi_model_batch_begin(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    // A crashed script must not be able to lock the user out of batching.
+    reclaim_expired_script_batches(&bi_state).await;
+    begin_model_batch(&bi_state, connection_id)
+}
+
+/// Close the open batch, keeping its edits as one undo step. When no edit
+/// actually ran (`had_edits` false) the redundant pre-batch snapshot is
+/// dropped so Undo isn't a visible no-op.
+#[tauri::command]
+pub async fn bi_model_batch_end(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    had_edits: bool,
+    window: tauri::Window,
+) -> Result<(), String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    reclaim_expired_script_batches(&bi_state).await;
+    guard_no_live_script_batch(&bi_state, connection_id)?;
+    end_model_batch(&bi_state, connection_id, had_edits)
+}
+
+/// Abort the open batch: reinstall the pre-batch snapshot (rolling back every
+/// edit made inside the batch) and return the restored overview.
+#[tauri::command]
+pub async fn bi_model_batch_cancel(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    window: tauri::Window,
+) -> Result<ModelOverview, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    reclaim_expired_script_batches(&bi_state).await;
+    guard_no_live_script_batch(&bi_state, connection_id)?;
+    let prev = rollback_model_batch(&bi_state, &connection_id, None).await?;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+    let bindings = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns
+            .get(&connection_id)
+            .map(|c| c.bindings.clone())
+            .unwrap_or_default()
+    };
     Ok(build_overview(&prev, &bindings, true, None))
 }
 
@@ -5021,33 +5249,69 @@ pub async fn bi_model_extension_data(
 
 // ---------------------------------------------------------------------------
 // Script gateway (design: docs/design/model-extensibility.md §6) — the ONE
-// broker-reachable door for consented model mutation. The bi_model_* commands
-// stay on the biData denylist; sandboxed scripts and distributed extensions
-// reach model definitions only through here, behind the `bi.model` capability
+// broker-reachable door for consented model work. The bi_model_* commands stay
+// on the biData denylist; sandboxed scripts and distributed extensions reach
+// model definitions only through here, behind the `bi.model` capability
 // (frontend broker gate + the authoritative Rust re-check below), a Rust-side
 // allowed-KIND set (RLS roles, connections/credentials, storage-mode/refresh
-// knobs are NOT dispatchable), a per-script rate limit, the always-on audit
+// knobs are NOT dispatchable), per-script rate limits, the always-on audit
 // trail, and the same apply_model_edit funnel every mutation uses — so undo
 // and bi:model-changed (source:"script", via the task-local attribution)
 // ride along for free.
+//
+// THREE ACTION FAMILIES, each with its own gate:
+//   READ  — info, validateMeasure, validateContext, validateModel,
+//           dependencyGraph, measureLineage, dependents. Pure projections of
+//           the base model; every response passes the same WHITELIST used by
+//           `info` (and error text is scrubbed of privileged terms), so a
+//           diagnostic can never become the back door to what `info` denies.
+//   BATCH — batchBegin / batchEnd / batchCancel. One undo entry for a
+//           multi-step script edit, with a deadline so a crashed script cannot
+//           wedge the model (see SCRIPT_BATCH_MAX_SECS).
+//   WRITE — upsert / delete over the allowed-kind set.
+//
+// RESPONSE SANITIZATION IS NOT OPTIONAL: the underlying mutation commands
+// return the FULL `ModelOverview`, which carries `securityRoles` and `sources`.
+// Handing that back raw would let any script read through the RESPONSE exactly
+// what `action: "info"` refuses to hand it through the REQUEST, so every
+// overview-returning arm goes through `overview_value` (= `sanitized_model_info`).
 // ---------------------------------------------------------------------------
 
-/// Authoritative per-script mutation rate limit for the model gateway
-/// (the allowlist row's `perMinute` is advisory UX). Own bucket — never
-/// shared with net.fetch's rate window.
+/// Authoritative per-script rate limits for the model gateway (the allowlist
+/// row's `perMinute` is advisory UX). Own buckets — never shared with
+/// net.fetch's rate window, and reads never share a bucket with mutations: a
+/// script that spent its read budget validating must still be able to apply
+/// the edit it just validated.
+///
+/// MUTATIONS are the expensive side (each rebuilds and reinstalls the model on
+/// the shared engine and pushes an undo snapshot), so they keep the original
+/// 30/min. Batching does NOT buy extra budget: `batchBegin` costs one mutation
+/// token and every edit inside the batch still costs one, so a batch is a way
+/// to make N edits ATOMIC, never a way to make more than N of them.
 const BI_MODEL_MUTATIONS_PER_MINUTE: usize = 30;
 
-fn check_gateway_rate(script_id: &str) -> Result<(), String> {
-    static WINDOWS: OnceLock<Mutex<HashMap<String, Vec<std::time::Instant>>>> = OnceLock::new();
+/// READS are pure in-memory projections of the base model — no engine lock, no
+/// I/O. 120/min (2/s) is generous for an authoring loop that validates before
+/// every write, and still bounds a script that tries to poll the gateway.
+const BI_MODEL_READS_PER_MINUTE: usize = 120;
+
+const RATE_BUCKET_MUTATION: &str = "mutation";
+const RATE_BUCKET_READ: &str = "read";
+
+fn check_gateway_rate(script_id: &str, bucket: &str, limit: usize) -> Result<(), String> {
+    static WINDOWS: OnceLock<Mutex<HashMap<(String, String), Vec<std::time::Instant>>>> =
+        OnceLock::new();
     let windows = WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut windows = windows.lock().unwrap();
     let now = std::time::Instant::now();
-    let window = windows.entry(script_id.to_string()).or_default();
+    let window = windows
+        .entry((script_id.to_string(), bucket.to_string()))
+        .or_default();
     window.retain(|t| now.duration_since(*t).as_secs() < 60);
-    if window.len() >= BI_MODEL_MUTATIONS_PER_MINUTE {
+    if window.len() >= limit {
         return Err(format!(
-            "RateLimited: bi.model allows {} model mutations per minute",
-            BI_MODEL_MUTATIONS_PER_MINUTE
+            "RateLimited: bi.model allows {} model {}s per minute",
+            limit, bucket
         ));
     }
     window.push(now);
@@ -5069,9 +5333,24 @@ fn gateway_field<T: serde::de::DeserializeOwned>(
 /// see" boundary — not even names), `sources` (connection targets), and each
 /// table's `sourceId`. Precedent: the full overview is window-guarded to
 /// MAIN_AND_MODEL_EDITOR precisely because it carries those fields.
-fn sanitized_model_info(overview: &ModelOverview) -> Result<serde_json::Value, String> {
-    let full = serde_json::to_value(overview).map_err(|e| e.to_string())?;
-    let full = full.as_object().ok_or("overview did not serialize to an object")?;
+///
+/// THE ONE PROJECTION FOR EVERY SCRIPT SURFACE. `bi.query`/`bi.model` metadata
+/// has two holders — this worker-realm gateway and the notebook's
+/// `HostModelProvider` (bi/script_provider.rs) — and the same grant must not
+/// mean "more" on one of them. Generic over `Serialize` so both DTOs
+/// (`ModelOverview` here, `BiModelInfo` there) run the identical filter; a
+/// second copy would drift.
+///
+/// Default-deny by construction: keys absent from the whitelist are dropped, so
+/// a field ADDED to a BI DTO later stays invisible to script surfaces until
+/// someone whitelists it deliberately.
+pub(crate) fn sanitized_model_info<T: serde::Serialize>(
+    info: &T,
+) -> Result<serde_json::Value, String> {
+    let full = serde_json::to_value(info).map_err(|e| e.to_string())?;
+    let full = full
+        .as_object()
+        .ok_or("model info did not serialize to an object")?;
     const WHITELIST: &[&str] = &[
         "editable",
         "readOnlyReason",
@@ -5115,13 +5394,548 @@ fn sanitized_model_info(overview: &ModelOverview) -> Result<serde_json::Value, S
     Ok(serde_json::Value::Object(out))
 }
 
+/// A mutation's `ModelOverview`, projected for script eyes. See the module
+/// note above: the overview carries `securityRoles` and `sources`, so EVERY
+/// overview-returning dispatch arm must come through here.
+fn overview_value(overview: ModelOverview) -> Result<serde_json::Value, String> {
+    sanitized_model_info(&overview)
+}
+
+// --- Read-only diagnostics --------------------------------------------------
+
+/// The gateway's read actions. Rate-limited in their own bucket; each response
+/// is a whitelist projection, never a straight serialization of a host DTO.
+const GATEWAY_READ_ACTIONS: &[&str] = &[
+    "info",
+    "validateMeasure",
+    "validateContext",
+    "validateModel",
+    "dependencyGraph",
+    "measureLineage",
+    "dependents",
+];
+
+/// The model-object kinds `upsert`/`delete` may target — one arm each in the
+/// dispatch below, and the list QUOTED verbatim in the rejection message (the
+/// UI and the tests read that message, so the two must not drift). Mirrored
+/// advisorily by the frontend's `BI_MODEL_SCRIPTABLE_KINDS`.
+///
+/// DELIBERATELY ABSENT, and to stay absent: security roles (`role`), data
+/// sources/connections/credentials (`source`, `sourceBinding`, `connect`),
+/// per-table storage mode, and refresh policies. Those are the "who may see
+/// what" and "where the data comes from" boundaries; a consented script may
+/// author analysis and data-collection definitions, never move either boundary.
+const GATEWAY_MUTABLE_KINDS: &[&str] = &[
+    "measure",
+    "calcColumn",
+    "relationship",
+    "hierarchy",
+    "kpi",
+    "calcGroup",
+    "perspective",
+    "culture",
+    "scriptFunction",
+    "calculatedTable",
+    "tableVariable",
+    "context",
+    "contextColumn",
+    "writebackColumn",
+    "metadata",
+    "dateTable",
+    "extensionData",
+];
+
+/// Replacement text for any diagnostic message that would name a privileged
+/// object. The script still learns that validation FAILED — it just does not
+/// learn who may see what, or where the data comes from.
+const PRIVILEGED_DETAIL_REDACTED: &str =
+    "Validation failed inside a privileged model area (security roles or data sources). \
+     Details are not available to scripts.";
+
+/// Phrases that mark a message as describing a privileged area even when it
+/// names no object (e.g. a role with an empty name, or a source added after
+/// this list was written).
+const PRIVILEGED_MARKERS: &[&str] = &[
+    "security role",
+    "securityrole",
+    "role '",
+    "data source",
+    "source '",
+    "connection string",
+    "connection to ",
+];
+
+/// Identifiers a script must never learn through an error message: security
+/// role names, and data-source ids/display names/targets. Short or blank terms
+/// are dropped — matching on them would redact almost everything.
+fn privileged_terms(base: &bi_engine::DataModel) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for role in base.security_roles() {
+        terms.push(role.name().to_string());
+    }
+    for src in base.sources() {
+        terms.push(src.id.clone());
+        if let Some(n) = &src.display_name {
+            terms.push(n.clone());
+        }
+        terms.push(src.connection.host.clone());
+        terms.push(src.connection.database.clone());
+        if let Some(s) = &src.connection.default_schema {
+            terms.push(s.clone());
+        }
+    }
+    terms.retain(|t| t.trim().chars().count() >= 2);
+    terms
+}
+
+/// Validation messages come straight from the engine and are NOT written with
+/// a sandbox in mind: a whole-model rebuild can fail on a role predicate or a
+/// source binding and say so by name. Redact wholesale rather than trim — a
+/// partially scrubbed message is a puzzle, not a boundary.
+fn scrub_privileged(base: &bi_engine::DataModel, message: &str) -> String {
+    let lower = message.to_lowercase();
+    if PRIVILEGED_MARKERS.iter().any(|m| lower.contains(m)) {
+        return PRIVILEGED_DETAIL_REDACTED.to_string();
+    }
+    if privileged_terms(base)
+        .iter()
+        .any(|t| lower.contains(&t.to_lowercase()))
+    {
+        return PRIVILEGED_DETAIL_REDACTED.to_string();
+    }
+    message.to_string()
+}
+
+/// The connection's base model + its workbook calculated-measure overlay.
+/// Unlike `editable_base` this also serves PACKAGE-SUBSCRIBED models: reading
+/// a read-only model's lineage is legitimate, editing it is not.
+fn read_base_and_calculated(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) -> Result<(bi_engine::DataModel, Vec<super::types::CalculatedMeasure>), String> {
+    let conns = bi_state.connections.lock().map_err(|e| e.to_string())?;
+    let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+    Ok((
+        conn.base_model
+            .clone()
+            .ok_or("This connection has no model loaded")?,
+        conn.calculated_measures.clone(),
+    ))
+}
+
+/// `MeasureValidation` for script eyes: explicit re-projection (default-deny)
+/// with the message scrubbed of privileged identifiers.
+fn sanitized_validation(
+    base: Option<&bi_engine::DataModel>,
+    v: MeasureValidation,
+) -> serde_json::Value {
+    let message = match (v.message, base) {
+        (Some(m), Some(b)) => Some(scrub_privileged(b, &m)),
+        (m, _) => m,
+    };
+    serde_json::json!({ "ok": v.ok, "message": message, "position": v.position })
+}
+
+/// `DependencyGraphDto` for script eyes. Rebuilt field by field rather than
+/// serialized, so a field added to the DTO later (a source id on a node, say)
+/// stays invisible until someone whitelists it deliberately.
+fn sanitized_dependency_graph(graph: &DependencyGraphDto) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": graph
+            .nodes
+            .iter()
+            .map(|n| serde_json::json!({
+                "id": n.id,
+                "nodeType": n.node_type,
+                "name": n.name,
+                "table": n.table,
+                "expression": n.expression,
+            }))
+            .collect::<Vec<_>>(),
+        "edges": graph
+            .edges
+            .iter()
+            .map(|e| serde_json::json!({
+                "fromId": e.from_id,
+                "toId": e.to_id,
+                "edgeType": e.edge_type,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// `MeasureLineage` for script eyes (same default-deny re-projection).
+fn sanitized_measure_lineage(l: &MeasureLineage) -> serde_json::Value {
+    serde_json::json!({
+        "measures": l.measures,
+        "columns": l
+            .columns
+            .iter()
+            .map(|c| serde_json::json!({ "table": c.table, "column": c.column }))
+            .collect::<Vec<_>>(),
+        "contexts": l.contexts,
+        "tableVariables": l.table_variables,
+        "globals": l.globals,
+        "referencedBy": l.referenced_by,
+    })
+}
+
+/// "What breaks if I delete this?" — the pre-delete impact check, computed from
+/// the dependency graph's REVERSE edges plus the structural bindings a
+/// table-shaped object carries.
+///
+/// Security roles that filter the object's table are COUNTED, never named:
+/// a script needs to know that deleting the table breaks privileged objects,
+/// but role identity is exactly what `sanitized_model_info` withholds.
+fn gateway_dependents(
+    base: &bi_engine::DataModel,
+    calculated: &[super::types::CalculatedMeasure],
+    graph: &DependencyGraphDto,
+    kind: &str,
+    name: &str,
+    table: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let node_id = match kind {
+        "measure" => Some(format!("measure:{}", name)),
+        "calculatedTable" => Some(format!("global:{}", name)),
+        "calcColumn" => Some(format!(
+            "cc:{}.{}",
+            table.ok_or("dependents for a 'calcColumn' requires 'table'")?,
+            name
+        )),
+        "contextColumn" => Some(format!(
+            "ctxcol:{}.{}",
+            table.ok_or("dependents for a 'contextColumn' requires 'table'")?,
+            name
+        )),
+        "table" => None,
+        other => {
+            return Err(format!(
+                "dependents: unsupported kind '{}' (expected measure|calcColumn|contextColumn|\
+                 calculatedTable|table)",
+                other
+            ))
+        }
+    };
+
+    let mut dependents: Vec<serde_json::Value> = Vec::new();
+    if let Some(id) = &node_id {
+        let dependant_ids: HashSet<&String> = graph
+            .edges
+            .iter()
+            .filter(|e| &e.to_id == id)
+            .map(|e| &e.from_id)
+            .collect();
+        for n in &graph.nodes {
+            if dependant_ids.contains(&n.id) {
+                dependents.push(serde_json::json!({
+                    "id": n.id,
+                    "nodeType": n.node_type,
+                    "name": n.name,
+                    "table": n.table,
+                }));
+            }
+        }
+    }
+    // Workbook calculated measures are not model nodes, but a delete breaks
+    // them just the same — the impact check must show EVERYTHING.
+    if kind == "measure" {
+        for r in referrers_of(base, calculated, name) {
+            if r.ends_with("(workbook measure)") {
+                dependents.push(serde_json::json!({
+                    "id": format!("workbook:{}", r),
+                    "nodeType": "workbookMeasure",
+                    "name": r,
+                    "table": serde_json::Value::Null,
+                }));
+            }
+        }
+    }
+
+    let structural = if kind == "table" || kind == "calculatedTable" {
+        calculated_table_dependents(base, name)
+    } else {
+        CalculatedTableDependentsDto {
+            relationships: Vec::new(),
+            hierarchies: Vec::new(),
+            security_roles: Vec::new(),
+            table_variables: Vec::new(),
+        }
+    };
+
+    Ok(serde_json::json!({
+        "objectId": node_id,
+        "dependents": dependents,
+        "relationships": structural.relationships,
+        "hierarchies": structural.hierarchies,
+        "tableVariables": structural.table_variables,
+        "privilegedDependents": structural.security_roles.len(),
+    }))
+}
+
+/// Dispatch one READ action. Sync throughout (every read is an in-memory
+/// projection of the connection's base model), and every arm returns a
+/// sanitized value — there is no path here that serializes a host DTO whole.
+fn gateway_read(
+    bi_state: &State<'_, BiState>,
+    connection_id: ConnectionId,
+    action: &str,
+    p: &serde_json::Map<String, serde_json::Value>,
+    window: &tauri::Window,
+) -> Result<serde_json::Value, String> {
+    match action {
+        "info" => {
+            let (base, bindings, editable, read_only_reason) = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                let editable = conn.package_data_source_id.is_none();
+                (
+                    conn.base_model
+                        .clone()
+                        .ok_or("This connection has no model loaded")?,
+                    conn.bindings.clone(),
+                    editable,
+                    if editable {
+                        None
+                    } else {
+                        Some("Package-subscribed model".to_string())
+                    },
+                )
+            };
+            let overview = build_overview(&base, &bindings, editable, read_only_reason);
+            sanitized_model_info(&overview)
+        }
+        "validateMeasure" => {
+            let v = bi_model_validate_measure(
+                bi_state.clone(),
+                connection_id,
+                gateway_field(p, "originalName")?,
+                gateway_field(p, "name")?,
+                gateway_field(p, "formula")?,
+                window.clone(),
+            )?;
+            let base = read_base_and_calculated(bi_state, connection_id)
+                .ok()
+                .map(|(b, _)| b);
+            Ok(sanitized_validation(base.as_ref(), v))
+        }
+        "validateContext" => {
+            let v = bi_model_validate_context(
+                bi_state.clone(),
+                connection_id,
+                gateway_field(p, "originalName")?,
+                gateway_field(p, "name")?,
+                gateway_field(p, "expression")?,
+                window.clone(),
+            )?;
+            let base = read_base_and_calculated(bi_state, connection_id)
+                .ok()
+                .map(|(b, _)| b);
+            Ok(sanitized_validation(base.as_ref(), v))
+        }
+        "validateModel" => {
+            let issues = bi_model_validate(bi_state.clone(), connection_id, window.clone())?;
+            let (base, _) = read_base_and_calculated(bi_state, connection_id)?;
+            Ok(serde_json::Value::Array(
+                issues
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "level": i.level,
+                            "message": scrub_privileged(&base, &i.message),
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        "dependencyGraph" => {
+            let graph =
+                bi_model_dependency_graph(bi_state.clone(), connection_id, window.clone())?;
+            Ok(sanitized_dependency_graph(&graph))
+        }
+        "measureLineage" => {
+            let lineage = bi_model_measure_lineage(
+                bi_state.clone(),
+                connection_id,
+                gateway_field(p, "name")?,
+                window.clone(),
+            )?;
+            Ok(sanitized_measure_lineage(&lineage))
+        }
+        "dependents" => {
+            let kind: String = gateway_field(p, "kind")?;
+            let name: String = gateway_field(p, "name")?;
+            let table: Option<String> = gateway_field(p, "table")?;
+            let graph =
+                bi_model_dependency_graph(bi_state.clone(), connection_id, window.clone())?;
+            let (base, calculated) = read_base_and_calculated(bi_state, connection_id)?;
+            gateway_dependents(
+                &base,
+                &calculated,
+                &graph,
+                &kind,
+                &name,
+                table.as_deref(),
+            )
+        }
+        other => Err(format!("Unknown read action '{}'", other)),
+    }
+}
+
+/// Dispatch one BATCH action. `batchBegin` reuses the same `in_batch`
+/// interlock the trusted CLI uses (so a nested batch — script or human — is
+/// rejected at its source) and additionally records OWNERSHIP + a deadline, so
+/// only the opening script can close it and a crashed script cannot wedge the
+/// model. Closing is deliberately NOT rate-limited: refusing to close would
+/// strand the batch until its deadline and fold the user's next edits into it.
+async fn gateway_batch(
+    bi_state: &BiState,
+    file_state: &FileState,
+    connection_id: ConnectionId,
+    script_id: &str,
+    action: &str,
+) -> Result<serde_json::Value, String> {
+    // Never operate on a batch that has already forfeited its deadline: a
+    // stale `batchEnd` must not commit a dead transaction, and a dead batch
+    // must not block a fresh `batchBegin`.
+    reclaim_expired_script_batches(bi_state).await;
+
+    let key = model_key_of(bi_state, connection_id)?;
+    match action {
+        "batchBegin" => {
+            check_gateway_rate(script_id, RATE_BUCKET_MUTATION, BI_MODEL_MUTATIONS_PER_MINUTE)?;
+            // Clear read-only error before opening a transaction that could
+            // never commit.
+            let _ = editable_base(bi_state, connection_id)?;
+            begin_model_batch(bi_state, connection_id).map_err(|e| {
+                match script_batch_registry()
+                    .lock()
+                    .ok()
+                    .and_then(|r| r.get(&key).map(|b| b.script_id.clone()))
+                {
+                    Some(owner) => format!(
+                        "{} (opened by script '{}'; nested batches are not allowed)",
+                        e, owner
+                    ),
+                    None => e,
+                }
+            })?;
+            script_batch_registry()
+                .lock()
+                .map_err(|e| e.to_string())?
+                .insert(
+                    key,
+                    ScriptBatch {
+                        script_id: script_id.to_string(),
+                        connection_id,
+                        deadline: std::time::Instant::now()
+                            + std::time::Duration::from_secs(SCRIPT_BATCH_MAX_SECS),
+                        edits: 0,
+                    },
+                );
+            Ok(serde_json::json!({
+                "ok": true,
+                "expiresInSeconds": SCRIPT_BATCH_MAX_SECS,
+            }))
+        }
+        "batchEnd" | "batchCancel" => {
+            let owner = {
+                let reg = script_batch_registry().lock().map_err(|e| e.to_string())?;
+                reg.get(&key).map(|b| b.script_id.clone())
+            };
+            match owner {
+                Some(o) if o == script_id => {}
+                Some(o) => {
+                    return Err(format!(
+                        "This model's open batch belongs to script '{}' — only its owner may \
+                         end or cancel it.",
+                        o
+                    ))
+                }
+                None => {
+                    return Err(
+                        "No script model batch is open for this connection (it may have expired)"
+                            .to_string(),
+                    )
+                }
+            }
+            let batch = script_batch_registry()
+                .lock()
+                .map_err(|e| e.to_string())?
+                .remove(&key)
+                .ok_or("No script model batch is open for this connection")?;
+            if action == "batchEnd" {
+                end_model_batch(bi_state, connection_id, batch.edits > 0)?;
+                Ok(serde_json::json!({ "ok": true, "edits": batch.edits }))
+            } else {
+                rollback_model_batch(bi_state, &connection_id, Some(script_id.to_string())).await?;
+                *file_state.is_modified.lock().map_err(|e| e.to_string())? = true;
+                Ok(serde_json::json!({ "ok": true, "rolledBack": batch.edits }))
+            }
+        }
+        other => Err(format!("Unknown batch action '{}'", other)),
+    }
+}
+
+/// Count one mutation against the script's open batch (drives `had_edits` at
+/// `batchEnd`, and the reclaim log). No-op when the script has no batch open.
+fn note_batch_edit(bi_state: &BiState, connection_id: ConnectionId, script_id: &str) {
+    let Ok(key) = model_key_of(bi_state, connection_id) else {
+        return;
+    };
+    if let Ok(mut reg) = script_batch_registry().lock() {
+        if let Some(b) = reg.get_mut(&key) {
+            if b.script_id == script_id {
+                b.edits += 1;
+            }
+        }
+    }
+}
+
+/// Record one gateway call in the always-on capability audit trail (success
+/// AND failure), mirroring bi.query/bi.sql.
+fn audit_gateway(
+    app_state: &crate::AppState,
+    script_id: &str,
+    detail: &str,
+    result: &Result<serde_json::Value, String>,
+) {
+    match result {
+        Ok(_) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            script_id,
+            true,
+            Some(detail),
+            None,
+        ),
+        Err(e) => crate::net_commands::record_capability_call(
+            &app_state.audit_log,
+            "bi.model",
+            script_id,
+            false,
+            Some(detail),
+            Some(e),
+        ),
+    }
+}
+
 /// Multiplexed, consent-gated model gateway for sandboxed scripts and
-/// distributed extensions: `action: "upsert" | "delete" | "info"` over an
-/// allowed-kind set. Mirrors the `script_bi_sql` precedent: the frontend
-/// broker gates on the `bi.model` capability; this command re-checks the
-/// grant authoritatively, enforces the kind set server-side, rejects
-/// package-subscribed models, dispatches into the SAME command logic the
-/// Model Editor uses, and records the always-on audit entry.
+/// distributed extensions. Three action families over ONE command (the
+/// `generate_handler!` stack budget is tight, so diagnostics and batching are
+/// actions here, not new commands):
+///
+///   READ   `info` | `validateMeasure` | `validateContext` | `validateModel` |
+///          `dependencyGraph` | `measureLineage` | `dependents`
+///   BATCH  `batchBegin` | `batchEnd` | `batchCancel`
+///   WRITE  `upsert` | `delete` over the allowed-kind set
+///
+/// Mirrors the `script_bi_sql` precedent: the frontend broker gates on the
+/// `bi.model` capability; this command re-checks the grant authoritatively,
+/// enforces the kind set server-side, rejects package-subscribed models for
+/// writes, dispatches into the SAME command logic the Model Editor uses,
+/// projects every response through the `info` whitelist, and records the
+/// always-on audit entry.
 #[tauri::command]
 pub async fn script_bi_model(
     bi_state: State<'_, BiState>,
@@ -5140,7 +5954,7 @@ pub async fn script_bi_model(
 
     // Authoritative capability re-check (A3): the renderer may be compromised,
     // so the TS broker's gate is not sufficient.
-    if !cap_store.is_bi_granted(&script_id, "bi.model") {
+    if !cap_store.is_granted(&script_id, "bi.model") {
         crate::log_warn!(
             "SECURITY",
             "script_bi_model DENIED (bi.model not granted): script={}",
@@ -5157,55 +5971,69 @@ pub async fn script_bi_model(
         return Err("PermissionDenied: bi.model not granted for this script".to_string());
     }
 
-    // Read: the sanitized whitelist projection (never roles / connection targets).
-    if action == "info" {
-        let (base, bindings, editable, read_only_reason) = {
-            let conns = bi_state.connections.lock().unwrap();
-            let conn = conns.get(&connection_id).ok_or("Connection not found")?;
-            let editable = conn.package_data_source_id.is_none();
-            (
-                conn.base_model
-                    .clone()
-                    .ok_or("This connection has no model loaded")?,
-                conn.bindings.clone(),
-                editable,
-                if editable { None } else { Some("Package-subscribed model".to_string()) },
-            )
-        };
-        let overview = build_overview(&base, &bindings, editable, read_only_reason);
-        let info = sanitized_model_info(&overview)?;
-        crate::net_commands::record_capability_call(
-            &app_state.audit_log,
-            "bi.model",
+    let p = payload
+        .as_ref()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    // --- READ-ONLY DIAGNOSTICS ---------------------------------------------
+    // Reads answer "would this work?" and "what depends on this?" WITHOUT the
+    // mutate-and-parse-the-error dance a write-only gateway forces. They serve
+    // package-subscribed (read-only) models too, and every response is a
+    // whitelist projection — see GATEWAY_READ_ACTIONS / gateway_read.
+    if GATEWAY_READ_ACTIONS.contains(&action.as_str()) {
+        check_gateway_rate(&script_id, RATE_BUCKET_READ, BI_MODEL_READS_PER_MINUTE)?;
+        let result = gateway_read(&bi_state, connection_id, &action, &p, &window);
+        audit_gateway(
+            &app_state,
             &script_id,
-            true,
-            Some(&format!("info — connection {}", connection_id)),
-            None,
+            &format!("{} — connection {}", action, connection_id),
+            &result,
         );
-        return Ok(info);
+        return result;
+    }
+
+    // --- ATOMIC BATCHES ----------------------------------------------------
+    if action.starts_with("batch") {
+        let result =
+            gateway_batch(&bi_state, &file_state, connection_id, &script_id, &action).await;
+        audit_gateway(
+            &app_state,
+            &script_id,
+            &format!("{} — connection {}", action, connection_id),
+            &result,
+        );
+        return result;
     }
 
     // Mutations from here on.
     if action != "upsert" && action != "delete" {
         return Err(format!(
-            "Unknown action '{}' (expected upsert|delete|info)",
+            "Unknown action '{}' (expected upsert|delete|info|validateMeasure|validateContext|\
+             validateModel|dependencyGraph|measureLineage|dependents|batchBegin|batchEnd|\
+             batchCancel)",
             action
         ));
     }
     let kind = kind.ok_or("Mutations require a 'kind'")?;
-    check_gateway_rate(&script_id)?;
+    check_gateway_rate(&script_id, RATE_BUCKET_MUTATION, BI_MODEL_MUTATIONS_PER_MINUTE)?;
     // Clear read-only error before any dispatch (defense in depth: every
     // dispatched command re-checks through editable_base / apply_model_edit).
-    let _ = editable_base(&bi_state, connection_id.clone())?;
+    let _ = editable_base(&bi_state, connection_id)?;
+    // Count the edit against this script's open batch (if any) BEFORE dispatch:
+    // a failed edit still consumed the attempt, and `had_edits` only needs to
+    // know whether the batch is worth an undo entry.
+    note_batch_edit(&bi_state, connection_id, &script_id);
 
-    let p = payload
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
     let sid = script_id.clone();
     let audit_action = action.clone();
     let audit_kind = kind.clone();
-    let conn = connection_id.clone();
+    let conn = connection_id;
     let w = window.clone();
+    // The writeback-column upsert re-feeds the live writeback stores, so it
+    // needs AppState too. `State` is a cheap handle; clone it so the audit tail
+    // below still owns one.
+    let app_for_dispatch = app_state.clone();
 
     // Dispatch inside the attribution scope so apply_model_edit emits
     // bi:model-changed with source:"script" + this script's id. The kind set
@@ -5243,7 +6071,7 @@ pub async fn script_bi_model(
                 // measure refs that validate but break at refresh. A column
                 // that routes dynamic is subsequently addressed via the
                 // "contextColumn" kind.
-                ("calcColumn", "upsert") => serde_json::to_value(
+                ("calcColumn", "upsert") => overview_value(
                     bi_model_upsert_model_column(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5255,14 +6083,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("calcColumn", "delete") => serde_json::to_value(
+                ),
+                ("calcColumn", "delete") => overview_value(
                     bi_model_delete_calc_column(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("relationship", "upsert") => serde_json::to_value(
+                ),
+                ("relationship", "upsert") => overview_value(
                     bi_model_upsert_relationship(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5276,14 +6102,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("relationship", "delete") => serde_json::to_value(
+                ),
+                ("relationship", "delete") => overview_value(
                     bi_model_delete_relationship(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("hierarchy", "upsert") => serde_json::to_value(
+                ),
+                ("hierarchy", "upsert") => overview_value(
                     bi_model_upsert_hierarchy(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5293,13 +6117,11 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("hierarchy", "delete") => serde_json::to_value(
+                ),
+                ("hierarchy", "delete") => overview_value(
                     bi_model_delete_hierarchy(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("kpi", "upsert") => serde_json::to_value(
+                ),
+                ("kpi", "upsert") => overview_value(
                     bi_model_upsert_kpi(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5313,13 +6135,11 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("kpi", "delete") => serde_json::to_value(
+                ),
+                ("kpi", "delete") => overview_value(
                     bi_model_delete_kpi(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("calcGroup", "upsert") => serde_json::to_value(
+                ),
+                ("calcGroup", "upsert") => overview_value(
                     bi_model_upsert_calc_group(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5334,14 +6154,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("calcGroup", "delete") => serde_json::to_value(
+                ),
+                ("calcGroup", "delete") => overview_value(
                     bi_model_delete_calc_group(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("perspective", "upsert") => serde_json::to_value(
+                ),
+                ("perspective", "upsert") => overview_value(
                     bi_model_upsert_perspective(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5353,14 +6171,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("perspective", "delete") => serde_json::to_value(
+                ),
+                ("perspective", "delete") => overview_value(
                     bi_model_delete_perspective(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("culture", "upsert") => serde_json::to_value(
+                ),
+                ("culture", "upsert") => overview_value(
                     bi_model_upsert_culture(
                         bs, fs, conn,
                         gateway_field(&p, "originalLocale")?,
@@ -5374,13 +6190,11 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("culture", "delete") => serde_json::to_value(
+                ),
+                ("culture", "delete") => overview_value(
                     bi_model_delete_culture(bs, fs, conn, gateway_field(&p, "locale")?, w).await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("scriptFunction", "upsert") => serde_json::to_value(
+                ),
+                ("scriptFunction", "upsert") => overview_value(
                     bi_model_upsert_script_function(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5392,14 +6206,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("scriptFunction", "delete") => serde_json::to_value(
+                ),
+                ("scriptFunction", "delete") => overview_value(
                     bi_model_delete_script_function(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("calculatedTable", "upsert") => serde_json::to_value(
+                ),
+                ("calculatedTable", "upsert") => overview_value(
                     bi_model_upsert_global_variable(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5411,9 +6223,8 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("calculatedTable", "delete") => serde_json::to_value(
+                ),
+                ("calculatedTable", "delete") => overview_value(
                     bi_model_delete_global_variable(
                         bs, fs, conn,
                         gateway_field(&p, "name")?,
@@ -5421,9 +6232,8 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("tableVariable", "upsert") => serde_json::to_value(
+                ),
+                ("tableVariable", "upsert") => overview_value(
                     bi_model_upsert_table_variable(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5434,14 +6244,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("tableVariable", "delete") => serde_json::to_value(
+                ),
+                ("tableVariable", "delete") => overview_value(
                     bi_model_delete_table_variable(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("context", "upsert") => serde_json::to_value(
+                ),
+                ("context", "upsert") => overview_value(
                     bi_model_upsert_context(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5450,13 +6258,11 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("context", "delete") => serde_json::to_value(
+                ),
+                ("context", "delete") => overview_value(
                     bi_model_delete_context(bs, fs, conn, gateway_field(&p, "name")?, w).await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("contextColumn", "upsert") => serde_json::to_value(
+                ),
+                ("contextColumn", "upsert") => overview_value(
                     bi_model_upsert_context_column(
                         bs, fs, conn,
                         gateway_field(&p, "originalName")?,
@@ -5468,14 +6274,12 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("contextColumn", "delete") => serde_json::to_value(
+                ),
+                ("contextColumn", "delete") => overview_value(
                     bi_model_delete_context_column(bs, fs, conn, gateway_field(&p, "name")?, w)
                         .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("metadata", "upsert") => serde_json::to_value(
+                ),
+                ("metadata", "upsert") => overview_value(
                     bi_model_set_metadata(
                         bs, fs, conn,
                         gateway_field(&p, "name")?,
@@ -5485,12 +6289,10 @@ pub async fn script_bi_model(
                         w,
                     )
                     .await?,
-                )
-                .map_err(|e| e.to_string()),
-                ("dateTable", "upsert") => serde_json::to_value(
+                ),
+                ("dateTable", "upsert") => overview_value(
                     bi_model_set_date_table(bs, fs, conn, gateway_field(&p, "table")?, w).await?,
-                )
-                .map_err(|e| e.to_string()),
+                ),
                 ("extensionData", "upsert") => {
                     let key: String = gateway_field(&p, "key")?;
                     let value: serde_json::Value = p
@@ -5516,41 +6318,58 @@ pub async fn script_bi_model(
                     )
                     .await
                 }
+                // A script that can build a whole model must be able to build
+                // its DATA-COLLECTION schema too — the writeback columns are a
+                // model definition like any other, and the sanitized info
+                // projection already exposes them read-only. Constraints,
+                // projection modes and the allowed-editor list go through the
+                // very same validation the Model Editor's dialog uses.
+                ("writebackColumn", "upsert") => overview_value(
+                    bi_model_upsert_writeback_column(
+                        app_for_dispatch, bs, fs, conn,
+                        gateway_field(&p, "originalId")?,
+                        gateway_field(&p, "name")?,
+                        gateway_field(&p, "table")?,
+                        gateway_field(&p, "dataType")?,
+                        gateway_field::<Option<Vec<String>>>(&p, "keyColumns")?.unwrap_or_default(),
+                        gateway_field::<Option<String>>(&p, "kind")?.unwrap_or_default(),
+                        gateway_field::<Option<String>>(&p, "projectionMode")?.unwrap_or_default(),
+                        gateway_field(&p, "projectionExpression")?,
+                        gateway_field::<Option<bool>>(&p, "required")?.unwrap_or(false),
+                        gateway_field(&p, "min")?,
+                        gateway_field(&p, "max")?,
+                        gateway_field::<Option<Vec<String>>>(&p, "enumValues")?.unwrap_or_default(),
+                        gateway_field(&p, "maxLength")?,
+                        gateway_field(&p, "pattern")?,
+                        gateway_field::<Option<Vec<String>>>(&p, "allowedEditors")?
+                            .unwrap_or_default(),
+                        gateway_field::<Option<bool>>(&p, "exposeHistory")?.unwrap_or(false),
+                        w,
+                    )
+                    .await?,
+                ),
+                ("writebackColumn", "delete") => overview_value(
+                    bi_model_delete_writeback_column(bs, fs, conn, gateway_field(&p, "id")?, w)
+                        .await?,
+                ),
                 (other, act) => Err(format!(
-                    "Kind '{}' is not scriptable via bi.model (action '{}'). Security roles, \
-                     data sources/connections, storage modes and refresh policies stay \
-                     privileged.",
-                    other, act
+                    "Kind '{}' is not scriptable via bi.model (action '{}'). Scriptable kinds: \
+                     {}. Security roles, data sources/connections, storage modes and refresh \
+                     policies stay privileged.",
+                    other,
+                    act,
+                    GATEWAY_MUTABLE_KINDS.join(", ")
                 )),
             }
         })
         .await;
 
-    // Always-on audit (success + failure), mirroring bi.query/bi.sql.
-    match &result {
-        Ok(_) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
-            "bi.model",
-            &sid,
-            true,
-            Some(&format!(
-                "{} {} — connection {}",
-                audit_action, audit_kind, connection_id
-            )),
-            None,
-        ),
-        Err(e) => crate::net_commands::record_capability_call(
-            &app_state.audit_log,
-            "bi.model",
-            &sid,
-            false,
-            Some(&format!(
-                "{} {} — connection {}",
-                audit_action, audit_kind, connection_id
-            )),
-            Some(e),
-        ),
-    }
+    audit_gateway(
+        &app_state,
+        &sid,
+        &format!("{} {} — connection {}", audit_action, audit_kind, connection_id),
+        &result,
+    );
     result
 }
 
@@ -7602,5 +8421,765 @@ mod tests {
             assert!(stacks.redo.is_empty());
             store.remove(&key); // cleanup
         }
+    }
+
+    // =======================================================================
+    // Script gateway: read-only diagnostics, atomic batches, writebackColumn
+    // =======================================================================
+
+    /// A model that DOES carry both privileged areas — an RLS role (static and
+    /// dynamic) and a persisted data source with a real target — i.e. exactly
+    /// what no script surface may ever read.
+    fn model_with_privileged_areas() -> DataModel {
+        DataModel::builder()
+            .add_source(bi_engine::PersistedSource {
+                id: "src-finance".to_string(),
+                kind: bi_engine::SourceKind::InMemory,
+                connection: bi_engine::PersistedConnection {
+                    host: "sql-prod.internal".to_string(),
+                    port: Some(5432),
+                    database: "FinanceWarehouse".to_string(),
+                    default_schema: Some("reporting".to_string()),
+                    trust_server_certificate: false,
+                    ssl_mode: None,
+                },
+                preferred_auth: bi_engine::PersistedAuthKind::Integrated,
+                display_name: Some("Finance Warehouse".to_string()),
+            })
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("country", DataType::String),
+                        Column::new("amount", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .add_security_role(bi_engine::SecurityRole::new("EMEA Managers").with_filter(
+                "Sales",
+                "country",
+                bi_engine::ComparisonOp::Equal,
+                "SE",
+            ))
+            .add_security_role(bi_engine::SecurityRole::new("Own Rows Only").with_filters(vec![
+                    bi_engine::FilterPredicate::username(
+                        "Sales",
+                        "country",
+                        bi_engine::ComparisonOp::Equal,
+                    ),
+                ]))
+            .build()
+            .unwrap()
+    }
+
+    /// A model shaped for writeback: an integer key column on an in-memory
+    /// host table (float keys and missing keys are rejected by the engine).
+    fn writeback_host_model() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "dim_customer",
+                    vec![
+                        Column::new("ID", DataType::Int64),
+                        Column::new("Name", DataType::String),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .build()
+            .unwrap()
+    }
+
+    /// A BiState carrying ONE connection with a live engine over `base`, keyed
+    /// by a caller-supplied model key. The key must be unique per test: the
+    /// undo store and the script-batch registry are process-global.
+    fn test_bi_state(key_path: &str, base: &DataModel) -> (BiState, ConnectionId) {
+        let model_key = Some(ModelKey::from_model_path(key_path));
+        {
+            // Isolate from anything a previous run left behind.
+            let mut store = model_undo_store().lock().unwrap();
+            store.remove(&model_key);
+            let mut reg = script_batch_registry().lock().unwrap();
+            reg.remove(&model_key);
+        }
+        let id = ConnectionId::from_bytes(identity::generate_uuid_v7());
+        let engine = bi_engine::Engine::new(base.clone());
+        let conn = super::super::types::Connection {
+            id,
+            name: "test".to_string(),
+            description: String::new(),
+            connection_type: super::super::types::ConnectionType::PostgreSQL,
+            connection_string: String::new(),
+            server: String::new(),
+            database: String::new(),
+            preferred_auth: "Integrated".to_string(),
+            model_path: Some(key_path.to_string()),
+            engine: Some(std::sync::Arc::new(tokio::sync::Mutex::new(engine))),
+            model_key,
+            connector_index: None,
+            bindings: Vec::new(),
+            last_refreshed: None,
+            created_at: String::new(),
+            is_connected: false,
+            active_queries: HashMap::new(),
+            package_data_source_id: None,
+            active_role: None,
+            base_model: Some(base.clone()),
+            calculated_measures: Vec::new(),
+        };
+        let state = BiState::new();
+        state.connections.lock().unwrap().insert(id, conn);
+        (state, id)
+    }
+
+    fn undo_depth(bi_state: &BiState, connection_id: ConnectionId) -> usize {
+        let key = model_key_of(bi_state, connection_id).unwrap();
+        let mut store = model_undo_store().lock().unwrap();
+        store.entry(key).or_default().undo.len()
+    }
+
+    fn in_batch(bi_state: &BiState, connection_id: ConnectionId) -> bool {
+        let key = model_key_of(bi_state, connection_id).unwrap();
+        let mut store = model_undo_store().lock().unwrap();
+        store.entry(key).or_default().in_batch
+    }
+
+    /// Add a measure through the real mutation funnel (what a gateway `upsert`
+    /// ultimately calls).
+    async fn add_measure(bi_state: &BiState, connection_id: ConnectionId, name: &'static str) {
+        apply_model_edit(bi_state, connection_id, move |base, _| {
+            let m = build_measure(name, "SUM(Sales[amount])", None, None, None, None)?;
+            upsert_measure_model(base, None, m, None)
+        })
+        .await
+        .unwrap();
+    }
+
+    // --- Sanitization ------------------------------------------------------
+
+    /// THE leak this wave closes: mutation commands return the FULL overview,
+    /// so before `overview_value` a script could read the RLS roles and the
+    /// connection target straight out of any upsert response — exactly what
+    /// `action: "info"` refuses to hand it.
+    #[test]
+    fn mutation_responses_are_projected_like_info() {
+        let base = model_with_privileged_areas();
+        let overview = build_overview(&base, &[], true, None);
+
+        let raw = serde_json::to_string(&overview).unwrap();
+        assert!(raw.contains("EMEA Managers") && raw.contains("sql-prod.internal"));
+
+        let projected = overview_value(overview).unwrap();
+        let text = serde_json::to_string(&projected).unwrap();
+        for leaked in [
+            "securityRoles",
+            "EMEA Managers",
+            "Own Rows Only",
+            "sources",
+            "src-finance",
+            "sql-prod.internal",
+            "FinanceWarehouse",
+            "Finance Warehouse",
+        ] {
+            assert!(!text.contains(leaked), "mutation response leaked '{}'", leaked);
+        }
+        // Still useful: the analysis metadata a script legitimately needs.
+        assert_eq!(projected["measures"][0]["name"], "Revenue");
+        assert_eq!(projected["tables"][0]["name"], "Sales");
+        assert!(projected.as_object().unwrap().contains_key("writebackColumns"));
+    }
+
+    /// Error TEXT is the other leak channel: engine validation happily names
+    /// the role or source it choked on.
+    #[test]
+    fn validation_messages_are_scrubbed_of_privileged_identifiers() {
+        let base = model_with_privileged_areas();
+
+        for privileged in [
+            "Role 'EMEA Managers' filters an unknown column",
+            "Own Rows Only has no table filters",
+            "Table Sales binds to source src-finance which is missing",
+            "Cannot reach sql-prod.internal",
+            "database FinanceWarehouse is offline",
+            // Marker phrases catch a message that names nothing concrete.
+            "A security role references a dropped column",
+            "data source binding is invalid",
+        ] {
+            assert_eq!(
+                scrub_privileged(&base, privileged),
+                PRIVILEGED_DETAIL_REDACTED,
+                "not scrubbed: {}",
+                privileged
+            );
+        }
+
+        // An ordinary authoring error survives verbatim — the whole point of
+        // the diagnostics is that the script can act on it.
+        let ordinary = "Unknown column 'Sales[amont]' in measure 'Revenue'";
+        assert_eq!(scrub_privileged(&base, ordinary), ordinary);
+    }
+
+    /// A model with no roles and no sources must not start redacting ordinary
+    /// messages (empty/short terms are dropped from the match list).
+    #[test]
+    fn scrubbing_does_not_fire_on_a_plain_model() {
+        let plain = base_model();
+        assert!(privileged_terms(&plain).is_empty());
+        let msg = "Measure 'Orders' already exists";
+        assert_eq!(scrub_privileged(&plain, msg), msg);
+    }
+
+    #[test]
+    fn sanitized_validation_is_a_closed_shape() {
+        let base = model_with_privileged_areas();
+        let v = MeasureValidation {
+            ok: false,
+            message: Some("Role 'EMEA Managers' is broken".to_string()),
+            position: Some(7),
+        };
+        let out = sanitized_validation(Some(&base), v);
+        let obj = out.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["message", "ok", "position"]);
+        assert_eq!(obj["message"], PRIVILEGED_DETAIL_REDACTED);
+        assert_eq!(obj["position"], 7);
+        assert_eq!(obj["ok"], false);
+    }
+
+    #[test]
+    fn sanitized_graph_and_lineage_are_whitelists() {
+        let graph = DependencyGraphDto {
+            nodes: vec![DependencyNodeDto {
+                id: "measure:Revenue".to_string(),
+                node_type: "measure".to_string(),
+                name: "Revenue".to_string(),
+                table: Some("Sales".to_string()),
+                expression: Some("SUM(Sales[amount])".to_string()),
+            }],
+            edges: vec![DependencyEdgeDto {
+                from_id: "measure:Boosted".to_string(),
+                to_id: "measure:Revenue".to_string(),
+                edge_type: "measure".to_string(),
+            }],
+        };
+        let g = sanitized_dependency_graph(&graph);
+        let mut node_keys: Vec<&str> = g["nodes"][0].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        node_keys.sort();
+        assert_eq!(node_keys, vec!["expression", "id", "name", "nodeType", "table"]);
+        let mut edge_keys: Vec<&str> = g["edges"][0].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        edge_keys.sort();
+        assert_eq!(edge_keys, vec!["edgeType", "fromId", "toId"]);
+
+        let lineage = MeasureLineage {
+            measures: vec!["Revenue".to_string()],
+            columns: vec![LineageColumn { table: "Sales".to_string(), column: "amount".to_string() }],
+            contexts: vec![],
+            table_variables: vec![],
+            globals: vec![],
+            referenced_by: vec!["Boosted".to_string()],
+        };
+        let l = sanitized_measure_lineage(&lineage);
+        let mut keys: Vec<&str> = l.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["columns", "contexts", "globals", "measures", "referencedBy", "tableVariables"]
+        );
+        assert_eq!(l["referencedBy"][0], "Boosted");
+    }
+
+    // --- dependents (pre-delete impact) ------------------------------------
+
+    #[test]
+    fn dependents_reports_reverse_edges_and_workbook_measures() {
+        let base = base_model();
+        let dep = build_measure("Boosted", "[Revenue] * 2", None, None, None, None).unwrap();
+        let base = upsert_measure_model(&base, None, dep, None).unwrap();
+        let calculated = vec![super::super::types::CalculatedMeasure {
+            name: "Workbook Margin".to_string(),
+            expression: "[Revenue] / 2".to_string(),
+        }];
+
+        // Build the graph the same way the read action does.
+        let graph = {
+            let measure_names: HashSet<String> =
+                base.measures().iter().map(|m| m.name().to_string()).collect();
+            let mut edges = Vec::new();
+            let mut nodes = Vec::new();
+            for m in base.measures() {
+                let id = format!("measure:{}", m.name());
+                let deps = bi_engine::extract_dependencies(m.expression(), &measure_names, &HashSet::new());
+                for r in deps.measures {
+                    edges.push(DependencyEdgeDto {
+                        from_id: id.clone(),
+                        to_id: format!("measure:{}", r),
+                        edge_type: "measure".to_string(),
+                    });
+                }
+                nodes.push(DependencyNodeDto {
+                    id,
+                    node_type: "measure".to_string(),
+                    name: m.name().to_string(),
+                    table: Some(m.table().to_string()),
+                    expression: None,
+                });
+            }
+            DependencyGraphDto { nodes, edges }
+        };
+
+        let out =
+            gateway_dependents(&base, &calculated, &graph, "measure", "Revenue", None).unwrap();
+        assert_eq!(out["objectId"], "measure:Revenue");
+        let names: Vec<String> = out["dependents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "Boosted"), "got {:?}", names);
+        assert!(
+            names.iter().any(|n| n.starts_with("Workbook Margin")),
+            "workbook measures break on delete too; got {:?}",
+            names
+        );
+        assert_eq!(out["privilegedDependents"], 0);
+    }
+
+    /// Roles that filter the table are COUNTED so a script can warn before a
+    /// destructive delete — and never named.
+    #[test]
+    fn dependents_counts_roles_without_naming_them() {
+        let base = model_with_privileged_areas();
+        let graph = DependencyGraphDto { nodes: vec![], edges: vec![] };
+        let out = gateway_dependents(&base, &[], &graph, "table", "Sales", None).unwrap();
+        assert_eq!(out["privilegedDependents"], 2);
+        let text = serde_json::to_string(&out).unwrap();
+        for leaked in ["EMEA Managers", "Own Rows Only", "securityRoles"] {
+            assert!(!text.contains(leaked), "dependents leaked '{}': {}", leaked, text);
+        }
+    }
+
+    #[test]
+    fn dependents_rejects_unknown_kinds_and_requires_a_table() {
+        let base = base_model();
+        let graph = DependencyGraphDto { nodes: vec![], edges: vec![] };
+        let err = gateway_dependents(&base, &[], &graph, "role", "EMEA", None).unwrap_err();
+        assert!(err.contains("unsupported kind 'role'"), "got: {}", err);
+        let err = gateway_dependents(&base, &[], &graph, "calcColumn", "Margin", None).unwrap_err();
+        assert!(err.contains("requires 'table'"), "got: {}", err);
+        assert!(
+            gateway_dependents(&base, &[], &graph, "calcColumn", "Margin", Some("Sales")).is_ok()
+        );
+    }
+
+    // --- Action + kind sets (quoted in the UI and in the error message) -----
+
+    #[test]
+    fn read_actions_and_mutable_kinds_are_the_documented_sets() {
+        for a in [
+            "info",
+            "validateMeasure",
+            "validateContext",
+            "validateModel",
+            "dependencyGraph",
+            "measureLineage",
+            "dependents",
+        ] {
+            assert!(GATEWAY_READ_ACTIONS.contains(&a), "missing read action {}", a);
+        }
+        assert_eq!(GATEWAY_READ_ACTIONS.len(), 7);
+
+        // The new kind is dispatchable...
+        assert!(GATEWAY_MUTABLE_KINDS.contains(&"writebackColumn"));
+        // ...and the deliberate exclusions stay excluded.
+        for forbidden in [
+            "role",
+            "securityRole",
+            "source",
+            "sourceBinding",
+            "storageMode",
+            "tableRefresh",
+            "connect",
+        ] {
+            assert!(
+                !GATEWAY_MUTABLE_KINDS.contains(&forbidden),
+                "'{}' must NOT be scriptable",
+                forbidden
+            );
+        }
+        // A read action can never be mistaken for a mutable kind.
+        for a in GATEWAY_READ_ACTIONS {
+            assert!(!GATEWAY_MUTABLE_KINDS.contains(a));
+        }
+    }
+
+    // --- Rate limiting -----------------------------------------------------
+
+    #[test]
+    fn read_and_mutation_rate_buckets_are_independent() {
+        let sid = "unit-test-rate-7c21";
+        for i in 0..BI_MODEL_MUTATIONS_PER_MINUTE {
+            check_gateway_rate(sid, RATE_BUCKET_MUTATION, BI_MODEL_MUTATIONS_PER_MINUTE)
+                .unwrap_or_else(|e| panic!("mutation {} rejected: {}", i, e));
+        }
+        let err = check_gateway_rate(sid, RATE_BUCKET_MUTATION, BI_MODEL_MUTATIONS_PER_MINUTE)
+            .unwrap_err();
+        assert!(err.starts_with("RateLimited:"), "got: {}", err);
+        assert!(err.contains("30 model mutations per minute"), "got: {}", err);
+
+        // A spent mutation budget must not block the diagnostics that would
+        // have told the script why its edit failed.
+        check_gateway_rate(sid, RATE_BUCKET_READ, BI_MODEL_READS_PER_MINUTE).unwrap();
+        // ...and buckets are per-script.
+        check_gateway_rate(
+            "unit-test-rate-other-7c21",
+            RATE_BUCKET_MUTATION,
+            BI_MODEL_MUTATIONS_PER_MINUTE,
+        )
+        .unwrap();
+    }
+
+    // --- Atomic batches ----------------------------------------------------
+
+    #[tokio::test]
+    async fn script_batch_collapses_many_edits_into_one_undo_entry() {
+        let (bi, conn) = test_bi_state("unit-test-batch-atomic", &base_model());
+        let file = FileState::default();
+
+        // Without a batch: one undo entry per edit.
+        add_measure(&bi, conn, "Solo").await;
+        assert_eq!(undo_depth(&bi, conn), 1);
+
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        assert!(in_batch(&bi, conn));
+        for m in ["A", "B", "C"] {
+            // What the gateway's mutation path does: count the edit, then edit.
+            note_batch_edit(&bi, conn, "script:a");
+            add_measure(&bi, conn, m).await;
+        }
+        let done = gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .unwrap();
+        assert_eq!(done["edits"], 3);
+        assert!(!in_batch(&bi, conn));
+
+        // 1 (solo) + 1 (the whole batch) — NOT 4.
+        assert_eq!(undo_depth(&bi, conn), 2);
+        let base = read_base_and_calculated(&bi, conn).unwrap().0;
+        for m in ["Solo", "A", "B", "C"] {
+            assert!(base.measures().iter().any(|x| x.name() == m));
+        }
+
+        // An EMPTY batch leaves no undo entry at all — Undo must never be a
+        // visible no-op just because a script opened a batch it did not use.
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        let done = gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .unwrap();
+        assert_eq!(done["edits"], 0);
+        assert_eq!(undo_depth(&bi, conn), 2);
+    }
+
+    /// Only the OWNING script's edits count toward its batch.
+    #[tokio::test]
+    async fn batch_edit_counting_is_per_owner() {
+        let (bi, conn) = test_bi_state("unit-test-batch-counting", &base_model());
+        let file = FileState::default();
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        note_batch_edit(&bi, conn, "script:a");
+        note_batch_edit(&bi, conn, "script:b");
+        note_batch_edit(&bi, conn, "script:a");
+        let done = gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .unwrap();
+        assert_eq!(done["edits"], 2);
+    }
+
+    #[tokio::test]
+    async fn nested_script_batches_are_rejected() {
+        let (bi, conn) = test_bi_state("unit-test-batch-nested", &base_model());
+        let file = FileState::default();
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        let err = gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap_err();
+        assert!(err.contains("already in progress"), "got: {}", err);
+        assert!(err.contains("nested batches are not allowed"), "got: {}", err);
+        // A DIFFERENT script cannot open one either, and cannot close this one.
+        let err = gateway_batch(&bi, &file, conn, "script:b", "batchBegin")
+            .await
+            .unwrap_err();
+        assert!(err.contains("script:a"), "got: {}", err);
+        let err = gateway_batch(&bi, &file, conn, "script:b", "batchCancel")
+            .await
+            .unwrap_err();
+        assert!(err.contains("only its owner"), "got: {}", err);
+
+        gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .unwrap();
+        // Closing twice is an error, not a silent no-op.
+        assert!(gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_cancel_rolls_back_every_edit_in_the_batch() {
+        let (bi, conn) = test_bi_state("unit-test-batch-cancel", &base_model());
+        let file = FileState::default();
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        add_measure(&bi, conn, "Doomed1").await;
+        add_measure(&bi, conn, "Doomed2").await;
+        gateway_batch(&bi, &file, conn, "script:a", "batchCancel")
+            .await
+            .unwrap();
+
+        let base = read_base_and_calculated(&bi, conn).unwrap().0;
+        assert!(base.measures().iter().all(|m| m.name() != "Doomed1"));
+        assert!(base.measures().iter().all(|m| m.name() != "Doomed2"));
+        assert!(!in_batch(&bi, conn));
+        assert_eq!(undo_depth(&bi, conn), 0, "cancel consumes its own snapshot");
+    }
+
+    /// THE CRASH PATH: a script opens a batch and never comes back. Left alone
+    /// the model is wedged — `in_batch` suppresses every later undo snapshot
+    /// and the Model Editor's own batch_begin fails. The deadline plus the
+    /// reclaim at the apply_model_edit choke point must heal it on the very
+    /// next edit, rolling the dead transaction back.
+    #[tokio::test]
+    async fn an_abandoned_script_batch_is_reclaimed_and_rolled_back() {
+        let (bi, conn) = test_bi_state("unit-test-batch-crash", &base_model());
+        let file = FileState::default();
+        let key = model_key_of(&bi, conn).unwrap();
+
+        gateway_batch(&bi, &file, conn, "script:zombie", "batchBegin")
+            .await
+            .unwrap();
+        add_measure(&bi, conn, "HalfDone").await;
+        assert!(in_batch(&bi, conn));
+
+        // The script dies here. Fast-forward past the deadline.
+        {
+            let mut reg = script_batch_registry().lock().unwrap();
+            let b = reg.get_mut(&key).unwrap();
+            b.deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+
+        // The user's next edit heals the model AND rolls the batch back.
+        add_measure(&bi, conn, "UserEdit").await;
+
+        assert!(!in_batch(&bi, conn), "the wedge must be cleared");
+        assert!(
+            script_batch_registry().lock().unwrap().get(&key).is_none(),
+            "the dead batch must be forgotten"
+        );
+        let base = read_base_and_calculated(&bi, conn).unwrap().0;
+        assert!(
+            base.measures().iter().all(|m| m.name() != "HalfDone"),
+            "a half-finished transaction is rolled back, not committed"
+        );
+        assert!(base.measures().iter().any(|m| m.name() == "UserEdit"));
+        // The user's edit got its own undo entry, i.e. undo works again.
+        assert_eq!(undo_depth(&bi, conn), 1);
+
+        // And the owning script can no longer end a batch that no longer exists.
+        let err = gateway_batch(&bi, &file, conn, "script:zombie", "batchEnd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("may have expired"), "got: {}", err);
+    }
+
+    /// A live script batch must not be closed out from under the script by the
+    /// trusted UI — but the block is bounded by the same deadline.
+    #[tokio::test]
+    async fn a_live_script_batch_blocks_the_trusted_close_paths() {
+        let (bi, conn) = test_bi_state("unit-test-batch-ownership", &base_model());
+        let file = FileState::default();
+        gateway_batch(&bi, &file, conn, "script:a", "batchBegin")
+            .await
+            .unwrap();
+        let err = guard_no_live_script_batch(&bi, conn).unwrap_err();
+        assert!(err.contains("script:a"), "got: {}", err);
+        assert!(err.contains(&SCRIPT_BATCH_MAX_SECS.to_string()), "got: {}", err);
+
+        gateway_batch(&bi, &file, conn, "script:a", "batchEnd")
+            .await
+            .unwrap();
+        guard_no_live_script_batch(&bi, conn).unwrap();
+    }
+
+    /// Opening a batch costs a mutation token, and so does every edit inside
+    /// it: batching buys ATOMICITY, never extra budget.
+    #[tokio::test]
+    async fn batch_begin_spends_a_mutation_token() {
+        let (bi, conn) = test_bi_state("unit-test-batch-rate", &base_model());
+        let file = FileState::default();
+        let sid = "unit-test-batch-rate-script";
+        for _ in 0..BI_MODEL_MUTATIONS_PER_MINUTE {
+            check_gateway_rate(sid, RATE_BUCKET_MUTATION, BI_MODEL_MUTATIONS_PER_MINUTE).unwrap();
+        }
+        let err = gateway_batch(&bi, &file, conn, sid, "batchBegin")
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("RateLimited:"), "got: {}", err);
+        // Closing is deliberately free — a rate-limited close would strand the
+        // batch — but there is nothing open to close here.
+        assert!(gateway_batch(&bi, &file, conn, sid, "batchEnd").await.is_err());
+    }
+
+    // --- writebackColumn ---------------------------------------------------
+
+    /// Round-trip through the SAME parser + model edit the gateway's
+    /// `writebackColumn` arm dispatches into: a scripted data-collection
+    /// schema is constrained exactly like a hand-authored one.
+    #[test]
+    fn writeback_column_round_trips_through_the_shared_model_edit() {
+        let base = writeback_host_model();
+        let wb = build_writeback_column(
+            "wb-forecast-1".to_string(),
+            "  Forecast  ",
+            "dim_customer",
+            "Float64",
+            vec!["ID".to_string()],
+            "history",
+            "latest",
+            None,
+            true,
+            Some(0.0),
+            Some(1000.0),
+            vec!["  ".to_string(), "high".to_string()],
+            Some(32),
+            Some("  ".to_string()),
+            vec!["alice@example.com".to_string(), "".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(wb.name(), "Forecast", "input is trimmed");
+
+        let edited = upsert_writeback_column_model(&base, None, wb).unwrap();
+        assert_eq!(edited.writeback_columns().len(), 1);
+        let stored = &edited.writeback_columns()[0];
+        assert_eq!(stored.id(), "wb-forecast-1");
+        let constraints = stored.constraints().expect("constraints were set");
+        assert_eq!(constraints.enum_values, vec!["high".to_string()]);
+        assert_eq!(constraints.pattern, None, "blank pattern is dropped");
+        assert_eq!(stored.allowed_editors(), ["alice@example.com"]);
+        // The engine synthesized the stores at validate.
+        assert!(edited.table("__wb_wbforecast1_hist").is_ok());
+
+        // It shows up in the SANITIZED info projection, read-only.
+        let projected = overview_value(build_overview(&edited, &[], true, None)).unwrap();
+        assert_eq!(projected["writebackColumns"][0]["name"], "Forecast");
+
+        // Update in place by id, then delete.
+        let wb2 = build_writeback_column(
+            "wb-forecast-1".to_string(),
+            "Forecast",
+            "dim_customer",
+            "Float64",
+            vec!["ID".to_string()],
+            "masterData",
+            "blank",
+            None,
+            false,
+            None,
+            None,
+            vec![],
+            None,
+            None,
+            vec![],
+            false,
+        )
+        .unwrap();
+        let edited = upsert_writeback_column_model(&edited, Some("wb-forecast-1"), wb2).unwrap();
+        assert_eq!(edited.writeback_columns().len(), 1, "upsert replaces, not appends");
+
+        let cleared = delete_writeback_column_model(&edited, "wb-forecast-1").unwrap();
+        assert!(cleared.writeback_columns().is_empty());
+        assert!(cleared.table("__wb_wbforecast1_hist").is_err());
+        assert!(delete_writeback_column_model(&cleared, "wb-forecast-1").is_err());
+    }
+
+    /// The payload is not trusted: bad enum-ish fields are rejected by name,
+    /// not silently coerced into a default.
+    #[test]
+    fn writeback_column_input_is_validated() {
+        let call = |name: &str, dt: &str, kind: &str, mode: &str, expr: Option<&str>| {
+            build_writeback_column(
+                "wb-x".to_string(),
+                name,
+                "dim_customer",
+                dt,
+                vec!["ID".to_string()],
+                kind,
+                mode,
+                expr,
+                false,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+                vec![],
+                false,
+            )
+        };
+        assert!(call("   ", "Float64", "history", "latest", None)
+            .unwrap_err()
+            .contains("cannot be empty"));
+        assert!(call("F", "Decimal", "history", "latest", None)
+            .unwrap_err()
+            .contains("Unsupported data type"));
+        assert!(call("F", "Float64", "audit", "latest", None)
+            .unwrap_err()
+            .contains("Unknown writeback column kind"));
+        assert!(call("F", "Float64", "history", "sideways", None)
+            .unwrap_err()
+            .contains("Unknown projection mode"));
+        assert!(call("F", "Float64", "history", "expression", None)
+            .unwrap_err()
+            .contains("needs an expression"));
+        assert!(call("F", "Float64", "history", "expression", Some("SUM("))
+            .unwrap_err()
+            .contains("does not parse"));
+        assert!(call("F", "Float64", "history", "expression", Some("MAX(history[value])")).is_ok());
+
+        // A key column the host table does not have fails at model validate.
+        let bad = build_writeback_column(
+            "wb-y".to_string(),
+            "F",
+            "dim_customer",
+            "Float64",
+            vec!["NoSuchColumn".to_string()],
+            "history",
+            "latest",
+            None,
+            false,
+            None,
+            None,
+            vec![],
+            None,
+            None,
+            vec![],
+            false,
+        )
+        .unwrap();
+        assert!(upsert_writeback_column_model(&writeback_host_model(), None, bad).is_err());
     }
 }

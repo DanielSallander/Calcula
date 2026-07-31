@@ -12,6 +12,23 @@ export const PROTOCOL_VERSION = 1;
 // Mount
 // ============================================================================
 
+/**
+ * Where a DISTRIBUTED script came from, mirrored read-only into
+ * `context.package`. Host-supplied at mount from the authoritative script
+ * definition — never from anything the script sends — so a package-aware script
+ * (one that branches on "which report am I shipped in, at which version") cannot
+ * lie about its own provenance to another script it calls.
+ *
+ * Absent for locally authored scripts; `context.package` is then `null`.
+ */
+export interface MountPackageInfo {
+  name: string;
+  /** Resolved semver of the package version this script was pulled from. Null
+   *  for a package pulled before versions were recorded on scripts. */
+  version: string | null;
+  provenance: "distributed";
+}
+
 export interface MountSpec {
   protocolVersion: number;
   scriptId: string;
@@ -25,6 +42,8 @@ export interface MountSpec {
   source: string;
   /** Script display name (console prefixes, error reporting). */
   scriptName: string;
+  /** Set for distributed scripts only — seeds the read-only `context.package`. */
+  packageInfo?: MountPackageInfo;
   /** Mirror seeds for sync getters (workbook/shape/panel props, slicer selection). */
   snapshot: {
     properties?: Record<string, unknown>;
@@ -129,13 +148,46 @@ export interface RpcErrorShape {
 
 /** Worker-side safety timeout for any pending call (ms). */
 export const CALL_TIMEOUT_MS = 30_000;
-/** Host deadlines by method class (ms): read 10s, mutate 30s, net 120s. */
+
+/**
+ * Deadline for a call that WAITS ON A HUMAN (the "ui" method class: the
+ * ui.dialog family). Every other deadline in this file bounds machine work, so
+ * 30s is generous; a modal a user is reading routinely outlives that, and the
+ * 30s timer would abandon the call while the dialog is still on screen — the
+ * script would see a spurious Timeout and the user's eventual answer would land
+ * nowhere. Five minutes is long enough to read and type, short enough that a
+ * forgotten dialog still frees the script (the host resolves it as DISMISSED —
+ * a "ui" call never hangs and never rejects on the deadline).
+ */
+export const UI_DIALOG_DEADLINE_MS = 300_000;
+
+/** Host deadlines by method class (ms): read 10s, mutate 30s, net 120s,
+ *  ui = however long a person takes (UI_DIALOG_DEADLINE_MS). */
 export const CLASS_DEADLINES_MS: Record<string, number> = {
   read: 10_000,
   mutate: 30_000,
   emit: 10_000,
   net: 120_000,
+  ui: UI_DIALOG_DEADLINE_MS,
 };
+
+/**
+ * Per-method worker-side deadline overrides. The worker cannot import the
+ * ALLOWLIST (policy must not ride into the sandbox bundle), so the handful of
+ * methods whose class deadline differs from CALL_TIMEOUT_MS are named here.
+ * Pinned against the allowlist's classes by the protocol tests.
+ */
+export const METHOD_DEADLINES_MS: Record<string, number> = {
+  "cap.dialogAlert": UI_DIALOG_DEADLINE_MS,
+  "cap.dialogConfirm": UI_DIALOG_DEADLINE_MS,
+  "cap.dialogPrompt": UI_DIALOG_DEADLINE_MS,
+  "cap.dialogForm": UI_DIALOG_DEADLINE_MS,
+};
+
+/** The worker-side deadline for one method (default CALL_TIMEOUT_MS). */
+export function callDeadlineMs(method: string): number {
+  return METHOD_DEADLINES_MS[method] ?? CALL_TIMEOUT_MS;
+}
 /** In-flight call cap per script; excess rejects HostError{rpc-saturated}. */
 export const MAX_INFLIGHT_CALLS = 32;
 /** Relayed methodCall deadline (ms). Must be >= CALL_TIMEOUT_MS: a relayed

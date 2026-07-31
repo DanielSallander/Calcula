@@ -347,6 +347,22 @@ export function registerExposed(
 }
 
 /**
+ * Withdraw a method the OWNER previously exposed (the cleanup returned by
+ * `context.expose(...)` being invoked while the script is still mounted).
+ *
+ * Owner-checked, not just key-checked: a remount registers the successor under
+ * the same key, so an unexpose that raced a remount must not delete the new
+ * script's entry. Returns true if an entry was actually removed.
+ */
+export function unregisterExposed(owner: ScriptHandle, methodName: string): boolean {
+  const key = exposedKey(owner.objectType, owner.instanceId, methodName);
+  const current = exposedMethods.get(key);
+  if (!current || current.owner !== owner) return false;
+  exposedMethods.delete(key);
+  return true;
+}
+
+/**
  * Call a method exposed by another script, enforcing R7: cross-tier or
  * cross-origin calls require the target to have opted in with {public: true}.
  * Returns a Promise (RESHAPE — already-awaiting scripts are unaffected).

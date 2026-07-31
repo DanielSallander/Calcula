@@ -45,7 +45,7 @@ pub enum UdfValue {
 /// yields "#DIV0", "#REF", etc.) because the UDF wire format is a contract with
 /// the JS side and must use the canonical Excel error literals that round-trip
 /// cleanly through `parse_cell_error`.
-fn cell_error_to_str(e: &CellError) -> &'static str {
+pub(crate) fn cell_error_to_str(e: &CellError) -> &'static str {
     match e {
         CellError::Div0 => "#DIV/0!",
         CellError::Ref => "#REF!",
@@ -103,6 +103,12 @@ pub fn eval_to_udf(r: &EvalResult) -> UdfValue {
 
 /// Convert a wire-format `UdfValue` back into an engine `EvalResult`.
 /// - Error{value} parses the cell-error literal back; unrecognized -> #VALUE!.
+/// - Array{value} -> `EvalResult::Array` (NOT `List`). This is what makes a JS
+///   array return SPILL like a native dynamic array: `spill_dimensions()` /
+///   `to_spill_values()` only recognize `Array`, and `List` renders as the
+///   opaque "[List(n)]" text. A flat JS array spills down one column; an array
+///   of arrays spills as rows x cols. The apply paths (update_cell /
+///   update_cells_batch) already run the spill machinery on the raw result.
 /// - Empty -> Text("") to represent a blank result (Number(0.0) would be wrong;
 ///   an empty cell coerces to "" in text contexts and 0 in numeric contexts via
 ///   EvalResult::as_number, so Text("") is the safest neutral blank).
@@ -113,7 +119,7 @@ pub fn udf_to_eval(v: &UdfValue) -> EvalResult {
         UdfValue::Boolean { value } => EvalResult::Boolean(*value),
         UdfValue::Error { value } => EvalResult::Error(parse_cell_error(value)),
         UdfValue::Array { value } => {
-            EvalResult::List(value.iter().map(udf_to_eval).collect())
+            EvalResult::Array(value.iter().map(udf_to_eval).collect())
         }
         UdfValue::Empty => EvalResult::Text(String::new()),
     }
@@ -141,6 +147,29 @@ pub struct UdfCall {
     pub args: Vec<UdfValue>,
 }
 
+/// An ACTIVE-SHEET cell coordinate crossing the UDF wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UdfCellRef {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// What one `collect_udf_calls` round returns.
+///
+/// `volatile_cells` are the active-sheet cells that call a UDF the author
+/// marked VOLATILE. They are NOT necessarily dependents of the edit, so the
+/// apply paths must splice them into the recalc order explicitly — otherwise
+/// "volatile" would only mean "a fresh value was fetched", not "the cell was
+/// recomputed". Empty for every workbook with no volatile UDF, which keeps the
+/// ordinary edit path byte-for-byte unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UdfCollectResult {
+    pub calls: Vec<UdfCall>,
+    pub volatile_cells: Vec<UdfCellRef>,
+}
+
 /// Build the udf_fn closure that serves a pre-fetched results table. On each
 /// (name, eval_args): convert args to UdfValue, compute `udf_key`, look up; Some
 /// -> `udf_to_eval(result)`, None -> None (engine emits #NAME?).
@@ -158,18 +187,34 @@ pub fn make_udf_resolver(
 // COLLECT COMMAND (read-only discovery, NO state mutation)
 // ============================================================================
 
-/// Pre-fetch COLLECT: discover which UDF calls a pending edit (and the formula
-/// cells that might transitively depend on a UDF) would make, so the frontend
-/// can resolve them off-thread before APPLY.
+/// Pre-fetch COLLECT: discover which UDF calls a pending edit (a single cell
+/// edit, or a whole paste/fill batch) would make, so the frontend can resolve
+/// them off-thread before APPLY.
 ///
 /// This is strictly read-only: it clones the grids into a scratch copy, applies
-/// the pending edit there, and evaluates against the scratch with a COLLECTING
+/// the pending edits there, and evaluates against the scratch with a COLLECTING
 /// udf_fn. It never mutates undo, dependents maps, or any real cell.
 ///
+/// WHICH CELLS ARE EVALUATED (the volatility contract):
+///  - the edited cells themselves, always;
+///  - active-sheet formula cells that mention a UDF name AND lie in the edit's
+///    dependency closure — exactly the set the apply cascade re-evaluates with
+///    the resolver wired (`recalc_order_from_seeds` + whole-column/row
+///    dependents, computed the same way `update_cell`/`update_cells_batch` do);
+///  - active-sheet formula cells that mention a VOLATILE UDF name, wherever
+///    they are (Excel's `Application.Volatile`).
+///
+/// It deliberately does NOT scan non-active sheets: their formula cells are
+/// recalculated by `cascade_cross_sheet_dependents` / the batch cross-sheet
+/// walk, neither of which is handed a UDF resolver, so those cells always take
+/// the `preserved_udf_value` path and a collected result for them could never
+/// be served. Scanning them was pure work.
+///
 /// Returns the `UdfCall`s discovered this round, EXCLUDING any whose key is
-/// already present in `known` (those are already resolved). Callers feed the
-/// growing `known` table back across rounds until this returns an empty Vec
-/// (a fixed point), at which point all transitively-needed UDF calls are known.
+/// already present in `known` (those are already resolved), plus the volatile
+/// cells the apply path must splice into its recalc order. Callers feed the
+/// growing `known` table back across rounds until `calls` comes back empty
+/// (a fixed point), at which point all transitively-needed calls are known.
 #[tauri::command]
 pub fn collect_udf_calls(
     state: State<AppState>,
@@ -179,12 +224,11 @@ pub fn collect_udf_calls(
     pivot_state: State<'_, crate::pivot::PivotState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
-    row: u32,
-    col: u32,
-    value: String,
+    edits: Vec<crate::api_types::CellUpdateInput>,
     udf_names: Vec<String>,
+    volatile_udf_names: Vec<String>,
     known: HashMap<String, UdfValue>,
-) -> Result<Vec<UdfCall>, String> {
+) -> Result<UdfCollectResult, String> {
     // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below, so the
     // discovery pass evaluates cells the same way update_cell's apply will.
     let control_values = crate::control_values::build_control_values(
@@ -197,9 +241,8 @@ pub fn collect_udf_calls(
     let sheet_names = state.sheet_names.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
-    let locale = state.locale.lock().unwrap();
-    // The edited cell is always on the ACTIVE sheet (update_cell edits there),
-    // so mirror that rather than trusting a caller-supplied index.
+    // The edited cells are always on the ACTIVE sheet (update_cell(s_batch)
+    // edit there), so mirror that rather than trusting a caller-supplied index.
     let sheet_index = *state.active_sheet.lock().unwrap();
 
     if sheet_index >= grids.len() || sheet_index >= sheet_names.len() {
@@ -210,6 +253,35 @@ pub fn collect_udf_calls(
             sheet_names.len()
         ));
     }
+
+    // --- Dependency closure of the pending edits, computed with the SAME
+    // helpers the apply cascades use so the two sets agree cell-for-cell. The
+    // maps are read pre-edit; that is sound because an edit only ever adds
+    // edges POINTING AT the edited cells (dependents[precedent] gains the
+    // edited cell), and the edited cells are seeds here anyway.
+    //
+    // Lock order: styles -> dependents -> ... -> locale, matching
+    // update_cell_impl. The guards are confined to this block so nothing is
+    // held across the evaluation below.
+    let seeds: Vec<(u32, u32)> = edits.iter().map(|e| (e.row, e.col)).collect();
+    let affected: crate::CoordSet = {
+        let dependents = state.dependents.lock().unwrap();
+        let column_dependents = state.column_dependents.lock().unwrap();
+        let row_dependents = state.row_dependents.lock().unwrap();
+        let mut set: crate::CoordSet =
+            crate::recalc_order_from_seeds(&seeds, &dependents, true)
+                .into_iter()
+                .collect();
+        for &seed in &seeds {
+            set.insert(seed);
+            for dep in crate::get_column_row_dependents(seed, &column_dependents, &row_dependents) {
+                set.insert(dep);
+            }
+        }
+        set
+    };
+
+    let locale = state.locale.lock().unwrap();
 
     // Pivot data + gather closures, mirroring update_cell's eval setup so the
     // scratch evaluation sees the same external context.
@@ -230,73 +302,80 @@ pub fn collect_udf_calls(
         gather_data.get(region_id).cloned().unwrap_or_default()
     };
 
-    // --- SCRATCH copy of grids; apply the pending edit there so dependents see
-    // the new value. Parse `value` exactly the way update_cell does.
+    // --- SCRATCH copy of grids; apply the pending edits there so dependents
+    // see the new values. Parse each value exactly the way the apply path does
+    // (invariant inputs skip delocalization, as in update_cells_batch).
     let mut scratch: Vec<engine::Grid> = grids.clone();
 
-    // Uppercase the UDF name set defensively (caller is expected to uppercase).
+    // Uppercase the UDF name sets defensively (caller is expected to uppercase).
     let udf_name_set: HashSet<String> =
         udf_names.iter().map(|n| n.to_uppercase()).collect();
+    let volatile_name_set: HashSet<String> =
+        volatile_udf_names.iter().map(|n| n.to_uppercase()).collect();
 
-    // Build the edited cell, including its cached AST if it's a formula, using
+    // Build each edited cell, including its cached AST if it's a formula, using
     // the same pipeline as update_cell (named/table/spill ref resolution).
-    {
-        let active_sheet = sheet_index;
-        if value.trim().is_empty() {
-            scratch[active_sheet].clear_cell(row, col);
-        } else {
-            let mut cell = parse_cell_input(&value, &locale);
-            if let Some(existing) = scratch[active_sheet].get_cell(row, col) {
-                cell.style_index = existing.style_index;
-            }
-            if let Some(formula) = cell.formula_string() {
-                if let Ok(parsed) = parser::parse(&formula) {
-                    // Resolve named references.
-                    let resolved = if crate::ast_has_named_refs(&parsed) {
-                        let named_ranges_map = state.named_ranges.lock().unwrap();
-                        let mut visited = HashSet::new();
-                        crate::resolve_names_in_ast(
-                            &parsed,
-                            &named_ranges_map,
-                            active_sheet,
-                            &mut visited,
-                        )
-                    } else {
-                        parsed
-                    };
-                    // Resolve structured table references.
-                    let resolved = if crate::ast_has_table_refs(&resolved) {
-                        let tables_map = state.tables.lock().unwrap();
-                        let table_names_map = state.table_names.lock().unwrap();
-                        let ctx = crate::TableRefContext {
-                            tables: &tables_map,
-                            table_names: &table_names_map,
-                            current_sheet_index: active_sheet,
-                            current_row: row,
-                        };
-                        crate::resolve_table_refs_in_ast(&resolved, &ctx)
-                    } else {
-                        resolved
-                    };
-                    // Resolve spill range references.
-                    let resolved = if crate::ast_has_spill_refs(&resolved) {
-                        let spill_ranges_map = state.spill_ranges.lock().unwrap();
-                        crate::resolve_spill_refs_in_ast(
-                            &resolved,
-                            &spill_ranges_map,
-                            active_sheet,
-                        )
-                    } else {
-                        resolved
-                    };
-                    let engine_ast = crate::convert_expr(&resolved);
-                    cell.set_cached_ast(engine_ast);
-                }
-                // On parse error we still store the cell (no AST); it won't
-                // surface UDF calls, which is correct.
-            }
-            scratch[active_sheet].set_cell(row, col, cell);
+    for edit in &edits {
+        let (row, col) = (edit.row, edit.col);
+        if edit.value.trim().is_empty() {
+            scratch[sheet_index].clear_cell(row, col);
+            continue;
         }
+        let mut cell = if edit.invariant.unwrap_or(false) {
+            crate::parse_cell_input_invariant(&edit.value, &locale)
+        } else {
+            parse_cell_input(&edit.value, &locale)
+        };
+        if let Some(existing) = scratch[sheet_index].get_cell(row, col) {
+            cell.style_index = existing.style_index;
+        }
+        if let Some(formula) = cell.formula_string() {
+            if let Ok(parsed) = parser::parse(&formula) {
+                // Resolve named references.
+                let resolved = if crate::ast_has_named_refs(&parsed) {
+                    let named_ranges_map = state.named_ranges.lock().unwrap();
+                    let mut visited = HashSet::new();
+                    crate::resolve_names_in_ast(
+                        &parsed,
+                        &named_ranges_map,
+                        sheet_index,
+                        &mut visited,
+                    )
+                } else {
+                    parsed
+                };
+                // Resolve structured table references.
+                let resolved = if crate::ast_has_table_refs(&resolved) {
+                    let tables_map = state.tables.lock().unwrap();
+                    let table_names_map = state.table_names.lock().unwrap();
+                    let ctx = crate::TableRefContext {
+                        tables: &tables_map,
+                        table_names: &table_names_map,
+                        current_sheet_index: sheet_index,
+                        current_row: row,
+                    };
+                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                } else {
+                    resolved
+                };
+                // Resolve spill range references.
+                let resolved = if crate::ast_has_spill_refs(&resolved) {
+                    let spill_ranges_map = state.spill_ranges.lock().unwrap();
+                    crate::resolve_spill_refs_in_ast(
+                        &resolved,
+                        &spill_ranges_map,
+                        sheet_index,
+                    )
+                } else {
+                    resolved
+                };
+                let engine_ast = crate::convert_expr(&resolved);
+                cell.set_cached_ast(engine_ast);
+            }
+            // On parse error we still store the cell (no AST); it won't
+            // surface UDF calls, which is correct.
+        }
+        scratch[sheet_index].set_cell(row, col, cell);
     }
 
     // --- COLLECTING udf_fn. Captures the UDF name set, the known table, and a
@@ -330,9 +409,42 @@ pub fn collect_udf_calls(
     };
     let udf_dyn: &dyn Fn(&str, &[EvalResult]) -> Option<EvalResult> = &collecting_udf_fn;
 
-    // --- Evaluate every formula cell whose text mentions any UDF name (case-
-    // insensitive substring is exact-enough for discovery), plus always the
-    // edited cell. We use cached ASTs where present, parsing otherwise.
+    // --- Candidate scan over the ACTIVE sheet only (see the fn doc). A cell
+    // can only call a UDF if the name appears in its formula text, so the
+    // case-insensitive substring test is exact for discovery.
+    let mut candidates: Vec<(u32, u32)> = Vec::new();
+    let mut volatile_cells: Vec<UdfCellRef> = Vec::new();
+    for (&(r, c), cell) in scratch[sheet_index].cells.iter() {
+        if cell.get_cached_ast().is_none() {
+            continue;
+        }
+        let Some(formula) = cell.formula_string() else {
+            continue;
+        };
+        let upper_formula = formula.to_uppercase();
+        if !udf_name_set
+            .iter()
+            .any(|n| upper_formula.contains(n.as_str()))
+        {
+            continue;
+        }
+        let is_volatile = volatile_name_set
+            .iter()
+            .any(|n| upper_formula.contains(n.as_str()));
+        if is_volatile {
+            volatile_cells.push(UdfCellRef { row: r, col: c });
+        } else if !affected.contains(&(r, c)) {
+            // Not reachable from this edit and not volatile: the apply cascade
+            // will never re-evaluate it, so resolving it would be wasted work.
+            continue;
+        }
+        candidates.push((r, c));
+    }
+    // Deterministic evaluation order (cells iterate in hash order otherwise).
+    candidates.sort_unstable();
+    volatile_cells.sort_unstable_by_key(|v| (v.row, v.col));
+
+    // --- Evaluate each candidate with its OWN position, using the cached AST.
     let eval_cell = |scratch: &[engine::Grid], r: u32, c: u32| {
         if let Some(cell) = scratch[sheet_index].get_cell(r, c) {
             if let Some(ast) = cell.get_cached_ast() {
@@ -362,75 +474,28 @@ pub fn collect_udf_calls(
         }
     };
 
-    // Iterate formula cells across every sheet; evaluate those that textually
-    // reference a UDF name. (A cell can only call a UDF if its name appears in
-    // the formula text, so this substring scan is exact for discovery.)
-    for sheet in 0..scratch.len() {
-        // Collect the candidate coordinates first to avoid borrow issues while
-        // evaluating (eval reads the whole scratch slice).
-        let mut candidates: Vec<(u32, u32)> = Vec::new();
-        for (&(r, c), cell) in scratch[sheet].cells.iter() {
-            if cell.get_cached_ast().is_none() {
-                continue;
-            }
-            if let Some(formula) = cell.formula_string() {
-                let upper_formula = formula.to_uppercase();
-                if udf_name_set
-                    .iter()
-                    .any(|n| upper_formula.contains(n.as_str()))
-                {
-                    candidates.push((r, c));
-                }
-            }
-        }
-        // Only the active sheet shares index space with `eval_cell`'s sheet_index
-        // assumption; for other sheets we evaluate with their own sheet index.
-        for (r, c) in candidates {
-            if sheet == sheet_index {
-                eval_cell(&scratch, r, c);
-            } else {
-                // Evaluate a formula cell on a non-active sheet.
-                if let Some(cell) = scratch[sheet].get_cell(r, c) {
-                    if let Some(ast) = cell.get_cached_ast() {
-                        let ast = ast.clone();
-                        let eval_ctx = engine::EvalContext {
-                            cube_prefetch: None,
-                            current_row: Some(r),
-                            current_col: Some(c),
-                            row_heights: None,
-                            column_widths: None,
-                            hidden_rows: None,
-                            control_values: Some(control_values.clone()),
-                        };
-                        let _ = crate::evaluate_formula_raw_with_files_and_pivot(
-                            &scratch,
-                            &sheet_names,
-                            sheet,
-                            &ast,
-                            eval_ctx,
-                            Some(&styles),
-                            &user_files,
-                            Some(&pivot_data_fn),
-                            Some(&gather_fn),
-                            Some(udf_dyn),
-                        );
-                    }
-                }
-            }
-        }
+    for (r, c) in &candidates {
+        eval_cell(&scratch, *r, *c);
     }
 
-    // Always evaluate the edited cell itself (it may be brand new and thus not
-    // discovered by the substring scan above if its formula was just set).
-    eval_cell(&scratch, row, col);
+    // Always evaluate the edited cells themselves (a brand-new formula is not
+    // in the pre-edit dependents graph, and the scan above only sees it once
+    // it has been written into the scratch — which it has, but an edit whose
+    // formula parse failed still deserves the explicit pass).
+    for &(row, col) in &seeds {
+        eval_cell(&scratch, row, col);
+    }
 
     // --- Return collected calls, excluding any already-known keys.
-    let result: Vec<UdfCall> = collected
+    let calls: Vec<UdfCall> = collected
         .into_inner()
         .into_values()
         .filter(|c| !known.contains_key(&c.key))
         .collect();
-    Ok(result)
+    Ok(UdfCollectResult {
+        calls,
+        volatile_cells,
+    })
 }
 
 #[cfg(test)]
@@ -513,14 +578,143 @@ mod tests {
                 ]
             }
         );
-        // Array converts back to a List (contained, non-spilling).
+        // Array converts back to an engine Array so the result SPILLS (a List
+        // would render as the opaque "[List(n)]" and stay in one cell).
         assert_eq!(
             udf_to_eval(&u),
-            EvalResult::List(vec![
+            EvalResult::Array(vec![
                 EvalResult::Number(1.0),
                 EvalResult::Text("x".to_string()),
                 EvalResult::Boolean(false),
             ])
+        );
+    }
+
+    #[test]
+    fn flat_array_return_spills_down_one_column() {
+        // A JS `return [1,2,3]` must behave like a native dynamic array: three
+        // rows, one column — NOT the contained "[List(3)]" text.
+        let u = UdfValue::Array {
+            value: vec![
+                UdfValue::Number { value: 1.0 },
+                UdfValue::Number { value: 2.0 },
+                UdfValue::Number { value: 3.0 },
+            ],
+        };
+        let r = udf_to_eval(&u);
+        assert_eq!(r.spill_dimensions(), (3, 1));
+        let spilled = r.to_spill_values();
+        assert_eq!(spilled.len(), 3);
+        assert_eq!(spilled[0], (0, 0, engine::CellValue::Number(1.0)));
+        assert_eq!(spilled[2], (2, 0, engine::CellValue::Number(3.0)));
+        // And it no longer renders as the opaque list marker.
+        assert_ne!(r.as_text(), "[List(3)]");
+    }
+
+    #[test]
+    fn nested_array_return_spills_as_rows_and_columns() {
+        // `return [[1,2],[3,4]]` -> a 2x2 spill.
+        let row = |a: f64, b: f64| UdfValue::Array {
+            value: vec![UdfValue::Number { value: a }, UdfValue::Number { value: b }],
+        };
+        let u = UdfValue::Array { value: vec![row(1.0, 2.0), row(3.0, 4.0)] };
+        let r = udf_to_eval(&u);
+        assert_eq!(r.spill_dimensions(), (2, 2));
+        let spilled = r.to_spill_values();
+        assert_eq!(spilled.len(), 4);
+        assert_eq!(spilled[1], (0, 1, engine::CellValue::Number(2.0)));
+        assert_eq!(spilled[3], (1, 1, engine::CellValue::Number(4.0)));
+    }
+
+    #[test]
+    fn empty_array_return_does_not_spill() {
+        // Degenerate but reachable (`return []`): must stay one cell rather
+        // than claiming a zero-sized spill range.
+        let r = udf_to_eval(&UdfValue::Array { value: vec![] });
+        assert_eq!(r, EvalResult::Array(vec![]));
+        assert_eq!(r.spill_dimensions(), (1, 1));
+    }
+
+    #[test]
+    fn array_result_serves_through_the_resolver() {
+        // End-to-end through the apply-time resolver: the table entry is an
+        // array and the engine receives a spillable Array.
+        let mut table = HashMap::new();
+        let args = vec![UdfValue::Number { value: 3.0 }];
+        table.insert(
+            udf_key("MAKELIST", &args),
+            UdfValue::Array {
+                value: vec![
+                    UdfValue::Number { value: 1.0 },
+                    UdfValue::Number { value: 2.0 },
+                    UdfValue::Number { value: 3.0 },
+                ],
+            },
+        );
+        let resolver = make_udf_resolver(&table);
+        let hit = resolver("MAKELIST", &[EvalResult::Number(3.0)]).expect("served");
+        assert_eq!(hit.spill_dimensions(), (3, 1));
+    }
+
+    #[test]
+    fn every_engine_cell_error_round_trips_through_the_wire() {
+        // A UDF author returning any of these literals must land on the
+        // matching CellError, not collapse to #VALUE! (defect: UDFs could not
+        // return a specific error value at all).
+        for (err, lit) in [
+            (CellError::Div0, "#DIV/0!"),
+            (CellError::Ref, "#REF!"),
+            (CellError::Name, "#NAME?"),
+            (CellError::Value, "#VALUE!"),
+            (CellError::NA, "#N/A"),
+            (CellError::Circular, "#CIRCULAR!"),
+            (CellError::Conflict, "#CONFLICT"),
+            (CellError::Blocked, "#BLOCKED!"),
+        ] {
+            let u = UdfValue::Error { value: lit.to_string() };
+            assert_eq!(
+                udf_to_eval(&u),
+                EvalResult::Error(err.clone()),
+                "literal {} must parse back to {:?}",
+                lit,
+                err
+            );
+            // Lower-case spelling is accepted too (authors type "#n/a").
+            let lower = UdfValue::Error { value: lit.to_lowercase() };
+            assert_eq!(udf_to_eval(&lower), EvalResult::Error(err));
+        }
+    }
+
+    #[test]
+    fn error_return_serves_through_the_resolver() {
+        let mut table = HashMap::new();
+        let args = vec![UdfValue::Text { value: "missing".to_string() }];
+        table.insert(
+            udf_key("LOOKUPX", &args),
+            UdfValue::Error { value: "#N/A".to_string() },
+        );
+        let resolver = make_udf_resolver(&table);
+        assert_eq!(
+            resolver("LOOKUPX", &[EvalResult::Text("missing".to_string())]),
+            Some(EvalResult::Error(CellError::NA))
+        );
+    }
+
+    #[test]
+    fn cell_ref_and_collect_result_serialize_camel_case() {
+        // The TS mirror reads `volatileCells: [{row, col}]`.
+        let r = UdfCollectResult {
+            calls: vec![UdfCall {
+                key: "K".to_string(),
+                name: "F".to_string(),
+                args: vec![],
+            }],
+            volatile_cells: vec![UdfCellRef { row: 2, col: 5 }],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            json,
+            r#"{"calls":[{"key":"K","name":"F","args":[]}],"volatileCells":[{"row":2,"col":5}]}"#
         );
     }
 

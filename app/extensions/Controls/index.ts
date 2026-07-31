@@ -17,6 +17,7 @@ import {
   IconShapes,
   IconImage,
   IconDesignMode,
+  registerControlStoreService,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
@@ -375,6 +376,24 @@ function activate(context: ExtensionContext): void {
   controlsBackend.set(context.invokeBackend);
 
   console.log("[Controls] Activating...");
+
+  // Expose the cell-anchored control inventory (IoC) so the script host's
+  // api.listObjects("shape") can enumerate buttons/checkboxes/shapes without
+  // importing Controls internals. Identity + anchor only — property VALUES may
+  // be formulas over the user's data and are read through their own paths.
+  registerControlStoreService({
+    async listControls(sheetIndex: number) {
+      const entries = await getAllControls(sheetIndex);
+      return entries.map((e) => ({
+        sheetIndex: e.sheetIndex,
+        row: e.row,
+        col: e.col,
+        controlType: e.metadata.controlType,
+        name: e.metadata.properties?.name?.value,
+      }));
+    },
+  });
+  cleanupFns.push(() => registerControlStoreService(null));
 
   // 1. Register button cell decoration for rendering (embedded buttons)
   const unregDecoration = context.grid.decorations.register("button", drawButton, 10);

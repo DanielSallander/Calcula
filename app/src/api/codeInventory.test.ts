@@ -32,6 +32,9 @@ vi.mock("./chartMarkScripts", () => ({
   loadPersistedMarkLibraryWithProvenance: vi.fn(),
   markScriptId: (id: string) => `__chartmark__:${id}`,
 }));
+vi.mock("./writebackValidators", () => ({
+  mountedWritebackValidators: vi.fn(),
+}));
 
 import { loadAllObjectScripts } from "./objectScriptBackend";
 import { listModuleScripts, getModuleScript } from "./moduleScriptBackend";
@@ -39,6 +42,7 @@ import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
 import { loadPersistedTransformLibraryWithProvenance } from "./chartTransformScripts";
 import { loadPersistedMarkLibraryWithProvenance } from "./chartMarkScripts";
+import { mountedWritebackValidators } from "./writebackValidators";
 import {
   getWorkbookCodeUnits,
   summarizeCodeInventory,
@@ -55,6 +59,7 @@ beforeEach(() => {
   (listMountedHandles as any).mockReturnValue([]);
   (loadPersistedTransformLibraryWithProvenance as any).mockResolvedValue(null);
   (loadPersistedMarkLibraryWithProvenance as any).mockResolvedValue(null);
+  (mountedWritebackValidators as any).mockReturnValue([]);
 });
 
 describe("getWorkbookCodeUnits — object scripts", () => {
@@ -283,5 +288,55 @@ describe("summarizeCodeInventory", () => {
       "object-script",
       "one-off-script",
     ]);
+  });
+});
+
+describe("getWorkbookCodeUnits — writeback validators", () => {
+  // A publisher-authored predicate the user APPROVED runs on their machine (in
+  // the embedded Rust QuickJS realm at submit). Leaving it out of the inventory
+  // would be exactly the "hidden code" the transparency vision forbids.
+  it("lists an approved validator once per (package, validator), with no reach", async () => {
+    (mountedWritebackValidators as any).mockReturnValue([
+      {
+        regionId: "r1",
+        packageName: "acme.budget",
+        packageVersion: "1.2.0",
+        name: "positive",
+        source: "(v) => (v > 0 ? null : 'must be positive')",
+        sourceHash: "abc123",
+        consented: true,
+      },
+      // A SECOND region sharing the same predicate must not double-list it.
+      {
+        regionId: "r2",
+        packageName: "acme.budget",
+        packageVersion: "1.2.0",
+        name: "positive",
+        source: "(v) => (v > 0 ? null : 'must be positive')",
+        sourceHash: "abc123",
+        consented: true,
+      },
+    ]);
+
+    const units = (await getWorkbookCodeUnits()).filter(
+      (u) => u.surfaceId === "writeback-validator",
+    );
+    expect(units).toHaveLength(1);
+    const u = units[0];
+    expect(u.id).toBe("acme.budget::positive");
+    expect(u.provenance).toBe("distributed");
+    expect(u.sourcePackage).toBe("acme.budget");
+    // A pure predicate: no ceiling, no grants — so it never counts as reaching
+    // beyond grid state.
+    expect(u.declaredCapabilities).toEqual([]);
+    expect(u.liveGrants).toEqual([]);
+    expect(codeUnitReachesBeyondGrid(u)).toBe(false);
+    // The source shown is the body that actually runs.
+    expect(u.source).toContain("must be positive");
+  });
+
+  it("contributes nothing when no validator is approved", async () => {
+    const units = await getWorkbookCodeUnits();
+    expect(units.filter((u) => u.surfaceId === "writeback-validator")).toHaveLength(0);
   });
 });

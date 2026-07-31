@@ -34,6 +34,11 @@ import {
   registerCellDoubleClickInterceptor,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
+import {
+  SCRIPT_BOOKMARK_MUTATIONS_EVENT,
+  getWorkbookScript,
+  runWorkbookScript,
+} from "@api/workbookScripts";
 
 // Internal modules — Cell Bookmarks
 import { drawBookmarkDot } from "./rendering/bookmarkDecoration";
@@ -51,6 +56,7 @@ import {
   toggleHighlight,
   setCurrentSheet,
   getBookmarkCount,
+  getAllBookmarks,
   onChange,
 } from "./lib/bookmarkStore";
 import {
@@ -62,15 +68,14 @@ import {
 import { ViewBookmarkCreateOverlay } from "./components/ViewBookmarkCreateOverlay";
 import { ViewBookmarkEditOverlay } from "./components/ViewBookmarkEditOverlay";
 import {
-  addViewBookmark,
   activateViewBookmark,
   removeViewBookmark,
   removeAllViewBookmarks,
   getViewBookmarkCount,
   onViewBookmarkChange,
+  serializeViewBookmarks,
   setScriptRunner,
 } from "./lib/viewBookmarkStore";
-import { DEFAULT_VIEW_DIMENSIONS } from "./lib/viewBookmarkTypes";
 
 // Internal modules — Persistence
 import { saveBookmarks, loadBookmarks } from "./lib/bookmarkPersistence";
@@ -289,9 +294,12 @@ function activate(context: ExtensionContext): void {
 
   // ---- 10. Event: Sheet Changed (update current sheet in store) ----
   const unregSheetChanged = onAppEvent(AppEvents.SHEET_CHANGED, (e: CustomEvent) => {
-    const detail = e.detail as { index?: number } | undefined;
-    if (detail?.index !== undefined) {
-      setCurrentSheet(detail.index);
+    // Every emitter in the repo sends { sheetIndex, sheetName }; reading
+    // `index` meant this never fired and the store kept the sheet it was
+    // initialized with.
+    const detail = e.detail as { sheetIndex?: number } | undefined;
+    if (typeof detail?.sheetIndex === "number") {
+      setCurrentSheet(detail.sheetIndex);
     }
   });
   cleanupFns.push(unregSheetChanged);
@@ -374,29 +382,33 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregAfterOpen);
 
   // ---- 12c. Script bookmark mutations listener ----
+  //      Every script surface routes its queued mutations here; the handler
+  //      validates the payload (it arrives as an untyped CustomEvent detail).
   const handleScriptMutations = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (Array.isArray(detail)) {
-      processBookmarkMutations(detail);
-    }
+    void processBookmarkMutations((e as CustomEvent).detail);
   };
-  window.addEventListener("script:bookmark-mutations", handleScriptMutations);
-  cleanupFns.push(() => window.removeEventListener("script:bookmark-mutations", handleScriptMutations));
+  window.addEventListener(SCRIPT_BOOKMARK_MUTATIONS_EVENT, handleScriptMutations);
+  cleanupFns.push(() =>
+    window.removeEventListener(SCRIPT_BOOKMARK_MUTATIONS_EVENT, handleScriptMutations)
+  );
 
   // ---- 13. Script runner for view bookmark onActivate ----
+  //      Runs through the @api script runtime so the security gate, the
+  //      bookmark collections the script can read, and the mutations it queues
+  //      all go through one path.
   setScriptRunner(async (scriptId: string) => {
-    const script = await context.invokeBackend<{ id: string; name: string; source: string }>(
-      "get_script",
-      { id: scriptId }
-    );
-    if (script) {
-      const result = await context.invokeBackend<{ success: boolean; error?: string }>(
-        "run_script",
-        { request: { source: script.source, filename: script.name || "bookmark-script.js" } }
-      );
-      if (!result.success && result.error) {
-        showToast(`Script error: ${result.error}`, { variant: "error" });
+    const script = await getWorkbookScript(scriptId);
+    if (!script) return;
+    const result = await runWorkbookScript(
+      script.source,
+      script.name || "bookmark-script.js",
+      {
+        cellBookmarksJson: JSON.stringify(getAllBookmarks()),
+        viewBookmarksJson: JSON.stringify(serializeViewBookmarks()),
       }
+    );
+    if (result.type === "error") {
+      showToast(`Script error: ${result.message}`, { variant: "error" });
     }
   });
   cleanupFns.push(() => setScriptRunner(null));

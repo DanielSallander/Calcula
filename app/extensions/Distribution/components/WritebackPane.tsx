@@ -20,6 +20,14 @@ import {
 } from "@api/distribution";
 import { DESIGNATE_WRITEBACK_DIALOG_ID } from "../manifest";
 import { WRITEBACK_REGIONS_CHANGED_EVENT } from "./DesignateWritebackDialog";
+import {
+  lastWritebackValidatorSync,
+  approveAndMountWritebackValidators,
+  WRITEBACK_VALIDATORS_CHANGED_EVENT,
+  type WritebackValidatorSyncResult,
+  type PendingValidatorConsent,
+  type BlockedValidatorRegion,
+} from "../lib/writebackValidatorSync";
 
 /** Format an ISO deadline as a relative "Due in …" / "Overdue" chip. */
 function deadlineLabel(iso?: string): { text: string; color: string } | null {
@@ -122,6 +130,94 @@ function OutboundPreviewPanel({
   );
 }
 
+/** Review-and-approve gate for a package's publisher-shipped writeback
+ *  validators. The Rust submit path runs these bodies itself, out of the
+ *  Ed25519-verified manifest, and REFUSES the submission until the user has
+ *  approved this exact source — so without this panel a validated region is
+ *  fillable but unsubmittable. The source shown here is byte-identical to what
+ *  the backend will execute (same manifest, same SHA-256 consent key). */
+function ValidatorConsentPanel({
+  entry,
+  busy,
+  onApprove,
+}: {
+  entry: PendingValidatorConsent;
+  busy: boolean;
+  onApprove: () => void;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      style={{
+        border: "1px solid #f0c36d",
+        background: "#fffdf5",
+        borderRadius: 4,
+        padding: 8,
+        marginBottom: 8,
+        fontSize: 11,
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+        Review and approve this package&apos;s input checks
+      </div>
+      <div style={{ color: "#555", marginBottom: 6 }}>
+        <strong>{entry.packageName}</strong> ships{" "}
+        {entry.validators.length === 1
+          ? "a check"
+          : `${entry.validators.length} checks`}{" "}
+        that decide whether your answers may be sent. It runs sandboxed, with no
+        access to your data, network or files — but nothing is submitted until you
+        have read it and approved it.
+      </div>
+      <button onClick={() => setExpanded((v) => !v)} style={{ fontSize: 11, marginBottom: 6 }}>
+        {expanded ? "Hide code" : `Show code (${entry.validators.map((v) => v.name).join(", ")})`}
+      </button>
+      {expanded && (
+        <div style={{ maxHeight: 180, overflow: "auto", marginBottom: 6 }}>
+          {entry.validators.map((v) => (
+            <div key={v.name} style={{ marginBottom: 6 }}>
+              <div style={{ fontWeight: 600 }}>{v.name}</div>
+              <pre
+                style={{
+                  margin: 0,
+                  padding: 4,
+                  background: "#fff",
+                  border: "1px solid #eee",
+                  borderRadius: 3,
+                  fontFamily: "Consolas, monospace",
+                  fontSize: 10,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {v.source}
+              </pre>
+              <div style={{ color: "#888" }}>SHA-256: {v.sourceHash}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <button onClick={onApprove} disabled={busy} style={{ fontSize: 11, fontWeight: 600 }}>
+        {busy ? "Approving..." : "Approve and enable"}
+      </button>
+    </div>
+  );
+}
+
+/** A region whose declared validator cannot run at all — the publisher named a
+ *  check but shipped no code for it, so the backend refuses the submission. */
+function BlockedValidatorNotice({
+  blocked,
+}: {
+  blocked: BlockedValidatorRegion;
+}): React.ReactElement {
+  return (
+    <div style={{ fontSize: 11, color: "#c5221f", marginTop: 4 }}>
+      This area cannot be submitted: {blocked.message}
+    </div>
+  );
+}
+
 export function WritebackPane() {
   const [regions, setRegions] = useState<WritebackRegionEntry[]>([]);
   const [draftRegions, setDraftRegions] = useState<WritebackRegionDeclaration[]>([]);
@@ -131,6 +227,10 @@ export function WritebackPane() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [preview, setPreview] = useState<OutboundSubmissionPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState<string | null>(null);
+  const [validators, setValidators] = useState<WritebackValidatorSyncResult>(() =>
+    lastWritebackValidatorSync(),
+  );
+  const [approving, setApproving] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -157,8 +257,38 @@ export function WritebackPane() {
     // Refresh when a draft region is added/updated (from this pane's Edit button
     // or the Data-menu Designate dialog).
     const off = onAppEvent(WRITEBACK_REGIONS_CHANGED_EVENT, () => void refresh());
-    return off;
+    // ...and when the extension's validator sync pass finishes, so the consent
+    // prompt appears without the user having to reopen the pane.
+    const offValidators = onAppEvent(WRITEBACK_VALIDATORS_CHANGED_EVENT, () => {
+      setValidators(lastWritebackValidatorSync());
+    });
+    return () => {
+      off();
+      offValidators();
+    };
   }, [refresh]);
+
+  // The user reviewed a package's validator source and approved it. Approval is
+  // per (package, validator body hash): a republished body asks again.
+  const handleApproveValidators = useCallback(
+    async (entry: PendingValidatorConsent) => {
+      setApproving(entry.packageName);
+      setSubmitError(null);
+      try {
+        await approveAndMountWritebackValidators(entry.packageName, entry.validators);
+        setValidators((prev) => ({
+          ...prev,
+          pending: prev.pending.filter((p) => p.packageName !== entry.packageName),
+          mounted: [...prev.mounted, ...entry.validators],
+        }));
+      } catch (err) {
+        setSubmitError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setApproving(null);
+      }
+    },
+    [],
+  );
 
   // Step 1: load a read-only preview of exactly what would be sent (no send yet).
   const handleReview = useCallback(async (regionId: string) => {
@@ -252,6 +382,14 @@ export function WritebackPane() {
           {submitError && (
             <div style={{ color: "red", fontSize: 11, marginBottom: 8 }}>{submitError}</div>
           )}
+          {validators.pending.map((entry) => (
+            <ValidatorConsentPanel
+              key={entry.packageName}
+              entry={entry}
+              busy={approving === entry.packageName}
+              onApprove={() => void handleApproveValidators(entry)}
+            />
+          ))}
           {totalDrafts > 0 && (
             <button
               onClick={handleSubmitAll}
@@ -276,6 +414,14 @@ export function WritebackPane() {
             const rejectedCount = draftsForRegion.filter((d) => d.state === "rejected").length;
             const isEmpty =
               draftCount === 0 && submittedCount === 0 && approvedCount === 0 && rejectedCount === 0;
+            // A region whose publisher-declared check cannot run (no body) or is
+            // not yet approved WILL be refused at submit by the Rust gate. Say so
+            // here instead of letting the user hit the refusal after confirming.
+            const blocked =
+              validators.blocked.find((b) => b.regionId === region.regionId) ?? null;
+            const awaitingConsent = validators.pending.some((p) =>
+              p.validators.some((v) => v.regionId === region.regionId),
+            );
 
             return (
               <div key={region.regionId || idx} style={{
@@ -308,10 +454,22 @@ export function WritebackPane() {
                       ))}
                   </div>
                 )}
+                {blocked && <BlockedValidatorNotice blocked={blocked} />}
+                {!blocked && awaitingConsent && (
+                  <div style={{ fontSize: 11, color: "#b06000", marginTop: 4 }}>
+                    Waiting for you to approve this package&apos;s input checks (above)
+                    — submissions are refused until then.
+                  </div>
+                )}
                 {draftCount > 0 && preview?.regionId !== region.regionId && (
                   <button
                     onClick={() => handleReview(region.regionId)}
-                    disabled={submitting !== null || previewLoading !== null}
+                    disabled={
+                      submitting !== null ||
+                      previewLoading !== null ||
+                      blocked !== null ||
+                      awaitingConsent
+                    }
                     style={{ marginTop: 4, fontSize: 11 }}
                   >
                     {previewLoading === region.regionId

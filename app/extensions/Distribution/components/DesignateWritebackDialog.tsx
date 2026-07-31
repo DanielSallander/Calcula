@@ -5,7 +5,10 @@
 //          or from the WritebackPane "Edit" button on a draft region (edit).
 
 import React, { useState, useCallback } from "react";
-import { listWritebackValidators } from "@api/writebackValidators";
+import {
+  listWritebackValidators,
+  writebackValidatorSchemaExtra,
+} from "@api/writebackValidators";
 import { emitAppEvent } from "@api";
 import {
   addWritebackRegion,
@@ -87,7 +90,32 @@ export function DesignateWritebackDialog({ onClose, data }: Props) {
       if (valueType === "enum" && enumValues.trim()) {
         schema.enumValues = enumValues.split(",").map((v) => v.trim()).filter(Boolean);
       }
-      if (customValidator) schema.customValidator = customValidator;
+      if (customValidator) {
+        // BOTH keys or neither. The subscriber's machine has no catalogue of
+        // this publisher's validators, so a name alone cannot be executed —
+        // and the Rust submit gate fails CLOSED on a name without a body
+        // ("ships no validator code for it"), which would make every region
+        // designated here unsubmittable. `writebackValidatorSchemaExtra`
+        // captures the registered function's own source for publication.
+        const extra = writebackValidatorSchemaExtra(customValidator);
+        // Editing a region whose validator body is already stored and whose
+        // name is unchanged keeps that body even if the registering extension
+        // is not loaded right now — re-publishing must not silently drop it.
+        const kept =
+          !extra && s?.customValidator === customValidator && s?.customValidatorSource
+            ? { customValidator, customValidatorSource: s.customValidatorSource }
+            : extra;
+        if (!kept) {
+          setError(
+            `The validator "${customValidator}" is no longer registered, so its code ` +
+              "cannot be published with this region. Pick another validator or none.",
+          );
+          setSubmitting(false);
+          return;
+        }
+        schema.customValidator = kept.customValidator;
+        schema.customValidatorSource = kept.customValidatorSource;
+      }
 
       const lifecycle: LifecyclePolicyConfig = {
         policy: lifecyclePolicy as LifecyclePolicyConfig["policy"],

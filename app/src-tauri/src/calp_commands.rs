@@ -5806,6 +5806,46 @@ pub fn calp_save_writeback_draft(
                     | Some(calp::writeback::LifecyclePolicy::RequiresUnlock)
             ) && registry_has_own_submission(&state, &region_id, row, col));
         check_lifecycle_policy(decl, already_submitted, &now)?;
+
+        // FAST FEEDBACK for a publisher-shipped custom validator: run it on the
+        // single value being typed so a rejection reaches the user in the cell
+        // they are editing (the frontend keeps them in edit mode and shows this
+        // message), not minutes later at submit. This is a CONVENIENCE run, and
+        // deliberately NOT fail-closed: a validator that is missing, not yet
+        // consented or broken must never make the workbook un-typable — it only
+        // has to make it un-SUBMITTABLE, which `submit_region_internal` enforces
+        // from the signature-verified manifest. Only an actual REJECTION by a
+        // consented validator stops the draft here.
+        if let Some(schema) = decl.schema.as_ref() {
+            if let Ok(Some(validator)) =
+                declared_validator(Some(schema), "", "", &region_id)
+            {
+                if let Ok((package_name, resolved_version, _)) =
+                    owning_subscription_for_region(&state, &region_id)
+                {
+                    if validator_consented(window_app_handle(&window), &package_name, &validator) {
+                        if let Some(scalar) = validator_scalar(&value) {
+                            let inputs = vec![ValidatorInput { row, col, value: scalar }];
+                            let context = validator_context(
+                                &region_id,
+                                Some(schema),
+                                &package_name,
+                                &resolved_version,
+                            );
+                            if let Ok(verdicts) = run_validator_batch(&validator, &inputs, &context)
+                            {
+                                if let Some(Some(message)) = verdicts.into_iter().next() {
+                                    return Err(format!(
+                                        "Rejected by '{}' (from {} v{}): {}",
+                                        validator.name, package_name, resolved_version, message
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Get or mint a CellId for this cell
@@ -5856,7 +5896,7 @@ pub fn calp_save_writeback_draft(
 
     // `immediate` regions go straight to the registry — saving IS submitting.
     if auto_submit {
-        submit_region_internal(&state, &region_id)?;
+        submit_region_internal(&state, &region_id, window_app_handle(&window))?;
     }
 
     Ok(())
@@ -5977,6 +6017,779 @@ pub fn calp_reconcile_writeback(
     Ok(layer.clone())
 }
 
+// ============================================================================
+// Custom writeback validators — publisher-shipped CODE, run authoritatively
+// ============================================================================
+//
+// WHY THE AUTHORITATIVE RUN IS HERE AND NOT IN THE FRONTEND WORKER
+// ----------------------------------------------------------------
+// A validator that runs only in the client is not a validator, it is a
+// suggestion. The client IS the caller of `calp_submit_region` (and of the
+// `distribution.writeback` script gateway that fronts it), so any verdict it
+// hands the backend — "I ran the validator, it passed" — is self-asserted by
+// the exact party the gate exists to constrain. A script holding
+// `distribution.writeback` can call `submitRegion` directly and simply never
+// run the check, or claim a pass it never got. There is no construction that
+// makes a caller-supplied verdict trustworthy, so none is accepted.
+//
+// The authoritative run therefore happens HERE, on the submit path, with three
+// properties no caller can influence:
+//
+//  1. SOURCE OF TRUTH. The validator body is read from the SAME Ed25519 + TOFU
+//     verified version manifest that already supplies the region's ValueSchema
+//     (the `decl` resolution in `submit_region_internal`). Never from the
+//     .cala, never from the caller, never from the frontend. A tampered
+//     workbook or a hostile script cannot swap the body, and a publisher who
+//     edits it publishes a new signed version.
+//
+//  2. SANDBOX. It executes in the embedded QuickJS interpreter — the same
+//     isolated Rust realm the notebook / one-off / MCP script surfaces use, and
+//     the same runtime limits (heap, JS stack, wall clock) — over an EMPTY
+//     cloned grid, with the `Calcula`, `model`, `display` and `console` globals
+//     removed before the publisher's code is reached. A validator is a pure
+//     `(value, ctx) => true | string`: no capabilities, no host state, no I/O.
+//     There is nothing to grant, therefore nothing to escalate. This is not a
+//     second sandbox; it is the existing one, entered with everything unbound.
+//
+//  3. FAIL CLOSED. A declared validator that has no body, is not consented,
+//     throws, exceeds its time budget, or returns anything other than
+//     true/null/undefined/string REJECTS the submission. It never silently
+//     passes. It also never blocks more than the submit of the one region that
+//     declares it: the workbook stays open, other regions still submit, drafts
+//     are still saved and editable, and the error names the package, the
+//     version and the validator so the user knows exactly what to chase.
+//
+// CONSENT. Publisher code that runs on a subscriber's machine goes through the
+// same door as every other distributed script: the shared consent store in the
+// workbook (`.calcula/script-consent.json`, written by @api/distributedConsent),
+// keyed by package AND by SHA-256 of the exact source. Changing the body changes
+// the hash and re-prompts; an un-consented validator fails closed at submit.
+// Validators are keyed under `<package>::writeback-validators` so granting them
+// neither clobbers nor inherits the object-script consent record for the same
+// package (two independent writers, one file).
+//
+// The frontend mirror in @api/writebackValidators.ts mounts the SAME source in
+// the hardened worker realm for as-you-type feedback. That run is advisory by
+// definition and is not consulted here.
+
+/// Schema `extra` key holding the validator's stable name.
+const VALIDATOR_NAME_KEY: &str = "customValidator";
+/// Schema `extra` key holding the validator's JS body (a function expression).
+const VALIDATOR_SOURCE_KEY: &str = "customValidatorSource";
+/// The workbook-embedded distributed-script consent store.
+const SCRIPT_CONSENT_FILE: &str = ".calcula/script-consent.json";
+
+/// Consent-store package key for a package's writeback validators.
+/// MUST match `writebackValidatorConsentKey` in @api/writebackValidators.ts.
+fn validator_consent_key(package_name: &str) -> String {
+    format!("{}::writeback-validators", package_name)
+}
+
+/// Consent-store script id for one validator.
+/// MUST match `writebackValidatorScriptId` in @api/writebackValidators.ts.
+fn validator_script_id(name: &str) -> String {
+    format!("writeback-validator:{}", name)
+}
+
+/// A publisher-declared validator resolved from a verified manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeclaredValidator {
+    pub name: String,
+    pub source: String,
+    pub source_hash: String,
+}
+
+/// Resolve the validator a region declares, if any.
+///
+/// `Ok(None)` = the region declares no validator (the overwhelmingly common
+/// case; nothing changes for it). `Ok(Some(_))` = a name AND a body are
+/// present. `Err(_)` = the region declares a validator NAME with no usable
+/// BODY — the "wishful metadata" case this whole gate exists to kill. That is a
+/// hard failure on submit, not a skip: a publisher who says "validate this" and
+/// a subscriber whose client silently ignores it is precisely the credibility
+/// hole that makes distributed writeback no better than emailing a sheet.
+pub(crate) fn declared_validator(
+    schema: Option<&calp::writeback::ValueSchema>,
+    package_name: &str,
+    resolved_version: &str,
+    region_id: &str,
+) -> Result<Option<DeclaredValidator>, String> {
+    let Some(schema) = schema else { return Ok(None) };
+    let name = schema
+        .extra
+        .get(VALIDATOR_NAME_KEY)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let Some(name) = name else { return Ok(None) };
+    let source = schema
+        .extra
+        .get(VALIDATOR_SOURCE_KEY)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let Some(source) = source else {
+        return Err(format!(
+            "Cannot submit to region '{}': {} v{} declares the custom validator \
+             '{}' but ships no validator code for it, so the check the publisher \
+             asked for cannot be performed. Ask the publisher to republish the \
+             package with the validator body included.",
+            region_id, package_name, resolved_version, name
+        ));
+    };
+    Ok(Some(DeclaredValidator {
+        name: name.to_string(),
+        source: source.to_string(),
+        source_hash: calp::integrity::sha256_hex(source.as_bytes()),
+    }))
+}
+
+/// Whether a parsed consent file grants `script_id`/`source_hash` under
+/// `package_key`. Pure (takes the parsed JSON) so it is unit-testable without a
+/// workbook. An absent/malformed file grants nothing.
+pub(crate) fn consent_granted_in(
+    consent_file: &serde_json::Value,
+    package_key: &str,
+    script_id: &str,
+    source_hash: &str,
+) -> bool {
+    let Some(consents) = consent_file.get("consents").and_then(|c| c.as_array()) else {
+        return false;
+    };
+    consents.iter().any(|record| {
+        record.get("packageName").and_then(|v| v.as_str()) == Some(package_key)
+            && record
+                .get("scripts")
+                .and_then(|s| s.as_array())
+                .map(|scripts| {
+                    scripts.iter().any(|s| {
+                        s.get("id").and_then(|v| v.as_str()) == Some(script_id)
+                            && s.get("sourceHash").and_then(|v| v.as_str()) == Some(source_hash)
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// The AppHandle behind a command's Window, without pulling `tauri::Manager`
+/// into this module's top-level import set. Needed because the validator gate
+/// reads the workbook's consent store (a `UserFilesState`) from paths whose
+/// only handle on the app is the window.
+fn window_app_handle(window: &tauri::Window) -> &tauri::AppHandle {
+    use tauri::Manager;
+    Manager::app_handle(window)
+}
+
+/// Read the workbook's distributed-script consent store. `None` when the
+/// workbook carries no consent file or it is not parseable JSON.
+fn read_script_consent_file(app: &tauri::AppHandle) -> Option<serde_json::Value> {
+    use tauri::Manager;
+    let user_files = app.state::<crate::persistence::UserFilesState>();
+    let files = user_files.files.lock().ok()?;
+    let bytes = files.get(SCRIPT_CONSENT_FILE)?;
+    serde_json::from_slice::<serde_json::Value>(bytes).ok()
+}
+
+/// Whether the user has consented to run this exact validator body for this
+/// package. Fails closed on every uncertainty (no file, no record, hash drift).
+fn validator_consented(
+    app: &tauri::AppHandle,
+    package_name: &str,
+    validator: &DeclaredValidator,
+) -> bool {
+    let Some(file) = read_script_consent_file(app) else { return false };
+    consent_granted_in(
+        &file,
+        &validator_consent_key(package_name),
+        &validator_script_id(&validator.name),
+        &validator.source_hash,
+    )
+}
+
+/// One value handed to the validator, with the cell it came from.
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatorInput {
+    pub row: u32,
+    pub col: u32,
+    pub value: serde_json::Value,
+}
+
+/// Unwrap a SubmissionValue into the plain JSON scalar a validator sees.
+/// `Empty` yields `None` — an empty cell is the `required` gate's business, not
+/// the validator's, which keeps the Rust verdict aligned with the frontend
+/// advisory run (which also skips blanks).
+fn validator_scalar(value: &calp::writeback::SubmissionValue) -> Option<serde_json::Value> {
+    use calp::writeback::SubmissionValue;
+    match value {
+        SubmissionValue::Number { value } => Some(serde_json::json!(value)),
+        SubmissionValue::Text { value } => Some(serde_json::json!(value)),
+        SubmissionValue::Boolean { value } => Some(serde_json::json!(value)),
+        SubmissionValue::Empty => None,
+    }
+}
+
+/// Wall-clock budget for one validator batch. Deliberately far below the
+/// one-off script budget: a validator is a pure predicate over a handful of
+/// scalars, and this runs synchronously inside the submit command, so a
+/// runaway body must surface as a fast, clear failure rather than a hang.
+const VALIDATOR_TIMEOUT_MS: u64 = 2_000;
+
+/// Escape a JSON literal for safe embedding in JS source. `serde_json` already
+/// produces a valid JS expression except for U+2028/U+2029, which are string
+/// terminators in JS but legal raw inside a JSON string.
+fn json_for_js(value: &serde_json::Value) -> String {
+    value
+        .to_string()
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// Run one validator over a batch of values in the embedded QuickJS realm.
+///
+/// Returns one entry per input, in order: `None` = accepted, `Some(message)` =
+/// rejected with the publisher's message. `Err(_)` means the validator could
+/// not be run to a verdict at all (bad source, thrown at load, timeout,
+/// unreadable result) — the caller turns that into a refusal, never a pass.
+pub(crate) fn run_validator_batch(
+    validator: &DeclaredValidator,
+    inputs: &[ValidatorInput],
+    context: &serde_json::Value,
+) -> Result<Vec<Option<String>>, String> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // A per-run nonce prefixes the verdict line. The result we read is the LAST
+    // line carrying it, which is emitted after the publisher's code has already
+    // returned — so even a body that prints a forged nonce line cannot displace
+    // the real verdict. (Forgery is not the threat model here — the publisher's
+    // own code faking a pass for the publisher's own region gains nothing — but
+    // the batch protocol should not be ambiguous either.)
+    let nonce = {
+        let bytes = identity::generate_uuid_v7();
+        let mut s = String::from("__calcula_wbv_");
+        for b in bytes.iter() {
+            s.push_str(&format!("{:02x}", b));
+        }
+        s.push_str("__");
+        s
+    };
+
+    let values: Vec<serde_json::Value> = inputs
+        .iter()
+        .map(|i| serde_json::json!({ "row": i.row, "col": i.col, "value": i.value }))
+        .collect();
+
+    // The publisher's source is embedded as the initializer of `__fn`. Every
+    // host global is dropped BEFORE it is evaluated, so the body opens onto a
+    // bare ECMAScript realm.
+    let harness = format!(
+        r#"(function () {{
+  var __emit = console.log;
+  try {{ delete globalThis.Calcula; }} catch (e) {{}}
+  try {{ delete globalThis.model; }} catch (e) {{}}
+  try {{ delete globalThis.display; }} catch (e) {{}}
+  try {{ delete globalThis.console; }} catch (e) {{}}
+  var __report = function (payload) {{ __emit({nonce} + JSON.stringify(payload)); }};
+  var __fn;
+  try {{
+    __fn = ({source});
+  }} catch (e) {{
+    __report({{ error: "validator source failed to load: " + String((e && e.message) || e) }});
+    return;
+  }}
+  if (typeof __fn !== "function") {{
+    __report({{ error: "validator source did not evaluate to a function" }});
+    return;
+  }}
+  var __values = {values};
+  var __ctx = {context};
+  var __out = [];
+  for (var i = 0; i < __values.length; i++) {{
+    var item = __values[i];
+    var ctx = {{
+      regionId: __ctx.regionId,
+      valueType: __ctx.valueType,
+      packageName: __ctx.packageName,
+      packageVersion: __ctx.packageVersion,
+      row: item.row,
+      col: item.col
+    }};
+    var r;
+    try {{
+      r = __fn(item.value, ctx);
+    }} catch (e) {{
+      __out.push({{ status: "threw", message: String((e && e.message) || e) }});
+      continue;
+    }}
+    if (r === true || r === null || r === undefined) {{
+      __out.push({{ status: "ok" }});
+    }} else if (typeof r === "string") {{
+      __out.push(r.trim() === "" ? {{ status: "ok" }} : {{ status: "rejected", message: r }});
+    }} else if (r === false) {{
+      __out.push({{ status: "rejected", message: "Value rejected by the validator." }});
+    }} else {{
+      __out.push({{ status: "invalid", message: "validator returned " + (typeof r) }});
+    }}
+  }}
+  __report({{ results: __out }});
+}})();
+"#,
+        nonce = json_for_js(&serde_json::Value::String(nonce.clone())),
+        source = validator.source,
+        values = json_for_js(&serde_json::Value::Array(values)),
+        context = json_for_js(context),
+    );
+
+    let options = script_engine::ScriptRunOptions {
+        limits: script_engine::ScriptLimits::with_timeout_ms(VALIDATOR_TIMEOUT_MS),
+        ..Default::default()
+    };
+    // Empty grid / empty registry / no sheet names: the validator has no data
+    // surface even if it somehow reached the (already-deleted) host globals.
+    let (result, _grids) = script_engine::ScriptEngine::run_with_options(
+        &harness,
+        "writeback-validator.js",
+        vec![engine::grid::Grid::new()],
+        engine::style::StyleRegistry::new(),
+        Vec::new(),
+        0,
+        options,
+    );
+
+    let output = match result {
+        script_engine::ScriptResult::Success { output, .. } => output,
+        script_engine::ScriptResult::Error { message, .. } => return Err(message),
+    };
+
+    let payload = output
+        .iter()
+        .rev()
+        .find_map(|item| {
+            let text = item.to_text();
+            text.strip_prefix(nonce.as_str()).map(|json| json.to_string())
+        })
+        .ok_or_else(|| "the validator produced no verdict".to_string())?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|e| format!("unreadable verdict ({})", e))?;
+    if let Some(error) = parsed.get("error").and_then(|v| v.as_str()) {
+        return Err(error.to_string());
+    }
+    let results = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "the validator produced no verdict".to_string())?;
+    if results.len() != inputs.len() {
+        return Err(format!(
+            "the validator returned {} verdict(s) for {} value(s)",
+            results.len(),
+            inputs.len()
+        ));
+    }
+
+    let mut verdicts = Vec::with_capacity(results.len());
+    for entry in results {
+        let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let message = entry
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        match status {
+            "ok" => verdicts.push(None),
+            "rejected" => verdicts.push(Some(if message.is_empty() {
+                "Value rejected by the validator.".to_string()
+            } else {
+                message
+            })),
+            // A validator that THREW or returned nonsense has not accepted the
+            // value; it has failed to judge it. Reject with the reason rather
+            // than pretend it passed.
+            "threw" => verdicts.push(Some(format!("the validator threw: {}", message))),
+            _ => verdicts.push(Some(format!(
+                "the validator gave no usable verdict ({})",
+                if message.is_empty() { status } else { &message }
+            ))),
+        }
+    }
+    Ok(verdicts)
+}
+
+/// The context object handed to a validator alongside each value.
+fn validator_context(
+    region_id: &str,
+    schema: Option<&calp::writeback::ValueSchema>,
+    package_name: &str,
+    resolved_version: &str,
+) -> serde_json::Value {
+    let value_type = schema.map(|s| match s.value_type {
+        calp::writeback::ValueType::Number => "number",
+        calp::writeback::ValueType::Integer => "integer",
+        calp::writeback::ValueType::Text => "text",
+        calp::writeback::ValueType::Date => "date",
+        calp::writeback::ValueType::Boolean => "boolean",
+        calp::writeback::ValueType::Enum => "enum",
+    });
+    serde_json::json!({
+        "regionId": region_id,
+        "valueType": value_type,
+        "packageName": package_name,
+        "packageVersion": resolved_version,
+    })
+}
+
+/// Enforce a region's publisher-shipped validator over a batch of values about
+/// to be written to the registry. Any refusal is returned as a user-facing
+/// message naming the package, version and validator.
+fn enforce_custom_validator(
+    app: &tauri::AppHandle,
+    decl: &calp::WritebackRegionDeclaration,
+    region_id: &str,
+    package_name: &str,
+    resolved_version: &str,
+    submissions: &[calp::writeback::WritebackSubmission],
+) -> Result<(), String> {
+    let Some(validator) = declared_validator(
+        decl.schema.as_ref(),
+        package_name,
+        resolved_version,
+        region_id,
+    )?
+    else {
+        return Ok(());
+    };
+
+    if !validator_consented(app, package_name, &validator) {
+        return Err(format!(
+            "Cannot submit to region '{}': the custom validator '{}' shipped by \
+             {} v{} has not been approved to run on this machine (or its code \
+             changed since it was approved). Open the package's writeback pane, \
+             review the validator code and approve it, then submit again.",
+            region_id, validator.name, package_name, resolved_version
+        ));
+    }
+
+    let inputs: Vec<ValidatorInput> = submissions
+        .iter()
+        .filter_map(|s| {
+            validator_scalar(&s.value).map(|value| ValidatorInput {
+                row: s.cell_row,
+                col: s.cell_col,
+                value,
+            })
+        })
+        .collect();
+    if inputs.is_empty() {
+        return Ok(());
+    }
+
+    let context = validator_context(region_id, decl.schema.as_ref(), package_name, resolved_version);
+    let verdicts = run_validator_batch(&validator, &inputs, &context).map_err(|e| {
+        format!(
+            "Cannot submit to region '{}': the custom validator '{}' shipped by \
+             {} v{} could not be run to a verdict ({}). Nothing was submitted. \
+             Ask the publisher to fix the validator.",
+            region_id, validator.name, package_name, resolved_version, e
+        )
+    })?;
+
+    for (input, verdict) in inputs.iter().zip(verdicts) {
+        if let Some(message) = verdict {
+            return Err(format!(
+                "Cell ({}, {}) was rejected by '{}' (from {} v{}): {}",
+                input.row + 1,
+                input.col + 1,
+                validator.name,
+                package_name,
+                resolved_version,
+                message
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod writeback_validator_tests {
+    //! The custom-validator gate. These cover the pure halves — declaration
+    //! resolution, consent matching, and the sandboxed execution protocol —
+    //! which together decide every accept/refuse the submit path makes.
+    use super::*;
+    use calp::writeback::{ValueSchema, ValueType};
+    use std::collections::HashMap;
+
+    fn schema_with(extra: &[(&str, &str)]) -> ValueSchema {
+        let mut map: HashMap<String, serde_json::Value> = HashMap::new();
+        for (k, v) in extra {
+            map.insert((*k).to_string(), serde_json::json!(v));
+        }
+        ValueSchema {
+            value_type: ValueType::Number,
+            required: false,
+            min: None,
+            max: None,
+            enum_values: Vec::new(),
+            max_length: None,
+            pattern: None,
+            extra: map,
+        }
+    }
+
+    fn ctx() -> serde_json::Value {
+        validator_context("r1", None, "pkg", "1.0.0")
+    }
+
+    fn input(value: serde_json::Value) -> ValidatorInput {
+        ValidatorInput { row: 0, col: 0, value }
+    }
+
+    fn validator(source: &str) -> DeclaredValidator {
+        DeclaredValidator {
+            name: "check".to_string(),
+            source: source.to_string(),
+            source_hash: calp::integrity::sha256_hex(source.as_bytes()),
+        }
+    }
+
+    // ---- declaration resolution -------------------------------------------
+
+    #[test]
+    fn region_without_a_validator_declares_none() {
+        assert_eq!(
+            declared_validator(Some(&schema_with(&[])), "pkg", "1.0.0", "r1").unwrap(),
+            None
+        );
+        assert_eq!(declared_validator(None, "pkg", "1.0.0", "r1").unwrap(), None);
+    }
+
+    #[test]
+    fn name_plus_body_resolves_with_the_consent_hash() {
+        let src = "(v) => true";
+        let schema = schema_with(&[("customValidator", "check"), ("customValidatorSource", src)]);
+        let v = declared_validator(Some(&schema), "pkg", "1.0.0", "r1")
+            .unwrap()
+            .expect("validator");
+        assert_eq!(v.name, "check");
+        assert_eq!(v.source, src);
+        assert_eq!(v.source_hash, calp::integrity::sha256_hex(src.as_bytes()));
+    }
+
+    /// The whole point: a NAME with no BODY is the old wishful-metadata state.
+    /// It must be a hard refusal, never a silent skip.
+    #[test]
+    fn name_without_a_body_is_a_hard_error_naming_the_package() {
+        let schema = schema_with(&[("customValidator", "iban")]);
+        let err = declared_validator(Some(&schema), "acme.budget", "2.1.0", "r1")
+            .expect_err("must refuse");
+        assert!(err.contains("acme.budget"), "{}", err);
+        assert!(err.contains("2.1.0"), "{}", err);
+        assert!(err.contains("iban"), "{}", err);
+    }
+
+    #[test]
+    fn a_blank_body_counts_as_no_body() {
+        let schema = schema_with(&[
+            ("customValidator", "check"),
+            ("customValidatorSource", "   \n  "),
+        ]);
+        assert!(declared_validator(Some(&schema), "pkg", "1.0.0", "r1").is_err());
+    }
+
+    // ---- consent ----------------------------------------------------------
+
+    fn consent_file(package_key: &str, id: &str, hash: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "consents": [{
+                "packageName": package_key,
+                "scripts": [{ "id": id, "sourceHash": hash }],
+                "grantedCapabilities": [],
+                "grantedAt": "2026-07-31T00:00:00Z"
+            }]
+        })
+    }
+
+    #[test]
+    fn consent_matches_on_package_key_script_id_and_hash() {
+        let key = validator_consent_key("pkg");
+        let id = validator_script_id("check");
+        let file = consent_file(&key, &id, "abc123");
+        assert!(consent_granted_in(&file, &key, &id, "abc123"));
+        // Source drift -> no consent (the publisher swapped the code).
+        assert!(!consent_granted_in(&file, &key, &id, "def456"));
+        // Another validator in the same package is not covered.
+        assert!(!consent_granted_in(&file, &key, &validator_script_id("other"), "abc123"));
+        // The package's OBJECT-SCRIPT record must not grant validators.
+        assert!(!consent_granted_in(&file, "pkg", &id, "abc123"));
+    }
+
+    #[test]
+    fn a_missing_or_malformed_consent_file_grants_nothing() {
+        assert!(!consent_granted_in(&serde_json::json!({}), "k", "i", "h"));
+        assert!(!consent_granted_in(&serde_json::json!({ "consents": 7 }), "k", "i", "h"));
+    }
+
+    #[test]
+    fn validator_consent_key_and_script_id_are_the_agreed_shapes() {
+        // These strings are a cross-language contract with
+        // @api/writebackValidators.ts — changing one without the other
+        // silently un-consents every validator.
+        assert_eq!(validator_consent_key("acme.budget"), "acme.budget::writeback-validators");
+        assert_eq!(validator_script_id("iban"), "writeback-validator:iban");
+    }
+
+    // ---- sandboxed execution ----------------------------------------------
+
+    #[test]
+    fn a_passing_validator_returns_no_verdicts() {
+        let v = validator("(value) => value > 0 ? true : 'must be positive'");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(5))], &ctx()).unwrap();
+        assert_eq!(verdicts, vec![None]);
+    }
+
+    #[test]
+    fn a_failing_validator_returns_the_publishers_message() {
+        let v = validator("(value) => value > 0 ? true : 'must be positive'");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(-1))], &ctx()).unwrap();
+        assert_eq!(verdicts, vec![Some("must be positive".to_string())]);
+    }
+
+    #[test]
+    fn verdicts_come_back_one_per_value_in_order() {
+        let v = validator("(value) => value % 2 === 0 ? true : 'odd'");
+        let verdicts = run_validator_batch(
+            &v,
+            &[
+                input(serde_json::json!(2)),
+                input(serde_json::json!(3)),
+                input(serde_json::json!(4)),
+            ],
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(verdicts, vec![None, Some("odd".to_string()), None]);
+    }
+
+    #[test]
+    fn the_context_reaches_the_validator() {
+        let v = validator(
+            "(value, ctx) => ctx.regionId === 'r1' && ctx.packageName === 'pkg' ? true : 'bad ctx'",
+        );
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        assert_eq!(verdicts, vec![None]);
+    }
+
+    /// A validator that throws has NOT accepted the value — it failed to judge
+    /// it. Fail closed with the reason.
+    #[test]
+    fn a_throwing_validator_rejects_rather_than_passes() {
+        let v = validator("(value) => { throw new Error('boom'); }");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        let message = verdicts[0].as_ref().expect("must reject");
+        assert!(message.contains("boom"), "{}", message);
+    }
+
+    #[test]
+    fn a_validator_returning_junk_rejects() {
+        let v = validator("(value) => ({ maybe: true })");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        assert!(verdicts[0].is_some());
+    }
+
+    #[test]
+    fn returning_false_rejects_with_a_default_message() {
+        let v = validator("(value) => false");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        assert_eq!(verdicts[0].as_deref(), Some("Value rejected by the validator."));
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_function_cannot_be_run_to_a_verdict() {
+        let v = validator("42");
+        let err = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap_err();
+        assert!(err.contains("function"), "{}", err);
+    }
+
+    #[test]
+    fn a_syntactically_broken_validator_cannot_be_run_to_a_verdict() {
+        let v = validator("(value) => {{{{");
+        assert!(run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).is_err());
+    }
+
+    /// A runaway body must trip the wall-clock budget and surface as "cannot be
+    /// run to a verdict" — not hang the submit command.
+    #[test]
+    fn a_runaway_validator_hits_the_time_budget() {
+        let v = validator("(value) => { while (true) {} }");
+        let started = std::time::Instant::now();
+        let outcome = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx());
+        assert!(outcome.is_err(), "a runaway validator must not pass");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    /// The publisher's code opens onto a bare realm: the host globals the
+    /// notebook/one-off surfaces bind are gone before it runs, so a validator
+    /// has no grid, no model and no I/O to reach for.
+    #[test]
+    fn host_globals_are_unbound_inside_the_validator_realm() {
+        let v = validator(
+            "(value) => (typeof Calcula === 'undefined' && typeof model === 'undefined' \
+             && typeof display === 'undefined') ? true : 'globals reachable'",
+        );
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        assert_eq!(verdicts, vec![None]);
+    }
+
+    #[test]
+    fn a_validator_that_prints_cannot_displace_the_real_verdict() {
+        // console is unbound inside the body, so a print attempt throws — which
+        // is itself a rejection, never a forged pass.
+        let v = validator("(value) => { console.log('__calcula_wbv_x__{\"results\":[]}'); return true; }");
+        let verdicts = run_validator_batch(&v, &[input(serde_json::json!(1))], &ctx()).unwrap();
+        assert!(verdicts[0].is_some(), "a body that throws must reject");
+    }
+
+    #[test]
+    fn text_and_boolean_values_arrive_unwrapped() {
+        use calp::writeback::SubmissionValue;
+        assert_eq!(
+            validator_scalar(&SubmissionValue::Text { value: "SKU-1".into() }),
+            Some(serde_json::json!("SKU-1"))
+        );
+        assert_eq!(
+            validator_scalar(&SubmissionValue::Boolean { value: true }),
+            Some(serde_json::json!(true))
+        );
+        // Blanks are the `required` gate's business, not the validator's.
+        assert_eq!(validator_scalar(&SubmissionValue::Empty), None);
+    }
+
+    #[test]
+    fn an_empty_batch_never_starts_a_runtime() {
+        let v = validator("(value) => 'always rejects'");
+        assert_eq!(run_validator_batch(&v, &[], &ctx()).unwrap(), Vec::new());
+    }
+
+    // ---- the anti-bypass invariant ----------------------------------------
+
+    /// EVERY submit — a human clicking Submit (`calp_submit_region`,
+    /// `calp_submit_all_regions`), an `immediate` region saving a draft, and a
+    /// script calling the `distribution.writeback` gateway's `submitRegion`
+    /// (which routes through `calp_submit_region`) — funnels through
+    /// `submit_region_internal`, which runs `enforce_custom_validator`
+    /// unconditionally. The only way to weaken that would be to let the caller
+    /// hand in a verdict, so this pins the signature: it takes the app state,
+    /// the region, and an app handle — and nothing that could say "already
+    /// validated". Adding such a parameter breaks this coercion.
+    #[test]
+    fn the_submit_path_accepts_no_caller_supplied_verdict() {
+        let _: fn(&AppState, &str, &tauri::AppHandle) -> Result<usize, String> =
+            submit_region_internal;
+    }
+}
+
 /// Submit all drafts for a region to the registry of the subscription that
 /// actually declares the region.
 ///
@@ -5984,7 +6797,11 @@ pub fn calp_reconcile_writeback(
 /// after every write succeeded. Advancing first would permanently mark values
 /// as submitted that the registry never received (retry would be a no-op
 /// because submit_region only advances Draft-state entries).
-fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, String> {
+fn submit_region_internal(
+    state: &AppState,
+    region_id: &str,
+    app: &tauri::AppHandle,
+) -> Result<usize, String> {
     let now = chrono::Utc::now().to_rfc3339();
 
     // Resolve the OWNING subscription for this region (not subscriptions[0]).
@@ -6119,6 +6936,21 @@ fn submit_region_internal(state: &AppState, region_id: &str) -> Result<usize, St
         check_lifecycle_policy(decl, already_submitted, &now)?;
     }
 
+    // PUBLISHER-SHIPPED CUSTOM VALIDATOR (see the section above). Runs over the
+    // whole batch BEFORE any registry write, from the same signature-verified
+    // declaration as the schema, in the embedded QuickJS realm, and fails closed
+    // — so a script calling this path directly (via the `distribution.writeback`
+    // gateway or `calp_submit_region`) is judged by exactly the same code as a
+    // human clicking Submit. There is no verdict parameter to forge.
+    enforce_custom_validator(
+        app,
+        decl,
+        region_id,
+        &package_name,
+        &resolved_version,
+        &to_submit,
+    )?;
+
     for sub in &to_submit {
         registry.save_submission(&package_name, &resolved_version, sub)
             .map_err(|e| e.to_string())?;
@@ -6163,7 +6995,7 @@ pub fn calp_submit_region(
     window: tauri::Window,
 ) -> Result<usize, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    submit_region_internal(&state, &region_id)
+    submit_region_internal(&state, &region_id, window_app_handle(&window))
 }
 
 /// Submit the drafts of EVERY writeback region that has any — the "I'm done /
@@ -6196,7 +7028,7 @@ pub fn calp_submit_all_regions(
     let mut total = 0usize;
     let mut submitted_regions = 0usize;
     for region_id in region_ids {
-        match submit_region_internal(&state, &region_id) {
+        match submit_region_internal(&state, &region_id, window_app_handle(&window)) {
             Ok(n) => {
                 total += n;
                 if n > 0 {
@@ -6243,6 +7075,35 @@ pub struct OutboundSubmissionPreview {
     pub submitter_id: String,
     pub submitter_name: String,
     pub values: Vec<OutboundValue>,
+    /// The publisher-shipped custom validator that WILL judge this submission,
+    /// when the region declares one. Absent when it declares none. This is the
+    /// frontend's only source for the validator body: it feeds the consent
+    /// prompt (review the code before approving it) and the advisory
+    /// as-you-type run in the hardened worker realm. The body is read from the
+    /// Ed25519-verified manifest here, so what the user reviews is what the
+    /// backend will run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator: Option<OutboundValidator>,
+    /// Set when the region declares a validator NAME but the package ships no
+    /// BODY for it. Submission will be refused; surfaced so the pane can say so
+    /// before the user fills the region in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_error: Option<String>,
+}
+
+/// The custom validator a submission will be judged by.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundValidator {
+    pub name: String,
+    /// The exact JS function-expression source the backend will execute.
+    pub source: String,
+    /// SHA-256 of `source` — the consent key. Matches
+    /// @api/distributedConsent's `sha256Hex(source)`.
+    pub source_hash: String,
+    /// Whether this exact body is already approved to run on this machine.
+    /// False ⇒ submission fails closed until the user reviews and approves it.
+    pub consented: bool,
 }
 
 /// Mirror `submit_region_internal`'s resolution + draft snapshot WITHOUT writing,
@@ -6290,6 +7151,46 @@ pub fn calp_preview_region_submission(
             .collect()
     };
 
+    // The validator that WILL judge this submission, resolved from the SAME
+    // signature-verified manifest the submit path reads it from — so the source
+    // the user reviews in the consent prompt is byte-identical to the source the
+    // backend executes. (The in-memory declarations cache is deliberately not
+    // used here: it would let a stale/unsigned copy be what the user approves.)
+    let (validator, validator_error) = {
+        let decl = crate::calp_registry::open_registry(&registry_path)
+            .ok()
+            .and_then(|registry| {
+                calp::integrity::verify_and_load_manifest_via(
+                    &*registry,
+                    &package_name,
+                    &resolved_version,
+                    &calcula_profile_dir(),
+                )
+                .ok()
+            })
+            .and_then(|(_, m)| m.writeback_regions)
+            .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
+        match decl
+            .as_ref()
+            .map(|d| declared_validator(d.schema.as_ref(), &package_name, &resolved_version, &region_id))
+        {
+            Some(Ok(Some(v))) => {
+                let consented = validator_consented(window_app_handle(&window), &package_name, &v);
+                (
+                    Some(OutboundValidator {
+                        name: v.name,
+                        source: v.source,
+                        source_hash: v.source_hash,
+                        consented,
+                    }),
+                    None,
+                )
+            }
+            Some(Err(message)) => (None, Some(message)),
+            _ => (None, None),
+        }
+    };
+
     Ok(OutboundSubmissionPreview {
         region_id,
         package_name,
@@ -6298,6 +7199,8 @@ pub fn calp_preview_region_submission(
         submitter_id: identity.id,
         submitter_name: identity.display_name,
         values,
+        validator,
+        validator_error,
     })
 }
 
@@ -6370,12 +7273,727 @@ fn require_publisher(
 /// Resolve a grid writeback region's owning subscription and assert the caller
 /// is that package's publisher. Shared by the dashboard load and both exports,
 /// so all three enforce identically.
-fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
+pub(crate) fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
     let registry =
         crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
     require_publisher(&*registry, &package_name, &resolved_version)
+}
+
+/// The MODEL-writeback twin of `require_region_publisher`: resolve the
+/// subscription that declares a writeback COLUMN and assert the caller holds
+/// that package's Ed25519 signing key.
+///
+/// Used by the script gateway to fail publisher-only actions BEFORE dispatch
+/// (so the denial is audited as a capability event, not just an error string).
+/// `calp_list_model_submissions` / `calp_set_model_submission_state` re-check
+/// the same gate internally — the boundary is enforced twice on purpose.
+pub(crate) fn require_model_writeback_publisher(
+    state: &AppState,
+    writeback_id: &str,
+) -> Result<(), String> {
+    let (package_name, resolved_version, registry_path, _) =
+        owning_subscription_for_model_writeback(state, writeback_id)?;
+    let registry =
+        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    require_publisher(&*registry, &package_name, &resolved_version)
+}
+
+// ============================================================================
+// Writeback claim lookups (shared with the script gateway and the grid write
+// path — see `scripting::writeback_gateway`)
+// ============================================================================
+
+/// The stable `SheetId` of the workbook's ACTIVE sheet — the sheet
+/// `update_cell` writes to. The script write path has no sheet parameter, so
+/// any "is this cell claimed?" question asked on its behalf must be asked about
+/// exactly this sheet.
+pub(crate) fn active_sheet_id(state: &AppState) -> Result<identity::SheetId, String> {
+    let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+    sheet_ids
+        .get(active)
+        .copied()
+        .ok_or_else(|| format!("No sheet at index {}", active))
+}
+
+/// The id of the PUBLISHED writeback region that claims (sheet, row, col), or
+/// `None`. Reads the same in-memory index every writeback gate uses — which is
+/// built only from signature-verified version manifests (see
+/// `rebuild_writeback_index`), so a claim can never come from an unsigned
+/// source.
+pub(crate) fn writeback_region_at(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    row: u32,
+    col: u32,
+) -> Option<String> {
+    let index = state.writeback_index.lock().ok()?;
+    index.region_id_at(sheet_id, row, col).map(|s| s.to_string())
+}
+
+/// The published declaration for a region id (schema + lifecycle governance),
+/// mirrored from the verified manifest by `rebuild_writeback_index`.
+pub(crate) fn writeback_declaration(
+    state: &AppState,
+    region_id: &str,
+) -> Option<calp::WritebackRegionDeclaration> {
+    let decls = state.writeback_declarations.lock().ok()?;
+    decls.iter().find(|d| d.id == region_id).cloned()
+}
+
+/// Whether the local writeback layer already holds a draft/submission for this
+/// exact slot. "A draft exists" is the proof that the value went through the
+/// authoritative `calp_save_writeback_draft` gate (schema + lifecycle) rather
+/// than straight into the grid.
+pub(crate) fn writeback_slot_has_draft(
+    state: &AppState,
+    region_id: &str,
+    row: u32,
+    col: u32,
+) -> bool {
+    state
+        .writeback_layer
+        .lock()
+        .map(|layer| {
+            layer
+                .drafts
+                .iter()
+                .any(|d| d.region_id == region_id && d.cell_row == row && d.cell_col == col)
+        })
+        .unwrap_or(false)
+}
+
+/// AUTHORITATIVE GUARD for the single-cell grid write path: refuse a write into
+/// a claimed writeback cell that has NO draft behind it.
+///
+/// The interactive editor's commit guard saves the draft FIRST and only then
+/// lets the normal commit through (so the cell displays what was drafted) —
+/// that path always passes here. What this closes is the silent-divergence
+/// bypass: a script calling `api.setCellValue` used to reach `update_cell`
+/// directly, writing a writeback cell with no draft, no schema check and no
+/// validator, so the grid and the writeback layer disagreed until reconcile.
+/// Scripts must instead go through `script_writeback` (action `cellGuard`),
+/// which creates the validated draft and only then lets the grid write happen.
+///
+/// Returns `Ok(())` when the cell is unclaimed (the overwhelmingly common case:
+/// one lock + an empty-index short-circuit).
+///
+/// WIRED at the top of `update_cell_impl` (app/src-tauri/src/commands/data.rs),
+/// the ONLY body behind the `update_cell` command. `update_cells_batch` already
+/// skips writeback cells (partial-success), `fill` has its own range guard, and
+/// `update_cell_on_sheets` (the group/off-sheet write) goes through
+/// `ensure_writeback_draft_before_write_on_sheets` below — so no grid write path
+/// can land a value in a claimed cell without a validated draft behind it.
+pub(crate) fn ensure_writeback_draft_before_write(
+    state: &AppState,
+    row: u32,
+    col: u32,
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let sheet_id = active_sheet_id(state)?;
+    ensure_writeback_draft_on_sheet(state, sheet_id, row, col)
+}
+
+/// The OFF-SHEET twin, for `update_cell_on_sheets` (group edit / a script's
+/// `updateCellOnSheets`). The active-sheet guard cannot cover it: that command
+/// writes sheets the active-sheet lookup would never name, and the writeback
+/// index is keyed by `SheetId`, so every targeted sheet must be asked about
+/// individually. `sheet_indices` that do not resolve are left to the caller's
+/// own bounds handling.
+pub(crate) fn ensure_writeback_draft_before_write_on_sheets(
+    state: &AppState,
+    sheet_indices: &[usize],
+    row: u32,
+    col: u32,
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let targets: Vec<identity::SheetId> = {
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        sheet_indices
+            .iter()
+            .filter_map(|i| sheet_ids.get(*i).copied())
+            .collect()
+    };
+    for sid in targets {
+        ensure_writeback_draft_on_sheet(state, sid, row, col)?;
+    }
+    Ok(())
+}
+
+/// Fast path shared by both guards: a workbook with no published writeback
+/// region at all pays exactly one lock.
+fn writeback_index_is_empty(state: &AppState) -> Result<bool, String> {
+    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+    Ok(index.is_empty())
+}
+
+/// The actual claim test for one (sheet, row, col).
+fn ensure_writeback_draft_on_sheet(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    row: u32,
+    col: u32,
+) -> Result<(), String> {
+    let Some(region_id) = writeback_region_at(state, sheet_id, row, col) else {
+        return Ok(());
+    };
+    if writeback_slot_has_draft(state, &region_id, row, col) {
+        return Ok(());
+    }
+    Err(format!(
+        "Cell ({}, {}) belongs to writeback region '{}'. Values there are collected as \
+         writeback drafts, not written straight to the grid — save a draft first \
+         (scripts: the distribution.writeback capability, action 'cellGuard').",
+        row, col, region_id
+    ))
+}
+
+// ============================================================================
+// RANGE-level writeback claim guard
+//
+// The single-cell guard above only sits on `update_cell_impl` /
+// `update_cell_on_sheets`. A whole family of commands rewrites rectangles of
+// the grid WITHOUT ever passing through them — sort, replace-all, clear,
+// merge, and insert/delete of rows and columns. Every one of those could
+// destroy, overwrite or displace the cells of a published writeback region:
+// values a publisher declared and a respondent is answerable for. The
+// interactive editor is fenced off from those cells by the frontend
+// `grid.rangeGuards` registry, but the script host, the MCP tools and the AI
+// never consult it, so the fence has to exist HERE, authoritatively.
+//
+// -------- POLICY: refuse the whole gesture. No partial mutation. -----------
+//
+// 1. WHO IS ACTING is already answered by the index being non-empty.
+//    `rebuild_writeback_index` builds this index EXCLUSIVELY from the
+//    signature-verified version manifests of the workbook's active
+//    SUBSCRIPTIONS. A publisher authoring their own package is not subscribed
+//    to it, so their workbook's index is empty and every guard below returns
+//    on its first lock. A non-empty index therefore means "this is a
+//    subscriber's copy of somebody else's published report", which is exactly
+//    the case where restructuring the form is never legitimate. That is why no
+//    `require_region_publisher` escape hatch is wired in here: it would cost a
+//    registry open plus an Ed25519 verification per gesture to re-answer a
+//    question the empty-index fast path already answers for free.
+//
+// 2. WHY THE SINGLE-CELL "a draft already exists => allow" RULE DOES NOT APPLY.
+//    That rule is sound for `update_cell` because the interactive commit guard
+//    saves the draft FIRST and then mirrors that same value into the cell — the
+//    draft IS the value being written, so grid and writeback layer agree. None
+//    of the gestures guarded here is a value-entry gesture: a sort permutes
+//    rows, so drafts keyed by (row, col) would end up describing different
+//    cells; a merge deletes the non-master cells outright; a clear erases the
+//    answer while the draft keeps asserting it; a shift moves the grid out from
+//    under a rectangle that does not move. In all of those, an existing draft
+//    makes the divergence WORSE, not safer. So drafts are deliberately not
+//    consulted by these guards.
+//
+// 3. SHIFTS ARE DESTRUCTION BY DISPLACEMENT. Region geometry is positional
+//    (`RegionSelector`'s row/col bounds) and is re-derived from the SIGNED
+//    manifest on every open — it is never rewritten by grid edits, and it
+//    cannot be: the manifest is signed. Insert a row above a claimed region and
+//    the respondent's answers slide out from under the claim while unrelated
+//    cells slide into it, permanently, with the drafts still pointing at the
+//    old coordinates. The rule is therefore: refuse any insert/delete whose
+//    SHIFT WINDOW touches a claimed region. The shift window of both
+//    `insert_rows(at, n)` and `delete_rows(at, n)` is "every row from `at`
+//    downwards, all columns" — one open-ended rectangle answers both. A
+//    structural edit strictly below (or strictly right of) every claimed region
+//    moves nothing that is claimed and is allowed through untouched.
+//
+// 4. FAILURE IS CLEAN. Every guard is called before the mutation takes its
+//    locks and before it opens an undo transaction, so a refusal is a no-op:
+//    never a half-applied sort, never a dangling transaction. The message names
+//    the region id and its A1 rectangle so the caller can act on it.
+//
+// 5. COST. `writeback_index_is_empty` is one mutex plus a check over an empty
+//    map — that is the entire price for a workbook with no subscriptions. When
+//    the index IS populated, each gesture pays ONE `regions_overlapping` linear
+//    scan over that sheet's handful of regions; nothing here is ever called per
+//    cell inside a mutation loop. Region-id resolution and A1 formatting run
+//    only on the refusal path.
+// ============================================================================
+
+/// RANGE guard, active sheet: refuse `action` if the rectangle overlaps any
+/// published writeback region. Coordinates may arrive in any order.
+///
+/// Wired into `sort_range`, `clear_range`, `clear_range_with_options` (content
+/// clears only), `clear_cell`, `replace_single`, `merge_cells`, `unmerge_cells`
+/// and `fill_range`.
+pub(crate) fn ensure_range_unclaimed(
+    state: &AppState,
+    action: &str,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let sheet_id = active_sheet_id(state)?;
+    let query = calp::writeback::PositionalRange {
+        row_start: start_row.min(end_row),
+        row_end: start_row.max(end_row),
+        col_start: start_col.min(end_col),
+        col_end: start_col.max(end_col),
+    };
+    ensure_range_unclaimed_on_sheet(state, sheet_id, &query, action)
+}
+
+/// The OFF-SHEET twin, for the group-edit commands (`clear_range_on_sheets`).
+/// The active-sheet lookup cannot name those sheets and the index is keyed by
+/// `SheetId`, so every targeted sheet is asked individually. Indices that do
+/// not resolve are left to the caller's own bounds handling, exactly as in
+/// `ensure_writeback_draft_before_write_on_sheets`.
+pub(crate) fn ensure_range_unclaimed_on_sheets(
+    state: &AppState,
+    action: &str,
+    sheet_indices: &[usize],
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let query = calp::writeback::PositionalRange {
+        row_start: start_row.min(end_row),
+        row_end: start_row.max(end_row),
+        col_start: start_col.min(end_col),
+        col_end: start_col.max(end_col),
+    };
+    let targets: Vec<identity::SheetId> = {
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        sheet_indices
+            .iter()
+            .filter_map(|i| sheet_ids.get(*i).copied())
+            .collect()
+    };
+    for sid in targets {
+        ensure_range_unclaimed_on_sheet(state, sid, &query, action)?;
+    }
+    Ok(())
+}
+
+/// CELL-LIST guard, active sheet: for gestures whose footprint is a scattered
+/// match list rather than a rectangle (`replace_all`). Checked against the
+/// actual cells so a replace that happens to miss every claimed cell still
+/// runs, instead of being refused by a bounding box it never touches.
+///
+/// Cost is one index lookup per candidate cell, on a list the caller is about
+/// to iterate anyway — and zero for a workbook with no regions.
+pub(crate) fn ensure_cells_unclaimed(
+    state: &AppState,
+    action: &str,
+    cells: &[(u32, u32)],
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let sheet_id = active_sheet_id(state)?;
+    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+    for &(row, col) in cells {
+        if let Some(region_id) = index.region_id_at(sheet_id, row, col) {
+            return Err(claim_refusal_cell(action, region_id, row, col));
+        }
+    }
+    Ok(())
+}
+
+/// SHIFT guard for `insert_rows` / `delete_rows`: refuse when the shift window
+/// (every row from `first_row` downwards, across all columns) touches a claimed
+/// region. See point 3 of the policy note above for why a shift that only moves
+/// a region — without overwriting a single cell of it — is still destruction.
+pub(crate) fn ensure_row_shift_unclaimed(
+    state: &AppState,
+    action: &str,
+    first_row: u32,
+) -> Result<(), String> {
+    ensure_range_unclaimed(state, action, first_row, 0, u32::MAX, u32::MAX)
+}
+
+/// SHIFT guard for `insert_columns` / `delete_columns`, the column twin.
+pub(crate) fn ensure_col_shift_unclaimed(
+    state: &AppState,
+    action: &str,
+    first_col: u32,
+) -> Result<(), String> {
+    ensure_range_unclaimed(state, action, 0, first_col, u32::MAX, u32::MAX)
+}
+
+/// The single overlap test every range guard funnels through: ONE
+/// `regions_overlapping` scan; the region id and its A1 rectangle are resolved
+/// only when the answer is "refuse".
+fn ensure_range_unclaimed_on_sheet(
+    state: &AppState,
+    sheet_id: identity::SheetId,
+    query: &calp::writeback::PositionalRange,
+    action: &str,
+) -> Result<(), String> {
+    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+    let hits = index.regions_overlapping(sheet_id, query);
+    let Some(hit) = hits.first() else {
+        return Ok(());
+    };
+    // A region's own top-left corner is always inside itself, so this resolves
+    // the id of the rectangle we just matched. Refusal path only.
+    let region_id = index
+        .region_id_at(sheet_id, hit.row_start, hit.col_start)
+        .unwrap_or("<unknown>");
+    Err(claim_refusal_range(action, region_id, hit))
+}
+
+/// A1 text for a claimed rectangle, e.g. `C5:D8`.
+fn range_a1(range: &calp::writeback::PositionalRange) -> String {
+    format!(
+        "{}{}:{}{}",
+        crate::pivot::utils::col_index_to_letter(range.col_start),
+        range.row_start + 1,
+        crate::pivot::utils::col_index_to_letter(range.col_end),
+        range.row_end + 1,
+    )
+}
+
+/// The shared refusal text. Names WHAT was refused, WHICH region stands in the
+/// way, WHERE that region is, and WHAT the caller can do instead — a caller
+/// that only learns "denied" cannot fix anything.
+fn claim_refusal(action: &str, region_id: &str, where_: &str) -> String {
+    format!(
+        "Can't {}: {} belongs to writeback region '{}', published by a package this \
+         workbook subscribes to. Those cells collect responses — values go in one \
+         draft at a time through the writeback form (scripts: the \
+         distribution.writeback capability, action 'cellGuard'), and clearing, \
+         merging, sorting or shifting them would orphan the answers already \
+         recorded against the published region. Work outside {}, or detach the \
+         subscription first to turn this into a plain workbook.",
+        action, where_, region_id, where_
+    )
+}
+
+fn claim_refusal_range(
+    action: &str,
+    region_id: &str,
+    range: &calp::writeback::PositionalRange,
+) -> String {
+    claim_refusal(action, region_id, &range_a1(range))
+}
+
+fn claim_refusal_cell(action: &str, region_id: &str, row: u32, col: u32) -> String {
+    claim_refusal(
+        action,
+        region_id,
+        &format!(
+            "{}{}",
+            crate::pivot::utils::col_index_to_letter(col),
+            row + 1
+        ),
+    )
+}
+
+#[cfg(test)]
+mod writeback_claim_tests {
+    //! The anti-bypass invariant for the single-cell grid write path: a claimed
+    //! writeback cell may only be written once a draft exists behind it (which
+    //! is what proves the value went through the schema/lifecycle gate). Before
+    //! this, `api.setCellValue` from a script wrote such a cell directly — no
+    //! draft, no schema check, no validator — and the grid silently diverged
+    //! from the writeback layer until reconcile.
+    use super::*;
+    use calp::writeback::{
+        RegionSelector, SubmissionState, SubmissionValue, ValueSchema, ValueType,
+        WritebackRegionDeclaration, WritebackSubmission,
+    };
+    use std::collections::HashMap;
+
+    /// An AppState with one published 2x2 writeback region ("r1") anchored at
+    /// (0,0) on the active sheet.
+    fn state_with_region() -> (crate::AppState, identity::SheetId) {
+        let state = crate::create_app_state();
+        let sheet_id = *state.sheet_ids.lock().unwrap().first().unwrap();
+        let decl = WritebackRegionDeclaration {
+            id: "r1".to_string(),
+            selector: RegionSelector {
+                sheet_id,
+                row_start: 0,
+                row_end: 1,
+                col_start: 0,
+                col_end: 1,
+            },
+            mode: None,
+            schema: Some(ValueSchema {
+                value_type: ValueType::Integer,
+                required: false,
+                min: None,
+                max: None,
+                enum_values: Vec::new(),
+                max_length: None,
+                pattern: None,
+                extra: HashMap::new(),
+            }),
+            visibility: None,
+            submission_policy: None,
+            version_binding: None,
+            lifecycle: None,
+            aggregation_hint: None,
+            expected_respondents: Vec::new(),
+            extra: HashMap::new(),
+        };
+        *state.writeback_index.lock().unwrap() =
+            calp::WritebackIndex::from_declarations(std::slice::from_ref(&decl)).unwrap();
+        *state.writeback_declarations.lock().unwrap() = vec![decl];
+        (state, sheet_id)
+    }
+
+    fn draft_for(region_id: &str, row: u32, col: u32) -> WritebackSubmission {
+        WritebackSubmission {
+            id: "sub-1".to_string(),
+            region_id: region_id.to_string(),
+            model_key: None,
+            cell_row: row,
+            cell_col: col,
+            cell_id: None,
+            submitter: calp::SubmitterIdentity {
+                display_name: "Tester".to_string(),
+                id: "tester".to_string(),
+                extra: HashMap::new(),
+            },
+            value: SubmissionValue::Number { value: 1.0 },
+            state: SubmissionState::Draft,
+            created_at: "2026-07-31T00:00:00Z".to_string(),
+            updated_at: "2026-07-31T00:00:00Z".to_string(),
+            submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn region_lookup_answers_only_for_claimed_cells() {
+        let (state, sheet_id) = state_with_region();
+        assert_eq!(active_sheet_id(&state).unwrap(), sheet_id);
+        assert_eq!(
+            writeback_region_at(&state, sheet_id, 0, 0).as_deref(),
+            Some("r1")
+        );
+        assert_eq!(
+            writeback_region_at(&state, sheet_id, 1, 1).as_deref(),
+            Some("r1")
+        );
+        assert_eq!(writeback_region_at(&state, sheet_id, 2, 0), None);
+        assert_eq!(writeback_region_at(&state, sheet_id, 0, 2), None);
+        // The declaration (schema governance) is reachable by region id.
+        let decl = writeback_declaration(&state, "r1").expect("declaration");
+        assert_eq!(decl.schema.unwrap().value_type, ValueType::Integer);
+        assert!(writeback_declaration(&state, "nope").is_none());
+    }
+
+    #[test]
+    fn unclaimed_cells_are_always_writable() {
+        let (state, _) = state_with_region();
+        assert!(ensure_writeback_draft_before_write(&state, 9, 9).is_ok());
+
+        // ...and a workbook with no writeback regions at all short-circuits.
+        let plain = crate::create_app_state();
+        assert!(ensure_writeback_draft_before_write(&plain, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn claimed_cell_without_a_draft_is_refused() {
+        let (state, _) = state_with_region();
+        let err = ensure_writeback_draft_before_write(&state, 0, 0)
+            .expect_err("a claimed cell with no draft must be refused");
+        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+        assert!(err.contains("cellGuard"), "the error must say how: {}", err);
+    }
+
+    #[test]
+    fn publisher_gate_fails_closed_for_both_writeback_surfaces() {
+        // Proof of publisher ownership is possession of the Ed25519 signing key
+        // the SIGNED version manifest names (`profile_holds_publisher_key`,
+        // covered cryptographically in core/calp/src/signing.rs). What must
+        // hold HERE is that the gate fails CLOSED when ownership cannot be
+        // established at all — no subscription, no registry, no manifest —
+        // instead of falling through to "allowed". A subscriber's script
+        // reaching `listSubmissions` / `setSubmissionState` lands exactly here.
+        let (state, _) = state_with_region();
+        let err = require_region_publisher(&state, "r1")
+            .expect_err("no owning subscription must not authorize a publisher action");
+        assert!(err.contains("r1"), "got: {}", err);
+
+        let err = require_model_writeback_publisher(&state, "some-column")
+            .expect_err("no owning subscription must not authorize a publisher action");
+        assert!(err.contains("some-column"), "got: {}", err);
+    }
+
+    #[test]
+    fn claimed_cell_with_a_draft_is_allowed_through() {
+        // The interactive editor's commit guard saves the draft and THEN lets
+        // the normal commit run so the cell displays the value — that path must
+        // keep working, or writeback becomes unusable by humans.
+        let (state, _) = state_with_region();
+        state
+            .writeback_layer
+            .lock()
+            .unwrap()
+            .set_draft(draft_for("r1", 0, 0));
+
+        assert!(writeback_slot_has_draft(&state, "r1", 0, 0));
+        assert!(ensure_writeback_draft_before_write(&state, 0, 0).is_ok());
+
+        // A DIFFERENT cell of the same region still needs its own draft — a
+        // per-region check would have let a script write the rest of the form.
+        assert!(!writeback_slot_has_draft(&state, "r1", 1, 1));
+        assert!(ensure_writeback_draft_before_write(&state, 1, 1).is_err());
+    }
+
+    #[test]
+    fn the_off_sheet_write_path_is_guarded_per_targeted_sheet() {
+        // `update_cell_on_sheets` (group edit, and a script's
+        // `updateCellOnSheets`) never consults the ACTIVE sheet, so the
+        // active-sheet guard cannot cover it. Each targeted sheet is asked
+        // about individually, by SheetId.
+        let (state, _) = state_with_region();
+
+        // Sheet 0 carries the region: a claimed cell with no draft is refused.
+        let err = ensure_writeback_draft_before_write_on_sheets(&state, &[0], 0, 0)
+            .expect_err("a claimed cell on a targeted sheet must be refused");
+        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+
+        // An unclaimed cell on that sheet is fine...
+        assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[0], 9, 9).is_ok());
+        // ...as is a sheet index that resolves to nothing (the caller's own
+        // bounds handling owns that case).
+        assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[97], 0, 0).is_ok());
+        // ...and an empty target list.
+        assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[], 0, 0).is_ok());
+
+        // Once a validated draft exists behind the cell, the write proceeds —
+        // the human group-edit path must keep working.
+        state
+            .writeback_layer
+            .lock()
+            .unwrap()
+            .set_draft(draft_for("r1", 0, 0));
+        assert!(ensure_writeback_draft_before_write_on_sheets(&state, &[0], 0, 0).is_ok());
+
+        // A workbook with no writeback regions short-circuits before any
+        // sheet-id resolution at all.
+        let plain = crate::create_app_state();
+        assert!(ensure_writeback_draft_before_write_on_sheets(&plain, &[0, 1], 0, 0).is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // RANGE-level guard (sort / replace-all / clear / merge / insert / delete)
+    // ---------------------------------------------------------------------
+
+    /// The region fixture claims rows 0..=1, columns 0..=1 — A1:B2.
+    #[test]
+    fn a_range_overlapping_a_claim_is_refused_and_the_error_is_actionable() {
+        let (state, _) = state_with_region();
+        let err = ensure_range_unclaimed(&state, "sort this range", 0, 0, 5, 5)
+            .expect_err("a range overlapping a claim must be refused");
+        assert!(err.contains("sort this range"), "names the gesture: {}", err);
+        assert!(err.contains("writeback region 'r1'"), "names the region: {}", err);
+        assert!(err.contains("A1:B2"), "names WHERE the region is: {}", err);
+        assert!(err.contains("detach"), "says what the caller can do: {}", err);
+
+        // Touching a single corner is enough.
+        assert!(ensure_range_unclaimed(&state, "clear", 1, 1, 9, 9).is_err());
+        // Coordinates in reverse order normalize, not slip through.
+        assert!(ensure_range_unclaimed(&state, "clear", 9, 9, 1, 1).is_err());
+    }
+
+    #[test]
+    fn a_range_that_misses_every_claim_is_untouched() {
+        let (state, _) = state_with_region();
+        assert!(ensure_range_unclaimed(&state, "sort", 2, 0, 100, 100).is_ok());
+        assert!(ensure_range_unclaimed(&state, "sort", 0, 2, 100, 100).is_ok());
+    }
+
+    #[test]
+    fn a_workbook_with_no_regions_takes_the_fast_path() {
+        // The publisher's own authoring workbook, and every workbook that never
+        // subscribed to anything: one lock, no sheet-id resolution, no scan.
+        let plain = crate::create_app_state();
+        assert!(ensure_range_unclaimed(&plain, "sort", 0, 0, 1000, 1000).is_ok());
+        assert!(ensure_range_unclaimed_on_sheets(&plain, "clear", &[0, 1], 0, 0, 99, 99).is_ok());
+        assert!(ensure_cells_unclaimed(&plain, "replace", &[(0, 0), (1, 1)]).is_ok());
+        assert!(ensure_row_shift_unclaimed(&plain, "insert rows", 0).is_ok());
+        assert!(ensure_col_shift_unclaimed(&plain, "insert columns", 0).is_ok());
+    }
+
+    #[test]
+    fn a_row_shift_that_would_move_a_claim_is_refused_but_one_below_it_is_not() {
+        // Region rows are 0..=1. Inserting/deleting at row 0 or 1 moves claimed
+        // cells out from under a rectangle that is pinned by the SIGNED
+        // manifest; at row 2 nothing claimed moves.
+        let (state, _) = state_with_region();
+        let err = ensure_row_shift_unclaimed(&state, "insert rows here", 0)
+            .expect_err("a shift at the region's first row must be refused");
+        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+        assert!(ensure_row_shift_unclaimed(&state, "delete rows here", 1).is_err());
+        assert!(ensure_row_shift_unclaimed(&state, "insert rows here", 2).is_ok());
+        assert!(ensure_row_shift_unclaimed(&state, "insert rows here", 1000).is_ok());
+    }
+
+    #[test]
+    fn a_column_shift_that_would_move_a_claim_is_refused_but_one_right_of_it_is_not() {
+        let (state, _) = state_with_region();
+        assert!(ensure_col_shift_unclaimed(&state, "insert columns here", 0).is_err());
+        assert!(ensure_col_shift_unclaimed(&state, "delete columns here", 1).is_err());
+        assert!(ensure_col_shift_unclaimed(&state, "insert columns here", 2).is_ok());
+    }
+
+    #[test]
+    fn the_cell_list_guard_answers_on_the_actual_cells_not_a_bounding_box() {
+        let (state, _) = state_with_region();
+        // A match list that straddles the region but never lands in it runs.
+        assert!(ensure_cells_unclaimed(&state, "replace all", &[(0, 5), (7, 0), (9, 9)]).is_ok());
+        // One claimed match refuses the whole gesture, naming that cell.
+        let err = ensure_cells_unclaimed(&state, "replace all", &[(9, 9), (1, 0)])
+            .expect_err("a claimed match must refuse the gesture");
+        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+        assert!(err.contains("A2"), "names the offending cell: {}", err);
+        assert!(ensure_cells_unclaimed(&state, "replace all", &[]).is_ok());
+    }
+
+    #[test]
+    fn an_existing_draft_does_not_excuse_a_range_gesture() {
+        // The single-cell guard lets a draft-backed write through because the
+        // value being written IS the draft. A sort/clear/merge is not that: it
+        // would leave the layer asserting an answer the grid no longer holds.
+        let (state, _) = state_with_region();
+        state
+            .writeback_layer
+            .lock()
+            .unwrap()
+            .set_draft(draft_for("r1", 0, 0));
+        assert!(ensure_writeback_draft_before_write(&state, 0, 0).is_ok());
+        assert!(ensure_range_unclaimed(&state, "sort", 0, 0, 0, 0).is_err());
+        assert!(ensure_cells_unclaimed(&state, "replace all", &[(0, 0)]).is_err());
+    }
+
+    #[test]
+    fn the_off_sheet_range_guard_is_asked_per_targeted_sheet() {
+        let (state, _) = state_with_region();
+        let err = ensure_range_unclaimed_on_sheets(&state, "clear", &[0], 0, 0, 3, 3)
+            .expect_err("a claimed range on a targeted sheet must be refused");
+        assert!(err.contains("writeback region 'r1'"), "got: {}", err);
+
+        assert!(ensure_range_unclaimed_on_sheets(&state, "clear", &[0], 5, 5, 9, 9).is_ok());
+        // Unresolvable indices and empty target lists belong to the caller's
+        // own bounds handling, matching the single-cell twin.
+        assert!(ensure_range_unclaimed_on_sheets(&state, "clear", &[97], 0, 0, 3, 3).is_ok());
+        assert!(ensure_range_unclaimed_on_sheets(&state, "clear", &[], 0, 0, 3, 3).is_ok());
+    }
 }
 
 /// Resolve the subscription that declares a model writeback column, returning

@@ -563,6 +563,15 @@ export function clearAuditLog(): Promise<void> {
 // Phase 9: Writeback Readiness
 // ============================================================================
 
+/**
+ * App event fired whenever the writeback region index is re-read (subscribe,
+ * refresh, detach, region designation). Anything holding a cached copy of the
+ * index listens for it — notably the script host, which uses its own copy to
+ * route a script's grid write into the same validated draft path a human
+ * keystroke takes without paying one IPC per cell.
+ */
+export const WRITEBACK_INDEX_CHANGED_EVENT = "distribution:writeback-index-changed";
+
 /** A writeback region entry from the backend index (flat format). */
 export interface WritebackRegionEntry {
   sheetId: string;
@@ -640,6 +649,13 @@ export interface ValueSchemaConfig {
    *  forward-compatible `extra` map on the Rust side — advisory, subscriber-side
    *  UX check layered on the authoritative built-in constraints. */
   customValidator?: string;
+  /** The validator's JS function-expression BODY, published alongside the name.
+   *  Required whenever `customValidator` is set: the subscriber's machine has
+   *  no catalogue of the publisher's validators, so the name alone cannot be
+   *  run — and the Rust submit gate FAILS CLOSED on a name without a body
+   *  ("declares the custom validator '…' but ships no validator code"). Always
+   *  set both together via `writebackValidatorSchemaExtra(name)`. */
+  customValidatorSource?: string;
 }
 
 export interface LifecyclePolicyConfig {
@@ -766,6 +782,20 @@ export interface OutboundSubmissionPreview {
   submitterId: string;
   submitterName: string;
   values: OutboundValue[];
+  /** The publisher-shipped custom validator that WILL judge this submission,
+   *  when the region declares one. The body is read from the Ed25519-verified
+   *  manifest, so what the user reviews here is byte-identical to what the
+   *  backend executes. Mirrors `OutboundValidator` in calp_commands.rs. */
+  validator?: {
+    name: string;
+    source: string;
+    sourceHash: string;
+    consented: boolean;
+  };
+  /** Set when the region declares a validator NAME but the package ships no
+   *  BODY for it — the submission WILL be refused (fail-closed) until the
+   *  publisher republishes with the validator body included. */
+  validatorError?: string;
 }
 
 /** Preview an outbound writeback submission without sending it. */

@@ -96,12 +96,16 @@ describe("writeback validators", () => {
     expect(runWritebackValidator(undefined, "x", { regionId: "r" })).toBeNull();
   });
 
-  it("contains a throwing validator (returns null)", () => {
+  // A validator that throws has NOT accepted the value — it failed to judge it.
+  // It used to return null (silent accept); it now reports the throw, matching
+  // the authoritative Rust verdict so the advisory hint and the submit refusal
+  // never disagree.
+  it("reports a throwing validator instead of silently accepting", () => {
     const cleanup = registerWritebackValidator("boom", "Boom", () => {
       throw new Error("bad");
     });
     try {
-      expect(runWritebackValidator("boom", "x", { regionId: "r" })).toBeNull();
+      expect(runWritebackValidator("boom", "x", { regionId: "r" })).toContain("bad");
     } finally {
       cleanup();
     }

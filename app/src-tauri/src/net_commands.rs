@@ -120,37 +120,12 @@ pub fn grant_script_net_origin(
     Ok(())
 }
 
-/// Mirror a consent-granted BI capability ("bi.query" / "bi.sql") into the
-/// authoritative backend store. The frontend's consent store is the system of
-/// record; this re-establishes the in-memory grant that `bi_query` /
-/// `script_bi_sql` re-check per call. Only the main window may grant.
-#[tauri::command]
-pub fn grant_script_bi(
-    cap_store: State<CapabilityStore>,
-    script_id: String,
-    capability: String,
-    window: Window,
-) -> Result<(), String> {
-    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    if capability != "bi.query"
-        && capability != "bi.sql"
-        && capability != "bi.model"
-        && capability != "bi.connector"
-    {
-        return Err(format!(
-            "InvalidCapability: {} (expected bi.query, bi.sql, bi.model or bi.connector)",
-            capability
-        ));
-    }
-    cap_store.grant_bi(&script_id, &capability);
-    log_info!(
-        "SECURITY",
-        "grant_script_bi: script={} capability={}",
-        script_id,
-        capability
-    );
-    Ok(())
-}
+// The capability grant mirror used to live here as `grant_script_bi`, whose id
+// check hard-rejected everything outside `bi.*`. It is now the generic
+// `grant_script_capability` (app/src-tauri/src/scripting/writeback_gateway.rs),
+// which validates against ONE allowlist covering every mirrored capability id —
+// `bi.*` and `distribution.writeback` alike. There is deliberately no second
+// grant door.
 
 /// Record a broker-mediated capability call into the per-workbook audit log
 /// (the always-on script-activity trail, `AuditEvent::CapabilityCall`), so
@@ -220,6 +195,24 @@ pub fn audit_record_capability(
         error.as_deref(),
     );
     Ok(())
+}
+
+/// Read EVERY capability a script currently holds in the authoritative backend
+/// store (session-scoped) — `bi.*`, `distribution.writeback`, whatever was
+/// mirrored.
+///
+/// TRANSPARENCY, not enforcement: the Rust-QuickJS surfaces (notebook cells)
+/// keep their JIT consent grants only in this store — there is no frontend
+/// mirror — so the "Code in This File" inventory has no other way to answer
+/// "what can this notebook touch?". Read-only, main window only.
+#[tauri::command]
+pub fn list_script_capability_grants(
+    cap_store: State<CapabilityStore>,
+    script_id: String,
+    window: Window,
+) -> Result<Vec<String>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    Ok(cap_store.granted_capabilities(&script_id))
 }
 
 /// Drop all backend capability state for a script. Called on unmount / revoke.
@@ -372,7 +365,7 @@ pub async fn script_http_fetch(
     // stored for the slot. The secret is attached to the outbound request
     // only — it is never returned to the caller in any error or response.
     if let Some(spec) = &request.secret_header {
-        if !cap_store.is_bi_granted(&script_id, "bi.connector") {
+        if !cap_store.is_granted(&script_id, "bi.connector") {
             log_warn!(
                 "SECURITY",
                 "script_http_fetch DENIED (secretHeader without bi.connector): script={} slot={}",

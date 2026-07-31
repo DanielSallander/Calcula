@@ -25,9 +25,9 @@ import { CAPABILITY_ID_SET, type CapabilityId } from "./capabilityIds";
 import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
 import {
   fetchOriginOf,
-  grantBiCapability,
+  grantBackendCapability,
   grantNetOrigin,
-  RUST_MIRRORED_BI_CAPS,
+  RUST_MIRRORED_CAPABILITIES,
   hasFetchOrigin,
   recordCapabilityGrant,
   requestCapabilityGrant,
@@ -44,6 +44,12 @@ import {
   type ExtRpcError,
   type WorkerExtensionManifest,
 } from "./extensionProtocol";
+import { requestScriptDialog, revokeScriptDialogs } from "./scriptDialogs";
+import type {
+  ScriptDialogFormSpec,
+  ScriptDialogPromptOptions,
+  ScriptDialogTextOptions,
+} from "./scriptDialogSpec";
 import { emitAppEvent, onAppEvent } from "../events";
 import { showToast } from "../notifications";
 import { CommandRegistry } from "../commands";
@@ -182,7 +188,18 @@ export async function mountWorkerExtension(
       }
     };
     worker.addEventListener("message", onAct);
-    worker.postMessage({ t: "activate", ceiling } as HX2W);
+    worker.postMessage({
+      t: "activate",
+      ceiling,
+      // Provenance mirror (B5): a sandboxed extension can ask which bundle and
+      // version it is running as. Sourced from the AUTHORITATIVE manifest (the
+      // signed sidecar when there is one), never from what the bundle reported.
+      package: {
+        name: manifest.name || extId,
+        version: manifest.version || null,
+        provenance: "distributed",
+      },
+    } as HX2W);
     setTimeout(() => {
       worker.removeEventListener("message", onAct);
       resolve({ ok: false, error: "activate timed out" });
@@ -251,6 +268,9 @@ export async function unmountWorkerExtension(extId: string): Promise<void> {
   }
   await revokeBackendCapabilities(mw.handle.scriptId);
   revokeScriptGrants(mw.handle.scriptId);
+  // Take down any modal this extension had on screen — otherwise it keeps
+  // asking on behalf of code that no longer exists (same rule as hostUnmountScript).
+  revokeScriptDialogs(mw.handle.scriptId);
   mw.worker.terminate();
 }
 
@@ -458,8 +478,8 @@ async function maybeRequestCapabilityGrant(mw: MountedExtension, method: string,
     recordCapabilityGrant(handle.scriptId, cap);
     // Mirror BI-family grants into the authoritative Rust store (the Rust
     // gates re-check it). net.fetch is mirrored above per-origin.
-    if (RUST_MIRRORED_BI_CAPS.has(cap)) {
-      await grantBiCapability(handle.scriptId, cap);
+    if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
+      await grantBackendCapability(handle.scriptId, cap);
     }
   }
 }
@@ -535,6 +555,29 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_bi_sql", { connectionId, sql, scriptId });
     }
+    // CUBE convenience over the SAME bi.query trust class as cap.biQuery above
+    // (member-expression ergonomics instead of a hand-built QueryRequest).
+    // extensionWorkerContext.ts has exposed capabilities.cube.* since it was
+    // written, but these three cases were never implemented, so every call fell
+    // through to `default:` and died with UnknownMethod — the identical defect
+    // B5 fixed for capabilities.dialog.*, one surface over. There is no new
+    // reach here: the backend commands and the bi.query grant are the same ones
+    // cap.biQuery already goes through.
+    case "cap.cubeValue": {
+      const [connection, members] = args as [string, string[]];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_value", { connection, members, scriptId });
+    }
+    case "cap.cubeKpi": {
+      const [connection, kpi, property] = args as [string, string, number];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_kpi", { connection, kpi, property, scriptId });
+    }
+    case "cap.cubeMembers": {
+      const [connection, level] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("cube_udf_members", { connection, level, scriptId });
+    }
     case "cap.biModelInfo": {
       // Sanitized model read (never security roles / connection targets).
       const [connectionId] = args as [string];
@@ -560,6 +603,192 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
         kind,
         payload: payload ?? null,
       });
+    }
+    case "cap.biModelValidate":
+    case "cap.biModelLineage": {
+      // Read-only diagnostics on the same gateway (separate Rust rate bucket).
+      // Answers are rebuilt field-by-field and error text scrubbed Rust-side.
+      const [connectionId, action, payload] = args as [string, string, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId,
+        action,
+        kind: null,
+        payload: payload ?? null,
+      });
+    }
+    case "cap.biModelBatch": {
+      // Atomic multi-edit: many changes, ONE undo entry. Ownership + a
+      // wall-clock deadline (rollback, never commit) are enforced Rust-side.
+      const [connectionId, action] = args as [string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_bi_model", {
+        connectionId,
+        scriptId,
+        action,
+        kind: null,
+        payload: null,
+      });
+    }
+    // ---- distribution.writeback: the .calp collection loop ----
+    case "cap.writebackListRegions":
+    case "cap.writebackGetLayer": {
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId,
+        action: method === "cap.writebackListRegions" ? "listRegions" : "getLayer",
+        payload: {},
+      });
+    }
+    case "cap.writebackSaveDraft": {
+      const [regionId, sheetId, row, col, value] = args as
+        [string, string, number, number, unknown];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId,
+        action: "saveDraft",
+        payload: { regionId, sheetId, row, col, value },
+      });
+    }
+    case "cap.writebackSubmit": {
+      const [regionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      const result = await invokeBackend<{ submitted: number }>("script_writeback", {
+        scriptId,
+        action: "submitRegion",
+        payload: { regionId },
+      });
+      return result?.submitted ?? 0;
+    }
+    case "cap.writebackPreview": {
+      const [regionId] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId,
+        action: "previewSubmission",
+        payload: { regionId },
+      });
+    }
+    case "cap.writebackListSubmissions": {
+      // PUBLISHER ONLY (Rust require_publisher over the signed manifest).
+      const [target] = args as [Record<string, unknown>];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_writeback", {
+        scriptId,
+        action: "listSubmissions",
+        payload: target,
+      });
+    }
+    case "cap.writebackReview": {
+      // PUBLISHER ONLY (Rust require_publisher over the signed manifest).
+      const [decision] = args as [Record<string, unknown>];
+      const { invokeBackend } = await import("../backend");
+      await invokeBackend("script_writeback", {
+        scriptId,
+        action: "setSubmissionState",
+        payload: decision,
+      });
+      return undefined;
+    }
+    // ---- schedule: persistent recurring jobs (the OnTime replacement) ----
+    // A sandboxed extension's CODE lives in %APPDATA%, but the SCHEDULE it
+    // registers lives in the workbook, so the user reviews and cancels it in
+    // the same place as a local script's. Owner identity is host-supplied from
+    // the mount handle — an extension cannot schedule under another's name.
+    //
+    // objectType/instanceId are the extension's own id and null: a worker
+    // extension exposes methods against its extension identity, not against a
+    // grid object, and that is the address the scheduler calls back on.
+    case "cap.scheduleEvery": {
+      const [intervalSecs, handler, options] = args as [
+        number,
+        string,
+        { label?: string } | undefined,
+      ];
+      const { scheduleEvery } = await import("./scheduler");
+      return scheduleEvery(
+        { scriptId, surface: "extension-worker", objectType: mw.extId, instanceId: null },
+        intervalSecs,
+        handler,
+        options?.label,
+      );
+    }
+    case "cap.scheduleAt": {
+      const [timeOfDay, handler, options] = args as [
+        string,
+        string,
+        { label?: string } | undefined,
+      ];
+      const { scheduleAt } = await import("./scheduler");
+      return scheduleAt(
+        { scriptId, surface: "extension-worker", objectType: mw.extId, instanceId: null },
+        timeOfDay,
+        handler,
+        options?.label,
+      );
+    }
+    case "cap.scheduleList": {
+      const { listScheduledJobsForScript } = await import("./scheduler");
+      return listScheduledJobsForScript(scriptId);
+    }
+    case "cap.scheduleCancel": {
+      const [jobId] = args as [string];
+      const { cancelScheduledJobForScript } = await import("./scheduler");
+      return cancelScheduledJobForScript(scriptId, jobId);
+    }
+    // ---- ui.dialog: the sandboxed extension's only route to the user ----
+    // Identity is HOST-supplied (name + origin from the mount handle), the
+    // guards and every dismissal path live in scriptDialogs.ts, and a dismissal
+    // resolves rather than rejecting — identical to the object-script path.
+    case "cap.dialogAlert": {
+      const [message, options] = args as [string, ScriptDialogTextOptions | undefined];
+      await requestScriptDialog({
+        scriptId,
+        scriptName: mw.handle.scriptName,
+        scriptOrigin: mw.handle.origin,
+        kind: "alert",
+        message,
+        textOptions: options,
+      });
+      return undefined;
+    }
+    case "cap.dialogConfirm": {
+      const [message, options] = args as [string, ScriptDialogTextOptions | undefined];
+      const answer = await requestScriptDialog({
+        scriptId,
+        scriptName: mw.handle.scriptName,
+        scriptOrigin: mw.handle.origin,
+        kind: "confirm",
+        message,
+        textOptions: options,
+      });
+      return answer.dismissed === false;
+    }
+    case "cap.dialogPrompt": {
+      const [message, options] = args as [string, ScriptDialogPromptOptions | undefined];
+      const answer = await requestScriptDialog({
+        scriptId,
+        scriptName: mw.handle.scriptName,
+        scriptOrigin: mw.handle.origin,
+        kind: "prompt",
+        message,
+        promptOptions: options,
+      });
+      if (answer.dismissed) return null;
+      return typeof answer.value === "string" ? answer.value : null;
+    }
+    case "cap.dialogForm": {
+      const [spec] = args as [ScriptDialogFormSpec];
+      const answer = await requestScriptDialog({
+        scriptId,
+        scriptName: mw.handle.scriptName,
+        scriptOrigin: mw.handle.origin,
+        kind: "form",
+        form: spec,
+      });
+      if (answer.dismissed) return null;
+      return answer.value !== null && typeof answer.value === "object" ? answer.value : null;
     }
     default:
       throw new BrokerError("UnknownMethod", `No extension host implementation for ${method}`);

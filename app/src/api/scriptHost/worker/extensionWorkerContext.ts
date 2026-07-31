@@ -13,9 +13,16 @@ import { safeClone } from "./workerHardening";
 import {
   EXTENSION_CALL_TIMEOUT_MS,
   type WX2H,
+  type ExtPackageInfo,
   type ExtRpcError,
   type ExtMenuItemData,
 } from "../extensionProtocol";
+import { METHOD_DEADLINES_MS } from "../protocol";
+import type {
+  ScriptDialogFormSpec,
+  ScriptDialogPromptOptions,
+  ScriptDialogTextOptions,
+} from "../scriptDialogSpec";
 
 type PostFn = (msg: WX2H) => void;
 type Handler = (...args: unknown[]) => unknown;
@@ -50,7 +57,10 @@ function unsupported(surface: string): never {
   );
 }
 
-export function buildExtensionContext(post: PostFn): {
+export function buildExtensionContext(
+  post: PostFn,
+  packageInfo: ExtPackageInfo,
+): {
   context: unknown;
   runtime: ExtWorkerRuntime;
 } {
@@ -72,18 +82,33 @@ export function buildExtensionContext(post: PostFn): {
 
   const brokerCall = (method: string, args: unknown[]): Promise<unknown> => {
     const callId = nextCallId++;
+    // The ui.dialog family blocks on a person, so it gets the long deadline
+    // (shared with object scripts via protocol.ts) instead of the 30s that
+    // bounds machine work.
+    const deadline = METHOD_DEADLINES_MS[method] ?? EXTENSION_CALL_TIMEOUT_MS;
     return new Promise<unknown>((resolve, reject) => {
       const timer = self.setTimeout(() => {
         if (pending.delete(callId)) {
           reject(new ExtensionCallError({ code: "Timeout", message: `${method}: timed out` }));
         }
-      }, EXTENSION_CALL_TIMEOUT_MS) as unknown as number;
+      }, deadline) as unknown as number;
       pending.set(callId, { resolve, reject, timer });
       post({ t: "call", callId, method, args });
     });
   };
 
   const context = {
+    /**
+     * Which distributed bundle (and version) this extension is running as.
+     * Host-built from the authoritative manifest and frozen — an extension
+     * cannot rewrite its own provenance before handing the object to anyone.
+     */
+    package: Object.freeze({
+      name: packageInfo.name,
+      version: packageInfo.version,
+      provenance: packageInfo.provenance,
+    }),
+
     /** Set by the extension if it returns a deactivate function from activate. */
     onDeactivate(fn: () => void): void {
       deactivateFn = fn;
@@ -144,7 +169,10 @@ export function buildExtensionContext(post: PostFn): {
         return unsupported("ui.taskPanes");
       },
       get dialogs(): never {
-        return unsupported("ui.dialogs");
+        // ui.dialogs registers a React COMPONENT, which cannot cross a worker
+        // boundary. Asking the user something can: capabilities.dialog.* renders
+        // a declarative modal in trusted host code and resolves with the answer.
+        return unsupported("ui.dialogs (to ask the user something, use capabilities.dialog.confirm / prompt / form)");
       },
       get overlays(): never {
         return unsupported("ui.overlays");
@@ -226,6 +254,131 @@ export function buildExtensionContext(post: PostFn): {
         },
         delete(connectionId: string, kind: string, payload: Record<string, unknown>): Promise<unknown> {
           return brokerCall("cap.biModelDelete", [connectionId, kind, payload]);
+        },
+        // Read-only diagnostics (own 120/min Rust bucket, so they still answer
+        // once the mutation budget is spent). Answers and error text are
+        // rebuilt/scrubbed Rust-side: no role, source, host or database name.
+        validateMeasure(connectionId: string, name: string, formula: string, originalName?: string): Promise<unknown> {
+          return brokerCall("cap.biModelValidate", [
+            connectionId,
+            "validateMeasure",
+            { name, formula, originalName: originalName ?? null },
+          ]);
+        },
+        validateContext(connectionId: string, name: string, expression: string, originalName?: string): Promise<unknown> {
+          return brokerCall("cap.biModelValidate", [
+            connectionId,
+            "validateContext",
+            { name, expression, originalName: originalName ?? null },
+          ]);
+        },
+        validateModel(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelValidate", [connectionId, "validateModel", {}]);
+        },
+        dependencyGraph(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelLineage", [connectionId, "dependencyGraph", {}]);
+        },
+        measureLineage(connectionId: string, name: string): Promise<unknown> {
+          return brokerCall("cap.biModelLineage", [connectionId, "measureLineage", { name }]);
+        },
+        dependents(connectionId: string, kind: string, name: string, table?: string): Promise<unknown> {
+          return brokerCall("cap.biModelLineage", [
+            connectionId,
+            "dependents",
+            { kind, name, table: table ?? null },
+          ]);
+        },
+        // Atomicity, never budget: batchBegin costs a mutation token and each
+        // edit inside still costs one. Only the opener may close it.
+        batchBegin(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelBatch", [connectionId, "batchBegin"]);
+        },
+        batchEnd(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelBatch", [connectionId, "batchEnd"]);
+        },
+        batchCancel(connectionId: string): Promise<unknown> {
+          return brokerCall("cap.biModelBatch", [connectionId, "batchCancel"]);
+        },
+      },
+      // The .calp collection loop (the distribution.writeback capability).
+      // listSubmissions / setSubmissionState act on OTHER PEOPLE'S submitted
+      // data and are additionally gated on Ed25519 package-signing key
+      // possession in Rust — the capability alone never buys them.
+      writeback: {
+        listRegions(): Promise<unknown> {
+          return brokerCall("cap.writebackListRegions", []);
+        },
+        getLayer(): Promise<unknown> {
+          return brokerCall("cap.writebackGetLayer", []);
+        },
+        saveDraft(
+          regionId: string,
+          sheetId: string,
+          row: number,
+          col: number,
+          value: unknown,
+        ): Promise<unknown> {
+          return brokerCall("cap.writebackSaveDraft", [regionId, sheetId, row, col, value]);
+        },
+        submitRegion(regionId: string): Promise<unknown> {
+          return brokerCall("cap.writebackSubmit", [regionId]);
+        },
+        previewSubmission(regionId: string): Promise<unknown> {
+          return brokerCall("cap.writebackPreview", [regionId]);
+        },
+        listSubmissions(target: Record<string, unknown>): Promise<unknown> {
+          return brokerCall("cap.writebackListSubmissions", [target]);
+        },
+        setSubmissionState(decision: Record<string, unknown>): Promise<unknown> {
+          return brokerCall("cap.writebackReview", [decision]);
+        },
+      },
+      // Persistent recurring jobs (the `schedule` capability). `handlerName`
+      // must be a method the extension published with context.expose(...) —
+      // a schedule stores a NAME, never a closure, so what it will run stays
+      // reviewable in the transparency panel after the workbook reloads.
+      //
+      // Jobs live in the workbook and resume when it is reopened, but only
+      // while Calcula is open: there is no headless runtime behind this.
+      schedule: {
+        every(
+          intervalSecs: number,
+          handlerName: string,
+          options?: { label?: string },
+        ): Promise<unknown> {
+          return brokerCall("cap.scheduleEvery", [intervalSecs, handlerName, options]);
+        },
+        at(
+          timeOfDay: string,
+          handlerName: string,
+          options?: { label?: string },
+        ): Promise<unknown> {
+          return brokerCall("cap.scheduleAt", [timeOfDay, handlerName, options]);
+        },
+        list(): Promise<unknown> {
+          return brokerCall("cap.scheduleList", []);
+        },
+        cancel(jobId: string): Promise<unknown> {
+          return brokerCall("cap.scheduleCancel", [jobId]);
+        },
+      },
+      // Modal question + declarative form (the ui.dialog capability). A
+      // sandboxed extension cannot register UI, but it CAN ask — the dialog is
+      // painted by trusted host code from this data-only spec, headed by the
+      // extension's own name so it can never pass itself off as the app.
+      // Dismissal resolves (false / null); it never rejects.
+      dialog: {
+        alert(message: string, options?: ScriptDialogTextOptions): Promise<void> {
+          return brokerCall("cap.dialogAlert", [message, options]) as Promise<void>;
+        },
+        confirm(message: string, options?: ScriptDialogTextOptions): Promise<boolean> {
+          return brokerCall("cap.dialogConfirm", [message, options]) as Promise<boolean>;
+        },
+        prompt(message: string, options?: ScriptDialogPromptOptions): Promise<string | null> {
+          return brokerCall("cap.dialogPrompt", [message, options]) as Promise<string | null>;
+        },
+        form(spec: ScriptDialogFormSpec): Promise<Record<string, unknown> | null> {
+          return brokerCall("cap.dialogForm", [spec]) as Promise<Record<string, unknown> | null>;
         },
       },
     },

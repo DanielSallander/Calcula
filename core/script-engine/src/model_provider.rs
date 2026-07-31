@@ -90,8 +90,17 @@ pub trait ModelDataProvider {
     /// never interprets it; ops hand it to JS via JSON.parse).
     fn connections(&self, surface: &str) -> Result<String, ModelProviderError>;
 
-    /// Model metadata (tables/columns/measures/relationships/KPIs/roles) for
-    /// one connection, as a JSON object string. `connection` is a name or id.
+    /// Model metadata (tables/columns/measures/relationships/hierarchies/KPIs/
+    /// calculation groups) for one connection, as a JSON object string.
+    /// `connection` is a name or id.
+    ///
+    /// CONTRACT FOR HOSTS: return a SANITIZED whitelist projection, never a
+    /// straight serialization of a host DTO. It must exclude security/RLS roles
+    /// (their names, per-table filter predicates and dynamic-identity markers
+    /// describe the "who may see which rows" boundary) and every connection
+    /// target (sources, per-table source ids). Sandboxed code enforces nothing,
+    /// so it needs none of it — and a second implementation must not become the
+    /// cheap way to read what the first one denies.
     fn model_info(&self, surface: &str, connection: &str) -> Result<String, ModelProviderError>;
 
     /// Structured model-scoped query (bi.query trust class).

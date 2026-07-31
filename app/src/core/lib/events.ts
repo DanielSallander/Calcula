@@ -58,8 +58,19 @@ export const AppEvents = {
   ROWS_DELETED: "app:rows-deleted",
   COLUMNS_DELETED: "app:columns-deleted",
 
-  // Sheet events
+  // Sheet events. SHEET_CHANGED is "the ACTIVE sheet changed"; the three below
+  // report the sheet COLLECTION changing (added / deleted / renamed) and are
+  // emitted by the tauri-api sheet wrappers, so every caller announces it.
+  // Payloads mirror api/events.ts (SheetAddedPayload / SheetDeletedPayload /
+  // SheetRenamedPayload) and are visible to user scripts — treat as public.
   SHEET_CHANGED: "app:sheet-changed",
+  SHEET_ADDED: "app:sheet-added",
+  SHEET_DELETED: "app:sheet-deleted",
+  SHEET_RENAMED: "app:sheet-renamed",
+
+  // An explicit recalculation pass finished (calculate_now / calculate_sheet).
+  // Payload: { scope, cellsUpdated, durationMs }.
+  RECALCULATION_COMPLETED: "app:recalculation-completed",
 
   // Editing events
   EDIT_STARTED: "app:edit-started",

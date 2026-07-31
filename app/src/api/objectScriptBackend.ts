@@ -22,6 +22,7 @@ interface ObjectScriptSummary {
   accessLevel: string;
   provenance?: string | null;
   packageName?: string | null;
+  packageVersion?: string | null;
 }
 
 interface ObjectScriptData {
@@ -35,6 +36,8 @@ interface ObjectScriptData {
   /** "local" | "distributed" — read-only; the backend preserves stored provenance on save. */
   provenance?: string | null;
   packageName?: string | null;
+  /** For distributed scripts: the resolved package version. Read-only over IPC. */
+  packageVersion?: string | null;
   /** The R19 declared-capability ceiling (authoritative). Read-only over IPC. */
   declaredCapabilities?: string[];
 }
@@ -78,6 +81,7 @@ export async function saveObjectScript(script: ObjectScriptDefinition): Promise<
     // the stored provenance (anti-laundering guard).
     provenance: script.provenance ?? null,
     packageName: script.packageName ?? null,
+    packageVersion: script.packageVersion ?? null,
   };
   return invoke<void>("save_object_script", { script: data });
 }
@@ -110,6 +114,7 @@ export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> 
         description: data.description ?? undefined,
         provenance: (data.provenance as ScriptProvenance | null) ?? undefined,
         packageName: data.packageName ?? undefined,
+        packageVersion: data.packageVersion ?? undefined,
         // The backend already filtered to recognized capability ids, so the
         // cast is safe; the broker re-filters defensively when building the
         // ceiling set.

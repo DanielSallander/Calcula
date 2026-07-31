@@ -39,6 +39,35 @@
  *  - bi.connector : register a script-fed data connector (feeds tables into
  *                   the BI model via the host orchestrator; named distinctly
  *                   from net.fetch so consent says what it means)
+ *  - ui.dialog    : interrupt the user with a MODAL question and read the
+ *                   answer (alert / confirm / prompt / declarative form). The
+ *                   dialog itself is rendered by TRUSTED host code — the script
+ *                   supplies only data — so this capability buys attention and
+ *                   input, never pixels. Purely frontend (no Rust entry): it
+ *                   reaches no backend command.
+ *  - distribution.writeback
+ *                 : fill in and SEND the input cells of a subscribed .calp
+ *                   package — read the workbook's writeback regions and drafts,
+ *                   save schema-validated drafts, and submit them to the
+ *                   publisher's registry. For a script that can also SIGN the
+ *                   package it additionally unlocks the publisher side: reading
+ *                   every submitter's answers and approving/rejecting them.
+ *                   Rust-enforced authoritatively in script_writeback (grant
+ *                   re-check + Ed25519 publisher gate + rate buckets + audit).
+ *  - schedule     : run one of the script's OWN exposed methods on a recurring
+ *                   schedule that survives reload — the Application.OnTime
+ *                   replacement. Jobs persist in the WORKBOOK, so this is the
+ *                   only capability whose effects outlive the session that
+ *                   consented to it; the consent string therefore says the
+ *                   quiet part out loud ("without you starting it"). Bounded
+ *                   HONESTLY to "while Calcula is open": there is no headless
+ *                   runtime, and the capability must never grow one without a
+ *                   new consent decision. Rust-enforced authoritatively in
+ *                   script_scheduler, which re-checks the grant at EVERY
+ *                   firing (a revoke stops a persisted job at the next tick),
+ *                   requires the owning script to be mounted, enforces a 30s
+ *                   floor and a per-job no-self-overlap guard, and audits
+ *                   every fire.
  */
 export const ALL_CAPABILITY_IDS = [
   "net.fetch",
@@ -49,6 +78,9 @@ export const ALL_CAPABILITY_IDS = [
   "formula.udf",
   "bi.model",
   "bi.connector",
+  "ui.dialog",
+  "distribution.writeback",
+  "schedule",
 ] as const;
 
 export type CapabilityId = (typeof ALL_CAPABILITY_IDS)[number];

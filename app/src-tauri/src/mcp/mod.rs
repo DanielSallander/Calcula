@@ -20,6 +20,14 @@ pub(crate) mod server;
 // pub(crate) so the in-app AI chat (ai_chat.rs) can reuse the same tool helpers
 // the MCP server exposes (read/write workbook), keeping one tool surface.
 pub(crate) mod tools;
+// UPDATE + DELETE tools for charts / named ranges / tables / pivots, plus sheet
+// management. Split out of tools.rs so the create-vs-edit surface stays legible
+// and the tier policy has one home (`objects::required_tier`).
+pub(crate) mod objects;
+// `draft_object_script`: the AI authors a macro, the USER reviews and mounts it.
+// Kept in its own module because its store must never be confused with — or
+// merged into — the workbook's mount-on-load object scripts.
+pub(crate) mod drafts;
 
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};

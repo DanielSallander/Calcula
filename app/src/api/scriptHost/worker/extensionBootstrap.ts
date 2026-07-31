@@ -11,7 +11,12 @@
 
 import { hardenAmbientGlobals, forwardConsole } from "./workerHardening";
 import { buildExtensionContext, type ExtWorkerRuntime } from "./extensionWorkerContext";
-import type { HX2W, WX2H, WorkerExtensionManifest } from "../extensionProtocol";
+import type {
+  ExtPackageInfo,
+  HX2W,
+  WX2H,
+  WorkerExtensionManifest,
+} from "../extensionProtocol";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -74,13 +79,13 @@ async function handleInit(source: string): Promise<void> {
   }
 }
 
-async function handleActivate(): Promise<void> {
+async function handleActivate(packageInfo: ExtPackageInfo): Promise<void> {
   if (!extModule) {
     post({ t: "activated", ok: false, error: "extension not initialized" });
     return;
   }
   try {
-    const built = buildExtensionContext(post);
+    const built = buildExtensionContext(post, packageInfo);
     runtime = built.runtime;
     intrinsicFreeze(built.context);
     const ret = await extModule.activate(built.context);
@@ -117,7 +122,9 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
       break;
     case "activate":
       // ceiling is display/shim-only here; enforcement is host-side (the broker).
-      void handleActivate();
+      // `package` is host-built from the authoritative manifest and mirrored
+      // read-only into context.package.
+      void handleActivate(msg.package);
       break;
     case "invokeHandler":
       if (runtime) void runtime.invokeHandler(msg.reqId, msg.handlerId, msg.args);

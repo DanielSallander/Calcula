@@ -75,6 +75,68 @@ test.describe("UDF evaluation (Phase C1)", () => {
     expect(result.second).toContain("42");
   });
 
+  test("a UDF formula written through the BATCH path evaluates (paste/fill)", async ({
+    appPage: page,
+  }) => {
+    // Paste, fill-handle and multi-cell edits all route through
+    // updateCellsBatch. That bridge used to send no UDF data at all, so a
+    // pasted =MYFN(...) had nothing pre-fetched and nothing stored to preserve
+    // and landed as #NAME?. Drive the batch wrapper directly to pin the fix,
+    // including an expression AROUND the call (a bare =MYFN() would look
+    // correct even when the cascade re-evaluates it without a resolver).
+    const result = await page.evaluate(async () => {
+      const api = await (window as any).__calcImport(
+        new URL("/src/api/index.ts", document.baseURI).href,
+      );
+      const core = await (window as any).__calcImport(
+        new URL("/src/core/lib/tauri-api.ts", document.baseURI).href,
+      );
+      const { registerFormulaFunction, installUdfEvaluation } = api;
+      const tauri = (window as any).__TAURI__;
+
+      const unregister = registerFormulaFunction({
+        name: "BATCHDOUBLE",
+        description: "Doubles a number",
+        syntax: "BATCHDOUBLE(x)",
+        category: "Custom",
+        minArgs: 1,
+        maxArgs: 1,
+        implementation: (x: unknown) => (x as number) * 2,
+      });
+      installUdfEvaluation();
+
+      const readDisplay = async (r: number, c: number): Promise<string> => {
+        const cell = await tauri.core.invoke("get_cell", { row: r, col: c });
+        return String(cell?.display ?? cell?.value ?? "");
+      };
+
+      try {
+        // One batch writing the input AND two formulas over it, exactly like a
+        // paste of a three-cell block.
+        await core.updateCellsBatch([
+          { row: 5, col: 0, value: "10" },
+          { row: 5, col: 1, value: "=BATCHDOUBLE(A6)", invariant: true },
+          { row: 5, col: 2, value: "=BATCHDOUBLE(A6)+1", invariant: true },
+        ]);
+        const bare = await readDisplay(5, 1);
+        const wrapped = await readDisplay(5, 2);
+        return { bare, wrapped };
+      } finally {
+        unregister();
+        await core.updateCellsBatch([
+          { row: 5, col: 0, value: "" },
+          { row: 5, col: 1, value: "" },
+          { row: 5, col: 2, value: "" },
+        ]);
+      }
+    });
+
+    expect(result.bare).toContain("20");
+    // 21, not 41: proof the dependent cascade served the pre-fetched result
+    // instead of re-applying the arithmetic to the cell's own stored value.
+    expect(result.wrapped).toContain("21");
+  });
+
   test("an unregistered name still yields #NAME?", async ({ appPage: page }) => {
     const result = await page.evaluate(async () => {
       const core = await (window as any).__calcImport(

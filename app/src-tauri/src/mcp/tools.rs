@@ -20,7 +20,7 @@ use super::server::ApplyFormattingParams;
 // Helpers
 // ============================================================================
 
-fn col_letter(col: u32) -> String {
+pub(crate) fn col_letter(col: u32) -> String {
     let mut result = String::new();
     let mut c = col as i64;
     loop {
@@ -650,7 +650,7 @@ pub fn get_chart(handle: &AppHandle, chart_id: &str) -> Result<String, String> {
 /// schema lives in the TypeScript Charts extension (Rust can't import it); the AI
 /// is grounded by the tool description + get_chart examples, and this rejects the
 /// obvious garbage (non-object, missing mark/data/series, oversized).
-fn validate_chart_spec_core(spec: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn validate_chart_spec_core(spec: &serde_json::Value) -> Result<(), String> {
     let obj = spec.as_object().ok_or("spec must be a JSON object")?;
     match obj.get("mark").and_then(|v| v.as_str()) {
         Some(m) if !m.trim().is_empty() => {}
@@ -965,60 +965,248 @@ pub fn create_pivot(
     ))
 }
 
-/// Execute a JavaScript script via the script engine.
-pub fn execute_script(
-    handle: &AppHandle,
-    code: &str,
-) -> Result<String, String> {
-    // External MCP clients are script execution too — the AI access ceiling
-    // must allow "script" AND the same security gate as run_script applies.
-    // ("prompt" without a session approval refuses: the MCP path is headless
-    // and cannot show a confirmation; approve in-app or set level to enabled.)
-    let script_state = handle.state::<crate::scripting::types::ScriptState>();
-    crate::scripting::commands::check_mcp_access(
-        &script_state,
-        crate::scripting::commands::McpAccessTier::Script,
-    )?;
+// ============================================================================
+// Script execution (model-aware, structured output)
+// ============================================================================
 
-    run_engine_script(handle, code)
+/// Surface-id prefix attributing an MCP script run in the capability audit
+/// trail. One id PER RUN (not one per session) so a concurrent run's
+/// grant/revoke can never clear another run's grant out from under it.
+fn mcp_script_surface_id() -> String {
+    format!("mcp:script:{}", uuid::Uuid::new_v4().simple())
 }
 
-/// Run a script through the engine WITHOUT a tier gate. Callers gate first:
-/// execute_script at the "script" tier; write_cell / write_cell_range at
-/// "mutate" (their generated Calcula.setCellValue/setRange snippets are
-/// app-authored cell writes, not arbitrary agent code).
-fn run_engine_script(
+/// The capabilities an MCP-run script may hold.
+///
+/// `bi.query` ONLY, and the reasoning is a strict-subset argument, not a
+/// convenience one: the MCP surface ALREADY exposes `run_bi_query`,
+/// `describe_bi_model`, `cube_value`, `cube_kpi` and `cube_members` as
+/// read-only tools that need no access ceiling at all. So a script that can
+/// call `model.query` / `model.info` / `model.value` / `model.members` /
+/// `model.kpi` can reach nothing the same client could not already reach with
+/// one tool call — and it must first clear the STRICTEST ceiling ("script")
+/// plus the Script Security gate. Model access via a script is therefore
+/// strictly MORE restricted than the direct BI tools, never less.
+///
+/// `bi.sql` is deliberately ABSENT. There is no direct MCP SQL tool, so
+/// granting it would make `execute_script` the way to obtain a capability the
+/// tool surface does not otherwise offer — the exact "weaker surface becomes
+/// the way to read what the stronger one denies" failure the notebook provider's
+/// exposure contract warns about. `model.sql` therefore raises the provider's
+/// normal consent error on this surface. Same for `bi.model`: the gateway gates
+/// lineage/validation diagnostics behind that stronger grant, and this surface
+/// has no business widening it.
+///
+/// SANITIZATION is inherited, not reimplemented: `HostModelProvider::model_info`
+/// runs the worker-realm gateway's own `sanitized_model_info` whitelist, so no
+/// `securityRoles` (role names, per-table filter predicates, dynamic-identity
+/// markers), no `sources` (connection targets) and no per-table `sourceId` can
+/// reach an AI client through `model.info`. `connections()` likewise emits only
+/// non-sensitive summaries — no connection strings, servers, databases or model
+/// paths.
+const MCP_SCRIPT_CAPABILITIES: &[&str] = &["bi.query"];
+
+/// What one script run produced.
+pub(crate) struct ScriptRunOutcome {
+    pub duration_ms: u64,
+    pub cells_modified: u32,
+    pub output: Vec<script_engine::ScriptOutputItem>,
+}
+
+/// Execute a JavaScript script via the script engine, WITH the read-only
+/// `model.*` API wired up.
+///
+/// Text-flattened result, for the in-app AI chat (which is a string-only tool
+/// surface). MCP's `run_script` uses `execute_script_structured` instead so
+/// tabular output survives as data.
+pub async fn execute_script(handle: &AppHandle, code: &str) -> Result<String, String> {
+    let outcome = run_script_with_model(handle, code).await?;
+    let output_text = outcome
+        .output
+        .iter()
+        .map(|i| i.to_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "Script executed ({}ms, {} cells modified){}",
+        outcome.duration_ms,
+        outcome.cells_modified,
+        if output_text.is_empty() {
+            String::new()
+        } else {
+            format!("\nOutput:\n{}", output_text)
+        }
+    ))
+}
+
+/// Execute a script and return its output as STRUCTURED JSON.
+///
+/// The old path flattened every output item through `ScriptOutputItem::to_text()`,
+/// so a `display.table(...)` — the one output shape a spreadsheet agent produces
+/// constantly — arrived as tab-separated text that the model then had to
+/// re-parse (and mis-parse, whenever a cell value contained a tab). Table items
+/// now keep their columns/rows/truncation, and the whole payload rides
+/// `CallToolResult::structured`.
+pub async fn execute_script_structured(
     handle: &AppHandle,
     code: &str,
-) -> Result<String, String> {
-    let state = handle.state::<AppState>();
+) -> Result<serde_json::Value, String> {
+    let outcome = run_script_with_model(handle, code).await?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "durationMs": outcome.duration_ms,
+        "cellsModified": outcome.cells_modified,
+        "output": outcome.output.iter().map(output_item_to_json).collect::<Vec<_>>(),
+    }))
+}
 
+/// One output item as JSON. Text stays text; a table keeps its shape.
+fn output_item_to_json(item: &script_engine::ScriptOutputItem) -> serde_json::Value {
+    match item {
+        script_engine::ScriptOutputItem::Text { text } => {
+            serde_json::json!({ "type": "text", "text": text })
+        }
+        script_engine::ScriptOutputItem::Table {
+            columns,
+            rows,
+            truncated,
+            total_rows,
+        } => serde_json::json!({
+            "type": "table",
+            "columns": columns,
+            "rows": rows,
+            "truncated": truncated,
+            "totalRows": total_rows,
+        }),
+    }
+}
+
+/// Gate, run, and apply one MCP/AI script with the model provider attached.
+///
+/// THREADING: the provider bridges to the async BI internals with
+/// `Handle::block_on`, which is only sound off a runtime thread — so the run
+/// happens on a DEDICATED OS thread, exactly like the notebook executor, and
+/// this fn awaits its oneshot reply instead of blocking a tokio worker. (The
+/// QuickJS session is `!Send` too, so it is created, used and dropped entirely
+/// inside that thread.)
+async fn run_script_with_model(
+    handle: &AppHandle,
+    code: &str,
+) -> Result<ScriptRunOutcome, String> {
+    // External MCP clients are script execution — the AI access ceiling must
+    // allow "script" AND the same security gate as run_script applies.
+    // ("prompt" without a session approval refuses: the MCP path is headless
+    // and cannot show a confirmation; approve in-app or set level to enabled.)
+    {
+        let script_state = handle.state::<crate::scripting::types::ScriptState>();
+        crate::scripting::commands::check_mcp_access(
+            &script_state,
+            crate::scripting::commands::McpAccessTier::Script,
+        )?;
+    }
+
+    let state = handle.state::<AppState>();
     // Clone data for isolated execution (same pattern as scripting/commands.rs)
     let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    // The REAL host inputs, so a script sees the live locale / calculation mode
+    // / named styles rather than engine defaults (what `ScriptEngine::run` gave).
+    let app_info = crate::scripting::types::build_app_info(&state);
+    let file_state = handle.state::<crate::persistence::FileState>();
+    let host_state =
+        crate::scripting::types::build_host_state(&state, Some(&file_state), active_sheet, None);
+    drop(file_state);
+    drop(state);
 
-    let (result, modified_grids) = script_engine::ScriptEngine::run(
-        code,
-        "mcp-script.js",
-        grids,
-        style_registry,
-        sheet_names,
-        active_sheet,
-    );
+    // Scope the model grant to THIS run's surface id and revoke it as soon as
+    // the run ends, success or failure.
+    let surface_id = mcp_script_surface_id();
+    {
+        let caps = handle.state::<crate::scripting::CapabilityStore>();
+        for capability in MCP_SCRIPT_CAPABILITIES {
+            caps.grant(&surface_id, capability);
+        }
+    }
 
-    match &result {
+    let rt = tokio::runtime::Handle::current();
+    let app = handle.clone();
+    let source = code.to_string();
+    let run_surface = surface_id.clone();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("mcp-script".to_string())
+        .spawn(move || {
+            let provider: std::rc::Rc<dyn script_engine::ModelDataProvider> =
+                std::rc::Rc::new(crate::bi::script_provider::HostModelProvider::new(app, rt));
+            let input = script_engine::CellRunInput {
+                grids,
+                style_registry,
+                sheet_names,
+                active_sheet,
+                surface_id: run_surface,
+                app_info,
+                host_state,
+            };
+            // A fresh session per run: the MCP surface is one-off, so JS globals
+            // must NOT leak between tool calls (and must never share the user's
+            // notebook session).
+            let seed = script_engine::CellRunInput {
+                grids: input.grids.clone(),
+                style_registry: input.style_registry.clone(),
+                sheet_names: input.sheet_names.clone(),
+                active_sheet: input.active_sheet,
+                surface_id: input.surface_id.clone(),
+                app_info: input.app_info.clone(),
+                host_state: input.host_state.clone(),
+            };
+            let outcome = match script_engine::NotebookSession::new(
+                Some(provider),
+                script_engine::ScriptLimits::default(),
+                seed,
+            ) {
+                Ok(session) => Ok(session.run_cell(&source, input)),
+                Err(e) => Err(e),
+            };
+            let _ = reply_tx.send(outcome);
+        });
+
+    let run_result = match spawned {
+        Ok(_handle) => reply_rx
+            .await
+            .map_err(|_| "Script thread terminated unexpectedly".to_string()),
+        Err(e) => Err(format!("Failed to spawn the script thread: {}", e)),
+    };
+
+    // Revoke unconditionally — a run's model grant must not outlive the run.
+    {
+        let caps = handle.state::<crate::scripting::CapabilityStore>();
+        caps.revoke_script(&surface_id);
+    }
+
+    let (result, modified_grids) = run_result??;
+    apply_script_result(handle, result, modified_grids, active_sheet)
+}
+
+/// Route a finished script's writes through the SHARED edit pipeline (C1a) so
+/// an AI/MCP write is UNDOABLE + dependency-recalc-tracked, exactly like the
+/// in-app run_script — instead of a wholesale grid swap that bypasses undo,
+/// recalc, and frontend events.
+fn apply_script_result(
+    handle: &AppHandle,
+    result: script_engine::ScriptResult,
+    modified_grids: Vec<engine::grid::Grid>,
+    active_sheet: usize,
+) -> Result<ScriptRunOutcome, String> {
+    let state = handle.state::<AppState>();
+    match result {
         script_engine::ScriptResult::Success {
             output,
             cells_modified,
             duration_ms,
             ..
         } => {
-            // Route the script's writes through the SHARED edit pipeline (C1a)
-            // so an AI/MCP write is UNDOABLE + dependency-recalc-tracked, exactly
-            // like the in-app run_script — instead of the old wholesale grid swap
-            // that bypassed undo, recalc, and frontend events.
             let file_state = handle.state::<crate::persistence::FileState>();
             let user_files_state = handle.state::<crate::persistence::UserFilesState>();
             let pivot_state = handle.state::<crate::pivot::PivotState>();
@@ -1033,35 +1221,20 @@ fn run_engine_script(
                 &ribbon_filter_state,
                 &modified_grids,
                 active_sheet,
-                *cells_modified,
+                cells_modified,
                 "mcp",
                 "",
             )?;
             // Notify the (out-of-band) frontend so the open grid refreshes — the
             // same Tauri-event bridge create_chart_from_spec uses for charts.
             let _ = handle.emit("grid:refresh", ());
-
-            let output_text = output
-                .iter()
-                .map(|i| i.to_text())
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(format!(
-                "Script executed ({}ms, {} cells modified){}",
+            Ok(ScriptRunOutcome {
                 duration_ms,
                 cells_modified,
-                if output_text.is_empty() {
-                    String::new()
-                } else {
-                    format!("\nOutput:\n{}", output_text)
-                }
-            ))
+                output,
+            })
         }
-        script_engine::ScriptResult::Error {
-            message,
-            output,
-            ..
-        } => {
+        script_engine::ScriptResult::Error { message, output } => {
             let output_text = output
                 .iter()
                 .map(|i| i.to_text())
@@ -1078,6 +1251,56 @@ fn run_engine_script(
             ))
         }
     }
+}
+
+/// Run a script through the engine WITHOUT a tier gate. Callers gate first:
+/// execute_script at the "script" tier; write_cell / write_cell_range at
+/// "mutate" (their generated Calcula.setCellValue/setRange snippets are
+/// app-authored cell writes, not arbitrary agent code).
+///
+/// No model provider here: these are app-authored `Calcula.setCellValue` /
+/// `setRange` snippets, so `model.*` has nothing to do, and running them on the
+/// caller's thread keeps a single cell write cheap. Only the agent-authored
+/// `execute_script` path takes the dedicated-thread + provider route.
+fn run_engine_script(
+    handle: &AppHandle,
+    code: &str,
+) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+
+    // Clone data for isolated execution (same pattern as scripting/commands.rs)
+    let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
+    let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    drop(state);
+
+    let (result, modified_grids) = script_engine::ScriptEngine::run(
+        code,
+        "mcp-script.js",
+        grids,
+        style_registry,
+        sheet_names,
+        active_sheet,
+    );
+
+    let outcome = apply_script_result(handle, result, modified_grids, active_sheet)?;
+    let output_text = outcome
+        .output
+        .iter()
+        .map(|i| i.to_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "Script executed ({}ms, {} cells modified){}",
+        outcome.duration_ms,
+        outcome.cells_modified,
+        if output_text.is_empty() {
+            String::new()
+        } else {
+            format!("\nOutput:\n{}", output_text)
+        }
+    ))
 }
 
 // ============================================================================
@@ -1727,5 +1950,93 @@ mod tests {
     fn bi_query_result_empty_columns() {
         let result = BiQueryResult { columns: vec![], rows: vec![], row_count: 0 };
         assert_eq!(format_bi_query_result(&result), "(query returned no columns)");
+    }
+
+    // ---- D5: model-aware, structured script execution ----
+
+    /// The exposure contract for `model.*` on the MCP surface: `bi.query` and
+    /// nothing else. `bi.sql` and `bi.model` have NO direct MCP tool, so
+    /// granting either would make a script the way to obtain a capability the
+    /// tool surface deliberately does not offer.
+    #[test]
+    fn an_mcp_script_may_only_hold_bi_query() {
+        assert_eq!(MCP_SCRIPT_CAPABILITIES, &["bi.query"]);
+        for forbidden in ["bi.sql", "bi.model", "bi.connector", "net.fetch", "storage", "ui.html", "formula.udf"] {
+            assert!(
+                !MCP_SCRIPT_CAPABILITIES.contains(&forbidden),
+                "an MCP script must not be granted '{}'",
+                forbidden
+            );
+        }
+    }
+
+    /// The grant is per-RUN and is cleaned up: a surface id is unique per run,
+    /// only the whitelisted capability lands in the authoritative store, and a
+    /// revoke leaves nothing behind for a later run to inherit.
+    #[test]
+    fn the_model_grant_is_scoped_to_one_run_and_revoked_after_it() {
+        let store = crate::scripting::CapabilityStore::new();
+        let surface = mcp_script_surface_id();
+        let other = mcp_script_surface_id();
+        assert_ne!(surface, other, "each run gets its own surface id");
+        assert!(surface.starts_with("mcp:script:"));
+
+        // Deny by default.
+        assert!(!store.is_granted(&surface, "bi.query"));
+
+        for capability in MCP_SCRIPT_CAPABILITIES {
+            store.grant(&surface, capability);
+        }
+        assert!(store.is_granted(&surface, "bi.query"));
+        // The capabilities NOT on the whitelist stay denied, so model.sql and
+        // the bi.model diagnostics raise the provider's consent error.
+        assert!(!store.is_granted(&surface, "bi.sql"));
+        assert!(!store.is_granted(&surface, "bi.model"));
+        // The grant does not leak to a concurrent run.
+        assert!(!store.is_granted(&other, "bi.query"));
+
+        store.revoke_script(&surface);
+        assert!(!store.is_granted(&surface, "bi.query"));
+        assert!(store.granted_capabilities(&surface).is_empty());
+    }
+
+    /// The flattening bug this replaces: `to_text()` turned a table into
+    /// tab-separated text, so any cell value containing a tab or newline was
+    /// unparseable on the client side. Structured output keeps the shape.
+    #[test]
+    fn structured_output_preserves_table_shape_that_to_text_destroys() {
+        let table = script_engine::ScriptOutputItem::Table {
+            columns: vec!["Region".to_string(), "Note".to_string()],
+            rows: vec![
+                vec!["North".to_string(), "has\ta tab".to_string()],
+                vec!["South".to_string(), "has\na newline".to_string()],
+            ],
+            truncated: true,
+            total_rows: 500,
+        };
+
+        // The old path: ambiguous — the row separator and a cell's own tab are
+        // the same character, so the client cannot recover the 2x2 shape.
+        let flattened = table.to_text();
+        assert!(flattened.contains("has\ta tab"));
+
+        let json = output_item_to_json(&table);
+        assert_eq!(json["type"], "table");
+        assert_eq!(json["columns"][0], "Region");
+        assert_eq!(json["rows"].as_array().unwrap().len(), 2);
+        // The embedded tab/newline survive INSIDE their cell instead of being
+        // mistaken for structure.
+        assert_eq!(json["rows"][0][1], "has\ta tab");
+        assert_eq!(json["rows"][1][1], "has\na newline");
+        assert_eq!(json["truncated"], true);
+        assert_eq!(json["totalRows"], 500);
+    }
+
+    #[test]
+    fn structured_output_keeps_text_items_as_text() {
+        let item = script_engine::ScriptOutputItem::text("hello");
+        let json = output_item_to_json(&item);
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["text"], "hello");
     }
 }

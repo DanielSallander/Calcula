@@ -15,9 +15,11 @@ describe('AppEvents', () => {
   });
 
   it('event count stays stable', () => {
-    // 59 since TABLE_CREATED / TABLE_DEFINITIONS_UPDATED were promoted to @api
-    // so the Table extension could stop re-declaring them locally.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`59`);
+    // 64 since B5 added the sheet-collection events (SHEET_ADDED /
+    // SHEET_DELETED / SHEET_RENAMED), RECALCULATION_COMPLETED, and
+    // PACKAGE_UPDATED — the last of which replaced the untyped, script-invisible
+    // "calp:scripts-pulled" window event.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`64`);
   });
 
   it('all values use the app: prefix', () => {

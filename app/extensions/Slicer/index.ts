@@ -117,6 +117,17 @@ function activate(context: ExtensionContext): void {
         columns: s.columns,
       };
     },
+    listSlicers() {
+      // Identity only (B3 enumeration) — never selectedItems or the cached
+      // item list, which are DATA and have their own read paths.
+      return getAllSlicers().map((s) => ({
+        id: s.id,
+        name: s.name,
+        sheetIndex: s.sheetIndex,
+        fieldName: s.fieldName,
+        sourceType: s.sourceType,
+      }));
+    },
     getSelectedItems(slicerId: string) {
       const s = getSlicerById(slicerId);
       return s?.selectedItems ?? [];

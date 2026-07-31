@@ -25,21 +25,32 @@ pub fn register_application_ops<'js>(
     let app = Object::new(ctx.clone())
         .map_err(|e| format!("Failed to create application object: {}", e))?;
 
-    // -- Read-only properties (set once) --
+    // -- Read-only properties --
+    //
+    // Backed by GETTERS, not values snapshotted at registration time: a
+    // notebook session registers this object once but lives across many cell
+    // runs, and the host re-applies `app_info` before each run. Freezing the
+    // values here would pin a sv-SE user's `decimalSeparator` to whatever was
+    // true when the session started (and, for a session created before the app
+    // finished hydrating, to the "." default forever).
     {
-        let sc = shared_ctx.borrow();
-        app.set("name", sc.app_info.name.clone())
-            .map_err(|e| format!("Failed to set application.name: {}", e))?;
-        app.set("version", sc.app_info.version.clone())
-            .map_err(|e| format!("Failed to set application.version: {}", e))?;
-        app.set("operatingSystem", sc.app_info.operating_system.clone())
-            .map_err(|e| format!("Failed to set application.operatingSystem: {}", e))?;
-        app.set("pathSeparator", sc.app_info.path_separator.clone())
-            .map_err(|e| format!("Failed to set application.pathSeparator: {}", e))?;
-        app.set("decimalSeparator", sc.app_info.decimal_separator.clone())
-            .map_err(|e| format!("Failed to set application.decimalSeparator: {}", e))?;
-        app.set("thousandsSeparator", sc.app_info.thousands_separator.clone())
-            .map_err(|e| format!("Failed to set application.thousandsSeparator: {}", e))?;
+        let read_only: [(&str, fn(&crate::types::AppInfo) -> String); 6] = [
+            ("name", |a| a.name.clone()),
+            ("version", |a| a.version.clone()),
+            ("operatingSystem", |a| a.operating_system.clone()),
+            ("pathSeparator", |a| a.path_separator.clone()),
+            ("decimalSeparator", |a| a.decimal_separator.clone()),
+            ("thousandsSeparator", |a| a.thousands_separator.clone()),
+        ];
+        for (name, pick) in read_only {
+            let sc = shared_ctx.clone();
+            let getter = Function::new(ctx.clone(), move || -> String {
+                pick(&sc.borrow().app_info)
+            })
+            .map_err(|e| format!("Failed to create __get_{}: {}", name, e))?;
+            app.set(format!("__get_{}", name), getter)
+                .map_err(|e| format!("Failed to set __get_{}: {}", name, e))?;
+        }
     }
 
     // -- Internal getter/setter functions for writable properties --
@@ -66,6 +77,14 @@ pub fn register_application_ops<'js>(
     }
 
     // enableEvents
+    //
+    // HONEST STATE: readable/writable inside the script and reported on the
+    // result, but NO host consumer acts on it yet — unlike screenUpdating,
+    // which suppresses the post-run grid refresh (Controls/Button,
+    // CellTypes/button, ScriptNotebook). Wiring it means deciding WHICH events
+    // it suppresses (object-script handlers? cell-change listeners?) for HOW
+    // long; until that decision is made, do not read a `false` here as
+    // "handlers were suppressed".
     {
         let sc = shared_ctx.clone();
         let getter = Function::new(ctx.clone(), move || -> bool {
@@ -194,6 +213,13 @@ pub fn register_application_ops<'js>(
         statusBar:       { get: app.__getStatusBar,       set: app.__setStatusBar },
         calculationMode: { get: app.__getCalculationMode },
     };
+    // Read-only app metadata: same getter treatment, so each read sees the
+    // host state re-applied for the CURRENT run.
+    var readOnly = ['name', 'version', 'operatingSystem', 'pathSeparator',
+                    'decimalSeparator', 'thousandsSeparator'];
+    for (var i = 0; i < readOnly.length; i++) {
+        props[readOnly[i]] = { get: app['__get_' + readOnly[i]] };
+    }
     for (var name in props) {
         var desc = props[name];
         desc.configurable = true;
@@ -208,6 +234,9 @@ pub fn register_application_ops<'js>(
     delete app.__getStatusBar;
     delete app.__setStatusBar;
     delete app.__getCalculationMode;
+    for (var j = 0; j < readOnly.length; j++) {
+        delete app['__get_' + readOnly[j]];
+    }
 })();
 "#;
 

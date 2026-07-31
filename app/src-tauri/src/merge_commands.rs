@@ -48,6 +48,16 @@ pub fn merge_cells(
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "merge cells")?;
     }
 
+    // WRITEBACK CLAIM GUARD. Merging DELETES every non-master cell in the
+    // range, so it is the bluntest of the range gestures: it would erase
+    // respondents' answers outright and leave the writeback layer asserting
+    // values for cells that no longer exist as separate slots. Refused for the
+    // whole range before any lock or undo transaction. See the policy note in
+    // calp_commands.rs for why an existing draft does not excuse this.
+    crate::calp_commands::ensure_range_unclaimed(
+        &state, "merge these cells", start_row, start_col, end_row, end_col,
+    )?;
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
@@ -189,17 +199,44 @@ pub fn unmerge_cells(
         crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "unmerge cells")?;
     }
 
+    // Find the merged region containing this cell FIRST, holding only
+    // `merged_regions`, so the writeback guard below can run before the rest of
+    // the lock set is taken (the guard takes its own locks — writeback_index,
+    // active_sheet, sheet_ids — and must never be reached with grid held, or
+    // two commands could acquire the two sets in opposite orders).
+    let region_to_remove = {
+        let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+        merged_regions
+            .iter()
+            .find(|r| {
+                row >= r.start_row && row <= r.end_row && col >= r.start_col && col <= r.end_col
+            })
+            .cloned()
+    };
+
+    // WRITEBACK CLAIM GUARD. Unmerging destroys no values — the slave cells
+    // were already emptied when the merge was made — but it changes which cell
+    // of a claimed rectangle is addressable and visible to the respondent.
+    // Guarding merge while leaving unmerge open would let a script toggle a
+    // claimed region's geometry at will, so both directions are refused. The
+    // check is against the FOUND REGION, not the clicked cell: a merge can
+    // extend into a claim that the clicked cell itself sits outside of.
+    if let Some(ref region) = region_to_remove {
+        crate::calp_commands::ensure_range_unclaimed(
+            &state,
+            "unmerge these cells",
+            region.start_row,
+            region.start_col,
+            region.end_row,
+            region.end_col,
+        )?;
+    }
+
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
-
-    // Find the merged region containing this cell
-    let region_to_remove = merged_regions
-        .iter()
-        .find(|r| row >= r.start_row && row <= r.end_row && col >= r.start_col && col <= r.end_col)
-        .cloned();
 
     if let Some(region) = region_to_remove {
         // Record undo: the merge region being removed

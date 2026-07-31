@@ -11,6 +11,11 @@ export {
   hostValidateScript,
   workerRealmAvailable,
   listFaultedScripts,
+  // Cancellable workbook lifecycle (B5): the save/close verdict machinery.
+  callWorkbookBeforeLifecycle,
+  raceLifecycleVerdict,
+  normalizeLifecycleVerdict,
+  type WorkbookLifecycleVerdict,
   getShapeBitmap,
   hasShapeBitmapRenderer,
   getSlicerItemBitmap,
@@ -70,3 +75,43 @@ export type { CapabilityRequestPayload, CapabilityDecision } from "./capabilitie
 // Declared/consented capabilities (Phase 4.2a): pragma parse + grant chokepoint.
 export { parseDeclaredCapabilities, applyConsentedCapabilities } from "./capabilities";
 export type { DeclaredCapabilities } from "./capabilities";
+
+// Persistent scheduled jobs (the `schedule` capability). The trusted-UI half is
+// exported so the transparency panel can SHOW and CANCEL every job in the
+// workbook — a persistent, self-starting job the user cannot see or stop would
+// be exactly the thing that got VBA distrusted.
+export {
+  listAllScheduledJobs,
+  cancelScheduledJob,
+  setScheduledJobEnabled,
+  syncPump as syncSchedulerPump,
+  stopSchedulerPump,
+} from "./scheduler";
+export type { ScheduledJob } from "./scheduler";
+
+// ui.dialog (B4): the trusted renderer picks requests up from the app event and
+// answers them here. Everything else about a dialog is internal to the host.
+export {
+  resolveScriptDialog,
+  dismissScriptDialog,
+  getActiveScriptDialog,
+  isScriptDialogMuted,
+  resetScriptDialogs,
+  MAX_CONSECUTIVE_DISMISSALS,
+  SCRIPT_DIALOG_REQUEST_EVENT,
+  SCRIPT_DIALOG_CANCELLED_EVENT,
+} from "./scriptDialogs";
+export type { ScriptDialogRequestPayload, ScriptDialogAnswer, ScriptDialogKind } from "./scriptDialogs";
+export {
+  DIALOG_FIELD_TYPES,
+  MAX_DIALOG_FIELDS,
+  normalizeDialogOption,
+} from "./scriptDialogSpec";
+export type {
+  ScriptDialogField,
+  ScriptDialogFieldType,
+  ScriptDialogFormSpec,
+  ScriptDialogOption,
+  ScriptDialogPromptOptions,
+  ScriptDialogTextOptions,
+} from "./scriptDialogSpec";

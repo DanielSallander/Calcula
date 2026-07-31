@@ -1250,6 +1250,13 @@ pub fn insert_rows(
         let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "insertRows", "insert rows")?;
     }
+    // WRITEBACK SHIFT GUARD. Inserting at `row` pushes every row from `row`
+    // downwards; a published writeback region's rectangle comes from the SIGNED
+    // manifest and does NOT move with it, so the respondent's answers would
+    // slide out from under the claim while unrelated cells slid in. Refused
+    // before the snapshot and before the undo transaction opens. An insert
+    // strictly below every claimed region moves nothing claimed and proceeds.
+    crate::calp_commands::ensure_row_shift_unclaimed(&state, "insert rows here", row)?;
     // Capture snapshot BEFORE acquiring other locks (helper acquires its own locks)
     let snapshot = capture_grid_snapshot(&state);
 
@@ -1564,6 +1571,8 @@ pub fn insert_columns(
         let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "insertColumns", "insert columns")?;
     }
+    // WRITEBACK SHIFT GUARD, column twin of the one in `insert_rows`.
+    crate::calp_commands::ensure_col_shift_unclaimed(&state, "insert columns here", col)?;
     // Capture snapshot BEFORE acquiring other locks
     let snapshot = capture_grid_snapshot(&state);
 
@@ -2266,6 +2275,11 @@ pub fn delete_rows(
         let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "deleteRows", "delete rows")?;
     }
+    // WRITEBACK SHIFT GUARD. Deleting from `row` both removes rows and pulls
+    // everything below upwards, so the affected window is identical to the
+    // insert case — the claimed rectangle stays where the signed manifest put
+    // it while the answers underneath move or vanish outright.
+    crate::calp_commands::ensure_row_shift_unclaimed(&state, "delete rows here", row)?;
     // Check if any spill range would be broken by this row deletion.
     // Block if any spill range has cells both inside and outside the deleted rows.
     {
@@ -2631,6 +2645,8 @@ pub fn delete_columns(
         let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
         crate::protection::check_sheet_action(&state, active_sheet, "deleteColumns", "delete columns")?;
     }
+    // WRITEBACK SHIFT GUARD, column twin of the one in `delete_rows`.
+    crate::calp_commands::ensure_col_shift_unclaimed(&state, "delete columns here", col)?;
     // Check if any spill range would be broken by this column deletion.
     {
         let active_sheet = *state.active_sheet.lock().unwrap();

@@ -205,7 +205,7 @@ pub async fn cube_udf_value(
     // granted bi.query — a compromised renderer can't bypass the broker check.
     // A trusted main-window call carries no script_id and passes untouched.
     if let Some(sid) = script_id.as_deref() {
-        if !cap_store.is_bi_granted(sid, "bi.query") {
+        if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_value DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
                 &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
@@ -238,7 +238,7 @@ pub async fn cube_udf_kpi(
 ) -> Result<Option<f64>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     if let Some(sid) = script_id.as_deref() {
-        if !cap_store.is_bi_granted(sid, "bi.query") {
+        if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_kpi DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
                 &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),
@@ -270,7 +270,7 @@ pub async fn cube_udf_members(
 ) -> Result<Vec<String>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     if let Some(sid) = script_id.as_deref() {
-        if !cap_store.is_bi_granted(sid, "bi.query") {
+        if !cap_store.is_granted(sid, "bi.query") {
             crate::log_warn!("SECURITY", "cube_udf_members DENIED (bi.query not granted): script={}", sid);
             crate::net_commands::record_capability_call(
                 &app_state.audit_log, "bi.query", sid, false, None, Some("bi.query not granted"),

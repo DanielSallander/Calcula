@@ -23,7 +23,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
-            sc.borrow().view_mode.clone()
+            sc.borrow().host.view_mode.clone()
         })
         .map_err(|e| format!("Failed to create getViewMode: {}", e))?;
         calcula
@@ -36,7 +36,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |mode: String| {
             let mut ctx = sc.borrow_mut();
-            ctx.view_mode = mode.clone();
+            ctx.host.view_mode = mode.clone();
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetViewMode { mode });
@@ -51,7 +51,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> f64 {
-            sc.borrow().zoom
+            sc.borrow().host.zoom
         })
         .map_err(|e| format!("Failed to create getZoom: {}", e))?;
         calcula
@@ -64,7 +64,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |percent: f64| {
             let mut ctx = sc.borrow_mut();
-            ctx.zoom = percent;
+            ctx.host.zoom = percent;
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetZoom { percent });
@@ -79,7 +79,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
-            sc.borrow().reference_style.clone()
+            sc.borrow().host.reference_style.clone()
         })
         .map_err(|e| format!("Failed to create getReferenceStyle: {}", e))?;
         calcula
@@ -92,7 +92,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |style: String| {
             let mut ctx = sc.borrow_mut();
-            ctx.reference_style = style.clone();
+            ctx.host.reference_style = style.clone();
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetReferenceStyle { style });
@@ -108,6 +108,8 @@ pub fn register_extended_ops<'js>(
     // ========================================================================
 
     // nextSheet() - switch to next sheet (wrapping)
+    // Queues the activation as well, so the host follows the script (see
+    // ops/sheets.rs setActiveSheet).
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || {
@@ -115,6 +117,10 @@ pub fn register_extended_ops<'js>(
             let count = ctx.grids.len();
             if count > 0 {
                 ctx.active_sheet = (ctx.active_sheet + 1) % count;
+                let sheet_index = ctx.active_sheet;
+                ctx.deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::ActivateSheet { sheet_index });
             }
         })
         .map_err(|e| format!("Failed to create nextSheet: {}", e))?;
@@ -135,6 +141,10 @@ pub fn register_extended_ops<'js>(
                 } else {
                     ctx.active_sheet - 1
                 };
+                let sheet_index = ctx.active_sheet;
+                ctx.deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::ActivateSheet { sheet_index });
             }
         })
         .map_err(|e| format!("Failed to create previousSheet: {}", e))?;
@@ -148,7 +158,8 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |index: i32| -> String {
             let ctx = sc.borrow();
-            ctx.sheet_visibility
+            ctx.host
+                .sheet_visibility
                 .get(index as usize)
                 .cloned()
                 .unwrap_or_else(|| "visible".to_string())
@@ -169,10 +180,10 @@ pub fn register_extended_ops<'js>(
                 let mut ctx = sc.borrow_mut();
                 let idx = index as usize;
                 // Extend visibility vec if needed
-                while ctx.sheet_visibility.len() <= idx {
-                    ctx.sheet_visibility.push("visible".to_string());
+                while ctx.host.sheet_visibility.len() <= idx {
+                    ctx.host.sheet_visibility.push("visible".to_string());
                 }
-                ctx.sheet_visibility[idx] = visibility.clone();
+                ctx.host.sheet_visibility[idx] = visibility.clone();
                 ctx.deferred_actions
                     .borrow_mut()
                     .push(DeferredAction::SetSheetVisibility {
@@ -193,10 +204,10 @@ pub fn register_extended_ops<'js>(
         let func = Function::new(ctx.clone(), move |index: i32| {
             let mut ctx = sc.borrow_mut();
             let idx = index as usize;
-            while ctx.sheet_visibility.len() <= idx {
-                ctx.sheet_visibility.push("visible".to_string());
+            while ctx.host.sheet_visibility.len() <= idx {
+                ctx.host.sheet_visibility.push("visible".to_string());
             }
-            ctx.sheet_visibility[idx] = "visible".to_string();
+            ctx.host.sheet_visibility[idx] = "visible".to_string();
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetSheetVisibility {
@@ -219,7 +230,8 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |key: String| -> String {
             let ctx = sc.borrow();
-            ctx.workbook_properties
+            ctx.host
+                .workbook_properties
                 .get(&key)
                 .cloned()
                 .unwrap_or_default()
@@ -231,11 +243,19 @@ pub fn register_extended_ops<'js>(
     }
 
     // setWorkbookProperty(key, value)
+    //
+    // Writes BOTH the in-context copy (so a later getWorkbookProperty in the
+    // same script reads back what it wrote) and the changed-properties map that
+    // the host applies afterwards. Mutating only the clone — what this used to
+    // do — silently dropped the write when the context was discarded.
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |key: String, value: String| {
             let mut ctx = sc.borrow_mut();
-            ctx.workbook_properties.insert(key, value);
+            ctx.workbook_properties_changed
+                .borrow_mut()
+                .insert(key.clone(), value.clone());
+            ctx.host.workbook_properties.insert(key, value);
         })
         .map_err(|e| format!("Failed to create setWorkbookProperty: {}", e))?;
         calcula
@@ -252,7 +272,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
             let ctx = sc.borrow();
-            serde_json::to_string(&ctx.named_style_names).unwrap_or_else(|_| "[]".to_string())
+            serde_json::to_string(&ctx.host.named_style_names).unwrap_or_else(|_| "[]".to_string())
         })
         .map_err(|e| format!("Failed to create getNamedStyles: {}", e))?;
         calcula
@@ -300,9 +320,9 @@ pub fn register_extended_ops<'js>(
         let func = Function::new(ctx.clone(), move || -> String {
             let ctx = sc.borrow();
             serde_json::json!({
-                "enabled": ctx.iteration_enabled,
-                "maxIterations": ctx.iteration_max_count,
-                "maxChange": ctx.iteration_max_change
+                "enabled": ctx.host.iteration_enabled,
+                "maxIterations": ctx.host.iteration_max_count,
+                "maxChange": ctx.host.iteration_max_change
             })
             .to_string()
         })
@@ -319,9 +339,9 @@ pub fn register_extended_ops<'js>(
             ctx.clone(),
             move |enabled: bool, max_iterations: i32, max_change: f64| {
                 let mut ctx = sc.borrow_mut();
-                ctx.iteration_enabled = enabled;
-                ctx.iteration_max_count = max_iterations.max(0) as u32;
-                ctx.iteration_max_change = max_change;
+                ctx.host.iteration_enabled = enabled;
+                ctx.host.iteration_max_count = max_iterations.max(0) as u32;
+                ctx.host.iteration_max_change = max_change;
                 ctx.deferred_actions
                     .borrow_mut()
                     .push(DeferredAction::SetIterationSettings {
@@ -464,7 +484,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
-            sc.borrow().scroll_area.clone().unwrap_or_default()
+            sc.borrow().host.scroll_area.clone().unwrap_or_default()
         })
         .map_err(|e| format!("Failed to create getScrollArea: {}", e))?;
         calcula
@@ -478,7 +498,7 @@ pub fn register_extended_ops<'js>(
         let func = Function::new(ctx.clone(), move |area: String| {
             let area_opt = if area.is_empty() { None } else { Some(area) };
             let mut ctx = sc.borrow_mut();
-            ctx.scroll_area = area_opt.clone();
+            ctx.host.scroll_area = area_opt.clone();
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetScrollArea { area: area_opt });
@@ -530,7 +550,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |value: bool| {
             let mut ctx = sc.borrow_mut();
-            ctx.display_gridlines = value;
+            ctx.host.display_gridlines = value;
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetDisplayGridlines { value });
@@ -546,7 +566,7 @@ pub fn register_extended_ops<'js>(
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move |value: bool| {
             let mut ctx = sc.borrow_mut();
-            ctx.display_headings = value;
+            ctx.host.display_headings = value;
             ctx.deferred_actions
                 .borrow_mut()
                 .push(DeferredAction::SetDisplayHeadings { value });
@@ -561,7 +581,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> bool {
-            sc.borrow().display_gridlines
+            sc.borrow().host.display_gridlines
         })
         .map_err(|e| format!("Failed to create getDisplayGridlines: {}", e))?;
         calcula
@@ -573,7 +593,7 @@ pub fn register_extended_ops<'js>(
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> bool {
-            sc.borrow().display_headings
+            sc.borrow().host.display_headings
         })
         .map_err(|e| format!("Failed to create getDisplayHeadings: {}", e))?;
         calcula

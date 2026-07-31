@@ -117,7 +117,7 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
     void refresh();
     const offs = [
       onAppEvent(AppEvents.SHEET_CHANGED, () => void refresh()),
-      onAppEvent("calp:scripts-pulled", () => void refresh()),
+      onAppEvent(AppEvents.PACKAGE_UPDATED, () => void refresh()),
     ];
     return () => offs.forEach((off) => off());
   }, [refresh]);

@@ -27,6 +27,9 @@ pub struct ObjectScriptSummary {
     pub provenance: Option<String>,
     #[serde(default)]
     pub package_name: Option<String>,
+    /// For distributed scripts: the resolved package version. Read-only over IPC.
+    #[serde(default)]
+    pub package_version: Option<String>,
     /// The R19 declared-capability ceiling (authoritative). Read-only over IPC.
     #[serde(default)]
     pub declared_capabilities: Vec<String>,
@@ -49,6 +52,10 @@ pub struct ObjectScriptData {
     pub provenance: Option<String>,
     #[serde(default)]
     pub package_name: Option<String>,
+    /// For distributed scripts: the resolved package version. Read-only over IPC
+    /// (preserved from the stored entry on save, exactly like package_name).
+    #[serde(default)]
+    pub package_version: Option<String>,
     /// The R19 declared-capability ceiling (authoritative). Read-only over IPC:
     /// save_object_script derives it from the source pragmas (local) or
     /// preserves the manifest-set ceiling (distributed).
@@ -134,6 +141,7 @@ fn to_summary(s: &SavedObjectScript) -> ObjectScriptSummary {
         access_level: access_level_to_string(&s.access_level),
         provenance: Some(provenance_to_string(&s.provenance)),
         package_name: s.package_name.clone(),
+        package_version: s.package_version.clone(),
         declared_capabilities: s.declared_capabilities.clone(),
     }
 }
@@ -149,6 +157,7 @@ fn to_data(s: &SavedObjectScript) -> ObjectScriptData {
         description: s.description.clone(),
         provenance: Some(provenance_to_string(&s.provenance)),
         package_name: s.package_name.clone(),
+        package_version: s.package_version.clone(),
         declared_capabilities: s.declared_capabilities.clone(),
     }
 }
@@ -168,6 +177,7 @@ fn from_data(d: &ObjectScriptData) -> Result<SavedObjectScript, String> {
         // script into a local one.
         provenance: ScriptProvenance::Local,
         package_name: None,
+        package_version: None,
         // The ceiling is derived server-side in save_object_script (from the
         // source for local scripts) or preserved from the stored distributed
         // entry — never taken from the payload.
@@ -243,6 +253,7 @@ pub fn save_object_script(
     if let Some(existing) = scripts.iter_mut().find(|s| s.id == saved.id) {
         saved.provenance = existing.provenance.clone();
         saved.package_name = existing.package_name.clone();
+        saved.package_version = existing.package_version.clone();
         if saved.provenance == ScriptProvenance::Distributed
             && saved.access_level == ScriptAccessLevel::Unlocked
             && existing.access_level != ScriptAccessLevel::Unlocked

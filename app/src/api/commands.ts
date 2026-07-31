@@ -132,6 +132,61 @@ const SCRIPT_SAFE_GRID_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 // ============================================================================
+// Macro-recorder observation hook
+// ----------------------------------------------------------------------------
+// Slice 2 of the recorder: cell writes alone produce disappointing macros, so
+// the registry reports every command dispatch too. The hook is called with a
+// PHASE rather than once at the end, because the recorder needs a scope, not a
+// notification:
+//
+//   before  -> a handler is about to run
+//   after   -> it ran and returned
+//   failed  -> it threw (the error still propagates to the caller)
+//   unhandled -> no handler and no grid bridge; nothing happened
+//
+// The scope matters because most CoreCommands ultimately reach the IPC bridge,
+// where the macro recorder ALREADY observes the operation with explicit
+// coordinates (see setGridRecorderHook in core/lib/tauri-api.ts). Recording
+// both would replay the action twice. With begin/end phases the recorder can
+// decide per command which representation wins and suppress the other, instead
+// of this registry having to know anything about macros.
+//
+// Zero cost when no recorder is installed: one null check per execute().
+// ============================================================================
+
+/** Where in a command's dispatch the recorder is being told about it. */
+export type CommandRecordPhase = "before" | "after" | "failed" | "unhandled";
+
+/** Best-effort observer of command dispatches. At most one is installed (by the
+ *  macro recorder while recording); pass null to uninstall. A failing hook never
+ *  affects the command. */
+export type CommandRecorderHook = (
+  commandId: string,
+  phase: CommandRecordPhase,
+  args?: unknown,
+) => void;
+
+let commandRecorderHook: CommandRecorderHook | null = null;
+
+/** Installed by the macro recorder while recording; pass null to uninstall. */
+export function setCommandRecorderHook(hook: CommandRecorderHook | null): void {
+  commandRecorderHook = hook;
+}
+
+function recordCommand(
+  commandId: string,
+  phase: CommandRecordPhase,
+  args?: unknown,
+): void {
+  if (!commandRecorderHook) return;
+  try {
+    commandRecorderHook(commandId, phase, args);
+  } catch (e) {
+    console.warn("[recorder] command hook failed; ignoring", e);
+  }
+}
+
+// ============================================================================
 // CommandRegistry Implementation
 // ============================================================================
 
@@ -213,16 +268,37 @@ class CommandRegistryImpl implements ICommandRegistry {
     // 1. Check local handlers first — return the handler's result.
     const handler = this.handlers.get(commandId);
     if (handler) {
-      return await handler(args);
+      recordCommand(commandId, "before", args);
+      try {
+        const result = await handler(args);
+        recordCommand(commandId, "after", args);
+        return result;
+      } catch (e) {
+        recordCommand(commandId, "failed", args);
+        throw e;
+      }
     }
 
     // 2. Bridge to gridCommands for grid-specific commands
     const gridCommand = GRID_COMMAND_MAP[commandId];
     if (gridCommand) {
-      const executed = await gridCommands.execute(gridCommand);
+      recordCommand(commandId, "before", args);
+      let executed: boolean;
+      try {
+        executed = await gridCommands.execute(gridCommand);
+      } catch (e) {
+        recordCommand(commandId, "failed", args);
+        throw e;
+      }
       if (executed) {
+        recordCommand(commandId, "after", args);
         return undefined;
       }
+      // The bridge exists but nothing ran (no handler mounted, or a guard
+      // refused): close the scope as "nothing happened", not as a success.
+      recordCommand(commandId, "unhandled", args);
+      console.warn(`[CommandRegistry] No handler registered for command: ${commandId}`);
+      return undefined;
     }
 
     // 3. No handler found
