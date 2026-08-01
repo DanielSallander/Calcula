@@ -4,6 +4,8 @@
 
 import { create } from "zustand";
 import { dispatchScriptSideEffects } from "@api/workbookScripts";
+import { persistNotebookCapabilityGrant } from "@api/scriptSecurity";
+import { isCapabilityId, type CapabilityId } from "@api";
 import type {
   NotebookDocument,
   NotebookCell,
@@ -26,17 +28,31 @@ function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
  */
 const BI_CONSENT_SENTINEL = "BI_CONSENT_REQUIRED";
 
-/** Extract the requested capability from a consent-sentinel error, or null. */
-function parseBiConsentCapability(message: string | undefined): string | null {
+/** Extract the requested capability from a consent-sentinel error, or null.
+ *  The id arrives inside a backend error STRING, so it is validated against the
+ *  canonical vocabulary rather than trusted: an unrecognized id must not reach
+ *  the grant call or the persisted trust store. */
+function parseBiConsentCapability(message: string | undefined): CapabilityId | null {
   if (!message || !message.includes(BI_CONSENT_SENTINEL)) return null;
   const m = message.match(/capability=([a-z.]+)/);
-  return m ? m[1] : "bi.query";
+  if (!m) return "bi.query";
+  return isCapabilityId(m[1]) ? m[1] : null;
 }
 
 /**
  * JIT consent for notebook model access: prompt, and on approval mirror the
- * grant into the authoritative backend CapabilityStore (session-scoped).
- * Returns true when granted (caller should retry the run once).
+ * grant into the authoritative backend CapabilityStore (in-memory) AND persist
+ * it to the local per-workbook trust store, so reopening the workbook does not
+ * re-ask for a decision already made. Returns true when granted (caller should
+ * retry the run once).
+ *
+ * The persisted half is deliberately capability-set-bound, not source-hash-bound
+ * (see @api/scriptSecurity): a notebook is an authoring surface edited between
+ * every run, so hashing it would re-prompt on essentially every replay. Only the
+ * exact capability ids the user approved are ever re-mirrored; anything else
+ * falls back to this prompt. The grant is listed and revocable per notebook in
+ * Settings > Script Security, and revoking clears the live grant too — which is
+ * why the prompt below must NOT say "for this session".
  */
 async function promptAndGrantBiCapability(
   notebookId: string,
@@ -51,10 +67,14 @@ async function promptAndGrantBiCapability(
   const ok = window.confirm(
     `This notebook wants to ${what}.\n\n` +
       `Capability: ${capability} (read-only; every call is recorded in the audit log)\n\n` +
-      `Allow for this session?`,
+      `Allow? This is remembered for this notebook on THIS COMPUTER only ` +
+      `(never stored in the file) and can be revoked in Settings > Script Security.`,
   );
   if (!ok) return false;
   await api.grantNotebookBiCapability(notebookId, capability);
+  // Persist AFTER the authoritative grant succeeds: a stored grant that the
+  // backend rejected would silently re-mirror a capability that never applied.
+  await persistNotebookCapabilityGrant(notebookId, capability);
   return true;
 }
 

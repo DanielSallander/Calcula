@@ -501,6 +501,72 @@ function emitFillRange(
   );
 }
 
+/**
+ * The sort-field properties `api.sortRange` accepts, in the order they are
+ * emitted. The broker validator REJECTS an unknown property outright, so this
+ * list is a hard filter and not a style choice: emitting a field the recorder
+ * happened to see but the script API does not know would generate a macro that
+ * fails on its first run.
+ */
+const SCRIPT_SORT_FIELD_KEYS = [
+  "key",
+  "ascending",
+  "sortOn",
+  "color",
+  "dataOption",
+  "subField",
+  "customOrder",
+] as const;
+
+type SortFieldPayload = RecordedGridEventOf<"sort">["fields"][number];
+
+/** Render one recorded sort criterion as a ScriptSortField object literal. */
+function sortFieldLiteral(field: SortFieldPayload): string {
+  const parts: string[] = [];
+  for (const key of SCRIPT_SORT_FIELD_KEYS) {
+    const value = field[key];
+    if (value === undefined) continue;
+    parts.push(`${key}: ${valueLiteral(value)}`);
+  }
+  return `{ ${parts.join(", ")} }`;
+}
+
+function emitSort(ctx: EmitContext, ev: RecordedGridEventOf<"sort">): void {
+  const label = a1Range(ev.startRow, ev.startCol, ev.endRow, ev.endCol);
+
+  if (ctx.o.target !== "objectScript") {
+    unsupported(ctx, `sort ${label} — the notebook runtime has no sort op`);
+    return;
+  }
+
+  // The broker requires a non-empty field list whose keys are non-negative
+  // integer offsets from the range start. A recording that violates either
+  // could only produce a macro that throws, so say so instead of emitting it.
+  if (ev.fields.length === 0) {
+    unsupported(ctx, `sort ${label} — no sort criteria were recorded`);
+    return;
+  }
+  const badKey = ev.fields.find(
+    (f) => !Number.isInteger(f.key) || f.key < 0,
+  );
+  if (badKey) {
+    unsupported(
+      ctx,
+      `sort ${label} — sort key ${badKey.key} is not an offset from the range start`,
+    );
+    return;
+  }
+
+  const fields = ev.fields.map(sortFieldLiteral).join(", ");
+  const options =
+    `{ matchCase: ${ev.matchCase}, hasHeaders: ${ev.hasHeaders},` +
+    ` orientation: ${jsString(ev.orientation)} }`;
+  push(
+    ctx,
+    `await api.sortRange(${ev.startRow}, ${ev.startCol}, ${ev.endRow}, ${ev.endCol}, [${fields}], ${options}); // ${label}`,
+  );
+}
+
 function emitObjectScriptOnly(
   ctx: EmitContext,
   statement: string,
@@ -543,6 +609,24 @@ function emitEvent(ctx: EmitContext, event: RecordedEvent): void {
     case "fillRange":
       emitFillRange(ctx, event);
       return;
+
+    case "sort":
+      emitSort(ctx, event);
+      return;
+
+    case "removeDuplicates": {
+      const label = a1Range(event.startRow, event.startCol, event.endRow, event.endCol);
+      const keys = event.keyColumns.map(colLetter).join(", ");
+      // No `api.removeDuplicates` exists on either runtime. Reporting it is the
+      // whole point: the rows it deleted are NOT coming back on replay, and a
+      // silent omission would leave the duplicates in place with no warning.
+      unsupported(
+        ctx,
+        `remove duplicates on ${label} (key column${event.keyColumns.length === 1 ? "" : "s"} ${keys || "none"})` +
+          " — no script API for remove-duplicates",
+      );
+      return;
+    }
 
     case "insertRows":
       emitObjectScriptOnly(

@@ -15,6 +15,14 @@
 //          .calp package. That consent is stored INSIDE the workbook (it must
 //          survive a copy) and is managed per package; workbook trust never
 //          covers it. See @api/distributedConsent.
+//
+//          Scheduled jobs (the `schedule` capability) are SHOWN here but not
+//          managed here, and that split is deliberate: everything else on this
+//          page is machine-scoped state stored on this computer, while a
+//          schedule lives inside the workbook. Duplicating the management UI
+//          would give the user two places to disagree about one workbook, so
+//          this section reports what is armed and links to the per-workbook
+//          "Code in This File" panel, which owns pause/cancel.
 
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -33,6 +41,13 @@ import {
   type WorkbookTrustRecord,
 } from "@api/scriptSecurity";
 import { onAppEvent } from "@api/events";
+import {
+  getWorkbookScheduledJobs,
+  describeJobTime,
+  type ScheduledJobEntry,
+} from "@api/codeInventory";
+import { openPanel } from "@api/ui";
+import type { CapabilityId } from "@api";
 
 // ============================================================================
 // Helpers
@@ -40,8 +55,14 @@ import { onAppEvent } from "@api/events";
 
 /** Short, human capability labels. Kept local (and small) on purpose: this page
  *  must never imply that a listed capability is GRANTED — these are the
- *  capabilities the trusted code DECLARES, i.e. the most it could ever ask for. */
-const CAP_LABEL: Record<string, string> = {
+ *  capabilities the trusted code DECLARES, i.e. the most it could ever ask for.
+ *
+ *  Typed `Record<CapabilityId, string>`, NOT `Record<string, string>`: every
+ *  other consent/label map in the app carries that type so a new capability
+ *  fails the build until it is phrased for the user, and this one silently did
+ *  not — it would have degraded to the raw id ("distribution.writeback") in a
+ *  security page, which is exactly the drift this program shipped twice. */
+const CAP_LABEL: Record<CapabilityId, string> = {
   "net.fetch": "Network",
   "bi.query": "BI query",
   "bi.sql": "BI SQL",
@@ -52,9 +73,13 @@ const CAP_LABEL: Record<string, string> = {
   "bi.connector": "BI connector",
   "ui.dialog": "Ask you",
   "distribution.writeback": "Package writeback",
+  schedule: "Scheduled jobs",
 };
 
-const capLabel = (id: string): string => CAP_LABEL[id] ?? id;
+/** Label for a capability id that arrives as an untrusted string (a persisted
+ *  trust record can name an id this build no longer knows). Unknown ids show
+ *  raw rather than being hidden. */
+const capLabel = (id: string): string => CAP_LABEL[id as CapabilityId] ?? id;
 
 function formatWhen(iso: string): string {
   if (!iso) return "unknown";
@@ -170,6 +195,17 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: 6,
     verticalAlign: "middle",
   },
+  jobRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 8,
+    fontSize: 11,
+    color: "var(--text-primary)",
+    padding: "6px 0",
+    borderTop: "1px solid var(--border-default)",
+    lineHeight: 1.5,
+  },
   notebookRow: {
     display: "flex",
     justifyContent: "space-between",
@@ -185,11 +221,22 @@ const styles: Record<string, React.CSSProperties> = {
 // Page
 // ============================================================================
 
+/** The "Code in This File" panel registered by the ScriptableObjects extension.
+ *  Referenced by id, never imported: extensions must not reach into a sibling's
+ *  internals (Facade Rule), and openPanel takes a plain id. */
+const CODE_IN_THIS_FILE_PANEL_ID = "scriptable-objects.codeInThisFile";
+
+/** How often the open page re-reads the schedule, so a count that says "2 jobs"
+ *  is still true a minute later. */
+const JOB_POLL_MS = 15_000;
+
 export function ScriptSecurityPage(): React.ReactElement {
   const [level, setLevel] = useState<ScriptSecurityLevel | null>(null);
   const [records, setRecords] = useState<WorkbookTrustRecord[]>(() => listWorkbookTrust());
   const [currentKey, setCurrentKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<ScheduledJobEntry[]>([]);
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(() => {
     setRecords(listWorkbookTrust());
@@ -215,6 +262,27 @@ export function ScriptSecurityPage(): React.ReactElement {
   }, []);
 
   useEffect(() => onAppEvent(SCRIPT_TRUST_CHANGED, refresh), [refresh]);
+
+  // The schedule of the OPEN workbook. Read-only here (see the header note);
+  // a failure is swallowed to [] rather than breaking the security page.
+  useEffect(() => {
+    let cancelled = false;
+    const load = (): void => {
+      getWorkbookScheduledJobs()
+        .then((next) => {
+          if (cancelled) return;
+          setJobs(next);
+          setNow(Date.now());
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = setInterval(load, JOB_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   const chooseLevel = useCallback((next: ScriptSecurityLevel) => {
     setLevel(next);
@@ -264,6 +332,48 @@ export function ScriptSecurityPage(): React.ReactElement {
             </label>
           );
         })}
+      </div>
+
+      {/* ---------------------------------------------------------------- */}
+      <div style={styles.section}>
+        <div style={styles.sectionTitle}>Scheduled Jobs</div>
+        <div style={styles.intro}>
+          Code in the open workbook that runs on a timer, without you starting
+          it. Every firing re-checks the script's capabilities, and nothing runs
+          while Calcula is closed. The schedule is stored in the workbook, so it
+          is reviewed and stopped there: open <strong>Code in This File</strong>{" "}
+          to pause or cancel a job.
+        </div>
+        {jobs.length === 0 ? (
+          <div style={styles.empty}>
+            No scripts are scheduled to run in this workbook.
+          </div>
+        ) : (
+          <>
+            {jobs.map((job) => (
+              <div key={job.id} style={styles.jobRow}>
+                <span>
+                  <strong style={{ fontWeight: 600 }}>{job.ownerName}</strong>
+                  <span style={{ color: "var(--text-tertiary)" }}> &middot; {job.target}</span>
+                  <div style={{ color: "var(--text-secondary)", marginTop: 2 }}>
+                    {job.cadence}
+                    {job.enabled
+                      ? ` · next run ${describeJobTime(job.nextRunMs, now)}`
+                      : " · paused"}
+                    {job.ownerMissing ? " · owner missing" : ""}
+                  </div>
+                </span>
+              </div>
+            ))}
+          </>
+        )}
+        <button
+          type="button"
+          style={{ ...styles.button, marginTop: 10 }}
+          onClick={() => openPanel(CODE_IN_THIS_FILE_PANEL_ID)}
+        >
+          Review scheduled jobs
+        </button>
       </div>
 
       {/* ---------------------------------------------------------------- */}

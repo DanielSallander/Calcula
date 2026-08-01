@@ -48,6 +48,12 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
   const [searchValue, setSearchValue] = useState("");
   const [replaceValue, setReplaceValue] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  // A replace can now be REFUSED outright by the backend writeback guard (a
+  // match sits inside a subscribed .calp region whose answers must not be
+  // rewritten). That arrives as a rejected promise naming the region, so it has
+  // to reach the user — swallowing it into console.error made Replace All look
+  // like a no-op with no explanation.
+  const [errorText, setErrorText] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -192,6 +198,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
       );
 
       if (result) {
+        setErrorText(null);
         // Emit cell change event for refresh
         cellEvents.emit({
           row: result.row,
@@ -206,6 +213,10 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
       }
     } catch (error) {
       console.error("[FindReplaceDialog] Replace failed:", error);
+      // A single replace inside a claimed writeback region now ERRORS rather
+      // than returning null (null was indistinguishable from "no match"), so
+      // this is the only place the user can learn why the cell did not change.
+      setErrorText(String(error instanceof Error ? error.message : error));
     }
   }, [currentIndex, matches, searchValue, replaceValue, options.caseSensitive, performSearch]);
 
@@ -219,12 +230,7 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
         matchEntireCell: options.matchEntireCell,
       });
 
-      console.log(`[FindReplaceDialog] Replaced ${result.replacementCount} occurrences`);
-
-      // TODO(v1.1): Surface in writeback side pane instead of console log
-      if (result.skippedWriteback && result.skippedWriteback > 0) {
-        console.warn(`[FindReplaceDialog] Skipped ${result.skippedWriteback} cells in writeback regions`);
-      }
+      setErrorText(null);
 
       // Emit refresh events
       for (const cell of result.updatedCells) {
@@ -241,6 +247,10 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
       setMatches([], searchValue);
     } catch (error) {
       console.error("[FindReplaceDialog] Replace all failed:", error);
+      // The backend refuses the WHOLE gesture rather than partially replacing,
+      // so nothing changed — say so, and pass its message through verbatim
+      // because it names the writeback region and the way out.
+      setErrorText(String(error instanceof Error ? error.message : error));
     }
   }, [searchValue, replaceValue, options.caseSensitive, options.matchEntireCell, setMatches]);
 
@@ -324,7 +334,11 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
             ref={searchInputRef}
             type="text"
             value={searchValue}
-            onChange={(e) => setSearchValue(e.target.value)}
+            onChange={(e) => {
+              // A new query supersedes the previous refusal.
+              setErrorText(null);
+              setSearchValue(e.target.value);
+            }}
             placeholder="Search..."
           />
           <S.ActionButton
@@ -390,9 +404,14 @@ export function FindReplaceDialog(props: DialogProps): React.ReactElement | null
           </S.CheckboxLabel>
         </S.OptionsRow>
 
-        {/* Status row */}
+        {/* Status row. A refusal outranks the match count: the user just asked
+            for a change that did NOT happen, and must be told why. */}
         <S.StatusRow>
-          {isSearching ? (
+          {errorText ? (
+            <span role="alert" style={{ color: "#A80000" }}>
+              {errorText}
+            </span>
+          ) : isSearching ? (
             <span>Searching...</span>
           ) : matches.length > 0 ? (
             <span>

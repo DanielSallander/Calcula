@@ -44,6 +44,11 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // signing key, but the phrase must not understate what the grant covers.
   "distribution.writeback":
     "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
+  // The only capability whose effects OUTLIVE the session that consented to it:
+  // the job is saved in the workbook and resumes on reopen. The phrase must say
+  // both halves (unattended + persisted) or the inspector understates the reach.
+  schedule:
+    "run itself on a schedule while Calcula is open, without anyone starting it — saved in this workbook, so it resumes after a reload",
 };
 
 function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {

@@ -17,6 +17,8 @@
 // lives outside `extensions/` + `src/` so tsc does not load it as a second set
 // of ambient globals alongside the generated output.
 
+// @generated:template-header-end
+
 // ============================================================================
 // Object types and capabilities (generated rosters)
 // ============================================================================
@@ -1120,7 +1122,7 @@ declare interface UnlockedAPI {
   /** Find every matching cell on the active sheet, in reading order. */
   findAll(query: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean }): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
   /** Replace everywhere on the active sheet (one undo step). */
-  replaceAll(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean }): Promise<{ replacementCount: number; skippedWriteback: number }>;
+  replaceAll(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean }): Promise<{ replacementCount: number }>;
 
   // -- Workbook objects: enumerate --
   // Identity and position only — never an object's contents.
@@ -1498,6 +1500,9 @@ declare interface SlicerContext extends BaseObjectContext {
      *            selectedTextColor, borderColor, borderRadius, opacity.
      */
     setProperty(name: string, value: string): void;
+    /** Discard this slicer's cached item painting and repaint it. Call it after
+     *  changing state your `itemRenderer` reads but Calcula cannot see. */
+    invalidate(): void;
   };
   /** Slicer properties (read-only). */
   readonly properties: {
@@ -1769,6 +1774,14 @@ declare interface ShapeContext extends BaseObjectContext {
   /** Called when any cell value changes. Use to re-render when source data updates. */
   onCellChange(handler: (detail: { changes: Array<{ row: number; col: number; newValue: string }> }) => void): () => void;
 
+  /**
+   * Declare custom properties that appear in the shape's Properties pane, so a
+   * user can configure your script without editing it. Sits on the context
+   * itself (NOT under `render`) — declaring a property is a change to the
+   * object's model, not to how it is painted.
+   */
+  declareProperties(props: DeclaredProperty[]): void;
+
   /** Rendering methods. */
   render: {
     /** Replace canvas rendering with an interactive HTML iframe overlay. */
@@ -1779,7 +1792,130 @@ declare interface ShapeContext extends BaseObjectContext {
     onMessage(handler: (detail: { type: string; data: unknown }) => void): () => void;
     /** Provide a custom canvas render function (replaces default shape path rendering). */
     canvasRenderer(renderer: (ctx: CanvasRenderingContext2D, bounds: ShapeRenderBounds) => void): () => void;
-    /** Declare custom properties that appear in the Properties pane. */
-    declareProperties(props: DeclaredProperty[]): void;
+    /** Discard this shape's cached painting and repaint it. Needed when your
+     *  renderer reads state Calcula cannot observe. */
+    invalidate(): void;
   };
 }
+
+// ============================================================================
+// Range Context (cell-behavior bindings / granular bricks)
+// ============================================================================
+
+/** The commit a range `onBeforeCommit` handler is asked to rule on. */
+declare interface RangeCommitContext {
+  row: number;
+  col: number;
+  sheetIndex: number;
+  /** What the cell holds now. */
+  oldValue?: string;
+  /** What the user just typed. */
+  newValue: string;
+}
+
+/**
+ * Context for a RANGE binding — a script attached to a block of cells rather
+ * than to a floating object (granular bricks). This is the surface behind a
+ * custom cell type: the binding sees clicks and edits on its own cells, and
+ * every write it makes is clamped to them.
+ */
+declare interface RangeContext extends BaseObjectContext {
+  /** The binding instance ID. */
+  readonly instanceId: string;
+  /** Called when a cell in the bound range is clicked. */
+  onClick(handler: (detail: { row: number; col: number }) => void): () => void;
+  /** Called when a cell in the bound range is double-clicked. */
+  onDoubleClick(handler: (detail: { row: number; col: number }) => void): () => void;
+  /** Called after a cell in the bound range changes. */
+  onChange(handler: (detail: { changes: Array<{ row: number; col: number; newValue: string }> }) => void): () => void;
+  /**
+   * Called BEFORE a cell in the bound range commits — and it can stop or
+   * rewrite the edit. Return nothing to accept it, `false` / `"cancel"` /
+   * `{ cancel: true, reason }` to reject it, or `{ value }` to substitute a
+   * different value.
+   *
+   * Calcula awaits your verdict under a hard deadline; a late answer is ignored
+   * and the edit proceeds, so a hung handler can never make cells uneditable.
+   *
+   * ```js
+   * range.onBeforeCommit(({ newValue }) => {
+   *   if (Number(newValue) < 0) return { cancel: true, reason: "Must be positive" };
+   * });
+   * ```
+   */
+  onBeforeCommit(
+    handler: (detail: RangeCommitContext) =>
+      | void
+      | false
+      | "cancel"
+      | { cancel: true; reason?: string }
+      | { value: string }
+      | Promise<void | false | "cancel" | { cancel: true; reason?: string } | { value: string }>,
+  ): () => void;
+  /** The bound range's A1 address ("Sheet1!A1:B10"). Sync, seeded at mount. */
+  getAddress(): string;
+  /** The bound range's values as display strings. Sync, seeded at mount. */
+  getValues(): string[][];
+  /** Write a 2D array into the bound range (clamped to it; one undo step). */
+  setValues(values: string[][]): Promise<void>;
+  /**
+   * Apply a registered CELL TYPE to the bound range — the declarative half of
+   * granular bricks (a rating widget, a status pill, a progress bar). `typeId`
+   * names a cell type some extension registered; `params` configures it.
+   */
+  setCellType(typeId: string, params?: Record<string, unknown>): Promise<void>;
+  /** Remove the cell type from the bound range, restoring plain cells. */
+  clearCellType(): Promise<void>;
+}
+
+// ============================================================================
+// Chart Mark Context (custom chart marks)
+// ============================================================================
+
+/** The plot rectangle and scales handed to a custom mark renderer. */
+declare interface ChartMarkRenderContext {
+  /** The offscreen canvas context to paint into. */
+  ctx: CanvasRenderingContext2D;
+  width: number;
+  height: number;
+  /** The resolved data rows for the mark's series. */
+  data: ReadonlyArray<Record<string, unknown>>;
+  /** The chart's ChartSpec, as resolved. */
+  spec: Record<string, unknown>;
+}
+
+/**
+ * Context for a CUSTOM CHART MARK — a script that paints a chart's plot area
+ * itself when the built-in marks (bar, line, area, ...) cannot express what you
+ * need.
+ *
+ * It is paint-only, and needs NO capability: your renderer runs in the worker
+ * against an OffscreenCanvas, and Calcula blits the bitmap into the chart's
+ * clipped plot rectangle. The mark never touches the real canvas or the DOM,
+ * so a slow or broken renderer costs you a frame, never the app.
+ */
+declare interface ChartMarkContext extends BaseObjectContext {
+  /** The chart instance this mark paints into. */
+  readonly instanceId: string;
+  render: {
+    /**
+     * Paint the plot area. Called on every frame the chart needs.
+     *
+     * ```js
+     * chartMark.render.markRenderer(({ ctx, width, height, data }) => {
+     *   ctx.fillStyle = "#4FC1FF";
+     *   data.forEach((row, i) => ctx.fillRect(i * 10, height - row.value, 8, row.value));
+     * });
+     * ```
+     */
+    markRenderer(renderer: (context: ChartMarkRenderContext) => void): () => void;
+    /** Request a repaint (your renderer reads state Calcula cannot observe). */
+    invalidate(): void;
+  };
+}
+
+// ============================================================================
+// The objectType -> context map (generated)
+// ============================================================================
+
+// @generated:context-type-map

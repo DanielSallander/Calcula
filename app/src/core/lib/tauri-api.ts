@@ -179,6 +179,11 @@ function shouldPrefetchCube(input: string): boolean {
 // The events are deliberately STRUCTURAL, not textual: Core does not know what
 // a "macro" is or which script runtime the recorder will target. It reports
 // what happened; the recorder's codegen decides how to say it.
+//
+// ONE HOOK, TWO FILES: most bridge calls live below, but the sort family
+// (sortRange / sortRangeByColumn / removeDuplicates) invokes Tauri from
+// app/src/api/backend.ts. It reports through the same exported recordGridEvent,
+// so a recording stays complete no matter which file made the call.
 // ============================================================================
 
 /** A cell write observed at the bridge, surfaced to the macro recorder. */
@@ -193,6 +198,25 @@ export interface RecordedCellWrite {
    * the same number, so the generator re-localizes such values.
    */
   invariant?: boolean;
+}
+
+/**
+ * One sort criterion as the bridge received it.
+ *
+ * Structurally identical to the facade's `SortField` (app/src/api/backend.ts)
+ * and to the object script's `ScriptSortField`, but declared here because Core
+ * may not import the facade. `key` is an offset FROM THE RANGE START, not an
+ * absolute column — the same convention the backend and the script API use, so
+ * the recorder can replay it without re-basing.
+ */
+export interface RecordedSortField {
+  key: number;
+  ascending?: boolean;
+  sortOn?: "value" | "cellColor" | "fontColor" | "icon";
+  color?: string;
+  dataOption?: "normal" | "textAsNumber";
+  subField?: string;
+  customOrder?: string;
 }
 
 /**
@@ -259,6 +283,28 @@ export type RecordedGridEvent =
       caseSensitive: boolean;
       matchEntireCell: boolean;
     }
+  | {
+      kind: "sort";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      /** At least one criterion; `key` is relative to `startRow`/`startCol`. */
+      fields: RecordedSortField[];
+      matchCase: boolean;
+      hasHeaders: boolean;
+      orientation: "rows" | "columns";
+    }
+  | {
+      kind: "removeDuplicates";
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      /** ABSOLUTE column indices that form the duplicate key. */
+      keyColumns: number[];
+      hasHeaders: boolean;
+    }
   | { kind: "activateSheet"; index: number }
   | { kind: "addSheet"; index: number; name: string }
   | { kind: "deleteSheet"; index: number }
@@ -282,7 +328,17 @@ export function isGridRecorderActive(): boolean {
   return gridRecorderHook !== null;
 }
 
-function recordGridEvent(event: RecordedGridEvent): void {
+/**
+ * Report one observed mutation to the installed recorder hook (a no-op when
+ * nobody is recording, and never able to fail the operation it observes).
+ *
+ * Exported because not every bridge call lives in this file: the sort family
+ * (`sortRange`, `sortRangeByColumn`, `removeDuplicates`) invokes Tauri from the
+ * facade's own command wrappers in `app/src/api/backend.ts`. Those calls have to
+ * reach the same single hook, or a recorded macro would silently omit the sort —
+ * the worst failure mode for a record-and-replay tool.
+ */
+export function recordGridEvent(event: RecordedGridEvent): void {
   if (!gridRecorderHook) return;
   try {
     gridRecorderHook(event);
@@ -1441,8 +1497,6 @@ export interface FindResult {
 export interface ReplaceResult {
   updatedCells: CellData[];
   replacementCount: number;
-  /** Number of cells skipped because they are in writeback regions. */
-  skippedWriteback?: number;
 }
 
 export interface FindOptions {

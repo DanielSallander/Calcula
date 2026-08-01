@@ -1340,7 +1340,7 @@ impl Default for ScriptProvenance {
 /// the script is denied a capability it correctly declared. The origin argument
 /// of a `// @capability net.fetch <origin>` pragma is a runtime grant hint, not
 /// part of the ceiling, so only the cap id set is collected here.
-pub const KNOWN_CAPABILITY_IDS: [&str; 10] = [
+pub const KNOWN_CAPABILITY_IDS: [&str; 11] = [
     "net.fetch",
     "bi.query",
     "bi.sql",
@@ -1351,6 +1351,7 @@ pub const KNOWN_CAPABILITY_IDS: [&str; 10] = [
     "bi.connector",
     "ui.dialog",
     "distribution.writeback",
+    "schedule",
 ];
 
 /// Parse a script source for `// @capability <id> [origin]` line-comment
@@ -1439,4 +1440,90 @@ pub struct SavedPivotLayout {
     pub source_bi_measures: Vec<String>,
     pub created_at: f64,
     pub updated_at: f64,
+}
+
+#[cfg(test)]
+mod capability_pragma_tests {
+    use super::*;
+
+    /// The TS source of truth, embedded at COMPILE time. Reading the real file
+    /// (rather than re-typing the list) is the whole point: this test fails when
+    /// capabilityIds.ts changes and this crate does not, which is exactly the
+    /// drift that shipped `schedule` as a silently-stripped pragma.
+    const CAPABILITY_IDS_TS: &str =
+        include_str!("../../../app/src/api/scriptHost/capabilityIds.ts");
+
+    /// Extract the string literals of the `ALL_CAPABILITY_IDS = [...]` array.
+    fn ts_capability_ids() -> Vec<String> {
+        let start = CAPABILITY_IDS_TS
+            .find("ALL_CAPABILITY_IDS")
+            .expect("ALL_CAPABILITY_IDS not found in capabilityIds.ts");
+        let open = CAPABILITY_IDS_TS[start..]
+            .find('[')
+            .expect("no [ after ALL_CAPABILITY_IDS")
+            + start;
+        let close = CAPABILITY_IDS_TS[open..]
+            .find(']')
+            .expect("unterminated ALL_CAPABILITY_IDS array")
+            + open;
+        CAPABILITY_IDS_TS[open + 1..close]
+            .split(',')
+            .filter_map(|tok| {
+                let t = tok.trim().trim_matches(|c| c == '"' || c == '\'');
+                if t.is_empty() { None } else { Some(t.to_string()) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn known_capability_ids_mirror_the_typescript_source_of_truth() {
+        let ts = ts_capability_ids();
+        let rs: Vec<String> = KNOWN_CAPABILITY_IDS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            rs, ts,
+            "KNOWN_CAPABILITY_IDS has drifted from ALL_CAPABILITY_IDS in \
+             app/src/api/scriptHost/capabilityIds.ts. An id present in TS but \
+             missing here is SILENTLY STRIPPED from a local script's declared \
+             ceiling at save and at .calp publish, so the script is denied a \
+             capability it correctly declared. Add the id to KNOWN_CAPABILITY_IDS \
+             (and bump its array length) rather than deleting this assertion."
+        );
+    }
+
+    #[test]
+    fn every_known_capability_id_parses_out_of_a_pragma() {
+        // Guards the parser itself, not just the list: each id must survive a
+        // real `// @capability <id>` line.
+        for id in KNOWN_CAPABILITY_IDS {
+            let source = format!("// @capability {id}\nfunction setup(context) {{}}\n");
+            assert_eq!(
+                parse_declared_capabilities(&source),
+                vec![id.to_string()],
+                "`// @capability {id}` did not survive parse_declared_capabilities"
+            );
+        }
+    }
+
+    #[test]
+    fn schedule_pragma_survives_the_ceiling_derivation() {
+        // Regression pin for the Wave D omission specifically: `schedule` was
+        // absent from KNOWN_CAPABILITY_IDS while fully wired everywhere else,
+        // so a script declaring it got an empty ceiling and the broker denied
+        // every cap.schedule* call with no diagnostic pointing here.
+        let source = "// @capability schedule\n// @capability bi.query\n";
+        assert_eq!(
+            parse_declared_capabilities(source),
+            vec!["schedule".to_string(), "bi.query".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_ids_are_ignored_and_duplicates_collapse() {
+        let source = "// @capability not.a.real.cap\n// @capability storage\n\
+                      // @capability storage\n// @capabilityx storage\n";
+        assert_eq!(
+            parse_declared_capabilities(source),
+            vec!["storage".to_string()]
+        );
+    }
 }

@@ -138,6 +138,14 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // key possession, and rate-limits per bucket. A direct call would hand a
     // non-trusted extension every respondent's submitted answers.
     "script_writeback",
+    // The persistent scheduler. Reachable by scripts ONLY through the broker's
+    // consent-gated cap.schedule* methods; Rust re-checks the `schedule` grant
+    // at every firing and requires the owning script to be mounted. The reason
+    // it must be listed here is the OTHER half of its op surface: cancel /
+    // setEnabled / complete are trusted-UI ops that are NOT script-gated, so a
+    // direct call would let a non-trusted extension silently disable or delete
+    // ANOTHER script's persisted jobs.
+    "script_scheduler",
     "bi_script_source",
     "bi_model_function_catalog",
     "bi_model_function_docs",

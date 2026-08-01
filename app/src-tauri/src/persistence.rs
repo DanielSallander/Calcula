@@ -1599,9 +1599,159 @@ fn assemble_workbook_for_save(
         };
     }
 
+    // Serialize the scheduled-job registry (the `schedule` capability's
+    // persisted half). This runs LAST among the script-related sections because
+    // it reads back the object scripts and module scripts already placed on
+    // `workbook` above — the schedule is bound to the code this very save is
+    // writing, not to whatever happens to be in memory.
+    persist_scheduled_jobs(&mut workbook);
+
     // Sheet-level metadata was already enriched by build_workbook_for_save.
     drop(sheet_ids_save);
     Ok(workbook)
+}
+
+// ============================================================================
+// SCHEDULED JOBS (the `schedule` capability's .cala round-trip)
+// ============================================================================
+
+/// SHA-256 of every script this workbook CARRIES, keyed by script id.
+///
+/// One function, used by both the save and the load side on purpose: the set of
+/// scripts a job may be bound to is then identical in both directions by
+/// construction, so the save path can never write a binding the load path is
+/// obliged to reject.
+///
+/// Only executable script surfaces are included. Notebooks are deliberately
+/// absent: they have no `context.expose` surface, cannot be the target of a
+/// scheduled call, and including them would let a job name something that can
+/// never legitimately answer it.
+fn workbook_script_hashes(workbook: &Workbook) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for s in &workbook.object_scripts {
+        out.insert(s.id.clone(), calp::integrity::sha256_hex(s.source.as_bytes()));
+    }
+    for s in &workbook.scripts {
+        out.insert(s.id.clone(), calp::integrity::sha256_hex(s.source.as_bytes()));
+    }
+    out
+}
+
+/// Write the scheduled-job registry into the workbook's user-files section.
+///
+/// The key is REMOVED when there is nothing to persist rather than merely left
+/// alone. `user_files` is also the user-visible virtual filesystem, so a file
+/// literally named `scheduled_jobs.json` could otherwise be planted through
+/// `create_virtual_file` and survive into the archive as a schedule nobody
+/// registered. Unconditionally owning the key means the section always reflects
+/// the live registry and nothing else. (Even a planted file could only ever name
+/// an already-consented script's already-exposed method — the load path proves
+/// that — but "the save path owns this key" is a cheaper invariant to hold than
+/// "every possible planted value is harmless".)
+fn persist_scheduled_jobs(workbook: &mut Workbook) {
+    use calcula_format::features::scheduled_jobs::{ScheduledJobsFile, SCHEDULED_JOBS_FILE};
+
+    let hashes = workbook_script_hashes(workbook);
+    let jobs = crate::scripting::scheduler::export_jobs_for_workbook(&hashes);
+    if jobs.is_empty() {
+        workbook.user_files.remove(SCHEDULED_JOBS_FILE);
+        return;
+    }
+    match ScheduledJobsFile::new(jobs).to_json_bytes() {
+        Ok(bytes) => {
+            workbook
+                .user_files
+                .insert(SCHEDULED_JOBS_FILE.to_string(), bytes);
+        }
+        Err(e) => {
+            // Never write a half-formed schedule: an unreadable section would be
+            // dropped on the next load anyway, and a truncated one is worse.
+            crate::log_warn!("SECURITY", "scheduled jobs could not be serialized: {}", e);
+            workbook.user_files.remove(SCHEDULED_JOBS_FILE);
+        }
+    }
+}
+
+/// Restore the scheduled-job registry from a freshly loaded workbook.
+///
+/// Called from `open_file` AFTER the workbook's scripts, object scripts and
+/// audit log have been restored, because all three are inputs: the scripts
+/// decide which jobs are still valid, and the audit log is where every refusal
+/// is recorded (running earlier would have the restored log overwrite them).
+///
+/// This never grants, mounts or starts anything — see the threat model at the
+/// top of scripting/scheduler.rs. An absent section clears the registry, so the
+/// previous workbook's schedule cannot leak into this document.
+///
+/// Takes the audit log directly rather than `State<AppState>` so the whole
+/// restore — including every refusal path — is exercisable in a unit test
+/// without a Tauri app handle.
+fn restore_scheduled_jobs(
+    audit_log: &Mutex<calp::audit::AuditLog>,
+    workbook: &mut Workbook,
+) {
+    use calcula_format::features::scheduled_jobs::{ScheduledJobsFile, SCHEDULED_JOBS_FILE};
+
+    let hashes = workbook_script_hashes(workbook);
+    let defs = match workbook.user_files.remove(SCHEDULED_JOBS_FILE) {
+        Some(bytes) => match ScheduledJobsFile::from_json_bytes(&bytes) {
+            Ok(file) => file.jobs,
+            Err(e) => {
+                // A malformed section disarms the whole schedule rather than
+                // being partially decoded — see ScheduledJobsFile::from_json_bytes.
+                crate::log_warn!(
+                    "SECURITY",
+                    "scheduled_jobs.json could not be parsed; no jobs restored: {}",
+                    e
+                );
+                crate::net_commands::record_capability_call(
+                    audit_log,
+                    crate::scripting::scheduler::SCHEDULE_CAPABILITY,
+                    "",
+                    false,
+                    Some("restore scheduled jobs"),
+                    Some("scheduled_jobs.json is unreadable; every job was discarded"),
+                );
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+
+    let outcome = crate::scripting::scheduler::import_jobs_for_workbook(defs, &hashes);
+    for dropped in &outcome.dropped {
+        crate::log_warn!(
+            "SECURITY",
+            "scheduled job discarded on load: script={} handler={} reason={}",
+            dropped.script_id,
+            dropped.handler,
+            dropped.reason
+        );
+        crate::net_commands::record_capability_call(
+            audit_log,
+            crate::scripting::scheduler::SCHEDULE_CAPABILITY,
+            &dropped.script_id,
+            false,
+            Some(&format!("restore scheduled job for {}", dropped.handler)),
+            Some(&dropped.reason),
+        );
+    }
+    if outcome.restored > 0 {
+        // The restore itself is audited too. A workbook that arrives already
+        // knowing what it wants to run on a timer is exactly the thing the
+        // transparency trail exists to make visible.
+        crate::net_commands::record_capability_call(
+            audit_log,
+            crate::scripting::scheduler::SCHEDULE_CAPABILITY,
+            "",
+            true,
+            Some(&format!(
+                "restored {} scheduled job(s) from the workbook (each still requires its script to be mounted, consented and granted before it can run)",
+                outcome.restored
+            )),
+            None,
+        );
+    }
 }
 
 #[tauri::command]
@@ -2349,6 +2499,11 @@ pub fn open_file(
         }
     }
 
+    // Restore the scheduled-job registry. Deliberately placed AFTER the audit
+    // log restore above: the drops this records must land in the log the user
+    // will actually read, not in one that is about to be replaced.
+    restore_scheduled_jobs(&state.audit_log, &mut workbook);
+
     // Restore writeback layer (drafts) from user_files (if present)
     {
         if let Some(json_bytes) = workbook.user_files.remove("writeback_drafts.json") {
@@ -2755,6 +2910,12 @@ pub fn new_file(
     // Clear script/notebook state
     script_state.workbook_scripts.lock().unwrap().clear();
     script_state.workbook_notebooks.lock().unwrap().clear();
+
+    // Drop the scheduled-job registry with the scripts that own it. Without
+    // this the previous workbook's schedule would survive into the blank
+    // document and be SAVED into it — the same leak family as the object-script
+    // leak fixed just below.
+    crate::scripting::scheduler::reset_jobs();
 
     // Clear object scripts — otherwise the previous workbook's scripts
     // (including distributed ones) leak into the new workbook and get saved
@@ -3513,6 +3674,14 @@ pub fn xlsx_save_loss_report(
         state.named_styles.lock().map_err(|e| e.to_string())?.values().any(|ns| !ns.built_in),
         "Custom named styles",
     );
+    // xlsx has nowhere to keep a schedule, so "Save As .xlsx" silently disarms
+    // every job. The user consented to automation that "resumes next time you
+    // open it"; a format that cannot honour that must say so BEFORE the save,
+    // not leave the promise quietly broken.
+    check(
+        crate::scripting::scheduler::has_scheduled_jobs(),
+        "Scheduled jobs (they stop running: xlsx cannot carry a schedule)",
+    );
 
     Ok(lost)
 }
@@ -3678,4 +3847,267 @@ pub fn set_extension_data_undoable(
         }
     }
     Ok(())
+}
+
+// ============================================================================
+// TESTS — scheduled jobs through the REAL .cala round trip
+// ============================================================================
+//
+// These drive `persist_scheduled_jobs` -> calcula_format::save_calcula ->
+// load_calcula -> `restore_scheduled_jobs`, i.e. the exact functions save_file
+// and open_file call, with a real ZIP on disk in between. Asserting on a
+// hand-rolled in-memory hand-off would have proved nothing about the feature's
+// headline promise ("it is still there next time you open the file").
+
+#[cfg(test)]
+mod scheduled_job_persistence_tests {
+    use super::*;
+    use crate::scripting::scheduler::{export_jobs_for_workbook, reset_jobs, MIN_INTERVAL_SECS};
+    use calcula_format::features::scheduled_jobs::{
+        ScheduledJobDef, ScheduledJobsFile, SCHEDULED_JOBS_FEATURE, SCHEDULED_JOBS_FILE,
+        SCHEDULED_JOBS_MIN_FORMAT_VERSION,
+    };
+
+    const SCRIPT_SOURCE: &str = "export function nightly() { refresh(); }";
+
+    /// The job registry is a process-global singleton; serialize the tests that
+    /// touch it so they cannot interleave.
+    fn global_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn audit() -> Mutex<calp::audit::AuditLog> {
+        Mutex::new(calp::audit::AuditLog::new())
+    }
+
+    /// A minimal workbook carrying ONE object script, which is what a job may
+    /// legitimately be bound to.
+    fn workbook_with_script(source: &str) -> Workbook {
+        let mut wb = Workbook::new();
+        wb.object_scripts.push(persistence::SavedObjectScript {
+            id: "obj-1".to_string(),
+            name: "Nightly".to_string(),
+            object_type: persistence::ScriptableObjectType::Shape,
+            instance_id: Some("i1".to_string()),
+            source: source.to_string(),
+            access_level: persistence::ScriptAccessLevel::Restricted,
+            description: None,
+            provenance: persistence::ScriptProvenance::Local,
+            package_name: None,
+            package_version: None,
+            declared_capabilities: vec!["schedule".to_string()],
+        });
+        wb
+    }
+
+    fn a_job(id: &str, handler: &str) -> ScheduledJobDef {
+        ScheduledJobDef {
+            id: id.to_string(),
+            script_id: "obj-1".to_string(),
+            script_hash: calp::integrity::sha256_hex(SCRIPT_SOURCE.as_bytes()),
+            surface: "object-script".to_string(),
+            object_type: "shape".to_string(),
+            instance_id: Some("i1".to_string()),
+            handler: handler.to_string(),
+            cadence: "dailyAt".to_string(),
+            interval_secs: MIN_INTERVAL_SECS,
+            minute_of_day: 390,
+            next_run_ms: 1_700_000_000_000,
+            enabled: true,
+            label: Some("Nightly refresh".to_string()),
+            last_run_ms: 0,
+            last_ok: false,
+            last_error: None,
+            run_count: 3,
+        }
+    }
+
+    /// Put one job for `obj-1` into the live registry.
+    fn register_live_job() {
+        reset_jobs();
+        let mut seed: HashMap<String, String> = HashMap::new();
+        seed.insert(
+            "obj-1".to_string(),
+            calp::integrity::sha256_hex(SCRIPT_SOURCE.as_bytes()),
+        );
+        let outcome = crate::scripting::scheduler::import_jobs_for_workbook(
+            vec![a_job("sched-1", "nightly")],
+            &seed,
+        );
+        assert_eq!(outcome.restored, 1);
+    }
+
+    /// The manifest as it was actually WRITTEN into the archive, so the stamp
+    /// assertions test the bytes on disk rather than the reader's reconstruction.
+    fn manifest_of(path: &std::path::Path) -> calcula_format::Manifest {
+        let bytes = std::fs::read(path).unwrap();
+        calcula_format::read_calcula_manifest(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_schedule_survives_save_and_reload_through_the_real_cala_path() {
+        let _g = global_guard();
+        register_live_job();
+
+        let mut wb = workbook_with_script(SCRIPT_SOURCE);
+        persist_scheduled_jobs(&mut wb);
+        assert!(wb.user_files.contains_key(SCHEDULED_JOBS_FILE));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduled.cala");
+        calcula_format::save_calcula(&wb, &path).unwrap();
+
+        // The workbook is closed: nothing is left in memory.
+        reset_jobs();
+        assert!(export_jobs_for_workbook(&workbook_script_hashes(&wb)).is_empty());
+
+        let mut loaded = calcula_format::load_calcula(&path).unwrap();
+        let log = audit();
+        restore_scheduled_jobs(&log, &mut loaded);
+
+        let jobs = export_jobs_for_workbook(&workbook_script_hashes(&loaded));
+        assert_eq!(jobs.len(), 1, "the schedule must survive the reload");
+        assert_eq!(jobs[0].handler, "nightly");
+        assert_eq!(jobs[0].cadence, "dailyAt");
+        assert_eq!(jobs[0].minute_of_day, 390);
+        assert_eq!(jobs[0].label.as_deref(), Some("Nightly refresh"));
+        assert_eq!(jobs[0].run_count, 3, "the run history comes back with it");
+        assert_eq!(
+            jobs[0].script_hash,
+            calp::integrity::sha256_hex(SCRIPT_SOURCE.as_bytes())
+        );
+
+        // The section is consumed on restore, exactly like the other
+        // user_files-backed artifacts, so it never surfaces in the virtual
+        // filesystem the user browses.
+        assert!(!loaded.user_files.contains_key(SCHEDULED_JOBS_FILE));
+        reset_jobs();
+    }
+
+    #[test]
+    fn saving_a_schedule_stamps_the_format_version_and_declares_the_feature() {
+        let _g = global_guard();
+        register_live_job();
+
+        let mut wb = workbook_with_script(SCRIPT_SOURCE);
+        persist_scheduled_jobs(&mut wb);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamped.cala");
+        calcula_format::save_calcula(&wb, &path).unwrap();
+
+        let manifest = manifest_of(&path);
+        assert_eq!(
+            manifest.format_version, SCHEDULED_JOBS_MIN_FORMAT_VERSION,
+            "a workbook that runs code on a timer must stamp its minimum reader version"
+        );
+        assert!(manifest.features.iter().any(|f| f == SCHEDULED_JOBS_FEATURE));
+
+        // ...and a workbook WITHOUT a schedule is not dragged up the chain.
+        reset_jobs();
+        let mut plain = workbook_with_script(SCRIPT_SOURCE);
+        persist_scheduled_jobs(&mut plain);
+        let plain_path = dir.path().join("plain.cala");
+        calcula_format::save_calcula(&plain, &plain_path).unwrap();
+        assert_eq!(
+            manifest_of(&plain_path).format_version,
+            calcula_format::CALA_BASE_FORMAT_VERSION,
+            "a workbook without a schedule is not dragged up the chain"
+        );
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_restored_job_whose_script_was_deleted_is_dropped_and_audited() {
+        let _g = global_guard();
+        register_live_job();
+
+        let mut wb = workbook_with_script(SCRIPT_SOURCE);
+        persist_scheduled_jobs(&mut wb);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orphan.cala");
+        calcula_format::save_calcula(&wb, &path).unwrap();
+        reset_jobs();
+
+        let mut loaded = calcula_format::load_calcula(&path).unwrap();
+        // The script was deleted between save and load.
+        loaded.object_scripts.clear();
+
+        let log = audit();
+        restore_scheduled_jobs(&log, &mut loaded);
+
+        assert!(
+            export_jobs_for_workbook(&workbook_script_hashes(&loaded)).is_empty(),
+            "a job whose owning script is gone must not be restored"
+        );
+        assert!(
+            !log.lock().unwrap().entries.is_empty(),
+            "the refusal must be visible in the audit trail"
+        );
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_restored_job_whose_script_was_edited_is_dropped() {
+        let _g = global_guard();
+        register_live_job();
+
+        let mut wb = workbook_with_script(SCRIPT_SOURCE);
+        persist_scheduled_jobs(&mut wb);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edited.cala");
+        calcula_format::save_calcula(&wb, &path).unwrap();
+        reset_jobs();
+
+        let mut loaded = calcula_format::load_calcula(&path).unwrap();
+        // Same script id, different body — consent was for the old one.
+        loaded.object_scripts[0].source = "export function nightly() { exfiltrate(); }".to_string();
+
+        let log = audit();
+        restore_scheduled_jobs(&log, &mut loaded);
+        assert!(
+            export_jobs_for_workbook(&workbook_script_hashes(&loaded)).is_empty(),
+            "a job must not survive its script being rewritten"
+        );
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_workbook_with_no_section_clears_the_previous_workbooks_schedule() {
+        let _g = global_guard();
+        register_live_job();
+
+        // Opening a document that carries no schedule must empty the registry,
+        // or the previous workbook's jobs would be saved into this one.
+        let mut plain = workbook_with_script(SCRIPT_SOURCE);
+        let log = audit();
+        restore_scheduled_jobs(&log, &mut plain);
+        assert!(export_jobs_for_workbook(&workbook_script_hashes(&plain)).is_empty());
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_planted_scheduled_jobs_file_cannot_smuggle_a_schedule_into_a_save() {
+        let _g = global_guard();
+        reset_jobs();
+
+        // A file literally named scheduled_jobs.json placed in the workbook's
+        // virtual filesystem must not become a schedule: the save path OWNS
+        // that key and rewrites it from the live registry (here: empty).
+        let mut wb = workbook_with_script(SCRIPT_SOURCE);
+        let planted = ScheduledJobsFile::new(vec![a_job("sched-99", "nightly")]);
+        wb.user_files.insert(
+            SCHEDULED_JOBS_FILE.to_string(),
+            planted.to_json_bytes().unwrap(),
+        );
+
+        persist_scheduled_jobs(&mut wb);
+        assert!(
+            !wb.user_files.contains_key(SCHEDULED_JOBS_FILE),
+            "the save path must rewrite (here: remove) the section, never inherit it"
+        );
+        reset_jobs();
+    }
 }

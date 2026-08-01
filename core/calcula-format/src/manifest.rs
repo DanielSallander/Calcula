@@ -4,11 +4,47 @@
 use identity::SheetId;
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Format version chain
+// ---------------------------------------------------------------------------
+//
+// The `.cala` archive carries ONE `format_version` in its manifest, and the
+// rule mirrors the BI model's stamp chain (`stamp_feature_format_version` in
+// bi/commands.rs): the writer stamps the HIGHEST minimum any feature actually
+// present in this document requires, raising it and never lowering it, and the
+// reader refuses anything above what it understands.
+//
+// Why a feature ever gets a link in this chain: not because it is new, but
+// because an older reader would MISHANDLE it. Simply ignoring an unknown
+// section is usually fine — the section is dropped on the next save, and the
+// user loses cosmetic state. That calculus changes for persisted automation:
+// silently dropping `scheduled_jobs.json` disarms schedules the user still
+// believes are running, with no error anywhere. So the scheduler takes a link
+// (see `features::scheduled_jobs::SCHEDULED_JOBS_MIN_FORMAT_VERSION`) and an
+// older build fails the open loudly instead.
+
+/// The floor every `.cala` carries: the original archive layout.
+pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
+
+/// The highest `format_version` THIS build knows how to read. A file stamped
+/// above this is refused rather than partially understood.
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
+
+/// Raise (never lower) a manifest's `format_version` to the minimum a present
+/// feature requires. Idempotent, and safe to call once per feature.
+pub fn stamp_feature_format_version(manifest: &mut Manifest, minimum: u32) {
+    if minimum > manifest.format_version {
+        manifest.format_version = minimum;
+    }
+}
+
 /// Root manifest for a .cala file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
-    /// Format version (currently 1).
+    /// Format version: `CALA_BASE_FORMAT_VERSION`, raised by
+    /// `stamp_feature_format_version` to the highest minimum any feature
+    /// present in this document requires.
     pub format_version: u32,
     /// Application identifier.
     pub application: String,
@@ -72,7 +108,7 @@ impl Manifest {
             .collect();
 
         Manifest {
-            format_version: 1,
+            format_version: CALA_BASE_FORMAT_VERSION,
             application: "Calcula".to_string(),
             created: None,
             modified: None,
@@ -101,7 +137,7 @@ impl Manifest {
             .collect();
 
         Manifest {
-            format_version: 1,
+            format_version: CALA_BASE_FORMAT_VERSION,
             application: "Calcula".to_string(),
             created: None,
             modified: None,

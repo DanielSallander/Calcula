@@ -28,8 +28,10 @@
 //! ungranted, unmounted or too-frequent job fire, because "due" re-derives all
 //! of that from state Rust owns.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use calcula_format::features::scheduled_jobs::ScheduledJobDef;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -450,56 +452,243 @@ fn complete_job(
 // ---------------------------------------------------------------------------
 // Workbook persistence (the .cala round-trip)
 // ---------------------------------------------------------------------------
+//
+// THE THREAT MODEL, WRITTEN DOWN, BECAUSE A PERSISTED JOB IS "CODE THAT RUNS
+// WHEN A WORKBOOK IS OPENED":
+//
+// 1. WHY THE WORKBOOK IS THE RIGHT HOME AT ALL. A job addresses
+//    (script_id, object_type, instance_id, handler) — four workbook-scoped
+//    identities. In a user-profile store those names would be meaningless for
+//    every other document, and worse, ambiguous ACROSS documents: two workbooks
+//    with an object script called "refresh" would collide into one schedule.
+//    The consent string the user actually agreed to also says it out loud —
+//    "saved in this workbook, so it resumes next time you open it" — so the
+//    workbook is both the correct engineering home and the promised one.
+//
+//    The obvious objection to a workbook home is "then a shared workbook
+//    carries jobs to other people". It does — as a PROPOSAL, never as an
+//    authorization, which is exactly the status the workbook already gives the
+//    script source sitting next to it. See gate (3).
+//
+// 2. RESTORING GRANTS NOTHING. `import_jobs_for_workbook` writes into the job
+//    list and touches nothing else. It never calls CapabilityStore::grant, and
+//    it cannot: the store is in-memory, starts empty every launch, and is
+//    populated only by the main-window consent flow. So the state a restored
+//    job needs in order to fire literally does not exist yet at load time.
+//
+// 3. FOUR INDEPENDENT GATES STAND BETWEEN "RESTORED" AND "FIRED", and three of
+//    them are Rust-authoritative:
+//      a. Script Security "disabled" -> `due` returns [] regardless of what is
+//         stored (the global off switch outranks any stored consent);
+//      b. the owning script must be MOUNTED, which for an unconsented workbook
+//         never happens — mounting IS the consent decision;
+//      c. the live `schedule` grant is re-checked per firing against the
+//         CapabilityStore, so an unconsented (or revoked) script is skipped and
+//         audited;
+//      d. the job must have survived load-time reconciliation below.
+//    None of these is stored in the file, so no amount of editing the file can
+//    turn them off.
+//
+// 4. LOAD-TIME RECONCILIATION binds a job to the exact code that was consented
+//    to. A job is dropped unless its owning script is carried by THIS workbook
+//    AND that script's source still hashes to what it hashed to when the job
+//    was saved. A deleted script, a renamed id, an edited body, or a swapped
+//    implementation therefore all disarm the job instead of silently redirecting
+//    the timer at new code. The same rule runs on the way OUT (`export`), so we
+//    never write a job we would refuse to read back.
+//
+// 5. .calp CANNOT USE THIS AS AN AUTO-RUN VECTOR. The section lives in the
+//    workbook's `user_files` map, and `user_files` is excluded from .calp by
+//    publish policy — the `calp` crate never reads `Workbook::user_files` at
+//    all, so there is no code path that could copy a schedule into a package.
+//    A distributed script therefore reaches a subscriber with exactly the reach
+//    it has today: it must be consented at the subscriber's own prompt, must
+//    declare `schedule` within its capability ceiling, and only then can it
+//    register a job — locally, in the subscriber's own workbook, under the
+//    subscriber's own grant. Persisted schedules add nothing to what
+//    distributed-script consent already permits. Storing the section in
+//    `user_files` rather than as a typed `Workbook` field is what makes that a
+//    STRUCTURAL property instead of a rule someone has to keep re-checking.
 
-/// Every job, for the workbook writer. Runtime-only flags are exported as-is;
-/// `import_jobs` sanitizes them on the way back in.
-pub fn export_jobs() -> Vec<ScheduledJob> {
-    scheduler().lock().unwrap().jobs.clone()
+/// Why a persisted job was refused at load. Surfaced in the audit trail so a
+/// disarmed schedule is visible rather than mysterious.
+#[derive(Debug, Clone)]
+pub struct DroppedJob {
+    pub script_id: String,
+    pub handler: String,
+    pub reason: String,
+}
+
+/// Result of restoring a workbook's schedule.
+#[derive(Debug, Default)]
+pub struct JobImportOutcome {
+    pub restored: usize,
+    pub dropped: Vec<DroppedJob>,
+}
+
+/// Convert a live job to its persisted form, binding it to `script_hash`.
+fn job_to_def(job: &ScheduledJob, script_hash: &str) -> ScheduledJobDef {
+    ScheduledJobDef {
+        id: job.id.clone(),
+        script_id: job.script_id.clone(),
+        script_hash: script_hash.to_string(),
+        surface: job.surface.clone(),
+        object_type: job.object_type.clone(),
+        instance_id: job.instance_id.clone(),
+        handler: job.handler.clone(),
+        cadence: job.cadence.clone(),
+        interval_secs: job.interval_secs,
+        minute_of_day: job.minute_of_day,
+        next_run_ms: job.next_run_ms,
+        enabled: job.enabled,
+        label: job.label.clone(),
+        last_run_ms: job.last_run_ms,
+        last_ok: job.last_ok,
+        last_error: job.last_error.clone(),
+        run_count: job.run_count,
+    }
+}
+
+/// Every job that this workbook is entitled to carry, for the .cala writer.
+///
+/// `script_hashes` maps script id -> SHA-256 of the source the workbook is
+/// about to persist. A job whose owning script is NOT in that map is not
+/// written: the schedule of a script the workbook does not carry (a 3rd-party
+/// extension worker, say) is session-scoped by construction, because there is
+/// no honest way for this document to vouch for code it does not contain — and
+/// the same id on another machine could name entirely different code. Writing
+/// it anyway would only produce a row the load path is obliged to drop.
+pub fn export_jobs_for_workbook(script_hashes: &HashMap<String, String>) -> Vec<ScheduledJobDef> {
+    let inner = scheduler().lock().unwrap();
+    inner
+        .jobs
+        .iter()
+        .filter_map(|job| script_hashes.get(&job.script_id).map(|h| job_to_def(job, h)))
+        .collect()
 }
 
 /// Replace the job list from a loaded workbook.
 ///
-/// Sanitizes on the way in, because the source is a FILE and a file is
-/// untrusted input: intervals below the floor are raised to it, an unknown
-/// cadence is dropped, `running` is forced false (no run survives the process
-/// that owned it), and the list is truncated to MAX_JOBS. A due-in-the-past
-/// job keeps its stale timestamp on purpose — it fires once shortly after the
-/// workbook opens (subject to mount + grant + consent), which is the "the
-/// nightly job did not run while you were away" behaviour users expect.
-pub fn import_jobs(jobs: Vec<ScheduledJob>) {
+/// This is the ONLY way jobs enter the registry from disk, and it is a pure
+/// state replacement: it grants nothing, mounts nothing, and starts nothing.
+///
+/// Every row is treated as untrusted input, because a `.cala` is a file and a
+/// file can be hand-edited or hostile:
+///   * the owning script must be carried by THIS workbook, and its source must
+///     still hash to what it hashed to at save time (gate 4 above) — otherwise
+///     the job is dropped and the refusal audited;
+///   * an unknown cadence, an empty script/handler, or a duplicate id is
+///     dropped outright;
+///   * an interval below `MIN_INTERVAL_SECS` is raised back to the floor and an
+///     out-of-range `minute_of_day` is clamped, so the file cannot buy a faster
+///     schedule than the live API would have allowed;
+///   * `running` never comes back true — a run cannot outlive its process, and a
+///     stuck "running" would wedge the job behind its own overlap guard;
+///   * the list is capped at `MAX_JOBS`.
+///
+/// A due-in-the-past job keeps its stale timestamp on purpose: it fires ONCE
+/// shortly after the workbook opens — subject to every gate above — which is
+/// the "the nightly job did not run while you were away" behaviour users
+/// expect, and is why `compute_next_run` measures from now rather than
+/// replaying missed slots.
+pub fn import_jobs_for_workbook(
+    defs: Vec<ScheduledJobDef>,
+    script_hashes: &HashMap<String, String>,
+) -> JobImportOutcome {
+    let mut outcome = JobImportOutcome::default();
     let mut inner = scheduler().lock().unwrap();
+    // Wholesale replacement: the previous workbook's schedule must never leak
+    // into this one (it would otherwise be saved into a document that never
+    // agreed to it).
     inner.jobs.clear();
+    inner.seq = 0;
+
     let mut max_seq = 0u64;
-    for mut job in jobs.into_iter().take(MAX_JOBS) {
-        if job.cadence != CADENCE_EVERY && job.cadence != CADENCE_DAILY_AT {
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for def in defs {
+        // One refusal ladder, evaluated before anything is moved out of `def`,
+        // so every drop reason reaches the audit trail with the job's identity
+        // still intact.
+        let refusal: Option<&str> = if def.cadence != CADENCE_EVERY && def.cadence != CADENCE_DAILY_AT
+        {
+            Some("unknown cadence")
+        } else if def.script_id.is_empty() || def.handler.is_empty() || def.id.is_empty() {
+            Some("job is missing its script, handler or id")
+        } else {
+            match script_hashes.get(&def.script_id) {
+                None => Some("the owning script is no longer in this workbook"),
+                // Consent was given to a specific body of code. New code needs
+                // a new decision, so the schedule disarms rather than silently
+                // pointing the timer at something the user never approved.
+                Some(current) if *current != def.script_hash => {
+                    Some("the owning script's source changed since the schedule was saved")
+                }
+                Some(_) if !seen_ids.insert(def.id.clone()) => Some("duplicate job id"),
+                Some(_) if inner.jobs.len() >= MAX_JOBS => {
+                    Some("workbook exceeds the scheduled-job limit")
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some(reason) = refusal {
+            outcome.dropped.push(DroppedJob {
+                script_id: def.script_id.clone(),
+                handler: def.handler.clone(),
+                reason: reason.to_string(),
+            });
             continue;
         }
-        if job.script_id.is_empty() || job.handler.is_empty() {
-            continue;
-        }
-        if job.cadence == CADENCE_EVERY {
-            job.interval_secs = job.interval_secs.max(MIN_INTERVAL_SECS);
-        }
-        if job.minute_of_day >= 1440 {
-            job.minute_of_day = 0;
-        }
-        job.running = false;
-        job.running_since_ms = 0;
-        job.denial_logged = false;
-        if let Some(n) = job.id.strip_prefix("sched-").and_then(|s| s.parse::<u64>().ok()) {
+
+        if let Some(n) = def.id.strip_prefix("sched-").and_then(|s| s.parse::<u64>().ok()) {
             max_seq = max_seq.max(n);
         }
-        inner.jobs.push(job);
+        inner.jobs.push(ScheduledJob {
+            id: def.id,
+            script_id: def.script_id,
+            surface: def.surface,
+            object_type: def.object_type,
+            instance_id: def.instance_id,
+            handler: def.handler,
+            interval_secs: if def.cadence == CADENCE_EVERY {
+                def.interval_secs.max(MIN_INTERVAL_SECS)
+            } else {
+                def.interval_secs
+            },
+            minute_of_day: if def.minute_of_day >= 1440 { 0 } else { def.minute_of_day },
+            cadence: def.cadence,
+            next_run_ms: def.next_run_ms,
+            enabled: def.enabled,
+            label: def.label,
+            running: false,
+            running_since_ms: 0,
+            last_run_ms: def.last_run_ms,
+            last_ok: def.last_ok,
+            last_error: def.last_error,
+            run_count: def.run_count,
+            denial_logged: false,
+        });
+        outcome.restored += 1;
     }
+
     // Continue the id sequence past anything restored, so a new job in this
     // session can never collide with a persisted one.
-    inner.seq = inner.seq.max(max_seq);
+    inner.seq = max_seq;
+    outcome
+}
+
+/// Whether this workbook currently schedules anything. Used by the "Save As
+/// xlsx" fidelity report: xlsx has nowhere to keep a schedule, so saving there
+/// disarms every job and the user has to be told before it happens.
+pub fn has_scheduled_jobs() -> bool {
+    !scheduler().lock().unwrap().jobs.is_empty()
 }
 
 /// Drop every job (workbook close / new workbook).
 pub fn reset_jobs() {
     let mut inner = scheduler().lock().unwrap();
     inner.jobs.clear();
+    inner.seq = 0;
 }
 
 /// Drop a script's jobs entirely — called when a script is DELETED (not merely
@@ -688,14 +877,41 @@ pub fn script_scheduler(
                 .as_deref()
                 .ok_or_else(|| "jobId is required".to_string())?;
             let enabled = request.enabled.unwrap_or(true);
-            let mut inner = scheduler().lock().unwrap();
-            match inner.jobs.iter_mut().find(|j| j.id == job_id) {
-                Some(job) => {
-                    job.enabled = enabled;
-                    if enabled {
-                        job.denial_logged = false;
-                        job.next_run_ms = compute_next_run(job, now);
+            // Scoped so the registry lock is released before the audit write:
+            // pausing is a user GOVERNANCE action and must be recorded on the
+            // same trail as `cancel`, but never while holding the scheduler.
+            let toggled = {
+                let mut inner = scheduler().lock().unwrap();
+                match inner.jobs.iter_mut().find(|j| j.id == job_id) {
+                    Some(job) => {
+                        job.enabled = enabled;
+                        if enabled {
+                            job.denial_logged = false;
+                            job.next_run_ms = compute_next_run(job, now);
+                        }
+                        Some((job.script_id.clone(), job.handler.clone()))
                     }
+                    None => None,
+                }
+            };
+            match toggled {
+                Some((script_id, handler)) => {
+                    // Symmetric with the `cancel` arm: "one audit trail spans
+                    // all script activity" is false the moment a user action
+                    // that starts or stops automation leaves no entry.
+                    record_capability_call(
+                        &app_state.audit_log,
+                        SCHEDULE_CAPABILITY,
+                        &script_id,
+                        true,
+                        Some(&format!(
+                            "{} job {} ({})",
+                            if enabled { "resumed" } else { "paused" },
+                            job_id,
+                            handler
+                        )),
+                        None,
+                    );
                     Ok(serde_json::json!({ "enabled": enabled }))
                 }
                 None => Err(format!("no such scheduled job: {}", job_id)),
@@ -813,6 +1029,33 @@ mod tests {
     const GRANTED: &dyn Fn(&str) -> bool = &|_: &str| true;
     const REVOKED: &dyn Fn(&str) -> bool = &|_: &str| false;
 
+    /// The job registry is a process-global singleton, so the tests that drive
+    /// it through the REAL persistence entry points have to run one at a time.
+    /// Without this they interleave and the failures look like logic bugs.
+    fn global_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The live job list (the `list` op's view), for assertions.
+    fn live_jobs() -> Vec<ScheduledJob> {
+        scheduler().lock().unwrap().jobs.clone()
+    }
+
+    fn hashes(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, source)| {
+                (
+                    (*id).to_string(),
+                    calp::integrity::sha256_hex(source.as_bytes()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn minimum_interval_is_enforced_on_registration() {
         let mut i = inner();
@@ -921,6 +1164,34 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_script_removes_exactly_its_own_jobs() {
+        // `remove_script_jobs` is what object_script_commands calls when a
+        // script is DELETED (not merely unmounted). A deleted script's job can
+        // neither fire nor persist, but it would otherwise linger in the
+        // transparency panel as a live-looking job for code that is gone.
+        let _g = global_guard();
+        reset_jobs();
+        {
+            let mut inner = scheduler().lock().unwrap();
+            add(&mut inner, "doomed", "tick", 30, 0);
+            add(&mut inner, "doomed", "other", 60, 0);
+            add(&mut inner, "survivor", "tick", 30, 0);
+        }
+        assert_eq!(live_jobs().len(), 3);
+
+        remove_script_jobs("doomed");
+
+        let left = live_jobs();
+        assert_eq!(left.len(), 1, "only the surviving script's job may remain");
+        assert_eq!(left[0].script_id, "survivor");
+
+        // Removing an unknown script is a no-op, not a panic or a mass wipe.
+        remove_script_jobs("never-existed");
+        assert_eq!(live_jobs().len(), 1);
+        reset_jobs();
+    }
+
+    #[test]
     fn trusted_ui_cancel_needs_no_owner() {
         let mut i = inner();
         add(&mut i, "s1", "tick", 30, 0);
@@ -933,8 +1204,10 @@ mod tests {
 
     #[test]
     fn persistence_round_trip_preserves_the_schedule() {
+        let _g = global_guard();
         reset_jobs();
         let now = 1_700_000_000_000;
+        let sources = hashes(&[("s1", "export function nightly() {}"), ("s2", "feed()")]);
         {
             let mut i = scheduler().lock().unwrap();
             upsert_job(
@@ -952,14 +1225,16 @@ mod tests {
             i.jobs[1].running_since_ms = now;
         }
 
-        let saved = export_jobs();
+        let saved = export_jobs_for_workbook(&sources);
         assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].script_hash, sources["s1"], "the job is bound to its script's source");
         reset_jobs();
-        assert!(export_jobs().is_empty(), "reset clears the store");
+        assert!(live_jobs().is_empty(), "reset clears the store");
 
-        import_jobs(saved.clone());
-        let restored = export_jobs();
-        assert_eq!(restored.len(), 2, "both jobs survive the round-trip");
+        let outcome = import_jobs_for_workbook(saved.clone(), &sources);
+        assert_eq!(outcome.restored, 2, "both jobs survive the round-trip");
+        assert!(outcome.dropped.is_empty());
+        let restored = live_jobs();
 
         let nightly = restored.iter().find(|j| j.handler == "nightly").unwrap();
         assert_eq!(nightly.cadence, CADENCE_DAILY_AT);
@@ -976,32 +1251,215 @@ mod tests {
 
     #[test]
     fn import_sanitizes_untrusted_file_content() {
+        let _g = global_guard();
         reset_jobs();
-        let mut too_fast = ScheduledJob {
-            id: "sched-9".into(), script_id: "s1".into(), surface: "object-script".into(),
+        let sources = hashes(&[("s1", "src")]);
+        let mut too_fast = ScheduledJobDef {
+            id: "sched-9".into(), script_id: "s1".into(),
+            script_hash: sources["s1"].clone(), surface: "object-script".into(),
             object_type: "shape".into(), instance_id: None, handler: "tick".into(),
             cadence: CADENCE_EVERY.into(), interval_secs: 1, minute_of_day: 0,
-            next_run_ms: 0, enabled: true, label: None, running: true, running_since_ms: 5,
-            last_run_ms: 0, last_ok: false, last_error: None, run_count: 0, denial_logged: false,
+            next_run_ms: 0, enabled: true, label: None,
+            last_run_ms: 0, last_ok: false, last_error: None, run_count: 0,
         };
-        let bogus_cadence = ScheduledJob { cadence: "wheneverIFeelLikeIt".into(), ..too_fast.clone() };
-        let no_handler = ScheduledJob { handler: String::new(), ..too_fast.clone() };
+        let bogus_cadence = ScheduledJobDef {
+            id: "sched-11".into(),
+            cadence: "wheneverIFeelLikeIt".into(),
+            ..too_fast.clone()
+        };
+        let no_handler = ScheduledJobDef {
+            id: "sched-12".into(),
+            handler: String::new(),
+            ..too_fast.clone()
+        };
         too_fast.minute_of_day = 99_999;
 
-        import_jobs(vec![too_fast, bogus_cadence, no_handler]);
-        let jobs = export_jobs();
-        assert_eq!(jobs.len(), 1, "unknown cadence and handler-less rows are dropped");
+        let outcome = import_jobs_for_workbook(
+            vec![too_fast, bogus_cadence, no_handler],
+            &sources,
+        );
+        let jobs = live_jobs();
+        assert_eq!(outcome.restored, 1, "unknown cadence and handler-less rows are dropped");
+        assert_eq!(outcome.dropped.len(), 2);
+        assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].interval_secs, MIN_INTERVAL_SECS, "the floor is re-applied on load");
         assert_eq!(jobs[0].minute_of_day, 0, "an out-of-range minute is clamped");
-        assert!(!jobs[0].running);
+        assert!(!jobs[0].running, "a file can never assert an in-flight run");
 
         // The id sequence continues past the restored ids, so a new job in this
         // session cannot collide with a persisted one.
         {
             let mut i = scheduler().lock().unwrap();
-            let fresh = add(&mut i, "s3", "other", 30, 0);
+            let fresh = add(&mut i, "s1", "other", 30, 0);
             assert_eq!(fresh.id, "sched-10");
         }
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_job_whose_script_is_gone_is_dropped_on_load() {
+        let _g = global_guard();
+        reset_jobs();
+        let sources = hashes(&[("s1", "src")]);
+        {
+            let mut i = scheduler().lock().unwrap();
+            add(&mut i, "s1", "tick", 30, 0);
+        }
+        let saved = export_jobs_for_workbook(&sources);
+        assert_eq!(saved.len(), 1);
+        reset_jobs();
+
+        // The workbook now carries a DIFFERENT set of scripts: s1 was deleted.
+        let outcome = import_jobs_for_workbook(saved, &hashes(&[("s2", "other")]));
+        assert_eq!(outcome.restored, 0, "an orphaned job must not be restored");
+        assert!(live_jobs().is_empty());
+        assert_eq!(outcome.dropped.len(), 1);
+        assert!(
+            outcome.dropped[0].reason.contains("no longer in this workbook"),
+            "got: {}",
+            outcome.dropped[0].reason
+        );
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_job_whose_script_source_changed_is_dropped_on_load() {
+        let _g = global_guard();
+        reset_jobs();
+        let before = hashes(&[("s1", "export function tick() { refresh(); }")]);
+        {
+            let mut i = scheduler().lock().unwrap();
+            add(&mut i, "s1", "tick", 30, 0);
+        }
+        let saved = export_jobs_for_workbook(&before);
+        reset_jobs();
+
+        // Same script id, different body. Consent was for the OLD body, so the
+        // schedule disarms instead of pointing the timer at unreviewed code.
+        let after = hashes(&[("s1", "export function tick() { exfiltrate(); }")]);
+        let outcome = import_jobs_for_workbook(saved.clone(), &after);
+        assert_eq!(outcome.restored, 0);
+        assert!(live_jobs().is_empty());
+        assert!(
+            outcome.dropped[0].reason.contains("source changed"),
+            "got: {}",
+            outcome.dropped[0].reason
+        );
+
+        // ...and the identical body still restores, so the hash is a binding,
+        // not a one-shot fuse.
+        assert_eq!(import_jobs_for_workbook(saved, &before).restored, 1);
+        reset_jobs();
+    }
+
+    #[test]
+    fn a_job_whose_script_is_not_workbook_owned_is_never_persisted() {
+        let _g = global_guard();
+        reset_jobs();
+        {
+            let mut i = scheduler().lock().unwrap();
+            add(&mut i, "workbook-script", "tick", 30, 0);
+            add(&mut i, "extension-worker-7", "poll", 30, 0);
+        }
+        // Only the workbook-carried script has a source this document can vouch
+        // for; the extension worker's schedule stays session-scoped rather than
+        // being written as a row the load path would have to drop.
+        let saved = export_jobs_for_workbook(&hashes(&[("workbook-script", "src")]));
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].script_id, "workbook-script");
+        reset_jobs();
+    }
+
+    #[test]
+    fn restoring_a_job_never_makes_it_fire_without_a_live_grant() {
+        let _g = global_guard();
+        reset_jobs();
+        let sources = hashes(&[("s1", "src")]);
+        {
+            let mut i = scheduler().lock().unwrap();
+            add(&mut i, "s1", "tick", 30, 0);
+        }
+        let saved = export_jobs_for_workbook(&sources);
+        reset_jobs();
+        assert_eq!(import_jobs_for_workbook(saved, &sources).restored, 1);
+
+        // Sweep against the LIVE registry, releasing the lock each time so a
+        // failed assertion cannot poison the global mutex for the other tests.
+        let sweep = |mounted: &[String], granted: &dyn Fn(&str) -> bool, now: i64| {
+            let mut i = scheduler().lock().unwrap();
+            sweep_due(&mut i, mounted, granted, now)
+        };
+        let mounted = vec!["s1".to_string()];
+
+        // The restored job is long past due. It still may not run, because
+        // import grants nothing: on a fresh launch the CapabilityStore is empty,
+        // which is what REVOKED models here.
+        let s1 = sweep(&mounted, REVOKED, 9_999_999_999);
+        assert!(s1.due.is_empty(), "a restored job must not fire ungranted");
+        assert_eq!(s1.denied.len(), 1, "and the refusal is audited");
+
+        // Not mounted + granted is equally inert — an unconsented workbook
+        // never mounts its scripts, so the schedule stays dormant. (The denial
+        // above pushed the slot forward, so step past it.)
+        let s2 = sweep(&[], GRANTED, 9_999_999_999 + 60_000);
+        assert!(s2.due.is_empty(), "a restored job must not fire unmounted");
+
+        // Only once BOTH hold does it run.
+        let s3 = sweep(&mounted, GRANTED, 9_999_999_999 + 60_000);
+        assert_eq!(s3.due.len(), 1, "mounted + granted is what finally lets it fire");
+        reset_jobs();
+    }
+
+    #[test]
+    fn opening_a_workbook_replaces_the_previous_workbooks_schedule() {
+        let _g = global_guard();
+        reset_jobs();
+        let a = hashes(&[("a1", "src-a")]);
+        {
+            let mut i = scheduler().lock().unwrap();
+            add(&mut i, "a1", "tick", 30, 0);
+        }
+        // Opening workbook B (which carries no schedule) must not leave A's
+        // jobs behind, or B would be saved with a schedule it never agreed to.
+        let outcome = import_jobs_for_workbook(Vec::new(), &hashes(&[("b1", "src-b")]));
+        assert_eq!(outcome.restored, 0);
+        assert!(live_jobs().is_empty(), "the previous workbook's jobs must not leak");
+        assert!(
+            export_jobs_for_workbook(&a).is_empty(),
+            "and therefore cannot be written into the new document"
+        );
+        reset_jobs();
+    }
+
+    #[test]
+    fn the_import_limit_matches_the_registration_limit() {
+        let _g = global_guard();
+        reset_jobs();
+        let sources = hashes(&[("s1", "src")]);
+        let defs: Vec<ScheduledJobDef> = (0..MAX_JOBS + 5)
+            .map(|n| ScheduledJobDef {
+                id: format!("sched-{}", n + 1),
+                script_id: "s1".into(),
+                script_hash: sources["s1"].clone(),
+                surface: "object-script".into(),
+                object_type: "shape".into(),
+                instance_id: None,
+                handler: format!("h{}", n),
+                cadence: CADENCE_EVERY.into(),
+                interval_secs: 60,
+                minute_of_day: 0,
+                next_run_ms: 0,
+                enabled: true,
+                label: None,
+                last_run_ms: 0,
+                last_ok: false,
+                last_error: None,
+                run_count: 0,
+            })
+            .collect();
+        let outcome = import_jobs_for_workbook(defs, &sources);
+        assert_eq!(outcome.restored, MAX_JOBS, "a file cannot exceed the live cap");
+        assert_eq!(outcome.dropped.len(), 5);
         reset_jobs();
     }
 

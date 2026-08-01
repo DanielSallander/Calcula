@@ -1077,10 +1077,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         recordScriptWrite(definition.id, active, cell.row, cell.col);
       }
       await afterCellDataChange(result.updatedCells);
-      return {
-        replacementCount: result.replacementCount,
-        skippedWriteback: result.skippedWriteback ?? 0,
-      };
+      // No skip count: the backend guard now REFUSES a replace that touches a
+      // claimed writeback region outright (it rejects, naming the region),
+      // rather than silently completing a partial edit.
+      return { replacementCount: result.replacementCount };
     }
 
     // ---- unlocked: workbook objects (B3) ----

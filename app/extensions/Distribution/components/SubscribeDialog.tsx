@@ -50,6 +50,11 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "ui.dialog": "interrupt you with a dialog and read your answer",
   "distribution.writeback":
     "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
+  // Subscribing is the moment somebody else's code enters this workbook, so
+  // this phrase carries the part that survives the session: the schedule is
+  // saved in YOUR workbook and starts itself again every time you open it.
+  schedule:
+    "run itself on a schedule while Calcula is open, without you starting it — saved in your workbook, so it resumes after a reload",
 };
 
 function capabilityPhrase(id: string): string {

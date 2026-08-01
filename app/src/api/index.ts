@@ -2062,6 +2062,10 @@ export {
 } from "./scriptHost/pivotLayoutVocabulary";
 export type { PivotArea } from "./scriptHost/pivotLayoutVocabulary";
 export type { MethodPolicy, Tier as ScriptTierName, CapabilityId, MethodClass } from "./scriptHost/allowlist";
+// The capability VOCABULARY itself, so an extension that receives a capability
+// id from an untrusted source (a backend error string, a package manifest, a
+// pragma) can narrow it against the one canonical set instead of casting.
+export { ALL_CAPABILITY_IDS, CAPABILITY_ID_SET, isCapabilityId } from "./scriptHost/capabilityIds";
 export { getAuditTail, getAuditTotal, onAudit, clearAudit } from "./scriptHost/auditRing";
 export type { AuditEntry } from "./scriptHost/auditRing";
 export { listMountedHandles, listExposed, BrokerError } from "./scriptHost/broker";
@@ -2300,8 +2304,32 @@ export {
   getWorkbookCodeUnits,
   summarizeCodeInventory,
   codeUnitReachesBeyondGrid,
+  // "What runs without me asking?" — the scheduled-job half of the inventory,
+  // plus the two controls that make seeing it actionable. Exported from the
+  // barrel (not only the ./codeInventory subpath) because a transparency
+  // surface must never be harder to reach than the thing it makes visible.
+  getWorkbookScheduledJobs,
+  summarizeScheduledJobs,
+  describeJobCadence,
+  describeJobTarget,
+  describeJobTime,
+  cancelScheduledJob,
+  setScheduledJobEnabled,
 } from "./codeInventory";
-export type { CodeUnit, CodeInventorySummary } from "./codeInventory";
+export type {
+  CodeUnit,
+  CodeInventorySummary,
+  ScheduledJobEntry,
+  ScheduledJobSummary,
+  ScheduledJob,
+} from "./codeInventory";
+
+// The scheduler's CLOCK lifecycle. The renderer owns the tick (Rust cannot call
+// into a worker realm), so whoever owns the script lifecycle has to start the
+// pump after a workbook's scripts are loaded and stop it when the workbook goes
+// away. Without this a schedule restored from the .cala sits correctly in Rust
+// and never ticks — persisted but dead.
+export { syncPump as syncSchedulerPump, stopSchedulerPump } from "./scriptHost/scheduler";
 
 // ---- Design Mode (app-global flag) + object script-presence badges (T4) ----
 export {

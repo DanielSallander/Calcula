@@ -19,7 +19,7 @@ const TARGETS: Array<{ id: MacroTarget; label: string; hint: string }> = [
     id: "objectScript",
     label: "Object script (recommended)",
     hint:
-      "Async `context.api`. Replays values, formatting, rows/columns, merge, freeze, sheets, find & replace — and can be saved straight onto a button.",
+      "Async `context.api`. Replays values, formatting, rows/columns, merge, freeze, sheets, sort, find & replace — and can be saved straight onto a button.",
   },
   {
     id: "notebook",

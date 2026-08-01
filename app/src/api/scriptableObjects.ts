@@ -580,7 +580,7 @@ export interface UnlockedAPI {
     search: string,
     replacement: string,
     options?: { caseSensitive?: boolean; matchEntireCell?: boolean },
-  ): Promise<{ replacementCount: number; skippedWriteback: number }>;
+  ): Promise<{ replacementCount: number }>;
 
   // ---- Workbook objects: enumerate (B3) ----
   // Identity and position only — never an object's contents.

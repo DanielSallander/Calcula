@@ -22,6 +22,8 @@ import {
   SCRIPT_DIALOG_REQUEST_EVENT,
   parseDeclaredCapabilities,
   applyConsentedCapabilities,
+  syncSchedulerPump,
+  stopSchedulerPump,
   IconScript,
   IconTemplate,
   IconMarketplace,
@@ -154,6 +156,8 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "ui.dialog": "Interrupt you with a dialog box and read what you answer",
   "distribution.writeback":
     "Fill in and send the input cells of a subscribed package — and, for a package this workbook can sign, read and approve everyone else's answers",
+  schedule:
+    "Run itself on a schedule while Calcula is open, saved in this workbook so it resumes after a reload",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */
@@ -296,6 +300,21 @@ async function loadAndMountScripts(): Promise<void> {
   }
 
   emitAppEvent(ScriptableObjectEvents.SCRIPTS_LOADED, { count: scripts.length });
+
+  // Start the scheduler's clock if this workbook carries any job.
+  //
+  // Rust restores the schedule during `open_file` and is the authority on what
+  // may fire, but it cannot call into a worker realm — the renderer has to tick
+  // it. This is the ONLY place that knows "this workbook's scripts are now
+  // loaded", so it is where the pump is started; without it a job restored from
+  // the .cala would sit correctly in the registry and simply never run.
+  //
+  // Deliberately AFTER the early return above: when Script Security refuses the
+  // workbook's scripts, no pump starts at all (Rust's `due` would also return
+  // nothing, so this is belt-and-braces, not the gate). The pump itself is a
+  // no-op when the registry is empty, and each tick re-derives mount + grant, so
+  // starting it before a pending consent prompt is answered runs nothing.
+  await syncSchedulerPump();
 }
 
 async function activate(context: ExtensionContext): Promise<void> {
@@ -519,6 +538,9 @@ async function activate(context: ExtensionContext): Promise<void> {
   // ---- Re-load scripts when a workbook is opened ----
   cleanupFunctions.push(
     onAppEvent(AppEvents.AFTER_OPEN, async () => {
+      // The outgoing workbook's schedule is gone (Rust replaced the registry
+      // during open_file); stop ticking for it until the new one is loaded.
+      stopSchedulerPump();
       resetObjectScriptManager();
       consentedPackages.clear();
       consentQueue.length = 0; // queued prompts belong to the previous workbook
@@ -592,6 +614,8 @@ async function activate(context: ExtensionContext): Promise<void> {
       // Check for any mounted scripts (they'll lose state on close)
       const allScripts = ObjectScriptManager.getAllScripts();
       const mountedCount = allScripts.filter((s) => ObjectScriptManager.isScriptMounted(s.id)).length;
+      // Nothing may tick for a workbook that is going away.
+      stopSchedulerPump();
       if (mountedCount > 0) {
         // Scripts are persisted in the workbook, so close is safe.
         // Unmount all running scripts cleanly before the workbook goes away.
@@ -601,6 +625,9 @@ async function activate(context: ExtensionContext): Promise<void> {
   );
   cleanupFunctions.push(
     onAppEvent(AppEvents.AFTER_NEW, () => {
+      // A blank workbook schedules nothing (Rust's new_file resets the
+      // registry); stop the clock rather than paying for an empty tick.
+      stopSchedulerPump();
       resetObjectScriptManager();
     }),
   );
@@ -880,6 +907,9 @@ async function activate(context: ExtensionContext): Promise<void> {
 // ============================================================================
 
 function deactivate(): void {
+  // Nothing may fire once the surface that mounts (and audits) scripts is gone.
+  stopSchedulerPump();
+
   // Unmount all scripts
   resetObjectScriptManager();
 

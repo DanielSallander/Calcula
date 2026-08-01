@@ -33,9 +33,12 @@ pub mod features;
 pub mod ai;
 
 pub use error::FormatError;
-pub use manifest::{Manifest, SheetEntry};
+pub use manifest::{
+    stamp_feature_format_version, Manifest, SheetEntry, CALA_BASE_FORMAT_VERSION,
+    CALA_MAX_SUPPORTED_FORMAT_VERSION,
+};
 // Re-export so the host can build/parse the ZIP bytes directly when needed.
-pub use zip_io::{read_calcula_bytes, write_calcula_bytes};
+pub use zip_io::{read_calcula_bytes, read_calcula_manifest, write_calcula_bytes};
 
 
 use persistence::Workbook;

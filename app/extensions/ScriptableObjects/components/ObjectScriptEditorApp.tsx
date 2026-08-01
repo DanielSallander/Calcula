@@ -33,6 +33,11 @@ import {
 import type { TemplateSummary } from "../lib/templateManager";
 import { hostValidateScript } from "@api";
 import { getBreakpoints, toggleBreakpoint, instrumentSource } from "../lib/debugger";
+import {
+  configureObjectScriptTypings,
+  setActiveContextType,
+  annotateScaffold,
+} from "../lib/monacoTypings";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 import {
   emitSaveAndApply,
@@ -148,23 +153,12 @@ loader.config({ monaco });
   document.head.appendChild(style);
 })();
 
-// Register type definitions for IntelliSense
-(function registerObjectScriptTypes() {
-  monacoTs.javascriptDefaults.addExtraLib(
-    objectContextsDts,
-    "objectContexts.d.ts",
-  );
-  monacoTs.javascriptDefaults.setDiagnosticsOptions({
-    noSemanticValidation: false,
-    noSyntaxValidation: false,
-  });
-  monacoTs.javascriptDefaults.setCompilerOptions({
-    target: monacoTs.ScriptTarget.ESNext,
-    allowNonTsExtensions: true,
-    allowJs: true,
-    checkJs: true,
-  });
-})();
+// Register the GENERATED type definitions on both language services. The
+// per-script `ObjectScriptContext` alias is published separately, whenever the
+// edited script changes (see the effect in the component below) — without it
+// the interfaces below are unreachable, because a script's context is a
+// parameter of `setup(context)` and nothing binds it.
+configureObjectScriptTypings(monacoTs, objectContextsDts);
 
 // ============================================================================
 // Console entry type
@@ -387,6 +381,13 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
+  // Point `ObjectScriptContext` at THIS script's context interface, so
+  // `@param {ObjectScriptContext} context` resolves to (say) SlicerContext.
+  useEffect(() => {
+    if (!activeScript) return;
+    setActiveContextType(monacoTs, activeScript.objectType, objectContextsDts);
+  }, [activeScript]);
+
   // Switch active script
   const handleSelectScript = useCallback((scriptId: string) => {
     // Auto-save current
@@ -512,7 +513,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       name,
       objectType,
       instanceId: null,
-      source: getScaffoldTemplate(objectType),
+      // The annotation is what makes `context.` complete; a new script starts
+      // with it so an author never has to know the trick.
+      source: annotateScaffold(getScaffoldTemplate(objectType)),
       accessLevel: "restricted",
     };
     await saveObjectScript(script);

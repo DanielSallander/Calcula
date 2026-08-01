@@ -16,6 +16,9 @@ import {
   toIdentifier,
 } from "../lib/actionCodegen";
 import type { RecordedAction, RecordedEvent } from "../lib/types";
+// The REAL broker validator, so "the generated sort call is accepted by the
+// script API" is a fact this suite checks rather than a claim it makes.
+import { vSortRange } from "@api/scriptHost/validators";
 
 // ============================================================================
 // Fixtures
@@ -547,6 +550,223 @@ describe("structural actions (object script)", () => {
     };
     expect(gen([act(event)]).unsupported).toHaveLength(1);
     expect(gen([act(event)], NB).unsupported).toHaveLength(1);
+  });
+});
+
+// ============================================================================
+// Sort / remove duplicates
+// ============================================================================
+//
+// Sort is the action a recorder MUST NOT miss: a macro that replays the writes
+// around a sort but not the sort itself runs cleanly and leaves the workbook in
+// a different order than the user saw. These tests pin both the emitted call
+// and the fact that the broker would accept it.
+
+/** A sort event over A1:C10, ascending on the second column. */
+function sortEvent(
+  overrides: Partial<Extract<RecordedEvent, { kind: "sort" }>> = {},
+): RecordedEvent {
+  return {
+    kind: "sort",
+    startRow: 0,
+    startCol: 0,
+    endRow: 9,
+    endCol: 2,
+    fields: [{ key: 1, ascending: true }],
+    matchCase: false,
+    hasHeaders: true,
+    orientation: "rows",
+    ...overrides,
+  };
+}
+
+/**
+ * Run generated object-script source against a recording `api` double.
+ *
+ * This is the only way to prove the emitted text is a working call and not just
+ * a plausible-looking string: the source is compiled and executed, so a syntax
+ * error or a wrong arity fails the test instead of shipping.
+ */
+async function runGenerated(
+  actions: RecordedAction[],
+): Promise<Array<{ method: string; args: unknown[] }>> {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const record =
+    (method: string) =>
+    async (...args: unknown[]) => {
+      calls.push({ method, args });
+      return 0;
+    };
+  const api = {
+    sortRange: record("sortRange"),
+    setCellValue: record("setCellValue"),
+    updateCellsBatch: record("updateCellsBatch"),
+    setActiveSheet: record("setActiveSheet"),
+  };
+
+  const { source } = generateMacroSource(actions, {
+    target: "objectScript",
+    wrapper: "bare",
+    header: false,
+    undoBatch: false,
+    emitInitialSheetActivate: false,
+    recordedAt: "T",
+    name: "Sort check",
+  });
+
+  const factory = new Function(`${source}\nreturn sortCheck;`) as () => (
+    api: unknown,
+  ) => Promise<void>;
+  await factory()(api);
+  return calls;
+}
+
+describe("sort", () => {
+  it("emits a sortRange call with the recorded rectangle, fields and options", () => {
+    const { source, unsupported } = gen([act(sortEvent())]);
+    expect(unsupported).toEqual([]);
+    expect(source).toContain(
+      "await api.sortRange(0, 0, 9, 2, [{ key: 1, ascending: true }], " +
+        '{ matchCase: false, hasHeaders: true, orientation: "rows" }); // A1:C10',
+    );
+  });
+
+  it("emits every criterion of a multi-field sort, in order", () => {
+    const { source } = gen([
+      act(
+        sortEvent({
+          fields: [
+            { key: 0, ascending: false, sortOn: "value" },
+            { key: 2, ascending: true, dataOption: "textAsNumber" },
+          ],
+        }),
+      ),
+    ]);
+    expect(source).toContain(
+      '[{ key: 0, ascending: false, sortOn: "value" }, ' +
+        '{ key: 2, ascending: true, dataOption: "textAsNumber" }]',
+    );
+  });
+
+  it("emits colour and custom-order criteria the script API understands", () => {
+    const { source } = gen([
+      act(
+        sortEvent({
+          fields: [
+            { key: 1, sortOn: "cellColor", color: "#FF0000" },
+            { key: 0, customOrder: "months" },
+          ],
+        }),
+      ),
+    ]);
+    expect(source).toContain('{ key: 1, sortOn: "cellColor", color: "#FF0000" }');
+    expect(source).toContain('{ key: 0, customOrder: "months" }');
+  });
+
+  it("drops properties the broker validator would reject", () => {
+    // A recorded field can carry more than the script API accepts (an older
+    // recording, a future backend field). The broker rejects an UNKNOWN
+    // property outright, so emitting it would generate a macro that throws.
+    const field = { key: 1, ascending: true, weight: 3 } as unknown as {
+      key: number;
+      ascending: boolean;
+    };
+    const { source } = gen([act(sortEvent({ fields: [field] }))]);
+    expect(source).toContain("[{ key: 1, ascending: true }]");
+    expect(source).not.toContain("weight");
+  });
+
+  it("respects matchCase and column orientation", () => {
+    const { source } = gen([
+      act(sortEvent({ matchCase: true, hasHeaders: false, orientation: "columns" })),
+    ]);
+    expect(source).toContain(
+      '{ matchCase: true, hasHeaders: false, orientation: "columns" }',
+    );
+  });
+
+  it("reports a sort as unavailable on the notebook runtime", () => {
+    const { unsupported, source } = gen([act(sortEvent())], NB);
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain("A1:C10");
+    expect(source).not.toContain("sortRange");
+  });
+
+  it("refuses to emit a sort with no criteria", () => {
+    const { unsupported, source } = gen([act(sortEvent({ fields: [] }))]);
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain("no sort criteria");
+    expect(source).not.toContain("api.sortRange");
+  });
+
+  it("refuses to emit a sort whose key is not a range-relative offset", () => {
+    const { unsupported, source } = gen([
+      act(sortEvent({ fields: [{ key: -1, ascending: true }] })),
+    ]);
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]).toContain("offset from the range start");
+    expect(source).not.toContain("api.sortRange");
+  });
+
+  it("generates source that runs and calls api.sortRange with the right arguments", async () => {
+    const calls = await runGenerated([act(sortEvent())]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("sortRange");
+    expect(calls[0].args).toEqual([
+      0,
+      0,
+      9,
+      2,
+      [{ key: 1, ascending: true }],
+      { matchCase: false, hasHeaders: true, orientation: "rows" },
+    ]);
+  });
+
+  it("generates a sort call the REAL broker validator accepts", async () => {
+    const calls = await runGenerated([
+      act(
+        sortEvent({
+          fields: [
+            { key: 1, ascending: false, sortOn: "fontColor", color: "#00FF00" },
+            { key: 2, dataOption: "textAsNumber", customOrder: "weekdays" },
+          ],
+          matchCase: true,
+          orientation: "columns",
+        }),
+      ),
+    ]);
+    expect(vSortRange(calls[0].args)).toBe(true);
+  });
+});
+
+describe("remove duplicates", () => {
+  const event: RecordedEvent = {
+    kind: "removeDuplicates",
+    startRow: 0,
+    startCol: 0,
+    endRow: 99,
+    endCol: 4,
+    keyColumns: [0, 2],
+    hasHeaders: true,
+  };
+
+  it("is reported on both runtimes rather than silently dropped", () => {
+    for (const opts of [{}, NB]) {
+      const { unsupported, source } = gen([act(event)], opts);
+      expect(unsupported).toHaveLength(1);
+      expect(source).toContain("NOT REPLAYABLE");
+    }
+  });
+
+  it("names the range and the key columns so the user can redo it", () => {
+    const { unsupported } = gen([act(event)]);
+    expect(unsupported[0]).toContain("A1:E100");
+    expect(unsupported[0]).toContain("key columns A, C");
+  });
+
+  it("uses the singular for a single key column", () => {
+    const { unsupported } = gen([act({ ...event, keyColumns: [3] })]);
+    expect(unsupported[0]).toContain("key column D");
   });
 });
 

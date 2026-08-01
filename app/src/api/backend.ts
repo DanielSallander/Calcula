@@ -9,6 +9,11 @@ import { emit, listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { CellData, DimensionData, FormattingResult } from "../core/types";
+// The macro recorder observes the IPC bridge, and the sort family invokes Tauri
+// from HERE rather than from core/lib/tauri-api.ts. Reporting to the same single
+// hook is what keeps a recording complete: an omitted sort produces a macro that
+// runs cleanly and leaves the data in the wrong order.
+import { recordGridEvent } from "../core/lib/tauri-api";
 
 // ============================================================================
 // Types
@@ -621,18 +626,57 @@ export async function sortRange<TResult>(
     orientation?: SortOrientation;
   }
 ): Promise<TResult> {
-  return invoke<TResult>("sort_range", {
+  const matchCase = options?.matchCase ?? false;
+  const hasHeaders = options?.hasHeaders ?? false;
+  const orientation = options?.orientation ?? "rows";
+
+  const result = await invoke<TResult>("sort_range", {
     params: {
       startRow,
       startCol,
       endRow,
       endCol,
       fields,
-      matchCase: options?.matchCase ?? false,
-      hasHeaders: options?.hasHeaders ?? false,
-      orientation: options?.orientation ?? "rows",
+      matchCase,
+      hasHeaders,
+      orientation,
     },
   });
+
+  // Record only a sort that actually happened. `sort_range` reports a refused
+  // sort (protected range, bad criteria) as `success: false` INSTEAD of
+  // rejecting, so recording unconditionally would put a no-op into the macro.
+  if (didSucceed(result)) {
+    recordGridEvent({
+      kind: "sort",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      // Copied, not aliased: the caller owns `fields` and may reuse the array
+      // for the next sort, which would retroactively rewrite the recording.
+      fields: fields.map((f) => ({ ...f })),
+      matchCase,
+      hasHeaders,
+      orientation,
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Whether a backend result object reports failure through a `success` flag.
+ *
+ * The sort commands are generic over their result type (each owning extension
+ * keeps its own), so this is the only way to tell a completed operation from a
+ * refused one without forcing a concrete type on every caller. Anything without
+ * a boolean `success` is treated as having succeeded — the command resolved.
+ */
+function didSucceed(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return true;
+  const flag = (result as { success?: unknown }).success;
+  return typeof flag === "boolean" ? flag : true;
 }
 
 /**
@@ -655,6 +699,8 @@ export async function sortRangeByColumn<TResult>(
   ascending: boolean = true,
   hasHeaders: boolean = false
 ): Promise<TResult> {
+  // Delegates, so the macro recorder sees exactly one `sort` event — recorded
+  // by sortRange below with the relative key it actually sent to the backend.
   return sortRange<TResult>(
     startRow,
     startCol,
@@ -2862,7 +2908,7 @@ export async function removeDuplicates(
   keyColumns: number[],
   hasHeaders: boolean,
 ): Promise<RemoveDuplicatesResult> {
-  return invoke<RemoveDuplicatesResult>("remove_duplicates", {
+  const result = await invoke<RemoveDuplicatesResult>("remove_duplicates", {
     params: {
       startRow,
       startCol,
@@ -2872,6 +2918,20 @@ export async function removeDuplicates(
       hasHeaders,
     },
   });
+
+  if (result.success) {
+    recordGridEvent({
+      kind: "removeDuplicates",
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      keyColumns: [...keyColumns],
+      hasHeaders,
+    });
+  }
+
+  return result;
 }
 
 // ============================================================================

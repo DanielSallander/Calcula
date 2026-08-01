@@ -300,6 +300,13 @@ pub fn delete_object_script(
     if scripts.len() == len_before {
         return Err(format!("Object script '{}' not found", id));
     }
+    drop(scripts);
+    // The script is gone, so its schedule is meaningless. It could not have
+    // fired anyway (a deleted script never mounts) nor survived a save (export
+    // filters on the workbook's script index), but leaving it in the registry
+    // would show the user a live-looking job for code that no longer exists —
+    // the transparency panel must not list a ghost.
+    crate::scripting::scheduler::remove_script_jobs(&id);
     Ok(())
 }
 
@@ -310,8 +317,20 @@ pub fn delete_object_script(
 /// types, so matching by id alone is sufficient. Lock-poison is swallowed: cleanup must
 /// never turn a successful delete into an error.
 pub(crate) fn prune_scripts_for_instance(state: &AppState, instance_id: &str) {
+    let mut removed: Vec<String> = Vec::new();
     if let Ok(mut scripts) = state.object_scripts.lock() {
-        scripts.retain(|s| s.instance_id.as_deref() != Some(instance_id));
+        scripts.retain(|s| {
+            let keep = s.instance_id.as_deref() != Some(instance_id);
+            if !keep {
+                removed.push(s.id.clone());
+            }
+            keep
+        });
+    }
+    // Same reasoning as delete_object_script: a pruned script's schedule must
+    // not outlive it in the registry the transparency panel reads.
+    for id in &removed {
+        crate::scripting::scheduler::remove_script_jobs(id);
     }
 }
 

@@ -1,3 +1,21 @@
+// TYPE-CHECK PROJECT — what `npm run check-types` compiles.
+//
+// Wider than tsconfig.app.json on purpose: the build only has to type-check what
+// ships, but the gate has to type-check everything a change can break. That now
+// includes app/scripts/, home of the object-script typings generator. Its output
+// (extensions/ScriptableObjects/objectContexts.d.ts) is the ONLY extraLib Monaco
+// loads for object scripts, so a break in the generator silently degrades every
+// script author's IntelliSense — exactly the kind of thing a type gate exists to
+// catch, and exactly what it could not see while app/scripts/ went unlisted.
+//
+// The generator's prose TEMPLATE is excluded. It is a .d.ts full of ambient
+// `declare interface` blocks that the generator copies into
+// extensions/ScriptableObjects/objectContexts.d.ts; loading both puts two
+// ambient copies of the same globals into one program. They merge silently while
+// the two agree, and produce a wall of "subsequent property declarations must
+// have the same type" the moment they do not — noise pointing at the wrong file.
+// Drift between template and output is already a hard failure through the
+// generator's own lockstep test (objectContextsTypings.test.ts).
 {
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
@@ -7,13 +25,15 @@
   },
   "include": [
     "src/**/*",
-    "extensions/**/*"
+    "extensions/**/*",
+    "scripts/**/*"
   ],
   "exclude": [
     "**/*.test.ts",
     "**/*.test.tsx",
     "**/__tests__/**/*",
     "**/test/**/*",
+    "scripts/scriptTypings/objectContexts.template.d.ts",
     "node_modules"
   ]
 }

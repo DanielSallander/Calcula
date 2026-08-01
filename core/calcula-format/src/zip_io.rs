@@ -11,7 +11,13 @@ use crate::features::pane_controls::PaneControlDef;
 use crate::features::scripts::ScriptDef;
 use crate::features::notebooks::NotebookDef;
 use crate::features::pivot_layouts::PivotLayoutDef;
-use crate::manifest::Manifest;
+use crate::features::scheduled_jobs::{
+    SCHEDULED_JOBS_FEATURE, SCHEDULED_JOBS_FILE, SCHEDULED_JOBS_MIN_FORMAT_VERSION,
+};
+use crate::manifest::{
+    stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
+    CALA_MAX_SUPPORTED_FORMAT_VERSION,
+};
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
 use crate::sheet_layout::SheetLayout;
 use crate::sheet_styles::{
@@ -87,6 +93,15 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
+    }
+    // Scheduled jobs ride in user_files (see features::scheduled_jobs for why
+    // that home is the .calp firewall), but they get their OWN manifest feature
+    // id and their own link in the format-version chain: "this document runs
+    // code on a timer" must be answerable from the manifest alone, and a reader
+    // that would silently drop the section has to fail the open instead.
+    if workbook.user_files.contains_key(SCHEDULED_JOBS_FILE) {
+        manifest.features.push(SCHEDULED_JOBS_FEATURE.to_string());
+        stamp_feature_format_version(&mut manifest, SCHEDULED_JOBS_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -389,6 +404,24 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     Ok(buf)
 }
 
+/// Read ONLY `manifest.json` out of plain `.cala` ZIP bytes.
+///
+/// Cheap enough to answer questions about a file without materializing the
+/// workbook — including the transparency question this exists for: "does this
+/// document declare the `scheduled_jobs` feature, i.e. does opening it arm code
+/// on a timer?" Does no version gating on purpose; the caller decides whether an
+/// unsupported version is fatal, and a version this build cannot open is exactly
+/// when reading the manifest is most useful.
+pub fn read_calcula_manifest(bytes: &[u8]) -> Result<Manifest, FormatError> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let mut entry = archive
+        .by_name("manifest.json")
+        .map_err(|_| FormatError::MissingEntry("manifest.json".to_string()))?;
+    let mut contents = String::new();
+    entry.read_to_string(&mut contents)?;
+    Ok(serde_json::from_str(&contents)?)
+}
+
 /// Parse a Workbook from `.cala` ZIP bytes (no file I/O). The host reads the
 /// file, decrypts if needed, then calls this on the plain ZIP bytes.
 pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
@@ -404,10 +437,18 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         serde_json::from_str(&contents)?
     };
 
-    if manifest.format_version != 1 {
+    // Read forward within the chain, refuse beyond it. A file stamped above
+    // what this build understands may contain a section we would drop on the
+    // next save (see the manifest's format-version chain notes); failing the
+    // open is the only outcome that cannot silently destroy the user's data.
+    if manifest.format_version < CALA_BASE_FORMAT_VERSION
+        || manifest.format_version > CALA_MAX_SUPPORTED_FORMAT_VERSION
+    {
         return Err(FormatError::InvalidFormat(format!(
-            "Unsupported format version: {}",
-            manifest.format_version
+            "Unsupported format version: {} (this build reads {}..={})",
+            manifest.format_version,
+            CALA_BASE_FORMAT_VERSION,
+            CALA_MAX_SUPPORTED_FORMAT_VERSION
         )));
     }
 
@@ -1842,5 +1883,131 @@ mod tests {
         assert!(!calcula_crypto::is_encrypted(&raw));
         let loaded = crate::load_calcula(&path).unwrap();
         assert_eq!(loaded.sheets.len(), workbook.sheets.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Scheduled jobs: the section, its manifest feature, and its version stamp
+    // -----------------------------------------------------------------------
+
+    /// Read manifest.json straight out of the archive so the test asserts on
+    /// what was actually WRITTEN, not on what the reader chose to reconstruct.
+    fn read_manifest(path: &std::path::Path) -> Manifest {
+        let bytes = std::fs::read(path).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entry = archive.by_name("manifest.json").unwrap();
+        let mut s = String::new();
+        entry.read_to_string(&mut s).unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn a_workbook_without_schedules_stays_at_the_base_format_version() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nojobs.cala");
+        write_calcula(&workbook, &path).unwrap();
+
+        let manifest = read_manifest(&path);
+        assert_eq!(manifest.format_version, CALA_BASE_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == SCHEDULED_JOBS_FEATURE));
+    }
+
+    #[test]
+    fn scheduled_jobs_declare_a_feature_and_stamp_the_format_version() {
+        use crate::features::scheduled_jobs::{ScheduledJobDef, ScheduledJobsFile};
+
+        let mut workbook = make_test_workbook();
+        let jobs = ScheduledJobsFile::new(vec![ScheduledJobDef {
+            id: "sched-1".to_string(),
+            script_id: "obj-1".to_string(),
+            script_hash: "deadbeef".to_string(),
+            surface: "object-script".to_string(),
+            object_type: "shape".to_string(),
+            instance_id: None,
+            handler: "nightly".to_string(),
+            cadence: "dailyAt".to_string(),
+            interval_secs: 0,
+            minute_of_day: 390,
+            next_run_ms: 1_700_000_000_000,
+            enabled: true,
+            label: Some("Nightly refresh".to_string()),
+            last_run_ms: 0,
+            last_ok: false,
+            last_error: None,
+            run_count: 0,
+        }]);
+        workbook.user_files.insert(
+            SCHEDULED_JOBS_FILE.to_string(),
+            jobs.to_json_bytes().unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.cala");
+        write_calcula(&workbook, &path).unwrap();
+
+        // The stamp chain: the section's presence RAISES format_version.
+        let manifest = read_manifest(&path);
+        assert_eq!(manifest.format_version, SCHEDULED_JOBS_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == SCHEDULED_JOBS_FEATURE));
+        assert!(manifest.features.iter().any(|f| f == "files"));
+
+        // ...and the section itself survives the round trip byte-for-byte.
+        let loaded = read_calcula(&path).unwrap();
+        let bytes = loaded
+            .user_files
+            .get(SCHEDULED_JOBS_FILE)
+            .expect("the scheduled-jobs section must round-trip");
+        let back = ScheduledJobsFile::from_json_bytes(bytes).unwrap();
+        assert_eq!(back.jobs.len(), 1);
+        assert_eq!(back.jobs[0].script_hash, "deadbeef");
+        assert_eq!(back.jobs[0].minute_of_day, 390);
+    }
+
+    #[test]
+    fn a_format_version_beyond_this_build_is_refused() {
+        // Forward-compat guard: a newer writer's archive must fail the open
+        // rather than be read partially and re-saved with sections dropped.
+        let workbook = make_test_workbook();
+        let mut bytes = write_calcula_bytes(&workbook).unwrap();
+        {
+            // Rewrite manifest.json with an out-of-range version.
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+            let mut manifest: Manifest = {
+                let mut e = archive.by_name("manifest.json").unwrap();
+                let mut s = String::new();
+                e.read_to_string(&mut s).unwrap();
+                serde_json::from_str(&s).unwrap()
+            };
+            manifest.format_version = CALA_MAX_SUPPORTED_FORMAT_VERSION + 1;
+
+            let mut out = Vec::new();
+            {
+                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+                let options =
+                    FileOptions::<()>::default().compression_method(CompressionMethod::Deflated);
+                for i in 0..archive.len() {
+                    let mut entry = archive.by_index(i).unwrap();
+                    let name = entry.name().to_string();
+                    zip.start_file(name.clone(), options.clone()).unwrap();
+                    if name == "manifest.json" {
+                        zip.write_all(serde_json::to_string_pretty(&manifest).unwrap().as_bytes())
+                            .unwrap();
+                    } else {
+                        let mut content = Vec::new();
+                        entry.read_to_end(&mut content).unwrap();
+                        zip.write_all(&content).unwrap();
+                    }
+                }
+                zip.finish().unwrap();
+            }
+            bytes = out;
+        }
+
+        let err = read_calcula_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported format version"),
+            "got: {}",
+            err
+        );
     }
 }

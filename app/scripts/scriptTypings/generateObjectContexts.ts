@@ -32,6 +32,10 @@ import { ALLOWLIST, type MethodPolicy } from "../../src/api/scriptHost/allowlist
 
 export const OBJECT_TYPE_MARKER = "// @generated:object-type-table";
 export const CAPABILITY_MARKER = "// @generated:capability-table";
+/** Everything above this line in the template is instructions to the AUTHOR and
+ *  never reaches the generated file. */
+export const HEADER_MARKER = "// @generated:template-header-end";
+export const CONTEXT_MAP_MARKER = "// @generated:context-type-map";
 
 export interface GenerateResult {
   /** The finished .d.ts text. Empty when `problems` is non-empty. */
@@ -123,6 +127,39 @@ function objectTypeTable(probe: ProbeResult): string {
     "// Object types the script host can mount, and the context interface each",
     "// one receives (generated from contextShims.ts buildTyped).",
     ...rows,
+  ].join("\n");
+}
+
+/**
+ * The objectType -> context interface map, as a real TYPE.
+ *
+ * This is what finally binds forty interfaces to something an author can reach.
+ * `setup(context)` takes its context as a PARAMETER, and TypeScript will not
+ * contextually type a parameter from an ambient interface — so before this,
+ * every declaration in this file was unreachable: typing `context.` in the
+ * editor produced nothing at all. The editor now emits, per open script,
+ *
+ *   declare type ObjectScriptContext = ObjectScriptContextByType["slicer"];
+ *
+ * and a one-line JSDoc annotation on `setup` resolves the whole surface.
+ */
+function contextTypeMap(probe: ProbeResult): string {
+  const rows = probe.objectTypes.map(([objectType, iface]) => `  ${objectType}: ${iface};`);
+  return [
+    "/**",
+    " * Every objectType a script can be attached to, mapped to the context",
+    " * interface `setup(context)` receives for it (generated from",
+    " * contextShims.ts).",
+    " *",
+    " * The editor narrows this to the script you have open and publishes the",
+    " * result as `ObjectScriptContext`. Annotate your setup function with",
+    ' * `@param {ObjectScriptContext} context` in a JSDoc block and the whole',
+    " * surface below becomes typed: completions, parameter hints, and the",
+    " * generated broker-policy text on hover.",
+    " */",
+    "declare interface ObjectScriptContextByType {",
+    ...rows,
+    "}",
   ].join("\n");
 }
 
@@ -245,11 +282,18 @@ export function generateObjectContexts(templateSource: string, templateName = "o
   if (!body.includes(CAPABILITY_MARKER)) {
     problems.push(`template is missing the ${CAPABILITY_MARKER} marker`);
   }
+  if (!body.includes(CONTEXT_MAP_MARKER)) {
+    problems.push(`template is missing the ${CONTEXT_MAP_MARKER} marker`);
+  }
   if (problems.length) {
     return { output: "", problems, unverified, stats: { interfaces: probe.interfaces.size, members: memberCount, documented } };
   }
   body = body.replace(OBJECT_TYPE_MARKER, objectTypeTable(probe));
   body = body.replace(CAPABILITY_MARKER, capabilityTable());
+  body = body.replace(CONTEXT_MAP_MARKER, contextTypeMap(probe));
+
+  const headerAt = body.indexOf(HEADER_MARKER);
+  if (headerAt >= 0) body = body.slice(headerAt + HEADER_MARKER.length).replace(/^\s*\n/, "");
 
   const output = `${BANNER}\n${body.replace(/\s*$/, "")}\n`;
   return {

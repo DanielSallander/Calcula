@@ -29,6 +29,7 @@ const CAP_ICON: Record<CapabilityId, string> = {
   "bi.connector": "->M",
   "ui.dialog": "[?]",
   "distribution.writeback": "->P",
+  schedule: "->S",
 };
 
 const overlay: React.CSSProperties = {
