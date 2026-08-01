@@ -2,7 +2,7 @@
 // PURPOSE: Formula library commands - function catalog, templates, and expression evaluation
 // FORMAT: seq|level|category|message
 
-use crate::api_types::{FunctionInfo, FunctionListResult};
+use crate::api_types::{FunctionInfo, FunctionListResult, TypedEvalResult};
 use crate::logging::{log_enter, log_exit};
 use crate::AppState;
 use crate::persistence::UserFilesState;
@@ -213,6 +213,144 @@ fn eval_result_to_display(result: &EvalResult) -> String {
 }
 
 // ============================================================================
+// Typed grid-backed evaluation (the WorksheetFunction bridge)
+// ============================================================================
+// `evaluate_expressions` above answers with DISPLAY STRINGS, which is right for
+// the file-template system (it splices text) and useless for a caller that
+// needs to know whether the answer was the number 5 or the text "5". This is the
+// typed counterpart: the same grid, the same evaluator, the engine's own typing.
+//
+// WHAT IT DELIBERATELY DOES NOT WIRE UP, and why:
+//   - the UDF hook. A user-defined function's implementation is JavaScript
+//     running in ANOTHER script's worker realm. Resolving one here would let a
+//     script re-enter a second script's realm synchronously, from inside a
+//     lock-held evaluation, through a door nobody consented to. An unknown name
+//     therefore answers #NAME? — the same answer `evaluate_expressions` gives.
+//   - pivot data / control values. `evaluate_expressions` does not supply them
+//     either; GETPIVOTDATA and GET.CONTROLVALUE fall back to their no-source
+//     behaviour. Parity with the existing command beats a second, subtly
+//     different evaluation context.
+// Both absences are documented on the script-facing surface, because a bridge
+// that quietly answers differently from the same formula in a cell is worse
+// than one that says where it stops.
+
+/// Map an `EvalResult` onto the `TypedEvalResult` triple. `display` is produced
+/// by the SAME formatter the grid uses (default style + workbook locale), so an
+/// evaluated 1234.5 reads exactly as it would in a cell.
+fn eval_result_to_typed(
+    result: &EvalResult,
+    styles: &engine::StyleRegistry,
+    locale: &engine::LocaleSettings,
+) -> TypedEvalResult {
+    let kind = match result {
+        EvalResult::Number(_) => "number",
+        EvalResult::Text(_) => "text",
+        EvalResult::Boolean(_) => "boolean",
+        EvalResult::Error(_) => "error",
+        // An array/list/dict/lambda has no scalar type; it reports as "text"
+        // with its rendered form, exactly as a List/Dict CELL does in
+        // `typed_cell_value` (commands/data.rs).
+        _ => "text",
+    };
+    let value = match result {
+        EvalResult::Array(_) | EvalResult::List(_) | EvalResult::Dict(_) | EvalResult::Lambda { .. } => {
+            serde_json::Value::String(eval_result_to_display(result))
+        }
+        // The REAL Excel literal ("#DIV/0!"), from the same helper the typed
+        // CELL read uses (commands/data.rs typed_cell_value). The older
+        // `eval_result_to_json` below renders `#{:?}` uppercased, which yields
+        // "#DIV0" — close enough for a template splice, wrong for an API whose
+        // whole promise is that an error is reported the way the grid reports
+        // it. Two paths that answer differently for the same failure is exactly
+        // how a script ends up matching on a string that never appears.
+        EvalResult::Error(e) => serde_json::Value::String(
+            crate::scripting::udf::cell_error_to_str(e).to_string(),
+        ),
+        other => eval_result_to_json(other),
+    };
+    let display = match result {
+        // A scalar renders through the real number formatter (default style);
+        // the aggregate forms have no CellValue equivalent to hand it.
+        EvalResult::Number(n) => {
+            crate::format_cell_value(&engine::CellValue::Number(*n), styles.get(0), locale)
+        }
+        EvalResult::Boolean(b) => {
+            crate::format_cell_value(&engine::CellValue::Boolean(*b), styles.get(0), locale)
+        }
+        EvalResult::Error(e) => crate::scripting::udf::cell_error_to_str(e).to_string(),
+        other => eval_result_to_display(other),
+    };
+    TypedEvalResult { value, display, r#type: kind.to_string() }
+}
+
+/// Evaluate formula expressions against the live grid and return TYPED results.
+///
+/// `sheet_index` selects the sheet whose grid unqualified references resolve
+/// against (defaults to the active sheet); qualified references ("Sheet2!A1")
+/// work regardless. A leading `=` is optional. An expression that does not parse
+/// yields `#SYNTAX!` in its own slot instead of failing the batch.
+#[tauri::command]
+pub fn evaluate_formula_typed(
+    expressions: Vec<String>,
+    sheet_index: Option<usize>,
+    state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+) -> Result<Vec<TypedEvalResult>, String> {
+    log_enter!("CMD", "evaluate_formula_typed", "count={}", expressions.len());
+
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
+    let user_files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    let target_sheet = sheet_index.unwrap_or(active_sheet);
+    if target_sheet >= grids.len() || target_sheet >= sheet_names.len() {
+        return Err(format!("sheet index out of range: {}", target_sheet));
+    }
+
+    let current_grid = &grids[target_sheet];
+    let current_sheet_name = &sheet_names[target_sheet];
+
+    let context = crate::create_multi_sheet_context(&grids, &sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let gather_data = crate::calp_commands::build_gather_data(&state);
+    let gather_fn = |region_id: &str| -> engine::GatherRegionData {
+        gather_data.get(region_id).cloned().unwrap_or_default()
+    };
+
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    evaluator.set_file_reader(&reader);
+    evaluator.set_gather_fn(&gather_fn);
+
+    let results: Vec<TypedEvalResult> = expressions
+        .iter()
+        .map(|expr_str| {
+            let formula = expr_str.trim();
+            let formula = formula.strip_prefix('=').unwrap_or(formula);
+            match parse_formula(formula) {
+                Ok(parser_ast) => {
+                    let engine_ast = crate::convert_expr(&parser_ast);
+                    let result = evaluator.evaluate(&engine_ast);
+                    eval_result_to_typed(&result, &styles, &locale)
+                }
+                Err(_) => TypedEvalResult {
+                    value: serde_json::Value::String("#SYNTAX!".to_string()),
+                    display: "#SYNTAX!".to_string(),
+                    r#type: "error".to_string(),
+                },
+            }
+        })
+        .collect();
+
+    log_exit!("CMD", "evaluate_formula_typed", "count={}", results.len());
+    Ok(results)
+}
+
+// ============================================================================
 // Scope-injected expression evaluation
 // ============================================================================
 // Dogfooding: extensions can evaluate Excel-like expressions over per-row
@@ -287,6 +425,102 @@ pub fn evaluate_scoped(
     scopes: Vec<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     evaluate_scoped_impl(&expression, &scopes)
+}
+
+#[cfg(test)]
+mod typed_eval_tests {
+    use super::*;
+
+    fn typed(result: EvalResult) -> TypedEvalResult {
+        let styles = engine::StyleRegistry::new();
+        let locale = engine::LocaleSettings::invariant();
+        eval_result_to_typed(&result, &styles, &locale)
+    }
+
+    /// The whole point of the typed shape: a caller can tell the NUMBER 5 from
+    /// the TEXT "5", which a display string can never express.
+    #[test]
+    fn scalars_keep_the_engines_typing() {
+        let n = typed(EvalResult::Number(5.0));
+        assert_eq!(n.r#type, "number");
+        assert_eq!(n.value, serde_json::json!(5.0));
+
+        let t = typed(EvalResult::Text("5".to_string()));
+        assert_eq!(t.r#type, "text");
+        assert_eq!(t.value, serde_json::json!("5"));
+
+        let b = typed(EvalResult::Boolean(true));
+        assert_eq!(b.r#type, "boolean");
+        assert_eq!(b.value, serde_json::json!(true));
+    }
+
+    /// An error is an ERROR, not a cell that happens to contain "#DIV/0!" — and
+    /// it carries the SAME literal a typed cell read reports. Two paths that
+    /// spell the same failure differently ("#DIV/0!" here, "#DIV0" there) is how
+    /// a script ends up matching on a string that never appears.
+    #[test]
+    fn an_error_reports_as_an_error_with_the_real_excel_literal() {
+        for (err, literal) in [
+            (engine::CellError::Div0, "#DIV/0!"),
+            (engine::CellError::Name, "#NAME?"),
+            (engine::CellError::Ref, "#REF!"),
+            (engine::CellError::Value, "#VALUE!"),
+        ] {
+            let e = typed(EvalResult::Error(err));
+            assert_eq!(e.r#type, "error");
+            assert_eq!(e.value, serde_json::json!(literal));
+            assert_eq!(e.display, literal);
+        }
+    }
+
+    /// Display goes through the REAL formatter, so an evaluated number reads the
+    /// way the same number reads in a cell.
+    #[test]
+    fn display_is_formatted_not_debug_printed() {
+        assert_eq!(typed(EvalResult::Number(1234.0)).display, "1234");
+        assert_eq!(typed(EvalResult::Boolean(false)).display, "FALSE");
+        assert_eq!(typed(EvalResult::Text("hi".to_string())).display, "hi");
+    }
+
+    /// An array/list has no JSON scalar form; it reports as text with its
+    /// rendered value rather than as `null`, which a caller could not
+    /// distinguish from an empty cell.
+    #[test]
+    fn aggregate_results_report_as_text() {
+        let a = typed(EvalResult::Array(vec![
+            EvalResult::Number(1.0),
+            EvalResult::Number(2.0),
+        ]));
+        assert_eq!(a.r#type, "text");
+        assert!(a.value.is_string());
+    }
+
+    /// A batch must never lose its other answers to one bad expression: the
+    /// syntax failure is a VALUE in its own slot, not a rejected command.
+    #[test]
+    fn a_syntax_error_is_a_value_not_a_rejection() {
+        // Mirrors the command's per-expression fallback exactly.
+        assert!(parse_formula("1 +").is_err());
+        let fallback = TypedEvalResult {
+            value: serde_json::Value::String("#SYNTAX!".to_string()),
+            display: "#SYNTAX!".to_string(),
+            r#type: "error".to_string(),
+        };
+        assert_eq!(fallback.r#type, "error");
+    }
+
+    /// The UDF hook is deliberately NOT wired: a UDF body is another script's
+    /// JavaScript, and resolving one from inside a lock-held evaluation would
+    /// re-enter that realm through a door nobody consented to.
+    #[test]
+    fn the_command_never_installs_a_udf_resolver() {
+        let src = include_str!("formula.rs");
+        let start = src
+            .find("pub fn evaluate_formula_typed")
+            .expect("command not found");
+        let body = &src[start..start + 3000];
+        assert!(!body.contains("set_udf_fn"));
+    }
 }
 
 #[cfg(test)]

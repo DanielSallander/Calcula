@@ -9,6 +9,7 @@
 
 pub mod display;
 pub mod limits;
+pub mod manifest;
 pub mod model_provider;
 pub mod notebook;
 pub mod ops;
@@ -128,7 +129,6 @@ impl ScriptEngine {
                 let deferred_actions = ctx.deferred_actions.borrow().clone();
                 let workbook_properties_changed = ctx.workbook_properties_changed.borrow().clone();
                 let screen_updating = *ctx.screen_updating.borrow();
-                let enable_events = *ctx.enable_events.borrow();
                 let grids = ctx.grids;
                 let result = types::ScriptResult::Success {
                     output,
@@ -138,7 +138,6 @@ impl ScriptEngine {
                     deferred_actions,
                     workbook_properties_changed,
                     screen_updating,
-                    enable_events,
                 };
                 (result, grids)
             }

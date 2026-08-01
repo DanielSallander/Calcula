@@ -6290,6 +6290,20 @@ pub(crate) fn run_validator_batch(
   try {{ delete globalThis.model; }} catch (e) {{}}
   try {{ delete globalThis.display; }} catch (e) {{}}
   try {{ delete globalThis.console; }} catch (e) {{}}
+  // The RAW sinks the `model` / `display` facades call through. Deleting the
+  // facade leaves these reachable by name, and "inert because this surface has
+  // no ModelDataProvider" is a property of another file that could change
+  // without anyone looking here. A validator is PUBLISHER-authored code running
+  // on the RESPONDENT's machine, so the realm it opens onto is the entire basis
+  // for consenting to it: delete the sinks, do not reason about them.
+  try {{ delete globalThis.__calcula_model_query; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_sql; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_value; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_kpi; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_members; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_info; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_model_connections; }} catch (e) {{}}
+  try {{ delete globalThis.__calcula_display_table; }} catch (e) {{}}
   var __report = function (payload) {{ __emit({nonce} + JSON.stringify(payload)); }};
   var __fn;
   try {{

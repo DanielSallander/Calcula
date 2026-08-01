@@ -526,12 +526,20 @@ declare namespace Calcula {
     let screenUpdating: boolean;
 
     /**
-     * Controls whether application events are fired during script execution.
-     * Default: `true`.
+     * There is deliberately NO `enableEvents`.
      *
-     * Analogous to Excel's `Application.EnableEvents`.
+     * Excel's `Application.EnableEvents = False` means "do not let my writes
+     * trigger anybody's change handlers". Calcula cannot honour that here,
+     * because this surface has no event delivery to suppress: cell writes from
+     * a script run are applied by the host and announced with a plain grid
+     * repaint, and never travel through the cell-event bus that object-script
+     * handlers listen on. A property that always answers `true` while promising
+     * it can turn events off would make you believe you were protected when you
+     * were not, so it was removed rather than left in place.
+     *
+     * The re-entrancy it exists to prevent is handled for you: an object
+     * script's own writes never re-fire that script's own change handlers.
      */
-    let enableEvents: boolean;
 
     /**
      * Set to a string to display a message in the status bar.

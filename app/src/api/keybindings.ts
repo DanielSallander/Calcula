@@ -11,6 +11,11 @@
 //              meaningless without grid focus — navigation, selection, edit-mode
 //              (F2/Esc/F8), plus grid-only command keys it handles locally
 //              (format toggles, number formats, Ctrl+;, Ctrl+`, F5/F9/F11).
+//            - Sandboxed SCRIPTS (the `ui.shortcut` capability): a script binds
+//              one Ctrl+Shift+<letter> to a method it exposed. Same registry,
+//              same conflict rules, same visible list — see "Script-owned
+//              shortcuts" below for the five rules that keep a key hook from
+//              being VBA's Application.OnKey.
 //          Grid-scoped commands (GRID_SCOPED_COMMANDS) fire only with grid focus
 //          and defer to native otherwise; copy/cut additionally defer when a DOM
 //          text selection exists. Supports user customization, conflict
@@ -20,6 +25,7 @@
 //       is a tracked, behavior-neutral follow-up (needs clipboard test coverage).
 
 import { CommandRegistry } from "./commands";
+import { showToast } from "./notifications";
 
 // ============================================================================
 // Types
@@ -30,7 +36,10 @@ export interface KeyBinding {
   id: string;
   /** Key combination: "Ctrl+C", "Ctrl+Shift+L", "F2" */
   combo: string;
-  /** Command to execute */
+  /** Command to execute. Empty for a SCRIPT binding, which runs a method the
+   *  script exposed rather than a registered command (see the script-shortcut
+   *  section below) — the runner is held in a private map, never on this
+   *  object, so a callable can never leak through `getAll()`. */
   commandId: string;
   /** Display name: "Copy", "Toggle AutoFilter" */
   label: string;
@@ -39,9 +48,11 @@ export interface KeyBinding {
   /** When active */
   context?: "always" | "editing" | "not-editing";
   /** Who defined it */
-  source: "built-in" | "extension" | "user";
+  source: "built-in" | "extension" | "user" | "script";
   /** Extension that registered it */
   extensionId?: string;
+  /** Sandboxed script that registered it (source === "script" only). */
+  scriptId?: string;
 }
 
 export interface ParsedCombo {
@@ -378,9 +389,14 @@ export function getCategories(): string[] {
  * Get the effective combo for a keybinding (user override or default).
  */
 export function getEffectiveCombo(id: string): string {
+  const binding = registry.get(id);
+  // A SCRIPT binding ignores user overrides entirely. It is a live grant, not a
+  // preference: remapping it would mean persisting an override under an id that
+  // disappears the moment the script unmounts — ambient state outliving the code
+  // it belongs to, which is the exact failure this feature must not reintroduce.
+  if (binding && binding.source === "script") return binding.combo;
   const override = userOverrides.get(id);
   if (override !== undefined) return override;
-  const binding = registry.get(id);
   return binding ? binding.combo : "";
 }
 
@@ -405,11 +421,31 @@ export function getDefaultCombo(id: string): string {
 
 /**
  * Set a user override for a keybinding.
+ *
+ * Returns the script collision this remap created, if any. Remapping an EXISTING
+ * shortcut onto a combination a running script holds is the same silent takeover
+ * as creating a new one, so it gets the same warning — see
+ * `findScriptKeybindingCollision`.
  */
-export function setUserKeybinding(id: string, combo: string): void {
+export function setUserKeybinding(id: string, combo: string): KeybindingCollision | null {
+  // Script shortcuts are not remappable (see getEffectiveCombo): storing an
+  // override here would be silently ignored at dispatch AND would leave a
+  // persisted entry for an id that vanishes at unmount. Refuse instead of
+  // pretending. Removing the shortcut outright IS supported —
+  // revokeScriptKeybinding.
+  if (registry.get(id)?.source === "script") {
+    console.warn(
+      `[Keybindings] '${id}' belongs to a running script and cannot be remapped; ` +
+        "remove it instead.",
+    );
+    return null;
+  }
+  const collision = findScriptKeybindingCollision(combo, id);
   userOverrides.set(id, combo);
   saveUserOverrides();
   notifyChange();
+  announceCollision(collision);
+  return collision;
 }
 
 /**
@@ -478,9 +514,103 @@ function saveCustomBindings(): void {
   localStorage.setItem(CUSTOM_BINDINGS_KEY, JSON.stringify(custom));
 }
 
+// ---------------------------------------------------------------------------
+// Shadowing a SCRIPT shortcut — the user always wins, and is always told
+// ---------------------------------------------------------------------------
+//
+// `handleGlobalKeyDown` resolves a tie in the user's favour ("THE APP ALWAYS
+// WINS"), which is the right outcome and must not change. What was missing is
+// the sentence that goes with it.
+//
+// A script shortcut is REFUSED at registration if the combination is already
+// taken (rule 3 above), so a collision can only be created from this side: the
+// user binds — or remaps onto — a combination a mounted script already holds.
+// The script keeps its registry row, keeps appearing in the shortcut list, and
+// simply stops firing. Nothing anywhere explains why, and the person best placed
+// to notice ("my macro stopped working") is the person with the least
+// information. That silence is the VBA `Application.OnKey` failure mode wearing
+// the opposite jacket: there, a script stole the user's key without saying so;
+// here, the user takes the script's key without being told. Both leave somebody
+// staring at a keyboard that does not do what the list says it does.
+//
+// So: warn at bind time, NAME the script, and never refuse. It is the user's
+// keyboard.
+
+/** A collision a user-created/remapped shortcut causes, in the words the
+ *  warning uses. */
+export interface KeybindingCollision {
+  /** The canonical combination both sides want. */
+  combo: string;
+  /** Registry ids that will stop firing (script bindings only). */
+  shadowedIds: string[];
+  /** The owning scripts, by display name, for the sentence. */
+  shadowedScriptNames: string[];
+  /** What each shadowed shortcut used to call ("refreshAll()"). */
+  shadowedLabels: string[];
+  /** The full sentence to show the user. */
+  message: string;
+}
+
+/**
+ * Would binding `combo` shadow a live script shortcut? Returns the collision, or
+ * null when the keys are free (or only collide with app bindings, which the
+ * existing conflict log already covers and which the user can see in the list).
+ *
+ * Exported so a settings UI can warn BEFORE the user commits, not only after.
+ */
+export function findScriptKeybindingCollision(
+  combo: string,
+  excludeId?: string,
+): KeybindingCollision | null {
+  if (typeof combo !== "string" || combo.trim() === "") return null;
+  const shadowed = findConflicts(combo, excludeId).filter((b) => b.source === "script");
+  if (shadowed.length === 0) return null;
+
+  const canonical = formatCombo(combo.trim());
+  const names = [...new Set(shadowed.map((b) => scriptBindings.get(b.id)?.scriptName ?? b.category))];
+  const labels = shadowed.map((b) => b.label);
+  const subject =
+    names.length === 1
+      ? `the script "${names[0]}"`
+      : `the scripts ${names.map((n) => `"${n}"`).join(", ")}`;
+  return {
+    combo: canonical,
+    shadowedIds: shadowed.map((b) => b.id),
+    shadowedScriptNames: names,
+    shadowedLabels: labels,
+    message:
+      `${canonical} is already used by ${subject} (${labels.join(", ")}). ` +
+      "Your shortcut wins — Calcula always prefers yours over a script's — so that " +
+      "script will stop responding to those keys until you change or remove your shortcut.",
+  };
+}
+
+/** Warn once, through the app's own toast, so the explanation reaches the user
+ *  even when the calling UI ignores the returned collision. */
+function announceCollision(collision: KeybindingCollision | null): void {
+  if (!collision) return;
+  console.warn(`[Keybindings] ${collision.message}`);
+  try {
+    showToast(collision.message, { variant: "warning", duration: 9000 });
+  } catch {
+    /* a window with no toast sink registered must not break the binding */
+  }
+}
+
+/** What `addCustomKeybinding` answers with: the binding, plus the collision it
+ *  created (null when the keys were free). */
+export interface AddCustomKeybindingResult {
+  binding: KeyBinding;
+  /** Non-null when a live script shortcut has just been shadowed. */
+  collision: KeybindingCollision | null;
+}
+
 /**
  * Add a new custom keybinding created by the user.
- * @returns The created keybinding, or null if the ID already exists.
+ *
+ * Never refuses: the user's keyboard is the user's. It DOES report — and
+ * announce — when the new shortcut takes a combination a running script holds,
+ * because app-wins silently is indistinguishable from the script being broken.
  */
 export function addCustomKeybinding(
   combo: string,
@@ -488,7 +618,7 @@ export function addCustomKeybinding(
   label: string,
   category?: string,
   context?: "always" | "editing" | "not-editing",
-): KeyBinding {
+): AddCustomKeybindingResult {
   const id = `user.custom.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
   const binding: KeyBinding = {
     id,
@@ -499,10 +629,14 @@ export function addCustomKeybinding(
     context: context ?? "always",
     source: "user",
   };
+  // Computed BEFORE the registry write, so the new binding cannot be reported as
+  // colliding with itself.
+  const collision = findScriptKeybindingCollision(combo, id);
   registry.set(id, binding);
   saveCustomBindings();
   notifyChange();
-  return binding;
+  announceCollision(collision);
+  return { binding, collision };
 }
 
 /**
@@ -591,6 +725,266 @@ export function registerKeybinding(binding: KeyBinding): () => void {
 }
 
 // ============================================================================
+// Script-owned shortcuts (the `ui.shortcut` capability)
+// ============================================================================
+//
+// A keyboard hook is a HIJACK PRIMITIVE, and it is the one VBA gave away for
+// free: `Application.OnKey "^s", "MyMacro"` silently takes Ctrl+S from the user
+// with no record anywhere that it happened. Everything below exists so that the
+// same convenience cannot become the same trap.
+//
+// FIVE RULES, all enforced here rather than at the call site, because the call
+// site is reached from three surfaces (object scripts, the broker, tests) and a
+// rule that lives in a caller is a rule with a hole in it:
+//
+//  1. SHAPE (an allowlist, not a blocklist). A script shortcut MUST be
+//     Ctrl+Shift+<letter>. A blocklist of "keys the app needs" would have to be
+//     exhaustive to be safe, and it cannot be: the grid owns Escape, Tab,
+//     Enter, Backspace, Delete, every arrow, Home/End/PageUp/PageDown, Space,
+//     F1-F12 and every unmodified printable character (that is TYPING), while
+//     the registry owns most Ctrl+<key> combinations and a user override can
+//     FREE one of those at any moment. One missed row and a script eats a key
+//     the user needs. An allowlist cannot be under-inclusive. It also dodges a
+//     second trap: Ctrl+Alt is AltGr on European layouts (on sv-SE, Ctrl+Alt+2
+//     is how you type "@"), so the Ctrl+Alt space is not free either — which is
+//     exactly the kind of thing a blocklist author never thinks of.
+//     Ctrl+Shift+<letter> is also the space VBA authors already use ("^+R").
+//  2. RESERVED. Ctrl+Shift+<letter> combinations Calcula or Excel own are
+//     refused by NAME, independently of what is currently in the registry —
+//     because `findConflicts` only sees today's registry, and a user who has
+//     remapped Ctrl+Shift+L has not thereby offered it to a script.
+//  3. CONFLICT. A combination already bound by anything — a built-in, an
+//     add-in, another script, the user — is REFUSED, never overridden. (The
+//     dispatcher additionally lets a non-script binding win a tie, so a
+//     built-in registered LATER still cannot be shadowed by registration
+//     order. That ordering accident is how this went wrong before.)
+//  4. LIFETIME. Script bindings are never persisted and never user-remappable:
+//     they live in the registry only while the script is mounted, and
+//     `revokeScriptKeybindingsForScript` at unmount takes them all back. A
+//     stored override for an id that disappears on unmount would be precisely
+//     the ambient state this must not create.
+//  5. NO KEYSTREAM. The handler is called with `{ combo }` and nothing else —
+//     not the DOM event, not the key, not the target, and never a keystroke the
+//     script did not bind. There is no "onKey" firehose to subscribe to.
+
+/** The one shape a script shortcut may take, in the words the refusal uses. */
+export const SCRIPT_SHORTCUT_SHAPE_RULE =
+  "a script shortcut must be Ctrl+Shift+<letter>, for example Ctrl+Shift+R";
+
+/**
+ * Ctrl+Shift+<letter> combinations a script may never claim, whatever the
+ * registry currently holds. The first group is Calcula's own (they are also in
+ * DEFAULT_KEYBINDINGS, so rule 3 would normally catch them — this list is what
+ * still refuses them after a user has remapped them away). The second group is
+ * Excel's, reserved so that shipping the matching feature later cannot be
+ * blocked by a shortcut some workbook's script grabbed first.
+ */
+const RESERVED_SCRIPT_COMBOS: ReadonlySet<string> = new Set([
+  // Calcula
+  "CTRL+SHIFT+C", // Format Painter
+  "CTRL+SHIFT+V", // Paste Special
+  "CTRL+SHIFT+S", // Save As
+  "CTRL+SHIFT+H", // Find and Replace
+  "CTRL+SHIFT+E", // Toggle File Explorer
+  "CTRL+SHIFT+X", // Toggle Extensions Manager
+  "CTRL+SHIFT+L", // Toggle AutoFilter
+  "CTRL+SHIFT+B", // Toggle Bookmark
+  "CTRL+SHIFT+N", // Toggle Script Notebook
+  // Excel parity
+  "CTRL+SHIFT+A", // Insert argument names
+  "CTRL+SHIFT+F", // Format Cells (Font)
+  "CTRL+SHIFT+O", // Select cells with comments
+  "CTRL+SHIFT+P", // Format Cells (Font size)
+  "CTRL+SHIFT+U", // Expand/collapse the formula bar
+]);
+
+/** How many shortcuts one script may hold at once. A script that wants nine
+ *  hotkeys is not automating a workbook, it is taking over a keyboard. */
+export const MAX_SCRIPT_KEYBINDINGS_PER_SCRIPT = 8;
+
+/** A script shortcut as the transparency surfaces (and the script itself) see
+ *  it. Pure data — the runner is deliberately not reachable from here. */
+export interface ScriptKeybinding {
+  /** Registry id: `script:<scriptId>:<CANONICAL COMBO>`. */
+  id: string;
+  /** Canonical combo ("Ctrl+Shift+R"). */
+  combo: string;
+  scriptId: string;
+  scriptName: string;
+  /** The name of the method the script exposed; what pressing the keys calls. */
+  handler: string;
+  /** Human label shown in the shortcut list. */
+  label: string;
+}
+
+export type ScriptKeybindingRefusalCode = "invalid" | "reserved" | "conflict" | "limit";
+
+export type ScriptKeybindingResult =
+  | { ok: true; binding: ScriptKeybinding }
+  | { ok: false; code: ScriptKeybindingRefusalCode; reason: string };
+
+/** Live script bindings by registry id (data), and their runners (callables,
+ *  kept apart so `getAllKeybindings()` can never hand one out). */
+const scriptBindings = new Map<string, ScriptKeybinding>();
+const scriptRunners = new Map<string, (combo: string) => void>();
+
+/**
+ * Why a script may not have this combination — or null if it may ask for it.
+ * Rules 1 and 2 only; the conflict and limit checks need the registry and live
+ * in `registerScriptKeybinding`.
+ */
+export function scriptComboRefusal(combo: unknown): string | null {
+  if (typeof combo !== "string" || combo.trim() === "") {
+    return `a shortcut must be a key combination — ${SCRIPT_SHORTCUT_SHAPE_RULE}`;
+  }
+  const parsed = parseCombo(combo.trim());
+  if (!parsed.ctrl || !parsed.shift || parsed.alt || parsed.meta || !/^[A-Za-z]$/.test(parsed.key)) {
+    return (
+      `"${combo}" is not a shortcut a script may take — ${SCRIPT_SHORTCUT_SHAPE_RULE}. ` +
+      "Calcula keeps every other combination for the grid and the app (typing, " +
+      "Escape, Tab, the arrows, the function keys, Ctrl+S, Ctrl+Z, Ctrl+C, ...)"
+    );
+  }
+  const canonical = `CTRL+SHIFT+${parsed.key.toUpperCase()}`;
+  if (RESERVED_SCRIPT_COMBOS.has(canonical)) {
+    return `Ctrl+Shift+${parsed.key.toUpperCase()} is reserved by Calcula and cannot be taken by a script`;
+  }
+  return null;
+}
+
+/** Canonical registry id for a script binding. */
+function scriptBindingId(scriptId: string, canonicalCombo: string): string {
+  return `script:${scriptId}:${canonicalCombo.toUpperCase()}`;
+}
+
+/**
+ * Bind one shortcut to one script. Refuses — loudly, with a reason a
+ * non-programmer can read — rather than silently dropping or overriding.
+ *
+ * `run` is invoked with the canonical combo when the keys are pressed; it is
+ * the ONLY thing the script ever learns about the keyboard.
+ */
+export function registerScriptKeybinding(req: {
+  scriptId: string;
+  scriptName: string;
+  combo: string;
+  handler: string;
+  label?: string;
+  run: (combo: string) => void;
+}): ScriptKeybindingResult {
+  const shapeProblem = scriptComboRefusal(req.combo);
+  if (shapeProblem) {
+    const code: ScriptKeybindingRefusalCode = shapeProblem.includes("reserved by Calcula")
+      ? "reserved"
+      : "invalid";
+    return { ok: false, code, reason: shapeProblem };
+  }
+  if (typeof req.handler !== "string" || req.handler.trim() === "") {
+    return { ok: false, code: "invalid", reason: "a shortcut must name a method to run" };
+  }
+
+  const combo = formatCombo(req.combo.trim());
+  const id = scriptBindingId(req.scriptId, combo);
+
+  // Re-binding the SAME combo from the SAME script replaces its own handler —
+  // that is an update, not a conflict. Anything else already holding the combo
+  // is a refusal.
+  const conflicts = findConflicts(combo, id);
+  if (conflicts.length > 0) {
+    return {
+      ok: false,
+      code: "conflict",
+      reason:
+        `${combo} is already bound to "${conflicts[0].label}" — a script may only claim ` +
+        "a shortcut nothing else uses",
+    };
+  }
+
+  const owned = [...scriptBindings.values()].filter((b) => b.scriptId === req.scriptId);
+  if (!scriptBindings.has(id) && owned.length >= MAX_SCRIPT_KEYBINDINGS_PER_SCRIPT) {
+    return {
+      ok: false,
+      code: "limit",
+      reason: `a script may hold at most ${MAX_SCRIPT_KEYBINDINGS_PER_SCRIPT} keyboard shortcuts at a time`,
+    };
+  }
+
+  installListener();
+
+  const handler = req.handler.trim();
+  const label = (req.label ?? "").trim() || `${handler}()`;
+  const binding: ScriptKeybinding = {
+    id,
+    combo,
+    scriptId: req.scriptId,
+    scriptName: req.scriptName,
+    handler,
+    label,
+  };
+  scriptBindings.set(id, binding);
+  scriptRunners.set(id, req.run);
+  registry.set(id, {
+    id,
+    combo,
+    // A script binding runs an EXPOSED METHOD, not a command: putting the
+    // handler in the global command registry would let anything that can
+    // execute a command call it, which is reach the script never asked for.
+    commandId: "",
+    label,
+    // Attribution is HOST-supplied: the category names the owning script, so a
+    // script shortcut can never present itself as a built-in in the list.
+    category: req.scriptName,
+    // NOT the script's choice. A shortcut that fired while the user is typing
+    // into the formula bar or a dialog field would both break text entry and
+    // turn a bound combo into a way to watch someone type.
+    context: "not-editing",
+    source: "script",
+    scriptId: req.scriptId,
+  });
+  notifyChange();
+  return { ok: true, binding };
+}
+
+/** Every live script shortcut (all scripts, or one script's own). */
+export function listScriptKeybindings(scriptId?: string): ScriptKeybinding[] {
+  const all = [...scriptBindings.values()];
+  const scoped = scriptId === undefined ? all : all.filter((b) => b.scriptId === scriptId);
+  return scoped
+    .map((b) => ({ ...b }))
+    .sort((a, b) => a.combo.localeCompare(b.combo) || a.scriptId.localeCompare(b.scriptId));
+}
+
+/** Take one script shortcut back. Used by the script itself (unbind), by the
+ *  transparency surface (the user's Remove button) and by unmount. */
+export function revokeScriptKeybinding(id: string): boolean {
+  if (!scriptBindings.has(id)) return false;
+  scriptBindings.delete(id);
+  scriptRunners.delete(id);
+  registry.delete(id);
+  notifyChange();
+  return true;
+}
+
+/** Take back ONE combo held by ONE script (the script's own `unbind`). */
+export function revokeScriptKeybindingCombo(scriptId: string, combo: string): boolean {
+  if (typeof combo !== "string" || combo.trim() === "") return false;
+  return revokeScriptKeybinding(scriptBindingId(scriptId, formatCombo(combo.trim())));
+}
+
+/** Take back everything a script holds. Called at unmount — a shortcut must not
+ *  outlive the code it runs. */
+export function revokeScriptKeybindingsForScript(scriptId: string): number {
+  const ids = [...scriptBindings.values()].filter((b) => b.scriptId === scriptId).map((b) => b.id);
+  for (const id of ids) {
+    scriptBindings.delete(id);
+    scriptRunners.delete(id);
+    registry.delete(id);
+  }
+  if (ids.length > 0) notifyChange();
+  return ids.length;
+}
+
+// ============================================================================
 // Change Notification
 // ============================================================================
 
@@ -666,12 +1060,31 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
 
   if (matches.length === 0) return false;
 
-  // If multiple matches, prefer extension over built-in (extension-registered
-  // commands are more specific). Among same source, first registered wins.
-  const winner = matches[0];
+  // THE APP ALWAYS WINS. A script shortcut is refused at registration if the
+  // combination is already taken, so a tie can only happen when something the
+  // app owns claimed the keys AFTERWARDS (a late-loading extension, a user
+  // remap). Leaving that to registration order is how a sandboxed contribution
+  // came to shadow a built-in once already; here it is a rule, not an accident.
+  // Otherwise: first registered wins.
+  const winner = matches.find((b) => b.source !== "script") ?? matches[0];
 
   event.preventDefault();
   event.stopPropagation();
+
+  if (winner.source === "script") {
+    const run = scriptRunners.get(winner.id);
+    if (run) {
+      // The ONLY thing that crosses to the script: the combination it bound.
+      // No DOM event, no key, no target, no repeat flag — a bound shortcut must
+      // not become a way to observe the keyboard.
+      try {
+        run(winner.combo);
+      } catch (err) {
+        console.error(`[Keybindings] Error running script shortcut '${winner.id}':`, err);
+      }
+    }
+    return true;
+  }
 
   CommandRegistry.execute(winner.commandId).catch((err) => {
     console.error(`[Keybindings] Error executing command '${winner.commandId}':`, err);

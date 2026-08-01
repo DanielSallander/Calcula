@@ -180,6 +180,26 @@ export const AppEvents = {
   // thinAppEventForScripts), because the counts describe the subscriber's
   // workbook, not the package.
   PACKAGE_UPDATED: "app:package-updated",
+
+  // A writeback SUBMISSION arrived for a region THIS workbook publishes (§5.5).
+  //
+  // HONESTY NOTE — READ BEFORE SUBSCRIBING. Submissions are appended to a
+  // registry on disk by OTHER people's machines. Nothing pushes into this
+  // process when that happens, so this event cannot fire on its own: it is
+  // raised by the DEMAND-DRIVEN publisher-inbox poll in @api/distribution.ts,
+  // which runs ONLY while something is subscribed (a script's api.onEvent, or
+  // the Responses dashboard being open) and only for regions this machine can
+  // prove it publishes (Ed25519 key possession, re-checked in Rust on every
+  // read). With no subscriber there is no poll and no cost. See
+  // SUBMISSION_POLL_INTERVAL_MS and getSubmissionWatchStatus() for the exact,
+  // disclosed cost.
+  //
+  // The payload names WHO submitted and WHERE, never WHAT (see
+  // WritebackSubmissionReceivedPayload); sandboxed script subscribers are
+  // thinned further to { regionId, count } (thinAppEventForScripts), because a
+  // per-respondent region's cell coordinates ARE an identity. The answers stay
+  // behind the publisher-gated cap.writebackListSubmissions.
+  WRITEBACK_SUBMISSION_RECEIVED: "app:writeback-submission-received",
 } as const;
 
 /**
@@ -307,6 +327,43 @@ export interface PackageUpdatedPayload {
    *  reports totals, not per-subscription counts). Subscribers must reload
    *  package-derived state regardless of the count. */
   scriptsPulled: number | null;
+}
+
+/** One newly-submitted value announced by WRITEBACK_SUBMISSION_RECEIVED. */
+export interface WritebackSubmissionNotice {
+  /** The submission event id — pass it back to approve/reject that exact one. */
+  submissionId: string;
+  submitterId: string;
+  submitterName: string;
+  cellRow: number;
+  cellCol: number;
+  /** ISO 8601 timestamp the contributor's machine recorded, when present. */
+  submittedAt: string | null;
+}
+
+/**
+ * Payload of AppEvents.WRITEBACK_SUBMISSION_RECEIVED (trusted subscribers).
+ *
+ * DELIBERATELY WITHOUT VALUES. This is a NOTIFICATION that answers arrived, not
+ * a delivery of them: the values live behind the publisher-gated inbox
+ * (loadRegionSubmissions / cap.writebackListSubmissions), which re-proves key
+ * possession in Rust at every read. Putting them on an event bus would move
+ * other people's answers to a surface that has no gate of its own.
+ *
+ * Sandboxed script subscribers receive only { regionId, count } — see
+ * thinAppEventForScripts in scriptHost/allowlist.ts.
+ */
+export interface WritebackSubmissionReceivedPayload {
+  regionId: string;
+  /** How many newly-submitted values this poll pass observed for the region. */
+  count: number;
+  /** Up to MAX_REPORTED_SUBMISSIONS of them; see `truncated`. */
+  submissions: WritebackSubmissionNotice[];
+  /** True when `count` exceeded the per-event cap and `submissions` is partial. */
+  truncated: boolean;
+  /** When the poll OBSERVED them (this machine's clock), ISO 8601. Not when
+   *  they were submitted — the gap is the poll interval, at most. */
+  observedAt: string;
 }
 
 /** Payload emitted with FILL_COMPLETED event. */

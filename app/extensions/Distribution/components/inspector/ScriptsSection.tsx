@@ -49,6 +49,18 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // both halves (unattended + persisted) or the inspector understates the reach.
   schedule:
     "run itself on a schedule while Calcula is open, without anyone starting it — saved in this workbook, so it resumes after a reload",
+  // Both directions, and the limit that bounds them. Saying only "read and
+  // write files" would describe ambient filesystem access; the picker is what
+  // makes this not that, so it belongs in the same sentence.
+  "file.picker":
+    "ask you to pick a file to save data into or to read — one file per ask, chosen by you, and it is never told where your files are",
+  // The inspector is read WITHOUT running anything, so this line is often the
+  // only warning a reviewer gets that a package installs a key hook at all.
+  // It therefore names the taking AND the two bounds that keep it from being
+  // Application.OnKey: it cannot take keys the app needs, and it sees nothing
+  // else you type.
+  "ui.shortcut":
+    "take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, and it never sees anything else you type",
 };
 
 function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {

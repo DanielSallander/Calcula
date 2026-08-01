@@ -74,7 +74,6 @@ function successResult(index: number) {
     durationMs: 1,
     executionIndex: index,
     screenUpdating: true,
-    enableEvents: true,
   };
 }
 

@@ -12,6 +12,8 @@ import {
   BrokerError,
   buildHandleFromDefinition,
   callExposed,
+  hostCallExposed,
+  listExposed,
   registerExposed,
   unregisterExposed,
   registerMountedHandle,
@@ -25,6 +27,10 @@ import {
   RENDER_TIMEOUT_MS,
   METHOD_CALL_TIMEOUT_MS,
   COALESCE_HOOKS,
+  type DebugAction,
+  type DebugPauseState,
+  type DebugReadyState,
+  type DebugSnapshotState,
   type H2W,
   type W2H,
   type MountSpec,
@@ -42,7 +48,9 @@ import {
   sanitizeSandboxGeometry,
 } from "./renderCache";
 import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
-import { MAX_RANGE_CELLS } from "./validators";
+import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS } from "./validators";
+import type { PickerTextEncoding } from "../filesystem";
+import type { AutoFilterColumnCriteria } from "../autoFilterService";
 import type { ScriptCell } from "../scriptableObjects";
 import type { TypedCellData } from "../lib";
 import type { CellData, FormattingOptions } from "../types";
@@ -51,13 +59,13 @@ import {
   grantBackendCapability,
   grantNetOrigin,
   hasFetchOrigin,
+  persistAlwaysGrant,
   recordCapabilityGrant,
   requestCapabilityGrant,
   resetAllGrants,
+  restoreAndSyncGrants,
   revokeBackendCapabilities,
   RUST_MIRRORED_CAPABILITIES,
-  syncBackendGrants,
-  syncNetOriginsToBackend,
   wasDeniedThisSession,
 } from "./capabilities";
 import {
@@ -90,6 +98,7 @@ import {
   type NamedRangeCoordsLike,
 } from "./objectCoords";
 import { showToast } from "../notifications";
+import { revokeScriptKeybindingsForScript } from "../keybindings";
 import { getCellBehaviorById } from "../cellBehaviors";
 import { ExtensionRegistry } from "../extensionRegistry";
 import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService, getControlStoreService } from "../componentStoreRegistry";
@@ -163,6 +172,209 @@ async function getLib() {
     _libModule = await import("../lib");
   }
   return _libModule;
+}
+
+// ============================================================================
+// Workbook file lifecycle (G1): rate limit + Before-Save re-entrancy guard
+// ============================================================================
+//
+// A script-initiated save takes EXACTLY the path Ctrl+S takes (core/lib/file-api
+// saveFile/saveFileAs): the cancellable Before-Save guards, the BEFORE_SAVE /
+// AFTER_SAVE broadcasts, and — for Save As — the .xlsx lossy-save consent. None
+// of that is re-implemented here, because a second implementation is a second
+// set of rules for the same act, and the whole point of the veto is that it
+// applies to a script exactly as it applies to a person.
+//
+// Two guards are this file's own:
+//
+//  1. RATE. One save per script per SCRIPT_SAVE_MIN_INTERVAL_MS. A `while(true)
+//     save()` loop must not thrash the disk (or, on a large workbook, wedge the
+//     app). This is a resource guard, NOT a security boundary — a compromised
+//     renderer can call save_file directly and always could; the security
+//     boundary here is that the WORKER cannot reach Tauri at all.
+//
+//  2. RE-ENTRANCY. A save attempted while a Before-Save/Close verdict is being
+//     collected is refused. Without it, an onBeforeSave handler that calls
+//     save() re-enters checkLifecycleGuards and recurses. Refusing is also the
+//     honest semantic: a handler being asked "may this save proceed?" is not in
+//     a position to start another one.
+
+/** Minimum gap between two script-initiated saves BY THE SAME SCRIPT. */
+export const SCRIPT_SAVE_MIN_INTERVAL_MS = 5_000;
+
+/** scriptId -> timestamp of its last accepted save/saveAs. */
+const lastScriptSave = new Map<string, number>();
+
+/** Depth of the Before-Save/Close verdict collection currently in progress. */
+let lifecycleVerdictDepth = 0;
+
+/** True while any mounted script is being asked for a save/close verdict. */
+export function isCollectingLifecycleVerdict(): boolean {
+  return lifecycleVerdictDepth > 0;
+}
+
+/**
+ * Run `fn` with the Before-Save/Close verdict depth raised, so any save a
+ * SCRIPT attempts while its own (or another script's) handler is being consulted
+ * is refused instead of re-entering checkLifecycleGuards.
+ *
+ * The wrapper exists — rather than two bare `depth += 1` lines inside the
+ * forwarder — so the rule itself is directly testable: the recursion it prevents
+ * would otherwise need a live worker to reproduce, which is exactly the kind of
+ * thing that ends up untested and then ships.
+ */
+export async function withLifecycleVerdictDepth<T>(fn: () => Promise<T>): Promise<T> {
+  lifecycleVerdictDepth += 1;
+  try {
+    return await fn();
+  } finally {
+    // Clamped: a workbook reset (hostResetAll -> resetScriptSaveLimits) can zero
+    // the counter while a verdict is still in flight, and a negative depth would
+    // make the NEXT reset leave the guard permanently disarmed.
+    lifecycleVerdictDepth = Math.max(0, lifecycleVerdictDepth - 1);
+  }
+}
+
+/**
+ * Throw unless `scriptId` may start a save right now. CHECK ONLY — the bucket is
+ * spent by {@link recordScriptSave}, once the save is actually going ahead.
+ *
+ * The split matters for one very ordinary script: `save()` on a workbook that
+ * has never been saved throws "no file to save back to", and the obvious next
+ * line is `saveAs()`. If the refused call had already spent the bucket, that
+ * second line would fail too, with a message about saving too often — punishing
+ * a script for an error it handled correctly.
+ *
+ * Separated from the executor so both rules are testable without a worker, and
+ * so the two refusal messages stay distinguishable to a script that wants to
+ * degrade gracefully.
+ */
+export function assertScriptSaveAllowed(scriptId: string, now: number = Date.now()): void {
+  if (lifecycleVerdictDepth > 0) {
+    throw new BrokerError(
+      "HostError",
+      "a save cannot be started from inside an onBeforeSave / onBeforeClose handler",
+    );
+  }
+  const last = lastScriptSave.get(scriptId);
+  if (last !== undefined && now - last < SCRIPT_SAVE_MIN_INTERVAL_MS) {
+    const waitMs = SCRIPT_SAVE_MIN_INTERVAL_MS - (now - last);
+    throw new BrokerError(
+      "HostError",
+      `saving too often: wait ${Math.ceil(waitMs / 1000)}s ` +
+        `(a script may save at most once every ${SCRIPT_SAVE_MIN_INTERVAL_MS / 1000}s)`,
+    );
+  }
+}
+
+/** Spend this script's save budget. Called once a save is really going ahead —
+ *  including one the user then cancels, because the guards ran and (for Save As)
+ *  a dialog was put on their screen. */
+export function recordScriptSave(scriptId: string, now: number = Date.now()): void {
+  lastScriptSave.set(scriptId, now);
+}
+
+/** Forget every save rate-limit bucket (workbook reset / tests). */
+export function resetScriptSaveLimits(): void {
+  lastScriptSave.clear();
+  lifecycleVerdictDepth = 0;
+}
+
+/**
+ * The executor behind `api.workbook.save()` / `saveAs()`.
+ *
+ * Exported so the two things that make it safe are directly testable without
+ * spawning a worker: the rate/re-entrancy refusal, and the fact that a
+ * Before-Save VETO comes back as `{ saved: false }` rather than a silent
+ * success. It delegates to core/lib/file-api — the SAME functions Ctrl+S and
+ * the File menu call — so the veto, the BEFORE_SAVE/AFTER_SAVE broadcasts, the
+ * dirty-state event, the window title and the .xlsx lossy-save consent are the
+ * originals, not a second implementation that could drift from them.
+ */
+export async function executeWorkbookSave(
+  scriptId: string,
+  mode: "save" | "saveAs",
+): Promise<ScriptSaveResult> {
+  assertScriptSaveAllowed(scriptId);
+  const fs = await import("../filesystem");
+  if (mode === "save") {
+    const currentPath = await fs.getCurrentFilePath();
+    if (!currentPath) {
+      // Deliberately NOT a silent Save As. saveFile() falls back to a picker
+      // when there is no path; for a script that would mean a file dialog the
+      // user never asked for, appearing out of nowhere. Fail loudly instead and
+      // let the script call saveAs() if that is really what it meant. The rate
+      // bucket is deliberately NOT spent here, so that saveAs() can follow
+      // immediately.
+      throw new BrokerError(
+        "HostError",
+        "this workbook has never been saved, so there is no file to save it back to — use saveAs()",
+      );
+    }
+    // null here can only mean a Before-Save guard vetoed (the no-path branch is
+    // excluded above), and the veto has already been reported to the user by
+    // name through the lifecycle cancel reporter.
+    recordScriptSave(scriptId);
+    const savedPath = await fs.saveFile();
+    return savedPath ? { saved: true, name: fs.fileNameOf(savedPath) } : { saved: false, name: null };
+  }
+  // saveAs: the script supplies NOTHING — no path, no name, no filter.
+  // saveFileAs() opens the same picker the File menu opens, applies the same
+  // .xlsx loss report, and runs the same Before-Save guards. A cancelled picker,
+  // a declined loss report and a vetoing guard all return null; all three are
+  // "the user said no", and all three resolve rather than reject.
+  recordScriptSave(scriptId);
+  const savedPath = await fs.saveFileAs();
+  return savedPath ? { saved: true, name: fs.fileNameOf(savedPath) } : { saved: false, name: null };
+}
+
+// ---- file.picker helpers (G1) ------------------------------------------------
+
+/** MIME types worth a friendlier picker label than "CSV file". Purely
+ *  cosmetic — a mimeType a script sends can only ever change the words on one
+ *  filter row, never which file is written or where. */
+const MIME_FILTER_LABELS: Record<string, string> = {
+  "text/csv": "CSV file",
+  "text/plain": "Text file",
+  "text/tab-separated-values": "Tab-separated file",
+  "text/markdown": "Markdown file",
+  "text/html": "HTML file",
+  "application/json": "JSON file",
+  "application/xml": "XML file",
+  "text/xml": "XML file",
+};
+
+/** The extension of a bare file name, lowercased, without the dot. */
+function fileExtensionOf(name: string): string | undefined {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return undefined;
+  const ext = name.slice(dot + 1).toLowerCase();
+  return /^[a-z0-9]{1,16}$/.test(ext) ? ext : undefined;
+}
+
+/** The label for the picker's file-type row. The script's own `description`
+ *  wins (it knows what it is producing), then the MIME table, then the bare
+ *  extension. Never the script's name — a filter row must not read like the
+ *  app is vouching for the file. */
+function filterLabelFor(
+  description: string | undefined,
+  mimeType: string | undefined,
+  extension: string | undefined,
+): string {
+  if (description && description.trim().length > 0) return description.trim();
+  if (mimeType && MIME_FILTER_LABELS[mimeType]) return MIME_FILTER_LABELS[mimeType];
+  if (extension) return `${extension.toUpperCase()} file`;
+  return "File";
+}
+
+/** The shape `api.workbook.save()` / `saveAs()` resolve to. A cancellation —
+ *  a guard veto, a dismissed picker, a declined .xlsx loss report — is NOT an
+ *  error: it resolves with `saved: false`, so a script's cancel path is
+ *  `if (!result.saved) return;` and never a rejected promise it must catch. */
+export interface ScriptSaveResult {
+  saved: boolean;
+  /** The file NAME written to (never a path); null when nothing was saved. */
+  name: string | null;
 }
 
 // ============================================================================
@@ -265,6 +477,14 @@ interface MountedWorker {
    * membership) without an IPC refetch per change event.
    */
   hostMirror: Map<string, unknown>;
+  /**
+   * Debug sessions only: suspends/restarts the 10s mount deadline. A breakpoint
+   * inside `setup` legitimately stops the mount for as long as the user is
+   * reading it, and the deadline would otherwise tear the worker down (and with
+   * it the session) mid-inspection.
+   */
+  suspendMountDeadline?: () => void;
+  resumeMountDeadline?: () => void;
 }
 
 const mounted = new Map<string, MountedWorker>();
@@ -320,6 +540,17 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
   }
   faulted.delete(definition.id);
 
+  // An open debug session survives a remount (Save & Apply keeps you in the
+  // debugger), but every remount restarts from a clean, un-paused state.
+  const debugSession = debugSessions.get(definition.id) ?? null;
+  if (debugSession) {
+    debugSession.status = "starting";
+    debugSession.paused = null;
+    debugSession.ready = null;
+    debugSession.lastSnapshot = null;
+    emitDebugState(debugSession, definition.id);
+  }
+
   const handle = buildHandleFromDefinition(definition);
   const worker = spawnWorker();
   const mw: MountedWorker = {
@@ -343,10 +574,24 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
   };
   mounted.set(definition.id, mw);
   mw.cleanupFns.push(registerMountedHandle(handle));
-  // Re-establish this script's net.fetch origins in the Rust store (a remount
-  // within the session keeps session grants; first mount pushes nothing).
-  void syncNetOriginsToBackend(definition.id);
-  void syncBackendGrants(definition.id);
+  // Re-establish this script's grants BEFORE the mount spec is built, so the
+  // capability list the worker realm receives is the one it actually has:
+  //   1. persisted "Allow always" decisions for THIS EXACT SOURCE (local
+  //      scripts only; a changed source lapses the grant and arms a diff for
+  //      the next JIT prompt), then
+  //   2. the resulting live set is pushed to the authoritative Rust store, which
+  //      re-validates every id — a persisted decision is an INPUT to the grant
+  //      flow, never a bypass of it.
+  // Awaited (the old fire-and-forget sync pair was not) because a scheduled job
+  // restored from the .cala can be swept as "due" the moment the tick pump
+  // starts, and Rust denies it unless the `schedule` grant is already there.
+  await restoreAndSyncGrants({
+    scriptId: definition.id,
+    scriptName: definition.name,
+    source: definition.source,
+    origin: handle.origin,
+    declaredCapabilities: handle.declaredCapabilities,
+  });
 
   const snapshot = await buildSnapshot(definition, mw);
   if (snapshot.properties) {
@@ -376,13 +621,46 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
             provenance: "distributed",
           }
         : undefined,
+    // Only a script the user explicitly opened a debug session on is
+    // instrumented; every other mount is byte-for-byte the production path.
+    debug: debugSession
+      ? {
+          breakpoints: debugSession.breakpoints,
+          pauseOnEntry: pauseOnEntryOnce.get(definition.id) === true,
+        }
+      : undefined,
     snapshot,
   };
+  pauseOnEntryOnce.set(definition.id, false);
 
   const mountedPromise = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Script mount timed out (10s)")), 10_000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    const arm = (): void => {
+      if (settled || timer !== null) return;
+      timer = setTimeout(() => {
+        timer = null;
+        settled = true;
+        reject(new Error("Script mount timed out (10s)"));
+      }, 10_000);
+    };
+    const disarm = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    arm();
+    // A debug session may legitimately stop inside `setup`; the deadline is
+    // suspended while it is paused and re-armed the moment it resumes, so a
+    // debugger can never be killed by the clock it is standing still in front of.
+    mw.suspendMountDeadline = disarm;
+    mw.resumeMountDeadline = arm;
     wireWorker(mw, (ok, error) => {
-      clearTimeout(timer);
+      settled = true;
+      disarm();
+      mw.suspendMountDeadline = undefined;
+      mw.resumeMountDeadline = undefined;
       if (ok) {
         resolve();
       } else {
@@ -440,7 +718,25 @@ export function hostUnmountScript(scriptId: string): void {
   // nothing is waiting on the answer — but the DIALOG would otherwise stay up,
   // asking on behalf of code that no longer exists.
   revokeScriptDialogs(scriptId);
+  // Take back every keyboard shortcut it held. The per-binding cleanups above
+  // already do this; this sweep is by scriptId and is the one that must not be
+  // forgettable — a shortcut that outlives its script is a key the user can
+  // press to reach code that is gone, which is precisely the ambient state
+  // Application.OnKey left behind.
+  revokeScriptKeybindingsForScript(scriptId);
+  // Throw away its private clipboard. It holds cell VALUES — a copy of part of
+  // the user's data — so it must not outlive the code that captured it, and a
+  // remounted successor must not inherit a buffer it never filled.
+  clearScriptClipboard(scriptId);
   mounted.delete(scriptId);
+  // The worker is gone, so any pause died with it. Say so rather than leaving a
+  // "paused" indicator standing in front of a script that no longer exists.
+  const session = debugSessions.get(scriptId);
+  if (session && session.status !== "detached") {
+    session.status = "detached";
+    session.paused = null;
+    emitDebugState(session, scriptId);
+  }
 }
 
 export function hostIsMounted(scriptId: string): boolean {
@@ -452,11 +748,24 @@ export function hostResetAll(): void {
     hostUnmountScript(scriptId);
   }
   faulted.clear();
+  // A new workbook is a new file: no debug session from the previous one may
+  // survive it (and none may be left "paused" against a worker that is gone).
+  for (const scriptId of [...debugSessions.keys()]) {
+    debugSessions.delete(scriptId);
+    pauseOnEntryOnce.delete(scriptId);
+    emitDebugState(null, scriptId);
+  }
   // Workbook reset = fresh session: forget all capability grants.
   resetAllGrants();
   // ...and every dialog mute / dismissal streak, so the next workbook's scripts
   // are not judged by the previous one's behavior.
   resetScriptDialogs();
+  // ...and the save rate buckets: a new workbook is a new file, and the old
+  // one's timings say nothing about it.
+  resetScriptSaveLimits();
+  // ...and every private clipboard: those hold cells from the workbook that is
+  // being replaced, and a style index from it means nothing in the next one.
+  clearScriptClipboard();
 }
 
 /** Faulted scripts (crashed twice within 30s) with their last error. */
@@ -496,6 +805,207 @@ export function hostValidateScript(source: string): Promise<{ valid: boolean; er
 
 function post(mw: MountedWorker, msg: H2W): void {
   mw.worker.postMessage(msg);
+}
+
+// ============================================================================
+// Debug sessions (task H1) — real step-through over the worker RPC
+// ============================================================================
+//
+// A session is ENTERED EXPLICITLY, by a user gesture in the script editor, on
+// one named script. It is never ambient and never self-service: nothing in the
+// ALLOWLIST, no `object.setState`/`object.getState` aspect, no broker method and
+// no extension-broker method produces a session, so a distributed script cannot
+// arrange to pause itself (nor to pause anybody else). Entering one REMOUNTS the
+// script with instrumentation — the mount is the only place its source is
+// compiled — which is why the UI announces the restart.
+//
+// A paused script holds no lock the app needs. Everything that awaits a script
+// is bounded host-side and defaults to letting the user through:
+//   - cell/bitmap renders   -> RENDER_TIMEOUT_MS, and the worker refuses to
+//                              suspend inside a render at all (beginNoPause).
+//   - onBeforeCommit        -> 1.5s, verdict defaults to ALLOW; a paused script
+//                              is skipped outright (see callRangeBeforeCommit).
+//   - onBeforeSave/Close    -> 3s, verdict defaults to ALLOW; a paused script is
+//                              likewise skipped, so a workbook can ALWAYS be
+//                              saved and closed while a debugger sits open.
+//   - scheduled jobs        -> METHOD_CALL_TIMEOUT_MS in the renderer plus the
+//                              Rust MAX_RUN_MS watchdog; a firing lands as a
+//                              normal failed run and is re-armed.
+//   - JS UDF evaluation     -> the same relayed-call deadline; the cell reports
+//                              an error and recalculates later.
+
+/** State of one open debug session, as the editor renders it. */
+export interface DebugSessionState {
+  scriptId: string;
+  scriptName: string;
+  /** "starting" until the worker reports what it managed to instrument. */
+  status: "starting" | "running" | "paused" | "detached";
+  breakpoints: number[];
+  ready: DebugReadyState | null;
+  paused: DebugPauseState | null;
+  /** Most recent non-pausing (synchronous-context) breakpoint report. */
+  lastSnapshot: DebugSnapshotState | null;
+}
+
+const debugSessions = new Map<string, DebugSessionState>();
+
+/** Broadcast the session so every editor surface can re-render it. */
+function emitDebugState(session: DebugSessionState | null, scriptId: string): void {
+  emitAppEvent("objectscript:debug-state", { scriptId, session });
+}
+
+/** The open session for a script, if any. */
+export function getDebugSession(scriptId: string): DebugSessionState | null {
+  return debugSessions.get(scriptId) ?? null;
+}
+
+/** Every open session (transparency: the user can see what is being debugged). */
+export function listDebugSessions(): DebugSessionState[] {
+  return [...debugSessions.values()];
+}
+
+/**
+ * True while this script is suspended at a yield point. Callers that hold a
+ * user-visible operation open (commit verdicts, save/close verdicts) use it to
+ * skip the wait entirely instead of burning their deadline on a script that is
+ * provably not going to answer.
+ */
+export function isScriptDebugPaused(scriptId: string): boolean {
+  return debugSessions.get(scriptId)?.status === "paused";
+}
+
+/**
+ * Open a debug session on a mounted script and remount it instrumented.
+ *
+ * Rejects for an unknown/unmounted script: the session is built from the
+ * AUTHORITATIVE mount definition the host already holds, never from anything
+ * the caller supplies beyond the breakpoint lines.
+ */
+export async function hostStartDebugSession(
+  scriptId: string,
+  breakpoints: number[] = [],
+  options: { pauseOnEntry?: boolean } = {},
+): Promise<DebugSessionState> {
+  const mw = mounted.get(scriptId);
+  if (!mw) {
+    throw new Error("Cannot debug a script that is not mounted — apply it first.");
+  }
+  const definition = mw.definition;
+  const session: DebugSessionState = {
+    scriptId,
+    scriptName: definition.name,
+    status: "starting",
+    breakpoints: normalizeBreakpointLines(breakpoints),
+    ready: null,
+    paused: null,
+    lastSnapshot: null,
+  };
+  debugSessions.set(scriptId, session);
+  pauseOnEntryOnce.set(scriptId, options.pauseOnEntry === true);
+  emitDebugState(session, scriptId);
+  try {
+    // Ungated remount on purpose: this is already-consented code being
+    // relaunched, exactly like the crash-respawn path. Re-gating here would
+    // prompt mid-session for a script the user is already running.
+    await mountWorker(definition);
+  } catch (err) {
+    debugSessions.delete(scriptId);
+    pauseOnEntryOnce.delete(scriptId);
+    emitDebugState(null, scriptId);
+    throw err;
+  }
+  return session;
+}
+
+/**
+ * End a session: release any pause FIRST (a stop must always resume — a script
+ * may never be left suspended by the act of closing the debugger), then remount
+ * the script from its original source so no instrumentation survives.
+ */
+export async function hostStopDebugSession(scriptId: string): Promise<void> {
+  const session = debugSessions.get(scriptId);
+  if (!session) return;
+  const mw = mounted.get(scriptId);
+  if (mw) {
+    post(mw, { t: "debugControl", action: "stop" });
+  }
+  debugSessions.delete(scriptId);
+  pauseOnEntryOnce.delete(scriptId);
+  emitDebugState(null, scriptId);
+  if (mw) {
+    await mountWorker(mw.definition);
+  }
+}
+
+/** Drive a running session (continue / step / pause). */
+export function hostDebugControl(scriptId: string, action: DebugAction): void {
+  const session = debugSessions.get(scriptId);
+  if (!session) return;
+  if (action === "stop") {
+    void hostStopDebugSession(scriptId);
+    return;
+  }
+  const mw = mounted.get(scriptId);
+  if (!mw) return;
+  post(mw, { t: "debugControl", action });
+  if (session.status === "paused") {
+    session.status = "running";
+    session.paused = null;
+    emitDebugState(session, scriptId);
+  }
+}
+
+/** Move breakpoints mid-session — live data, no remount. */
+export function hostSetDebugBreakpoints(scriptId: string, lines: number[]): void {
+  const normalized = normalizeBreakpointLines(lines);
+  const session = debugSessions.get(scriptId);
+  if (session) {
+    session.breakpoints = normalized;
+    emitDebugState(session, scriptId);
+  }
+  const mw = mounted.get(scriptId);
+  if (mw && session) {
+    post(mw, { t: "debugBreakpoints", lines: normalized });
+  }
+}
+
+function normalizeBreakpointLines(lines: number[]): number[] {
+  const set = new Set<number>();
+  for (const n of lines) {
+    if (Number.isInteger(n) && n > 0) set.add(n);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+/** pauseOnEntry applies to the mount that starts the session, not to later ones. */
+const pauseOnEntryOnce = new Map<string, boolean>();
+
+function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${string}` }>): void {
+  const scriptId = mw.definition.id;
+  const session = debugSessions.get(scriptId);
+  if (!session) return;
+  switch (msg.t) {
+    case "debugReady":
+      session.ready = msg.state;
+      session.status = "running";
+      break;
+    case "debugPaused":
+      session.status = "paused";
+      session.paused = msg.state;
+      // The script stopped before finishing `setup` — hold the mount deadline
+      // open for as long as the user keeps it there.
+      mw.suspendMountDeadline?.();
+      break;
+    case "debugResumed":
+      session.status = "running";
+      session.paused = null;
+      mw.resumeMountDeadline?.();
+      break;
+    case "debugSnapshot":
+      session.lastSnapshot = msg.state;
+      break;
+  }
+  emitDebugState(session, scriptId);
 }
 
 // ============================================================================
@@ -574,6 +1084,12 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
           stack: msg.stack,
           hook: msg.hook,
         });
+        break;
+      case "debugReady":
+      case "debugPaused":
+      case "debugResumed":
+      case "debugSnapshot":
+        handleDebugMessage(mw, msg);
         break;
       case "validated":
       case "pong":
@@ -676,7 +1192,18 @@ async function maybeRequestCapabilityGrant(
     } catch (e) {
       console.error("[caps] failed to mirror net.fetch origin to backend:", e);
     }
-    // (decision === "always" persistence across reload lands in Phase 4.2.)
+    if (decision === "always") {
+      // Persisted per workbook + script + SOURCE HASH, and per ORIGIN: another
+      // origin re-prompts even though net.fetch itself is now remembered.
+      await persistAlwaysGrant({
+        scriptId: handle.scriptId,
+        scriptName: handle.scriptName,
+        source: mw.definition.source,
+        origin: handle.origin,
+        capability: cap,
+        netOrigin: origin,
+      });
+    }
     return;
   }
 
@@ -695,6 +1222,19 @@ async function maybeRequestCapabilityGrant(
     // re-check it per call).
     if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
       await grantBackendCapability(handle.scriptId, cap);
+    }
+    if (decision === "always") {
+      // "Always" now survives a restart — bound to this workbook and to this
+      // script's exact source. This is what makes a `schedule` job restored
+      // from the .cala able to fire without re-asking (§7.10).
+      await persistAlwaysGrant({
+        scriptId: handle.scriptId,
+        scriptName: handle.scriptName,
+        source: mw.definition.source,
+        origin: handle.origin,
+        capability: cap,
+        netOrigin: null,
+      });
     }
   }
 }
@@ -975,6 +1515,16 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await grid.freezePanes(freezeRow ?? null, freezeCol ?? null);
       return undefined;
     }
+    case "api.splitPanes": {
+      // The freeze row's twin, and the same orchestrator shape: @api/grid
+      // persists the split AND emits SPLIT_CHANGED, which the Shell bridges into
+      // Core's split config — the same path View ▸ Split uses. Nothing about the
+      // document changes, only what is on screen.
+      const [splitRow, splitCol] = args as [number | null, number | null];
+      const grid = await import("../grid");
+      await grid.splitWindow(splitRow ?? null, splitCol ?? null);
+      return undefined;
+    }
 
     // ---- unlocked: sheet CRUD (B2) ----
     case "api.addSheet": {
@@ -1029,6 +1579,52 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await announceSheetsChanged(result);
       return undefined;
     }
+    case "api.moveSheet": {
+      // Reordering renumbers OTHER sheets, so a script holding indexes must
+      // re-read after this. Both ends are checked against the live list first:
+      // move_sheet clamps out-of-range silently, and a silent clamp is a script
+      // that thinks it moved a sheet somewhere it did not.
+      const [fromIndex, toIndex] = args as [number, number];
+      const lib = await getLib();
+      const before = await lib.getSheets();
+      if (!before.sheets.some((s) => s.index === fromIndex)) {
+        throw new BrokerError("ValidationError", `No sheet with index ${fromIndex}`);
+      }
+      if (toIndex >= before.sheets.length) {
+        throw new BrokerError(
+          "ValidationError",
+          `toIndex ${toIndex} is past the last position (${before.sheets.length - 1})`,
+        );
+      }
+      const result = await lib.moveSheet(fromIndex, toIndex);
+      await announceSheetsChanged(result);
+      return undefined;
+    }
+    case "api.copySheet": {
+      // copy_sheet inserts the duplicate immediately after its source, so every
+      // index at or after that point shifts by one — the same "re-read your
+      // indexes" contract as moveSheet. The new sheet is resolved by comparing
+      // the list BEFORE and AFTER rather than by arithmetic on the insert
+      // position, so a backend that changes where it inserts cannot make this
+      // return the wrong sheet.
+      const [sourceIndex, newName] = args as [number, string?];
+      const lib = await getLib();
+      const before = await lib.getSheets();
+      if (!before.sheets.some((s) => s.index === sourceIndex)) {
+        throw new BrokerError("ValidationError", `No sheet with index ${sourceIndex}`);
+      }
+      if (newName !== undefined && newName !== null) {
+        await assertSheetNameFree(lib, newName, null);
+      }
+      const result = await lib.copySheet(sourceIndex, newName ?? undefined);
+      await announceSheetsChanged(result);
+      const beforeNames = new Set(before.sheets.map((s) => s.name));
+      const added = result.sheets.find((s) => !beforeNames.has(s.name));
+      if (!added) {
+        throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
+      }
+      return { index: added.index, name: added.name };
+    }
 
     // ---- unlocked: sort + find/replace (B2) ----
     case "api.sortRange": {
@@ -1056,6 +1652,40 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await afterCellDataChange(result.updatedCells);
       return result.sortedCount;
     }
+    // ---- the WorksheetFunction bridge (G4) ----
+    // Nothing is written and nothing is remembered: the Rust command builds a
+    // throwaway evaluator over the live grid, answers, and drops it. So this is
+    // a READ, and its reach is exactly api.getRangeValues' reach.
+    case "api.evaluate": {
+      const [expressions, options] = args as [string[], { sheetIndex?: number } | undefined];
+      const mod = await import("../formulaEval");
+      return mod.evaluateFormulasTyped(expressions, options?.sheetIndex);
+    }
+    // ---- explicit formula read/write, A1 or R1C1 (G4) ----
+    case "api.getCellFormula": {
+      const [row, col, options] = args as [number, number, ScriptFormulaOptions | undefined];
+      const lib = await getLib();
+      return readCellFormula(lib, options?.sheetIndex, row, col, options?.style);
+    }
+    case "api.setCellFormula": {
+      const [row, col, formula, options] = args as
+        [number, number, string | null, ScriptFormulaOptions | undefined];
+      const lib = await getLib();
+      await writeCellFormula(lib, definition.id, options?.sheetIndex, row, col, formula, options?.style);
+      return undefined;
+    }
+    // ---- range copy / paste / paste special (G4) ----
+    case "api.copyRange": {
+      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
+        [number, number, number, number, number?];
+      const lib = await getLib();
+      return copyRangeToScriptClipboard(lib, definition.id, sheetIndex, startRow, startCol, endRow, endCol);
+    }
+    case "api.pasteRange": {
+      const [row, col, options] = args as [number, number, ScriptPasteOptions | undefined];
+      const lib = await getLib();
+      return pasteScriptClipboard(lib, definition.id, row, col, options ?? {});
+    }
     case "api.findAll": {
       const [query, options] = args as [string, Record<string, boolean> | undefined];
       const lib = await getLib();
@@ -1081,6 +1711,57 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // claimed writeback region outright (it rejects, naming the region),
       // rather than silently completing a partial edit.
       return { replacementCount: result.replacementCount };
+    }
+
+    // ---- unlocked: column filtering / AutoFilter (G4) ----
+    //
+    // ALL SIX go through @api/autoFilterService, never through the backend
+    // commands directly, and that is a correctness requirement rather than a
+    // layering preference. The AutoFilter extension caches the filter's range,
+    // and a chevron click sends a column index RELATIVE to that cached start
+    // column, which the backend then resolves against ITS start column. Filter
+    // behind the cache's back and the next click filters a different column than
+    // the one the user pressed. The seam is also what pushes the hidden-row set
+    // into Core and re-syncs the chevron regions, so it is the only door that
+    // leaves the grid showing what the backend believes.
+    //
+    // Nothing here touches `Table.autoFilterId`. That link is DERIVED state that
+    // Rust recomputes in relink_autofilter_owner inside the very commands these
+    // calls reach (after releasing the auto_filters guard, because the canonical
+    // lock order is tables -> auto_filters). Maintaining it from here would both
+    // duplicate that rule and get it wrong.
+    case "api.autoFilterGet":
+    case "api.autoFilterListValues":
+    case "api.autoFilterApply":
+    case "api.autoFilterSetColumn":
+    case "api.autoFilterClear":
+    case "api.autoFilterRemove":
+      return executeAutoFilter(method, args);
+
+    // ---- unlocked: workbook file lifecycle (G1) ----
+    //
+    // Every one of these delegates to core/lib/file-api — the SAME functions the
+    // File menu and Ctrl+S call. That is the requirement, not a convenience: the
+    // Before-Save veto, the BEFORE_SAVE/AFTER_SAVE broadcasts, the dirty-state
+    // event, the window title and the .xlsx lossy-save consent all live there,
+    // and a script-initiated save that reimplemented any of them would be a save
+    // the user cannot veto or be warned about.
+    case "api.workbookSave":
+      return executeWorkbookSave(definition.id, "save");
+    case "api.workbookSaveAs":
+      return executeWorkbookSave(definition.id, "saveAs");
+    case "api.workbookIsDirty": {
+      const fs = await import("../filesystem");
+      return fs.isFileModified();
+    }
+    case "api.workbookFileName": {
+      // NAME ONLY. The full path is withheld on purpose: a sandboxed script has
+      // no API that takes a path, so the directory buys it nothing — while
+      // "C:\Users\<real name>\Consulting\ClientX" handed to a script that also
+      // holds net.fetch is an exfiltration the fetch consent never covered.
+      const fs = await import("../filesystem");
+      const path = await fs.getCurrentFilePath();
+      return path ? fs.fileNameOf(path) : null;
     }
 
     // ---- unlocked: workbook objects (B3) ----
@@ -1258,6 +1939,22 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await writeCellsOnSheet(lib, definition.id, targetSheet, active, updates);
       return undefined;
     }
+    case "sheet.getCellFormula": {
+      const [row, col, options] = args as [number, number, ScriptFormulaOptions | undefined];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, options?.sheetIndex);
+      return readCellFormula(lib, target, row, col, options?.style);
+    }
+    case "sheet.setCellFormula": {
+      const [row, col, formula, options] = args as
+        [number, number, string | null, ScriptFormulaOptions | undefined];
+      const lib = await getLib();
+      // clampSheetIndex refuses a restricted script that named ANOTHER sheet
+      // before a single character of the formula is drafted anywhere.
+      const target = await clampSheetIndex(lib, handle, options?.sheetIndex);
+      await writeCellFormula(lib, definition.id, target, row, col, formula, options?.style);
+      return undefined;
+    }
     case "sheet.setRangeFormat": {
       // Own-sheet formatting: identical reach to sheet.setRangeValues (clamped
       // to the script's sheet), appearance instead of content.
@@ -1417,6 +2114,149 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       });
       if (answer.dismissed) return null;
       return answer.value !== null && typeof answer.value === "object" ? answer.value : null;
+    }
+    // ---- file.picker: the user picks the file, the host does the I/O ----
+    //
+    // The broker has already enforced that file.picker was declared (R19) and
+    // granted, and vFileExport/vFileImport have already rejected any
+    // suggestedName that is a path in disguise. What is left here is the part
+    // that makes this safe where VBA's FileSystemObject was not: the ONLY thing
+    // that selects a file is a native picker the human drives. There is no
+    // argument on either call that can name a location, and none is
+    // reconstructed from anything the script sent.
+    case "cap.fileExportText": {
+      const [suggestedName, content, options] = args as [
+        string,
+        string,
+        { mimeType?: string; encoding?: PickerTextEncoding; description?: string } | undefined,
+      ];
+      const fs = await import("../filesystem");
+      const extension = fileExtensionOf(suggestedName);
+      return fs.exportTextViaPicker({
+        suggestedName,
+        content,
+        title: `${definition.name} — save a file`,
+        filterName: filterLabelFor(options?.description, options?.mimeType, extension),
+        filterExtensions: extension ? [extension] : [],
+        encoding: options?.encoding,
+      });
+    }
+    case "cap.fileImportText": {
+      const [options] = args as [{ extensions?: string[]; description?: string } | undefined];
+      const fs = await import("../filesystem");
+      const extensions = (options?.extensions ?? []).map((e) => e.toLowerCase());
+      // Cancellation resolves null (never hangs, never rejects); an oversize
+      // file rejects rather than truncating.
+      return fs.importTextViaPicker({
+        title: `${definition.name} — open a file`,
+        filterName: filterLabelFor(options?.description, undefined, extensions[0]),
+        filterExtensions: extensions,
+        maxChars: MAX_FILE_TEXT_CHARS,
+      });
+    }
+    // PRINTING (G4). The script names a FILE and nothing else — it supplies no
+    // bytes, so this cannot become "write whatever I like wherever the user can
+    // be persuaded to click". The document is rendered by TRUSTED code through
+    // the feature-neutral @api/printService seam, from the workbook's own page
+    // setup, print area, print titles, page breaks and headers/footers: the same
+    // generatePdf(getPrintData()) the File menu runs. Then the same picker
+    // cap.fileExportText uses, driven by the same human.
+    case "cap.filePrintPdf": {
+      const [suggestedName] = args as [string?];
+      const printService = await import("../printService");
+      // Rendered BEFORE the picker opens on purpose: if no print provider is
+      // registered (the Print extension is disabled) the script gets a clear
+      // refusal instead of a file dialog that ends in an empty file.
+      const bytes = await printService.renderWorkbookPdf();
+      const fs = await import("../filesystem");
+      return fs.exportBinaryViaPicker({
+        suggestedName: suggestedName ?? (await defaultPdfName(fs)),
+        bytes,
+        title: `${definition.name} — save a PDF`,
+        filterName: "PDF file",
+        filterExtensions: ["pdf"],
+      });
+    }
+    // ---- ui.shortcut: one combination, bound to one exposed method ----
+    //
+    // WHAT THIS EXECUTOR DELIBERATELY DOES NOT DO: install a key listener.
+    // There is exactly one keydown listener in the app (keybindings.ts), and it
+    // stays the only one — a second listener would be a second policy, and a
+    // second policy is how a script ends up seeing keys nobody granted it. All
+    // this does is ask the registry for one combination and hand it a runner.
+    //
+    // THE RUNNER IS THE WHOLE TRUST BOUNDARY, so read it closely:
+    //   - it re-checks that THIS mount is still the live one (a remount gets a
+    //     fresh MountedWorker; a stale closure must not reach into it),
+    //   - it re-checks that the script still EXPOSES the named method AND that
+    //     the exposure is still owned by this script — hostCallExposed keys on
+    //     (objectType, instanceId, name), so without the owner check a second
+    //     script on the same object could inherit a shortcut it never asked
+    //     for,
+    //   - it passes `{ combo }` and nothing else. Not the DOM event, not the
+    //     key, not the target, not a repeat flag. A script learns that ITS
+    //     shortcut fired, never what the user typed.
+    // Invocation goes through callExposedMethod — the same door a scheduled job
+    // and a cross-script call use. There is no second way into a script realm.
+    case "cap.shortcutBind": {
+      const [combo, handler, options] = args as [string, string, { label?: string } | undefined];
+      const kb = await import("../keybindings");
+      const scriptId = definition.id;
+      const objectType = definition.objectType;
+      const boundInstanceId = definition.instanceId;
+      const handlerName = handler.trim();
+      const result = kb.registerScriptKeybinding({
+        scriptId,
+        scriptName: definition.name,
+        combo,
+        handler: handlerName,
+        label: options?.label,
+        run: (firedCombo: string) => {
+          if (mounted.get(scriptId) !== mw) return;
+          const exposed = listExposed().find(
+            (m) =>
+              m.ownerScriptId === scriptId &&
+              m.objectType === objectType &&
+              m.instanceId === boundInstanceId &&
+              m.methodName === handlerName,
+          );
+          if (!exposed) {
+            console.warn(
+              `[Keybindings] ${firedCombo}: "${definition.name}" no longer exposes ${handlerName}()`,
+            );
+            return;
+          }
+          void Promise.resolve(
+            hostCallExposed(objectType, boundInstanceId, handlerName, [{ combo: firedCombo }]),
+          ).catch((err) => {
+            console.error(`[Keybindings] ${firedCombo} -> ${handlerName}() failed:`, err);
+          });
+        },
+      });
+      if (!result.ok) {
+        // A refusal is LOUD and reaches the author verbatim: a shortcut that
+        // silently did not take is the failure mode this whole design exists to
+        // avoid. PermissionDenied for a policy refusal (reserved / already
+        // taken / too many), ValidationError only for a malformed request.
+        throw new BrokerError(
+          result.code === "invalid" ? "ValidationError" : "PermissionDenied",
+          result.reason,
+        );
+      }
+      // Bound for as long as this mount lives, and not one keystroke longer.
+      // (hostUnmountScript ALSO sweeps by scriptId, so a shortcut cannot
+      // survive on a cleanup list that failed to run.)
+      mw.cleanupFns.push(() => kb.revokeScriptKeybinding(result.binding.id));
+      return { ...result.binding };
+    }
+    case "cap.shortcutUnbind": {
+      const [combo] = args as [string];
+      const { revokeScriptKeybindingCombo } = await import("../keybindings");
+      return revokeScriptKeybindingCombo(definition.id, combo);
+    }
+    case "cap.shortcutList": {
+      const { listScriptKeybindings } = await import("../keybindings");
+      return listScriptKeybindings(definition.id);
     }
     case "cap.storageGet": {
       // The broker already enforced `storage` is declared (R19 ceiling) and
@@ -2118,6 +2958,454 @@ async function readTypedCell(
 ): Promise<ScriptCell> {
   const grid = await readTypedRange(lib, sheetIndex, row, col, row, col);
   return grid[0][0];
+}
+
+// ============================================================================
+// Explicit formula read/write, with a reference style (G4)
+// ============================================================================
+// `getCellData().formula` could already answer "what formula is in this cell",
+// but only in A1, and there was NO way to author one except by passing a value
+// string to setCellValue. These two helpers make both directions explicit and
+// add the R1C1 spelling — VBA's `Range.FormulaR1C1`.
+//
+// THE STYLE IS THE CALLER'S CLAIM, NEVER THE USER'S SETTING. A script that says
+// "R1C1" means it; the View ▸ R1C1 toggle a user flipped an hour ago must not
+// silently change what a script's string means. So the conversion base is the
+// TARGET CELL's own coordinates and the style comes from the argument, never
+// from get_reference_style.
+//
+// KNOWN EDGE (inherited, documented rather than hidden): the A1<->R1C1 converter
+// in app/src-tauri/src/r1c1.rs is regex-based over the formula text. It skips
+// string literals and refuses matches adjacent to identifier characters, but a
+// DEFINED NAME that looks like a reference (a name literally called `RC` or
+// `R1C1`) would be rewritten. Formulas that use only cell references, ranges and
+// functions — which is what this API exists for — convert exactly.
+
+export interface ScriptFormulaOptions {
+  style?: "A1" | "R1C1";
+  sheetIndex?: number;
+}
+
+// The four G4 helpers below are EXPORTED for the same reason executeWorkbookSave
+// is: what makes them safe (the R1C1 base cell, the writeback draft gate, the
+// per-cell reference shift, the refusal to paste an empty buffer) is otherwise
+// only reachable through a live worker realm, which jsdom cannot spawn. They
+// take their `lib` as a parameter precisely so a test can drive them.
+
+/**
+ * The formula in one cell, in the requested notation. `null` when the cell
+ * holds a plain value, is empty, or has its formula hidden by sheet protection
+ * (the typed read already withholds it there — this must not reveal what
+ * `getCellData` refuses to).
+ */
+export async function readCellFormula(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  row: number,
+  col: number,
+  style: "A1" | "R1C1" | undefined,
+): Promise<string | null> {
+  const cell = await readTypedCell(lib, sheetIndex, row, col);
+  const formula = cell.formula;
+  if (!formula) return null;
+  if (style !== "R1C1") return formula;
+  const grid = await import("../grid");
+  return grid.convertFormulaStyle(formula, "A1", "R1C1", row, col);
+}
+
+/**
+ * Put a formula into one cell.
+ *
+ * `null` CLEARS it (the honest spelling of "this cell should no longer compute
+ * anything"). A string is always written as a FORMULA — the leading `=` is
+ * added when the caller omitted it — because a method called setCellFormula
+ * that quietly stored text when you forgot one character is a trap; text goes
+ * through setCellValue, which is what it is for.
+ *
+ * Everything that makes an ordinary script write safe applies unchanged: the
+ * write is attributed (so the script's own range-behaviour handlers do not
+ * re-fire for it) and a .calp writeback cell is drafted through the same
+ * authoritative gate a human keystroke takes, or the whole call throws.
+ */
+export async function writeCellFormula(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  sheetIndex: number | undefined,
+  row: number,
+  col: number,
+  formula: string | null,
+  style: "A1" | "R1C1" | undefined,
+): Promise<void> {
+  const active = await lib.getActiveSheet();
+  const target = sheetIndex ?? (await activeSheetForWriteGuard(lib));
+  let value = "";
+  if (formula !== null) {
+    const trimmed = formula.trim();
+    if (trimmed.length > 0) {
+      const withEquals = trimmed.startsWith("=") ? trimmed : `=${trimmed}`;
+      value =
+        style === "R1C1"
+          ? await (await import("../grid")).convertFormulaStyle(withEquals, "R1C1", "A1", row, col)
+          : withEquals;
+    }
+  }
+  recordScriptWrite(scriptId, target, row, col);
+  await writeCellsOnSheet(lib, scriptId, target, active, [{ row, col, value }]);
+}
+
+// ============================================================================
+// Range copy / paste / paste special (G4)
+// ============================================================================
+//
+// THE ONE DECISION THAT MATTERS, stated where the code is: there is NO method
+// here that reads the operating system's clipboard, and none that writes it.
+//
+//   Reading it is ambient authority. What a person last copied is arbitrary —
+//   a password out of a password manager, a bank number, a sentence from a chat
+//   window — and it has nothing to do with this workbook. There is no way to
+//   scope it (a script cannot ask for "only the spreadsheet-shaped clipboards"),
+//   no way to write an honest consent line for it, and no way for a user to
+//   audit what was taken after the fact. So it is refused outright rather than
+//   sold as a capability.
+//
+//   Writing it is the other half of the same problem: it silently destroys what
+//   the user had in hand, and it is a channel out of Calcula into every other
+//   application on the machine — an exfiltration route that no consent given for
+//   "this script may read your cells" ever covered.
+//
+// What a script gets instead is a buffer of ITS OWN: per script, host-side,
+// never persisted, discarded when the script unmounts. Copy fills it from a
+// range the script names; paste writes it into a place the script names. That
+// is the whole of VBA's `Range.Copy` / `PasteSpecial` idiom, minus the ambient
+// part nobody needed.
+
+/** One captured cell. `styleIndex` is the workbook-local style-registry index,
+ *  which is why a paste can only target the same workbook — and it always does,
+ *  because the buffer never leaves this process. */
+interface ClipboardCell {
+  value: number | string | boolean | null;
+  display: string;
+  formula: string | null;
+  type: string;
+  styleIndex: number;
+}
+
+interface ScriptClipboard {
+  /** Where it was copied FROM — the base for relative-reference shifting. */
+  startRow: number;
+  startCol: number;
+  rows: number;
+  cols: number;
+  /** Dense rows x cols; a null entry is a cell that did not exist. */
+  cells: (ClipboardCell | null)[][];
+}
+
+// ============================================================================
+// Column filtering / AutoFilter (G4)
+// ============================================================================
+//
+// One executor behind six broker rows, because all six are the SAME act aimed
+// at the same object: the filter on the active sheet. Extracted from the switch
+// so the argument order — the whole failure surface here, since every AutoFilter
+// argument is a bare integer — is pinned by a test rather than by reading.
+//
+// THE ROUTING IS THE POINT. Every call goes through @api/autoFilterService, the
+// seam the AutoFilter extension registers, and NEVER through the backend
+// commands directly. The extension caches the filter's range, and a chevron
+// click sends a column index relative to that cache; filtering behind it leaves
+// the next click aimed at a different column, with the grid still showing rows
+// the backend believes are hidden.
+//
+// AND THE ABSENCE IS THE POINT TOO. Nothing here reads, writes or infers
+// `Table.autoFilterId`. That link is DERIVED state recomputed by Rust
+// (relink_autofilter_owner) inside the very commands the controller reaches,
+// after releasing the auto_filters guard, because the canonical lock order is
+// tables -> auto_filters. There is no correct way to maintain it from the
+// frontend and no reason to try.
+
+/** Exported for tests: the AutoFilter executor, driven with a fake controller
+ *  (a live worker realm is not available under jsdom). */
+export async function executeAutoFilter(method: string, args: unknown[]): Promise<unknown> {
+  const svc = await import("../autoFilterService");
+  // Throws a plain Error when the AutoFilter extension is not loaded; the
+  // broker turns that into a HostError the script can see, which is the honest
+  // outcome — the alternative is filtering somewhere the user cannot look.
+  const filter = svc.requireAutoFilterController();
+  switch (method) {
+    case "api.autoFilterGet":
+      return filter.get();
+    case "api.autoFilterListValues": {
+      const [columnIndex] = args as [number];
+      return filter.listValues(columnIndex);
+    }
+    case "api.autoFilterApply": {
+      const [startRow, startCol, endRow, endCol] = args as [number, number, number, number];
+      return filter.apply(startRow, startCol, endRow, endCol);
+    }
+    case "api.autoFilterSetColumn": {
+      // vAutoFilterCriteria has already proved the discriminated shape, so the
+      // cast lands on a validated payload.
+      const [columnIndex, criteria] = args as [number, AutoFilterColumnCriteria];
+      return filter.setColumn(columnIndex, criteria);
+    }
+    case "api.autoFilterClear": {
+      const [columnIndex] = args as [number | null | undefined];
+      return filter.clear(columnIndex ?? null);
+    }
+    case "api.autoFilterRemove":
+      await filter.remove();
+      return undefined;
+    default:
+      throw new BrokerError("UnknownMethod", `Unknown AutoFilter method: ${method}`);
+  }
+}
+
+/** scriptId -> that script's private clipboard. Never shared, never persisted. */
+const scriptClipboards = new Map<string, ScriptClipboard>();
+
+/** What copy/paste answer with, so a script can size its own layout. */
+export interface ScriptClipboardSize {
+  rows: number;
+  cols: number;
+}
+
+/** Forget one script's clipboard (unmount) or all of them (workbook reset). */
+export function clearScriptClipboard(scriptId?: string): void {
+  if (scriptId === undefined) scriptClipboards.clear();
+  else scriptClipboards.delete(scriptId);
+}
+
+/** Test/inspection hook: the size of a script's buffer, or null if empty. */
+export function scriptClipboardSize(scriptId: string): ScriptClipboardSize | null {
+  const clip = scriptClipboards.get(scriptId);
+  return clip ? { rows: clip.rows, cols: clip.cols } : null;
+}
+
+/**
+ * Capture a rectangle into the calling script's private clipboard.
+ *
+ * ACTIVE SHEET ONLY, and refused (never silently redirected) otherwise: the
+ * typed read is sheet-aware but `get_viewport_cells` — the only bulk source of
+ * STYLE INDEXES — is not, and a copy that silently dropped every cell's
+ * formatting on another sheet would be a paste that looks like it worked. Same
+ * rule, same message, as sortRange / mergeCells / replaceAll.
+ */
+export async function copyRangeToScriptClipboard(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  sheetIndex: number | undefined,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<ScriptClipboardSize> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  await assertActiveSheet(lib, sheetIndex, "copyRange");
+  const rows = endRow - startRow + 1;
+  const cols = endCol - startCol + 1;
+  // Two reads, one rectangle: the typed one carries value/type/formula, the
+  // viewport one carries styleIndex. Neither shape alone can express a paste.
+  const [typed, styled] = await Promise.all([
+    lib.getRangeCellsTyped(startRow, startCol, endRow, endCol),
+    lib.getViewportCells(startRow, startCol, endRow, endCol),
+  ]);
+  const styleAt = new Map<string, number>();
+  for (const c of styled) styleAt.set(`${c.row},${c.col}`, c.styleIndex ?? 0);
+
+  const cells: (ClipboardCell | null)[][] = [];
+  for (let r = 0; r < rows; r++) cells.push(new Array<ClipboardCell | null>(cols).fill(null));
+  for (const c of typed) {
+    const r = c.row - startRow;
+    const k = c.col - startCol;
+    if (r < 0 || r >= rows || k < 0 || k >= cols) continue;
+    cells[r][k] = {
+      value: c.value,
+      display: c.display,
+      formula: c.formula ?? null,
+      type: c.type,
+      styleIndex: styleAt.get(`${c.row},${c.col}`) ?? 0,
+    };
+  }
+  // A style-only cell has no typed entry (the backend keeps the payload sparse)
+  // but still carries formatting worth pasting.
+  for (const c of styled) {
+    const r = c.row - startRow;
+    const k = c.col - startCol;
+    if (r < 0 || r >= rows || k < 0 || k >= cols) continue;
+    if (cells[r][k] === null && (c.styleIndex ?? 0) !== 0) {
+      cells[r][k] = { value: null, display: "", formula: null, type: "empty", styleIndex: c.styleIndex ?? 0 };
+    }
+  }
+  scriptClipboards.set(scriptId, { startRow, startCol, rows, cols, cells });
+  return { rows, cols };
+}
+
+export interface ScriptPasteOptions {
+  mode?: "all" | "values" | "formulas";
+  transpose?: boolean;
+  skipBlanks?: boolean;
+  sheetIndex?: number;
+}
+
+/**
+ * The string that reproduces a captured cell's VALUE (not its formula).
+ *
+ * Numbers and booleans are written INVARIANT — "1234.5", "TRUE" — so a paste on
+ * a sv-SE workbook does not turn 1234.5 into text because the decimal separator
+ * disagreed. `display` is deliberately not used: it is formatted ("1 234,50 kr")
+ * and writing it back would store text where a number was.
+ */
+function clipboardValueString(cell: ClipboardCell): { value: string; invariant: boolean } {
+  switch (cell.type) {
+    case "number":
+      return { value: typeof cell.value === "number" ? String(cell.value) : cell.display, invariant: true };
+    case "boolean":
+      return { value: cell.value ? "TRUE" : "FALSE", invariant: true };
+    case "empty":
+      return { value: "", invariant: false };
+    // "error" carries its Excel literal ("#DIV/0!") and "text" its own text.
+    default:
+      return { value: typeof cell.value === "string" ? cell.value : cell.display, invariant: false };
+  }
+}
+
+/**
+ * Write the calling script's clipboard into the grid at (row, col).
+ *
+ * ACTIVE SHEET ONLY, for the same reason copy is: `update_cells_batch` is the
+ * only write that carries a style index, and it has no sheet parameter.
+ *
+ * Relative references are shifted PER CELL (source position -> destination
+ * position), which is also what makes `transpose` correct: a transposed paste
+ * gives each formula its own row/column delta rather than one delta for the
+ * block. Mode "values" writes no formulas at all and mode "formulas" carries no
+ * styles, which is the PasteSpecial vocabulary a macro author expects.
+ */
+export async function pasteScriptClipboard(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  row: number,
+  col: number,
+  options: ScriptPasteOptions,
+): Promise<ScriptClipboardSize> {
+  const clip = scriptClipboards.get(scriptId);
+  if (!clip) {
+    throw new BrokerError(
+      "HostError",
+      "nothing to paste: call copyRange(...) first (each script has its own clipboard, and it is empty when the script starts)",
+    );
+  }
+  const active = await assertActiveSheet(lib, options.sheetIndex, "pasteRange");
+  const mode = options.mode ?? "all";
+  const transpose = options.transpose === true;
+  const destRows = transpose ? clip.cols : clip.rows;
+  const destCols = transpose ? clip.rows : clip.cols;
+  assertRangeSize(row, col, row + destRows - 1, col + destCols - 1);
+
+  // Pass 1: decide every destination cell, and collect the formulas that need
+  // shifting (one batched round trip, never one call per formula).
+  interface Pending {
+    row: number;
+    col: number;
+    value: string;
+    invariant: boolean;
+    styleIndex?: number;
+    shiftIndex?: number;
+  }
+  const pending: Pending[] = [];
+  const shifts: Array<{ formula: string; rowDelta: number; colDelta: number }> = [];
+  for (let r = 0; r < clip.rows; r++) {
+    for (let c = 0; c < clip.cols; c++) {
+      const cell = clip.cells[r][c];
+      if (cell === null && options.skipBlanks === true) continue;
+      const destRow = row + (transpose ? c : r);
+      const destCol = col + (transpose ? r : c);
+      if (cell === null) {
+        // A blank source cell CLEARS its destination — that is what a paste of a
+        // rectangle means. `skipBlanks` above is how a caller says otherwise.
+        pending.push({ row: destRow, col: destCol, value: "", invariant: false });
+        continue;
+      }
+      const entry: Pending = { row: destRow, col: destCol, value: "", invariant: false };
+      if (mode !== "values" && cell.formula) {
+        const rowDelta = destRow - (clip.startRow + r);
+        const colDelta = destCol - (clip.startCol + c);
+        if (rowDelta === 0 && colDelta === 0) {
+          entry.value = cell.formula;
+        } else {
+          entry.shiftIndex = shifts.length;
+          shifts.push({ formula: cell.formula, rowDelta, colDelta });
+        }
+      } else {
+        const v = clipboardValueString(cell);
+        entry.value = v.value;
+        entry.invariant = v.invariant;
+      }
+      if (mode === "all") entry.styleIndex = cell.styleIndex;
+      pending.push(entry);
+    }
+  }
+  if (shifts.length > 0) {
+    const shifted = await lib.shiftFormulasBatch(shifts);
+    for (const p of pending) {
+      if (p.shiftIndex !== undefined) p.value = shifted[p.shiftIndex];
+    }
+  }
+  if (pending.length === 0) return { rows: destRows, cols: destCols };
+
+  // Pass 2: the write, on exactly the same terms as any other script write —
+  // attributed (no self-echo into the script's own onChange), and every cell
+  // claimed by a .calp writeback region drafted through the authoritative gate
+  // instead of being written behind the publisher's schema.
+  for (const p of pending) recordScriptWrite(scriptId, active, p.row, p.col);
+  const { plain, drafted } = await captureWritebackWrites(
+    scriptId,
+    pending.map((p) => ({ sheetIndex: active, row: p.row, col: p.col, value: p.value })),
+  );
+  const byCoord = new Map(pending.map((p) => [`${p.row},${p.col}`, p]));
+  const updates = plain.map((w) => {
+    const p = byCoord.get(`${w.row},${w.col}`);
+    const update: { row: number; col: number; value: string; styleIndex?: number; invariant?: boolean } = {
+      row: w.row,
+      col: w.col,
+      value: w.value,
+    };
+    if (p?.styleIndex !== undefined) update.styleIndex = p.styleIndex;
+    if (p?.invariant) update.invariant = true;
+    return update;
+  });
+  await withScriptUndoBatch(lib, `Paste ${pending.length} cells`, async () => {
+    if (updates.length > 0) {
+      const changed = await lib.updateCellsBatch(updates);
+      await afterCellDataChange(changed);
+    }
+    // update_cells_batch DROPS writeback cells, so a drafted one is written on
+    // its own or the grid would show nothing at all (same rule as
+    // api.updateCellsBatch).
+    for (const w of drafted) {
+      await lib.updateCell(w.row, w.col, w.value);
+    }
+  });
+  return { rows: destRows, cols: destCols };
+}
+
+/** The picker's pre-filled name for a script-requested PDF: this workbook's own
+ *  file name with a .pdf extension, or a neutral default when it has never been
+ *  saved. The FULL PATH is never used or returned — only the last segment, which
+ *  is exactly what api.workbookFileName already gives a script. */
+async function defaultPdfName(fs: typeof import("../filesystem")): Promise<string> {
+  try {
+    const path = await fs.getCurrentFilePath();
+    if (path) {
+      const name = fs.fileNameOf(path);
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      if (stem.length > 0) return `${stem}.pdf`;
+    }
+  } catch {
+    // A workbook with no file is the normal case, not an error.
+  }
+  return "workbook.pdf";
 }
 
 /**
@@ -2836,6 +4124,11 @@ export async function callRangeBeforeCommit(
 ): Promise<RangeCommitVerdict | null> {
   const mw = mounted.get(scriptId);
   if (!mw) return null;
+  if (isScriptDebugPaused(scriptId)) {
+    // The script is suspended at a breakpoint. Waiting out the 1.5s deadline
+    // would only add latency to the user's Enter key before allowing anyway.
+    return null;
+  }
   try {
     const result = await Promise.race([
       relayMethodCall(mw, "__range_onBeforeCommit", [payload]),
@@ -2967,6 +4260,17 @@ export async function callWorkbookBeforeLifecycle(
 ): Promise<WorkbookLifecycleVerdict | null> {
   const mw = mounted.get(scriptId);
   if (!mw) return null;
+  if (isScriptDebugPaused(scriptId)) {
+    // DEBUGGING MUST NEVER MAKE A WORKBOOK UNSAVEABLE. A script stopped at a
+    // breakpoint cannot deliver a verdict, and the default-allow policy already
+    // says a verdict that does not arrive is not a veto — so skip the 3s wait
+    // and let the save/close through immediately.
+    console.warn(
+      `[ScriptHost] "${mw.definition.name}" is paused in the debugger — its ` +
+        `onBefore${action === "save" ? "Save" : "Close"} verdict is skipped (allowing the ${action}).`,
+    );
+    return null;
+  }
   return raceLifecycleVerdict(
     () => relayMethodCall(mw, LIFECYCLE_RELAY[action], [detail]),
     mw.definition.name,
@@ -2985,9 +4289,17 @@ function wireLifecycleGuardForwarder(mw: MountedWorker, action: LifecycleAction)
   return registerLifecycleGuard(
     async (a, detail): Promise<LifecycleGuardResult | null> => {
       if (a !== action) return null;
-      const verdict = await callWorkbookBeforeLifecycle(scriptId, action, detail);
-      if (!verdict?.cancel) return null;
-      return { by: mw.definition.name, reason: verdict.reason };
+      // While a verdict is being collected, a script-initiated save is refused
+      // (assertScriptSaveAllowed reads this depth). Without it, an onBeforeSave
+      // handler that calls api.workbook.save() re-enters checkLifecycleGuards
+      // and recurses; with it, that call rejects with a message naming the
+      // reason, the handler's throw is treated as "no objection" like any other,
+      // and the user's original save proceeds.
+      return withLifecycleVerdictDepth(async () => {
+        const verdict = await callWorkbookBeforeLifecycle(scriptId, action, detail);
+        if (!verdict?.cancel) return null;
+        return { by: mw.definition.name, reason: verdict.reason };
+      });
     },
   );
 }
@@ -3038,14 +4350,30 @@ function addForwarder(mw: MountedWorker, hook: string, unsub: CleanupFn): void {
 function wireAppEventForwarder(mw: MountedWorker, hook: string, eventName: string): void {
   if (mw.forwarders.has(hook)) return;
   // Payloads crossing into the sandbox are THINNED for events whose full
-  // payload carries capability-gated metadata (BI model events).
-  addForwarder(
-    mw,
-    hook,
-    onAppEvent(eventName, (detail) =>
-      forwardEvent(mw, hook, thinAppEventForScripts(eventName, detail)),
-    ),
+  // payload carries capability-gated metadata (BI model events, and the
+  // writeback-submission notification — see thinAppEventForScripts).
+  const unsub = onAppEvent(eventName, (detail) =>
+    forwardEvent(mw, hook, thinAppEventForScripts(eventName, detail)),
   );
+  // WRITEBACK_SUBMISSION_RECEIVED is the one app event that does not fire on
+  // its own: it is raised by the demand-driven publisher-inbox poll, which runs
+  // only while somebody holds a watch. Subscribing IS the demand, so acquire
+  // one here and release it with the forwarder — a script that stops listening
+  // (or is unmounted, or faults) must not leave a timer polling a registry on
+  // its behalf. Acquisition is async only because the module is lazily
+  // imported; the release closes over the promise so an unmount that lands
+  // first still releases.
+  if (eventName === AppEvents.WRITEBACK_SUBMISSION_RECEIVED) {
+    const releasing = import("../distribution")
+      .then((mod) => mod.acquireSubmissionWatch())
+      .catch(() => null);
+    addForwarder(mw, hook, () => {
+      unsub();
+      void releasing.then((release) => release?.());
+    });
+    return;
+  }
+  addForwarder(mw, hook, unsub);
 }
 
 /**

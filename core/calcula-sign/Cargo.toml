@@ -1,0 +1,20 @@
+[package]
+name = "calcula-sign"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Sign a Calcula add-in's sidecar manifest (Ed25519) — the author-facing publishing tool"
+
+[[bin]]
+name = "calcula-sign"
+path = "src/main.rs"
+
+# Deliberately dependency-light: all key handling, signing and verification is
+# calp::signing — the SAME code path that signs .calp packages. This crate owns
+# no crypto of its own.
+[dependencies]
+calp = { path = "../calp" }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

@@ -19,6 +19,13 @@ import {
   vObjectKind, vObjectId, vObjectAspect, vCreateChart, vCreateTable,
   vCreateNamedRange, vNamedRangeName, vCreatePivot, MAX_OBJECT_LIST,
   vDialogMessage, vDialogPrompt, vDialogForm,
+  vFileExport, vFileImport, MAX_FILE_TEXT_CHARS, MAX_FILE_NAME,
+  vShortcutBind, vShortcutUnbind,
+  vEvaluate, MAX_EVAL_EXPRESSIONS, MAX_EVAL_EXPRESSION_CHARS,
+  vFormulaRead, vFormulaWrite, vPasteRange, vPrintPdf,
+  vMoveSheet, vCopySheet, vSplit,
+  vAutoFilterRange, vAutoFilterColumn, vAutoFilterClear, vAutoFilterCriteria,
+  MAX_AUTOFILTER_COLUMNS, MAX_AUTOFILTER_VALUES,
   type Validator,
 } from "./validators";
 import { MAX_DIALOG_FIELDS, MAX_DIALOG_MESSAGE } from "./scriptDialogSpec";
@@ -33,12 +40,17 @@ export type { CapabilityId };
 export type Tier = "restricted" | "unlocked";
 /**
  * What a method DOES, for the transparency panel and the audit ring — and, for
- * "ui", for its deadline. "ui" is the one class whose completion is bounded by a
- * PERSON rather than by machine work: it blocks until the user answers a modal,
- * so protocol.ts gives it UI_DIALOG_DEADLINE_MS instead of the 30s that governs
+ * "ui" and "file", for its deadline. Those two are the classes whose completion
+ * is bounded by a PERSON rather than by machine work: "ui" blocks until the user
+ * answers a modal, "file" until the user picks a file in a native dialog. Both
+ * get UI_DIALOG_DEADLINE_MS in protocol.ts instead of the 30s that governs
  * everything else (CLASS_DEADLINES_MS).
+ *
+ * "file" is its own class rather than a flavour of "ui" because the panel line a
+ * user reads must not say "shows a dialog" about a method that also PUTS THEIR
+ * DATA ON DISK. The picker is the mechanism; the file is the consequence.
  */
-export type MethodClass = "read" | "mutate" | "emit" | "net" | "ui";
+export type MethodClass = "read" | "mutate" | "emit" | "net" | "ui" | "file";
 
 export interface MethodPolicy {
   /** Minimum tier ("restricted" = every script may call it). */
@@ -79,6 +91,15 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Read a block of cells on its own sheet in one go (values, types and formulas)" },
   "sheet.setRangeValues":  { tier: "restricted", class: "mutate", validate: vRangeWrite, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Write a block of cells on its own sheet in one go (a single undo step)" },
+  // Explicit formula read/write on its OWN sheet, clamped exactly like the two
+  // rows above. Same reach as sheet.setCellValue (a formula IS cell content);
+  // what these add is the R1C1 spelling, which is what makes "write this same
+  // relative formula down the whole column" one line instead of a loop that
+  // rebuilds an address per row.
+  "sheet.getCellFormula":  { tier: "restricted", class: "read",   validate: vFormulaRead,
+                             desc: "Read the formula in a cell on its own sheet, in ordinary A1 form or in R1C1 form" },
+  "sheet.setCellFormula":  { tier: "restricted", class: "mutate", validate: vFormulaWrite,
+                             desc: "Put a formula into a cell on its own sheet, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it)" },
   // Own-sheet FORMATTING (B2). Same reach as sheet.setRangeValues — the script's
   // own sheet, clamped — but it changes appearance instead of content, so it is
   // strictly less destructive than the write row above it.
@@ -119,13 +140,144 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.setRowHeight":      { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a row's height" },
   "api.setColumnWidth":    { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a column's width" },
   "api.freezePanes":       { tier: "unlocked", class: "mutate", validate: vFreeze,   desc: "Freeze (or unfreeze) rows and columns so they stay on screen while scrolling" },
+  // The other half of View ▸ Window, shipped one wave late (§6.6). Split is a
+  // VIEW setting like freeze — it changes what is on screen, never a value —
+  // and it is persisted per sheet by the same backend the View ribbon writes to,
+  // so a script setting it and a person setting it are the same act.
+  "api.splitPanes":        { tier: "unlocked", class: "mutate", validate: vSplit,
+                             desc: "Split the window into scrollable panes at a row and/or column (pass nothing to remove the split)" },
   "api.addSheet":          { tier: "unlocked", class: "mutate", validate: vSheetName, desc: "Add a new sheet to the workbook" },
   "api.deleteSheet":       { tier: "unlocked", class: "mutate", validate: vIndex,    desc: "Delete a sheet and everything on it" },
   "api.renameSheet":       { tier: "unlocked", class: "mutate", validate: vSheetRename, desc: "Rename a sheet" },
   "api.setSheetVisibility":{ tier: "unlocked", class: "mutate", validate: vSheetVisibility, desc: "Show or hide a sheet" },
+  // Move / copy (§2.4). Sheet CRUD shipped in B2 without them, which left the
+  // commonest report-building move — "duplicate last month's sheet and rename
+  // it" — impossible from a script. Same tier and no capability, for the same
+  // reason as the four rows above: this is the shape of the document the script
+  // already lives in, and it reaches nothing outside it.
+  "api.moveSheet":         { tier: "unlocked", class: "mutate", validate: vMoveSheet,
+                             desc: "Move a sheet to a different position in the tab bar" },
+  "api.copySheet":         { tier: "unlocked", class: "mutate", validate: vCopySheet,
+                             desc: "Duplicate a sheet — its cells, formatting and objects — as a new sheet next to it" },
   "api.sortRange":         { tier: "unlocked", class: "mutate", validate: vSortRange, desc: "Sort a block of cells by one or more columns" },
   "api.findAll":           { tier: "unlocked", class: "read",   validate: vFind,     desc: "Find every cell on the active sheet matching a search text" },
   "api.replaceAll":        { tier: "unlocked", class: "mutate", validate: vReplace,  desc: "Replace a search text everywhere on the active sheet (a single undo step)" },
+  // ---- unlocked: COLUMN FILTERING / AutoFilter (§2.6). The feature has had a
+  //      full UI since day one and NO script reach at all — so "filter to this
+  //      month, export, clear" was a thing a person could do and a script could
+  //      not. Same tier and no capability as sortRange, which is the closest
+  //      relative: filtering only decides which rows are SHOWN, it changes no
+  //      value, and everything it touches is inside the document.
+  //
+  //      TWO STRUCTURAL FACTS, both enforced elsewhere and neither re-stated as
+  //      an argument here:
+  //        - ACTIVE SHEET ONLY. Every backend AutoFilter command acts on the
+  //          active sheet and there is no sheet parameter to pass, so these rows
+  //          take none. Switch sheets first.
+  //        - TABLE OWNERSHIP IS DERIVED. `Table.autoFilterId` is recomputed by
+  //          Rust (relink_autofilter_owner) inside the same commands the ribbon
+  //          calls. Nothing on this path sets or infers it, which is why a
+  //          script cannot orphan a table's filter link.
+  //
+  //      The work is done through @api/autoFilterService — the feature-neutral
+  //      seam the AutoFilter extension registers — so the extension's cached
+  //      range, its chevron regions and the hidden-row set stay in step. With
+  //      the extension disabled these REFUSE rather than filtering invisibly.
+  "api.autoFilterGet":     { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read the column filter on the sheet: which cells it covers, what each column is filtered by, and which rows it is currently hiding" },
+  "api.autoFilterListValues": { tier: "unlocked", class: "read", validate: vAutoFilterColumn,
+                             desc: "List the distinct values in one filtered column (with how often each occurs), so a filter can be built from them" },
+  "api.autoFilterApply":   { tier: "unlocked", class: "mutate", validate: vAutoFilterRange,
+                             limits: { maxColumns: MAX_AUTOFILTER_COLUMNS },
+                             desc: "Turn column filtering on for a block of cells, putting filter buttons in its first row" },
+  "api.autoFilterSetColumn": { tier: "unlocked", class: "mutate", validate: vAutoFilterCriteria,
+                             limits: { maxValues: MAX_AUTOFILTER_VALUES },
+                             desc: "Filter one column — by picking which values to keep, or by a rule like \">100\" — hiding the rows that do not match" },
+  "api.autoFilterClear":   { tier: "unlocked", class: "mutate", validate: vAutoFilterClear,
+                             desc: "Stop filtering one column (or all of them) and show those rows again — the filter buttons stay" },
+  "api.autoFilterRemove":  { tier: "unlocked", class: "mutate", validate: vNone,
+                             desc: "Turn column filtering off completely and show every row again" },
+  // ---- unlocked: THE WORKSHEET-FUNCTION BRIDGE (G4). VBA's
+  //      Application.WorksheetFunction: work out an answer with the 400+
+  //      built-in formula functions instead of reimplementing VLOOKUP in
+  //      JavaScript. It CHANGES NOTHING — the expression is evaluated against a
+  //      throwaway evaluator over the live grid and the answer is handed back
+  //      typed; nothing is stored, no cell is touched, and no undo entry is
+  //      made. Its reach is therefore exactly api.getRangeValues' reach (read
+  //      any cell), which is why it needs no capability and sits at the tier
+  //      that already grants that.
+  //
+  //      TWO THINGS IT DELIBERATELY CANNOT REACH, both enforced in the Rust
+  //      command (evaluate_formula_typed): user-defined functions are NOT
+  //      resolved — a UDF body is another script's JavaScript, and resolving one
+  //      here would re-enter that realm synchronously from inside a lock-held
+  //      evaluation — and pivot/control sources are not wired, exactly as in the
+  //      pre-existing evaluate_expressions.
+  "api.evaluate":          { tier: "unlocked", class: "read",   validate: vEvaluate,
+                             // Both numbers are ENFORCED by vEvaluate before the
+                             // tier check. No perMinute is declared, because none
+                             // is enforced — this row reaches no Rust gate, and a
+                             // limit that only exists in the table is worse than
+                             // no limit at all.
+                             limits: { maxExpressions: MAX_EVAL_EXPRESSIONS, maxChars: MAX_EVAL_EXPRESSION_CHARS },
+                             desc: "Work out the answer to a spreadsheet formula (for example a lookup or a total) without writing it into a cell — it reads cells, it never changes anything" },
+  // ---- unlocked: EXPLICIT FORMULA read/write with a reference style (G4).
+  //      Reading a formula was only possible as a by-product of a typed cell
+  //      read, and writing one meant passing "=A1+B1" to setCellValue with no
+  //      way to say which notation was meant. These two rows make both explicit
+  //      and add R1C1 — VBA's FormulaR1C1 — which is how a macro writes the same
+  //      relative formula into a thousand cells. Same reach as api.getCellData /
+  //      api.setCellValue, which already sit at this tier: a formula is cell
+  //      content, and R1C1 is a spelling of it, not a new authority.
+  "api.getCellFormula":    { tier: "unlocked", class: "read",   validate: vFormulaRead,
+                             desc: "Read the formula in a cell, in ordinary A1 form or in R1C1 form (empty when the cell holds a plain value)" },
+  "api.setCellFormula":    { tier: "unlocked", class: "mutate", validate: vFormulaWrite,
+                             desc: "Put a formula into a cell, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it)" },
+  // ---- unlocked: RANGE COPY / PASTE / PASTE SPECIAL (G4). VBA's Range.Copy +
+  //      PasteSpecial, over ranges the script names explicitly.
+  //
+  //      WHAT IS NOT HERE, ON PURPOSE: any way to READ THE SYSTEM CLIPBOARD.
+  //      What the user last copied may be a password or a message from another
+  //      application; there is no honest scope for "let this script see it" and
+  //      no consent string that would make it fair, so it is refused outright
+  //      rather than sold as a capability. Copy fills a buffer belonging to the
+  //      CALLING SCRIPT (host-side, per script, discarded at unmount); paste
+  //      reads that buffer back. The OS clipboard and the clipboard the user's
+  //      own Ctrl+V reads are never written either — a script cannot take away
+  //      what somebody has in hand, and cannot use the clipboard as a way out of
+  //      the app.
+  "api.copyRange":         { tier: "unlocked", class: "read",   validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Copy a block of cells into this script's own private clipboard (nothing leaves Calcula, and what YOU copied is untouched)" },
+  "api.pasteRange":        { tier: "unlocked", class: "mutate", validate: vPasteRange, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Paste the block it copied earlier into another place on the sheet — everything, or only the values, or only the formulas (a single undo step)" },
+  // ---- unlocked: WORKBOOK FILE LIFECYCLE (G1). No capability, deliberately:
+  //      this is reach over the document the script already lives in and can
+  //      already rewrite cell by cell — it reaches nothing ambient. What it DOES
+  //      change is permanence, so the consent text says so in the words that
+  //      matter ("making every change permanent"), because "close without
+  //      saving" is the escape hatch a user reaches for when a script misbehaves
+  //      and a script-initiated save is what takes it away.
+  //
+  //      WHAT IS DELIBERATELY ABSENT: open / close / new. Calcula holds ONE
+  //      document, so each of those REPLACES or DISCARDS the workbook the user
+  //      is looking at (fileOpen() does not even prompt on unsaved changes, and
+  //      reloads the window afterwards). "Open" is worse still: a picker says
+  //      "open this file" to the user, not "let this running script read this
+  //      file", so the click would not be honest consent for what followed. A
+  //      script may PERSIST the document it lives in; it may never replace or
+  //      discard it. The legitimate need behind "open" — read a file the user
+  //      chooses — is cap.fileImportText, whose consent text says exactly that.
+  //
+  //      Rate-limited host-side (one save per script per 5s) so a loop cannot
+  //      thrash the disk, and refused while a Before-Save verdict is being
+  //      collected so a script cannot save from inside its own onBeforeSave.
+  "api.workbookSave":      { tier: "unlocked", class: "file", validate: vNone, limits: { minIntervalMs: 5_000 },
+                             desc: "Save this workbook back to the file it came from, making every change permanent — including changes this script just made" },
+  "api.workbookSaveAs":    { tier: "unlocked", class: "file", validate: vNone, limits: { minIntervalMs: 5_000 },
+                             desc: "Ask you where to save a copy of this workbook (you choose the folder and the name)" },
+  "api.workbookIsDirty":   { tier: "unlocked", class: "read",   validate: vNone, desc: "Check whether this workbook has unsaved changes" },
+  "api.workbookFileName":  { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read the file name of this workbook (just the name — never the folder it is in)" },
   // ---- unlocked: workbook OBJECTS (B3) — the "build a dashboard from code"
   //      surface. Same whole-workbook reach the rows above already have, so no
   //      capability is involved: charts, tables, pivots, named ranges, slicers
@@ -307,6 +459,89 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.dialogForm":        { tier: "restricted", capability: "ui.dialog", class: "ui",
                              validate: vDialogForm, limits: { maxFields: MAX_DIALOG_FIELDS },
                              desc: "Ask you to fill in a small form (text, numbers, dates, choices, checkboxes) and read your answers" },
+  // ---- file.picker (G1): the sanctioned tail of "export a CSV" / "read the
+  //      config the user picks". Excel's answer was FileSystemObject — a path
+  //      string and unbounded reach. This is the opposite construction: the
+  //      script names a FILE NAME and hands over CONTENT, the HOST opens a
+  //      native picker, the HUMAN chooses the file, and the host does the I/O.
+  //      A path never travels in either direction, so there is nothing for a
+  //      hostile script to aim: no fixed target, no traversal, no enumeration,
+  //      and no way to touch a file the user did not just select by hand.
+  //      Class "file" (person-bounded deadline; see MethodClass above). ----
+  "cap.fileExportText":    { tier: "restricted", capability: "file.picker", class: "file",
+                             validate: vFileExport,
+                             limits: { maxChars: MAX_FILE_TEXT_CHARS, maxNameChars: MAX_FILE_NAME },
+                             desc: "Ask you where to save a text file it has produced (you choose the folder and the name; it is never told where anything on your computer is)" },
+  "cap.fileImportText":    { tier: "restricted", capability: "file.picker", class: "file",
+                             validate: vFileImport,
+                             limits: { maxChars: MAX_FILE_TEXT_CHARS },
+                             desc: "Ask you to pick a text file and read what is inside it (only the one file you pick, and only its contents and its name)" },
+  // PRINTING (G4), and the only shape of it that can be honest. The script
+  // supplies a FILE NAME and NOTHING ELSE — no bytes, no page setup, no range —
+  // and the HOST renders the PDF from the workbook's own print settings through
+  // the same generatePdf(getPrintData()) path File > Export to PDF uses, then
+  // opens the same picker cap.fileExportText opens. So this adds no reach at all
+  // beyond that row: it is "save a file the user chooses", where the file's
+  // CONTENTS are produced by trusted code rather than by the caller.
+  //
+  // Sending to a real PRINTER is deliberately absent, not deferred: the only
+  // implementation opens a pop-up window and calls window.print(), which needs a
+  // window, can be silently blocked, and reports nothing back — a call that may
+  // do nothing and can never say so is exactly the kind of API this program has
+  // twice shipped by accident. See app/src/api/printService.ts.
+  "cap.filePrintPdf":      { tier: "restricted", capability: "file.picker", class: "file",
+                             // No perMinute: every call opens a picker the user
+                             // has to drive, which is a firmer rate limit than any
+                             // number here, and an unenforced one would be a lie.
+                             validate: vPrintPdf, limits: { maxNameChars: MAX_FILE_NAME },
+                             desc: "Turn the sheet you would print into a PDF and ask you where to save it (you choose the folder and the name; it is never told where anything on your computer is)" },
+  // ---- ui.shortcut (G2): the Application.OnKey replacement. A script binds
+  //      ONE combination to a method it already published with context.expose,
+  //      and pressing those keys calls it — through callExposedMethod, the same
+  //      door a scheduled job and a cross-script call use, so a keystroke can
+  //      never reach anything an ordinary call could not.
+  //
+  //      WHY A CAPABILITY AND NOT JUST A TIER. Every other row on this table
+  //      answers "what may it touch?". This one answers something different: it
+  //      INTERCEPTS the user. Binding a key is not workbook reach — nothing in
+  //      the document changes — but it puts a script between a person and their
+  //      keyboard, which is outside the document by any reading, and it is the
+  //      primitive VBA handed out for free (`Application.OnKey "^s"` silently
+  //      takes Ctrl+S, with no record that it happened). So it is gated exactly
+  //      like ui.dialog, which seizes the user's ATTENTION: restricted tier plus
+  //      a consented capability, because a script that merely wants to be
+  //      triggered by a button should not be paying for a key hook, and a script
+  //      that does want one should have had to say so out loud.
+  //
+  //      Everything that makes it safe is structural and lives in
+  //      app/src/api/keybindings.ts, not in this row: the combination must be
+  //      Ctrl+Shift+<letter> (so typing, Escape, Tab, arrows, F1-F12 and the
+  //      Ctrl+<key> space the grid owns are unreachable BY SHAPE), a taken
+  //      combination is refused rather than overridden, the app wins any later
+  //      tie, the binding appears in the shortcut list, and unmount takes it
+  //      back. The handler is told `{ combo }` and nothing else — there is no
+  //      key stream, so this can never become a keylogger.
+  //
+  //      Class "mutate": it changes host state (the shortcut list) and returns
+  //      immediately. NOT class "ui" — that class carries the five-minute
+  //      person-length deadline for a modal a human is reading, and nothing
+  //      here waits on a human. ----
+  "cap.shortcutBind":      { tier: "restricted", capability: "ui.shortcut", class: "mutate",
+                             validate: vShortcutBind,
+                             // maxShortcuts mirrors MAX_SCRIPT_KEYBINDINGS_PER_SCRIPT in
+                             // ../keybindings, which ENFORCES it. Written as a literal
+                             // rather than imported because this table is bundled by the
+                             // typings generator, and keybindings.ts drags the command
+                             // registry (and the grid) in with it; a test pins the two
+                             // numbers together instead.
+                             limits: { perMinute: 30, maxShortcuts: 8 },
+                             desc: "Take over one Ctrl+Shift+letter keyboard shortcut, so pressing it runs one of its own methods (it cannot take a shortcut anything else uses, it cannot take the keys Calcula needs, and it never sees anything else you type)" },
+  "cap.shortcutUnbind":    { tier: "restricted", capability: "ui.shortcut", class: "mutate",
+                             validate: vShortcutUnbind, limits: { perMinute: 60 },
+                             desc: "Give back one of the keyboard shortcuts it took" },
+  "cap.shortcutList":      { tier: "restricted", capability: "ui.shortcut", class: "read",
+                             validate: vNone, limits: { perMinute: 60 },
+                             desc: "List the keyboard shortcuts it has taken" },
   "cap.storageGet":        { tier: "restricted", capability: "storage", class: "read",
                              validate: vKey, desc: "Read script-private data stored in the workbook" },
   "cap.storageSet":        { tier: "restricted", capability: "storage", class: "mutate",
@@ -328,6 +563,12 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "ext.log":               { tier: "restricted", class: "emit",   validate: vAny,     desc: "Write to the extension console" },
   "ext.executeCommand":    { tier: "restricted", class: "mutate", validate: vCommand, desc: "Run a command flagged scriptSafe by its extension" },
   "ext.emitEvent":         { tier: "restricted", class: "emit",   validate: vEvent,   desc: "Emit a custom app event (auto-namespaced userscript:*)" },
+  // Upkeep for the cell-styling contribution: throw away the styles this
+  // extension's own contributor produced so the next paint asks it again. It
+  // names no target — the host scopes it to the caches that extension created —
+  // so it buys refresh, never reach.
+  "ext.invalidateCellStyles": { tier: "restricted", class: "emit", validate: vNone,
+                             desc: "Re-ask its own cell-styling contributor for the colours of the cells on screen" },
 };
 
 /**
@@ -365,6 +606,18 @@ export const SCRIPT_SUBSCRIBABLE_APP_EVENTS: ReadonlySet<string> = new Set([
   // Report-distribution lifecycle. Payload is THINNED for sandboxed
   // subscribers (see thinAppEventForScripts).
   AppEvents.PACKAGE_UPDATED,
+  // A writeback submission arrived for a region THIS workbook publishes (§5.5).
+  //
+  // Two things are true at once here and both matter. It is SAFE TO SUBSCRIBE:
+  // the thinned payload is { regionId, count } and nothing else, so a sandboxed
+  // script learns that answers arrived and never learns whose or what — the
+  // answers stay behind cap.writebackListSubmissions, which Rust gates on
+  // Ed25519 key possession per call. And it is NOT FREE: subscribing is what
+  // STARTS the publisher-inbox poll in @api/distribution.ts (nothing pushes into
+  // this process when somebody else's machine appends to a registry). The poll
+  // is demand-driven, one pass a minute, bounded to regions this machine can
+  // prove it publishes, and disclosed by getSubmissionWatchStatus().
+  AppEvents.WRITEBACK_SUBMISSION_RECEIVED,
 ]);
 
 /**
@@ -385,6 +638,18 @@ export function thinAppEventForScripts(eventName: string, payload: unknown): unk
     // to enumerate that otherwise — so only the identity crosses.
     const p = (payload ?? {}) as { packageName?: string; version?: string | null };
     return { packageName: p.packageName, version: p.version ?? null };
+  }
+  if (eventName === AppEvents.WRITEBACK_SUBMISSION_RECEIVED) {
+    // A NOTIFICATION, not a delivery. The full payload names WHO submitted and
+    // WHERE — and in a per-subscriber writeback region the cell coordinates ARE
+    // the identity, so "row 7" and "Alice" are the same disclosure. A sandboxed
+    // script has no sanctioned way to enumerate other respondents (that is
+    // cap.writebackListSubmissions, which Rust gates on the publisher's signing
+    // key), so neither identity nor location may cross here just because the
+    // script happened to be listening. What survives is exactly what makes the
+    // event useful: which region, and how many arrived.
+    const p = (payload ?? {}) as { regionId?: string; count?: number };
+    return { regionId: p.regionId, count: p.count ?? 0 };
   }
   if (eventName === AppEvents.BI_MODEL_CHANGED) {
     const p = (payload ?? {}) as { connectionId?: string; domain?: string; revision?: number };

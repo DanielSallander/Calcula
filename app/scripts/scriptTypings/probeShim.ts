@@ -68,6 +68,8 @@ export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string
   ["caps.connector", "ScriptConnectorApi"],
   ["caps.schedule", "ScriptScheduleApi"],
   ["caps.dialog", "ScriptDialogApi"],
+  ["caps.file", "ScriptFileApi"],
+  ["caps.shortcut", "ScriptShortcutApi"],
   ["api", "UnlockedAPI"],
   ["api.workbook", "ScriptWorkbook"],
   ["api.chart()", "ScriptChartHandle"],

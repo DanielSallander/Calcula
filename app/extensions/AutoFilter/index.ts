@@ -23,7 +23,9 @@ import {
   getOpenDropdownCol,
   resetState,
   toggleFilter,
+  createAutoFilterController,
 } from "./lib/filterStore";
+import { registerAutoFilterController } from "@api/autoFilterService";
 import { registerDataMenu } from "./handlers/dataMenuBuilder";
 import { FilterEvents } from "./lib/filterEvents";
 import FilterDropdownOverlay from "./components/FilterDropdownOverlay";
@@ -266,7 +268,16 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // 8. Load initial filter state
+  // 8. Publish the callable, UI-free driver for column filtering.
+  //     @api/autoFilterService is a feature-neutral seam (Inversion of Control,
+  //     like the print seam): the API facade — and through it the script broker
+  //     — can filter without importing this extension, and this extension stays
+  //     the only owner of the chevron regions, the cached AutoFilterInfo and the
+  //     hidden-row push into Core. Registered BEFORE the initial state load so a
+  //     caller cannot arrive between the two and be told "no provider".
+  cleanupFns.push(registerAutoFilterController(createAutoFilterController()));
+
+  // 9. Load initial filter state
   refreshFilterState();
 
   isActivated = true;

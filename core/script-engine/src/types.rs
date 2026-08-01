@@ -355,8 +355,6 @@ pub struct ScriptContext {
     pub app_info: AppInfo,
     /// Writable: Application.screenUpdating (default true)
     pub screen_updating: RefCell<bool>,
-    /// Writable: Application.enableEvents (default true)
-    pub enable_events: RefCell<bool>,
     /// Deferred actions queued by the script (goto, calculate, statusBar, etc.)
     pub deferred_actions: RefCell<Vec<DeferredAction>>,
     /// Live workbook/view state fed in by the host (see HostState). Scripts
@@ -399,7 +397,6 @@ impl ScriptContext {
             bookmark_mutations: RefCell::new(Vec::new()),
             app_info,
             screen_updating: RefCell::new(true),
-            enable_events: RefCell::new(true),
             deferred_actions: RefCell::new(Vec::new()),
             host,
             workbook_properties_changed: RefCell::new(HashMap::new()),
@@ -468,8 +465,6 @@ pub enum ScriptResult {
         workbook_properties_changed: HashMap<String, String>,
         /// Whether screen updating was enabled (Application.screenUpdating)
         screen_updating: bool,
-        /// Whether events were enabled (Application.enableEvents)
-        enable_events: bool,
     },
     /// Script encountered an error
     Error {

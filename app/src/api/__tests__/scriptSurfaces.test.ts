@@ -27,6 +27,14 @@ import {
 import { ALL_CAPABILITY_IDS, type CapabilityId } from "../scriptHost/capabilityIds";
 import { ALLOWLIST, type MethodPolicy } from "../scriptHost/allowlist";
 import { buildHandleFromDefinition } from "../scriptHost/broker";
+import {
+  EXTENSION_BROKER_METHODS,
+  CONTRIBUTION_REQUIRED_CAPABILITY,
+} from "../scriptHost/extensionProtocol";
+import {
+  computeExtensionCeiling,
+  unreachableExtensionCapabilities,
+} from "../../shell/registries/extensionTrust";
 
 describe("script-surface taxonomy", () => {
   it("covers exactly the documented surfaces", () => {
@@ -41,6 +49,7 @@ describe("script-surface taxonomy", () => {
       "notebook-cell",
       "object-script",
       "one-off-script",
+      "script-library",
       "writeback-validator",
     ];
     expect(ids).toEqual(expected);
@@ -69,6 +78,9 @@ describe("script-surface taxonomy", () => {
       "notebook-cell",
       "object-script",
       "one-off-script",
+      // A third-party library imported with `// @uses`: its module bodies run in
+      // their own hardened worker realm, so authored code really does execute.
+      "script-library",
       // The publisher's writeback predicate: authoritatively evaluated in the
       // embedded Rust QuickJS realm at submit (and mounted advisory-only in a
       // worker realm), so authored code really does execute here.
@@ -118,15 +130,29 @@ describe("script-surface taxonomy", () => {
 // ============================================================================
 
 /** Surfaces whose R19 ceiling comes from the AUTHOR (source pragmas / package
- *  manifest / library definition) — nothing narrows them, so their row must
- *  list the whole broker-gated vocabulary, exactly. */
+ *  manifest / library definition) AND whose broker door is the whole shared
+ *  ALLOWLIST — nothing narrows them, so their row must list the whole
+ *  broker-gated vocabulary, exactly. */
 const AUTHOR_DECLARED_SURFACES: ScriptSurfaceId[] = [
   "object-script",
-  // The signed sidecar manifest's `capabilities` IS the author declaration.
-  "extension-worker",
+  // A library's ceiling is its own source pragmas, INTERSECTED at link time with
+  // the importing script's. The row therefore has to state the un-intersected
+  // author-declared set — what a GIVEN realm ends up holding is per-mount data
+  // the code inventory reports, not a property of the surface.
+  "script-library",
   "formula-udf",
   "chart-transform-sandbox",
 ];
+
+/** Author-declared too — the signed sidecar's `capabilities` IS the declaration
+ *  — but NARROWED by a second gate the others do not have: handleBrokerCall
+ *  refuses anything outside EXTENSION_BROKER_METHODS before the broker sees it.
+ *  So its row is legitimately SHORTER than the broker-gated vocabulary, and the
+ *  adversarial pass found three ids (ui.html, bi.connector, ui.shortcut) that
+ *  had been listed here anyway — reach the consent prompt named and the broker
+ *  refused. Kept separate rather than folded in, so "shorter" has to stay a
+ *  derived fact rather than becoming an excuse. */
+const METHOD_NARROWED_SURFACES: ScriptSurfaceId[] = ["extension-worker"];
 
 describe("script-surface capability completeness", () => {
   it("derives the broker-gated set from the ALLOWLIST itself", () => {
@@ -168,6 +194,70 @@ describe("script-surface capability completeness", () => {
       expect(enforceableCapabilities(surface), id).toEqual(gated);
       expect(surface.capabilities.slice().sort(), id).toEqual(gated.slice().sort());
     }
+  });
+
+  it("the sandboxed-extension row lists EXACTLY what a sandboxed extension can reach", () => {
+    // Derived from the two things that can require a capability on this surface:
+    // a method it may call, and a contribution kind it may register. Reconstructed
+    // here from the enforcing constants rather than imported, so a change to
+    // extensionReachableCapabilities that silently widened the set would still
+    // have to be reflected in BOTH places.
+    const reachable = new Set<CapabilityId>();
+    for (const method of EXTENSION_BROKER_METHODS) {
+      const cap = ALLOWLIST[method]?.capability;
+      if (cap) reachable.add(cap);
+    }
+    for (const cap of Object.values(CONTRIBUTION_REQUIRED_CAPABILITY)) {
+      if (cap) reachable.add(cap);
+    }
+
+    for (const id of METHOD_NARROWED_SURFACES) {
+      const surface = getScriptSurface(id)!;
+      expect(surface.runtime, id).toBe("worker-realm");
+      expect(surface.mountCeiling, `${id} must NOT pin a mount ceiling`).toBeUndefined();
+      expect(new Set(enforceableCapabilities(surface)), id).toEqual(reachable);
+      expect(new Set(surface.capabilities), id).toEqual(reachable);
+    }
+
+    // The three the adversarial pass removed, pinned by name so a future edit
+    // that re-adds one has to argue with this test rather than with a comment.
+    const extensionRow = getScriptSurface("extension-worker")!;
+    for (const absent of ["ui.html", "bi.connector", "ui.shortcut"] as CapabilityId[]) {
+      expect(reachable.has(absent), `${absent} must have no door on this surface`).toBe(false);
+      expect(extensionRow.capabilities, `${absent} must not be listed`).not.toContain(absent);
+    }
+    // ...and formula.udf must STAY, even though no broker method requires it:
+    // admitContribution does, and deriving from methods alone would silently
+    // strip every worksheet function an add-in ships.
+    expect(extensionRow.capabilities).toContain("formula.udf");
+    expect(
+      [...EXTENSION_BROKER_METHODS].some((m) => ALLOWLIST[m]?.capability === "formula.udf"),
+      "if a broker method ever requires formula.udf, this test's premise changed",
+    ).toBe(false);
+  });
+
+  it("a sandboxed extension's ceiling drops what it cannot use, and says so", () => {
+    // The consent prompt is built from this list ("Capabilities it can use: …"),
+    // so anything that survives here is a promise the broker has to keep.
+    const declared = [
+      "storage",
+      "ui.html",
+      "bi.connector",
+      "ui.shortcut",
+      "formula.udf",
+    ] as CapabilityId[];
+    expect(computeExtensionCeiling(declared, "distributed").sort()).toEqual([
+      "formula.udf",
+      "storage",
+    ]);
+    expect(unreachableExtensionCapabilities(declared, "distributed").sort()).toEqual([
+      "bi.connector",
+      "ui.html",
+      "ui.shortcut",
+    ]);
+    // A built-in is not ceiling-bound, so neither list applies to it.
+    expect(computeExtensionCeiling(declared, "trusted")).toEqual([]);
+    expect(unreachableExtensionCapabilities(declared, "trusted")).toEqual([]);
   });
 
   it("object scripts declare bi.sql (the confirmed drift, pinned)", () => {
@@ -258,10 +348,18 @@ describe("script-surface capability completeness", () => {
       const understated = auditScriptSurfaceCapabilities().filter(
         (a) => a.understated.length > 0,
       );
-      // Every author-declared worker surface now understates its reach.
+      // Every author-declared worker surface now understates its reach. The
+      // sandboxed-extension row does NOT, and that is correct rather than a
+      // gap: the probe row is not in EXTENSION_BROKER_METHODS, so a sandboxed
+      // extension genuinely cannot reach it — which is the whole reason that
+      // surface is derived separately.
       expect(understated.map((a) => a.surfaceId).sort()).toEqual(
         [...AUTHOR_DECLARED_SURFACES].sort(),
       );
+      expect(
+        understated.map((a) => a.surfaceId),
+        "a method a sandboxed extension cannot call must not count against its row",
+      ).not.toContain("extension-worker");
       for (const a of understated) {
         expect(a.understated).toEqual(["test.newReach"]);
       }

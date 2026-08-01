@@ -55,6 +55,7 @@ import ScriptDialogPrompt, {
 } from "./components/ScriptDialogPrompt";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
+import { installObjectScriptDebugBridge, reloadPersistedBreakpoints } from "./lib/debugger";
 import type { DialogProps } from "@api/uiTypes";
 import { openObjectScriptEditor } from "./lib/openObjectScriptWindow";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
@@ -158,6 +159,10 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
     "Fill in and send the input cells of a subscribed package — and, for a package this workbook can sign, read and approve everyone else's answers",
   schedule:
     "Run itself on a schedule while Calcula is open, saved in this workbook so it resumes after a reload",
+  "file.picker":
+    "Ask you to pick a file to save data into or to read — you choose the file every time, and it is never told where your files are",
+  "ui.shortcut":
+    "Take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, and it never sees anything else you type",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */
@@ -655,7 +660,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   // ---- Register the Marketplace dialog ----
   context.ui.dialogs.register({
     id: "scriptable-objects.marketplace",
-    title: "Script Marketplace",
+    title: "Script Libraries",
     component: ScriptMarketplace,
     width: 550,
     height: 500,
@@ -681,7 +686,7 @@ async function activate(context: ExtensionContext): Promise<void> {
   });
   context.ui.menus.registerItem("developer", {
     id: "scriptable-objects.marketplace",
-    label: "Script Marketplace...",
+    label: "Script Libraries...",
     icon: IconMarketplace,
     action: () => {
       context.ui.dialogs.show("scriptable-objects.marketplace");
@@ -754,6 +759,25 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   // ---- Cross-window event bridge: Object Script Editor separate window ----
 
+  // Debug sessions live in the MAIN window (that is where the script's worker is
+  // mounted), so the standalone editor window drives them through this relay.
+  // Without it, F5/F9/F10/F11 work in the in-window dialog and silently do
+  // nothing in the separate window — the worst kind of half-shipped feature.
+  // The bridge is an authority-free relay: every command names a scriptId the
+  // host resolves against its own mount table, and it can only ask for what the
+  // host already exposes to trusted UI.
+  cleanupFunctions.push(installObjectScriptDebugBridge());
+
+  // Breakpoints are workbook state (extension-data key calcula.objectScripts.debug).
+  // Load this workbook's set now, and re-load whenever the open workbook changes,
+  // so a new file never inherits the previous one's gutter.
+  void reloadPersistedBreakpoints();
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.AFTER_OPEN, () => {
+      void reloadPersistedBreakpoints();
+    }),
+  );
+
   // Handle save-and-apply requests from the editor window
   onSaveAndApply(async (payload) => {
     const script = payload.script;
@@ -765,8 +789,11 @@ async function activate(context: ExtensionContext): Promise<void> {
     }
     await ObjectScriptManager.mountScript(script.id);
 
-    // Restore original source (the payload may contain instrumented source)
-    // The editor window already persisted the original source to backend
+    // The payload carries the AUTHOR'S source, never an instrumented copy: since
+    // the step debugger landed, instrumentation happens only inside the worker at
+    // a debug mount, so what is stored, hashed and distributed is always the real
+    // script. (Before that, breakpoints were injected `context.log` calls and the
+    // instrumented text reached this handler — hence the old restore step here.)
     showToast("Script saved and applied.", { type: "success" });
   }).then((fn) => cleanupFunctions.push(fn));
 

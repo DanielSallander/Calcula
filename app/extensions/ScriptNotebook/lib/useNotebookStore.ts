@@ -13,6 +13,11 @@ import type {
   NotebookSummary,
 } from "../types";
 import * as api from "./notebookApi";
+import {
+  cellKindOf,
+  emptySourceForKind,
+  type NotebookCellKind,
+} from "./cellKind";
 
 /** Check if the last response in a batch has screenUpdating=false (suppressed). */
 function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
@@ -116,12 +121,18 @@ interface NotebookState {
   saveActiveNotebook: () => Promise<void>;
 
   // Cell management
-  addCell: (afterCellId?: string) => void;
+  /** Add an empty cell of `kind` (default "code") after `afterCellId`. */
+  addCell: (afterCellId?: string, kind?: NotebookCellKind) => void;
   /**
    * Append a cell that already has source (the macro recorder's "record into a
    * cell"). Returns the new cell's id, or null when no notebook is open.
    */
   appendCellWithSource: (source: string) => string | null;
+  /**
+   * Append several cells at once, each with its source already rendered
+   * (the "Test in notebook" scaffold door). Returns the new cells' ids.
+   */
+  appendCellsWithSource: (sources: string[]) => string[];
   removeCell: (cellId: string) => void;
   updateCellSource: (cellId: string, source: string) => void;
   moveCellUp: (cellId: string) => void;
@@ -141,10 +152,10 @@ function generateCellId(): string {
   return `cell-${Date.now()}-${cellCounter}`;
 }
 
-function createEmptyCell(): NotebookCell {
+function createEmptyCell(kind: NotebookCellKind = "code"): NotebookCell {
   return {
     id: generateCellId(),
-    source: "",
+    source: emptySourceForKind(kind),
     lastOutput: [],
     lastError: null,
     cellsModified: 0,
@@ -205,11 +216,11 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   },
 
   // Cell management
-  addCell: (afterCellId?: string) => {
+  addCell: (afterCellId?: string, kind: NotebookCellKind = "code") => {
     const { activeNotebook } = get();
     if (!activeNotebook) return;
 
-    const newCell = createEmptyCell();
+    const newCell = createEmptyCell(kind);
     const cells = [...activeNotebook.cells];
 
     if (afterCellId) {
@@ -240,6 +251,20 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     // because the notebook was never saved would defeat the point.
     api.saveNotebook(updated).then(() => get().refreshNotebookList());
     return newCell.id;
+  },
+
+  appendCellsWithSource: (sources: string[]) => {
+    const { activeNotebook } = get();
+    if (!activeNotebook || sources.length === 0) return [];
+
+    const newCells = sources.map((source) => ({ ...createEmptyCell(), source }));
+    const updated = {
+      ...activeNotebook,
+      cells: [...activeNotebook.cells, ...newCells],
+    };
+    set({ activeNotebook: updated });
+    api.saveNotebook(updated).then(() => get().refreshNotebookList());
+    return newCells.map((c) => c.id);
   },
 
   removeCell: (cellId: string) => {
@@ -299,6 +324,10 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
     const cell = activeNotebook.cells.find((c) => c.id === cellId);
     if (!cell) return;
+    // Text cells are prose, not code. The backend skips them too
+    // (notebook_commands.rs::is_markdown_source) — this is the UI half of the
+    // same rule, so a stray keyboard shortcut cannot hand markdown to QuickJS.
+    if (cellKindOf(cell.source) === "markdown") return;
 
     set({ isExecuting: true, executingCellId: cellId });
 

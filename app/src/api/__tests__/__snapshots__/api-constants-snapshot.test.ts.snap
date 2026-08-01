@@ -65,6 +65,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "TABLE_DEFINITIONS_UPDATED": "app:table-definitions-updated",
   "THEME_CHANGED": "app:theme-changed",
   "VIEW_MODE_CHANGED": "app:view-mode-changed",
+  "WRITEBACK_SUBMISSION_RECEIVED": "app:writeback-submission-received",
   "ZOOM_CHANGED": "app:zoom-changed",
 }
 `;

@@ -14,6 +14,18 @@
 // Local scripts acquire caps via JIT (R10: Allow once / Always / Deny on first
 // use). Distributed scripts acquire them via package consent (Phase 4.2) — JIT
 // is suppressed for them here.
+//
+// "ALWAYS" NOW MEANS ALWAYS (F1). A local script's "Allow always" decision is
+// persisted per WORKBOOK + SCRIPT + SOURCE HASH in @api/scriptSecurity (local
+// user state, localStorage, never inside the file) and re-established at mount
+// by `restoreAndSyncGrants` below. Two rules keep that from being a widening:
+//   * the restore goes through the SAME `grant_script_capability` /
+//     `grant_script_net_origin` commands a fresh consent uses, so Rust remains
+//     the authority and its own allowlist still validates every id; and
+//   * only the exact ids/origins recorded are restored, so any escalation lands
+//     outside the grant set and re-prompts.
+// scriptSecurity.ts is DYNAMICALLY imported (it imports distributedConsent,
+// which imports this module — a static edge would close that cycle).
 
 import type { CapabilityId } from "./allowlist";
 import { CAPABILITY_ID_SET } from "./capabilityIds";
@@ -79,11 +91,13 @@ export function recordCapabilityGrant(
 export function revokeScriptGrants(scriptId: string): void {
   grantState.delete(scriptId);
   deniedThisSession.delete(scriptId);
+  lapsedGrantNotices.delete(scriptId);
 }
 
 export function resetAllGrants(): void {
   grantState.clear();
   deniedThisSession.clear();
+  lapsedGrantNotices.clear();
 }
 
 // ============================================================================
@@ -248,6 +262,115 @@ export async function revokeCapability(scriptId: string, cap: CapabilityId): Pro
 }
 
 // ============================================================================
+// Persisted "Always allow in this workbook" grants (F1)
+// ============================================================================
+
+/** scriptId -> a user-facing explanation (with a diff) of a persisted grant that
+ *  was DISCARDED at mount because the script's source changed. Consumed ONCE by
+ *  the next JIT prompt, so the user re-approves against the change rather than
+ *  blindly. Session-scoped by design: it is a notice, not a decision. */
+const lapsedGrantNotices = new Map<string, string>();
+
+/** Record a lapse notice for the next prompt (called by the mount-time restore). */
+export function noteLapsedGrant(scriptId: string, notice: string): void {
+  lapsedGrantNotices.set(scriptId, notice);
+}
+
+/** Take (and clear) a pending lapse notice for a script. */
+export function consumeLapsedGrantNotice(scriptId: string): string | null {
+  const notice = lapsedGrantNotices.get(scriptId) ?? null;
+  lapsedGrantNotices.delete(scriptId);
+  return notice;
+}
+
+/** Test/lifecycle hook: forget every pending lapse notice. */
+export function resetLapsedGrantNotices(): void {
+  lapsedGrantNotices.clear();
+}
+
+/** What `restoreAndSyncGrants` needs from a mount. Deliberately the AUTHORITATIVE
+ *  pieces only — an id, the source the host is about to run, the origin the
+ *  broker derived, and the R19 ceiling. Nothing script-supplied. */
+export interface GrantRestoreTarget {
+  scriptId: string;
+  scriptName: string;
+  source: string;
+  /** `handle.origin`: "local" for workbook-authored code, the package name for
+   *  distributed code (which never JIT-prompts and never persists here). */
+  origin: string;
+  /** `handle.declaredCapabilities` — the ceiling a restored id must still fit. */
+  declaredCapabilities: Iterable<CapabilityId>;
+}
+
+/**
+ * Mount-time hydration + backend sync, in the one order that is correct:
+ *
+ *  1. restore this script's PERSISTED "Always" decisions for THIS EXACT SOURCE
+ *     (dropped and replaced by a lapse notice if the source changed),
+ *  2. push the resulting live grant set to the authoritative Rust store.
+ *
+ * Step 2 subsumes the old standalone `syncNetOriginsToBackend`/`syncBackendGrants`
+ * pair for a remount, so a remount within the session still keeps its session
+ * grants. Distributed scripts skip step 1 entirely: their capabilities come from
+ * package consent, which is persisted INSIDE the workbook (it must survive a
+ * copy) and applied before mount by `applyConsentedCapabilities`.
+ */
+export async function restoreAndSyncGrants(target: GrantRestoreTarget): Promise<void> {
+  if (target.origin === "local") {
+    try {
+      const { restorePersistedScriptCapabilityGrant } = await import("../scriptSecurity");
+      const restored = await restorePersistedScriptCapabilityGrant({
+        scriptId: target.scriptId,
+        source: target.source,
+        declaredCapabilities: [...target.declaredCapabilities],
+      });
+      for (const cap of restored.capabilities) {
+        recordCapabilityGrant(target.scriptId, cap);
+      }
+      for (const origin of restored.netOrigins) {
+        recordCapabilityGrant(target.scriptId, "net.fetch", origin);
+      }
+      if (restored.lapseNotice) noteLapsedGrant(target.scriptId, restored.lapseNotice);
+    } catch (e) {
+      // Fail CLOSED: no restore means the script simply JIT-prompts again.
+      console.warn("[caps] could not restore persisted capability grants:", e);
+    }
+  }
+  await syncNetOriginsToBackend(target.scriptId);
+  await syncBackendGrants(target.scriptId);
+}
+
+/**
+ * Persist an "Allow always" decision for a LOCAL script. Called from the JIT
+ * path the moment the user chooses it. Best-effort: an unsaved workbook (no
+ * path to bind to) simply keeps the grant session-only, which is what the
+ * dialog's own scope wording ("in this workbook") already implies.
+ */
+export async function persistAlwaysGrant(args: {
+  scriptId: string;
+  scriptName: string;
+  source: string;
+  /** `handle.origin`; anything but "local" is ignored (package consent path). */
+  origin: string;
+  capability: CapabilityId;
+  netOrigin?: string | null;
+}): Promise<void> {
+  if (args.origin !== "local") return;
+  try {
+    const { persistScriptCapabilityGrant } = await import("../scriptSecurity");
+    await persistScriptCapabilityGrant({
+      scriptId: args.scriptId,
+      scriptName: args.scriptName,
+      source: args.source,
+      capability: args.capability,
+      netOrigin: args.netOrigin ?? null,
+    });
+  } catch (e) {
+    console.warn("[caps] could not persist an 'always' capability grant:", e);
+  }
+}
+
+// ============================================================================
 // JIT grant request/response (R10) — request emitted host-side, the
 // ScriptableObjects extension renders the dialog and resolves the decision.
 // ============================================================================
@@ -278,12 +401,34 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "ui.dialog": "show you a dialog and receive what you enter",
   "distribution.writeback":
     "fill in the input cells of a subscribed package and send your answers to its publisher (and, if it can sign the package, read and approve everyone else's)",
-  // Honest on both counts: it starts ITSELF (that is the novel authority), and
-  // it only does so while the app is open (that is the honest limit). Naming
-  // the limit is not a hedge — a user who reads "on a schedule" and imagines a
-  // service that emails them at 3am has been misled.
+  // Honest on THREE counts, and the third one used to be wrong. It starts ITSELF
+  // (the novel authority); it only does so while the app is open (the honest
+  // limit — a user who reads "on a schedule" and pictures a service emailing
+  // them at 3am has been misled); and it only survives a restart if the answer
+  // to THIS dialog is "Always". The old wording promised "saved in this
+  // workbook, so it resumes next time you open it" before the user had chosen
+  // anything, which was false for the "Once" button standing right next to it:
+  // the JOB is saved in the workbook, but the PERMISSION it needs to fire is
+  // not, unless it is remembered. Never state the outcome of a choice the user
+  // has not made yet.
   schedule:
-    "run on a schedule while Calcula is open, without you starting it (saved in this workbook, so it resumes next time you open it)",
+    "run on a schedule while Calcula is open, without you starting it (the job is saved in this workbook; it only keeps running after a restart if you answer 'Always')",
+  // Says what it CAN do and, in the same breath, the limit that makes it safe —
+  // because "read and write files" without the second clause would describe
+  // VBA's FileSystemObject, and this is deliberately not that. It cannot reach a
+  // file you did not just choose, it is never told where anything on this
+  // machine is, and every call opens a picker you drive.
+  "file.picker":
+    "ask you to pick a file — to save data into, or to open and read. You choose the file in the usual Windows dialog every single time; it can never reach a file you did not just pick, and it is never told where your files are",
+  // Three honest clauses, in the order a worried person asks them. What it
+  // takes (one shortcut, of a shape that cannot collide with typing or with the
+  // keys Calcula needs), what it CANNOT take (anything already in use — and it
+  // never sees the keyboard, only its own combination), and how you take it
+  // back (it is in the shortcut list, and it disappears when the script stops).
+  // "Read your keystrokes" is what a user fears here, so the text must deny it
+  // explicitly rather than leave it unmentioned.
+  "ui.shortcut":
+    "claim a keyboard shortcut of the form Ctrl+Shift+<letter>, so pressing it runs its code. It cannot take a shortcut anything else already uses, it cannot take the keys Calcula needs, and it never sees anything you type — only that its own shortcut was pressed. It appears in your shortcut list and goes away when the script stops",
 };
 
 /** One-line description of a capability id, for transparency UI (extension
@@ -324,6 +469,11 @@ function rememberDenied(scriptId: string, cap: CapabilityId, origin: string | nu
  * Prompt the user (JIT) for a capability. Resolves to the decision; a 60s
  * no-answer falls back to "deny". The dialog is rendered by the
  * ScriptableObjects extension, which calls resolveCapabilityRequest.
+ *
+ * If this script had a persisted "Always" grant that LAPSED because its source
+ * changed, the diff is shown FIRST and must be acknowledged before the grant
+ * dialog appears — re-consent after an edit is never a blind re-approval, and
+ * declining the notice is a deny (remembered for the session like any other).
  */
 export function requestCapabilityGrant(args: {
   scriptId: string;
@@ -331,6 +481,18 @@ export function requestCapabilityGrant(args: {
   capability: CapabilityId;
   origin: string | null;
 }): Promise<CapabilityDecision> {
+  const lapse = consumeLapsedGrantNotice(args.scriptId);
+  if (lapse && typeof window !== "undefined" && typeof window.confirm === "function") {
+    const proceed = window.confirm(
+      `${lapse}\n\n` +
+        `It is asking again now. Continue to the permission request?\n` +
+        `(Cancel denies it for this session.)`,
+    );
+    if (!proceed) {
+      rememberDenied(args.scriptId, args.capability, args.origin);
+      return Promise.resolve("deny");
+    }
+  }
   const requestId = `cap-${++requestSeq}`;
   const payload: CapabilityRequestPayload = {
     requestId,

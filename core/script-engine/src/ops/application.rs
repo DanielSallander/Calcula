@@ -2,7 +2,7 @@
 //! PURPOSE: Application-level operations for the script engine.
 //! CONTEXT: Registers the Calcula.application namespace, modelled after
 //! Excel's Application object. Provides read-only app metadata properties,
-//! read-write control properties (screenUpdating, enableEvents), and
+//! read-write control properties (screenUpdating, statusBar), and
 //! deferred action methods (calculate, goto, statusBar).
 
 use rquickjs::{Function, Object};
@@ -15,7 +15,7 @@ use crate::types::{DeferredAction, ScriptContext};
 ///
 /// After creating the object with Rust-backed functions, a small JS snippet
 /// is evaluated to wire up getter/setter properties (screenUpdating,
-/// enableEvents, statusBar, calculationMode) so scripts can use natural
+/// statusBar, calculationMode) so scripts can use natural
 /// property syntax: `Calcula.application.screenUpdating = false`.
 pub fn register_application_ops<'js>(
     ctx: &rquickjs::Ctx<'js>,
@@ -76,33 +76,30 @@ pub fn register_application_ops<'js>(
             .map_err(|e| format!("Failed to set __setScreenUpdating: {}", e))?;
     }
 
-    // enableEvents
+    // enableEvents IS DELIBERATELY ABSENT — do not re-add it without wiring it.
     //
-    // HONEST STATE: readable/writable inside the script and reported on the
-    // result, but NO host consumer acts on it yet — unlike screenUpdating,
-    // which suppresses the post-run grid refresh (Controls/Button,
-    // CellTypes/button, ScriptNotebook). Wiring it means deciding WHICH events
-    // it suppresses (object-script handlers? cell-change listeners?) for HOW
-    // long; until that decision is made, do not read a `false` here as
-    // "handlers were suppressed".
-    {
-        let sc = shared_ctx.clone();
-        let getter = Function::new(ctx.clone(), move || -> bool {
-            *sc.borrow().enable_events.borrow()
-        })
-        .map_err(|e| format!("Failed to create __getEnableEvents: {}", e))?;
-        app.set("__getEnableEvents", getter)
-            .map_err(|e| format!("Failed to set __getEnableEvents: {}", e))?;
-    }
-    {
-        let sc = shared_ctx.clone();
-        let setter = Function::new(ctx.clone(), move |value: bool| {
-            *sc.borrow().enable_events.borrow_mut() = value;
-        })
-        .map_err(|e| format!("Failed to create __setEnableEvents: {}", e))?;
-        app.set("__setEnableEvents", setter)
-            .map_err(|e| format!("Failed to set __setEnableEvents: {}", e))?;
-    }
+    // It used to exist here: readable, writable, reported on the run result, and
+    // consumed by NOBODY. `Application.EnableEvents = False` means one thing to
+    // a VBA author — "do not let my writes trigger anybody's change handlers" —
+    // and Calcula could not honour it, because this surface has no event
+    // delivery to suppress. Cell writes from a QuickJS run are applied by the
+    // host and announced with a bare grid repaint; they do not travel through
+    // the cell-event bus that object-script handlers listen on, so there was
+    // never a storm for the flag to prevent. A property that always answers
+    // "yes, events are on" while promising it can turn them off is worse than a
+    // missing one: it makes a script author believe they are protected.
+    //
+    // The re-entrancy this flag exists to prevent IS handled in Calcula, but
+    // structurally rather than by a switch: the object-script broker attributes
+    // every write to the script that made it and suppresses that script's own
+    // echo (see `recordScriptWrite` / `isOwnScriptWrite` in
+    // app/src/api/scriptHost/host.ts). That guard cannot be forgotten, cannot be
+    // left switched off by a script that faulted halfway through, and does not
+    // need the author to know it exists.
+    //
+    // If a future surface DOES deliver events to these scripts, the flag can
+    // come back — but only together with the code that reads it, and only once
+    // "which events, for how long" has an answer written down.
 
     // statusBar (getter returns string or false, setter accepts string or false)
     {
@@ -209,7 +206,6 @@ pub fn register_application_ops<'js>(
     var app = Calcula.application;
     var props = {
         screenUpdating:  { get: app.__getScreenUpdating,  set: app.__setScreenUpdating },
-        enableEvents:    { get: app.__getEnableEvents,    set: app.__setEnableEvents },
         statusBar:       { get: app.__getStatusBar,       set: app.__setStatusBar },
         calculationMode: { get: app.__getCalculationMode },
     };
@@ -229,8 +225,6 @@ pub fn register_application_ops<'js>(
     // Clean up internal helpers
     delete app.__getScreenUpdating;
     delete app.__setScreenUpdating;
-    delete app.__getEnableEvents;
-    delete app.__setEnableEvents;
     delete app.__getStatusBar;
     delete app.__setStatusBar;
     delete app.__getCalculationMode;

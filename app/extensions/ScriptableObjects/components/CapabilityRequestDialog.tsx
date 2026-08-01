@@ -189,11 +189,26 @@ export default function CapabilityRequestDialog({
             <div style={originStyle}>{origin}</div>
           )}
 
+          {/* CONSENT TEXT — held to the same bar as the capability itself.
+              Two claims that used to be here are gone because they were not true:
+              "cannot read or write your cells" (an object script reads and writes
+              its own sheet at its access level, with no capability involved — see
+              the sheet.* rows in scriptHost/allowlist.ts), and an unqualified
+              "remember this", which for years meant only "until you quit". */}
           <p style={{ fontSize: 11, color: "#888" }}>
-            The script runs sandboxed and cannot read or write your cells or files
-            unless you separately grant it. Granting this only permits the action
-            described above. Choose <strong>Allow once</strong> for a single use, or
-            <strong> Allow always</strong> to remember this for this script.
+            The script runs sandboxed — it cannot reach your machine, and it has no
+            access to the network, your BI data or storage except what you grant
+            here. Granting this permits only the action described above.
+          </p>
+          <p style={{ fontSize: 11, color: "#888" }}>
+            Choose <strong>Allow once</strong> for a single use, or{" "}
+            <strong>Allow always</strong> to remember it for this script in this
+            workbook. An "always" answer is stored on this computer only — never
+            inside the file, so a copy you send someone else arrives with no
+            permissions — and it is withdrawn automatically if the script's code
+            changes. You can revoke it any time in Settings &gt; Script Security.
+            (A workbook that has never been saved has nowhere to store the answer,
+            so there "always" lasts only until you close Calcula.)
           </p>
         </div>
 

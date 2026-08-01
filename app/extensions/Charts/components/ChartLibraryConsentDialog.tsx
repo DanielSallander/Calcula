@@ -30,6 +30,8 @@ const CAP_ICON: Record<CapabilityId, string> = {
   "ui.dialog": "[?]",
   "distribution.writeback": "->P",
   schedule: "->S",
+  "file.picker": "[/]",
+  "ui.shortcut": "[^+]",
 };
 
 const overlay: React.CSSProperties = {

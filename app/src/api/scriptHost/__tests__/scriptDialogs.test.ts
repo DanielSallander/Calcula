@@ -288,12 +288,46 @@ describe("ui method class", () => {
     }
   });
 
-  it("the per-method worker deadlines cover exactly the ui methods", () => {
-    expect(Object.keys(METHOD_DEADLINES_MS).sort()).toEqual(uiMethods);
-    for (const method of uiMethods) {
-      expect(callDeadlineMs(method), method).toBe(CLASS_DEADLINES_MS.ui);
+  // Two classes are bounded by a PERSON rather than by machine work: "ui" (a
+  // modal the user is reading) and "file" (a native picker the user is driving).
+  // Both must carry the long deadline, and the hand-maintained protocol list
+  // must cover exactly them — a person-bounded method left on the 30s default
+  // is abandoned mid-dialog, and the user's eventual answer lands nowhere.
+  const personBoundedMethods = Object.entries(ALLOWLIST)
+    .filter(([, policy]) => policy.class === "ui" || policy.class === "file")
+    .map(([method]) => method)
+    .sort();
+
+  it("the file class is exactly the user-driven file pickers", () => {
+    const fileMethods = Object.entries(ALLOWLIST)
+      .filter(([, policy]) => policy.class === "file")
+      .map(([method]) => method)
+      .sort();
+    expect(fileMethods).toEqual([
+      "api.workbookSave",
+      "api.workbookSaveAs",
+      "cap.fileExportText",
+      "cap.fileImportText",
+      // G4: the PDF export opens the same picker cap.fileExportText opens, so
+      // it is the same class and carries the same person-length deadline. The
+      // difference is that the CONTENT is rendered by the host, not supplied by
+      // the caller — which makes it strictly narrower, never wider.
+      "cap.filePrintPdf",
+    ]);
+  });
+
+  it("the per-method worker deadlines cover exactly the person-bounded methods", () => {
+    // api.workbookSave is class "file" but takes no picker (it writes back to
+    // the file the workbook came from), so it is NOT in the per-method list —
+    // it is bounded by the Before-Save handlers, which have their own 3s
+    // deadline. saveAs DOES open a picker and so does need the long one.
+    const withPickers = personBoundedMethods.filter((m) => m !== "api.workbookSave");
+    expect(Object.keys(METHOD_DEADLINES_MS).sort()).toEqual(withPickers);
+    for (const method of withPickers) {
       expect(callDeadlineMs(method), method).toBe(UI_DIALOG_DEADLINE_MS);
     }
+    expect(CLASS_DEADLINES_MS.ui).toBe(UI_DIALOG_DEADLINE_MS);
+    expect(CLASS_DEADLINES_MS.file).toBe(UI_DIALOG_DEADLINE_MS);
   });
 
   it("leaves every other method on the ordinary call timeout", () => {

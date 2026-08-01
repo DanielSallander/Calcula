@@ -41,7 +41,37 @@ vi.mock("@api", () => ({
 const getWorkbookScheduledJobs = vi.fn();
 const cancelScheduledJob = vi.fn();
 const setScheduledJobEnabled = vi.fn();
+// The panel also renders "Held by scripts right now" and the machine-scoped
+// add-in trail. Neither is under test here, so both are stubbed EMPTY — which
+// is also the honest default for a workbook where no script holds anything.
+const getScriptHeldState = vi.fn(async () => ({
+  shortcuts: [],
+  clipboards: [],
+  watches: [],
+}));
+const getExtensionAuditTrail = vi.fn(async () => ({
+  entries: [],
+  total: 0,
+  unreadableLines: 0,
+  path: "",
+  missing: true,
+  lastWriteError: "",
+}));
 vi.mock("@api/codeInventory", () => ({
+  // The panel derives the "what can it touch?" badge from the interpreter reach
+  // mirror, so the mock has to carry those two helpers as well. Real behaviour
+  // (not a stub): a unit with no declared ceiling and no interpreter capability
+  // is grid-only, which is what these fixtures are.
+  codeUnitMayReachBeyondGrid: (u: {
+    declaredCapabilities?: string[];
+    liveGrants?: string[];
+    interpreterCapabilities?: string[] | null;
+  }) =>
+    (u.declaredCapabilities?.length ?? 0) > 0 ||
+    (u.liveGrants?.length ?? 0) > 0 ||
+    (u.interpreterCapabilities?.length ?? 0) > 0,
+  describeInterpreterReach: (reach: readonly string[]) =>
+    reach.length === 0 ? "Nothing." : `Can touch ${reach.join(", ")}.`,
   getWorkbookScheduledJobs: (...args: unknown[]) => getWorkbookScheduledJobs(...args),
   cancelScheduledJob: (...args: unknown[]) => cancelScheduledJob(...args),
   setScheduledJobEnabled: (...args: unknown[]) => setScheduledJobEnabled(...args),
@@ -54,6 +84,27 @@ vi.mock("@api/codeInventory", () => ({
     orphaned: jobs.filter((j) => j.ownerMissing).length,
     nextRunMs: null,
   }),
+  getScriptHeldState: (...args: unknown[]) => getScriptHeldState(...(args as [])),
+  summarizeScriptHeldState: (s: {
+    shortcuts: unknown[];
+    clipboards: { cells: number }[];
+    watches: { running: boolean }[];
+  }) => ({
+    shortcuts: s.shortcuts.length,
+    clipboards: s.clipboards.length,
+    clipboardCells: s.clipboards.reduce((n, c) => n + c.cells, 0),
+    runningWatches: s.watches.filter((w) => w.running).length,
+    any: s.shortcuts.length > 0 || s.clipboards.length > 0 || s.watches.length > 0,
+  }),
+  revokeScriptKeybinding: vi.fn(),
+  clearScriptClipboard: vi.fn(async () => undefined),
+  getExtensionAuditTrail: (...args: unknown[]) => getExtensionAuditTrail(...(args as [])),
+  EXTENSION_AUDIT_ACTION_LABELS: {
+    installed: "Installed",
+    removed: "Removed",
+    publisherPinned: "Publisher trusted",
+    publisherChangeAccepted: "Publisher CHANGED — accepted",
+  },
 }));
 
 vi.mock("@api/events", () => ({
@@ -290,5 +341,50 @@ describe("CodeInThisFilePanel — scheduled jobs", () => {
     expect(container.textContent).not.toContain(
       "No scripts are scheduled to run in this workbook.",
     );
+  });
+});
+
+// ===========================================================================
+// The "what can it touch?" badge (integration review, 2026-08-01)
+// ===========================================================================
+//
+// The badge used to be driven by declaredCapabilities alone. For the Rust-QuickJS
+// surfaces that OVERSTATED the sandbox: a notebook declares no ceiling and is
+// granted bi.query / bi.sql through a JIT consent at run time, so the panel — the
+// transparency surface of record — printed "Grid-only / Sandboxed to grid data
+// only" about code that was one click from the BI model.
+
+describe("CodeInThisFilePanel — reach badge", () => {
+  const notebookUnit = {
+    surfaceId: "notebook-cell",
+    id: "nb1",
+    name: "Q4 analysis",
+    residence: "Notebook",
+    provenance: "local",
+    sourcePackage: null,
+    declaredCapabilities: [],
+    liveGrants: null,
+    tier: null,
+    mounted: false,
+    interpreterReach: ["grid", "model"],
+    interpreterCapabilities: ["bi.query", "bi.sql"],
+    source: "model.query()",
+    lineCount: 1,
+  };
+
+  it("does NOT call a notebook grid-only when BI reach can be granted to it", async () => {
+    getWorkbookCodeUnits.mockResolvedValue([notebookUnit]);
+    await render();
+    expect(container.textContent).toContain("Grid + on request");
+    expect(container.textContent).not.toContain("Grid-only");
+  });
+
+  it("still says grid-only for a surface no capability can be granted to", async () => {
+    getWorkbookCodeUnits.mockResolvedValue([
+      { ...notebookUnit, interpreterReach: ["grid"], interpreterCapabilities: [] },
+    ]);
+    await render();
+    expect(container.textContent).toContain("Grid-only");
+    expect(container.textContent).not.toContain("Grid + on request");
   });
 });

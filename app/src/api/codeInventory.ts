@@ -38,6 +38,14 @@
 //            its code and reach must be visible here, never hidden. The raw JSON
 //            store record is filtered out of the module list (it is data, not
 //            code) — we surface the parsed functions instead.
+//          - The Rust-QuickJS surfaces' reach is DERIVED, not asserted. It used
+//            to be a hand-written "grid-only" comment on this file, which is the
+//            one link in the transparency chain nothing verified: an op module
+//            could grow a new privileged reach and the panel would keep saying
+//            "grid-only". QUICKJS_SURFACE_REACH below mirrors the interpreter's
+//            own op/reach manifest (core/script-engine/src/manifest.rs), which a
+//            Rust test diffs against the LIVE registered surface and a TS test
+//            (__tests__/interpreterReachDrift.test.ts) diffs against this file.
 
 import type { ScriptSurfaceId } from "./scriptSurfaces";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
@@ -55,6 +63,9 @@ import { loadPersistedTransformLibraryWithProvenance, CHART_TRANSFORMS_SCRIPT_ID
 import { loadPersistedMarkLibraryWithProvenance, markScriptId } from "./chartMarkScripts";
 import { mountedWritebackValidators } from "./writebackValidators";
 import { listAllScheduledJobs, type ScheduledJob } from "./scriptHost/scheduler";
+import { listScriptKeybindings } from "./keybindings";
+import { listInstalledLibraries, listLibraryRealms, readLockedSource } from "./scriptLibraries";
+import { invokeBackend } from "./backend";
 
 // The trusted-UI half of the scheduler is re-exported through the inventory so
 // that a transparency surface has ONE door for both halves of the promise:
@@ -62,6 +73,117 @@ import { listAllScheduledJobs, type ScheduledJob } from "./scriptHost/scheduler"
 // Visibility without control would still leave the user unable to say no.
 export { cancelScheduledJob, setScheduledJobEnabled } from "./scriptHost/scheduler";
 export type { ScheduledJob } from "./scriptHost/scheduler";
+
+// Same reasoning, same door: a shortcut a script holds must be revocable from
+// the surface that shows it. `revokeScriptKeybinding` is the trusted-UI half of
+// the `ui.shortcut` capability (keybindings.ts rule 4).
+export { revokeScriptKeybinding } from "./keybindings";
+export type { ScriptKeybinding } from "./keybindings";
+
+// ===========================================================================
+// Interpreter-derived reach for the Rust-QuickJS surfaces
+// ---------------------------------------------------------------------------
+// GROUND TRUTH: core/script-engine/src/manifest.rs. Every constant in this
+// block mirrors it, and app/src/api/__tests__/interpreterReachDrift.test.ts
+// reads that Rust file and fails if they diverge — naming this block as the fix
+// site. Do not "correct" a value here to make a test pass: the interpreter is
+// authoritative, so either the manifest row is right and this mirror is stale,
+// or a new op genuinely widened a sandbox and the FIX IS IN RUST.
+// ===========================================================================
+
+/** What sandboxed code on the Rust-QuickJS interpreter can touch. Mirrors
+ *  `ReachClass::as_str()` in core/script-engine/src/manifest.rs. */
+export type InterpreterReachClass =
+  /** Cells, formulas, ranges, fills and style application in the CLONED grid. */
+  | "grid"
+  /** Sheets, visibility, document properties, named styles, calc settings. */
+  | "workbook"
+  /** View/UX state applied by the host after the run (zoom, status bar, ...). */
+  | "view"
+  /** Cell and view bookmarks. */
+  | "bookmarks"
+  /** Console lines and structured tables returned to the caller. */
+  | "output"
+  /** Read-only application/locale metadata. */
+  | "appMetadata"
+  /** Read-only BI/semantic-model data — the ONLY class that leaves the clone. */
+  | "model";
+
+/** The surfaces that run on the Rust-QuickJS interpreter. `Extract` (rather
+ *  than a fresh union) so renaming a ScriptSurfaceId breaks the build here
+ *  instead of silently dropping a surface out of the reach mirror. */
+export type QuickJsSurfaceId = Extract<
+  ScriptSurfaceId,
+  "notebook-cell" | "one-off-script" | "mcp-tool" | "writeback-validator"
+>;
+
+/**
+ * Every reach class each Rust-QuickJS surface actually has, derived from the
+ * interpreter's manifest AND from how the host builds that surface's realm:
+ *
+ *  - notebook-cell       : a ModelDataProvider IS injected
+ *                          (scripting/notebook_executor.rs), so `model` is in.
+ *  - one-off-script      : `ScriptEngine::run_with_options` installs NO provider,
+ *  - mcp-tool            : likewise — the model ops are registered on every
+ *                          surface and THROW without a provider, so these two
+ *                          are grid-only by construction, not by assertion.
+ *  - writeback-validator : the submit harness deletes the host globals before
+ *                          the publisher's code is evaluated, so it reaches
+ *                          nothing at all.
+ *
+ * Classes are listed in manifest order (grid outwards).
+ */
+export const QUICKJS_SURFACE_REACH: Record<QuickJsSurfaceId, readonly InterpreterReachClass[]> = {
+  "notebook-cell": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata", "model"],
+  "one-off-script": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata"],
+  "mcp-tool": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata"],
+  "writeback-validator": [],
+};
+
+/**
+ * The capability ids each Rust-QuickJS surface's reach can demand — i.e. what a
+ * just-in-time consent prompt on that surface may ever ask for. Empty is the
+ * honest, DERIVED form of the "grid-only" claim: not "we believe it is
+ * grid-only", but "no op reachable from this realm is capability-gated".
+ *
+ * These are CEILINGS, not grants: a notebook holds nothing until the user
+ * approves a prompt, and the grant then lives in the Rust CapabilityStore (read
+ * live into `liveGrants`).
+ */
+export const QUICKJS_SURFACE_CAPABILITIES: Record<QuickJsSurfaceId, readonly CapabilityId[]> = {
+  "notebook-cell": ["bi.query", "bi.sql"],
+  "one-off-script": [],
+  "mcp-tool": [],
+  "writeback-validator": [],
+};
+
+/** Human phrasing for one reach class — the panel must never render the raw
+ *  wire name at the user. */
+const REACH_LABELS: Record<InterpreterReachClass, string> = {
+  grid: "cell values and formulas (a private copy of the grid)",
+  workbook: "workbook structure and calculation settings",
+  view: "view state (zoom, gridlines, status bar, navigation)",
+  bookmarks: "cell and view bookmarks",
+  output: "console and table output back to you",
+  appMetadata: "read-only app and locale metadata",
+  model: "read-only BI model data — only after you approve it",
+};
+
+/**
+ * One sentence describing what code on a Rust-QuickJS surface can touch, built
+ * from the interpreter manifest rather than from prose. Used by the
+ * transparency panel so the sentence cannot drift from the sandbox.
+ */
+export function describeInterpreterReach(
+  reach: readonly InterpreterReachClass[],
+): string {
+  if (reach.length === 0) {
+    return "Nothing: this code runs in a bare JavaScript realm with every Calcula global removed.";
+  }
+  const parts = reach.map((r) => REACH_LABELS[r]);
+  const last = parts.pop() as string;
+  return parts.length === 0 ? `Can touch ${last}.` : `Can touch ${parts.join(", ")} and ${last}.`;
+}
 
 /** One normalized code unit residing in the open workbook. */
 export interface CodeUnit {
@@ -91,6 +213,20 @@ export interface CodeUnit {
   tier: "restricted" | "unlocked" | null;
   /** Whether this code is currently mounted/active in the broker. */
   mounted: boolean;
+  /**
+   * For code running on the Rust-QuickJS interpreter: the reach classes that
+   * surface actually has, DERIVED from the interpreter's op manifest and from
+   * whether the host injects a model provider / deletes the host globals.
+   * `null` on worker-realm surfaces, whose reach is the broker's business
+   * (declaredCapabilities + liveGrants describe those completely).
+   */
+  interpreterReach: readonly InterpreterReachClass[] | null;
+  /**
+   * For Rust-QuickJS code: the capability ids this surface's reach can ever
+   * demand (the JIT-consent CEILING). `null` on worker-realm surfaces.
+   * Empty array = the derived, verified form of "grid-only".
+   */
+  interpreterCapabilities: readonly CapabilityId[] | null;
   /** The full source text — shown inline so code is never hidden in the file. */
   source: string;
   /** Lines of source (a size-at-a-glance signal). */
@@ -104,6 +240,10 @@ export interface CodeInventorySummary {
   distributed: number;
   /** Units whose declared ceiling lets them reach beyond grid state. */
   beyondGrid: number;
+  /** Units that COULD reach beyond grid state — including a Rust-QuickJS unit
+   *  that holds no grant yet but whose surface can be granted one just in time.
+   *  Always >= beyondGrid; the gap is "what a prompt could still turn on". */
+  beyondGridCapable: number;
   /** Units currently mounted/active. */
   mounted: number;
   /** Units grouped by surface, in the taxonomy's canonical order. */
@@ -118,6 +258,23 @@ export interface CodeInventorySummary {
  *  while it was querying the BI model. */
 export function codeUnitReachesBeyondGrid(unit: CodeUnit): boolean {
   return unit.declaredCapabilities.length > 0 || (unit.liveGrants?.length ?? 0) > 0;
+}
+
+/**
+ * True iff the unit could reach beyond grid state — right now, OR after a
+ * just-in-time consent prompt its surface is allowed to raise.
+ *
+ * This is the CEILING question, and it is deliberately separate from
+ * `codeUnitReachesBeyondGrid` (the "right now" question). A notebook holding no
+ * grant answers false there and true here: nothing has been approved yet, but
+ * the surface can ask, and a transparency panel that only ever showed the
+ * "right now" answer would let a user conclude a notebook is incapable of
+ * touching the BI model when in fact one click stands between it and the data.
+ */
+export function codeUnitMayReachBeyondGrid(unit: CodeUnit): boolean {
+  return (
+    codeUnitReachesBeyondGrid(unit) || (unit.interpreterCapabilities?.length ?? 0) > 0
+  );
 }
 
 const lineCount = (source: string): number =>
@@ -144,11 +301,12 @@ async function safely<T>(label: string, run: () => Promise<T[]>): Promise<T[]> {
  * (object scripts, then the grid-only Rust-QuickJS surfaces) then by name.
  */
 export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
-  const [objectScripts, moduleSummaries, notebookSummaries, mounted] =
+  const [objectScripts, moduleSummaries, notebookSummaries, lockedLibraries, mounted] =
     await Promise.all([
       safely("object scripts", loadAllObjectScripts),
       safely("module scripts", listModuleScripts),
       safely("notebooks", listNotebooks),
+      safely("script libraries", listInstalledLibraries),
       Promise.resolve(listMountedHandles()),
     ]);
 
@@ -176,9 +334,66 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       liveGrants: handle ? ([...handle.grants] as CapabilityId[]) : null,
       tier: handle ? handle.tier : s.accessLevel === "unlocked" ? "unlocked" : "restricted",
       mounted: !!handle,
+      // Worker realm, not the Rust interpreter: the broker is the whole story.
+      interpreterReach: null,
+      interpreterCapabilities: null,
       source: s.source,
       lineCount: lineCount(s.source),
     });
+  }
+
+  // ---- Script libraries (worker realms; third-party code living IN the file) --
+  //
+  // A library is imported with `// @uses`, so no object script's source contains
+  // it — yet its exact bytes are in this workbook (.calcula/script-libs/) and it
+  // executes here. Leaving it out would be the single biggest hole in "the user
+  // can always discover what code exists": the most likely place for hostile
+  // third-party code to sit is precisely a dependency nobody typed.
+  //
+  // The CEILING shown is the LOCKED module's own declaration; the GRANTS shown
+  // are the live realm's, which is the intersection with whichever consumer
+  // pulled it in. They differ on purpose — that gap is the narrowing, and the
+  // panel should show it rather than pick one.
+  const realmsByPackage = new Map<string, ReturnType<typeof listLibraryRealms>[number]>();
+  for (const realm of listLibraryRealms()) {
+    // A package can hold several realms (different consumers, different
+    // ceilings). Show the WIDEST — understating what is running is the failure
+    // mode that matters.
+    const prior = realmsByPackage.get(realm.package);
+    if (!prior || realm.capabilities.length > prior.capabilities.length) {
+      realmsByPackage.set(realm.package, realm);
+    }
+  }
+  for (const lib of lockedLibraries) {
+    const realm = realmsByPackage.get(lib.package) ?? null;
+    for (const mod of lib.modules) {
+      let source = "";
+      try {
+        source = await readLockedSource(mod.sourceHash);
+      } catch (e) {
+        // An unreadable/tampered blob must be VISIBLE, not omitted: an entry the
+        // panel silently drops is exactly the thing an attacker wants.
+        source = `// [the cached source for this module could not be verified: ${
+          e instanceof Error ? e.message : String(e)
+        }]`;
+      }
+      units.push({
+        surfaceId: "script-library",
+        id: `${lib.package}@${lib.resolved}/${mod.id}`,
+        name: `${mod.name} (${lib.package}@${lib.resolved})`,
+        residence: `Library module — imported with // @uses, cached in .calcula/script-libs/${mod.sourceHash.slice(0, 12)}…`,
+        provenance: "distributed",
+        sourcePackage: lib.package,
+        declaredCapabilities: [...mod.capabilities],
+        liveGrants: realm ? [...realm.capabilities] : null,
+        tier: realm ? realm.tier : null,
+        mounted: realm !== null,
+        interpreterReach: null,
+        interpreterCapabilities: null,
+        source,
+        lineCount: lineCount(source),
+      });
+    }
   }
 
   // ---- Module scripts (Rust QuickJS; grid-only, no privileged capabilities) -
@@ -204,12 +419,15 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       residence: `Module — ${describeModuleScriptScope(summary.scope)}`,
       provenance: pkg ? "distributed" : "local",
       sourcePackage: pkg,
-      // The one-off surface installs no model provider at all
-      // (script-engine model_provider.rs), so it is grid-only by construction.
+      // The one-off surface declares no R19 ceiling; what it can touch is a
+      // property of the interpreter + the host's construction of the realm,
+      // read below from the manifest mirror instead of asserted here.
       declaredCapabilities: [],
       liveGrants: null,
       tier: null,
       mounted: false,
+      interpreterReach: QUICKJS_SURFACE_REACH["one-off-script"],
+      interpreterCapabilities: QUICKJS_SURFACE_CAPABILITIES["one-off-script"],
       source,
       lineCount: lineCount(source),
     });
@@ -265,6 +483,10 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       liveGrants: notebookGrants[i],
       tier: null,
       mounted: false,
+      // A notebook IS handed a ModelDataProvider, so unlike the one-off surface
+      // its realm really can reach the BI model once a prompt is approved.
+      interpreterReach: QUICKJS_SURFACE_REACH["notebook-cell"],
+      interpreterCapabilities: QUICKJS_SURFACE_CAPABILITIES["notebook-cell"],
       source,
       lineCount: lineCount(source),
     });
@@ -298,6 +520,8 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
         liveGrants: libHandle ? ([...libHandle.grants] as CapabilityId[]) : null,
         tier: libHandle ? libHandle.tier : "restricted",
         mounted: !!libHandle,
+        interpreterReach: null,
+        interpreterCapabilities: null,
         source,
         lineCount: lineCount(source),
       });
@@ -330,6 +554,8 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
         liveGrants: transformHandle ? ([...transformHandle.grants] as CapabilityId[]) : null,
         tier: transformHandle ? transformHandle.tier : "restricted",
         mounted: !!transformHandle,
+        interpreterReach: null,
+        interpreterCapabilities: null,
         source,
         lineCount: lineCount(source),
       });
@@ -365,6 +591,8 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
         liveGrants: handle ? ([...handle.grants] as CapabilityId[]) : null,
         tier: handle ? handle.tier : "restricted",
         mounted: !!handle,
+        interpreterReach: null,
+        interpreterCapabilities: null,
         source,
         lineCount: lineCount(source),
       });
@@ -396,6 +624,11 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       liveGrants: [],
       tier: "restricted",
       mounted: true,
+      // The authoritative run is the Rust QuickJS one, whose harness deletes
+      // every host global first — so the manifest derives an EMPTY reach for
+      // this surface rather than this file claiming "a pure predicate".
+      interpreterReach: QUICKJS_SURFACE_REACH["writeback-validator"],
+      interpreterCapabilities: QUICKJS_SURFACE_CAPABILITIES["writeback-validator"],
       source: v.source,
       lineCount: lineCount(v.source),
     });
@@ -404,16 +637,28 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
   return units;
 }
 
-/** Canonical surface ordering for the inspector (object scripts first — they
- *  carry the only real reach — then the grid-only surfaces).
+/**
+ * Surfaces the taxonomy defines but this per-file inventory deliberately omits.
  *
- *  `extension-worker` is deliberately absent: a sandboxed distributed extension
- *  is a script SURFACE (it has a taxonomy row) but its code lives in
- *  %APPDATA%/extensions, not in the open workbook, so it is not "code in this
- *  file". Listing it here would promise per-file provenance this inventory
- *  cannot honor. */
-const SURFACE_ORDER: ScriptSurfaceId[] = [
+ * `extension-worker`: a sandboxed distributed extension is a script SURFACE (it
+ * has a taxonomy row) but its code lives in %APPDATA%/extensions, not in the
+ * open workbook, so it is not "code in this file". Listing it here would
+ * promise per-file provenance this inventory cannot honor.
+ *
+ * Every omission must be listed HERE with its reason, because the compile-time
+ * guard below treats this list as the only sanctioned way for a surface to be
+ * missing from the inspector.
+ */
+const SURFACES_NOT_IN_THIS_FILE = ["extension-worker"] as const;
+type OmittedSurfaceId = (typeof SURFACES_NOT_IN_THIS_FILE)[number];
+
+/** Canonical surface ordering for the inspector (object scripts first — they
+ *  carry the only real reach — then the grid-only surfaces). */
+const SURFACE_ORDER = [
   "object-script",
+  // Immediately after the scripts that import them: a library is third-party
+  // code nobody typed into this file, so it belongs high in the reading order.
+  "script-library",
   "formula-udf",
   "chart-transform-sandbox",
   "chart-mark",
@@ -422,7 +667,29 @@ const SURFACE_ORDER: ScriptSurfaceId[] = [
   "notebook-cell",
   "chart-transform",
   "mcp-tool",
-];
+] as const satisfies readonly Exclude<ScriptSurfaceId, OmittedSurfaceId>[];
+
+/**
+ * COMPILE-TIME exhaustiveness guard. Adding a `ScriptSurfaceId` to the taxonomy
+ * without adding it to SURFACE_ORDER (or to SURFACES_NOT_IN_THIS_FILE, with a
+ * reason) makes this assignment fail to type-check, and the error text names the
+ * missing id. A surface silently absent from the ordering would have its units
+ * DROPPED from `summarizeCodeInventory().bySurface` — code that exists in the
+ * workbook but never appears in the "Code in This File" panel is precisely the
+ * hidden-code failure this product exists to prevent, so it must not be
+ * possible to introduce it by forgetting a line.
+ */
+type MissingFromSurfaceOrder = Exclude<
+  ScriptSurfaceId,
+  OmittedSurfaceId | (typeof SURFACE_ORDER)[number]
+>;
+const _surfaceOrderIsExhaustive: [MissingFromSurfaceOrder] extends [never]
+  ? true
+  : {
+      error: "A ScriptSurfaceId is missing from SURFACE_ORDER in codeInventory.ts — add it there, or to SURFACES_NOT_IN_THIS_FILE with a reason";
+      missing: MissingFromSurfaceOrder;
+    } = true;
+void _surfaceOrderIsExhaustive;
 
 /** Roll an inventory up for the panel header + group it by surface. */
 export function summarizeCodeInventory(units: CodeUnit[]): CodeInventorySummary {
@@ -443,6 +710,7 @@ export function summarizeCodeInventory(units: CodeUnit[]): CodeInventorySummary 
     local: units.filter((u) => u.provenance === "local").length,
     distributed: units.filter((u) => u.provenance === "distributed").length,
     beyondGrid: units.filter(codeUnitReachesBeyondGrid).length,
+    beyondGridCapable: units.filter(codeUnitMayReachBeyondGrid).length,
     mounted: units.filter((u) => u.mounted).length,
     bySurface,
   };
@@ -650,4 +918,365 @@ export function summarizeScheduledJobs(jobs: ScheduledJobEntry[]): ScheduledJobS
     orphaned: jobs.filter((j) => j.ownerMissing).length,
     nextRunMs: armed.length === 0 ? null : Math.min(...armed.map((j) => j.nextRunMs)),
   };
+}
+
+// ===========================================================================
+// What scripts are HOLDING right now — "state I did not put there"
+// ===========================================================================
+//
+// The code list answers "what code exists"; the schedule answers "what runs
+// without me asking". Neither answers the third question, and it is the one VBA
+// answered worst: WHAT IS A SCRIPT HOLDING ON MY BEHALF RIGHT NOW?
+//
+// Three things sit in that gap. Each is already exposed as an API, each is
+// already refused/bounded/consented correctly, and each was invisible to the
+// person it belongs to:
+//
+//   1. KEYBOARD SHORTCUTS (`ui.shortcut`). `Application.OnKey "^+r", "Macro"`
+//      is the canonical VBA hijack: a key silently stops doing what the user
+//      expects and nothing anywhere records that a script took it. Calcula
+//      already refuses the dangerous shapes, reserves the app's own keys and
+//      revokes at unmount — but a shortcut nobody can SEE is still a shortcut
+//      nobody can take back, and "invisible key binding" is exactly the failure
+//      this product exists to avoid.
+//   2. PRIVATE CLIPBOARDS. Copying a range into a script's own buffer never
+//      touches the OS clipboard (host.ts refuses that outright), but the buffer
+//      still holds real cell VALUES out of the user's workbook, held by code,
+//      for as long as the script is mounted. Cells sitting in a script's hand
+//      is a fact about the user's data.
+//   3. BACKGROUND WATCHERS. A script subscribing to writeback submissions makes
+//      Calcula poll a registry on a timer. It is demand-driven, bounded and
+//      authorization-checked in Rust — and it is still network traffic and
+//      background work the user caused without doing anything.
+//
+// The rule this section applies is the one the scheduler already established:
+// VISIBILITY PLUS CONTROL. Showing the user a shortcut they cannot revoke, or a
+// buffer they cannot clear, is half a promise. So the panel gets `revoke` and
+// `clear` alongside the list.
+
+/** One keyboard shortcut a live script is holding, joined with its owner. */
+export interface ScriptShortcutEntry {
+  /** Registry id — the handle for revoking it. */
+  id: string;
+  /** Canonical combination ("Ctrl+Shift+R"). */
+  combo: string;
+  scriptId: string;
+  /** Owning code unit's display name; falls back to the name the host recorded
+   *  at bind time, which is host-supplied and never the script's own claim. */
+  ownerName: string;
+  /** True when no code unit in this workbook owns it (a distributed extension
+   *  worker, whose code lives in %APPDATA%/extensions, or a stale row). */
+  ownerMissing: boolean;
+  ownerProvenance: "local" | "distributed" | "unknown";
+  ownerPackage: string | null;
+  /** The exposed method the keys call. */
+  handler: string;
+  /** Human label for the shortcut list ("refreshAll()"). */
+  label: string;
+}
+
+/** One script's private clipboard, as a size — never its contents. */
+export interface ScriptClipboardEntry {
+  scriptId: string;
+  ownerName: string;
+  ownerMissing: boolean;
+  ownerProvenance: "local" | "distributed" | "unknown";
+  ownerPackage: string | null;
+  rows: number;
+  cols: number;
+  /** rows x cols — the number of cells the script currently holds. */
+  cells: number;
+}
+
+/** The background registry poll, phrased for a person. */
+export interface BackgroundWatchEntry {
+  /** Stable id for the row. */
+  id: string;
+  /** What is being watched, in one line. */
+  what: string;
+  running: boolean;
+  /** How many holders want it (scripts + open panes). */
+  refCount: number;
+  intervalMs: number;
+  /** Human cadence, e.g. "Every minute". */
+  cadence: string;
+  /** Registry regions polled on the last pass. */
+  watchedRegionIds: string[];
+  /** Regions skipped for the session (not published by this machine). */
+  skippedRegionIds: string[];
+  /** ISO timestamp of the last completed pass, or null. */
+  lastPollAt: string | null;
+  /** Backend calls the last pass made. */
+  lastPollCalls: number;
+  lastError: string | null;
+}
+
+/** Everything scripts are holding on the user's behalf right now. */
+export interface ScriptHeldState {
+  shortcuts: ScriptShortcutEntry[];
+  clipboards: ScriptClipboardEntry[];
+  /** Background work scripts caused. Empty when nothing is polling. */
+  watches: BackgroundWatchEntry[];
+}
+
+/** Header roll-up for the held-state section. */
+export interface ScriptHeldStateSummary {
+  shortcuts: number;
+  clipboards: number;
+  /** Total cells sitting in script clipboards. */
+  clipboardCells: number;
+  /** Background watchers actually running. */
+  runningWatches: number;
+  /** True when a script is holding ANYTHING. */
+  any: boolean;
+}
+
+/** The submission watch's row id — stable so the UI can key on it. */
+const SUBMISSION_WATCH_ID = "distribution.submissionWatch";
+
+/** Human cadence for a millisecond interval, reusing the job phrasing so the two
+ *  sections cannot describe "every minute" differently. */
+function describeIntervalMs(ms: number): string {
+  return `Every ${describeInterval(Math.round(ms / 1000))}`;
+}
+
+/** Owner join shared by the shortcut and clipboard lists: a code unit if this
+ *  workbook carries one, else a live broker mount (a distributed extension
+ *  worker is mounted but is deliberately not "code in this file"), else nobody.
+ */
+function joinOwner(
+  scriptId: string,
+  fallbackName: string,
+  ownerById: Map<string, CodeUnit>,
+  handleById: Map<string, { scriptName: string; origin: string }>,
+): {
+  ownerName: string;
+  ownerMissing: boolean;
+  ownerProvenance: "local" | "distributed" | "unknown";
+  ownerPackage: string | null;
+} {
+  const owner = ownerById.get(scriptId) ?? null;
+  const handle = owner ? null : (handleById.get(scriptId) ?? null);
+  return {
+    ownerName: owner?.name ?? handle?.scriptName ?? fallbackName ?? scriptId,
+    ownerMissing: owner === null && handle === null,
+    ownerProvenance: owner
+      ? owner.provenance
+      : handle
+        ? handle.origin === "local"
+          ? "local"
+          : "distributed"
+        : "unknown",
+    ownerPackage:
+      owner?.sourcePackage ?? (handle && handle.origin !== "local" ? handle.origin : null),
+  };
+}
+
+/**
+ * Everything scripts are holding right now, joined with the code that holds it.
+ *
+ * Pass `units` when the caller already has the inventory (the transparency panel
+ * does) so the owner join costs nothing extra.
+ *
+ * Every read is best-effort in the same way the rest of this module is: a window
+ * without a given subsystem wired reports "nothing held" for that subsystem
+ * rather than failing the whole panel. The one thing it must never do is report
+ * LESS than is really held, which is why the clipboard read enumerates every
+ * mounted handle rather than only the workbook's own code units — a distributed
+ * extension worker holds a buffer of the user's cells exactly like a local
+ * object script does.
+ */
+export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeldState> {
+  const mounted = listMountedHandles();
+  const handleById = new Map(mounted.map((h) => [h.scriptId, h]));
+
+  // The shortcut list is pure, synchronous host state, so it is read first: if
+  // the inventory join below fails, a held shortcut is still reported (with its
+  // host-recorded owner name) rather than disappearing.
+  let held: ReturnType<typeof listScriptKeybindings> = [];
+  try {
+    held = listScriptKeybindings();
+  } catch (e) {
+    console.warn("[codeInventory] script shortcuts unavailable:", e);
+  }
+
+  // Clipboards: ask the host for the SIZE of each mounted script's buffer. The
+  // contents are deliberately never read here — the user needs to know cells are
+  // held and be able to drop them, not to have a second copy rendered into the
+  // DOM.
+  let clipboardSizes: { scriptId: string; rows: number; cols: number }[] = [];
+  try {
+    const host = await import("./scriptHost/host");
+    for (const handle of mounted) {
+      const size = host.scriptClipboardSize(handle.scriptId);
+      if (size && size.rows > 0 && size.cols > 0) {
+        clipboardSizes.push({ scriptId: handle.scriptId, rows: size.rows, cols: size.cols });
+      }
+    }
+  } catch (e) {
+    console.warn("[codeInventory] script clipboards unavailable:", e);
+    clipboardSizes = [];
+  }
+
+  // Only fetch the inventory when something is actually held, so a workbook
+  // where no script holds anything pays nothing for this section.
+  const needsOwners = held.length > 0 || clipboardSizes.length > 0;
+  const owners = needsOwners ? (units ?? (await getWorkbookCodeUnits())) : [];
+  const ownerById = new Map(owners.map((u) => [u.id, u]));
+
+  const shortcuts: ScriptShortcutEntry[] = held.map((b) => ({
+    id: b.id,
+    combo: b.combo,
+    scriptId: b.scriptId,
+    handler: b.handler,
+    label: b.label,
+    ...joinOwner(b.scriptId, b.scriptName, ownerById, handleById),
+  }));
+
+  const clipboards: ScriptClipboardEntry[] = clipboardSizes.map((c) => ({
+    scriptId: c.scriptId,
+    rows: c.rows,
+    cols: c.cols,
+    cells: c.rows * c.cols,
+    ...joinOwner(c.scriptId, c.scriptId, ownerById, handleById),
+  }));
+
+  // The submission watch. Reported whenever anything holds it — including the
+  // Responses pane, because "why is Calcula talking to the registry" is the
+  // user's question regardless of who asked for it.
+  const watches: BackgroundWatchEntry[] = [];
+  try {
+    const { getSubmissionWatchStatus } = await import("./distribution");
+    const s = getSubmissionWatchStatus();
+    if (s.refCount > 0 || s.running) {
+      watches.push({
+        id: SUBMISSION_WATCH_ID,
+        what: "Checks the distribution registry for new writeback submissions",
+        running: s.running,
+        refCount: s.refCount,
+        intervalMs: s.intervalMs,
+        cadence: describeIntervalMs(s.intervalMs),
+        watchedRegionIds: [...s.watchedRegionIds],
+        skippedRegionIds: [...s.skippedRegionIds],
+        lastPollAt: s.lastPollAt,
+        lastPollCalls: s.lastPollCalls,
+        lastError: s.lastError,
+      });
+    }
+  } catch (e) {
+    console.warn("[codeInventory] submission watch status unavailable:", e);
+  }
+
+  shortcuts.sort((a, b) => a.combo.localeCompare(b.combo) || a.ownerName.localeCompare(b.ownerName));
+  clipboards.sort((a, b) => b.cells - a.cells || a.ownerName.localeCompare(b.ownerName));
+  return { shortcuts, clipboards, watches };
+}
+
+/** Roll the held state up for a header chip. */
+export function summarizeScriptHeldState(state: ScriptHeldState): ScriptHeldStateSummary {
+  const clipboardCells = state.clipboards.reduce((n, c) => n + c.cells, 0);
+  const runningWatches = state.watches.filter((w) => w.running).length;
+  return {
+    shortcuts: state.shortcuts.length,
+    clipboards: state.clipboards.length,
+    clipboardCells,
+    runningWatches,
+    any:
+      state.shortcuts.length > 0 || state.clipboards.length > 0 || state.watches.length > 0,
+  };
+}
+
+/**
+ * Drop one script's private clipboard. The control half of the promise: a buffer
+ * the user can see but not empty is a buffer they cannot say no to.
+ *
+ * Safe by construction — `clearScriptClipboard` only forgets host-side state; it
+ * cannot touch the grid, and the script simply finds its buffer empty (the same
+ * state it starts in) the next time it pastes.
+ */
+export async function clearScriptClipboard(scriptId: string): Promise<void> {
+  const host = await import("./scriptHost/host");
+  host.clearScriptClipboard(scriptId);
+}
+
+// ===========================================================================
+// Machine-scoped: add-ins installed on THIS COMPUTER
+// ===========================================================================
+//
+// THIS SECTION IS NOT ABOUT THE OPEN WORKBOOK, and every surface that renders it
+// must say so. It is here anyway because this module is the transparency spine
+// and because the question it answers is one a user asks in the same breath as
+// "what code is in this file": "...and what else did I let onto this machine?".
+//
+// An add-in is the widest-blast-radius decision in Calcula — the code lands in
+// %APPDATA%/com.calcula.app/extensions and loads into EVERY workbook afterwards
+// — so recording it in a .cala would have made the broadest consent the
+// shortest-lived record. The trail lives in the profile directory beside the
+// publisher pin store it explains (Rust: app/src-tauri/src/extension_audit.rs),
+// append-only, and is read through a main-window-only command.
+//
+// It is a RECORD, not an authority: nothing in Calcula consults it to decide
+// whether an add-in may load. Trust is re-derived from the signature, the code
+// hash and the pin store on every scan.
+
+/** One machine-scoped add-in decision. Mirrors `ExtensionAuditEntry` in
+ *  app/src-tauri/src/extension_audit.rs field for field (camelCase over the
+ *  wire, snake_case in Rust — the Golden Rule). */
+export interface ExtensionAuditEntry {
+  /** RFC 3339 UTC timestamp. */
+  at: string;
+  /** "installed" | "removed" | "publisherPinned" | "publisherChangeAccepted". */
+  action: string;
+  id: string;
+  name: string;
+  version: string;
+  bundleFileName: string;
+  publisherKey: string;
+  previousPublisherKey: string;
+  /** The trust status at the moment of the decision, NOT re-derived now. */
+  trustStatus: string;
+  capabilitiesHonored: boolean;
+  declaredCapabilities: string[];
+  /** Flattened "kind:id" contribution declarations. */
+  contributions: string[];
+  sourcePath: string;
+  detail: string;
+}
+
+/** A read of the machine trail. `missing` and a read error are distinguished on
+ *  purpose: both render as an empty list and they mean opposite things. */
+export interface ExtensionAuditTrail {
+  entries: ExtensionAuditEntry[];
+  total: number;
+  unreadableLines: number;
+  /** Absolute path, so the user can read the file themselves. */
+  path: string;
+  missing: boolean;
+  lastWriteError: string;
+}
+
+/** Human phrasing for one recorded action. A UI must never render the raw wire
+ *  word at a user for a security event. */
+export const EXTENSION_AUDIT_ACTION_LABELS: Record<string, string> = {
+  installed: "Installed",
+  removed: "Removed",
+  publisherPinned: "Publisher trusted",
+  publisherChangeAccepted: "Publisher CHANGED — accepted",
+};
+
+/** Read this machine's add-in trust trail. Never throws: a window without the
+ *  backend wired reports an unreadable trail rather than failing the panel. */
+export async function getExtensionAuditTrail(): Promise<ExtensionAuditTrail> {
+  try {
+    return await invokeBackend<ExtensionAuditTrail>("list_extension_audit");
+  } catch (e) {
+    return {
+      entries: [],
+      total: 0,
+      unreadableLines: 0,
+      path: "",
+      missing: false,
+      lastWriteError: e instanceof Error ? e.message : String(e),
+    };
+  }
 }

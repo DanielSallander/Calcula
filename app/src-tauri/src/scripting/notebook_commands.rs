@@ -126,6 +126,40 @@ pub async fn notebook_delete(
 // Internal Helpers
 // ============================================================================
 
+/// True when a cell holds PROSE, not JavaScript.
+///
+/// A notebook text cell is marked by a `//!markdown` first line rather than by
+/// a new persisted field, so the `.cala` / `.calp` notebook record keeps one
+/// shape (see ScriptNotebook/lib/cellKind.ts for the full rationale). This is
+/// the AUTHORITATIVE half of that rule: run / run-all / rewind / run-from all
+/// funnel through `run_cell_internal`, so a text cell can never reach QuickJS
+/// even if a frontend forgot to filter it — markdown is not valid JavaScript,
+/// and executing it would surface as a confusing syntax error rather than as
+/// the no-op it must be.
+///
+/// Must agree with `MARKER_RE` in cellKind.ts: optional indent, `//!`, optional
+/// space, `markdown`, optional trailing space — case-insensitive.
+pub(crate) fn is_markdown_source(source: &str) -> bool {
+    let first_line = source.split('\n').next().unwrap_or("");
+    let trimmed = first_line.trim_end_matches('\r').trim();
+    let Some(rest) = trimmed.strip_prefix("//!") else {
+        return false;
+    };
+    rest.trim().eq_ignore_ascii_case("markdown")
+}
+
+/// The response a skipped (text) cell answers with: a success that ran nothing.
+fn markdown_skip_response() -> NotebookCellResponse {
+    NotebookCellResponse::Success {
+        output: Vec::new(),
+        cells_modified: 0,
+        duration_ms: 0,
+        execution_index: 0,
+        screen_updating: true,
+        deferred_actions: Vec::new(),
+    }
+}
+
 /// Internal helper that runs a single notebook cell.
 /// Separated from the Tauri command so it can be called from run_all/rewind/run_from.
 ///
@@ -142,6 +176,14 @@ async fn run_cell_internal(
     source: &str,
     view_state: Option<&crate::scripting::types::HostViewState>,
 ) -> Result<NotebookCellResponse, String> {
+    // Text cells are prose: they never reach the interpreter, never take a
+    // checkpoint, and never consume an execution index. Checked BEFORE the
+    // script-security gate so a "prompt"/"disabled" setting does not make a
+    // literate notebook unreadable — nothing is being executed to gate.
+    if is_markdown_source(source) {
+        return Ok(markdown_skip_response());
+    }
+
     // Notebook cells are script execution — same security gate as run_script.
     super::commands::check_script_security(script_state)?;
 
@@ -278,7 +320,6 @@ async fn run_cell_internal(
             cells_modified,
             duration_ms,
             screen_updating,
-            enable_events,
             deferred_actions,
             ..
         } => Ok(NotebookCellResponse::Success {
@@ -287,7 +328,6 @@ async fn run_cell_internal(
             duration_ms,
             execution_index,
             screen_updating,
-            enable_events,
             deferred_actions,
         }),
         script_engine::ScriptResult::Error { message, output } => {
@@ -631,4 +671,76 @@ pub async fn notebook_reset_runtime(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let _exec = script_state.notebook_exec_lock.lock().await;
     reset_runtime_internal(&script_state).await
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod markdown_cell_tests {
+    use super::{is_markdown_source, markdown_skip_response};
+    use crate::scripting::types::NotebookCellResponse;
+
+    #[test]
+    fn marker_is_recognized_in_its_canonical_form() {
+        assert!(is_markdown_source("//!markdown\n# Heading"));
+    }
+
+    #[test]
+    fn marker_tolerates_indent_space_case_and_crlf() {
+        for src in [
+            "  //!markdown\ntext",
+            "//! markdown\ntext",
+            "//!MARKDOWN\ntext",
+            "//!markdown   \ntext",
+            "//!markdown\r\ntext",
+            "//!markdown",
+        ] {
+            assert!(is_markdown_source(src), "should be markdown: {:?}", src);
+        }
+    }
+
+    /// The marker only counts on the FIRST line — a code cell that mentions it
+    /// later is still code, or a snippet could be silenced by a comment.
+    #[test]
+    fn marker_on_a_later_line_does_not_count() {
+        assert!(!is_markdown_source("const x = 1;\n//!markdown\n"));
+    }
+
+    #[test]
+    fn ordinary_code_and_comments_are_not_markdown() {
+        for src in [
+            "",
+            "1 + 1",
+            "// markdown\nconst x = 1;",
+            "//!markdownish\ntext",
+            "//!md\ntext",
+            "/*!markdown*/",
+            "model.query('c', {measures: ['x']})",
+        ] {
+            assert!(!is_markdown_source(src), "should be code: {:?}", src);
+        }
+    }
+
+    /// A skipped text cell answers as an inert success: no output, no grid
+    /// writes, and screen updating untouched.
+    #[test]
+    fn skip_response_is_inert() {
+        match markdown_skip_response() {
+            NotebookCellResponse::Success {
+                output,
+                cells_modified,
+                deferred_actions,
+                screen_updating,
+                ..
+            } => {
+                assert!(output.is_empty());
+                assert_eq!(cells_modified, 0);
+                assert!(deferred_actions.is_empty());
+                assert!(screen_updating);
+            }
+            other => panic!("expected an inert success, got {:?}", other),
+        }
+    }
 }

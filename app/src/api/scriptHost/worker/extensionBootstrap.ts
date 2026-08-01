@@ -12,6 +12,7 @@
 import { hardenAmbientGlobals, forwardConsole } from "./workerHardening";
 import { buildExtensionContext, type ExtWorkerRuntime } from "./extensionWorkerContext";
 import type {
+  ExtContributionDeclaration,
   ExtPackageInfo,
   HX2W,
   WX2H,
@@ -72,6 +73,7 @@ async function handleInit(source: string): Promise<void> {
         apiVersion: m.apiVersion,
         capabilities: m.capabilities,
         workerSupport: m.workerSupport,
+        contributes: m.contributes,
       },
     });
   } catch (e) {
@@ -79,13 +81,16 @@ async function handleInit(source: string): Promise<void> {
   }
 }
 
-async function handleActivate(packageInfo: ExtPackageInfo): Promise<void> {
+async function handleActivate(
+  packageInfo: ExtPackageInfo,
+  contributes: ExtContributionDeclaration,
+): Promise<void> {
   if (!extModule) {
     post({ t: "activated", ok: false, error: "extension not initialized" });
     return;
   }
   try {
-    const built = buildExtensionContext(post, packageInfo);
+    const built = buildExtensionContext(post, packageInfo, contributes);
     runtime = built.runtime;
     intrinsicFreeze(built.context);
     const ret = await extModule.activate(built.context);
@@ -121,10 +126,11 @@ self.onmessage = (e: MessageEvent<HX2W>) => {
       void handleInit(msg.source);
       break;
     case "activate":
-      // ceiling is display/shim-only here; enforcement is host-side (the broker).
-      // `package` is host-built from the authoritative manifest and mirrored
-      // read-only into context.package.
-      void handleActivate(msg.package);
+      // ceiling + contributes are display/shim-only here; enforcement is
+      // host-side (the broker for capabilities, setupRegistration for
+      // contributions). `package` is host-built from the authoritative manifest
+      // and mirrored read-only into context.package.
+      void handleActivate(msg.package, msg.contributes ?? {});
       break;
     case "invokeHandler":
       if (runtime) void runtime.invokeHandler(msg.reqId, msg.handlerId, msg.args);

@@ -19,6 +19,7 @@ import {
   biModelValidateContext,
 } from "@api";
 import type { ModelContextInfo, ModelOverview } from "@api";
+import { testContextInNotebook } from "../../lib/notebookBridge";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import {
@@ -160,6 +161,25 @@ function ContextEditorModal({
     }
   }, [connectionId, name, expression, original]);
 
+  // "Test in notebook": read-only validation + a scaffolded notebook cell.
+  // Never touches biModelUpsertContext — nothing is applied to the model.
+  const handleTestInNotebook = useCallback(async () => {
+    setError(null);
+    setStatus(null);
+    try {
+      await testContextInNotebook({
+        connectionId,
+        name,
+        expression,
+        originalName: original?.name ?? null,
+        knownMeasures: overview.measures,
+      });
+      setStatus("Sent to the notebook (main window) — nothing was applied to the model.");
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }, [connectionId, name, expression, original, overview.measures]);
+
   const handleSave = useCallback(async () => {
     setError(null);
     setStatus(null);
@@ -191,6 +211,14 @@ function ContextEditorModal({
           </button>
           <button style={styles.btn} onClick={() => void handleValidate()}>
             Validate
+          </button>
+          <button
+            style={styles.btn}
+            onClick={() => void handleTestInNotebook()}
+            disabled={!connectionId}
+            title="Validate this draft and open it in the notebook — read-only, nothing is applied to the model"
+          >
+            Test in notebook
           </button>
           <button
             style={styles.primaryBtn}

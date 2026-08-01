@@ -16,9 +16,26 @@
 //! store: a script's authoritative grants must have exactly one home, or a
 //! revoke would have to remember to visit all of them.
 //!
-//! Persistence lives frontend-side (the consent / .cala store). This store is
-//! in-memory only: it does NOT read or write disk. On unmount/revoke the
-//! frontend calls `revoke_script` to drop the in-memory entry.
+//! PERSISTENCE IS DELIBERATELY NOT HERE. This store is in-memory only: it does
+//! NOT read or write disk. Two different stores own the durable decision, and
+//! neither of them is this one:
+//!   * package consent for DISTRIBUTED code lives inside the workbook (it must
+//!     survive a copy) — `app/src/api/distributedConsent.ts`;
+//!   * an "Always allow in this workbook" decision for LOCAL code lives in the
+//!     signed-in user's WebView localStorage on THIS machine
+//!     (`app/src/api/scriptSecurity.ts`), keyed by workbook path + script id +
+//!     SHA-256 of the approved source.
+//! Both are re-established at mount through the ordinary grant commands
+//! (`grant_script_capability` / `grant_script_net_origin`), so a restored
+//! decision is an INPUT to the grant flow and is validated by the same
+//! `GRANTABLE_CAPABILITIES` allowlist as a fresh consent — never a bypass.
+//! Keeping the durable half out of the backend is what makes it impossible for
+//! a grant to arrive with a file: a workbook copied from another machine lands
+//! with an EMPTY store, whatever it contains. If this store ever learned to
+//! persist, that property would be gone.
+//!
+//! On unmount/revoke the frontend calls `revoke_script` to drop the in-memory
+//! entry (a revoke must bite a running script, not only the next launch).
 //!
 //! The `url` crate is not a direct dependency of this crate (only transitive via
 //! tauri), so origin parsing/normalization here is done manually from the raw
@@ -30,6 +47,39 @@ use std::time::{Duration, Instant};
 
 /// Rolling rate-limit window length.
 const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Every capability id this store will accept a grant for — the backend's
+/// vocabulary, owned by the store that holds the grants.
+///
+/// The list exists so a compromised renderer cannot invent capability ids: a
+/// grant is only ever mirrored here AFTER the frontend consent flow said yes,
+/// and this is the check that the id it names is one the backend recognizes.
+///
+/// It must stay in step with `RUST_MIRRORED_CAPABILITIES`
+/// (`app/src/api/scriptHost/capabilities.ts`) — the frontend's list of the
+/// capabilities whose authoritative gate lives in Rust. An id the frontend
+/// mirrors but this list omits is worse than a missing feature: the grant
+/// command hard-errors, the Rust gate keeps answering "not granted", and the
+/// capability looks implemented while being unusable.
+///
+/// `schedule` is in that category and is why this list moved here:
+/// `script_scheduler` gates every registration AND every firing on
+/// `is_granted(script_id, "schedule")`, so an allowlist without it makes the
+/// whole scheduler unreachable for object scripts.
+pub const GRANTABLE_CAPABILITIES: &[&str] = &[
+    "bi.query",
+    "bi.sql",
+    "bi.model",
+    "bi.connector",
+    "distribution.writeback",
+    "schedule",
+];
+
+/// Whether `capability` is an id the backend store will accept a grant for.
+/// Exact match — the ids are opaque strings and no gate asks a prefix question.
+pub fn is_grantable(capability: &str) -> bool {
+    GRANTABLE_CAPABILITIES.contains(&capability)
+}
 
 /// Per-script capability state.
 #[derive(Default)]
@@ -337,6 +387,68 @@ mod tests {
         assert!(!store.is_granted("s1", "distribution.writeback"));
         assert!(!store.is_granted("s1", "bi.model"));
         assert!(store.granted_capabilities("s1").is_empty());
+    }
+
+    #[test]
+    fn schedule_is_grantable_or_the_scheduler_is_unreachable() {
+        // Regression guard for a real defect: `script_scheduler` denies both
+        // registration and every firing unless the store holds a `schedule`
+        // grant, so an allowlist without "schedule" makes the capability
+        // impossible to hold and the scheduler dead code.
+        assert!(is_grantable("schedule"));
+        // Every capability the frontend mirrors (RUST_MIRRORED_CAPABILITIES in
+        // app/src/api/scriptHost/capabilities.ts) must be accepted here.
+        for cap in [
+            "bi.query",
+            "bi.sql",
+            "bi.model",
+            "bi.connector",
+            "distribution.writeback",
+            "schedule",
+        ] {
+            assert!(is_grantable(cap), "{} must be grantable", cap);
+        }
+    }
+
+    #[test]
+    fn invented_and_frontend_only_capabilities_are_not_grantable() {
+        // A compromised renderer cannot widen the vocabulary...
+        assert!(!is_grantable("machine.pwn"));
+        assert!(!is_grantable("bi"));
+        assert!(!is_grantable("bi.query.raw"));
+        // ...and capabilities with no backend gate stay frontend-only: mirroring
+        // them would create a backend grant nothing ever checks.
+        assert!(!is_grantable("ui.html"));
+        assert!(!is_grantable("ui.dialog"));
+        assert!(!is_grantable("formula.udf"));
+        assert!(!is_grantable("storage"));
+        // file.picker is host-mediated: the broker gates the call and a NATIVE
+        // PICKER the user drives chooses the file, so there is no backend gate to
+        // consult. A grant here would imply a Rust check that does not exist.
+        assert!(!is_grantable("file.picker"));
+        // ui.shortcut likewise: the single keydown listener in api/keybindings.ts
+        // owns dispatch, and nothing in Rust ever sees a keystroke.
+        assert!(!is_grantable("ui.shortcut"));
+        // net.fetch is granted per ORIGIN through grant_net_origin, never as a
+        // bare capability id.
+        assert!(!is_grantable("net.fetch"));
+    }
+
+    #[test]
+    fn a_restored_grant_is_indistinguishable_from_a_fresh_one() {
+        // Persisted "Always" decisions are re-applied at mount through the SAME
+        // grant path. This pins the property that matters: the store has no
+        // "restored" mode, no persistence of its own, and a fresh process
+        // starts with nothing until the renderer's consent flow re-grants.
+        let store = CapabilityStore::new();
+        assert!(!store.is_granted("btn-1", "schedule"));
+        store.grant("btn-1", "schedule");
+        assert!(store.is_granted("btn-1", "schedule"));
+
+        // A "relaunch" is a new store: whatever was granted before is gone.
+        let after_restart = CapabilityStore::new();
+        assert!(!after_restart.is_granted("btn-1", "schedule"));
+        assert!(after_restart.granted_capabilities("btn-1").is_empty());
     }
 
     #[test]

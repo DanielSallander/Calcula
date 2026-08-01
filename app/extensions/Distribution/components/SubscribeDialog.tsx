@@ -55,6 +55,15 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // saved in YOUR workbook and starts itself again every time you open it.
   schedule:
     "run itself on a schedule while Calcula is open, without you starting it — saved in your workbook, so it resumes after a reload",
+  // The last screen before somebody else's code enters this workbook, so the
+  // phrase carries both what it can do AND the bound that makes it safe.
+  "file.picker":
+    "ask you to pick a file to save data into or to read — one file per ask, chosen by you in the usual Windows dialog, and it is never told where your files are",
+  // Last screen before somebody else's code enters this workbook: say that a
+  // key on YOUR keyboard is about to run THEIR code, and say in the same breath
+  // what it cannot reach — otherwise "keyboard" reads as "keylogger".
+  "ui.shortcut":
+    "take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, it appears in your shortcut list, and it never sees anything else you type",
 };
 
 function capabilityPhrase(id: string): string {

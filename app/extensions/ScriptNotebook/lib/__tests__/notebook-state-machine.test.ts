@@ -74,7 +74,6 @@ const successResponse = (idx = 1) => ({
   durationMs: 5,
   executionIndex: idx,
   screenUpdating: true,
-  enableEvents: true,
 });
 
 const errorResponse = (msg = 'Error') => ({

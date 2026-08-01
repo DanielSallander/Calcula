@@ -111,6 +111,9 @@ pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
 pub mod calp_inspector;
+pub mod library_commands;
+pub mod extension_install;
+pub mod extension_audit;
 pub mod calp_registry;
 pub mod managed_policy;
 pub mod state_digest;
@@ -3561,9 +3564,12 @@ pub struct ExtensionFileEntry {
     /// importing/executing the bundle (Wave 3 / S8-C7 follow-up).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_json: Option<String>,
-    /// Ed25519 signature trust over the sidecar manifest (mirrors .calp / S5):
-    /// "unsigned" | "invalid" | "publisherChanged" | "firstUse" | "verified".
-    /// The host grants the manifest's declared ceiling ONLY when verified/firstUse.
+    /// Ed25519 signature trust over the sidecar manifest (mirrors .calp / S5).
+    /// The SCAN vocabulary is `extension_install::EXTENSION_TRUST_STATUSES`
+    /// minus `firstUse` (an installer-only promise): "unsigned" | "invalid" |
+    /// "codeUnverified" | "trustUnavailable" | "publisherChanged" |
+    /// "notInstalled" | "verified". The host grants the manifest's declared
+    /// ceiling ONLY for statuses in `trust_grants_capabilities`.
     pub trust_status: String,
 }
 
@@ -3589,36 +3595,53 @@ fn verify_extension_manifest(
     let version = parsed.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string();
     let publisher_key = parsed.get("publisherKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-    // Unsigned: missing id, missing publisher key, or no signature file.
-    if id.is_empty() || publisher_key.is_empty() || !sig_path.exists() {
-        return (Some(manifest_json), "unsigned".to_string());
-    }
-    let sig_hex = match std::fs::read_to_string(sig_path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return (Some(manifest_json), "unsigned".to_string()),
-    };
+    let sig_hex = std::fs::read_to_string(sig_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
 
-    // Verify the detached signature over the RAW on-disk manifest bytes.
-    if calp::signing::verify_signature(&publisher_key, &manifest_bytes, &sig_hex, &id, &version)
-        .is_err()
-    {
-        return (Some(manifest_json), "invalid".to_string());
-    }
-
-    // TOFU: pin the publisher key for this extension id (namespaced `ext:<id>`).
-    let tofu_key = format!("ext:{}", id);
-    match calp::signing::load_trusted_publishers(profile_dir) {
-        Ok(pinned) => match pinned.get(&tofu_key) {
-            Some(k) if k != &publisher_key => (Some(manifest_json), "publisherChanged".to_string()),
-            Some(_) => (Some(manifest_json), "verified".to_string()),
-            None => {
-                let _ = calp::signing::pin_publisher(profile_dir, &tofu_key, &publisher_key);
-                (Some(manifest_json), "firstUse".to_string())
-            }
-        },
-        // TOFU store unreadable -> the signature already verified; treat as verified.
-        Err(_) => (Some(manifest_json), "verified".to_string()),
-    }
+    // ONE decision, shared with the installer
+    // (extension_install::decide_extension_trust, reached here through its
+    // scan-side wrapper): signature over the RAW on-disk manifest bytes, then the
+    // publisher pin, then what the signature actually COVERS.
+    //
+    // The code-hash half is re-checked on EVERY scan, not just at install: the
+    // threat is a program file swapped under an add-in the user already trusted,
+    // and an install-time-only check would never see that. A mismatch is not a
+    // weaker kind of signed — the claim about the code is broken — and a signed
+    // manifest with no codeHash at all is not "signed" in any sense that covers
+    // what will execute. Both land outside `verified`/`firstUse`, which is what
+    // zeroes the capability ceiling frontend-side, taking formula.udf with it.
+    let bundle = calp::signing::extension_layout_for_manifest(manifest_path).map(|l| l.bundle);
+    // THE SCAN VERIFIES A PIN. IT NEVER CREATES ONE.
+    //
+    // This function used to answer `firstUse` for a publisher this machine had
+    // never seen and then SILENTLY PIN the key — trust-on-first-use with nobody
+    // present to be the "first use". It granted nothing directly (the capability
+    // ceiling is a separate frontend gate, and consent for distributed scripts is
+    // separate again), but it handed an attacker a free primitive: drop a bundle
+    // into %APPDATA%/…/extensions signed with your own key under someone else's
+    // add-in id, and you own the pin for that id. The real publisher's next
+    // release then reads `publisherChanged`, and the honest author is the one
+    // wearing the warning badge.
+    //
+    // Now that `install_extension` exists, pinning belongs there — behind a
+    // dialog that shows the key, the capabilities and the contributions BEFORE
+    // anything is trusted. Here, first contact is reported as what it is
+    // (`notInstalled`: present on disk, never installed through Calcula, no
+    // record of anyone agreeing to this key) and lands outside
+    // `trust_grants_capabilities`, so the add-in loads with an EMPTY ceiling
+    // until the user installs it properly.
+    let (status, _pinned) = crate::extension_install::decide_extension_trust_for_scan(
+        profile_dir,
+        &id,
+        &version,
+        &publisher_key,
+        &manifest_bytes,
+        &parsed,
+        &sig_hex,
+        bundle.as_deref(),
+    );
+    (Some(manifest_json), status)
 }
 
 #[cfg(test)]
@@ -3629,6 +3652,22 @@ mod ext_manifest_tests {
         let p = dir.join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    /// Write `<stem>.js` and return the manifest fields that make a signature
+    /// COVER it: `codeHash`, as calcula-sign stamps before signing.
+    ///
+    /// These fixtures used to have no bundle at all, so every one of them
+    /// exercised the `notDeclared` path — which is exactly the path the
+    /// adversarial pass closed. Without a real bundle they would now all report
+    /// `codeUnverified` and prove nothing about the states they are named for.
+    fn bundle_with_hash(dir: &std::path::Path, stem: &str, code: &str) -> String {
+        let path = dir.join(format!("{}.js", stem));
+        std::fs::write(&path, code).unwrap();
+        format!(
+            r#","codeHash":"{}""#,
+            calp::signing::extension_code_hash(&path).unwrap()
+        )
     }
 
     #[test]
@@ -3657,21 +3696,81 @@ mod ext_manifest_tests {
         assert_eq!(status, "unsigned"); // has key but no signature file
     }
 
+    /// Pin a publisher key the way `install_extension` does, so a scan test can
+    /// set up "the user already installed this" without re-implementing the
+    /// installer. The scan itself no longer pins anything.
+    fn pin(profile: &std::path::Path, id: &str, key: &str) {
+        calp::signing::pin_publisher(profile, &format!("ext:{}", id), key).unwrap();
+    }
+
+    /// The scan VERIFIES a pin; it never CREATES one.
+    ///
+    /// Before this wave the first scan of an unknown publisher answered
+    /// `firstUse` and silently pinned, so scanning the same bundle twice walked
+    /// firstUse -> verified with nobody ever having been asked. Now first
+    /// contact is `notInstalled` and stays `notInstalled` no matter how many
+    /// times the app launches: a file that was copied into the extensions
+    /// folder cannot promote itself.
     #[test]
-    fn signed_first_use_then_verified_then_tamper_invalid() {
+    fn a_scan_never_pins_and_first_contact_stays_untrusted() {
         let dir = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let kp = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let code_hash = bundle_with_hash(dir.path(), "s", "export default {};\n");
         let manifest = format!(
-            r#"{{"id":"e.signed","version":"1.0.0","workerSupport":true,"capabilities":["storage"],"publisherKey":"{}"}}"#,
-            kp.public_key_hex()
+            r#"{{"id":"e.signed","version":"1.0.0","workerSupport":true,"capabilities":["storage"],"publisherKey":"{}"{}}}"#,
+            kp.public_key_hex(),
+            code_hash
         );
         let mp = write(dir.path(), "s.manifest.json", &manifest);
         let sig = kp.sign(&std::fs::read(&mp).unwrap());
         let sp = write(dir.path(), "s.manifest.sig", &sig);
 
-        // First scan pins the publisher (firstUse); second matches (verified).
-        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "firstUse");
+        // Scan after scan after scan: still not installed, still not pinned.
+        for _ in 0..3 {
+            assert_eq!(
+                verify_extension_manifest(&mp, &sp, profile.path()).1,
+                crate::extension_install::TRUST_NOT_INSTALLED,
+            );
+        }
+        assert!(
+            calp::signing::load_trusted_publishers(profile.path())
+                .unwrap()
+                .get("ext:e.signed")
+                .is_none(),
+            "the scan must never create a pin — that is the installer's job"
+        );
+        // ...and the ceiling stays empty, so a hand-copied add-in gets no
+        // capabilities (no formula.udf, no storage, no network) until installed.
+        assert!(!crate::extension_install::trust_grants_capabilities(
+            crate::extension_install::TRUST_NOT_INSTALLED
+        ));
+    }
+
+    #[test]
+    fn signed_and_pinned_is_verified_then_tamper_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let kp = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let code_hash = bundle_with_hash(dir.path(), "s", "export default {};\n");
+        let manifest = format!(
+            r#"{{"id":"e.signed","version":"1.0.0","workerSupport":true,"capabilities":["storage"],"publisherKey":"{}"{}}}"#,
+            kp.public_key_hex(),
+            code_hash
+        );
+        let mp = write(dir.path(), "s.manifest.json", &manifest);
+        let sig = kp.sign(&std::fs::read(&mp).unwrap());
+        let sp = write(dir.path(), "s.manifest.sig", &sig);
+
+        // The user installed it, so the key is pinned.
+        pin(profile.path(), "e.signed", &kp.public_key_hex());
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "verified");
+
+        // Swapping the PROGRAM FILE under an already-trusted add-in — the threat
+        // an install-time-only check never sees — breaks the signed codeHash.
+        std::fs::write(dir.path().join("s.js"), "/* evil */").unwrap();
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "invalid");
+        std::fs::write(dir.path().join("s.js"), "export default {};\n").unwrap();
         assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "verified");
 
         // Tampering the manifest invalidates the detached signature.
@@ -3684,25 +3783,131 @@ mod ext_manifest_tests {
         let dir = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
         let kp_a = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let code_hash = bundle_with_hash(dir.path(), "p", "export default {};\n");
         let m_a = format!(
-            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"}}"#,
-            kp_a.public_key_hex()
+            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"{}}}"#,
+            kp_a.public_key_hex(),
+            code_hash
         );
         let mp = write(dir.path(), "p.manifest.json", &m_a);
         let sp = write(dir.path(), "p.manifest.sig", &kp_a.sign(&std::fs::read(&mp).unwrap()));
-        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "firstUse");
+        // Publisher A's release was INSTALLED (the only thing that pins).
+        pin(profile.path(), "e.pc", &kp_a.public_key_hex());
+        assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "verified");
 
         // A DIFFERENT publisher re-signs the same id with their own key.
         let profile_b = tempfile::tempdir().unwrap();
         let kp_b = calp::signing::PublisherKeypair::load_or_create(profile_b.path()).unwrap();
         let m_b = format!(
-            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"}}"#,
-            kp_b.public_key_hex()
+            r#"{{"id":"e.pc","version":"1.0.0","publisherKey":"{}"{}}}"#,
+            kp_b.public_key_hex(),
+            code_hash
         );
         write(dir.path(), "p.manifest.json", &m_b);
         write(dir.path(), "p.manifest.sig", &kp_b.sign(&std::fs::read(&mp).unwrap()));
         // The profile still has publisher A pinned for ext:e.pc.
         assert_eq!(verify_extension_manifest(&mp, &sp, profile.path()).1, "publisherChanged");
+    }
+
+    /// THE SQUAT THIS CLOSES, end to end.
+    ///
+    /// An attacker who can write `%APPDATA%/…/extensions` drops a bundle signed
+    /// with THEIR key under an id they do not own. Under scan-time TOFU the next
+    /// launch pinned that key for the id, and the genuine publisher's later
+    /// release then read `publisherChanged` — the real author wearing the
+    /// warning badge, the attacker wearing "Signed". Now the dropped bundle
+    /// stays `notInstalled` forever and the real publisher's install is a clean
+    /// first contact.
+    #[test]
+    fn a_dropped_bundle_cannot_squat_the_pin_for_an_id_it_does_not_own() {
+        let ext = tempfile::tempdir().unwrap();
+        let user_profile = tempfile::tempdir().unwrap();
+
+        // The ATTACKER's key, generated in their own profile.
+        let attacker_profile = tempfile::tempdir().unwrap();
+        let attacker = calp::signing::PublisherKeypair::load_or_create(attacker_profile.path()).unwrap();
+        let code_hash = bundle_with_hash(ext.path(), "acme-tax", "export default {};\n");
+        let m = format!(
+            r#"{{"id":"acme.tax-tools","version":"9.9.9","workerSupport":true,"capabilities":["formula.udf"],"publisherKey":"{}"{}}}"#,
+            attacker.public_key_hex(),
+            code_hash
+        );
+        let mp = write(ext.path(), "acme-tax.manifest.json", &m);
+        let sp = write(
+            ext.path(),
+            "acme-tax.manifest.sig",
+            &attacker.sign(&std::fs::read(&mp).unwrap()),
+        );
+
+        // Every launch from now on.
+        for _ in 0..5 {
+            let (_, status) = verify_extension_manifest(&mp, &sp, user_profile.path());
+            assert_eq!(
+                status,
+                crate::extension_install::TRUST_NOT_INSTALLED,
+                "a dropped bundle must never become trusted by being scanned"
+            );
+        }
+        assert!(
+            calp::signing::load_trusted_publishers(user_profile.path())
+                .unwrap()
+                .is_empty(),
+            "the attacker's key must not be pinned for acme.tax-tools"
+        );
+
+        // The GENUINE publisher later ships the same id. It is first contact,
+        // not a publisher change, so the real author is not the one flagged.
+        let acme_profile = tempfile::tempdir().unwrap();
+        let acme = calp::signing::PublisherKeypair::load_or_create(acme_profile.path()).unwrap();
+        assert_ne!(acme.public_key_hex(), attacker.public_key_hex());
+        let real = tempfile::tempdir().unwrap();
+        let real_hash = bundle_with_hash(real.path(), "acme-tax", "export default { real: true };\n");
+        let m2 = format!(
+            r#"{{"id":"acme.tax-tools","version":"1.0.0","workerSupport":true,"capabilities":["formula.udf"],"publisherKey":"{}"{}}}"#,
+            acme.public_key_hex(),
+            real_hash
+        );
+        let mp2 = write(real.path(), "acme-tax.manifest.json", &m2);
+        let sp2 = write(
+            real.path(),
+            "acme-tax.manifest.sig",
+            &acme.sign(&std::fs::read(&mp2).unwrap()),
+        );
+        let (_, status) = verify_extension_manifest(&mp2, &sp2, user_profile.path());
+        assert_eq!(
+            status,
+            crate::extension_install::TRUST_NOT_INSTALLED,
+            "the genuine publisher must read as first contact, NOT as a publisher change"
+        );
+    }
+
+    /// A signature that verifies but makes NO claim about the program file is
+    /// not trusted, and — critically — does not pin. The scan is the launch-time
+    /// gate on the capability ceiling, so this is where "signed" has to mean the
+    /// code or it means nothing.
+    #[test]
+    fn signed_without_a_code_hash_is_not_trusted_and_does_not_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let kp = calp::signing::PublisherKeypair::load_or_create(profile.path()).unwrap();
+        std::fs::write(dir.path().join("n.js"), "export default {};\n").unwrap();
+        let manifest = format!(
+            r#"{{"id":"e.nohash","version":"1.0.0","workerSupport":true,"capabilities":["storage"],"publisherKey":"{}"}}"#,
+            kp.public_key_hex()
+        );
+        let mp = write(dir.path(), "n.manifest.json", &manifest);
+        let sp = write(dir.path(), "n.manifest.sig", &kp.sign(&std::fs::read(&mp).unwrap()));
+
+        let (_, status) = verify_extension_manifest(&mp, &sp, profile.path());
+        assert_eq!(status, crate::extension_install::TRUST_CODE_UNVERIFIED);
+        assert!(!crate::extension_install::trust_grants_capabilities(&status));
+        assert!(
+            calp::signing::load_trusted_publishers(profile.path())
+                .unwrap()
+                .get("ext:e.nohash")
+                .is_none(),
+            "a key we will not trust must not become the pin a later release is measured against"
+        );
     }
 }
 
@@ -3840,12 +4045,45 @@ fn resolve_uninstall_targets(
     }
 }
 
+/// Read whatever identity the about-to-be-removed bundle still carries, so the
+/// machine-scoped trail can name WHAT was removed rather than only which file
+/// disappeared. Read BEFORE the delete, obviously — afterwards there is nothing
+/// left to read — and entirely best-effort: an unreadable or absent sidecar
+/// yields an empty description, never a refusal to uninstall.
+fn describe_installed_extension(
+    ext_dir: &std::path::Path,
+    file_name: &str,
+) -> (String, String, String, String) {
+    let manifest_path = match file_name.strip_suffix("/index.js") {
+        Some(dir) => ext_dir.join(dir).join("extension.manifest.json"),
+        None => match file_name.strip_suffix(".js") {
+            Some(stem) => ext_dir.join(format!("{}.manifest.json", stem)),
+            None => return (String::new(), String::new(), String::new(), String::new()),
+        },
+    };
+    let parsed = std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| {
+        parsed
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    (s("id"), s("name"), s("version"), s("publisherKey"))
+}
+
 /// Uninstall a third-party extension by deleting its bundle + sidecar files (or
 /// its directory) from the extensions directory (C7). The extensions directory is
 /// ALWAYS app_data/extensions (never caller-supplied); `file_name` is the value
 /// reported by `scan_extension_directory` and is validated to stay within it. The
 /// TOFU publisher pin (`ext:{id}`) is intentionally left in place so a later
-/// re-install of the same id from the same key still verifies.
+/// re-install of the same id from the same key still verifies — which is exactly
+/// why the removal is recorded in the machine-scoped trail: the pin outlives the
+/// add-in, so the record of why it exists has to as well.
 #[tauri::command]
 fn uninstall_extension(
     app_handle: tauri::AppHandle,
@@ -3862,6 +4100,8 @@ fn uninstall_extension(
     let ext_dir_canon = ext_dir
         .canonicalize()
         .map_err(|e| format!("Extensions directory not available: {}", e))?;
+
+    let (id, name, version, publisher_key) = describe_installed_extension(&ext_dir, &file_name);
 
     let targets = resolve_uninstall_targets(&ext_dir, &file_name)?;
 
@@ -3892,6 +4132,29 @@ fn uninstall_extension(
     if !removed_any {
         return Err(format!("Extension '{}' not found", file_name));
     }
+
+    // Machine-scoped, append-only, and written only for a removal that actually
+    // happened. The publisher pin is deliberately NOT revoked here, so this row
+    // is the only thing that explains why a key for a long-gone add-in is still
+    // trusted on this machine.
+    crate::extension_audit::record(
+        &crate::calp_commands::calcula_profile_dir(),
+        crate::extension_audit::ExtensionAuditEntry {
+            at: crate::extension_audit::now_rfc3339(),
+            action: crate::extension_audit::ACTION_REMOVED.to_string(),
+            id: id.clone(),
+            name: name.clone(),
+            version,
+            bundle_file_name: file_name.clone(),
+            publisher_key,
+            detail: format!(
+                "Removed '{}' from this computer. Its trusted publisher key was kept, so \
+                 reinstalling the same add-in from the same publisher will still verify.",
+                if name.is_empty() { file_name } else { name },
+            ),
+            ..Default::default()
+        },
+    );
     Ok(())
 }
 
@@ -4079,6 +4342,7 @@ pub fn run() {
             formula::get_all_functions,
             formula::get_function_template,
             formula::evaluate_expressions,
+            formula::evaluate_formula_typed,
             formula::evaluate_scoped,
             // File commands
             persistence::save_file,
@@ -4716,6 +4980,8 @@ pub fn run() {
             scan_extension_directory,
             get_extensions_directory,
             uninstall_extension,
+            extension_install::install_extension,
+            extension_audit::list_extension_audit,
             // .calp distribution commands
             calp_commands::calp_publish,
             calp_commands::calp_publish_preview,
@@ -4736,6 +5002,7 @@ pub fn run() {
             calp_inspector::calp_inspector_writeback,
             calp_inspector::calp_inspector_artifact,
             calp_inspector::calp_inspector_verify_artifacts,
+            library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_get_package_objects,
             calp_commands::calp_get_overrides,

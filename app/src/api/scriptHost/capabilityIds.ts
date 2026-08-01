@@ -68,6 +68,42 @@
  *                   requires the owning script to be mounted, enforces a 30s
  *                   floor and a per-job no-self-overlap guard, and audits
  *                   every fire.
+ *  - file.picker  : ask the USER to pick ONE file — to save text into, or to
+ *                   read text from. Named for the MECHANISM, not the reach,
+ *                   because the mechanism IS the safety story: the script
+ *                   never supplies, sees or stores a path; the host opens a
+ *                   native picker, the human chooses the file, and the host
+ *                   does the I/O, one file per call. ("file.access" was
+ *                   rejected as an id — it reads as ambient filesystem
+ *                   access, which is exactly the false impression this
+ *                   capability must never create.)
+ *                   Purely frontend / host-mediated (same shape as ui.dialog):
+ *                   the trusted main thread performs the read/write through
+ *                   the already-privileged read_text_file / write_text_file
+ *                   commands, so there is NO Rust CapabilityStore entry and it
+ *                   is NOT in RUST_MIRRORED_CAPABILITIES. The containment that
+ *                   matters is that the worker realm has no Tauri, no fs and
+ *                   no path vocabulary at all — it can only ask the host to
+ *                   ask the user.
+ *  - ui.shortcut  : take over ONE keyboard shortcut so pressing it runs one of
+ *                   the script's own exposed methods — the Application.OnKey
+ *                   replacement. Named for what the user gets (a shortcut),
+ *                   never "keyboard": a script never sees the keyboard, only
+ *                   the combination it was granted. Bounded structurally, not
+ *                   by promise (app/src/api/keybindings.ts): the combination
+ *                   must be Ctrl+Shift+<letter> (so typing, Escape, Tab, the
+ *                   arrows, F1-F12 and every Ctrl+<key> the grid and the app
+ *                   own are unreachable BY SHAPE, not by blocklist), a
+ *                   combination anything else already holds is refused rather
+ *                   than overridden, the app wins any later tie, at most 8 per
+ *                   script, and the binding is listed in the shortcut list and
+ *                   dies with the mount. The handler receives `{ combo }` and
+ *                   nothing else — there is no key stream to subscribe to.
+ *                   Purely frontend / host-mediated (same shape as ui.dialog
+ *                   and file.picker): the keydown listener, the registry and
+ *                   the dispatch are all trusted main-thread code, so there is
+ *                   NO Rust CapabilityStore entry and it is NOT in
+ *                   RUST_MIRRORED_CAPABILITIES.
  */
 export const ALL_CAPABILITY_IDS = [
   "net.fetch",
@@ -81,6 +117,8 @@ export const ALL_CAPABILITY_IDS = [
   "ui.dialog",
   "distribution.writeback",
   "schedule",
+  "file.picker",
+  "ui.shortcut",
 ] as const;
 
 export type CapabilityId = (typeof ALL_CAPABILITY_IDS)[number];

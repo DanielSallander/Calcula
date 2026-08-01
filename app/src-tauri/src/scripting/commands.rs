@@ -943,7 +943,6 @@ pub fn run_script(
             // Persisted server-side in step 3 — not part of the IPC response.
             workbook_properties_changed: _,
             screen_updating,
-            enable_events,
         } => Ok(RunScriptResponse::Success {
             output: output.iter().map(|i| i.to_text()).collect(),
             cells_modified,
@@ -951,7 +950,6 @@ pub fn run_script(
             bookmark_mutations,
             deferred_actions,
             screen_updating,
-            enable_events,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(RunScriptResponse::Error {

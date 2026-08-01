@@ -3,6 +3,11 @@
 // CONTEXT: Extensions import from here — never directly from @tauri-apps/api.
 
 import { invokeBackend } from "./backend";
+import { AppEvents, emitAppEvent } from "./events";
+import type {
+  WritebackSubmissionNotice,
+  WritebackSubmissionReceivedPayload,
+} from "./events";
 import {
   collectDistributableObjects,
   materializePulledObjects,
@@ -912,6 +917,266 @@ export interface RegionResponseStatus {
 /** Who has responded vs. who is still expected for a region. */
 export function regionResponseStatus(regionId: string): Promise<RegionResponseStatus> {
   return invokeBackend("calp_region_response_status", { regionId });
+}
+
+// ============================================================================
+// Submission watch (§5.5): the honest push behind WRITEBACK_SUBMISSION_RECEIVED
+// ============================================================================
+//
+// THE PROBLEM. A subscriber submits by APPENDING to a registry on disk (or a
+// share) from THEIR machine. The publisher's Calcula is not in that path and
+// receives nothing — so until now a publisher learned about answers by opening
+// the Responses pane and looking, and a script could not react at all.
+//
+// WHAT A REAL PUSH WOULD NEED, and why it does not exist: an OS file watcher on
+// the registry, plus a way to know which of its thousands of files matter. The
+// registry is an append-only event log that Rust folds on read; there is no
+// change feed, no sequence cursor, and no per-region "latest" marker to watch.
+// So a true push is not available, and inventing an event that never fires
+// would be worse than none.
+//
+// WHAT THIS IS INSTEAD, stated plainly: a POLL, wearing an event. It is
+// acceptable here only because all three of these hold:
+//
+//  1. DEMAND-DRIVEN. Nothing polls until something subscribes. The script host
+//     acquires a watch when a script subscribes to the event and releases it at
+//     unmount; the Responses pane acquires one while it is open. Refcount zero
+//     = timer cleared = zero cost, which is the default state of every workbook.
+//  2. BOUNDED. One pass every SUBMISSION_POLL_INTERVAL_MS, sequential, one IPC
+//     per PUBLISHER-OWNED region. A region that refuses the publisher gate is
+//     recorded and never polled again this session, so a subscriber-only
+//     workbook settles at ONE region-list call per interval and no inbox reads.
+//     Passes never overlap (a slow pass skips the next tick).
+//  3. DISCLOSED. getSubmissionWatchStatus() reports the refcount, the interval,
+//     which regions are watched, when the last pass ran and what it cost, so the
+//     poll can be shown to the user rather than merely documented here.
+//
+// AUTHORIZATION IS NOT THIS FILE'S. Every inbox read goes through
+// calp_load_region_submissions, which re-proves Ed25519 publisher-key
+// possession in Rust on every call. The watcher cannot see a submission the
+// caller was not already entitled to fetch by hand.
+
+/** How often a pass runs while at least one watcher is registered. */
+export const SUBMISSION_POLL_INTERVAL_MS = 60_000;
+
+/** Per-event cap on the `submissions` array (the count is always exact). */
+export const MAX_REPORTED_SUBMISSIONS = 50;
+
+/** Live state of the submission watch, for disclosure surfaces. */
+export interface SubmissionWatchStatus {
+  /** How many holders currently want the watch (0 = nothing is polling). */
+  refCount: number;
+  running: boolean;
+  intervalMs: number;
+  /** Regions polled on the last pass (publisher-owned ones only). */
+  watchedRegionIds: string[];
+  /** Regions skipped for the rest of the session: not published by this
+   *  machine, so their inbox is not ours to read. */
+  skippedRegionIds: string[];
+  /** ISO 8601 timestamp of the last completed pass, or null. */
+  lastPollAt: string | null;
+  /** Backend calls the last pass made (1 region list + 1 per watched region). */
+  lastPollCalls: number;
+  /** Failure of the last pass, if any (never thrown — a poll must not break
+   *  the app, and a permanently failing poll must be visible, not silent). */
+  lastError: string | null;
+}
+
+let watchRefCount = 0;
+let watchTimer: ReturnType<typeof setInterval> | null = null;
+/** The pass currently running, so two never overlap (a slow pass makes the next
+ *  tick a no-op rather than stacking a second walk of the registry). */
+let inFlightPass: Promise<void> | null = null;
+/** regionId -> submission ids already reported (replaced each pass, so this is
+ *  bounded by the region's live slot count rather than by history). */
+const seenSubmissionIds = new Map<string, Set<string>>();
+/** Regions whose inbox this machine may not read (not the publisher). */
+const nonPublisherRegions = new Set<string>();
+let lastPollAt: string | null = null;
+let lastPollCalls = 0;
+let lastWatchError: string | null = null;
+let watchedRegionIds: string[] = [];
+
+/** True when the failure is the publisher gate refusing, rather than a
+ *  transient I/O problem. Only this class disables a region for the session —
+ *  a missing network share must be retried, a missing signing key never
+ *  succeeds. Mirrors require_publisher's message in calp_commands.rs. */
+function isPublisherRefusal(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /only the publisher of/i.test(msg) || /can view or manage its writeback submissions/i.test(msg);
+}
+
+/**
+ * Run ONE pass. `announce` false primes the seen-sets without emitting — used
+ * on the first pass after the watch starts, because "this submission exists"
+ * is not "this submission just arrived", and a publisher whose script starts
+ * on a full inbox must not be told the whole history is new.
+ */
+async function doSubmissionPass(announce: boolean): Promise<void> {
+  let calls = 0;
+  // Pass-local, then published once at the end. Assigning lastWatchError as we
+  // go and clearing it on success loses a per-region failure the moment any
+  // other region succeeds — which is exactly the case worth reporting.
+  let passError: string | null = null;
+  try {
+    const regions = await getWritebackRegions();
+    calls += 1;
+    const liveRegionIds = new Set(regions.map((r) => r.regionId));
+    // Forget state for regions that no longer exist (unsubscribed package).
+    for (const id of [...seenSubmissionIds.keys()]) {
+      if (!liveRegionIds.has(id)) seenSubmissionIds.delete(id);
+    }
+    for (const id of [...nonPublisherRegions]) {
+      if (!liveRegionIds.has(id)) nonPublisherRegions.delete(id);
+    }
+
+    const watched: string[] = [];
+    for (const region of regions) {
+      const regionId = region.regionId;
+      if (nonPublisherRegions.has(regionId)) continue;
+      let rows: RegionSubmission[];
+      try {
+        rows = await loadRegionSubmissions(regionId);
+        calls += 1;
+      } catch (err) {
+        calls += 1;
+        if (isPublisherRefusal(err)) {
+          // Not ours to read. Record it so this is a one-time cost per region.
+          nonPublisherRegions.add(regionId);
+          seenSubmissionIds.delete(regionId);
+        } else {
+          passError = err instanceof Error ? err.message : String(err);
+        }
+        continue;
+      }
+      watched.push(regionId);
+
+      // Only "submitted" counts as ARRIVED. An approve/reject is the
+      // publisher's own action and re-folds to a new record; announcing it
+      // would tell a publisher their own click was an incoming answer.
+      const current = new Set<string>();
+      const fresh: WritebackSubmissionNotice[] = [];
+      const previous = seenSubmissionIds.get(regionId);
+      for (const row of rows) {
+        if (row.state !== "submitted") continue;
+        current.add(row.submissionId);
+        if (announce && previous && !previous.has(row.submissionId)) {
+          fresh.push({
+            submissionId: row.submissionId,
+            submitterId: row.submitterId,
+            submitterName: row.submitterName,
+            cellRow: row.cellRow,
+            cellCol: row.cellCol,
+            submittedAt: row.submittedAt ?? null,
+          });
+        }
+      }
+      // Replacing (not merging) keeps this bounded by the live slot count.
+      seenSubmissionIds.set(regionId, current);
+
+      if (fresh.length > 0) {
+        const payload: WritebackSubmissionReceivedPayload = {
+          regionId,
+          count: fresh.length,
+          submissions: fresh.slice(0, MAX_REPORTED_SUBMISSIONS),
+          truncated: fresh.length > MAX_REPORTED_SUBMISSIONS,
+          observedAt: new Date().toISOString(),
+        };
+        emitAppEvent(AppEvents.WRITEBACK_SUBMISSION_RECEIVED, payload);
+      }
+    }
+    watchedRegionIds = watched;
+  } catch (err) {
+    // A poll must never break the caller. It must also never fail invisibly —
+    // that is what lastError and the disclosure surface are for.
+    passError = err instanceof Error ? err.message : String(err);
+  } finally {
+    lastWatchError = passError;
+    lastPollCalls = calls;
+    lastPollAt = new Date().toISOString();
+  }
+}
+
+/** Start a pass, or join the one already running. Never two at once. */
+function runSubmissionPass(announce: boolean): Promise<void> {
+  if (inFlightPass) return inFlightPass;
+  const pass = doSubmissionPass(announce).finally(() => {
+    inFlightPass = null;
+  });
+  inFlightPass = pass;
+  return pass;
+}
+
+/** Resolve when no pass is running. The priming pass a watch starts is
+ *  fire-and-forget by design (acquiring must not block a subscription); this is
+ *  how a caller — or a test — waits for it. */
+export function whenSubmissionWatchSettled(): Promise<void> {
+  return inFlightPass ?? Promise.resolve();
+}
+
+/**
+ * Register interest in WRITEBACK_SUBMISSION_RECEIVED and start the poll if this
+ * is the first holder. Returns a release function; the watch stops when the
+ * last holder releases. The release is idempotent, so a cleanup array that runs
+ * twice cannot drive the count negative and strand the timer.
+ */
+export function acquireSubmissionWatch(): () => void {
+  watchRefCount += 1;
+  if (watchRefCount === 1) {
+    // Prime first (no announcements), then poll on the interval.
+    void runSubmissionPass(false);
+    watchTimer = setInterval(() => {
+      void runSubmissionPass(true);
+    }, SUBMISSION_POLL_INTERVAL_MS);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    watchRefCount = Math.max(0, watchRefCount - 1);
+    if (watchRefCount === 0 && watchTimer !== null) {
+      clearInterval(watchTimer);
+      watchTimer = null;
+      watchedRegionIds = [];
+    }
+  };
+}
+
+/** Disclosure: exactly what the submission watch is doing and what it costs. */
+export function getSubmissionWatchStatus(): SubmissionWatchStatus {
+  return {
+    refCount: watchRefCount,
+    running: watchTimer !== null,
+    intervalMs: SUBMISSION_POLL_INTERVAL_MS,
+    watchedRegionIds: [...watchedRegionIds],
+    skippedRegionIds: [...nonPublisherRegions],
+    lastPollAt,
+    lastPollCalls,
+    lastError: lastWatchError,
+  };
+}
+
+/**
+ * Run a pass NOW without waiting for the interval — used by the Responses pane
+ * so "Refresh" also advances the watch, and by tests. Announces like a normal
+ * pass (the priming pass has already happened if a watch is held).
+ */
+export function pollSubmissionsNow(): Promise<void> {
+  return runSubmissionPass(watchRefCount > 0);
+}
+
+/** Test/reset hook: drop every watcher, timer and remembered id. */
+export function resetSubmissionWatch(): void {
+  if (watchTimer !== null) clearInterval(watchTimer);
+  watchTimer = null;
+  watchRefCount = 0;
+  inFlightPass = null;
+  seenSubmissionIds.clear();
+  nonPublisherRegions.clear();
+  watchedRegionIds = [];
+  lastPollAt = null;
+  lastPollCalls = 0;
+  lastWatchError = null;
 }
 
 // ============================================================================

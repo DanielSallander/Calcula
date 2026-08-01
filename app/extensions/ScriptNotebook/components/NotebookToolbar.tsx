@@ -4,6 +4,7 @@
 
 import React, { useState, useCallback } from "react";
 import { useNotebookStore } from "../lib/useNotebookStore";
+import { MODEL_QUERY_TEMPLATE } from "../lib/cellTemplates";
 
 const PlayAllIcon = () => (
   <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -31,6 +32,7 @@ export function NotebookToolbar(): React.ReactElement {
     isExecuting,
     runAll,
     addCell,
+    appendCellsWithSource,
     createNotebook,
     openNotebook,
     deleteNotebook,
@@ -132,9 +134,23 @@ export function NotebookToolbar(): React.ReactElement {
           <button
             style={styles.button}
             onClick={() => addCell()}
-            title="Add Cell at End"
+            title="Add a code cell at the end"
           >
-            +Cell
+            + Code
+          </button>
+          <button
+            style={styles.button}
+            onClick={() => addCell(undefined, "markdown")}
+            title="Add a text (markdown) cell at the end — prose, never executed"
+          >
+            + Text
+          </button>
+          <button
+            style={styles.button}
+            onClick={() => appendCellsWithSource([MODEL_QUERY_TEMPLATE])}
+            title="Add a starter cell for the read-only model API"
+          >
+            Model query…
           </button>
           <div style={{ flex: 1 }} />
           <button

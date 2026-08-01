@@ -3859,6 +3859,29 @@ pub fn set_extension_data_undoable(
 // hand-rolled in-memory hand-off would have proved nothing about the feature's
 // headline promise ("it is still there next time you open the file").
 
+/// THE canonical serialization point for every test that drives the process-
+/// global scheduled-job registry (`crate::scripting::scheduler`'s `SCHEDULER`
+/// singleton), wherever that test lives.
+///
+/// It is crate-visible on purpose. Two modules in this crate exercise that one
+/// singleton — this file (through the real .cala save/load path) and the
+/// scheduler's own unit tests — and both of them CLEAR it wholesale, because
+/// "open a workbook" and "close a workbook" genuinely mean "replace the entire
+/// schedule". A per-module lock therefore serializes each module against itself
+/// and neither against the other, which is exactly the shape of flake that only
+/// reproduces under `cargo test`'s default parallelism and vanishes under
+/// `--test-threads=1`.
+///
+/// Poison is deliberately ignored (`into_inner`): a panicking test must not
+/// convert one failure into a cascade of unrelated ones.
+#[cfg(test)]
+pub(crate) fn scheduler_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod scheduled_job_persistence_tests {
     use super::*;
@@ -3870,13 +3893,25 @@ mod scheduled_job_persistence_tests {
 
     const SCRIPT_SOURCE: &str = "export function nightly() { refresh(); }";
 
-    /// The job registry is a process-global singleton; serialize the tests that
-    /// touch it so they cannot interleave.
+    /// Serialize against every OTHER test that drives the same singleton.
+    ///
+    /// This module used to declare its own `static LOCK` — and so does
+    /// `crate::scripting::scheduler`'s test module. Two mutexes, ONE global
+    /// registry: each module was internally serialized and the two interleaved
+    /// freely, in the same test binary, on the same thread pool. Since
+    /// `import_jobs_for_workbook` and `reset_jobs` both CLEAR the whole registry
+    /// (they are workbook-open / workbook-close semantics, so they must), a
+    /// scheduler test's `reset_jobs()` lands between this module's
+    /// `register_live_job()` and its `persist_scheduled_jobs(...)` and the
+    /// schedule is simply gone. `--test-threads=1` hid it, which is the worst
+    /// property a flake can have on a security-relevant test: people learn to
+    /// re-run it instead of reading it.
+    ///
+    /// The canonical lock now lives at crate scope (`scheduler_test_guard`
+    /// below) and BOTH modules take it, so mutual exclusion is real rather than
+    /// per-module.
     fn global_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        super::scheduler_test_guard()
     }
 
     fn audit() -> Mutex<calp::audit::AuditLog> {

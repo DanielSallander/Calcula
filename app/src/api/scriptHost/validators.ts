@@ -1576,3 +1576,481 @@ export const vKV: Validator = ([key, value]) => {
   if (!isBoundedString(value, 262_144)) return "value must be a string (max 256 KB)";
   return true;
 };
+
+// ============================================================================
+// file.picker — user-chosen file export / import (G1)
+// ============================================================================
+//
+// THE INVARIANT THESE VALIDATORS EXIST TO KEEP: no path string ever crosses
+// from a script to the disk. `suggestedName` is a FILE NAME, not a location,
+// and this is where that is made true rather than hoped for — a suggestion
+// containing a separator, a drive letter, a `..` segment or an ADS colon is
+// REJECTED, not sanitized, so a script cannot pre-aim the picker at
+// C:\Users\<name>\... and rely on a distracted click. The user still chooses
+// the folder in the native dialog; the suggestion only pre-fills the name box.
+
+/** Max characters of text one export may write / one import may return.
+ *  ~8 MB of plain ASCII: enough for a real CSV report, small enough that a
+ *  runaway script cannot fill a disk one picker at a time. */
+export const MAX_FILE_TEXT_CHARS = 8_000_000;
+/** Max length of the suggested file name (a name box, not a path). */
+export const MAX_FILE_NAME = 128;
+/** Max extension filters an import may ask the picker to offer. */
+export const MAX_FILE_EXTENSIONS = 16;
+/** Text encodings an export may request. Deliberately tiny: "utf-8-bom" exists
+ *  because Excel misreads accented UTF-8 CSV without a BOM, and "ansi" because
+ *  legacy tooling still demands it. Nothing here can escape a text file. */
+const FILE_ENCODINGS: ReadonlySet<string> = new Set(["utf-8", "utf-8-bom", "ansi"]);
+
+/** Characters that can never appear in a bare file name. Spelled as an explicit
+ *  ARRAY rather than a regex character class on purpose: `\` and `/` inside a
+ *  class are exactly the two characters an escaping slip silently drops, and
+ *  those two are the whole point of this check. A list cannot be mis-escaped. */
+const FORBIDDEN_NAME_CHARS: readonly string[] = [
+  "\\", // Windows path separator (and the leading pair of a UNC path)
+  "/",    // POSIX path separator
+  ":",    // drive letter AND the NTFS alternate-data-stream marker
+  "*",
+  "?",
+  "\"",
+  "<",
+  ">",
+  "|",
+];
+
+/** An extension token as it appears in a picker filter: letters/digits only,
+ *  no dot, no wildcard, no path. ("*" is deliberately NOT allowed — an
+ *  "All files" filter is the host's decision, not the script's.) */
+const SAFE_EXTENSION_RE = /^[A-Za-z0-9]{1,16}$/;
+
+/** A MIME type used ONLY to label the picker's filter row. */
+const SAFE_MIME_RE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}$/;
+
+/** True when `name` is a bare, safe file name (exported for the host + tests). */
+export function isSafeFileName(name: unknown): name is string {
+  if (!isBoundedString(name, MAX_FILE_NAME)) return false;
+  if (name.length === 0) return false;
+  // Validated VERBATIM, never after a trim: the exact string checked here is the
+  // exact string handed to the picker, so there is no gap between what was
+  // approved and what the dialog shows.
+  if (name !== name.trim()) return false;
+  for (const ch of FORBIDDEN_NAME_CHARS) {
+    if (name.includes(ch)) return false;
+  }
+  // Control characters (including the NUL a truncation attack would use).
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  // "." and ".." pass every check above but are LOCATIONS, not names; a trailing
+  // dot is silently stripped by Windows, which would make the file actually
+  // written differ from the name we validated and audited.
+  if (/^\.+$/.test(name)) return false;
+  if (name.endsWith(".")) return false;
+  return true;
+}
+
+/** cap.fileExportText args: [suggestedName, content, options?]. */
+export const vFileExport: Validator = ([suggestedName, content, options]) => {
+  if (!isSafeFileName(suggestedName)) {
+    return `suggestedName must be a bare file name — no folders, no drive letters, no ".." (max ${MAX_FILE_NAME} chars)`;
+  }
+  if (typeof content !== "string") return "content must be a string";
+  if (content.length > MAX_FILE_TEXT_CHARS) {
+    return `content is ${content.length} characters (max ${MAX_FILE_TEXT_CHARS})`;
+  }
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["mimeType", "encoding", "description"], "export option");
+  if (known !== true) return known;
+  if (o.mimeType !== undefined && (typeof o.mimeType !== "string" || !SAFE_MIME_RE.test(o.mimeType))) {
+    return 'mimeType must look like "text/csv"';
+  }
+  if (o.encoding !== undefined && (typeof o.encoding !== "string" || !FILE_ENCODINGS.has(o.encoding))) {
+    return `encoding must be one of: ${[...FILE_ENCODINGS].join(", ")}`;
+  }
+  if (o.description !== undefined && (!isBoundedString(o.description, MAX_FILE_NAME) || (o.description as string).trim().length === 0)) {
+    return `description must be a non-empty string (max ${MAX_FILE_NAME} chars)`;
+  }
+  return true;
+};
+
+/** cap.fileImportText args: [options?]. */
+export const vFileImport: Validator = ([options]) => {
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["extensions", "description"], "import option");
+  if (known !== true) return known;
+  if (o.extensions !== undefined) {
+    if (!Array.isArray(o.extensions)) return "extensions must be an array of strings";
+    if (o.extensions.length === 0) return "extensions must not be empty (omit it to offer every file)";
+    if (o.extensions.length > MAX_FILE_EXTENSIONS) {
+      return `extensions has ${o.extensions.length} entries (max ${MAX_FILE_EXTENSIONS})`;
+    }
+    for (const ext of o.extensions) {
+      if (typeof ext !== "string" || !SAFE_EXTENSION_RE.test(ext)) {
+        return 'each extension must be letters/digits only, without a dot (e.g. "csv")';
+      }
+    }
+  }
+  if (o.description !== undefined && (!isBoundedString(o.description, MAX_FILE_NAME) || (o.description as string).trim().length === 0)) {
+    return `description must be a non-empty string (max ${MAX_FILE_NAME} chars)`;
+  }
+  return true;
+};
+
+// ============================================================================
+// Workbook file lifecycle (G1) — no arguments cross at all
+// ============================================================================
+//
+// save / saveAs / isDirty / fileName take NOTHING. That is the design, not an
+// oversight: `save()` acts on the file the workbook already came from and
+// `saveAs()` asks the user, so there is no argument a script could supply that
+// would name a destination. vNone is therefore the whole validator, and any
+// future argument here would be a path in disguise.
+
+// ============================================================================
+// ui.shortcut — one keyboard shortcut bound to one exposed method (G2)
+// ============================================================================
+//
+// THE SHAPE OF THE COMBINATION IS NOT CHECKED HERE, on purpose. There is one
+// place that decides which keys a script may take (scriptComboRefusal in
+// app/src/api/keybindings.ts) and it is the same place that owns the registry
+// and the dispatcher, so the rule cannot be true in one file and stale in
+// another. Duplicating even a weakened form of it here — "looks like a combo" —
+// would invite exactly the drift that lets a second, laxer gate become the one
+// that matters. These validators bound SIZE and SHAPE of the arguments; the
+// POLICY answer comes from the registry, and its refusal reaches the script
+// verbatim.
+
+/** Longest shortcut string accepted at the boundary ("Ctrl+Shift+Alt+Meta+X"
+ *  is 21 characters; 64 is room to be wrong in a readable way). */
+const MAX_COMBO_CHARS = 64;
+
+/** cap.shortcutBind args: [combo, handlerName, options?]. */
+export const vShortcutBind: Validator = ([combo, handler, options]) => {
+  if (!isBoundedString(combo, MAX_COMBO_CHARS) || (combo as string).trim().length === 0) {
+    return `combo must be a non-empty shortcut string (max ${MAX_COMBO_CHARS} chars), e.g. "Ctrl+Shift+R"`;
+  }
+  // The handler is a method the script itself published with context.expose —
+  // a NAME, never a function. Nothing callable crosses the worker boundary, and
+  // a name is what makes the binding readable in the shortcut list after the
+  // fact ("Ctrl+Shift+R calls refreshAll()").
+  if (!isBoundedString(handler, MAX_KEY) || (handler as string).trim().length === 0) {
+    return "handler must be the name of a method this script exposed with context.expose(...)";
+  }
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["label"], "shortcut option");
+  if (known !== true) return known;
+  if (o.label !== undefined && !isBoundedString(o.label, MAX_KEY)) {
+    return "options.label must be a short string";
+  }
+  return true;
+};
+
+/** cap.shortcutUnbind args: [combo]. */
+export const vShortcutUnbind: Validator = ([combo]) => {
+  if (!isBoundedString(combo, MAX_COMBO_CHARS) || (combo as string).trim().length === 0) {
+    return `combo must be a non-empty shortcut string (max ${MAX_COMBO_CHARS} chars)`;
+  }
+  return true;
+};
+
+// ============================================================================
+// api.evaluate — the WorksheetFunction bridge (G4)
+// ============================================================================
+//
+// WHAT THESE BOUNDS ARE AND ARE NOT. They bound WORK, not reach: an expression
+// evaluates against the same grid the calling tier can already read cell by
+// cell, so there is nothing here to escalate. What a formula CAN do is run for a
+// long time (`SUMPRODUCT` over whole columns) or recurse without a floor — the
+// engine has no evaluation depth or time limit, verified, and a recursive
+// named function will exhaust the stack. That hazard is NOT created here: a
+// script holding this tier can already write the identical formula into a cell
+// with api.setCellValue and get the identical evaluation. These limits therefore
+// exist to make the ACCIDENT cheap (a loop calling evaluate() a thousand times a
+// second), and the residual engine hazard is reported rather than papered over.
+
+/** Longest single expression accepted. Excel's own formula limit is 8192
+ *  characters, so anything longer was not going to evaluate anyway. */
+export const MAX_EVAL_EXPRESSION_CHARS = 8_192;
+/** Expressions per call. One round trip for a batch is the point; 64 keeps the
+ *  worst-case synchronous evaluation on the Rust side bounded. */
+export const MAX_EVAL_EXPRESSIONS = 64;
+
+/** api.evaluate args: [expressions, options?]. */
+export const vEvaluate: Validator = ([expressions, options]) => {
+  if (!Array.isArray(expressions)) return "expressions must be an array of strings";
+  if (expressions.length === 0) return "expressions must not be empty";
+  if (expressions.length > MAX_EVAL_EXPRESSIONS) {
+    return `too many expressions: ${expressions.length} (max ${MAX_EVAL_EXPRESSIONS})`;
+  }
+  for (const e of expressions) {
+    if (!isBoundedString(e, MAX_EVAL_EXPRESSION_CHARS)) {
+      return `each expression must be a string (max ${MAX_EVAL_EXPRESSION_CHARS} chars)`;
+    }
+    if ((e as string).trim().length === 0) return "an expression must not be empty";
+  }
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["sheetIndex"], "evaluate option");
+  if (known !== true) return known;
+  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
+    return "options.sheetIndex must be a non-negative integer";
+  }
+  return true;
+};
+
+// ============================================================================
+// Explicit formula read / write, with a reference style (G4)
+// ============================================================================
+//
+// Until now a script wrote a formula by passing "=A1+B1" to setCellValue and
+// read one back inside a typed cell — A1 only, both directions, with no way to
+// say which notation was meant. R1C1 is not a cosmetic preference: it is how a
+// macro writes the SAME relative formula into a thousand cells without
+// recomputing an address per cell, which is exactly what `FormulaR1C1` is for.
+//
+// The style is a WHOLE-STRING claim about the notation the caller is speaking,
+// resolved host-side against the cell's own coordinates (an R1C1 offset is
+// meaningless without a base cell). It is deliberately NOT read from the user's
+// current reference-style setting: a script's meaning must not change because
+// somebody ticked a View option.
+
+/** Reference notations a formula argument may be written in. */
+export const FORMULA_REFERENCE_STYLES: ReadonlySet<string> = new Set(["A1", "R1C1"]);
+
+function checkFormulaOptions(options: unknown): true | string {
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["style", "sheetIndex"], "formula option");
+  if (known !== true) return known;
+  if (o.style !== undefined && (typeof o.style !== "string" || !FORMULA_REFERENCE_STYLES.has(o.style))) {
+    return `options.style must be one of: ${[...FORMULA_REFERENCE_STYLES].join(", ")}`;
+  }
+  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
+    return "options.sheetIndex must be a non-negative integer";
+  }
+  return true;
+}
+
+/** api.getCellFormula / sheet.getCellFormula args: [row, col, options?]. */
+export const vFormulaRead: Validator = ([row, col, options]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  return checkFormulaOptions(options);
+};
+
+/** api.setCellFormula / sheet.setCellFormula args: [row, col, formula, options?].
+ *  `formula` may be null — that CLEARS the cell's formula, which is the honest
+ *  spelling of `Range.Formula = ""` and cannot be confused with writing the
+ *  literal text "". */
+export const vFormulaWrite: Validator = ([row, col, formula, options]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  if (formula !== null && !isBoundedString(formula, MAX_EVAL_EXPRESSION_CHARS)) {
+    return `formula must be a string (max ${MAX_EVAL_EXPRESSION_CHARS} chars) or null to clear it`;
+  }
+  return checkFormulaOptions(options);
+};
+
+// ============================================================================
+// Range copy / paste (G4)
+// ============================================================================
+//
+// THE DECISION THIS VALIDATOR ENCODES: there is no method here that READS the
+// system clipboard, and there never will be by accident, because there is no
+// argument shape for one. What the user has copied may be a password, a bank
+// number or a message from another application; "let this script see whatever
+// you last copied" is ambient authority with no honest scope and no honest
+// consent string, so it is REFUSED rather than gated. Copy fills a buffer that
+// belongs to the calling script alone (host-side, per script, gone at unmount);
+// paste reads it back. Neither touches the OS clipboard or the clipboard the
+// user's own Ctrl+V reads, so a running script can never overwrite what a person
+// has in hand, nor smuggle a workbook out through it.
+
+/** What a paste transfers. "formats" is deliberately absent — see the host
+ *  executor for the evidence (there is no batch style write, and set_cell_style
+ *  silently no-ops on a cell that does not exist yet, so a formats-only paste
+ *  would succeed while doing nothing for every blank destination cell). */
+export const PASTE_MODES: ReadonlySet<string> = new Set(["all", "values", "formulas"]);
+
+/** api.pasteRange args: [row, col, options?]. */
+export const vPasteRange: Validator = ([row, col, options]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["mode", "transpose", "skipBlanks", "sheetIndex"], "paste option");
+  if (known !== true) return known;
+  if (o.mode !== undefined && (typeof o.mode !== "string" || !PASTE_MODES.has(o.mode))) {
+    return `options.mode must be one of: ${[...PASTE_MODES].join(", ")}`;
+  }
+  if (o.transpose !== undefined && typeof o.transpose !== "boolean") {
+    return "options.transpose must be a boolean";
+  }
+  if (o.skipBlanks !== undefined && typeof o.skipBlanks !== "boolean") {
+    return "options.skipBlanks must be a boolean";
+  }
+  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
+    return "options.sheetIndex must be a non-negative integer";
+  }
+  return true;
+};
+
+// ============================================================================
+// cap.filePrintPdf — export the printable sheet as a PDF (G4, file.picker)
+// ============================================================================
+//
+// Same construction as vFileExport, one argument shorter: the script names a
+// FILE and nothing else. It does NOT hand over a payload — the host RENDERS the
+// document from the workbook's own page setup — so there is no route here for a
+// script to write bytes of its choosing to a file the user can be talked into
+// picking. `suggestedName` is optional; the host supplies a default.
+
+// ============================================================================
+// Sheet move / copy + split panes (G4)
+// ============================================================================
+
+/** api.moveSheet args: [fromIndex, toIndex]. */
+export const vMoveSheet: Validator = ([fromIndex, toIndex]) => {
+  if (!isCellCoord(fromIndex)) return "fromIndex must be a non-negative integer";
+  if (!isCellCoord(toIndex)) return "toIndex must be a non-negative integer";
+  return true;
+};
+
+/** api.copySheet args: [sourceIndex, newName?]. Omitted name = the app's next
+ *  default ("Sheet1 (2)"). */
+export const vCopySheet: Validator = ([sourceIndex, newName]) => {
+  if (!isCellCoord(sourceIndex)) return "sourceIndex must be a non-negative integer";
+  if (newName === undefined || newName === null) return true;
+  return checkSheetName(newName);
+};
+
+/** api.splitPanes args: [splitRow, splitCol]. Same SHAPE as vFreeze, but a
+ *  separate validator so the message names the argument the caller passed —
+ *  "freezeRow must be..." on a splitPanes() call is the kind of small lie that
+ *  sends an author looking in the wrong place. */
+export const vSplit: Validator = ([splitRow, splitCol]) => {
+  for (const [name, v] of [["splitRow", splitRow], ["splitCol", splitCol]] as const) {
+    if (v === null || v === undefined) continue;
+    if (!isCellCoord(v)) return `${name} must be a non-negative integer or null`;
+  }
+  return true;
+};
+
+// ============================================================================
+// AutoFilter (G4)
+// ============================================================================
+//
+// Every AutoFilter backend command acts on the ACTIVE SHEET and addresses a
+// column by an index RELATIVE to the filter's own start column, so these
+// validators enforce exactly that vocabulary and nothing wider. There is no
+// sheetIndex argument to validate anywhere here — not because it is optional,
+// but because there is none to pass (host.ts refuses an off-sheet call rather
+// than pretending one exists).
+
+/** A filter range may be at most this many columns wide. Not a security bound —
+ *  the backend allocates one criteria slot per column, and a script asking for
+ *  a filter across a million columns is a mistake worth catching early. */
+export const MAX_AUTOFILTER_COLUMNS = 4096;
+
+/** How many values a single values-filter may name, and how long each may be. */
+export const MAX_AUTOFILTER_VALUES = 10_000;
+const MAX_AUTOFILTER_VALUE_CHARS = 4096;
+/** Length cap on a custom criterion (">=100", "=*text*"). */
+const MAX_AUTOFILTER_CRITERION = 1024;
+
+/** api.autoFilterApply args: [startRow, startCol, endRow, endCol]. */
+export const vAutoFilterRange: Validator = ([startRow, startCol, endRow, endCol]) => {
+  if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
+  if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
+  if (!isCellCoord(endRow)) return "endRow must be a non-negative integer";
+  if (!isCellCoord(endCol)) return "endCol must be a non-negative integer";
+  if ((endRow as number) < (startRow as number)) return "endRow must be >= startRow";
+  if ((endCol as number) < (startCol as number)) return "endCol must be >= startCol";
+  const cols = (endCol as number) - (startCol as number) + 1;
+  if (cols > MAX_AUTOFILTER_COLUMNS) {
+    return `filter range too wide: ${cols} columns (max ${MAX_AUTOFILTER_COLUMNS})`;
+  }
+  return true;
+};
+
+/** api.autoFilterListValues args: [columnIndex]. */
+export const vAutoFilterColumn: Validator = ([columnIndex]) =>
+  isCellCoord(columnIndex) && (columnIndex as number) < MAX_AUTOFILTER_COLUMNS
+    ? true
+    : `columnIndex must be a non-negative integer below ${MAX_AUTOFILTER_COLUMNS}, counted from the filter's first column`;
+
+/** api.autoFilterClear args: [columnIndex | null]. null = every column. */
+export const vAutoFilterClear: Validator = ([columnIndex]) => {
+  if (columnIndex === null || columnIndex === undefined) return true;
+  return vAutoFilterColumn([columnIndex]);
+};
+
+/** api.autoFilterSetColumn args: [columnIndex, criteria]. */
+export const vAutoFilterCriteria: Validator = ([columnIndex, criteria]) => {
+  const col = vAutoFilterColumn([columnIndex]);
+  if (col !== true) return col;
+  if (typeof criteria !== "object" || criteria === null || Array.isArray(criteria)) {
+    return 'criteria must be an object: { kind: "values", values } or { kind: "custom", criterion1 }';
+  }
+  const c = criteria as Record<string, unknown>;
+  if (c.kind === "values") {
+    const known = checkKnownKeys(c, ["kind", "values", "includeBlanks"], "criteria option");
+    if (known !== true) return known;
+    if (!Array.isArray(c.values)) return "criteria.values must be an array of strings";
+    if (c.values.length > MAX_AUTOFILTER_VALUES) {
+      return `criteria.values may name at most ${MAX_AUTOFILTER_VALUES} values`;
+    }
+    for (const v of c.values) {
+      if (!isBoundedString(v, MAX_AUTOFILTER_VALUE_CHARS)) {
+        return `each criteria.values entry must be a string (max ${MAX_AUTOFILTER_VALUE_CHARS} chars)`;
+      }
+    }
+    if (c.includeBlanks !== undefined && typeof c.includeBlanks !== "boolean") {
+      return "criteria.includeBlanks must be a boolean";
+    }
+    return true;
+  }
+  if (c.kind === "custom") {
+    const known = checkKnownKeys(
+      c,
+      ["kind", "criterion1", "criterion2", "operator"],
+      "criteria option",
+    );
+    if (known !== true) return known;
+    if (!isBoundedString(c.criterion1, MAX_AUTOFILTER_CRITERION) || c.criterion1.trim() === "") {
+      return `criteria.criterion1 must be a non-empty string (max ${MAX_AUTOFILTER_CRITERION} chars)`;
+    }
+    if (
+      c.criterion2 !== undefined &&
+      c.criterion2 !== null &&
+      !isBoundedString(c.criterion2, MAX_AUTOFILTER_CRITERION)
+    ) {
+      return `criteria.criterion2 must be a string (max ${MAX_AUTOFILTER_CRITERION} chars)`;
+    }
+    if (c.operator !== undefined && c.operator !== "and" && c.operator !== "or") {
+      return 'criteria.operator must be "and" or "or"';
+    }
+    return true;
+  }
+  return 'criteria.kind must be "values" or "custom"';
+};
+
+/** cap.filePrintPdf args: [suggestedName?]. */
+export const vPrintPdf: Validator = ([suggestedName]) => {
+  if (suggestedName === undefined || suggestedName === null) return true;
+  if (!isSafeFileName(suggestedName)) {
+    return `suggestedName must be a bare file name — no folders, no drive letters, no ".." (max ${MAX_FILE_NAME} chars)`;
+  }
+  if (!/\.pdf$/i.test(suggestedName)) return 'suggestedName must end in ".pdf"';
+  return true;
+};

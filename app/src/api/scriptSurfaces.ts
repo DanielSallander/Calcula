@@ -22,6 +22,7 @@
 
 import { ALL_CAPABILITY_IDS, type CapabilityId } from "./scriptHost/capabilityIds";
 import { ALLOWLIST } from "./scriptHost/allowlist";
+import { extensionReachableCapabilities } from "./scriptHost/extensionProtocol";
 
 export type ScriptRuntime =
   | "worker-realm" // per-script hardened Web Worker, broker-mediated
@@ -31,6 +32,7 @@ export type ScriptRuntime =
 
 export type ScriptSurfaceId =
   | "object-script"
+  | "script-library"
   | "extension-worker"
   | "formula-udf"
   | "notebook-cell"
@@ -105,20 +107,23 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "ui.dialog",
       "distribution.writeback",
       "schedule",
+      "file.picker",
+      "ui.shortcut",
     ],
-    gate: "Tier broker + R19 declared ceiling + per-package consent (JIT prompt for local scripts); net.fetch / bi.query / bi.sql / bi.model / bi.connector / distribution.writeback / schedule are re-checked authoritatively in Rust (schedule on every firing, so a revoke stops a job persisted in the workbook)",
+    gate: "Tier broker + R19 declared ceiling + per-package consent (JIT prompt for local scripts); net.fetch / bi.query / bi.sql / bi.model / bi.connector / distribution.writeback / schedule are re-checked authoritatively in Rust (schedule on every firing, so a revoke stops a job persisted in the workbook); file.picker is host-mediated — the broker gates the call and a native picker the USER drives chooses the file, so no path ever crosses; ui.shortcut is host-mediated too — the broker gates the binding and the ONE keydown listener in the app (api/keybindings.ts) owns dispatch, so a script is told only that its own Ctrl+Shift+<letter> fired",
     executesUserCode: true,
   },
   {
-    id: "extension-worker",
-    label: "Sandboxed extensions",
+    id: "script-library",
+    label: "Script libraries",
     runtime: "worker-realm",
     containment:
-      "A distributed extension that declares workerSupport runs its WHOLE activation in a per-extension hardened worker (scriptHost/worker/extensionWorkerContext.ts): no DOM, no Tauri, no direct grid — UI and data reach are message-passed to the host and every privileged call is broker-mediated. Its code lives in %APPDATA%/extensions, NOT in the workbook, so it is a script SURFACE without being an entry in the per-file code inventory",
-    // The ceiling is the SIGNED MANIFEST's `capabilities` (extensionWorkerHost.ts
-    // mountWorkerExtension -> buildHandleFromDefinition), i.e. author-declared:
-    // nothing narrows it, so the whole broker-gated vocabulary is reachable once
-    // declared and consented. Distributed provenance means NO auto ui.html.
+      "A third-party library imported with `// @uses` runs in its OWN hardened worker realm, never inside its consumer's — so its module state, its exceptions and its capability grants are all separate. Its R19 ceiling is `declared(library) INTERSECT declared(consumer)` (and, for a library's own dependency, INTERSECT its parent's), so importing a library can never hand a script reach the script did not itself declare. Only names the module marked `// @export` are routable, through one token-gated entry point. The exact bytes live in the workbook (.calcula/script-libs/<sha256>.js) and are re-hashed on every read",
+    // The ceiling is AUTHOR-declared (source pragmas) exactly like an object
+    // script's, so every broker-gated capability is reachable in principle —
+    // what a GIVEN realm holds is the intersection, which is per-mount data and
+    // therefore reported by the code inventory, not by this row. Understating
+    // here would promise the user less than the broker would allow.
     capabilities: [
       "net.fetch",
       "bi.query",
@@ -131,8 +136,49 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "ui.dialog",
       "distribution.writeback",
       "schedule",
+      "file.picker",
+      "ui.shortcut",
     ],
-    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / bi.connector / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing)",
+    gate: "Ed25519 signature + TOFU publisher pin at resolve (the SAME .calp trust root as report packages, no second signer), per-workbook consent keyed `lib:<package>` over the exact module sources, a version pin in .calcula/script-deps.json that mount never re-resolves against the registry, and then the tier broker + the INTERSECTED R19 ceiling. Calls in are authorized by an unguessable host-issued token, which is delegation-transparent but not caller-identifying — see docs/design/script-package-manager.md §10.4",
+    executesUserCode: true,
+  },
+  {
+    id: "extension-worker",
+    label: "Sandboxed extensions",
+    runtime: "worker-realm",
+    containment:
+      "A distributed extension that declares workerSupport runs its WHOLE activation in a per-extension hardened worker (scriptHost/worker/extensionWorkerContext.ts): no DOM, no Tauri, no direct grid — UI and data reach are message-passed to the host and every privileged call is broker-mediated. Its code lives in %APPDATA%/extensions, NOT in the workbook, so it is a script SURFACE without being an entry in the per-file code inventory",
+    // The ceiling is the SIGNED MANIFEST's `capabilities` (extensionWorkerHost.ts
+    // mountWorkerExtension -> buildHandleFromDefinition), NARROWED by
+    // computeExtensionCeiling to what this surface can actually exercise.
+    //
+    // THIS ROW IS SHORTER THAN THE OBJECT-SCRIPT ROW ABOVE, ON PURPOSE. A
+    // sandboxed extension reaches the broker only through EXTENSION_BROKER_METHODS,
+    // a strict subset of the shared ALLOWLIST, so `ui.html`, `bi.connector` and
+    // `ui.shortcut` have NO door here at all: ui.html addresses a shape instance
+    // an extension does not own, bi.connector's two rows are object-script only,
+    // and an extension's keyboard path is the DECLARATIVE keybinding contribution
+    // (disclosed in the signed sidecar before the bundle runs), not the
+    // imperative capability. Listing them cost nothing in reach and everything in
+    // honesty: they appeared in the consent prompt's "Capabilities it can use"
+    // line. Distributed provenance also means NO auto ui.html.
+    //
+    // `enforceableCapabilities` derives this exact set for this surface id, so
+    // the audit below compares the row against the code rather than against a
+    // second copy of this comment.
+    capabilities: [
+      "net.fetch",
+      "bi.query",
+      "bi.sql",
+      "storage",
+      "formula.udf",
+      "bi.model",
+      "ui.dialog",
+      "distribution.writeback",
+      "schedule",
+      "file.picker",
+    ],
+    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling; the signature must also cover the BUNDLE via codeHash, re-checked on every scan) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing); file.picker is host-mediated (native picker, user chooses the file, no path crosses). ui.shortcut is NOT reachable here: an extension's keyboard path is the declarative keybinding contribution, held to the same Ctrl+Shift+<letter> rule",
     executesUserCode: true,
   },
   {
@@ -157,6 +203,8 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "ui.dialog",
       "distribution.writeback",
       "schedule",
+      "file.picker",
+      "ui.shortcut",
     ],
     gate: "Broker (declared + granted): formula.udf gates the invocation, the library mount's own R19 ceiling + grants gate what the body may touch",
     executesUserCode: true,
@@ -212,6 +260,8 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "ui.dialog",
       "distribution.writeback",
       "schedule",
+      "file.picker",
+      "ui.shortcut",
     ],
     gate: "Broker + R19 ceiling (the library's declaration) + per-package consent (distributed)",
     executesUserCode: true,
@@ -326,6 +376,15 @@ export function brokerGatedCapabilities(): CapabilityId[] {
 export function enforceableCapabilities(surface: ScriptSurface): CapabilityId[] {
   if (surface.runtime !== "worker-realm") {
     return orderCapabilities(surface.capabilities);
+  }
+  // A sandboxed extension does not reach the whole ALLOWLIST: handleBrokerCall
+  // rejects anything outside EXTENSION_BROKER_METHODS before the broker sees it,
+  // so several capabilities have no door on this surface at all. Deriving from
+  // the broker-gated set alone overstated this row by three ids (ui.html,
+  // bi.connector, ui.shortcut) — reach the consent prompt named and the broker
+  // refused. The narrower set is derived too, so it cannot go stale.
+  if (surface.id === "extension-worker") {
+    return orderCapabilities([...extensionReachableCapabilities()]);
   }
   const gated = new Set(brokerGatedCapabilities());
   if (!surface.mountCeiling) {

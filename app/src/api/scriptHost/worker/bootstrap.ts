@@ -10,6 +10,8 @@
 import { MAX_SANDBOX_HIT_RECTS, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, type WorkerRuntime } from "./contextShims";
 import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
+import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
+import { createDebugRuntime, type DebugController } from "./debugRuntime";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -43,14 +45,23 @@ forwardConsole((level, args) => post({ t: "console", level, args }));
 
 type SetupFn = (context: unknown) => unknown;
 
-async function compileSource(source: string): Promise<SetupFn> {
+/**
+ * Wrap + import one source. `asyncWrapper` is set for a DEBUG mount so the
+ * instrumented top level may `await` its yield points; the wrapper's result is
+ * awaited by handleMount either way, so nothing else changes.
+ *
+ * The wrapper deliberately adds NO newline before the user source: line numbers
+ * inside the blob are the user's line numbers, which is what breakpoints, error
+ * stacks and the debugger's call-stack view all address.
+ */
+async function compileSource(source: string, asyncWrapper = false): Promise<SetupFn> {
   // Cosmetic cleanup only (imports/exports won't resolve in a blob module).
   const cleaned = source
     .replace(/^\s*import\s+.*$/gm, "// [import removed]")
     .replace(/^\s*export\s+default\s+/gm, "");
 
   const wrapped =
-    `export default function(context) { ${cleaned}\n` +
+    `export default ${asyncWrapper ? "async " : ""}function(context) { ${cleaned}\n` +
     `; return typeof setup === "function" ? setup(context) : undefined; }`;
 
   const blob = new Blob([wrapped], { type: "text/javascript" });
@@ -61,6 +72,60 @@ async function compileSource(source: string): Promise<SetupFn> {
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+// ============================================================================
+// 2b. Debug session (task H1) — present ONLY when the host mounted this script
+//     for debugging. Everything below is inert on a normal mount.
+// ============================================================================
+
+let dbg: DebugController | null = null;
+
+/**
+ * Compile for a debug session: instrument, verify by compiling, and fall back
+ * to the ORIGINAL source if anything at all went wrong. A transform bug can
+ * cost stepping; it must never cost the user their script.
+ */
+async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
+  const debugSpec = spec.debug!;
+  dbg = createDebugRuntime(debugSpec, post);
+  (self as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = {
+    h: (line: number, locals: () => never) => dbg?.h(line, locals),
+    s: (line: number, locals: () => never) => dbg?.s(line, locals),
+    p: (pairs: Array<[string, () => unknown]>) => dbg?.p(pairs) ?? [],
+  };
+
+  const result = instrumentForDebug(spec.source);
+  if (result.ok) {
+    try {
+      const fn = await compileSource(result.code, true);
+      post({
+        t: "debugReady",
+        state: {
+          instrumented: true,
+          pausableLines: result.pausableLines,
+          snapshotLines: result.snapshotLines,
+          promotedFunctions: result.promotedFunctions,
+        },
+      });
+      return fn;
+    } catch (err) {
+      result.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+  post({
+    t: "debugReady",
+    state: {
+      instrumented: false,
+      pausableLines: [],
+      snapshotLines: [],
+      promotedFunctions: [],
+      error: result.error ?? "the script could not be instrumented for stepping",
+    },
+  });
+  dbg.dispose();
+  dbg = null;
+  return compileSource(spec.source);
 }
 
 // ============================================================================
@@ -76,7 +141,7 @@ async function handleMount(spec: MountSpec): Promise<void> {
       post({ t: "mounted", ok: false, error: `Protocol version mismatch: host ${spec.protocolVersion}, worker 1` });
       return;
     }
-    const setup = await compileSource(spec.source);
+    const setup = spec.debug ? await compileForDebug(spec) : await compileSource(spec.source);
     const { context, rt } = buildWorkerContext(spec, post);
     runtime = rt;
     intrinsicFreeze(context);
@@ -109,7 +174,18 @@ function handleRenderCells(reqId: number, cells: RenderCellRequest[]): void {
     post({ t: "renderCellsResult", reqId, styles: cells.map(() => null) });
     return;
   }
-  const styles = cells.map((cell) => {
+  // The host is holding a 2s deadline open for this batch. A yield point inside
+  // a renderer must therefore never suspend — see DebugController.beginNoPause.
+  dbg?.beginNoPause();
+  try {
+    post({ t: "renderCellsResult", reqId, styles: renderCellStyles(renderer, cells) });
+  } finally {
+    dbg?.endNoPause();
+  }
+}
+
+function renderCellStyles(renderer: unknown, cells: RenderCellRequest[]): (Record<string, unknown> | null)[] {
+  return cells.map((cell) => {
     try {
       const result = (renderer as (p: unknown) => unknown)({
         row: cell.row,
@@ -127,10 +203,19 @@ function handleRenderCells(reqId: number, cells: RenderCellRequest[]): void {
       return null;
     }
   });
-  post({ t: "renderCellsResult", reqId, styles });
 }
 
 function handleRenderDraw(reqId: number, target: RenderDrawTarget, w: number, h: number, dpr: number): void {
+  // Same 2s host deadline as renderCells — never suspend inside a paint.
+  dbg?.beginNoPause();
+  try {
+    handleRenderDrawInner(reqId, target, w, h, dpr);
+  } finally {
+    dbg?.endNoPause();
+  }
+}
+
+function handleRenderDrawInner(reqId: number, target: RenderDrawTarget, w: number, h: number, dpr: number): void {
   const hook =
     target.kind === "shape" ? "canvasRenderer"
       : target.kind === "chartMark" ? "markRenderer"
@@ -233,11 +318,36 @@ self.onmessage = (e: MessageEvent<H2W>) => {
     case "methodCall":
       void handleMethodCall(msg.callId, msg.methodName, msg.args);
       break;
+    case "debugBreakpoints":
+      dbg?.setBreakpoints(msg.lines);
+      break;
+    case "debugControl":
+      dbg?.control(msg.action);
+      if (msg.action === "stop") {
+        dbg = null;
+      }
+      break;
     case "ping":
       post({ t: "pong", seq: msg.seq });
       break;
   }
 };
+
+/**
+ * Promotion to `async` (debug sessions only) turns a handler's synchronous
+ * throw into a rejected promise, which `dispatchEvent`'s try/catch cannot see.
+ * Report those the same way, so debugging never makes an error QUIETER than it
+ * was. Installed only when a session exists.
+ */
+self.addEventListener("unhandledrejection", (e: Event) => {
+  if (!dbg) return;
+  const reason = (e as PromiseRejectionEvent).reason;
+  post({
+    t: "error",
+    message: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
 
 // teardown on terminate() is implicit (the whole realm dies); the export
 // below keeps the symbol referenced for the unused-var lint.

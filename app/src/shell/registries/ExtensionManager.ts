@@ -97,8 +97,10 @@ import {
   registerMountedHandle,
 } from "../../api/scriptHost/broker";
 import {
+  computeContributionCeiling,
   computeExtensionCeiling,
   mayActivateOnMainThread,
+  unreachableExtensionCapabilities,
   type ExtensionTrust,
 } from "./extensionTrust";
 import { loadDisabledIds, persistDisabledIds } from "./extensionDisabledStore";
@@ -111,10 +113,20 @@ import {
 } from "./extensionConsentStore";
 // Phase B: sandboxed worker-realm execution for opted-in distributed extensions.
 import {
+  forgetDeclaredContributions,
+  getDeclaredContributions,
   mountWorkerExtension,
+  recordDeclaredContributions,
   unmountWorkerExtension,
 } from "../../api/scriptHost/extensionWorkerHost";
-import type { WorkerExtensionManifest } from "../../api/scriptHost/extensionProtocol";
+import {
+  CONTRIBUTION_DECLARATION_KEY,
+  CONTRIBUTION_KIND_LABEL,
+  CONTRIBUTION_REACH_NOTE,
+  EXTENSION_CONTRIBUTION_KINDS,
+  type ExtContributionDeclaration,
+  type WorkerExtensionManifest,
+} from "../../api/scriptHost/extensionProtocol";
 
 // ============================================================================
 // Types
@@ -154,6 +166,44 @@ interface SidecarManifest {
   version?: string;
   capabilities?: string[];
   workerSupport?: boolean;
+  /** The declarative CONTRIBUTION ceiling: which worksheet functions, commands,
+   *  menu items, ribbon buttons, shortcuts, cell-styling contributors and file
+   *  formats the add-in may install. Read WITHOUT importing the bundle, so the
+   *  user can see what an add-in will add before allowing it to run. */
+  contributes?: ExtContributionDeclaration;
+}
+
+/** One line per declared contribution kind, for the consent prompt + logs. */
+function describeContributions(declared: ExtContributionDeclaration): string[] {
+  const lines: string[] = [];
+  for (const kind of EXTENSION_CONTRIBUTION_KINDS) {
+    const list = declared[CONTRIBUTION_DECLARATION_KEY[kind]];
+    if (!list || list.length === 0) continue;
+    const shown = list.slice(0, 8).join(", ");
+    const more = list.length > 8 ? `, +${list.length - 8} more` : "";
+    lines.push(`  - ${CONTRIBUTION_KIND_LABEL[kind]}: ${shown}${more}`);
+  }
+  return lines;
+}
+
+/**
+ * The REACH sentences for the kinds this add-in actually declares.
+ *
+ * Kept separate from `describeContributions` (which answers "what will appear?")
+ * because this answers the harder question — "what will it be able to see or
+ * do?" — and that is the one the consent bar holds us to. Driven by
+ * CONTRIBUTION_REACH_NOTE rather than by an `if` per kind, so a kind added to
+ * the protocol later cannot ship a reach the prompt forgot to mention.
+ */
+function describeContributionReach(declared: ExtContributionDeclaration): string[] {
+  const lines: string[] = [];
+  for (const kind of EXTENSION_CONTRIBUTION_KINDS) {
+    const list = declared[CONTRIBUTION_DECLARATION_KEY[kind]];
+    if (!list || list.length === 0) continue;
+    const note = CONTRIBUTION_REACH_NOTE[kind];
+    if (note) lines.push(`${CONTRIBUTION_KIND_LABEL[kind]}: ${note}`);
+  }
+  return lines;
 }
 
 // ============================================================================
@@ -642,14 +692,39 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
     // The declared ceiling is honored ONLY for a verified / first-use signature;
     // unsigned / invalid / changed -> deny-by-default (empty ceiling, still loads).
     const trustOk = entry.trustStatus === "verified" || entry.trustStatus === "firstUse";
+    // computeExtensionCeiling also drops recognized capabilities a SANDBOXED
+    // extension has no door to (ui.html / bi.connector / ui.shortcut). Without
+    // that, they reached the ceiling, the grant set and the consent prompt's
+    // "Capabilities it can use" line — naming reach the broker would then refuse.
     const ceiling = trustOk
-      ? (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId))
+      ? computeExtensionCeiling(parsed.capabilities as CapabilityId[] | undefined, "distributed")
       : [];
     if (!trustOk) {
       console.warn(
         `[ExtensionManager] '${parsed.id}' sidecar trust='${entry.trustStatus}': capabilities denied (deny-by-default).`,
       );
     }
+    // Said out loud rather than swallowed: a publisher who declared one of these
+    // has misunderstood the sandbox, and the user's consent list must not imply
+    // the add-in got it.
+    const unreachable = unreachableExtensionCapabilities(
+      parsed.capabilities as CapabilityId[] | undefined,
+      "distributed",
+    );
+    if (unreachable.length > 0) {
+      console.warn(
+        `[ExtensionManager] '${parsed.id}' declares ${unreachable.join(", ")}, which a sandboxed ` +
+          `extension cannot use; dropped from its ceiling.`,
+      );
+    }
+
+    // The CONTRIBUTION ceiling is honored regardless of signature (it only ever
+    // narrows what the code may register, and its real job is disclosure — see
+    // computeContributionCeiling). Worksheet functions stay signature-gated
+    // anyway, because they additionally need the formula.udf capability, which
+    // the `trustOk` gate above zeroes for an unsigned/invalid/changed sidecar.
+    const contributes = computeContributionCeiling(parsed.contributes, "distributed");
+    recordDeclaredContributions(parsed.id, contributes);
 
     const displayName = parsed.name || entry.fileName;
     if (parsed.workerSupport === true) {
@@ -659,6 +734,7 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
         version: parsed.version ?? "0.0.0",
         capabilities: ceiling,
         workerSupport: true,
+        contributes,
       });
       if (result.ok && result.extId) {
         this.recordWorkerExtension(result.extId, result.manifest, displayName, entry.trustStatus, entry.fileName);
@@ -678,6 +754,11 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
    *  re-enable it. The ceiling shown is what it WOULD get if trusted + enabled. */
   private recordDisabledExtension(parsed: SidecarManifest, trustStatus?: string, fileName?: string): void {
     if (this.extensions.has(parsed.id)) return;
+    // Disclose what it WOULD contribute, even though its code is never imported.
+    recordDeclaredContributions(
+      parsed.id,
+      computeContributionCeiling(parsed.contributes, "distributed"),
+    );
     const declaredCapabilities = computeExtensionCeiling(
       (parsed.capabilities ?? []).filter((c): c is CapabilityId => CAPABILITY_ID_SET.has(c as CapabilityId)),
       "distributed",
@@ -795,6 +876,13 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
     parsed: SidecarManifest | null,
   ): void {
     this.pendingConsent.set(id, { entry, hash });
+    // Disclosure BEFORE consent: the sidecar was read without importing the
+    // bundle, so the manager UI (and the prompt below) can name every worksheet
+    // function / menu item / shortcut this add-in wants to install while its
+    // code has still never run.
+    if (parsed) {
+      recordDeclaredContributions(id, computeContributionCeiling(parsed.contributes, "distributed"));
+    }
     if (!this.extensions.has(id)) {
       const displayName = parsed?.name || entry.fileName;
       const version = parsed?.version ?? "0.0.0";
@@ -861,14 +949,35 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
       const name = ext?.name ?? id;
       const caps = ext?.declaredCapabilities ?? [];
       const signed = ext?.trustStatus === "verified" || ext?.trustStatus === "firstUse";
+      // Consent must describe the ACTUAL reach. Capabilities answer "what of the
+      // world outside this workbook can it touch?"; contributions answer "what
+      // will appear in my app, under what names?" — and the second question is
+      // the one a worksheet function makes urgent, because a function silently
+      // added to the catalog recalculates against the user's data forever after.
+      const declaredContributions = getDeclaredContributions(id);
+      const contributionLines = describeContributions(declaredContributions);
+      // Two of those kinds hand the add-in workbook data with no capability
+      // behind it (a worksheet function is called with your cells; a cell-style
+      // contributor is SHOWN the cells it styles). Naming the surface is not the
+      // same as naming the reach, so the reach gets its own paragraph.
+      const reachLines = describeContributionReach(declaredContributions);
+      const reachClause = reachLines.length
+        ? `\nWhat that means:\n${reachLines.map((l) => `  - ${l}`).join("\n")}\n`
+        : "";
       let allow = false;
       try {
         allow = window.confirm(
           `Calcula found a third-party extension that was not installed by Calcula:\n\n` +
             `    "${name}"\n\n` +
             `Signature: ${signed ? (ext?.trustStatus ?? "signed") : "unsigned / unverified"}\n` +
-            `Capabilities it can use: ${caps.length ? caps.join(", ") : "none"}\n\n` +
-            `Custom code can read and change your data. Only allow extensions you trust.\n\n` +
+            `Capabilities it can use: ${caps.length ? caps.join(", ") : "none"}\n` +
+            (contributionLines.length
+              ? `It will add to Calcula:\n${contributionLines.join("\n")}\n`
+              : `It adds nothing to Calcula's menus, ribbon or formulas.\n`) +
+            reachClause +
+            `\nIt runs sandboxed: it cannot reach your machine, and anything outside ` +
+            `this workbook (network, storage, BI queries) is asked for separately ` +
+            `the first time it is used. Only allow extensions you trust.\n\n` +
             `Allow "${name}" to load? (You can change this later in Extensions.)`,
         );
       } catch {
@@ -1078,8 +1187,9 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
     // Delete the bundle + sidecars on disk (path-traversal-guarded in Rust).
     await invokeBackend("uninstall_extension", { fileName: entry.fileName });
 
-    // Drop it from the list + any persisted disabled flag.
+    // Drop it from the list + any persisted disabled flag + its disclosure.
     this.extensions.delete(id);
+    forgetDeclaredContributions(id);
     if (this.disabledIds.delete(id)) {
       persistDisabledIds(this.disabledIds);
     }

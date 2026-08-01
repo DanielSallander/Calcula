@@ -334,7 +334,6 @@ describe("useNotebookStore", () => {
         durationMs: 5,
         executionIndex: 1,
         screenUpdating: true,
-        enableEvents: true,
       });
 
       await useNotebookStore.getState().runCell("c1");
@@ -400,7 +399,6 @@ describe("useNotebookStore", () => {
           durationMs: 1,
           executionIndex: 1,
           screenUpdating: true,
-          enableEvents: true,
         },
       ]);
       mockLoadNotebook.mockResolvedValue(updatedNb);

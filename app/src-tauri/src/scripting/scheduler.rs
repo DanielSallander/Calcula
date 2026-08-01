@@ -1032,11 +1032,17 @@ mod tests {
     /// The job registry is a process-global singleton, so the tests that drive
     /// it through the REAL persistence entry points have to run one at a time.
     /// Without this they interleave and the failures look like logic bugs.
+    ///
+    /// It used to be a `static LOCK` DECLARED HERE — and `persistence.rs`'s
+    /// scheduled-job tests declared their own, separate one. Two mutexes over
+    /// one registry, in the same test binary: each module was serialized against
+    /// itself and neither against the other, so a `reset_jobs()` here would land
+    /// in the middle of a save/reload round-trip there. That flake reproduced
+    /// only under `cargo test`'s default parallelism and vanished under
+    /// `--test-threads=1`. There is now exactly ONE lock, and both modules take
+    /// it.
     fn global_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::persistence::scheduler_test_guard()
     }
 
     /// The live job list (the `list` op's view), for assertions.

@@ -209,7 +209,6 @@ impl NotebookSession {
                 let deferred_actions = ctx.deferred_actions.borrow().clone();
                 let workbook_properties_changed = ctx.workbook_properties_changed.borrow().clone();
                 let screen_updating = *ctx.screen_updating.borrow();
-                let enable_events = *ctx.enable_events.borrow();
                 let result = ScriptResult::Success {
                     output,
                     cells_modified,
@@ -218,7 +217,6 @@ impl NotebookSession {
                     deferred_actions,
                     workbook_properties_changed,
                     screen_updating,
-                    enable_events,
                 };
                 (result, grids)
             }

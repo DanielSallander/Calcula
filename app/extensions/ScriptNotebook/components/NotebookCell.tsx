@@ -2,11 +2,19 @@
 // PURPOSE: Individual cell component in the notebook view.
 // CONTEXT: Contains a code editor textarea, run/rewind controls, and output display.
 
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
+import { showToast } from "@api";
 import type { NotebookCell as NotebookCellType } from "../types";
 import { CellOutput } from "./CellOutput";
+import { MarkdownView } from "./MarkdownView";
 import { NotebookMonacoEditor } from "./NotebookMonacoEditor";
 import { useNotebookStore } from "../lib/useNotebookStore";
+import { cellKindOf, markdownBodyOf, withMarkdownMarker } from "../lib/cellKind";
+import {
+  methodNameFor,
+  planPromotion,
+  promoteCellToObjectScript,
+} from "../lib/promoteToObjectScript";
 
 interface NotebookCellProps {
   cell: NotebookCellType;
@@ -58,6 +66,76 @@ const ArrowDownIcon = () => (
   </svg>
 );
 
+/** Promote: an arrow leaving a box — "graduate this cell out of the notebook". */
+const PromoteIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <path d="M8 11V2M5 5l3-3 3 3" />
+    <path d="M2.5 9v4.5h11V9" />
+  </svg>
+);
+
+/**
+ * "Promote to object script": ask for a name, show the capability set DERIVED
+ * from what the cell actually called, and only then persist — unmounted.
+ *
+ * The consent text says exactly what happens (an INACTIVE script, started by
+ * hand) because that is exactly what `promoteCellToObjectScript` does; it never
+ * calls mountScript.
+ */
+async function promoteWithConsent(
+  cell: NotebookCellType,
+  cellNumber: number,
+  notebookName: string,
+): Promise<void> {
+  const plan = planPromotion(cell.source);
+  const defaultName = `${notebookName} — cell ${cellNumber}`;
+  const scriptName = window.prompt(
+    "Promote this cell to an object script.\n\n" +
+      "The analysis becomes a callable method on a workbook script. Name it:",
+    defaultName,
+  );
+  if (scriptName === null || scriptName.trim() === "") return;
+
+  const methodName = methodNameFor(scriptName);
+  const capLine =
+    plan.capabilities.length > 0
+      ? plan.capabilities.map((c) => `  • ${c}`).join("\n")
+      : "  (none — this cell used no privileged API)";
+  const noteLine =
+    plan.notes.length > 0
+      ? `\n\nPorting notes are written into the script:\n${plan.notes
+          .map((n) => `  • ${n.api}`)
+          .join("\n")}`
+      : "";
+
+  const ok = window.confirm(
+    `Create the object script "${scriptName.trim()}"?\n\n` +
+      `It will declare these capabilities, derived from the calls this cell made:\n${capLine}\n\n` +
+      `The script is saved INACTIVE. Nothing runs until you start it in the Object ` +
+      `Scripts pane, and its analysis then runs only when the exposed method ` +
+      `"${methodName}" is called — never on workbook open.${noteLine}`,
+  );
+  if (!ok) return;
+
+  try {
+    const result = await promoteCellToObjectScript({
+      scriptName: scriptName.trim(),
+      methodName,
+      cellSource: cell.source,
+      notebookName,
+      cellNumber,
+    });
+    showToast(
+      `Created inactive object script "${result.scriptName}". Review and start it in the Object Scripts pane.`,
+      { type: "success" },
+    );
+  } catch (err) {
+    showToast(`Promotion failed: ${err instanceof Error ? err.message : String(err)}`, {
+      type: "error",
+    });
+  }
+}
+
 export function NotebookCell({
   cell,
   index,
@@ -65,6 +143,7 @@ export function NotebookCell({
   isLast,
 }: NotebookCellProps): React.ReactElement {
   const {
+    activeNotebook,
     updateCellSource,
     runCell,
     rewindToCell,
@@ -76,6 +155,14 @@ export function NotebookCell({
     isExecuting,
     executingCellId,
   } = useNotebookStore();
+
+  const kind = cellKindOf(cell.source);
+  const isMarkdown = kind === "markdown";
+  // A text cell opens rendered once it has content; a brand-new one opens in
+  // edit mode so there is something to type into.
+  const [editingText, setEditingText] = useState(
+    () => isMarkdown && markdownBodyOf(cell.source).trim() === "",
+  );
 
   const isRunning = executingCellId === cell.id;
   const hasExecuted = cell.executionIndex !== null;
@@ -110,30 +197,52 @@ export function NotebookCell({
     runCell(cell.id);
   }, [cell.id, runCell]);
 
+  const handleTextChange = useCallback(
+    (body: string) => {
+      updateCellSource(cell.id, withMarkdownMarker(body));
+    },
+    [cell.id, updateCellSource],
+  );
+
+  const handlePromote = useCallback(() => {
+    void promoteWithConsent(cell, index + 1, activeNotebook?.name ?? "Notebook");
+  }, [cell, index, activeNotebook]);
+
   return (
     <div
       style={{
         ...styles.cell,
-        ...cellStateStyle,
+        ...(isMarkdown ? styles.textCell : cellStateStyle),
       }}
     >
       {/* Cell header */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
-          <span style={styles.cellLabel}>
-            [{cell.executionIndex ?? " "}]
+          <span style={isMarkdown ? styles.textLabel : styles.cellLabel}>
+            {isMarkdown ? "Text" : `[${cell.executionIndex ?? " "}]`}
           </span>
         </div>
         <div style={styles.headerRight}>
-          <button
-            style={styles.iconButton}
-            onClick={() => runCell(cell.id)}
-            disabled={isExecuting}
-            title="Run cell (Shift+Enter)"
-          >
-            <PlayIcon />
-          </button>
-          {hasRun && (
+          {isMarkdown && (
+            <button
+              style={styles.textButton}
+              onClick={() => setEditingText((v) => !v)}
+              title={editingText ? "Render this text" : "Edit this text"}
+            >
+              {editingText ? "Done" : "Edit"}
+            </button>
+          )}
+          {!isMarkdown && (
+            <button
+              style={styles.iconButton}
+              onClick={() => runCell(cell.id)}
+              disabled={isExecuting}
+              title="Run cell (Shift+Enter)"
+            >
+              <PlayIcon />
+            </button>
+          )}
+          {!isMarkdown && hasRun && (
             <button
               style={styles.iconButton}
               onClick={() => rewindToCell(cell.id)}
@@ -143,7 +252,7 @@ export function NotebookCell({
               <RewindIcon />
             </button>
           )}
-          {hasRun && (
+          {!isMarkdown && hasRun && (
             <button
               style={styles.iconButton}
               onClick={() => runFromCell(cell.id)}
@@ -151,6 +260,15 @@ export function NotebookCell({
               title="Run from this cell onwards"
             >
               <RunFromIcon />
+            </button>
+          )}
+          {!isMarkdown && cell.source.trim() !== "" && (
+            <button
+              style={styles.iconButton}
+              onClick={handlePromote}
+              title="Promote to an object script (saved inactive, for review)"
+            >
+              <PromoteIcon />
             </button>
           )}
           <span style={styles.separator} />
@@ -189,21 +307,42 @@ export function NotebookCell({
         </div>
       </div>
 
-      {/* Code editor */}
-      <NotebookMonacoEditor
-        value={cell.source}
-        onChange={handleSourceChange}
-        onRunCell={handleRunCell}
-      />
+      {isMarkdown ? (
+        /* Text cell: prose only. No editor, no run controls, no output —
+           run/rewind skip it on both sides of the IPC boundary. */
+        editingText ? (
+          <textarea
+            style={styles.textArea}
+            value={markdownBodyOf(cell.source)}
+            onChange={(e) => handleTextChange(e.target.value)}
+            onBlur={() => setEditingText(false)}
+            placeholder="Markdown — headings, lists, `code`, **bold**, links…"
+            autoFocus
+          />
+        ) : (
+          <div onDoubleClick={() => setEditingText(true)} title="Double-click to edit">
+            <MarkdownView source={markdownBodyOf(cell.source)} />
+          </div>
+        )
+      ) : (
+        <>
+          {/* Code editor */}
+          <NotebookMonacoEditor
+            value={cell.source}
+            onChange={handleSourceChange}
+            onRunCell={handleRunCell}
+          />
 
-      {/* Output */}
-      <CellOutput
-        output={cell.lastOutput}
-        error={cell.lastError}
-        cellsModified={cell.cellsModified}
-        durationMs={cell.durationMs}
-        executionIndex={cell.executionIndex}
-      />
+          {/* Output */}
+          <CellOutput
+            output={cell.lastOutput}
+            error={cell.lastError}
+            cellsModified={cell.cellsModified}
+            durationMs={cell.durationMs}
+            executionIndex={cell.executionIndex}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -260,6 +399,39 @@ const styles: Record<string, React.CSSProperties> = {
     color: "var(--accent-color, #0078d4)",
     fontWeight: 600,
     minWidth: "24px",
+  },
+  textCell: {
+    borderLeftColor: "var(--text-secondary, #999)",
+  },
+  textLabel: {
+    fontSize: "10px",
+    letterSpacing: "0.4px",
+    textTransform: "uppercase" as const,
+    color: "var(--text-secondary, #888)",
+    fontWeight: 600,
+  },
+  textButton: {
+    padding: "1px 6px",
+    fontSize: "11px",
+    border: "none",
+    background: "transparent",
+    color: "var(--accent-color, #0078d4)",
+    cursor: "pointer",
+    fontWeight: 500,
+  },
+  textArea: {
+    width: "100%",
+    minHeight: "80px",
+    boxSizing: "border-box" as const,
+    padding: "8px 10px",
+    border: "none",
+    outline: "none",
+    resize: "vertical" as const,
+    fontFamily: "Consolas, 'Courier New', monospace",
+    fontSize: "12px",
+    lineHeight: "18px",
+    background: "var(--editor-bg, #fff)",
+    color: "var(--text-primary, #333)",
   },
   iconButton: {
     display: "inline-flex",

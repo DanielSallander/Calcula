@@ -19,6 +19,7 @@ import {
   subscribeToKeybindingChanges,
   addCustomKeybinding,
   removeCustomKeybinding,
+  revokeScriptKeybinding,
   getAvailableCommands,
   type KeyBinding,
 } from "@api/keybindings";
@@ -93,7 +94,22 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
   }, [onCancelEdit]);
 
   const displayCombo = formatCombo(effectiveCombo);
-  const sourceLabel = binding.source === "built-in" ? "Built-in" : binding.extensionId || "Extension";
+  // A SCRIPT shortcut is not an extension's. Saying "Extension" here hid the one
+  // fact that matters about it — that a script inside THIS WORKBOOK is holding a
+  // key — behind the word for code the user installed on purpose. The category
+  // column already names the owning script (host-supplied at registration), so
+  // this reads "Script" and the two together say who has the key.
+  const isScript = binding.source === "script";
+  const sourceLabel = isScript
+    ? "Script"
+    : binding.source === "built-in"
+      ? "Built-in"
+      : binding.extensionId || "Extension";
+  // A script binding is never persisted and never user-remappable
+  // (setUserKeybinding refuses it, and getEffectiveCombo ignores overrides for
+  // it), so an Edit button here is a control that does nothing. Hide it rather
+  // than leave a dead affordance on a security surface.
+  const mayEdit = !isScript;
 
   if (editing) {
     return h("tr", { style: rowStyles.row },
@@ -149,15 +165,17 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
           ...rowStyles.comboDisplay,
           ...(isOverridden ? rowStyles.overridden : {}),
         },
-        onClick: onStartEdit,
-        title: "Click to change shortcut",
+        onClick: mayEdit ? onStartEdit : undefined,
+        title: mayEdit
+          ? "Click to change shortcut"
+          : "A script holds this shortcut. It cannot be remapped — remove it, or stop the script.",
       }, displayCombo),
     ),
     // Source
     h("td", { style: rowStyles.cellSource }, sourceLabel),
     // Actions
     h("td", { style: rowStyles.cellActions },
-      h("button", {
+      mayEdit && h("button", {
         style: rowStyles.actionBtn,
         onClick: onStartEdit,
         title: "Edit shortcut",
@@ -170,8 +188,10 @@ function KeybindingRow(props: KeybindingRowProps): React.ReactElement {
       onDelete && h("button", {
         style: { ...rowStyles.actionBtn, color: "#d32f2f" },
         onClick: onDelete,
-        title: "Remove this custom shortcut",
-      }, "Delete"),
+        title: isScript
+          ? "Take this shortcut back from the script"
+          : "Remove this custom shortcut",
+      }, isScript ? "Revoke" : "Delete"),
     ),
   );
 }
@@ -249,6 +269,13 @@ export function KeybindingsPage(): React.ReactElement {
 
   const handleDelete = useCallback((id: string) => {
     removeCustomKeybinding(id);
+  }, []);
+
+  /** Take a script's shortcut back. A user who cannot see WHY a key stopped
+   *  working must at least be able to reclaim it without stopping the script;
+   *  the script is told nothing and simply stops being called. */
+  const handleRevokeScript = useCallback((id: string) => {
+    revokeScriptKeybinding(id);
   }, []);
 
   const handleAddSubmit = useCallback(() => {
@@ -422,7 +449,16 @@ export function KeybindingsPage(): React.ReactElement {
                 onCancelEdit: handleCancelEdit,
                 onSaveEdit: (combo: string) => handleSaveEdit(binding.id, combo),
                 onReset: () => handleReset(binding.id),
-                onDelete: binding.source === "user" ? () => handleDelete(binding.id) : undefined,
+                // A user's own custom shortcut can be deleted; a SCRIPT's can be
+                // revoked. Leaving the script case out meant the one binding the
+                // user did not create was also the one they could not take back
+                // from this page.
+                onDelete:
+                  binding.source === "user"
+                    ? () => handleDelete(binding.id)
+                    : binding.source === "script"
+                      ? () => handleRevokeScript(binding.id)
+                      : undefined,
               })
             ),
           ]),

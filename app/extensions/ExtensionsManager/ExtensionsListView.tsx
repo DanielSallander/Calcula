@@ -10,6 +10,19 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { ActivityViewProps } from "@api/uiTypes";
 import { getExtensionManager, describeCapability } from "@api";
 import type { LoadedExtension, ExtensionStatus, CapabilityId } from "@api";
+import {
+  getDeclaredContributions,
+  listExtensionContributions,
+  subscribeToExtensionContributions,
+  type ExtensionContribution,
+} from "@api/scriptHost/extensionWorkerHost";
+import {
+  CONTRIBUTION_DECLARATION_KEY,
+  CONTRIBUTION_KIND_LABEL,
+  EXTENSION_CONTRIBUTION_KINDS,
+  countContributions,
+} from "@api/scriptHost/extensionProtocol";
+import { InstallAddInDialog } from "./InstallAddInDialog";
 
 /** Status badge colors */
 const STATUS_COLORS: Record<ExtensionStatus, { bg: string; text: string }> = {
@@ -26,22 +39,48 @@ const SIGNATURE_BADGES: Record<string, { label: string; bg: string; text: string
   unsigned: { label: "Unsigned", bg: "#f1f3f4", text: "#5f6368", title: "No signature. Capabilities are denied by default." },
   invalid: { label: "Invalid signature", bg: "#fce8e6", text: "#c5221f", title: "Signature did not verify. Capabilities are denied by default." },
   publisherChanged: { label: "Publisher changed!", bg: "#fce8e6", text: "#c5221f", title: "The signing key changed since this extension was first trusted. Capabilities are denied by default." },
+  codeUnverified: { label: "Code not covered", bg: "#fef7e0", text: "#a05a00", title: "The signature covers this add-in's description but not its program file, so Calcula cannot tell whether this is the code the publisher signed. Capabilities are denied by default." },
+  // Scan-only. The bundle is signed and its code is covered, but nobody on this
+  // machine ever agreed to trust the key: it was placed in the extensions folder
+  // directly instead of installed. The scan used to pin silently here, which let
+  // a dropped file squat the pin for an id it did not own.
+  notInstalled: { label: "Not installed here", bg: "#fef7e0", text: "#a05a00", title: "This add-in was placed in the extensions folder rather than installed through Calcula, so nobody on this computer has ever agreed to trust its publisher. Capabilities are denied by default. Use \"Install add-in...\" to review who signed it and what it declares, then trust it." },
+  trustUnavailable: { label: "Publisher unknown", bg: "#fef7e0", text: "#a05a00", title: "The signature is valid, but Calcula could not read its own record of which publisher signed this add-in before, so it cannot tell whether the publisher changed. Capabilities are denied by default." },
 };
 
 /**
  * Extensions manager view - lists all loaded extensions and controls them.
  */
 export function ExtensionsListView(_props: ActivityViewProps): React.ReactElement {
-  const [extensions, setExtensions] = useState<LoadedExtension[]>([]);
+  // Seeded during render (the Shell has registered the manager long before any
+  // view mounts) so the effect only SUBSCRIBES: calling setState synchronously
+  // in an effect body cascades renders.
+  const [extensions, setExtensions] = useState<LoadedExtension[]>(() => [
+    ...getExtensionManager().getExtensions(),
+  ]);
+
+  const [contributions, setContributions] = useState<ExtensionContribution[]>(
+    listExtensionContributions,
+  );
+
+  // The install on-ramp (G0). Kept in this panel rather than the ribbon because
+  // the decision it presents belongs next to the list of what is already
+  // installed and what each of those may touch.
+  const [installOpen, setInstallOpen] = useState(false);
+  const [installedName, setInstalledName] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setExtensions([...getExtensionManager().getExtensions()]);
+    setContributions(listExtensionContributions());
   }, []);
 
   useEffect(() => {
-    refresh();
-    const unsub = getExtensionManager().subscribe(refresh);
-    return unsub;
+    const unsubManager = getExtensionManager().subscribe(refresh);
+    const unsubContrib = subscribeToExtensionContributions(refresh);
+    return () => {
+      unsubManager();
+      unsubContrib();
+    };
   }, [refresh]);
 
   const errorCount = extensions.filter((e) => e.status === "error").length;
@@ -60,7 +99,28 @@ export function ExtensionsListView(_props: ActivityViewProps): React.ReactElemen
         {disabledCount > 0 && (
           <span style={styles.disabledBadge}>{disabledCount} disabled</span>
         )}
+        <button
+          type="button"
+          style={styles.installButton}
+          onClick={() => setInstallOpen(true)}
+          title="Install a third-party add-in from a folder — you see its publisher and everything it will add before anything is copied"
+        >
+          Install add-in…
+        </button>
       </div>
+
+      {installedName && (
+        <div style={styles.installedBanner}>
+          Installed &quot;{installedName}&quot;. Reload Calcula to load it.
+        </div>
+      )}
+
+      {installOpen && (
+        <InstallAddInDialog
+          onClose={() => setInstallOpen(false)}
+          onInstalled={(r) => setInstalledName(r.name)}
+        />
+      )}
 
       {/* Extension list */}
       <div style={styles.list}>
@@ -68,7 +128,11 @@ export function ExtensionsListView(_props: ActivityViewProps): React.ReactElemen
           <div style={styles.emptyState}>No managed extensions loaded</div>
         ) : (
           extensions.map((ext) => (
-            <ExtensionItem key={ext.id} extension={ext} />
+            <ExtensionItem
+              key={ext.id}
+              extension={ext}
+              contributions={contributions.filter((c) => c.extId === ext.id)}
+            />
           ))
         )}
       </div>
@@ -84,7 +148,78 @@ export function ExtensionsListView(_props: ActivityViewProps): React.ReactElemen
   );
 }
 
-function ExtensionItem({ extension }: { extension: LoadedExtension }): React.ReactElement {
+/**
+ * The transparency block for a third-party extension: what it DECLARED it would
+ * contribute (read from the sidecar manifest without running the bundle, so it
+ * is visible even for an add-in awaiting consent), and — once mounted — what the
+ * host actually installed or REFUSED.
+ *
+ * A registered worksheet function must never be invisible: a formula that
+ * recalculates against the user's data is the highest-consequence thing an
+ * add-in can install, so it is listed by name here as well as in the consent
+ * prompt.
+ */
+function ContributionBlock({
+  extensionId,
+  contributions,
+}: {
+  extensionId: string;
+  contributions: ExtensionContribution[];
+}): React.ReactElement | null {
+  const declared = getDeclaredContributions(extensionId);
+  const declaredCount = countContributions(declared);
+  const installed = contributions.filter((c) => !c.refusedReason);
+  const refused = contributions.filter((c) => c.refusedReason);
+  if (declaredCount === 0 && installed.length === 0 && refused.length === 0) return null;
+
+  return (
+    <div style={styles.contribBlock}>
+      {EXTENSION_CONTRIBUTION_KINDS.map((kind) => {
+        const names = declared[CONTRIBUTION_DECLARATION_KEY[kind]] ?? [];
+        if (names.length === 0) return null;
+        const live = new Set(
+          installed.filter((c) => c.kind === kind).map((c) => c.id.toUpperCase()),
+        );
+        return (
+          <div key={kind} style={styles.contribRow}>
+            <span style={styles.contribKind}>{CONTRIBUTION_KIND_LABEL[kind]}</span>
+            <span style={styles.contribNames}>
+              {names.map((n) => (
+                <span
+                  key={n}
+                  style={{
+                    ...styles.contribChip,
+                    ...(live.has(n.toUpperCase()) ? styles.contribChipLive : {}),
+                  }}
+                  title={
+                    live.has(n.toUpperCase())
+                      ? "Declared and installed"
+                      : "Declared in the manifest; not installed (yet)"
+                  }
+                >
+                  {n}
+                </span>
+              ))}
+            </span>
+          </div>
+        );
+      })}
+      {refused.map((r) => (
+        <div key={`${r.kind}:${r.id}`} style={styles.contribRefused}>
+          Refused {CONTRIBUTION_KIND_LABEL[r.kind]} &quot;{r.id}&quot;: {r.refusedReason}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExtensionItem({
+  extension,
+  contributions,
+}: {
+  extension: LoadedExtension;
+  contributions: ExtensionContribution[];
+}): React.ReactElement {
   const [isHovered, setIsHovered] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmingUninstall, setConfirmingUninstall] = useState(false);
@@ -192,6 +327,11 @@ function ExtensionItem({ extension }: { extension: LoadedExtension }): React.Rea
             ))
           )}
         </div>
+      )}
+
+      {/* Declared / installed / refused contributions (third-party only) */}
+      {!isBuiltIn && (
+        <ContributionBlock extensionId={extension.id} contributions={contributions} />
       )}
 
       {extension.error && (
@@ -315,6 +455,25 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "1px 6px",
     borderRadius: 8,
   },
+  installButton: {
+    marginLeft: "auto",
+    fontSize: 11,
+    padding: "3px 10px",
+    borderRadius: 4,
+    border: "1px solid transparent",
+    backgroundColor: "#1967d2",
+    color: "#fff",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  installedBanner: {
+    padding: "6px 12px",
+    fontSize: 11,
+    color: "#137333",
+    backgroundColor: "#e6f4ea",
+    borderBottom: "1px solid #a8d5b5",
+    flexShrink: 0,
+  },
   list: {
     flex: 1,
     overflowY: "auto",
@@ -404,6 +563,50 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 10,
     color: "#9aa0a6",
     fontStyle: "italic" as const,
+  },
+  contribBlock: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 3,
+    marginTop: 6,
+    paddingTop: 5,
+    borderTop: "1px dashed #eaeaea",
+  },
+  contribRow: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 6,
+  },
+  contribKind: {
+    fontSize: 10,
+    color: "#5f6368",
+    minWidth: 96,
+    flexShrink: 0,
+  },
+  contribNames: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 3,
+  },
+  contribChip: {
+    fontSize: 10,
+    fontFamily: "monospace",
+    padding: "1px 5px",
+    borderRadius: 3,
+    backgroundColor: "#f1f3f4",
+    color: "#9aa0a6",
+    cursor: "help",
+  },
+  contribChipLive: {
+    backgroundColor: "#e6f4ea",
+    color: "#137333",
+  },
+  contribRefused: {
+    fontSize: 10,
+    color: "#b06000",
+    backgroundColor: "#fef7e0",
+    borderRadius: 3,
+    padding: "3px 6px",
   },
   itemError: {
     fontSize: 11,

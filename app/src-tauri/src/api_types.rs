@@ -159,6 +159,23 @@ pub struct TypedCellData {
     pub r#type: String,
 }
 
+/// The result of evaluating ONE formula expression against the live grid
+/// (`evaluate_formula_typed`) — the WorksheetFunction bridge's payload.
+///
+/// Deliberately the same `value` / `display` / `type` triple `TypedCellData`
+/// carries, minus the coordinates and the formula (an expression that was never
+/// stored has neither), so a script can treat an evaluated result and a read
+/// cell with the same code path. An expression that fails to parse comes back
+/// as type "error" with the Excel literal "#SYNTAX!" rather than rejecting the
+/// whole batch — one bad expression must not lose the other nine answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypedEvalResult {
+    pub value: serde_json::Value,
+    pub display: String,
+    pub r#type: String,
+}
+
 /// Represents a single item in a collection preview (List or Dict).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

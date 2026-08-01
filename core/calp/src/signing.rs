@@ -22,6 +22,15 @@
 //! This module owns the keypair, the sign/verify primitives, and the TOFU
 //! store. integrity.rs wires them into the pull/inspect verification step.
 
+//! EXTENSION ADD-INS (G0). The same keypair, the same detached-signature shape
+//! and the same TOFU store also cover third-party EXTENSION sidecar manifests —
+//! deliberately, so an author has ONE publisher identity and the app has ONE
+//! trust root. The extension-specific pieces (file layout, the `codeHash` field
+//! that extends signature coverage from the manifest to the bundle, and the
+//! `ext:<id>` TOFU namespace) live at the bottom of this file so the signing
+//! tool (`core/calcula-sign`), the installer and the scan-time verifier all
+//! share one implementation instead of three that can drift.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -257,7 +266,11 @@ impl Default for TrustedPublishersFile {
     }
 }
 
-fn trusted_publishers_file_path(profile_dir: &Path) -> PathBuf {
+/// Where the TOFU pin map lives. Public so a test can corrupt exactly the file
+/// the loader reads (rather than hard-coding the name and drifting from it) —
+/// which is how the "an unreadable pin store must not read as trusted" rule is
+/// proved rather than asserted.
+pub fn trusted_publishers_file_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("trusted-publishers.json")
 }
 
@@ -294,6 +307,204 @@ pub fn pin_publisher(
     let content = serde_json::to_string_pretty(&file)?;
     std::fs::write(trusted_publishers_file_path(profile_dir), content)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Third-party EXTENSION add-ins: layout, code-hash coverage, TOFU namespace
+// ---------------------------------------------------------------------------
+
+/// The JSON field in an extension sidecar manifest that carries the SHA-256 of
+/// the bundle the host will execute. It is inside the signed bytes, which is the
+/// only reason a signature over the manifest says anything about the CODE.
+pub const EXTENSION_CODE_HASH_FIELD: &str = "codeHash";
+
+/// The suffix every extension sidecar manifest must have.
+pub const EXTENSION_MANIFEST_SUFFIX: &str = ".manifest.json";
+
+/// The base name reserved for the DIRECTORY-bundle convention
+/// (`<ext-dir>/extension.manifest.json` + `<ext-dir>/index.js`).
+pub const EXTENSION_DIR_MANIFEST_BASE: &str = "extension";
+
+/// The three files that make up a third-party add-in on disk. Resolved purely
+/// from names (no filesystem probing), so the signing tool, the installer and
+/// the scan-time verifier can never disagree about WHICH bytes were signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionBundleLayout {
+    /// `<base>.manifest.json` — the bytes that are signed.
+    pub manifest: PathBuf,
+    /// `<base>.manifest.sig` — hex of the detached Ed25519 signature.
+    pub signature: PathBuf,
+    /// The single JavaScript file the host imports (`<base>.js`, or `index.js`
+    /// for the directory-bundle convention). This is the ONLY executed file.
+    pub bundle: PathBuf,
+}
+
+/// Resolve the layout from a sidecar manifest path.
+///
+/// Naming rules (must match `scan_extension_directory`):
+///   - `<dir>/extension.manifest.json` -> bundle `<dir>/index.js`  (directory bundle)
+///   - `<dir>/<base>.manifest.json`    -> bundle `<dir>/<base>.js` (file bundle)
+///
+/// Returns `None` when the path does not end in `.manifest.json` or has an
+/// empty base. `extension.js` is therefore NOT a usable file-bundle name — the
+/// base `extension` is reserved for the directory convention. That is a
+/// deliberate refusal rather than a probe-the-disk guess: which file the
+/// signature covers must never depend on what else happens to be in the folder.
+pub fn extension_layout_for_manifest(manifest_path: &Path) -> Option<ExtensionBundleLayout> {
+    let file_name = manifest_path.file_name()?.to_str()?;
+    let base = file_name.strip_suffix(EXTENSION_MANIFEST_SUFFIX)?;
+    if base.is_empty() {
+        return None;
+    }
+    let dir = manifest_path.parent().unwrap_or_else(|| Path::new(""));
+    let bundle_name = if base == EXTENSION_DIR_MANIFEST_BASE {
+        "index.js".to_string()
+    } else {
+        format!("{}.js", base)
+    };
+    Some(ExtensionBundleLayout {
+        manifest: manifest_path.to_path_buf(),
+        signature: dir.join(format!("{}.manifest.sig", base)),
+        bundle: dir.join(bundle_name),
+    })
+}
+
+/// Resolve the layout from whatever an author or a user pointed at: a bundle
+/// `.js`, a `<base>.manifest.json`, or the folder that contains them.
+///
+/// Folder rules:
+///   - contains `index.js` -> directory bundle (`extension.manifest.json`)
+///   - otherwise exactly ONE top-level `*.js` -> file bundle for that file
+///   - zero or several -> an error naming the ambiguity
+pub fn extension_layout_for_source(source: &Path) -> Result<ExtensionBundleLayout, CalpError> {
+    let bad = |msg: String| CalpError::Registry(msg);
+
+    if source.is_dir() {
+        if source.join("index.js").is_file() {
+            let manifest = source.join(format!(
+                "{}{}",
+                EXTENSION_DIR_MANIFEST_BASE, EXTENSION_MANIFEST_SUFFIX
+            ));
+            return extension_layout_for_manifest(&manifest)
+                .ok_or_else(|| bad("could not resolve the directory-bundle layout".to_string()));
+        }
+        let mut js: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(source)? {
+            let path = entry?.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("js") {
+                js.push(path);
+            }
+        }
+        js.sort();
+        return match js.len() {
+            0 => Err(bad(format!(
+                "'{}' contains no add-in bundle: expected index.js or a single <name>.js",
+                source.display()
+            ))),
+            1 => extension_layout_for_source(&js[0]),
+            n => Err(bad(format!(
+                "'{}' contains {} .js files; point at the bundle file itself so it is unambiguous which one is signed",
+                source.display(),
+                n
+            ))),
+        };
+    }
+
+    let file_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| bad(format!("'{}' is not a usable file name", source.display())))?;
+
+    if file_name.ends_with(EXTENSION_MANIFEST_SUFFIX) {
+        return extension_layout_for_manifest(source)
+            .ok_or_else(|| bad(format!("'{}' is not a valid sidecar manifest name", file_name)));
+    }
+
+    let stem = file_name
+        .strip_suffix(".js")
+        .ok_or_else(|| bad(format!(
+            "'{}' is neither a .js bundle, a <name>.manifest.json, nor a folder",
+            file_name
+        )))?;
+    let dir = source.parent().unwrap_or_else(|| Path::new(""));
+    let base = if stem == "index" {
+        EXTENSION_DIR_MANIFEST_BASE
+    } else {
+        stem
+    };
+    if base == EXTENSION_DIR_MANIFEST_BASE && stem == EXTENSION_DIR_MANIFEST_BASE {
+        return Err(bad(
+            "'extension.js' is a reserved name: the base 'extension' belongs to the \
+             directory-bundle convention (extension.manifest.json + index.js). Rename the bundle."
+                .to_string(),
+        ));
+    }
+    extension_layout_for_manifest(&dir.join(format!("{}{}", base, EXTENSION_MANIFEST_SUFFIX)))
+        .ok_or_else(|| bad(format!("could not resolve a layout for '{}'", file_name)))
+}
+
+/// SHA-256 (lowercase hex) of the bundle file the host will execute.
+pub fn extension_code_hash(bundle: &Path) -> Result<String, CalpError> {
+    let bytes = std::fs::read(bundle)?;
+    Ok(crate::integrity::sha256_hex(&bytes))
+}
+
+/// Outcome of comparing a manifest's declared `codeHash` to the bundle on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeHashStatus {
+    /// The manifest does not declare `codeHash`: the signature covers the
+    /// manifest ONLY, so the executable bytes are NOT authenticated.
+    NotDeclared,
+    /// Declared and matching: the signature transitively covers the bundle.
+    Match,
+    /// Declared and DIFFERENT: the bundle was modified after signing.
+    Mismatch,
+    /// Declared, but the bundle could not be read.
+    BundleUnreadable,
+}
+
+impl CodeHashStatus {
+    /// Stable wire string for the frontend / reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodeHashStatus::NotDeclared => "notDeclared",
+            CodeHashStatus::Match => "match",
+            CodeHashStatus::Mismatch => "mismatch",
+            CodeHashStatus::BundleUnreadable => "bundleUnreadable",
+        }
+    }
+}
+
+/// Compare the `codeHash` inside an already-signature-verified manifest against
+/// the bundle on disk.
+///
+/// SECURITY: call this ONLY after `verify_signature` succeeded over the raw
+/// manifest bytes. On its own the field is attacker-controlled; its value comes
+/// entirely from being inside the signed bytes.
+pub fn check_extension_code_hash(
+    manifest: &serde_json::Value,
+    bundle: &Path,
+) -> CodeHashStatus {
+    let declared = manifest
+        .get(EXTENSION_CODE_HASH_FIELD)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if declared.is_empty() {
+        return CodeHashStatus::NotDeclared;
+    }
+    match extension_code_hash(bundle) {
+        Ok(actual) if actual == declared => CodeHashStatus::Match,
+        Ok(_) => CodeHashStatus::Mismatch,
+        Err(_) => CodeHashStatus::BundleUnreadable,
+    }
+}
+
+/// The TOFU store key for an extension id. Namespaced so an add-in can never
+/// collide with (or hijack the pin of) a `.calp` package of the same name.
+pub fn extension_tofu_key(id: &str) -> String {
+    format!("ext:{}", id)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,5 +695,101 @@ mod tests {
         pin_publisher(dir.path(), "pkg", "2222").unwrap();
         let map = load_trusted_publishers(dir.path()).unwrap();
         assert_eq!(map.get("pkg"), Some(&"2222".to_string()));
+    }
+
+    // -- Extension add-in layout / code-hash coverage (G0) -------------------
+
+    #[test]
+    fn layout_file_bundle_from_manifest() {
+        let l = extension_layout_for_manifest(Path::new("/ext/tax-tools.manifest.json")).unwrap();
+        assert!(l.signature.ends_with("tax-tools.manifest.sig"));
+        assert!(l.bundle.ends_with("tax-tools.js"));
+    }
+
+    #[test]
+    fn layout_directory_bundle_from_manifest() {
+        let l = extension_layout_for_manifest(Path::new("/ext/my-ext/extension.manifest.json"))
+            .unwrap();
+        assert!(l.signature.ends_with("extension.manifest.sig"));
+        assert!(l.bundle.ends_with("index.js"));
+    }
+
+    #[test]
+    fn layout_rejects_non_manifest_names() {
+        assert!(extension_layout_for_manifest(Path::new("/ext/tax-tools.json")).is_none());
+        assert!(extension_layout_for_manifest(Path::new("/ext/.manifest.json")).is_none());
+    }
+
+    #[test]
+    fn layout_from_source_file_dir_and_index() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tax-tools.js"), "//x").unwrap();
+
+        // Pointing at the bundle file.
+        let l = extension_layout_for_source(&dir.path().join("tax-tools.js")).unwrap();
+        assert!(l.manifest.ends_with("tax-tools.manifest.json"));
+
+        // Pointing at the folder that holds exactly one .js.
+        let l2 = extension_layout_for_source(dir.path()).unwrap();
+        assert_eq!(l, l2);
+
+        // index.js in a folder is the DIRECTORY convention.
+        let d2 = TempDir::new().unwrap();
+        std::fs::write(d2.path().join("index.js"), "//x").unwrap();
+        let l3 = extension_layout_for_source(d2.path()).unwrap();
+        assert!(l3.manifest.ends_with("extension.manifest.json"));
+        assert!(l3.bundle.ends_with("index.js"));
+    }
+
+    #[test]
+    fn layout_from_source_rejects_ambiguity_and_reserved_names() {
+        let dir = TempDir::new().unwrap();
+        // Zero bundles.
+        assert!(extension_layout_for_source(dir.path()).is_err());
+        // Two bundles, no index.js -> ambiguous.
+        std::fs::write(dir.path().join("a.js"), "//a").unwrap();
+        std::fs::write(dir.path().join("b.js"), "//b").unwrap();
+        assert!(extension_layout_for_source(dir.path()).is_err());
+        // The reserved base name.
+        assert!(extension_layout_for_source(Path::new("/ext/extension.js")).is_err());
+        // Not a bundle at all.
+        assert!(extension_layout_for_source(Path::new("/ext/readme.txt")).is_err());
+    }
+
+    #[test]
+    fn code_hash_status_covers_the_bundle() {
+        let dir = TempDir::new().unwrap();
+        let bundle = dir.path().join("a.js");
+        std::fs::write(&bundle, b"console.log(1)").unwrap();
+        let hash = extension_code_hash(&bundle).unwrap();
+
+        // Declared + matching.
+        let m = serde_json::json!({ "codeHash": hash });
+        assert_eq!(check_extension_code_hash(&m, &bundle), CodeHashStatus::Match);
+        // Uppercase hex is accepted (normalized).
+        let m_up = serde_json::json!({ "codeHash": hash.to_uppercase() });
+        assert_eq!(check_extension_code_hash(&m_up, &bundle), CodeHashStatus::Match);
+
+        // Tampering the bundle after signing is DETECTED.
+        std::fs::write(&bundle, b"console.log(2)").unwrap();
+        assert_eq!(check_extension_code_hash(&m, &bundle), CodeHashStatus::Mismatch);
+
+        // Missing bundle.
+        std::fs::remove_file(&bundle).unwrap();
+        assert_eq!(
+            check_extension_code_hash(&m, &bundle),
+            CodeHashStatus::BundleUnreadable
+        );
+
+        // No declaration at all -> the signature covers the manifest only.
+        assert_eq!(
+            check_extension_code_hash(&serde_json::json!({}), &bundle),
+            CodeHashStatus::NotDeclared
+        );
+    }
+
+    #[test]
+    fn extension_tofu_key_is_namespaced() {
+        assert_eq!(extension_tofu_key("calcula.example.tax-tools"), "ext:calcula.example.tax-tools");
     }
 }

@@ -2,6 +2,19 @@
 // PURPOSE: Lightweight Monaco editor for notebook cells with Calcula API intellisense.
 // CONTEXT: Provides autocomplete, hover docs, and syntax validation for the
 //          Calcula.* and console.* APIs inside notebook cells.
+//
+//          NOTEBOOK CELLS STAY JAVASCRIPT, DELIBERATELY. A cell is executed by
+//          the Rust QuickJS interpreter over cloned grid state — a different
+//          runtime from the object-script Worker realm, with different globals
+//          (`Calcula.*`, not an object `context`) and its own audit trail keyed
+//          to the text that ran. Giving it TypeScript would mean compiling cell
+//          text before execution, which would make the text the interpreter
+//          runs different from the text the author wrote and the audit recorded.
+//          If that is ever wanted it needs its own lib and its own compile step
+//          on the execution path — NOT the object-script ones. What this file
+//          does need from the shared lane machinery is its own .d.ts and honest
+//          diagnostics: CustomFunctions used to switch validation off globally
+//          at startup, which silently disabled type-checking in here too.
 
 import React, { useRef, useCallback, useEffect } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
@@ -13,6 +26,7 @@ import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 // Vite ?raw import: loads .d.ts as a plain string for Monaco type registration
 import calculaDts from "../../_shared/lib/calcula.d.ts?raw";
+import { registerScriptSurface } from "../../_shared/lib/monacoScriptLanes";
 
 // ============================================================================
 // Monaco Worker Setup (local, no CDN)
@@ -37,26 +51,18 @@ self.MonacoEnvironment = {
 
 loader.config({ monaco });
 
-// Register Calcula API types eagerly at module load time.
-// This ensures IntelliSense is ready before the first editor mounts.
-(function registerCalculaTypes() {
-  monacoTs.javascriptDefaults.addExtraLib(
-    calculaDts,
-    "calcula.d.ts",
-  );
-
-  monacoTs.javascriptDefaults.setDiagnosticsOptions({
-    noSemanticValidation: false,
-    noSyntaxValidation: false,
+// Register the Calcula API types eagerly at module load time so IntelliSense is
+// ready before the first editor mounts — through the shared lane registry, so
+// this surface's libs and diagnostics are MERGED with the other script editors'
+// instead of the two of them overwriting each other at startup.
+function registerSurface(): void {
+  registerScriptSurface(monacoTs, {
+    lane: "javascript",
+    surface: "notebook",
+    libs: [{ path: "calcula.d.ts", content: calculaDts }],
   });
-
-  monacoTs.javascriptDefaults.setCompilerOptions({
-    target: monacoTs.ScriptTarget.ESNext,
-    allowNonTsExtensions: true,
-    allowJs: true,
-    checkJs: true,
-  });
-})();
+}
+registerSurface();
 
 // ============================================================================
 // Props
@@ -100,6 +106,10 @@ export function NotebookMonacoEditor({
   const handleMount: OnMount = useCallback(
     (ed, _m) => {
       editorRef.current = ed;
+      // Re-assert on mount: module load order decides who configured Monaco
+      // first, mount order decides who configured it last, and the MERGED
+      // configuration has to be the live one either way.
+      registerSurface();
 
       // Shift+Enter = run cell (prevent default newline)
       ed.addAction({

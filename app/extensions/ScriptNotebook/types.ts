@@ -28,7 +28,13 @@ export type NotebookOutputItem =
       totalRows: number;
     };
 
-/** A single cell in a notebook. */
+/** A single cell in a notebook.
+ *
+ *  There is deliberately no `kind` field: a cell is prose when its source
+ *  starts with `//!markdown` (see lib/cellKind.ts for why, and
+ *  notebook_commands.rs::is_markdown_source for the authoritative half of the
+ *  same rule). Keeping the kind in the bytes keeps the .cala/.calp notebook
+ *  record at one shape across all three persistence layers. */
 export interface NotebookCell {
   id: string;
   source: string;
@@ -77,8 +83,6 @@ export type NotebookCellResponse =
       executionIndex: number;
       /** Application.screenUpdating value at end of cell execution */
       screenUpdating: boolean;
-      /** Application.enableEvents value at end of cell execution */
-      enableEvents: boolean;
       /** Deferred actions from Application object (goto, calculate, statusBar) */
       deferredActions?: DeferredAction[];
     }

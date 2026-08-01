@@ -8,7 +8,8 @@ members = [
     "script-engine",
     "calcula-format",
     "calcula-crypto",
-    "calp"
+    "calp",
+    "calcula-sign"
 ]
 exclude = ["pivot-bench"]
 resolver = "2"

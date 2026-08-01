@@ -323,8 +323,6 @@ export interface ScriptRunSuccess {
   deferredActions?: DeferredAction[];
   /** Application.screenUpdating value at end of script. */
   screenUpdating: boolean;
-  /** Application.enableEvents value at end of script. */
-  enableEvents: boolean;
 }
 
 /** Failed script run. */

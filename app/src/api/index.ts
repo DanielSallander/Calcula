@@ -1114,11 +1114,17 @@ export {
   addCustomKeybinding,
   removeCustomKeybinding,
   getAvailableCommands,
+  // A user binding never LOSES to a script's — it is the user's keyboard — but
+  // the shadowing has to be sayable before they commit, not discovered later as
+  // "my script stopped responding". A settings UI calls this to warn in place.
+  findScriptKeybindingCollision,
 } from "./keybindings";
 export type {
   KeyBinding,
   ParsedCombo,
   IKeybindingsAPI,
+  KeybindingCollision,
+  AddCustomKeybindingResult,
 } from "./keybindings";
 
 // ============================================================================
@@ -2304,6 +2310,15 @@ export {
   getWorkbookCodeUnits,
   summarizeCodeInventory,
   codeUnitReachesBeyondGrid,
+  // The DERIVED reach of the Rust-QuickJS surfaces (verified against the
+  // interpreter's own op manifest, core/script-engine/src/manifest.rs). A
+  // transparency surface must be able to say "grid-only" only when that is a
+  // derived fact — `codeUnitMayReachBeyondGrid` is the one that also counts a
+  // capability the surface can be GRANTED, which is what a notebook has.
+  codeUnitMayReachBeyondGrid,
+  describeInterpreterReach,
+  QUICKJS_SURFACE_REACH,
+  QUICKJS_SURFACE_CAPABILITIES,
   // "What runs without me asking?" — the scheduled-job half of the inventory,
   // plus the two controls that make seeing it actionable. Exported from the
   // barrel (not only the ./codeInventory subpath) because a transparency
@@ -2322,7 +2337,21 @@ export type {
   ScheduledJobEntry,
   ScheduledJobSummary,
   ScheduledJob,
+  InterpreterReachClass,
+  QuickJsSurfaceId,
 } from "./codeInventory";
+
+// Third-party add-in CONTRIBUTIONS: what an installed extension has actually
+// added to this app (worksheet functions, ribbon buttons, shortcuts, cell
+// styling, importers) and what it DECLARED it would add — including every
+// refusal. The transparency answer to "what did that add-in put in my app?".
+export {
+  listExtensionContributions,
+  subscribeToExtensionContributions,
+  getDeclaredContributions,
+  listExtensionRibbonButtons,
+} from "./scriptHost/extensionWorkerHost";
+export type { ExtensionContribution } from "./scriptHost/extensionWorkerHost";
 
 // The scheduler's CLOCK lifecycle. The renderer owns the tick (Rust cannot call
 // into a worker realm), so whoever owns the script lifecycle has to start the

@@ -6,7 +6,8 @@
 
 import React from "react";
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { IconNotebook } from "@api";
+import { IconNotebook, showToast } from "@api";
+import { listenTauriEvent } from "@api/backend";
 import {
   SCRIPT_DEFERRED_ACTIONS_EVENT,
   normalizeDeferredActions,
@@ -21,6 +22,11 @@ import { notebookBackend } from "./lib/notebookBackend";
 import { useNotebookStore } from "./lib/useNotebookStore";
 import { applyDeferredActions } from "./lib/deferredActions";
 import { liveDeferredActionHost } from "./lib/deferredActionHost";
+import {
+  NOTEBOOK_SCAFFOLD_EVENT,
+  normalizeScaffoldRequest,
+  scaffoldCellSource,
+} from "./lib/notebookScaffold";
 
 // ============================================================================
 // Constants
@@ -112,6 +118,19 @@ function activate(context: ExtensionContext): void {
     ],
   });
 
+  // 2b. Data menu entry — the notebook is an ANALYSIS workbench, so it belongs
+  //     next to the other data tools, not only under Developer. The Developer
+  //     container above stays registered (AIChat + Controls inject into it).
+  context.ui.menus.registerItem("data", {
+    id: "data:notebook",
+    label: "Notebook",
+    icon: IconNotebook,
+    order: 70,
+    action: () => {
+      context.ui.activityBar.toggle(VIEW_ID);
+    },
+  });
+
   // 3. Keyboard shortcut: Ctrl+Shift+N to toggle notebook
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.shiftKey && e.key === "N") {
@@ -173,6 +192,38 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() =>
     window.removeEventListener(MACRO_TO_NOTEBOOK_EVENT, handleMacroSource),
   );
+
+  // 7. "Test in notebook" scaffolds (Model Editor). A CROSS-WINDOW Tauri event,
+  //    because the Model Editor is its own window and a DOM CustomEvent cannot
+  //    reach us there. The payload only becomes CELL SOURCE — text in an editor.
+  //    It is never executed on arrival: cells run when the user runs them, and a
+  //    model.* call inside one still meets the notebook's own consent gate. The
+  //    payload is re-validated (untyped IPC) and capped before it is stored.
+  let unlistenScaffold: (() => void) | null = null;
+  void listenTauriEvent(NOTEBOOK_SCAFFOLD_EVENT, (payload) => {
+    const request = normalizeScaffoldRequest(payload);
+    if (!request) return;
+    void (async () => {
+      try {
+        if (!useNotebookStore.getState().activeNotebook) {
+          await useNotebookStore.getState().createNotebook(request.notebookName);
+        }
+        useNotebookStore
+          .getState()
+          .appendCellsWithSource(request.cells.map(scaffoldCellSource));
+        context.ui.activityBar.open(VIEW_ID);
+        showToast(`${request.title} — added to the notebook`, { type: "info" });
+      } catch (err) {
+        console.error("[ScriptNotebook] Failed to apply notebook scaffold:", err);
+      }
+    })();
+  }).then((off) => {
+    unlistenScaffold = off;
+  });
+  cleanupFns.push(() => {
+    unlistenScaffold?.();
+    unlistenScaffold = null;
+  });
 
   isActivated = true;
   console.log("[ScriptNotebook] Activated successfully.");

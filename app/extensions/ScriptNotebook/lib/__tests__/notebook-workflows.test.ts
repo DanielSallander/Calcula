@@ -70,7 +70,6 @@ function successResponse(index: number, output: string[] = []): any {
     durationMs: 5,
     executionIndex: index,
     screenUpdating: true,
-    enableEvents: true,
   };
 }
 

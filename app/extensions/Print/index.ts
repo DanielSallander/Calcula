@@ -38,6 +38,7 @@ import {
   clearPrintTitleCols,
   indexToCol,
 } from "@api/lib";
+import { registerPdfRenderer } from "@api/printService";
 import { save } from "@tauri-apps/plugin-dialog";
 import { PageSetupDialog } from "./components/PageSetupDialog";
 import { executePrint } from "./lib/printGenerator";
@@ -328,6 +329,24 @@ function activate(context: ExtensionContext): void {
     priority: 100,
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("page-setup"));
+
+  // 1b. Publish the workbook-to-PDF renderer through the feature-neutral seam
+  //     (@api/printService), so anything in the facade that needs a printable
+  //     document — today the script broker's `caps.file.exportPdf` — can ask for
+  //     one WITHOUT importing this extension. Same page setup, same print area,
+  //     same page breaks and headers/footers as File ▸ Export to PDF: the two
+  //     paths share generatePdf(getPrintData()), so a script's PDF and a user's
+  //     PDF can never drift apart.
+  //
+  //     Only the PDF path is published. `executePrint()` needs a pop-up window
+  //     and the OS print dialog, and reports nothing back — see the note in
+  //     printService.ts for why that must not be offered to a script.
+  cleanupFns.push(
+    registerPdfRenderer(async () => {
+      const data = await getPrintData();
+      return new Uint8Array(generatePdf(data));
+    }),
+  );
 
   // 2. Track selection changes
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {

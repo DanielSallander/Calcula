@@ -6,8 +6,10 @@
 //          calp_set_submission_state, so a publisher can SEE who responded and
 //          approve/reject — instead of GATHER formulas being the only surface.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { onAppEvent, AppEvents } from "@api";
+import type { WritebackSubmissionReceivedPayload } from "@api/events";
+import { acquireSubmissionWatch } from "@api/distribution";
 import {
   getWritebackRegions,
   loadRegionSubmissions,
@@ -50,6 +52,11 @@ export function PublisherDashboardPane(): React.ReactElement {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // The watch subscription must not be torn down and re-created every time the
+  // publisher picks a different region, so the handler reads the selection
+  // through a ref instead of closing over it.
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selected;
 
   const loadRegions = useCallback(async () => {
     try {
@@ -87,6 +94,30 @@ export function PublisherDashboardPane(): React.ReactElement {
     const unsub = onAppEvent(AppEvents.SHEET_CHANGED, loadRegions);
     return unsub;
   }, [loadRegions]);
+
+  // Hold a submission watch while this pane is open, and refresh when it says
+  // answers arrived. The watch is refcounted and demand-driven: opening this
+  // pane is one of the two things that make the publisher-inbox poll run at all
+  // (the other is a script subscribing to the event), and closing the pane gives
+  // it back — an inbox nobody is looking at costs nothing.
+  useEffect(() => {
+    const release = acquireSubmissionWatch();
+    const unsub = onAppEvent<WritebackSubmissionReceivedPayload>(
+      AppEvents.WRITEBACK_SUBMISSION_RECEIVED,
+      (payload) => {
+        // Only reload the list the publisher is actually looking at. The event
+        // carries no values by design, so the authoritative read is still the
+        // publisher-gated one below.
+        if (payload?.regionId && payload.regionId === selectedRef.current) {
+          void loadSubs(payload.regionId);
+        }
+      },
+    );
+    return () => {
+      unsub();
+      release();
+    };
+  }, [loadSubs]);
 
   useEffect(() => {
     if (selected) loadSubs(selected);

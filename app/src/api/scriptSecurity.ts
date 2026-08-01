@@ -69,12 +69,26 @@
 //   Corollary: an UNSAVED workbook has no path, therefore no trust key, and can
 //   never be persistently trusted. It falls back to the session prompt. This is
 //   deliberate and mirrors Excel (a Trusted Document must have a location).
+//
+// ---------------------------------------------------------------------------
+// THREE INDEPENDENT DECISIONS LIVE IN THE SAME RECORD
+// ---------------------------------------------------------------------------
+//   `WorkbookTrustRecord` holds three things, and they NEVER imply one another:
+//     runTrust        - "this workbook's own scripts may EXECUTE". Grants no
+//                       capability, ever.
+//     notebookGrants  - "this notebook may use these capabilities" (not
+//                       source-hash-bound; see the note above those helpers).
+//     scriptGrants    - "this object script may use these capabilities",
+//                       SOURCE-HASH-BOUND, per capability, per net.fetch origin.
+//   They share one file because they share one identity (the workbook) and one
+//   revoke surface (Settings > Script Security) — not because they share a
+//   meaning. Every read path below reads exactly one of them.
 
 import { invokeBackend } from "./backend";
 import { emitAppEvent, onAppEvent, AppEvents } from "./events";
 import { sha256Hex, diffScriptSets, declaredCapabilitySet } from "./distributedConsent";
 import type { ConsentedScript, ChangedScript } from "./distributedConsent";
-import type { CapabilityId } from "./scriptHost/capabilityIds";
+import { isCapabilityId, type CapabilityId } from "./scriptHost/capabilityIds";
 
 // ============================================================================
 // The global Script Security level
@@ -116,7 +130,10 @@ export const SCRIPT_SECURITY_LEVEL_INFO: Record<
       "individual workbook so it stops asking; that trust is stored on this " +
       "computer only, is tied to the exact code you approved, and lapses the " +
       "moment that code changes. Trusting a workbook never grants a capability " +
-      "(network, BI queries, writeback) — those are always asked separately.",
+      "(network, BI queries, writeback) — those are always asked separately, " +
+      "per script. You can answer 'Always allow in this workbook' to a " +
+      "capability question too; that answer is stored the same way — on this " +
+      "computer only, tied to that script's exact code — and is revocable here.",
   },
   enabled: {
     label: "Run all scripts without asking",
@@ -172,6 +189,39 @@ export interface NotebookCapabilityGrant {
   grantedAt: string;
 }
 
+/**
+ * A persisted "Always allow in this workbook" capability decision for ONE
+ * worker-realm LOCAL script (object script / chart mark / chart transform / UDF
+ * library) inside ONE workbook.
+ *
+ * Unlike a notebook grant this IS source-hash-bound, and the asymmetry is
+ * deliberate. A notebook is an authoring surface edited between every run, so
+ * hashing it would re-prompt forever (see the note above the notebook helpers).
+ * An object script is INSTALLED code: it sits on a shape, fires on click, on
+ * open, or on a schedule, and the user is not looking at it when it runs. That
+ * is exactly the code whose permission must not survive somebody rewriting it.
+ */
+export interface ScriptCapabilityGrant {
+  /** The mount id — the same string the broker and the Rust CapabilityStore key
+   *  grants under (`HostMountDefinition.id`). */
+  scriptId: string;
+  /** Display name, for the Settings list. */
+  scriptName: string;
+  /** SHA-256 of the EXACT source the user approved. A mismatch lapses the whole
+   *  grant — every capability in it, not just the changed part. */
+  sourceHash: string;
+  /** The approved source, retained so a lapse can show a DIFF instead of asking
+   *  for a blind re-approval. */
+  source: string;
+  /** Capability ids approved with "Always", sorted. An id NOT in this list is an
+   *  escalation and always goes back through the JIT prompt. */
+  capabilities: CapabilityId[];
+  /** For net.fetch: the exact origins approved, sorted. An origin not in this
+   *  list re-prompts even when net.fetch itself is persisted. */
+  netOrigins: string[];
+  grantedAt: string;
+}
+
 /** The "this workbook's own local scripts may run" decision. */
 export interface WorkbookRunTrust {
   /** Every LOCAL script covered, with the exact source the user approved. */
@@ -194,6 +244,10 @@ export interface WorkbookTrustRecord {
    *  workbook can be trusted to run with zero capability grants, and a notebook
    *  grant can exist without the workbook being run-trusted). */
   notebookGrants: NotebookCapabilityGrant[];
+  /** Persisted "Always allow" capability grants for this workbook's own
+   *  worker-realm scripts. SEPARATE from runTrust for the same reason: run-trust
+   *  says "this code may execute", never "this code may reach the network". */
+  scriptGrants: ScriptCapabilityGrant[];
 }
 
 interface TrustFile {
@@ -258,10 +312,51 @@ function readTrustFile(): TrustFile {
                       typeof r.runTrust.trustedAt === "string" ? r.runTrust.trustedAt : "",
                   }
                 : null,
+            // Capability ids are filtered to the RECOGNIZED vocabulary at read
+            // time, not just at use time. A notebook grant is re-mirrored into
+            // the backend by `rehydrateNotebookCapabilityGrants` with no ceiling
+            // in front of it (a notebook declares none), so this file is the last
+            // place an id from tampered local storage could be caught before it
+            // becomes a `grant_script_capability` argument. Rust's own allowlist
+            // is the authority that makes the attack pointless; this is the layer
+            // that makes it impossible to attempt.
             notebookGrants: Array.isArray(r.notebookGrants)
-              ? r.notebookGrants.filter(
-                  (g) => g && typeof g.notebookId === "string" && Array.isArray(g.capabilities),
-                )
+              ? r.notebookGrants
+                  .filter(
+                    (g) => g && typeof g.notebookId === "string" && Array.isArray(g.capabilities),
+                  )
+                  .map((g) => ({
+                    notebookId: g.notebookId,
+                    capabilities: g.capabilities.filter(isCapabilityId),
+                    grantedAt: typeof g.grantedAt === "string" ? g.grantedAt : "",
+                  }))
+                  .filter((g) => g.capabilities.length > 0)
+              : [],
+            // A script grant with no sourceHash could never be matched against
+            // live code, so it would either lapse forever or (worse, if the
+            // check were sloppy) apply to anything. Drop it at read time.
+            scriptGrants: Array.isArray(r.scriptGrants)
+              ? r.scriptGrants
+                  .filter(
+                    (g) =>
+                      g &&
+                      typeof g.scriptId === "string" &&
+                      g.scriptId.length > 0 &&
+                      typeof g.sourceHash === "string" &&
+                      g.sourceHash.length > 0 &&
+                      Array.isArray(g.capabilities),
+                  )
+                  .map((g) => ({
+                    scriptId: g.scriptId,
+                    scriptName: typeof g.scriptName === "string" ? g.scriptName : g.scriptId,
+                    sourceHash: g.sourceHash,
+                    source: typeof g.source === "string" ? g.source : "",
+                    capabilities: g.capabilities.filter(isCapabilityId),
+                    netOrigins: Array.isArray(g.netOrigins)
+                      ? g.netOrigins.filter((o): o is string => typeof o === "string")
+                      : [],
+                    grantedAt: typeof g.grantedAt === "string" ? g.grantedAt : "",
+                  }))
               : [],
           })),
       };
@@ -285,7 +380,9 @@ function writeTrustFile(file: TrustFile): void {
 /** Drop records that no longer carry any decision, so revoking really removes
  *  the workbook from the user-visible list instead of leaving a husk. */
 function prune(records: WorkbookTrustRecord[]): WorkbookTrustRecord[] {
-  return records.filter((r) => r.runTrust !== null || r.notebookGrants.length > 0);
+  return records.filter(
+    (r) => r.runTrust !== null || r.notebookGrants.length > 0 || r.scriptGrants.length > 0,
+  );
 }
 
 /** Every workbook the user has made a persistent decision about (for the
@@ -307,7 +404,13 @@ function upsertRecord(
   const file = readTrustFile();
   let record = file.records.find((r) => r.workbookKey === workbookKey);
   if (!record) {
-    record = { workbookKey, displayPath, runTrust: null, notebookGrants: [] };
+    record = {
+      workbookKey,
+      displayPath,
+      runTrust: null,
+      notebookGrants: [],
+      scriptGrants: [],
+    };
     file.records.push(record);
   }
   record.displayPath = displayPath;
@@ -508,8 +611,9 @@ export async function trustCurrentWorkbook(): Promise<boolean> {
   return true;
 }
 
-/** Revoke run-trust for one workbook. Notebook capability grants are a SEPARATE
- *  decision and survive; revoke them explicitly. */
+/** Revoke run-trust for one workbook. Notebook and script capability grants are
+ *  SEPARATE decisions and survive; revoke them explicitly. (The converse is the
+ *  property that matters: run-trust never created them in the first place.) */
 export function revokeWorkbookRunTrust(workbookKey: string): void {
   const file = readTrustFile();
   const record = file.records.find((r) => r.workbookKey === workbookKey);
@@ -518,18 +622,38 @@ export function revokeWorkbookRunTrust(workbookKey: string): void {
   writeTrustFile({ version: 1, records: prune(file.records) });
 }
 
-/** Forget EVERYTHING about one workbook — run-trust and every notebook grant. */
+/** Forget EVERYTHING about one workbook — run-trust, every notebook grant and
+ *  every script capability grant. When it is the OPEN workbook, the live and
+ *  authoritative Rust grants are dropped too, so a running script loses the
+ *  capability now rather than at the next launch. */
 export function revokeWorkbookTrustEntirely(workbookKey: string): void {
   const file = readTrustFile();
+  const record = file.records.find((r) => r.workbookKey === workbookKey);
+  const scriptGrants = (record?.scriptGrants ?? []).map((g) => ({
+    scriptId: g.scriptId,
+    capabilities: [...g.capabilities],
+  }));
   writeTrustFile({
     version: 1,
     records: file.records.filter((r) => r.workbookKey !== workbookKey),
   });
+  void stopLiveScriptGrants(workbookKey, scriptGrants);
 }
 
 /** Clear the whole trust store (the "revoke all" escape hatch). */
 export function revokeAllWorkbookTrust(): void {
+  const file = readTrustFile();
+  const perWorkbook = file.records.map((r) => ({
+    workbookKey: r.workbookKey,
+    grants: r.scriptGrants.map((g) => ({
+      scriptId: g.scriptId,
+      capabilities: [...g.capabilities],
+    })),
+  }));
   writeTrustFile({ version: 1, records: [] });
+  for (const wb of perWorkbook) {
+    void stopLiveScriptGrants(wb.workbookKey, wb.grants);
+  }
 }
 
 // ============================================================================
@@ -650,6 +774,271 @@ export async function rehydrateNotebookCapabilityGrants(): Promise<number> {
     }
   }
   return restored;
+}
+
+// ============================================================================
+// Object-script capability grants (persisted per workbook + script + SOURCE HASH)
+// ============================================================================
+//
+// The JIT prompt (R10) has always offered "Allow always", and until now "always"
+// meant "until you close Calcula": the authoritative Rust CapabilityStore is
+// in-memory and starts empty every launch, and nothing on this side wrote the
+// decision down. Two consequences, both bad:
+//   1. the user re-answered the same question on every restart, for their OWN
+//      code — the fatigue that pushes people to flip Script Security to
+//      "enabled" globally, which turns the whole tier model off;
+//   2. a `schedule` job restored from the .cala sat armed but DORMANT until its
+//      script happened to re-ask, so the consent string's promise ("saved in
+//      this workbook, so it resumes next time you open it") was only
+//      conditionally true.
+//
+// These helpers make "always" mean what it says, WITHOUT widening anything:
+//
+//   HASH-BOUND.        The grant records the SHA-256 of the exact source the
+//                      user approved. At mount the live source is re-hashed; a
+//                      mismatch DELETES the grant (the user approved code, not
+//                      a file name) and hands the next prompt a diff.
+//   CEILING-BOUND.     Only capabilities still inside the script's R19 declared
+//                      ceiling are restored. A pragma removal cannot leave a
+//                      grant floating above the ceiling.
+//   ESCALATION-SAFE.   ONLY the exact ids (and, for net.fetch, the exact
+//                      origins) in the record are restored. Anything else is
+//                      absent from the grant set, so the broker denies it and
+//                      the JIT prompt fires — a script cannot quietly acquire a
+//                      capability it was never granted.
+//   NEVER RUN-TRUST.   Trusting a workbook to RUN its scripts still grants zero
+//                      capabilities: nothing here reads `runTrust`, and
+//                      `trustCurrentWorkbook` never writes here.
+//   LOCAL-ONLY.        Same guarantee as the rest of this module (see header):
+//                      localStorage, never a virtual file, so no byte of it can
+//                      ride inside a .cala or a .calp to another machine.
+//   REVOCABLE.         Per capability and per script, from Settings, and the
+//                      revoke drops the live + Rust grant too ("revoked means
+//                      stop", not "stop next launch").
+//   LOCAL SCRIPTS ONLY. Distributed (.calp) scripts never JIT-prompt and never
+//                      reach here — they keep per-package consent, which lives
+//                      INSIDE the workbook because it must survive a copy.
+//                      Callers enforce this; `persistScriptCapabilityGrant` is
+//                      only reached from the local-only JIT path.
+
+/** What a mount should re-establish for one script, plus any lapse to show. */
+export interface RestoredScriptGrant {
+  /** Capability ids to put back into the live grant set (and mirror to Rust). */
+  capabilities: CapabilityId[];
+  /** net.fetch origins to put back. Empty unless net.fetch itself was restored. */
+  netOrigins: string[];
+  /** Non-null when a stored grant was DISCARDED because the source changed:
+   *  a user-facing explanation with a diff, to show before asking again. */
+  lapseNotice: string | null;
+}
+
+/** The persisted grant for one script in the OPEN workbook, or null. */
+export async function getScriptCapabilityGrant(
+  scriptId: string,
+): Promise<ScriptCapabilityGrant | null> {
+  const identity = await currentWorkbookTrustKey();
+  if (!identity) return null;
+  const record = getWorkbookTrustRecord(identity.key);
+  return record?.scriptGrants.find((g) => g.scriptId === scriptId) ?? null;
+}
+
+/**
+ * Persist an "Always allow in this workbook" JIT decision for one LOCAL script.
+ * Returns false when the workbook has no path — an unsaved workbook has no
+ * identity to bind to, so the decision stays session-only (mirrors run-trust).
+ *
+ * If a stored grant exists for a DIFFERENT source hash it is REPLACED, not
+ * merged: capabilities approved for code that no longer exists must never
+ * accumulate onto its replacement.
+ */
+export async function persistScriptCapabilityGrant(args: {
+  scriptId: string;
+  scriptName: string;
+  source: string;
+  capability: CapabilityId;
+  netOrigin?: string | null;
+}): Promise<boolean> {
+  const identity = await currentWorkbookTrustKey();
+  if (!identity) return false;
+  const sourceHash = await sha256Hex(args.source);
+  const now = new Date().toISOString();
+  upsertRecord(identity.key, identity.displayPath, (record) => {
+    const existing = record.scriptGrants.find((g) => g.scriptId === args.scriptId);
+    const fresh: ScriptCapabilityGrant = {
+      scriptId: args.scriptId,
+      scriptName: args.scriptName,
+      sourceHash,
+      source: args.source,
+      capabilities: [args.capability],
+      netOrigins: args.netOrigin ? [args.netOrigin] : [],
+      grantedAt: now,
+    };
+    if (!existing) {
+      record.scriptGrants.push(fresh);
+      return;
+    }
+    if (existing.sourceHash !== sourceHash) {
+      // The code changed since the earlier grant — start over from this one
+      // decision instead of inheriting permissions granted to other code.
+      record.scriptGrants[record.scriptGrants.indexOf(existing)] = fresh;
+      return;
+    }
+    existing.scriptName = args.scriptName;
+    existing.source = args.source;
+    if (!existing.capabilities.includes(args.capability)) {
+      existing.capabilities = [...existing.capabilities, args.capability].sort();
+    }
+    if (args.netOrigin && !existing.netOrigins.includes(args.netOrigin)) {
+      existing.netOrigins = [...existing.netOrigins, args.netOrigin].sort();
+    }
+    existing.grantedAt = now;
+  });
+  return true;
+}
+
+/**
+ * Decide what a mounting script may have back from its persisted grant.
+ *
+ * This is an INPUT to the grant flow, never a bypass of it: the caller records
+ * the returned ids into the live grant set and mirrors them through the same
+ * `grant_script_capability` / `grant_script_net_origin` commands a fresh consent
+ * would use, so the Rust store stays the authority and its own allowlist still
+ * validates every id.
+ *
+ * A source-hash mismatch discards the grant here and now (so it can never be
+ * revived) and returns a diff for the next prompt.
+ */
+export async function restorePersistedScriptCapabilityGrant(args: {
+  scriptId: string;
+  source: string;
+  /** The script's authoritative R19 ceiling (broker handle.declaredCapabilities). */
+  declaredCapabilities: readonly CapabilityId[];
+}): Promise<RestoredScriptGrant> {
+  const none: RestoredScriptGrant = { capabilities: [], netOrigins: [], lapseNotice: null };
+  const identity = await currentWorkbookTrustKey();
+  if (!identity) return none;
+  const record = getWorkbookTrustRecord(identity.key);
+  const grant = record?.scriptGrants.find((g) => g.scriptId === args.scriptId);
+  if (!grant) return none;
+
+  const liveHash = await sha256Hex(args.source);
+  if (liveHash !== grant.sourceHash) {
+    // LAPSE. Drop the stored decision before returning — an edited script must
+    // not keep yesterday's permissions even for the rest of this session.
+    dropScriptGrant(identity.key, args.scriptId);
+    return { capabilities: [], netOrigins: [], lapseNotice: describeScriptGrantLapse(grant, args.source) };
+  }
+
+  const ceiling = new Set(args.declaredCapabilities);
+  const capabilities = grant.capabilities.filter((c) => ceiling.has(c));
+  const netOrigins = capabilities.includes("net.fetch") ? [...grant.netOrigins] : [];
+  return { capabilities, netOrigins, lapseNotice: null };
+}
+
+/** The explanation shown before re-asking a script whose persisted grant lapsed
+ *  — what it used to be allowed to do, and exactly what changed in the code. */
+export function describeScriptGrantLapse(
+  grant: ScriptCapabilityGrant,
+  newSource: string,
+): string {
+  const caps = grant.capabilities.join(", ") || "(none)";
+  const diff = grant.source
+    ? formatSourceDiff(grant.source, newSource)
+    : "  (the approved source was not retained, so no diff can be shown)";
+  return (
+    `The code of "${grant.scriptName}" has CHANGED since you chose "Always allow".\n\n` +
+    `The saved permission (${caps}) has been withdrawn — permissions follow the ` +
+    `code you approved, not the script's name.\n\n` +
+    `What changed:\n${diff}`
+  );
+}
+
+/** Remove one script's persisted grant from one workbook (storage only). */
+function dropScriptGrant(workbookKey: string, scriptId: string): void {
+  const file = readTrustFile();
+  const record = file.records.find((r) => r.workbookKey === workbookKey);
+  if (!record) return;
+  const next = record.scriptGrants.filter((g) => g.scriptId !== scriptId);
+  if (next.length === record.scriptGrants.length) return;
+  record.scriptGrants = next;
+  writeTrustFile({ version: 1, records: prune(file.records) });
+}
+
+/**
+ * "Revoked means stop": drop the live (broker) grant AND the authoritative Rust
+ * grant for a script, so a revoke bites a script that is running RIGHT NOW
+ * rather than at the next launch. Only meaningful for the OPEN workbook — a
+ * closed workbook has nothing mounted, and its script ids must never be used to
+ * revoke same-named ids in the workbook that IS open.
+ */
+async function stopLiveScriptGrants(
+  workbookKey: string,
+  grants: Array<{ scriptId: string; capabilities: CapabilityId[] }>,
+): Promise<void> {
+  if (grants.length === 0) return;
+  const identity = await currentWorkbookTrustKey();
+  if (!identity || identity.key !== workbookKey) return;
+  try {
+    const { revokeCapability } = await import("./scriptHost/capabilities");
+    for (const g of grants) {
+      for (const cap of g.capabilities) {
+        await revokeCapability(g.scriptId, cap);
+      }
+    }
+  } catch (e) {
+    console.warn("[scriptSecurity] could not drop live script capability grants:", e);
+  }
+}
+
+/** Revoke ONE persisted capability from ONE script. The live + Rust grants go
+ *  too when that workbook is the open one. */
+export async function revokeScriptCapability(
+  workbookKey: string,
+  scriptId: string,
+  capability: CapabilityId,
+): Promise<void> {
+  const file = readTrustFile();
+  const record = file.records.find((r) => r.workbookKey === workbookKey);
+  const grant = record?.scriptGrants.find((g) => g.scriptId === scriptId);
+  if (!record || !grant) return;
+  grant.capabilities = grant.capabilities.filter((c) => c !== capability);
+  if (capability === "net.fetch") grant.netOrigins = [];
+  // A grant with nothing left in it is not a decision — remove the husk so the
+  // Settings list shows the script gone rather than empty.
+  if (grant.capabilities.length === 0) {
+    record.scriptGrants = record.scriptGrants.filter((g) => g.scriptId !== scriptId);
+  }
+  writeTrustFile({ version: 1, records: prune(file.records) });
+  await stopLiveScriptGrants(workbookKey, [{ scriptId, capabilities: [capability] }]);
+}
+
+/** Revoke EVERY persisted capability of one script. */
+export async function revokeScriptCapabilityGrants(
+  workbookKey: string,
+  scriptId: string,
+): Promise<void> {
+  const file = readTrustFile();
+  const record = file.records.find((r) => r.workbookKey === workbookKey);
+  const grant = record?.scriptGrants.find((g) => g.scriptId === scriptId);
+  if (!record || !grant) return;
+  const capabilities = [...grant.capabilities];
+  record.scriptGrants = record.scriptGrants.filter((g) => g.scriptId !== scriptId);
+  writeTrustFile({ version: 1, records: prune(file.records) });
+  await stopLiveScriptGrants(workbookKey, [{ scriptId, capabilities }]);
+}
+
+/**
+ * Re-establish the OPEN workbook's persisted script grants without a mount —
+ * used when a workbook's scripts are already mounted (e.g. the security level
+ * was just relaxed) and by tests. Mount-time restore is the normal path
+ * (`restoreAndSyncGrants` in scriptHost/capabilities.ts), because only the mount
+ * knows each script's live source and ceiling. Returns how many scripts were
+ * considered.
+ */
+export async function countPersistedScriptGrants(): Promise<number> {
+  const identity = await currentWorkbookTrustKey();
+  if (!identity) return 0;
+  return getWorkbookTrustRecord(identity.key)?.scriptGrants.length ?? 0;
 }
 
 // ============================================================================

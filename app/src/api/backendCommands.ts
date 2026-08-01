@@ -72,6 +72,12 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   extensionManagement: [
     "scan_extension_directory",
     "uninstall_extension",
+    // Installing an add-in copies code into %APPDATA%/extensions and pins a
+    // publisher key. Defence-in-depth today (the Rust command is main-window
+    // gated and a distributed extension cannot reach the main thread), but a
+    // denylist of "the dangerous few" must not have a hole exactly where the
+    // install command is.
+    "install_extension",
   ],
   // Starting the local MCP server (exposes the live workbook to external
   // clients) and widening the AI tool-surface access ceiling.

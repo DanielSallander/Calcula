@@ -33,13 +33,29 @@ import {
 } from "../lib/templateManager";
 import type { TemplateSummary } from "../lib/templateManager";
 import { hostValidateScript } from "@api";
-import { getBreakpoints, toggleBreakpoint, clearBreakpoints, instrumentSource } from "../lib/debugger";
+import { prefetchScriptTranspiler } from "@api/scriptTranspile";
+import { clearBreakpoints, shiftBreakpoints } from "../lib/debugger";
+import {
+  breakpointShift,
+  DebugPanel,
+  DebugToolbar,
+  injectDebugStyles,
+  useDebugSession,
+  type DebugDecoration,
+} from "./DebugPanel";
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 import {
   configureObjectScriptTypings,
   setActiveContextType,
   annotateScaffold,
 } from "../lib/monacoTypings";
+import {
+  objectScriptModelPath,
+  registerJavascriptLane,
+  registerTypescriptLane,
+  gateObjectScriptSave,
+  type ScriptAuthoringLanguage,
+} from "../lib/authoringLanguage";
 
 // ============================================================================
 // Monaco Worker Setup
@@ -229,6 +245,12 @@ loader.config({ monaco });
 // the interfaces are unreachable, because a script's context is a parameter of
 // `setup(context)` and nothing binds it.
 configureObjectScriptTypings(monacoTs, objectContextsDts);
+// ...and claim the object-script share of the shared language services, so the
+// merged configuration (not whichever extension was imported last) is what is
+// live. Without this, CustomFunctions' fragment settings switched validation
+// off for this editor too and the generated typings produced completions but
+// never a single diagnostic.
+registerJavascriptLane(monacoTs, objectContextsDts);
 
 // ============================================================================
 // Drag & Resize Hook
@@ -415,6 +437,11 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   const [scripts, setScripts] = useState<ObjectScriptDefinition[]>([]);
   const [activeScriptId, setActiveScriptId] = useState<string | null>(initScriptId ?? null);
   const [source, setSource] = useState("");
+  // Authoring language for the OPEN script. Stored scripts are always
+  // JavaScript (that is the only thing the worker can import), so this always
+  // starts at "javascript"; switching to TypeScript is an authoring decision
+  // that lasts until the next save compiles the text back down.
+  const [language, setLanguage] = useState<ScriptAuthoringLanguage>("javascript");
   const [isDirty, setIsDirty] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showConsole, setShowConsole] = useState(true);
@@ -512,17 +539,43 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
   // Point `ObjectScriptContext` at THIS script's context interface, so
-  // `@param {ObjectScriptContext} context` resolves to (say) SlicerContext.
+  // `@param {ObjectScriptContext} context` resolves to (say) SlicerContext —
+  // on BOTH lanes, because JSDoc types only apply to a .js model and real
+  // annotations only apply to a .ts one.
   useEffect(() => {
     if (!activeScript) return;
     setActiveContextType(monacoTs, activeScript.objectType, objectContextsDts);
+    registerTypescriptLane(monacoTs, activeScript.objectType, objectContextsDts);
   }, [activeScript]);
 
+  // Push one line into the editor console and reveal it.
+  const reportToConsole = useCallback((message: string, scriptId?: string) => {
+    setConsoleEntries((prev) => [
+      ...prev,
+      {
+        id: ++consoleIdRef.current,
+        level: "error",
+        message,
+        scriptId,
+        timestamp: Date.now(),
+      },
+    ]);
+    setShowConsole(true);
+  }, []);
+
   // Switch active script
-  const handleSelectScript = useCallback((scriptId: string) => {
-    // Auto-save current
+  const handleSelectScript = useCallback(async (scriptId: string) => {
+    // Auto-save current. The same gate as the Save button: an auto-save is
+    // still a save, and un-runnable text must never reach the store just
+    // because the author clicked another script in the list.
     if (isDirty && activeScript) {
-      const updated = { ...activeScript, source };
+      const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
+      if (!gate.ok) {
+        reportToConsole(gate.detail, activeScript.id);
+        showToast(`${gate.message} Staying on "${activeScript.name}".`, { type: "error" });
+        return;
+      }
+      const updated = { ...activeScript, source: gate.javascript };
       ObjectScriptManager.registerScript(updated);
       saveObjectScript(updated).catch(console.error);
     }
@@ -531,63 +584,61 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     if (script) {
       setActiveScriptId(scriptId);
       setSource(script.source);
+      setLanguage("javascript");
       setIsDirty(false);
     }
-  }, [isDirty, activeScript, source, scripts]);
+  }, [isDirty, activeScript, source, scripts, reportToConsole]);
 
   // Save
   const handleSave = useCallback(async () => {
     if (!activeScript) return;
 
-    // Validate script in a scratch worker before mounting (syntax only —
-    // nothing user-authored executes)
-    const validation = await hostValidateScript(source);
-    if (!validation.valid) {
-      setConsoleEntries((prev) => [
-        ...prev,
-        {
-          id: ++consoleIdRef.current,
-          level: "error",
-          message: `Compilation error: ${validation.error}`,
-          scriptId: activeScript.id,
-          timestamp: Date.now(),
-        },
-      ]);
-      setShowConsole(true);
-      showToast("Script has errors. Check the console.", { type: "error" });
-      // Still save the source (so user doesn't lose edits)
-      const updated = { ...activeScript, source };
-      ObjectScriptManager.registerScript(updated);
-      try { await saveObjectScript(updated); } catch { /* ignore */ }
-      setIsDirty(false);
+    // THE GATE. Compile (TypeScript in, JavaScript out; JavaScript passes
+    // through byte for byte) and parse the result in a scratch worker —
+    // nothing user-authored executes. A failure here BLOCKS the save: the
+    // store feeds the runtime, the source hash behind every capability grant,
+    // the transparency panel and .calp distribution, so it must never hold
+    // text that cannot run.
+    const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
+    if (!gate.ok) {
+      reportToConsole(gate.detail, activeScript.id);
+      showToast(gate.message, { type: "error" });
       return;
     }
 
-    // Save the original source
-    const updated = { ...activeScript, source };
+    // From here on, ONE artifact: the JavaScript that will run.
+    const storedSource = gate.javascript;
+    const updated = { ...activeScript, source: storedSource };
     ObjectScriptManager.registerScript(updated);
 
-    // If breakpoints are set, instrument the source for execution
-    const instrumentedSource = instrumentSource(activeScript.id, source);
-    const execution = { ...updated, source: instrumentedSource };
-
-    // Remount script to apply changes (using instrumented source if breakpoints exist)
+    // Remount to apply. Debug instrumentation is NOT baked into what we store
+    // or mount here: the host applies it inside the worker, only for a script
+    // the user opened a session on, and re-applies it on this very remount — so
+    // Save & Apply keeps you in the debugger without the stored source ever
+    // differing from the source that runs.
     if (ObjectScriptManager.isScriptMounted(updated.id)) {
       ObjectScriptManager.unmountScript(updated.id);
     }
-    // Temporarily register with instrumented source for mounting, then restore original
-    ObjectScriptManager.registerScript(execution);
     await ObjectScriptManager.mountScript(updated.id);
-    ObjectScriptManager.registerScript(updated); // Restore original for persistence
 
     try {
       await saveObjectScript(updated);
       setIsDirty(false);
-      showToast("Script saved and applied.", { type: "success" });
+      if (gate.transformed) {
+        // Show the author exactly what was stored. The alternative — keeping
+        // the TypeScript on screen while the store holds something else —
+        // would put the editor out of step with the text that runs, is
+        // hashed for consent and is shown to whoever reviews this workbook.
+        setSource(storedSource);
+        setLanguage("javascript");
+        showToast("TypeScript compiled. The stored script is the JavaScript now shown.", { type: "success" });
+      } else {
+        showToast("Script saved and applied.", { type: "success" });
+      }
     } catch (e) {
       showToast(`Failed to save: ${e}`, { type: "error" });
     }
-  }, [activeScript, source]);
+  }, [activeScript, source, reportToConsole]);
 
   // Toggle access level
   const handleToggleAccess = useCallback(() => {
@@ -605,6 +656,7 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     if (existing) {
       setActiveScriptId(existing.id);
       setSource(existing.source);
+      setLanguage("javascript");
       return;
     }
 
@@ -624,61 +676,124 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     saveObjectScript(script).catch(console.error);
     setActiveScriptId(id);
     setSource(script.source);
+    setLanguage("javascript");
     setIsDirty(false);
   }, []);
 
-  // Breakpoint state
-  const [breakpointLines, setBreakpointLines] = useState<number[]>([]);
-  const breakpointDecorationsRef = useRef<string[]>([]);
+  // ---- Debugging (task H1) -------------------------------------------------
+  // The session lives in the host; this is a view of it plus the gutter.
+  const debug = useDebugSession(activeScriptId ?? null);
+  const debugRef = useRef(debug);
+  debugRef.current = debug;
+  const activeScriptIdRef = useRef<string | null>(activeScriptId ?? null);
+  activeScriptIdRef.current = activeScriptId ?? null;
+  const debugDecorationsRef = useRef<string[]>([]);
+  const breakpointLines = debug.breakpointLines;
 
-  // Update breakpoint decorations in the editor
-  const updateBreakpointDecorations = useCallback((ed: monacoEditor.IStandaloneCodeEditor, lines: number[]) => {
-    const decorations = lines.map((line) => ({
-      range: new monaco.Range(line, 1, line, 1),
-      options: {
-        isWholeLine: true,
-        glyphMarginClassName: "breakpoint-glyph",
-        glyphMarginHoverMessage: { value: `Breakpoint at line ${line}` },
-        linesDecorationsClassName: "breakpoint-line-decoration",
-      },
-    }));
-    breakpointDecorationsRef.current = ed.deltaDecorations(
-      breakpointDecorationsRef.current,
-      decorations,
-    );
+  useEffect(() => {
+    injectDebugStyles();
   }, []);
+
+  const applyDebugDecorations = useCallback(
+    (ed: monacoEditor.IStandaloneCodeEditor, decorations: DebugDecoration[]) => {
+      debugDecorationsRef.current = ed.deltaDecorations(
+        debugDecorationsRef.current,
+        decorations.map((d) => ({
+          range: new monaco.Range(d.line, 1, d.line, 1),
+          options: {
+            isWholeLine: true,
+            glyphMarginClassName: d.glyphClassName,
+            glyphMarginHoverMessage: { value: d.hover },
+            className: d.lineClassName,
+            linesDecorationsClassName: d.lineClassName ?? "breakpoint-line-decoration",
+          },
+        })),
+      );
+    },
+    [],
+  );
+
+  // Re-paint the gutter whenever breakpoints or the session state change.
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (ed) applyDebugDecorations(ed, debug.decorations);
+  }, [debug.decorations, applyDebugDecorations]);
+
+  // Bring the paused statement into view — a debugger that stops off-screen
+  // is indistinguishable from one that did not stop.
+  const pausedLine = debug.session?.paused?.line;
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (ed && pausedLine) {
+      ed.revealLineInCenterIfOutsideViewport(pausedLine);
+      ed.setPosition({ lineNumber: pausedLine, column: 1 });
+    }
+  }, [pausedLine]);
 
   // Monaco mount
   const handleMount: OnMount = useCallback((ed) => {
     editorRef.current = ed;
+    // Re-assert this surface's share of the shared language services. Module
+    // load order decides who configured Monaco first; mount order decides who
+    // configured it LAST, and the merged configuration has to win.
+    registerJavascriptLane(monacoTs, objectContextsDts);
+    // Warm the compiler chunk in the background so the first save is not the
+    // moment it is fetched. Fire-and-forget: mounting never waits on it.
+    prefetchScriptTranspiler();
     ed.addAction({
       id: "objectScript.save",
       label: "Save Script",
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
       run: () => handleSave(),
     });
+    ed.addAction({
+      id: "objectScript.debug.continue",
+      label: "Debug: Continue",
+      keybindings: [monaco.KeyCode.F5],
+      run: () => debugRef.current.send("continue"),
+    });
+    ed.addAction({
+      id: "objectScript.debug.stepOver",
+      label: "Debug: Step Over",
+      keybindings: [monaco.KeyCode.F10],
+      run: () => debugRef.current.send("stepOver"),
+    });
+    ed.addAction({
+      id: "objectScript.debug.stepInto",
+      label: "Debug: Step Into",
+      keybindings: [monaco.KeyCode.F11],
+      run: () => debugRef.current.send("stepInto"),
+    });
+    ed.addAction({
+      id: "objectScript.debug.toggleBreakpoint",
+      label: "Debug: Toggle Breakpoint",
+      keybindings: [monaco.KeyCode.F9],
+      run: (editor) => {
+        const line = editor.getPosition()?.lineNumber;
+        if (line) debugRef.current.toggleLine(line);
+      },
+    });
 
     // Toggle breakpoints on gutter click
     ed.onMouseDown((e) => {
-      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && activeScriptId) {
+      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
         const line = e.target.position?.lineNumber;
-        if (line) {
-          const bps = toggleBreakpoint(activeScriptId, line);
-          const lines = bps.filter((bp) => bp.enabled).map((bp) => bp.line);
-          setBreakpointLines(lines);
-          updateBreakpointDecorations(ed, lines);
-        }
+        if (line && activeScriptIdRef.current) debugRef.current.toggleLine(line);
       }
     });
 
-    // Load existing breakpoints
-    if (activeScriptId) {
-      const bps = getBreakpoints(activeScriptId);
-      const lines = bps.filter((bp) => bp.enabled).map((bp) => bp.line);
-      setBreakpointLines(lines);
-      updateBreakpointDecorations(ed, lines);
-    }
-  }, [handleSave, activeScriptId, updateBreakpointDecorations]);
+    // Keep breakpoints anchored to their statement across edits.
+    ed.onDidChangeModelContent((e) => {
+      const scriptId = activeScriptIdRef.current;
+      if (!scriptId) return;
+      for (const change of e.changes) {
+        const shift = breakpointShift(change);
+        if (shift) shiftBreakpoints(scriptId, shift.fromLine, shift.delta);
+      }
+    });
+
+    applyDebugDecorations(ed, debugRef.current.decorations);
+  }, [handleSave, applyDebugDecorations]);
 
   // Source change
   const handleChange = useCallback((val: string | undefined) => {
@@ -717,14 +832,23 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     const name = prompt("Template name:", `${activeScript.name} Template`);
     if (!name) return;
 
+    // A template is stamped straight into a new script, so it is subject to the
+    // same rule: only JavaScript that compiles may be stored.
+    const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
+    if (!gate.ok) {
+      reportToConsole(gate.detail, activeScript.id);
+      showToast(`Template not saved: ${gate.message}`, { type: "error" });
+      return;
+    }
+
     const template = createTemplateFromScript(
-      { ...activeScript, source },
+      { ...activeScript, source: gate.javascript },
       name,
     );
     await saveTemplate(template);
     setTemplates(await listTemplates());
     showToast(`Saved template "${name}"`, { type: "success" });
-  }, [activeScript, source]);
+  }, [activeScript, source, reportToConsole]);
 
   // Create script from template
   const handleNewFromTemplate = useCallback(async (templateId: string) => {
@@ -733,13 +857,23 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
 
     const instanceId = activeScript?.instanceId || null;
     const stamped = stampFromTemplate(template, instanceId || crypto.randomUUID());
-    ObjectScriptManager.registerScript(stamped);
-    await saveObjectScript(stamped);
-    setActiveScriptId(stamped.id);
-    setSource(stamped.source);
+    // Templates live on disk and can be hand-edited or copied in from
+    // elsewhere, so a stamped script goes through the same gate as typed code.
+    const gate = await gateObjectScriptSave(stamped.source, stamped.name, hostValidateScript);
+    if (!gate.ok) {
+      reportToConsole(gate.detail, stamped.id);
+      showToast(`Template "${template.name}" does not compile — nothing was created.`, { type: "error" });
+      return;
+    }
+    const created = { ...stamped, source: gate.javascript };
+    ObjectScriptManager.registerScript(created);
+    await saveObjectScript(created);
+    setActiveScriptId(created.id);
+    setSource(created.source);
+    setLanguage("javascript");
     setIsDirty(false);
     showToast(`Created from template "${template.name}"`, { type: "success" });
-  }, [activeScript]);
+  }, [activeScript, reportToConsole]);
 
   // Delete template
   const handleDeleteTemplate = useCallback(async (templateId: string) => {
@@ -847,7 +981,7 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
           <select
             className="ose-toolbar-select"
             value={activeScriptId ?? ""}
-            onChange={(e) => handleSelectScript(e.target.value)}
+            onChange={(e) => { void handleSelectScript(e.target.value); }}
           >
             {scripts.map((s) => (
               <option key={s.id} value={s.id}>
@@ -908,6 +1042,20 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
           <div style={{ flex: 1 }} />
 
           {/* Right side controls */}
+          {activeScript && !isReadOnly && (
+            <button
+              className="ose-toolbar-btn"
+              onClick={() => setLanguage((l) => (l === "typescript" ? "javascript" : "typescript"))}
+              title={
+                language === "typescript"
+                  ? "Authoring in TypeScript: type annotations are checked here and compiled to JavaScript when you save. The stored script is always the JavaScript."
+                  : "Authoring in JavaScript with JSDoc types. Switch to TypeScript to use real type annotations (compiled on save)."
+              }
+            >
+              {language === "typescript" ? "TS" : "JS"}
+            </button>
+          )}
+
           {activeScript && (
             <button className="ose-toolbar-btn" onClick={handleToggleAccess}
               title={`Access level: ${activeScript.accessLevel}. Click to toggle.`}>
@@ -942,6 +1090,29 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
           {/* Separator */}
           <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
 
+          {/* Step debugging. Only for an APPLIED script: a session instruments
+              the source at mount, so there has to be a mount. */}
+          {activeScript && (
+            <DebugToolbar
+              state={debug}
+              disabled={!activeScript || isDirty}
+              buttonClassName="ose-toolbar-btn"
+            />
+          )}
+
+          {activeScript && breakpointLines.length > 0 && !debug.session && (
+            <button
+              className="ose-toolbar-btn"
+              onClick={() => activeScriptId && clearBreakpoints(activeScriptId)}
+              title={`Remove ${breakpointLines.length} breakpoint(s) from this script`}
+            >
+              Clear {breakpointLines.length} BP
+            </button>
+          )}
+
+          {/* Separator */}
+          <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
+
           <button
             className="ose-toolbar-btn primary"
             onClick={handleSave}
@@ -961,7 +1132,13 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
             <div style={{ flex: 1, minHeight: 0 }}>
               <Editor
                 height="100%"
-                language="javascript"
+                language={language}
+                // The model NAME decides how Monaco's worker parses the text
+                // (tsWorker.getScriptKind reads the extension), so the path —
+                // not the `language` prop alone — is what makes TypeScript
+                // annotations legal. One model per script keeps the squiggles
+                // attached to the script in front of the author.
+                path={objectScriptModelPath(activeScriptId, language)}
                 theme="vs-dark"
                 value={source}
                 onChange={handleChange}
@@ -991,6 +1168,18 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
                 }}
               />
             </div>
+
+            {/* Debugger: locals, call stack, and why a breakpoint did not stop */}
+            <DebugPanel
+              state={debug}
+              onRevealLine={(line) => {
+                const ed = editorRef.current;
+                if (!ed) return;
+                ed.revealLineInCenter(line);
+                ed.setPosition({ lineNumber: line, column: 1 });
+                ed.focus();
+              }}
+            />
 
             {/* Console splitter + panel */}
             {showConsole && (

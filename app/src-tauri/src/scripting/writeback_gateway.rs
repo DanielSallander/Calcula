@@ -354,16 +354,12 @@ fn coerce_submission_value(
 // Grant mirroring
 // ---------------------------------------------------------------------------
 
-/// Every capability id the backend store will accept a grant for. A grant is
-/// only ever mirrored here AFTER the frontend's consent flow said yes; this
-/// list exists so a compromised renderer cannot invent capability ids.
-const GRANTABLE_CAPABILITIES: &[&str] = &[
-    "bi.query",
-    "bi.sql",
-    "bi.model",
-    "bi.connector",
-    WRITEBACK_CAPABILITY,
-];
+// The grantable-capability vocabulary is owned by the store that holds the
+// grants (`capability_store::GRANTABLE_CAPABILITIES` / `is_grantable`). This
+// command used to keep a private copy, and the copy drifted: it omitted
+// `schedule`, so `grant_script_capability` hard-errored on the one capability
+// `script_scheduler` gates every registration AND every firing on — making the
+// scheduler unreachable for object scripts while looking implemented.
 
 /// Mirror a consent-granted capability into the authoritative backend store.
 /// The frontend's consent store is the system of record (it persists); this
@@ -378,11 +374,11 @@ pub fn grant_script_capability(
     window: Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    if !GRANTABLE_CAPABILITIES.contains(&capability.as_str()) {
+    if !crate::scripting::capability_store::is_grantable(&capability) {
         return Err(format!(
             "InvalidCapability: {} (expected one of {})",
             capability,
-            GRANTABLE_CAPABILITIES.join(", ")
+            crate::scripting::capability_store::GRANTABLE_CAPABILITIES.join(", ")
         ));
     }
     cap_store.grant(&script_id, &capability);
@@ -861,14 +857,13 @@ mod tests {
 
     #[test]
     fn grantable_capability_list_is_closed() {
-        assert!(GRANTABLE_CAPABILITIES.contains(&WRITEBACK_CAPABILITY));
+        use crate::scripting::capability_store::is_grantable;
+        assert!(is_grantable(WRITEBACK_CAPABILITY));
         for invented in ["distribution.publish", "fs.write", "distribution", ""] {
-            assert!(
-                !GRANTABLE_CAPABILITIES.contains(&invented),
-                "'{}' must not be grantable",
-                invented
-            );
+            assert!(!is_grantable(invented), "'{}' must not be grantable", invented);
         }
+        // The one that drifted: `script_scheduler` is dead code without it.
+        assert!(is_grantable("schedule"));
     }
 
     // -----------------------------------------------------------------------

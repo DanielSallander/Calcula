@@ -7,7 +7,8 @@ describe("generateLibrarySource", () => {
       { name: "addTax", params: ["price", "rate"], body: "return price * (1 + rate);" },
     ]);
     expect(src).toContain('function setup(context)');
-    expect(src).toContain('context.expose("ADDTAX", async (price, rate) =>');
+    expect(src).toContain('fns["ADDTAX"] = async (price, rate) =>');
+    expect(src).toContain('context.expose("ADDTAX", fns["ADDTAX"], { public: false });');
     // Exposed { public: false } so a peer sandboxed script cannot reach the
     // library's capabilities via context.callMethod (only trusted host code,
     // which bypasses the public policy, invokes it).
@@ -25,13 +26,13 @@ describe("generateLibrarySource", () => {
       },
     ]);
     expect(src).toContain("const cube = caps.cube;");
-    expect(src).toContain('context.expose("REVBYCOUNTRY", async (country) =>');
+    expect(src).toContain('fns["REVBYCOUNTRY"] = async (country) =>');
     expect(src).toContain("cube.value(");
   });
 
   it("handles zero-param functions and trims param whitespace", () => {
     const src = generateLibrarySource([{ name: "pi", params: [" "], body: "return 3.14159;" }]);
-    expect(src).toContain('context.expose("PI", async () =>');
+    expect(src).toContain('fns["PI"] = async () =>');
   });
 
   it("skips functions with a blank name", () => {
@@ -40,7 +41,7 @@ describe("generateLibrarySource", () => {
       { name: "ok", params: [], body: "return 2;" },
     ]);
     expect(src).not.toContain("return 1;");
-    expect(src).toContain('context.expose("OK", async () =>');
+    expect(src).toContain('fns["OK"] = async () =>');
   });
 
   it("produces compilable structure for multiple functions", () => {
@@ -96,6 +97,65 @@ describe("generateLibrarySource", () => {
     expect(() =>
       generateLibrarySource([{ name: "has space", params: [], body: "return 1;" }]),
     ).toThrow();
+  });
+
+  // -------------------------------------------------------------------------
+  // Sibling calls + library imports (script package manager, first slice)
+  // -------------------------------------------------------------------------
+
+  it("binds every function into `fns` so a body can call a SIBLING by name", () => {
+    // Before this, each expose closure was anonymous inside setup and nothing
+    // bound a sibling to a name; the only reachable path was the undocumented
+    // context.callMethod peer call. `fns` sanctions it explicitly.
+    const src = generateLibrarySource([
+      { name: "base", params: ["x"], body: "return x * 2;" },
+      { name: "wrapper", params: ["x"], body: "return await fns.BASE(x) + 1;" },
+    ]);
+    expect(src).toContain("const fns = {};");
+    expect(src).toContain('fns["BASE"] = async (x) =>');
+    expect(src).toContain("return await fns.BASE(x) + 1;");
+  });
+
+  it("a sibling call actually resolves when the generated source is executed", async () => {
+    const src = generateLibrarySource([
+      { name: "base", params: ["x"], body: "return x * 2;" },
+      { name: "wrapper", params: ["x"], body: "return (await fns.BASE(x)) + 1;" },
+    ]);
+    const exposed = new Map<string, (...a: unknown[]) => unknown>();
+    const context = {
+      caps: {},
+      expose: (name: string, fn: (...a: unknown[]) => unknown) => exposed.set(name, fn),
+    };
+    // Same wrapper shape as the worker bootstrap.
+    // eslint-disable-next-line no-new-func
+    new Function("context", `${src}\n; return setup(context);`)(context);
+    await expect(exposed.get("WRAPPER")!(5)).resolves.toBe(11);
+  });
+
+  it("rejects a parameter named `fns` or `imports` (they shadow the bindings)", () => {
+    expect(validateParam("fns", "F")).not.toBeNull();
+    expect(validateParam("imports", "F")).not.toBeNull();
+  });
+
+  it("emits `// @uses` pragmas so ONE parser reads UDF and object-script imports alike", () => {
+    const src = generateLibrarySource(
+      [{ name: "f", params: [], body: "return await imports.stats.mean([1,2]);" }],
+      [
+        { alias: "stats", package: "acme.stats", pin: "^1.2.0", isolated: false },
+        { alias: "vault", package: "acme.vault", pin: "2.0.0", isolated: true },
+      ],
+    );
+    expect(src.startsWith("// @uses stats acme.stats@^1.2.0\n")).toBe(true);
+    expect(src).toContain("// @uses-isolated vault acme.vault@2.0.0");
+    // The pragma block precedes setup(), so it is line-anchored exactly like a
+    // hand-written script's.
+    expect(src.indexOf("// @uses stats")).toBeLessThan(src.indexOf("function setup"));
+  });
+
+  it("emits no pragma block when nothing is imported", () => {
+    const src = generateLibrarySource([{ name: "f", params: [], body: "return 1;" }]);
+    expect(src.startsWith("function setup(context)")).toBe(true);
+    expect(src).not.toContain("@uses");
   });
 });
 

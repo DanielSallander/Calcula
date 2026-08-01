@@ -34,7 +34,7 @@ export function NotebookPanel(_props: ActivityViewProps): React.ReactElement {
             ))
           ) : (
             <div style={styles.empty}>
-              No cells. Click "+Cell" to add one.
+              No cells. Click "+ Code" for JavaScript or "+ Text" for prose.
             </div>
           )
         ) : (

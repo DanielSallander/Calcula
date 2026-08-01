@@ -16,6 +16,7 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import type { ModelMeasureInfo, ModelOverview } from "@api";
 import { biModelUpsertMeasure, biModelValidateMeasure } from "@api";
+import { testMeasureInNotebook } from "../../lib/notebookBridge";
 import { Field, Modal, styles } from "../editorShared";
 import { NUMBER_FORMAT_PRESETS } from "../../../_shared/components/NumberFormatModal";
 import {
@@ -234,6 +235,26 @@ export function MeasureEditorModal({
     }
   }, [connectionId, name, formula, existing]);
 
+  // "Test in notebook": validate through the READ-ONLY diagnostic and hand the
+  // draft to the notebook as prose + a runnable query. Nothing is applied to
+  // the model — this button never touches the upsert path.
+  const handleTestInNotebook = useCallback(async () => {
+    setError(null);
+    setStatus(null);
+    try {
+      await testMeasureInNotebook({
+        connectionId,
+        name,
+        formula,
+        existing,
+        knownMeasures: overview.measures,
+      });
+      setStatus("Sent to the notebook (main window) — nothing was applied to the model.");
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }, [connectionId, name, formula, existing, overview.measures]);
+
   const handleSave = useCallback(async () => {
     setError(null);
     setStatus(null);
@@ -286,6 +307,14 @@ export function MeasureEditorModal({
           </button>
           <button style={styles.btn} onClick={() => void handleValidate()}>
             Validate
+          </button>
+          <button
+            style={styles.btn}
+            onClick={() => void handleTestInNotebook()}
+            disabled={!connectionId}
+            title="Validate this draft and open it in the notebook — read-only, nothing is applied to the model"
+          >
+            Test in notebook
           </button>
           <button
             style={styles.primaryBtn}

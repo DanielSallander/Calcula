@@ -3,6 +3,12 @@
 // CONTEXT: Stores current filter state and provides functions to modify it.
 
 import type { AutoFilterInfo, AutoFilterResult } from "@api";
+import type {
+  AutoFilterController,
+  AutoFilterSnapshot,
+  AutoFilterColumnCriteria,
+  AutoFilterUniqueValues,
+} from "@api/autoFilterService";
 import type { FilterState } from "../types";
 
 /** Minimal selection type for filter operations. */
@@ -437,6 +443,201 @@ export async function applyExpressionFilter(
     window.dispatchEvent(new CustomEvent("grid:refresh"));
     emitAppEvent(FilterEvents.FILTER_APPLIED, { column: relativeColIndex });
   }
+}
+
+// ============================================================================
+// Script-callable surface (the AutoFilterController seam)
+// ============================================================================
+//
+// The functions above are driven by the dropdown overlay and the Data menu, so
+// they read the current SELECTION and the open-dropdown column. A caller that
+// is not a person — the script broker, through @api/autoFilterService — has
+// neither, so this block is the same operations with every input passed in
+// explicitly and nothing read from UI state.
+//
+// WHAT IT DELIBERATELY REUSES: syncOverlayRegion + syncHiddenRows + the cached
+// `state.autoFilterInfo`, i.e. exactly what a click updates. That is the whole
+// reason the broker is routed through the extension instead of calling the
+// backend commands itself — a filter applied behind this cache's back leaves
+// chevron clicks resolving column indexes against a stale start_col.
+//
+// WHAT IT DELIBERATELY DOES NOT TOUCH: table ownership. `Table.autoFilterId` is
+// derived state recomputed inside the Rust commands (relink_autofilter_owner);
+// nothing here may set or infer it.
+
+function toSnapshot(info: AutoFilterInfo, hiddenRows: number[]): AutoFilterSnapshot {
+  return {
+    id: info.id,
+    startRow: info.startRow,
+    startCol: info.startCol,
+    endRow: info.endRow,
+    endCol: info.endCol,
+    enabled: info.enabled,
+    isDataFiltered: info.isDataFiltered,
+    columns: info.criteria.map((c, columnIndex) =>
+      c
+        ? {
+            columnIndex,
+            filterOn: c.filterOn,
+            values: c.values ?? [],
+            criterion1: c.criterion1 ?? null,
+            criterion2: c.criterion2 ?? null,
+            operator: c.operator ?? null,
+            filterOutBlanks: c.filterOutBlanks === true,
+          }
+        : null,
+    ),
+    hiddenRows: [...hiddenRows].sort((a, b) => a - b),
+  };
+}
+
+/** Adopt an AutoFilterResult into the cache + the view, then project it. */
+function adoptResult(result: AutoFilterResult, action: string): AutoFilterSnapshot {
+  if (!result.success || !result.autoFilter) {
+    throw new Error(result.error || `${action} was refused by the workbook`);
+  }
+  state.autoFilterInfo = result.autoFilter;
+  state.isActive = result.autoFilter.enabled;
+  syncOverlayRegion();
+  syncHiddenRows(result);
+  return toSnapshot(result.autoFilter, result.hiddenRows ?? []);
+}
+
+/** Read the active sheet's filter WITHOUT forcing a full view resync (a caller
+ *  may read often). The cache is still repaired, because a stale cached range
+ *  is the failure mode that misdirects a later chevron click. */
+export async function readAutoFilter(): Promise<AutoFilterSnapshot | null> {
+  const info = await getAutoFilter();
+  if (!info) {
+    if (state.autoFilterInfo) {
+      state.autoFilterInfo = null;
+      state.isActive = false;
+      state.openDropdownCol = null;
+      syncOverlayRegion();
+    }
+    return null;
+  }
+  state.autoFilterInfo = info;
+  state.isActive = info.enabled;
+  syncOverlayRegion();
+  const hiddenRows = await getHiddenRows();
+  return toSnapshot(info, hiddenRows);
+}
+
+/** Turn filtering on for an explicit rectangle (first row = header row). */
+export async function applyFilterToRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<AutoFilterSnapshot> {
+  const result = await applyAutoFilter(startRow, startCol, endRow, endCol);
+  const snapshot = adoptResult(result, "Applying a filter");
+  emitAppEvent(FilterEvents.FILTER_TOGGLED, { active: true });
+  return snapshot;
+}
+
+/** Filter one column by picking values. */
+export async function setColumnValueFilter(
+  relativeColIndex: number,
+  values: string[],
+  includeBlanks: boolean,
+): Promise<AutoFilterSnapshot> {
+  const result = await setColumnFilterValues(relativeColIndex, values, includeBlanks);
+  const snapshot = adoptResult(result, "Filtering a column");
+  emitAppEvent(FilterEvents.FILTER_APPLIED, { column: relativeColIndex });
+  return snapshot;
+}
+
+/** Filter one column by an Excel-style rule (">=100", "<>done", "=*text*"). */
+export async function setColumnRuleFilter(
+  relativeColIndex: number,
+  criterion1: string,
+  criterion2: string | undefined,
+  operator: "and" | "or" | undefined,
+): Promise<AutoFilterSnapshot> {
+  const result = await setColumnCustomFilter(
+    relativeColIndex,
+    criterion1,
+    criterion2,
+    operator,
+  );
+  const snapshot = adoptResult(result, "Filtering a column");
+  emitAppEvent(FilterEvents.FILTER_APPLIED, { column: relativeColIndex });
+  return snapshot;
+}
+
+/** Stop filtering one column, or every column when `relativeColIndex` is null. */
+export async function clearFilterCriteria(
+  relativeColIndex: number | null,
+): Promise<AutoFilterSnapshot> {
+  const result =
+    relativeColIndex === null
+      ? await clearAutoFilterCriteria()
+      : await clearColumnCriteria(relativeColIndex);
+  const snapshot = adoptResult(result, "Clearing a filter");
+  emitAppEvent(FilterEvents.FILTER_CLEARED, {
+    column: relativeColIndex === null ? "all" : relativeColIndex,
+  });
+  return snapshot;
+}
+
+/** Turn filtering off entirely and show every row again. */
+export async function removeFilter(): Promise<void> {
+  const result = await removeAutoFilter();
+  if (!result.success) {
+    throw new Error(result.error || "Turning the filter off was refused by the workbook");
+  }
+  state.autoFilterInfo = null;
+  state.isActive = false;
+  state.openDropdownCol = null;
+  syncOverlayRegion();
+  clearHiddenRows();
+  emitAppEvent(FilterEvents.FILTER_TOGGLED, { active: false });
+}
+
+/** Distinct values in one column, for building a values filter. */
+export async function listColumnValues(
+  relativeColIndex: number,
+): Promise<AutoFilterUniqueValues> {
+  const result = await getFilterUniqueValues(relativeColIndex);
+  if (!result.success) {
+    throw new Error(result.error || "Reading the values in that column was refused");
+  }
+  return {
+    values: result.values.map((v) => ({ value: v.value, count: v.count })),
+    hasBlanks: result.hasBlanks === true,
+  };
+}
+
+/**
+ * The AutoFilterController handed to @api at activation. Built here (rather
+ * than in index.ts) so the operations and the cache they repair stay in one
+ * file — a controller assembled elsewhere out of the pieces above would be a
+ * second place that has to remember the sync order.
+ */
+export function createAutoFilterController(): AutoFilterController {
+  return {
+    get: () => readAutoFilter(),
+    listValues: (columnIndex: number) => listColumnValues(columnIndex),
+    apply: (startRow: number, startCol: number, endRow: number, endCol: number) =>
+      applyFilterToRange(startRow, startCol, endRow, endCol),
+    setColumn: (columnIndex: number, criteria: AutoFilterColumnCriteria) =>
+      criteria.kind === "values"
+        ? setColumnValueFilter(
+            columnIndex,
+            criteria.values,
+            criteria.includeBlanks === true,
+          )
+        : setColumnRuleFilter(
+            columnIndex,
+            criteria.criterion1,
+            criteria.criterion2,
+            criteria.operator,
+          ),
+    clear: (columnIndex: number | null) => clearFilterCriteria(columnIndex),
+    remove: () => removeFilter(),
+  };
 }
 
 // ============================================================================

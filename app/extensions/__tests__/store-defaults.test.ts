@@ -412,11 +412,13 @@ describe("ScriptNotebook store initial state", () => {
   it("matches snapshot", () => {
     // Actions are destructured away on purpose: this snapshot guards the DATA
     // defaults, so adding an action must not churn it. `appendCellWithSource`
-    // is the macro recorder's hand-off entry point (Wave D).
+    // is the macro recorder's hand-off entry point (Wave D);
+    // `appendCellsWithSource` is the Model Editor's "Test in notebook" scaffold
+    // door (Wave H) — it only ever appends CELL TEXT, never runs anything.
     const { refreshNotebookList, createNotebook, openNotebook, closeNotebook,
       deleteNotebook, saveActiveNotebook, addCell, removeCell, updateCellSource,
       moveCellUp, moveCellDown, runCell, runAll, rewindToCell, runFromCell,
-      appendCellWithSource,
+      appendCellWithSource, appendCellsWithSource,
       ...state } = useNotebookStore.getState();
     expect(state).toMatchInlineSnapshot(`
       {

@@ -19,7 +19,14 @@ describe('AppEvents', () => {
     // SHEET_DELETED / SHEET_RENAMED), RECALCULATION_COMPLETED, and
     // PACKAGE_UPDATED — the last of which replaced the untyped, script-invisible
     // "calp:scripts-pulled" window event.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`64`);
+    //
+    // 65 since G4 added WRITEBACK_SUBMISSION_RECEIVED: until now a .calp
+    // publisher could learn that answers had arrived ONLY by opening the
+    // Responses pane and looking, and a script could not learn it at all. The
+    // count is bumped deliberately, and the event is a real one — it is raised
+    // by the demand-driven publisher-inbox poll in @api/distribution.ts, which
+    // exists precisely so this id is not a promise nothing keeps.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`65`);
   });
 
   it('all values use the app: prefix', () => {

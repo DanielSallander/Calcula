@@ -678,6 +678,10 @@ import {
 } from "./scriptHost/host";
 import { emitAppEvent } from "./events";
 import { ensureScriptsAllowed } from "./scriptSecurity";
+// Shared-library imports (@api/scriptLibraries). A script's `// @uses` pragmas
+// are resolved HERE, by trusted host code, against the workbook lockfile —
+// before the source ever reaches the worker. See docs/design/script-package-manager.md.
+import { linkScript, resetScriptLibraryRealms, type LinkedImport } from "./scriptLibraries";
 
 /**
  * Call an exposed method on another script from TRUSTED host code
@@ -1502,6 +1506,23 @@ function notifyChange(): void {
   }
 }
 
+/**
+ * What each mounted script linked, keyed by scriptId. Read by the transparency
+ * surfaces so "which libraries can this script call, and at what ceiling" is
+ * answerable without re-deriving it from the source.
+ */
+const linkedImports = new Map<string, LinkedImport[]>();
+
+/** The library imports a mounted script linked (transparency panel / tests). */
+export function getLinkedImports(scriptId: string): LinkedImport[] {
+  return linkedImports.get(scriptId) ?? [];
+}
+
+/** Every mounted script's linked library imports. */
+export function listLinkedImports(): Array<{ scriptId: string; imports: LinkedImport[] }> {
+  return [...linkedImports.entries()].map(([scriptId, imports]) => ({ scriptId, imports }));
+}
+
 /** Get the lookup key for a script — primitives use objectType, components use instanceId. */
 function getLookupKey(objectType: ScriptableObjectType, instanceId?: string | null): string {
   if (instanceId) return `component:${objectType}:${instanceId}`;
@@ -1581,6 +1602,31 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         );
       }
 
+      // LINK the script's declared library imports BEFORE mounting it.
+      //
+      // Ordering is a security property, not a convenience: the aliases are
+      // resolved from the AUTHORITATIVE source against the workbook lockfile,
+      // each library realm is mounted at `declared(library) INTERSECT
+      // declared(this script)` (so a dependency can never widen this script's
+      // ceiling), and an alias that is not installed / whose consent lapsed
+      // throws here — the consumer never starts with a dangling import.
+      //
+      // The returned prelude is a SINGLE line of host-generated code (no
+      // third-party bytes, just resolved addresses and host-issued call
+      // tokens), prepended so the user's own line numbers are unchanged.
+      const link = await linkScript({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        source: definition.source,
+        declaredCapabilities: definition.declaredCapabilities ?? [],
+        accessLevel: definition.accessLevel,
+      });
+      mounted.cleanupFns.push(link.release);
+      if (link.imports.length > 0) {
+        linkedImports.set(definition.id, link.imports);
+        mounted.cleanupFns.push(() => linkedImports.delete(definition.id));
+      }
+
       // Worker realm (sandbox Phase 3): the script executes in its own
       // Worker with no ambient authority; every privileged call comes
       // back as an RPC through the broker. Unmount = terminate.
@@ -1589,7 +1635,7 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         name: definition.name,
         objectType: definition.objectType,
         instanceId: definition.instanceId,
-        source: definition.source,
+        source: link.prelude + definition.source,
         accessLevel: definition.accessLevel,
         provenance: definition.provenance,
         packageName: definition.packageName,
@@ -1657,6 +1703,10 @@ export function resetObjectScriptManager(): void {
   registeredScripts.clear();
   mountedScripts.clear();
   changeListeners.clear();
+  linkedImports.clear();
+  // Library realms are mounted scripts too — drop them with everything else, or
+  // a closed workbook leaves a realm holding a consented capability set.
+  resetScriptLibraryRealms();
   clearExposed();
   hostResetAll();
 }

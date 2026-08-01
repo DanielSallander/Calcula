@@ -50,6 +50,82 @@ interface ScriptFindOptions {
   searchFormulas?: boolean;
 }
 
+/** How one column of an AutoFilter is currently filtered (read back). */
+interface ScriptAutoFilterColumn {
+  /** 0-based offset FROM THE FILTER'S FIRST COLUMN. */
+  columnIndex: number;
+  filterOn: string;
+  values: string[];
+  criterion1: string | null;
+  criterion2: string | null;
+  operator: "and" | "or" | null;
+  filterOutBlanks: boolean;
+}
+
+/** The column filter on the active sheet (mirrors @api AutoFilterSnapshot). */
+interface ScriptAutoFilter {
+  id: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  enabled: boolean;
+  isDataFiltered: boolean;
+  /** One entry per column of the range, in range order; null = unfiltered. */
+  columns: Array<ScriptAutoFilterColumn | null>;
+  /** Absolute row indices the filter is currently hiding. */
+  hiddenRows: number[];
+}
+
+/** What may be asked of one column: pick values, or write a rule. */
+type ScriptAutoFilterCriteria =
+  | { kind: "values"; values: string[]; includeBlanks?: boolean }
+  | { kind: "custom"; criterion1: string; criterion2?: string; operator?: "and" | "or" };
+
+/** Distinct values in one filtered column. */
+interface ScriptAutoFilterValues {
+  values: Array<{ value: string; count: number }>;
+  hasBlanks: boolean;
+}
+
+/** api.evaluate options. `sheetIndex` is the sheet UNQUALIFIED references
+ *  resolve against (defaults to the active one); "Sheet2!A1" always works. */
+interface ScriptEvaluateOptions {
+  sheetIndex?: number;
+}
+
+/** One evaluated expression — the same value/display/type triple a typed cell
+ *  read carries, minus the coordinates and the formula. */
+interface ScriptEvaluatedValue {
+  value: number | string | boolean | null;
+  display: string;
+  type: "number" | "text" | "boolean" | "empty" | "error";
+}
+
+/** Formula read/write options. `style` is the notation the CALLER is speaking —
+ *  never the user's View setting, so a script's meaning cannot change because
+ *  somebody ticked a checkbox. */
+interface ScriptFormulaOptions {
+  style?: "A1" | "R1C1";
+  sheetIndex?: number;
+}
+
+/** What copy/paste answer with, so a caller can size its own layout. */
+interface ScriptClipboardSize {
+  rows: number;
+  cols: number;
+}
+
+/** PasteSpecial options. "formats" is deliberately not a mode — see the host
+ *  executor: there is no batch style write, and the per-cell one silently does
+ *  nothing on a destination cell that does not exist yet. */
+interface ScriptPasteOptions {
+  mode?: "all" | "values" | "formulas";
+  transpose?: boolean;
+  skipBlanks?: boolean;
+  sheetIndex?: number;
+}
+
 /** One object returned by api.charts() / api.tables() / ... (mirrors the host's
  *  ScriptObjectRef; see scriptHost/objectInventory.ts). */
 interface ScriptObjectRef {
@@ -408,6 +484,60 @@ type WritebackReviewShim =
       reason?: string;
     };
 
+/** What api.workbook.save() / saveAs() resolve to. `saved: false` is the
+ *  cancelled case (a Before-Save veto or a dismissed picker) — not an error. */
+interface ScriptSaveResultShim {
+  saved: boolean;
+  /** The file NAME written to; null when nothing was saved. Never a path. */
+  name: string | null;
+}
+
+/** caps.file.exportText options (file.picker). Nothing here names a location:
+ *  the two label fields only change words on the picker's file-type row, and
+ *  `encoding` only changes how the text is encoded once the user has chosen. */
+interface ScriptFileExportOptions {
+  /** e.g. "text/csv" — used to label the picker's file-type row. */
+  mimeType?: string;
+  /** "utf-8" (default), "utf-8-bom" (what Excel wants for accented CSV), "ansi". */
+  encoding?: "utf-8" | "utf-8-bom" | "ansi";
+  /** Overrides the file-type row's label ("Quarterly report"). */
+  description?: string;
+}
+
+/** caps.file.importText options (file.picker). `extensions` filters what the
+ *  picker OFFERS; it does not restrict what the user may ultimately choose. */
+interface ScriptFileImportOptions {
+  /** Extensions without dots, e.g. ["csv", "txt"]. */
+  extensions?: string[];
+  /** Overrides the file-type row's label. */
+  description?: string;
+}
+
+/** What caps.file.importText hands back. `name` is the FILE NAME the user saw
+ *  in the picker — never the folder it came from. */
+interface ScriptImportedFile {
+  name: string;
+  content: string;
+}
+
+/** caps.shortcut.bind options (ui.shortcut). There is nothing here that widens
+ *  the reach: a label is what the user reads in their shortcut list. */
+interface ScriptShortcutOptions {
+  /** What the shortcut list should call this ("Refresh all figures"). */
+  label?: string;
+}
+
+/** One live shortcut this script holds. `handler` is the exposed method the
+ *  keys call — the reason the binding is readable months later. */
+interface ScriptShortcutBinding {
+  id: string;
+  combo: string;
+  scriptId: string;
+  scriptName: string;
+  handler: string;
+  label: string;
+}
+
 /** Connector-secret header injection spec (bi.connector; resolved server-side). */
 interface SecretHeaderShim {
   sourceId: string;
@@ -481,6 +611,24 @@ function buildCapsShim(rt: WorkerRuntime): {
     confirm(message: string, options?: ScriptDialogTextOptions): Promise<boolean>;
     prompt(message: string, options?: ScriptDialogPromptOptions): Promise<string | null>;
     form(spec: ScriptDialogFormSpec): Promise<Record<string, unknown> | null>;
+  };
+  file: {
+    exportText(
+      suggestedName: string,
+      content: string,
+      options?: ScriptFileExportOptions,
+    ): Promise<string | null>;
+    importText(options?: ScriptFileImportOptions): Promise<ScriptImportedFile | null>;
+    exportPdf(suggestedName?: string): Promise<string | null>;
+  };
+  shortcut: {
+    bind(
+      combo: string,
+      handlerName: string,
+      options?: ScriptShortcutOptions,
+    ): Promise<ScriptShortcutBinding>;
+    unbind(combo: string): Promise<boolean>;
+    list(): Promise<ScriptShortcutBinding[]>;
   };
 } {
   return {
@@ -679,6 +827,82 @@ function buildCapsShim(rt: WorkerRuntime): {
         return (await call(rt, "cap.dialogForm", [spec])) as Record<string, unknown> | null;
       },
     },
+    // User-chosen file export / import (the file.picker capability). This shim
+    // has no authority of its own and — just as importantly — no vocabulary for
+    // one: there is no path parameter to pass, no directory to remember and no
+    // handle to reuse. Every call opens a picker the USER drives, so "which
+    // file" is answered by a human, once, per call.
+    //
+    // Both wait on a person, so their deadline is the long one (class "file" in
+    // the allowlist -> METHOD_DEADLINES_MS). Cancelling resolves null; it never
+    // rejects and never hangs.
+    file: {
+      /** Save `content` to a file the user picks. Resolves to the chosen file
+       *  NAME, or null if they cancelled. */
+      async exportText(
+        suggestedName: string,
+        content: string,
+        options?: ScriptFileExportOptions,
+      ) {
+        return (await call(rt, "cap.fileExportText", [
+          suggestedName,
+          content,
+          options,
+        ])) as string | null;
+      },
+      /** Read a file the user picks. Resolves to { name, content }, or null if
+       *  they cancelled. Rejects if the chosen file is too big to hand over —
+       *  never silently truncated. */
+      async importText(options?: ScriptFileImportOptions) {
+        return (await call(rt, "cap.fileImportText", [options])) as ScriptImportedFile | null;
+      },
+      /**
+       * Save the sheet you would PRINT as a PDF, to a file the user picks.
+       * Resolves to the chosen file NAME, or null if they cancelled.
+       *
+       * The script supplies a name and nothing else — no bytes, no page setup,
+       * no range. Calcula renders the document from the workbook's own print
+       * settings (print area, print titles, page breaks, headers and footers),
+       * exactly as File > Export to PDF does. Rejects when no print provider is
+       * available, rather than writing an empty file.
+       */
+      async exportPdf(suggestedName?: string) {
+        return (await call(rt, "cap.filePrintPdf", [suggestedName])) as string | null;
+      },
+    },
+    // One keyboard shortcut, bound to one method this script already published
+    // with context.expose (the `ui.shortcut` capability) — the replacement for
+    // VBA's Application.OnKey.
+    //
+    // NOTE WHAT IS NOT HERE, because it is the point: there is no `onKey`, no
+    // key stream, no listener over the keyboard. A script gets exactly the
+    // combinations it asked for and was granted, one call each, and its handler
+    // is told `{ combo }` — not which key, not what else was typed, not where
+    // the focus was. A keyboard hook that could observe anything beyond its own
+    // shortcut would be a keylogger with a nicer name, so that shape does not
+    // exist to be misused.
+    //
+    // `bind` REJECTS rather than quietly failing: a combination Calcula needs,
+    // one that anything else already holds, or a ninth shortcut all come back
+    // as errors with the reason in plain words. Nothing is ever overridden.
+    shortcut: {
+      /** Bind `combo` (Ctrl+Shift+<letter>) to the exposed method `handlerName`. */
+      async bind(combo: string, handlerName: string, options?: ScriptShortcutOptions) {
+        return (await call(rt, "cap.shortcutBind", [
+          combo,
+          handlerName,
+          options,
+        ])) as ScriptShortcutBinding;
+      },
+      /** Give one shortcut back. Resolves false if this script did not hold it. */
+      async unbind(combo: string) {
+        return (await call(rt, "cap.shortcutUnbind", [combo])) as boolean;
+      },
+      /** The shortcuts this script currently holds. */
+      async list() {
+        return (await call(rt, "cap.shortcutList", [])) as ScriptShortcutBinding[];
+      },
+    },
   };
 }
 
@@ -850,8 +1074,35 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     getSheetNames: () => call(rt, "api.getSheetNames", []),
     getActiveSheet: () => call(rt, "api.getActiveSheet", []),
     setActiveSheet: (index: number) => call(rt, "api.setActiveSheet", [index]),
-    // Canonical Workbook -> Sheet -> Range navigation (C3 step 3).
-    workbook: makeWorkbook(workbookTransport),
+    // Canonical Workbook -> Sheet -> Range navigation (C3 step 3), plus the
+    // FILE LIFECYCLE (G1) of the document this script lives in.
+    //
+    // The lifecycle members are spread onto the navigation facet rather than
+    // built into makeWorkbook(): navigation is a pure transport-driven model
+    // shared with extensions, while save/saveAs are broker calls with their own
+    // policy rows, rate limit and consent text. Keeping them here means the
+    // canonical model gains no notion of files at all.
+    //
+    // There is no open(), close() or new(): Calcula holds ONE document, so each
+    // of those would replace or discard the workbook the user is looking at, and
+    // a picker click meaning "open this file" is not consent for "let this
+    // running script read this file". See the allowlist comment on
+    // api.workbookSave.
+    workbook: {
+      ...makeWorkbook(workbookTransport),
+      /** Save back to the file this workbook came from. Rejects if it has never
+       *  been saved (use saveAs), if this script saved less than 5 seconds ago,
+       *  or if called from inside an onBeforeSave handler. Resolves
+       *  `{ saved: false, name: null }` when a Before-Save handler vetoed. */
+      save: () => call(rt, "api.workbookSave", []) as Promise<ScriptSaveResultShim>,
+      /** Ask the user where to save a copy. Resolves `{ saved: false }` if they
+       *  cancel the picker (or decline the .xlsx loss report). */
+      saveAs: () => call(rt, "api.workbookSaveAs", []) as Promise<ScriptSaveResultShim>,
+      /** Whether this workbook has unsaved changes. */
+      isDirty: () => call(rt, "api.workbookIsDirty", []) as Promise<boolean>,
+      /** This workbook's file NAME (never its folder); null if never saved. */
+      fileName: () => call(rt, "api.workbookFileName", []) as Promise<string | null>,
+    },
     emitEvent: (name: string, detail?: unknown) => callFire(rt, "api.emitEvent", [name, detail]),
     onEvent(name: string, handler: (detail: unknown) => void): CleanupFn {
       const cleanup = registerHook(rt, `event:${name}`, handler);
@@ -892,6 +1143,9 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       call(rt, "api.setColumnWidth", [col, width, sheetIndex]),
     freezePanes: (freezeRow: number | null, freezeCol: number | null) =>
       call(rt, "api.freezePanes", [freezeRow, freezeCol]),
+    /** The other half of View ▸ Window (G4): scrollable panes, not frozen ones. */
+    splitPanes: (splitRow: number | null, splitCol: number | null) =>
+      call(rt, "api.splitPanes", [splitRow, splitCol]),
 
     // ---- Sheet CRUD (B2) ----
     addSheet: (name?: string) => call(rt, "api.addSheet", [name]),
@@ -899,12 +1153,77 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     renameSheet: (index: number, newName: string) => call(rt, "api.renameSheet", [index, newName]),
     setSheetVisibility: (index: number, visibility: "visible" | "hidden" | "veryHidden") =>
       call(rt, "api.setSheetVisibility", [index, visibility]),
+    // ---- Sheet move / copy (G4) ----
+    // Both RENUMBER other sheets, so any index a script is holding is stale
+    // afterwards. That is stated on the authoring surface rather than papered
+    // over — there is no stable sheet handle to hand back instead.
+    moveSheet: (fromIndex: number, toIndex: number) =>
+      call(rt, "api.moveSheet", [fromIndex, toIndex]),
+    copySheet: (sourceIndex: number, newName?: string) =>
+      call(rt, "api.copySheet", [sourceIndex, newName]) as
+        Promise<{ index: number; name: string }>,
 
     // ---- Sort + find/replace (B2) ----
     sortRange: (
       startRow: number, startCol: number, endRow: number, endCol: number,
       fields: ScriptSortField[], options?: ScriptSortOptions, sheetIndex?: number,
     ) => call(rt, "api.sortRange", [startRow, startCol, endRow, endCol, fields, options, sheetIndex]),
+    // ---- the WorksheetFunction bridge (G4) ----
+    // `evaluate` answers ONE expression, `evaluateAll` a batch in one round
+    // trip; both go through the same broker method, so there is one policy row
+    // and one consent line for the pair.
+    async evaluate(expression: string, options?: ScriptEvaluateOptions) {
+      const [result] = (await call(rt, "api.evaluate", [
+        [expression],
+        options,
+      ])) as ScriptEvaluatedValue[];
+      return result;
+    },
+    evaluateAll: (expressions: string[], options?: ScriptEvaluateOptions) =>
+      call(rt, "api.evaluate", [expressions, options]) as Promise<ScriptEvaluatedValue[]>,
+
+    // ---- explicit formula read/write, A1 or R1C1 (G4) ----
+    getCellFormula: (row: number, col: number, options?: ScriptFormulaOptions) =>
+      call(rt, "api.getCellFormula", [row, col, options]) as Promise<string | null>,
+    setCellFormula: (
+      row: number, col: number, formula: string | null, options?: ScriptFormulaOptions,
+    ) => call(rt, "api.setCellFormula", [row, col, formula, options]) as Promise<void>,
+
+    // ---- copy / paste / paste special (G4) ----
+    // The clipboard behind these is THIS SCRIPT'S OWN: host-side, per script,
+    // gone when the script stops. It is not the Windows clipboard and not the
+    // one your Ctrl+V reads — a script can neither see what you copied nor take
+    // it away from you.
+    copyRange: (
+      startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number,
+    ) => call(rt, "api.copyRange", [startRow, startCol, endRow, endCol, sheetIndex]) as
+      Promise<ScriptClipboardSize>,
+    paste: (row: number, col: number, options?: ScriptPasteOptions) =>
+      call(rt, "api.pasteRange", [row, col, options]) as Promise<ScriptClipboardSize>,
+    /** `paste` with an explicit mode — the PasteSpecial spelling. */
+    pasteSpecial: (row: number, col: number, options: ScriptPasteOptions) =>
+      call(rt, "api.pasteRange", [row, col, options]) as Promise<ScriptClipboardSize>,
+
+    // ---- column filtering / AutoFilter (G4) ----
+    // Grouped under `api.filter.*` because six flat methods called
+    // autoFilterSomething would crowd the surface, and because the grouping is
+    // exactly one thing: the filter on the ACTIVE SHEET. Column indexes are
+    // RELATIVE to the filter's first column, the same way the backend and the
+    // dropdown address them.
+    filter: {
+      get: () => call(rt, "api.autoFilterGet", []) as Promise<ScriptAutoFilter | null>,
+      listValues: (columnIndex: number) =>
+        call(rt, "api.autoFilterListValues", [columnIndex]) as Promise<ScriptAutoFilterValues>,
+      apply: (startRow: number, startCol: number, endRow: number, endCol: number) =>
+        call(rt, "api.autoFilterApply", [startRow, startCol, endRow, endCol]) as
+          Promise<ScriptAutoFilter>,
+      setColumn: (columnIndex: number, criteria: ScriptAutoFilterCriteria) =>
+        call(rt, "api.autoFilterSetColumn", [columnIndex, criteria]) as Promise<ScriptAutoFilter>,
+      clear: (columnIndex?: number | null) =>
+        call(rt, "api.autoFilterClear", [columnIndex ?? null]) as Promise<ScriptAutoFilter>,
+      remove: () => call(rt, "api.autoFilterRemove", []) as Promise<void>,
+    },
+
     findAll: (query: string, options?: ScriptFindOptions) =>
       call(rt, "api.findAll", [query, options]),
     replaceAll: (
@@ -1032,6 +1351,14 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
           call(rt, "sheet.setCellValue", [row, col, value, sheetIndex]),
         getCellData: (row: number, col: number, sheetIndex?: number) =>
           call(rt, "sheet.getCellData", [row, col, sheetIndex]),
+        // Explicit formula read/write on THIS sheet, A1 or R1C1 (G4). Clamped
+        // exactly like getCellValue/setCellValue above: naming another sheet is
+        // unlocked-tier reach and is refused, not silently redirected.
+        getCellFormula: (row: number, col: number, options?: ScriptFormulaOptions) =>
+          call(rt, "sheet.getCellFormula", [row, col, options]) as Promise<string | null>,
+        setCellFormula: (
+          row: number, col: number, formula: string | null, options?: ScriptFormulaOptions,
+        ) => call(rt, "sheet.setCellFormula", [row, col, formula, options]) as Promise<void>,
         setRangeFormat: (
           startRow: number, startCol: number, endRow: number, endCol: number,
           format: ScriptFormat, sheetIndex?: number,

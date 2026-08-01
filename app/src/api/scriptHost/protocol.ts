@@ -29,6 +29,23 @@ export interface MountPackageInfo {
   provenance: "distributed";
 }
 
+/**
+ * A DEBUG SESSION the user explicitly opened on this script (task H1).
+ *
+ * Present only when the host mounts the script FOR debugging: instrumentation
+ * costs a yield point per statement, so a normal mount never carries it. A
+ * script cannot put itself into a session — there is no allowlist method, no
+ * setState/getState aspect and no broker method that produces this field; it is
+ * built host-side from a user gesture in the editor, exactly like `tier` and
+ * `capabilities`.
+ */
+export interface DebugSpec {
+  /** Lines the user marked. Live data — updatable mid-session, no remount. */
+  breakpoints: number[];
+  /** Pause at the first yield point of `setup` (default false). */
+  pauseOnEntry: boolean;
+}
+
 export interface MountSpec {
   protocolVersion: number;
   scriptId: string;
@@ -44,6 +61,8 @@ export interface MountSpec {
   scriptName: string;
   /** Set for distributed scripts only — seeds the read-only `context.package`. */
   packageInfo?: MountPackageInfo;
+  /** Set ONLY for a mount the user opened a debug session on. */
+  debug?: DebugSpec;
   /** Mirror seeds for sync getters (workbook/shape/panel props, slicer selection). */
   snapshot: {
     properties?: Record<string, unknown>;
@@ -72,8 +91,19 @@ export type RenderDrawTarget = {
   item?: unknown;
 };
 
+/** What the editor can ask a debug session to do. */
+export type DebugAction =
+  | "continue"
+  | "stepOver"
+  | "stepInto"
+  | "stepOut"
+  | "pause"
+  | "stop";
+
 export type H2W =
   | { t: "mount"; spec: MountSpec }
+  | { t: "debugBreakpoints"; lines: number[] }
+  | { t: "debugControl"; action: DebugAction }
   | { t: "validate"; source: string }
   | { t: "event"; hook: string; payload: unknown }
   | { t: "mirror"; path: string; value: unknown }
@@ -117,8 +147,69 @@ export interface SandboxHitGeometry {
 /** Hard cap on returned rects (a hostile mark can't bloat host memory/hit-tests). */
 export const MAX_SANDBOX_HIT_RECTS = 5_000;
 
+// ============================================================================
+// Debug channel (task H1)
+// ============================================================================
+
+/**
+ * One inspected binding. STRINGIFIED IN THE WORKER: only a name, a type tag and
+ * a bounded preview ever cross to the host. No object graph, no function
+ * reference, nothing structured-cloned out of the realm — the debug channel is
+ * a viewport, never a new export path.
+ */
+export interface DebugVariable {
+  name: string;
+  type: string;
+  value: string;
+}
+
+/** One frame of the captured call stack (best effort — see debugRuntime.ts). */
+export interface DebugFrame {
+  functionName: string;
+  line: number | null;
+}
+
+/** The state the editor renders while a script sits at a yield point. */
+export interface DebugPauseState {
+  line: number;
+  reason: "breakpoint" | "step" | "pause" | "entry";
+  variables: DebugVariable[];
+  callStack: DebugFrame[];
+  /** Yield points suspended behind this pause (concurrent hook dispatches). */
+  waiting: number;
+}
+
+/**
+ * A breakpoint that could not suspend: it sits in a SYNCHRONOUS function, and
+ * JS cannot suspend synchronous code without blocking the whole realm. The
+ * runtime captures the locals and keeps going, and the editor says so.
+ */
+export interface DebugSnapshotState {
+  line: number;
+  variables: DebugVariable[];
+  /** Hits collapsed into this report by the rate limiter. */
+  suppressed: number;
+}
+
+/** What instrumentation actually achieved for this script. */
+export interface DebugReadyState {
+  /** False when the pass bailed out — the ORIGINAL source is running. */
+  instrumented: boolean;
+  /** Lines with a pausable yield point (breakpoints here are VERIFIED). */
+  pausableLines: number[];
+  /** Lines with a snapshot-only yield point (synchronous context). */
+  snapshotLines: number[];
+  /** Functions promoted to `async` so their bodies could become pausable. */
+  promotedFunctions: string[];
+  error?: string;
+}
+
 export type W2H =
   | { t: "mounted"; ok: boolean; error?: string }
+  | { t: "debugReady"; state: DebugReadyState }
+  | { t: "debugPaused"; state: DebugPauseState }
+  | { t: "debugResumed" }
+  | { t: "debugSnapshot"; state: DebugSnapshotState }
   | { t: "validated"; valid: boolean; error?: string }
   | { t: "call"; callId: number; method: string; args: unknown[] }
   | { t: "hookRegistered"; hook: string }
@@ -162,13 +253,15 @@ export const CALL_TIMEOUT_MS = 30_000;
 export const UI_DIALOG_DEADLINE_MS = 300_000;
 
 /** Host deadlines by method class (ms): read 10s, mutate 30s, net 120s,
- *  ui = however long a person takes (UI_DIALOG_DEADLINE_MS). */
+ *  ui / file = however long a person takes (UI_DIALOG_DEADLINE_MS — a native
+ *  file picker is bounded by the same human as a modal). */
 export const CLASS_DEADLINES_MS: Record<string, number> = {
   read: 10_000,
   mutate: 30_000,
   emit: 10_000,
   net: 120_000,
   ui: UI_DIALOG_DEADLINE_MS,
+  file: UI_DIALOG_DEADLINE_MS,
 };
 
 /**
@@ -182,6 +275,20 @@ export const METHOD_DEADLINES_MS: Record<string, number> = {
   "cap.dialogConfirm": UI_DIALOG_DEADLINE_MS,
   "cap.dialogPrompt": UI_DIALOG_DEADLINE_MS,
   "cap.dialogForm": UI_DIALOG_DEADLINE_MS,
+  // The file.picker family and workbook Save As (class "file"): a native
+  // save/open dialog is bounded by the same person a modal is. On the 30s
+  // default the worker would abandon the call while the picker was still open,
+  // the script would see a spurious Timeout, and the file the user then chose
+  // would be written with nobody listening for the result.
+  //
+  // api.workbookSave is deliberately absent: it opens no picker (it writes back
+  // to the file the workbook came from) and is bounded by the Before-Save
+  // handlers, which carry their own 3s deadline in host.ts.
+  "cap.fileExportText": UI_DIALOG_DEADLINE_MS,
+  "cap.fileImportText": UI_DIALOG_DEADLINE_MS,
+  // Same picker, plus a PDF render before it opens.
+  "cap.filePrintPdf": UI_DIALOG_DEADLINE_MS,
+  "api.workbookSaveAs": UI_DIALOG_DEADLINE_MS,
 };
 
 /** The worker-side deadline for one method (default CALL_TIMEOUT_MS). */
@@ -201,6 +308,22 @@ export const METHOD_CALL_TIMEOUT_MS = CALL_TIMEOUT_MS;
 export const EVENT_QUEUE_HIGH_WATER = 256;
 /** Render request: no response within this window -> drop in-flight, degrade. */
 export const RENDER_TIMEOUT_MS = 2_000;
+
+/**
+ * Max variable-preview length crossing the debug channel, per value. Bounds
+ * what one paused frame can push at the host.
+ */
+export const DEBUG_VALUE_PREVIEW_CHARS = 200;
+
+/** Max stack frames reported with a pause. */
+export const DEBUG_MAX_STACK_FRAMES = 32;
+
+/**
+ * Minimum gap between two `debugSnapshot` reports (synchronous-context hits).
+ * A breakpoint inside a hot synchronous loop cannot pause, so without this it
+ * would post one message per iteration and drown the host message loop.
+ */
+export const DEBUG_SNAPSHOT_MIN_INTERVAL_MS = 250;
 
 /**
  * Hooks whose queued events coalesce latest-per-key under backpressure;

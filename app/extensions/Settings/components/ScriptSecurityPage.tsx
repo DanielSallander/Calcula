@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/Settings/components/ScriptSecurityPage.tsx
 // PURPOSE: The Script Security settings page — the level picker
 //          (disabled / ask / enabled) with honest descriptions, plus the
-//          transparency + revoke surface for persistent per-workbook trust and
-//          persisted notebook capability grants.
+//          transparency + revoke surface for persistent per-workbook trust,
+//          persisted script capability grants ("Always allow in this workbook")
+//          and persisted notebook capability grants.
 // CONTEXT: Extension UI — imports ONLY from @api (facade rule). Every script
 //          prompt in the app tells the user to "change it in Settings > Script
 //          Security"; before this page existed, that instruction pointed at
@@ -35,6 +36,8 @@ import {
   revokeWorkbookRunTrust,
   revokeWorkbookTrustEntirely,
   revokeNotebookCapabilityGrants,
+  revokeScriptCapability,
+  revokeScriptCapabilityGrants,
   revokeAllWorkbookTrust,
   currentWorkbookTrustKey,
   type ScriptSecurityLevel,
@@ -74,6 +77,8 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "ui.dialog": "Ask you",
   "distribution.writeback": "Package writeback",
   schedule: "Scheduled jobs",
+  "file.picker": "Files you pick",
+  "ui.shortcut": "Keyboard shortcut",
 };
 
 /** Label for a capability id that arrives as an untrusted string (a persisted
@@ -215,6 +220,29 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "4px 0",
     borderTop: "1px solid var(--border-default)",
   },
+  // A granted capability is revocable ON THE CHIP: the thing the user wants to
+  // take away is the capability, not "the script's row".
+  capChipButton: {
+    fontSize: 10,
+    padding: "1px 6px",
+    borderRadius: 3,
+    border: "1px solid var(--border-default)",
+    backgroundColor: "var(--bg-subtle, #EEF1F4)",
+    color: "var(--text-secondary)",
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+  },
+  capChipX: { fontWeight: 700, color: "var(--text-danger, #B3261E)" },
+  originLine: {
+    fontSize: 10,
+    color: "var(--text-tertiary)",
+    fontFamily: "'Cascadia Code', Consolas, monospace",
+    wordBreak: "break-all",
+    marginTop: 4,
+  },
 };
 
 // ============================================================================
@@ -292,6 +320,7 @@ export function ScriptSecurityPage(): React.ReactElement {
 
   const trusted = records.filter((r) => r.runTrust !== null);
   const withNotebookGrants = records.filter((r) => r.notebookGrants.length > 0);
+  const withScriptGrants = records.filter((r) => r.scriptGrants.length > 0);
 
   return (
     <div style={styles.content}>
@@ -451,6 +480,93 @@ export function ScriptSecurityPage(): React.ReactElement {
 
       {/* ---------------------------------------------------------------- */}
       <div style={styles.section}>
+        <div style={styles.sectionTitle}>Script Capability Grants</div>
+        <div style={styles.intro}>
+          Capabilities you answered <strong>Always allow in this workbook</strong>{" "}
+          to, for one script. Each grant is tied to that script&apos;s exact code:
+          edit the script and the grant is withdrawn automatically and you are
+          asked again, with a summary of what changed. A capability the script
+          never had is always asked for, even when other grants are remembered.
+          Like every decision on this page, these are stored on this computer
+          only — never in the workbook, so a copy you send someone carries no
+          permissions. Revoking takes effect immediately, not at the next launch.
+        </div>
+        {withScriptGrants.length === 0 && (
+          <div style={styles.empty}>
+            No script capability grants are remembered. Capability prompts are
+            answered per use until you choose &quot;Always allow&quot;.
+          </div>
+        )}
+        {withScriptGrants.map((record) => {
+          const { name, folder } = splitPath(record.displayPath);
+          return (
+            <div key={record.workbookKey} style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div>
+                  <div style={styles.wbName}>
+                    {name}
+                    {record.workbookKey === currentKey && (
+                      <span style={styles.currentBadge}>OPEN</span>
+                    )}
+                  </div>
+                  {folder && <div style={styles.wbFolder}>{folder}</div>}
+                </div>
+              </div>
+              {record.scriptGrants.map((grant) => (
+                <div key={grant.scriptId} style={styles.notebookRow}>
+                  <span>
+                    <strong style={{ fontWeight: 600 }}>{grant.scriptName}</strong>
+                    <span style={{ color: "var(--text-tertiary)" }}>
+                      {" "}
+                      &middot; approved {formatWhen(grant.grantedAt)}
+                    </span>
+                    <span style={styles.chipRow}>
+                      {grant.capabilities.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          title={`Revoke ${capLabel(c)} for ${grant.scriptName}`}
+                          style={styles.capChipButton}
+                          onClick={() => {
+                            void revokeScriptCapability(
+                              record.workbookKey,
+                              grant.scriptId,
+                              c,
+                            ).then(refresh);
+                          }}
+                        >
+                          {capLabel(c)}
+                          <span style={styles.capChipX}>&times;</span>
+                        </button>
+                      ))}
+                    </span>
+                    {grant.netOrigins.length > 0 && (
+                      <div style={styles.originLine}>
+                        Network access is limited to: {grant.netOrigins.join(", ")}
+                      </div>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    style={styles.dangerButton}
+                    onClick={() => {
+                      void revokeScriptCapabilityGrants(
+                        record.workbookKey,
+                        grant.scriptId,
+                      ).then(refresh);
+                    }}
+                  >
+                    Revoke all
+                  </button>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ---------------------------------------------------------------- */}
+      <div style={styles.section}>
         <div style={styles.sectionTitle}>Notebook Capability Grants</div>
         <div style={styles.intro}>
           Capabilities you approved for a specific notebook, remembered so that
@@ -528,8 +644,10 @@ export function ScriptSecurityPage(): React.ReactElement {
             onClick={() => {
               if (
                 window.confirm(
-                  "Forget every trusted workbook and every remembered notebook capability grant?\n\n" +
-                    "You will be asked again the next time any workbook wants to run its scripts.",
+                  "Forget every trusted workbook and every remembered capability grant " +
+                    "(scripts and notebooks)?\n\n" +
+                    "You will be asked again the next time any workbook wants to run its " +
+                    "scripts, and again the next time any script uses a capability.",
                 )
               ) {
                 revokeAllWorkbookTrust();

@@ -1340,7 +1340,7 @@ impl Default for ScriptProvenance {
 /// the script is denied a capability it correctly declared. The origin argument
 /// of a `// @capability net.fetch <origin>` pragma is a runtime grant hint, not
 /// part of the ceiling, so only the cap id set is collected here.
-pub const KNOWN_CAPABILITY_IDS: [&str; 11] = [
+pub const KNOWN_CAPABILITY_IDS: [&str; 13] = [
     "net.fetch",
     "bi.query",
     "bi.sql",
@@ -1352,6 +1352,8 @@ pub const KNOWN_CAPABILITY_IDS: [&str; 11] = [
     "ui.dialog",
     "distribution.writeback",
     "schedule",
+    "file.picker",
+    "ui.shortcut",
 ];
 
 /// Parse a script source for `// @capability <id> [origin]` line-comment

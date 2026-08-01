@@ -21,6 +21,23 @@
 //          only a live count and a link here — the schedule lives in the
 //          workbook, so the per-workbook panel is its home, not the machine-
 //          scoped trust page.
+//
+//          THREE MORE THINGS LIVE HERE for the same reason ("Held by scripts
+//          right now"): a keyboard shortcut a script has taken, cells sitting
+//          in a script's private clipboard, and a background registry poll a
+//          script caused. All three were already refused/bounded/consented
+//          correctly and all three were INVISIBLE to the person they belong to,
+//          which is precisely VBA's Application.OnKey failure. Each row carries
+//          its control (revoke / clear), because showing a hold the user cannot
+//          release is half a promise.
+//
+//          And ONE section here is deliberately NOT about this workbook: the
+//          machine-scoped add-in trail. Installing an add-in puts code in
+//          %APPDATA% that loads into EVERY workbook afterwards, so it is the
+//          widest consent Calcula asks for — and it left no record at all until
+//          app/src-tauri/src/extension_audit.rs. It is rendered last, visually
+//          separated and labelled "this computer", so it can never be mistaken
+//          for something the open file carries.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -34,13 +51,24 @@ import type {
   CapabilityId,
 } from "@api";
 import {
+  codeUnitMayReachBeyondGrid,
+  describeInterpreterReach,
   getWorkbookScheduledJobs,
   summarizeScheduledJobs,
   describeJobTime,
   cancelScheduledJob,
   setScheduledJobEnabled,
+  getScriptHeldState,
+  summarizeScriptHeldState,
+  revokeScriptKeybinding,
+  clearScriptClipboard,
+  getExtensionAuditTrail,
+  EXTENSION_AUDIT_ACTION_LABELS,
   type ScheduledJobEntry,
   type ScheduledJobSummary,
+  type ScriptHeldState,
+  type ExtensionAuditTrail,
+  type ExtensionAuditEntry,
 } from "@api/codeInventory";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent, onAppEvent } from "@api/events";
@@ -62,6 +90,8 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "ui.dialog": "Ask you",
   "distribution.writeback": "Package writeback",
   schedule: "Scheduled jobs",
+  "file.picker": "Files you pick",
+  "ui.shortcut": "Keyboard shortcut",
 };
 
 const capLabel = (c: CapabilityId): string => CAP_LABEL[c] ?? c;
@@ -291,6 +321,410 @@ const orphanBadge: React.CSSProperties = {
 
 const dangerLinkBtnStyle: React.CSSProperties = { ...linkBtnStyle, color: "#B00020" };
 
+// ---- Held by scripts right now ("state I did not put there") --------------
+
+const heldSectionStyle: React.CSSProperties = {
+  margin: "0 4px 10px",
+  border: "1px solid #D8DEE8",
+  borderRadius: 4,
+  backgroundColor: "#F7F9FC",
+};
+
+const heldHeaderStyle: React.CSSProperties = {
+  padding: "5px 8px",
+  borderBottom: "1px solid #E4E9F0",
+  fontWeight: 600,
+  fontSize: 11.5,
+  color: "#33558A",
+};
+
+const heldIntroStyle: React.CSSProperties = {
+  padding: "6px 8px 0",
+  fontSize: 10,
+  color: "#5A6B85",
+  lineHeight: 1.4,
+};
+
+const heldEmptyStyle: React.CSSProperties = {
+  padding: "8px",
+  fontSize: 10.5,
+  color: "#6B7A90",
+  lineHeight: 1.4,
+};
+
+const heldRowStyle: React.CSSProperties = {
+  padding: "6px 8px",
+  borderTop: "1px solid #E4E9F0",
+};
+
+const comboBadge: React.CSSProperties = {
+  ...chipStyle,
+  backgroundColor: "#DCE6F7",
+  color: "#26467E",
+  fontWeight: 600,
+  fontFamily: "'Cascadia Code', Consolas, monospace",
+};
+
+// ---- Machine-scoped add-in trail ------------------------------------------
+
+const machineSectionStyle: React.CSSProperties = {
+  margin: "14px 4px 10px",
+  border: "1px solid #DDD",
+  borderRadius: 4,
+  backgroundColor: "#FAFAFA",
+};
+
+const machineHeaderStyle: React.CSSProperties = {
+  padding: "5px 8px",
+  borderBottom: "1px solid #E6E6E6",
+  fontWeight: 600,
+  fontSize: 11.5,
+  color: "#444",
+};
+
+const machineScopeNoteStyle: React.CSSProperties = {
+  padding: "6px 8px 0",
+  fontSize: 10,
+  color: "#7A7A7A",
+  lineHeight: 1.4,
+};
+
+const auditActionBadge = (action: string): React.CSSProperties => {
+  if (action === "publisherChangeAccepted") {
+    return { ...chipStyle, backgroundColor: "#F3E2E2", color: "#8A3A3A", fontWeight: 600 };
+  }
+  if (action === "removed") {
+    return { ...chipStyle, backgroundColor: "#E8E8E8", color: "#555" };
+  }
+  if (action === "publisherPinned") {
+    return { ...chipStyle, backgroundColor: "#E6ECF6", color: "#33558A" };
+  }
+  return { ...chipStyle, backgroundColor: "#E6F0E6", color: "#3A6B3A" };
+};
+
+// ============================================================================
+// Held-by-scripts section — visibility AND control
+// ============================================================================
+
+function HeldByScriptsSection({
+  state,
+  onChanged,
+}: {
+  state: ScriptHeldState;
+  onChanged: () => void;
+}): React.ReactElement {
+  const summary = summarizeScriptHeldState(state);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const revokeShortcut = useCallback(
+    (id: string, combo: string, ownerName: string) => {
+      const ok = window.confirm(
+        `Take ${combo} back from "${ownerName}"?\n\n` +
+          "The script keeps running; it just stops receiving those keys. It can ask for the " +
+          "shortcut again the next time it runs.",
+      );
+      if (!ok) return;
+      setBusy(id);
+      setError(null);
+      try {
+        revokeScriptKeybinding(id);
+        onChanged();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [onChanged],
+  );
+
+  const clearClipboard = useCallback(
+    (scriptId: string, ownerName: string, cells: number) => {
+      const ok = window.confirm(
+        `Empty the private clipboard held by "${ownerName}"?\n\n` +
+          `${cells} cell${cells === 1 ? "" : "s"} copied from this workbook are being held by ` +
+          "that script. Emptying it changes nothing in the grid — the script simply finds its " +
+          "buffer empty, exactly as it does when it starts.",
+      );
+      if (!ok) return;
+      setBusy(scriptId);
+      setError(null);
+      void clearScriptClipboard(scriptId)
+        .then(onChanged)
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setBusy(null));
+    },
+    [onChanged],
+  );
+
+  return (
+    <div style={heldSectionStyle}>
+      <div style={heldHeaderStyle}>
+        Held by scripts right now (
+        {summary.shortcuts + summary.clipboards + state.watches.length})
+      </div>
+
+      {!summary.any && (
+        <div style={heldEmptyStyle}>
+          No script is holding a keyboard shortcut, a copy of your cells, or a
+          background check.
+        </div>
+      )}
+
+      {summary.any && (
+        <div style={heldIntroStyle}>
+          Things scripts are holding on your behalf. None of it is hidden from
+          you, and none of it survives the script: everything here is taken back
+          automatically when the script stops. You can take it back sooner.
+        </div>
+      )}
+
+      {state.shortcuts.map((s) => (
+        <div key={s.id} style={heldRowStyle} data-script-shortcut-id={s.id}>
+          <div style={unitHeaderRowStyle}>
+            <span style={jobTargetStyle}>Calls {s.handler}()</span>
+            <span style={comboBadge}>{s.combo}</span>
+          </div>
+          <div style={jobMetaStyle}>
+            Keyboard shortcut held by{" "}
+            <strong style={{ fontWeight: 600 }}>{s.ownerName}</strong>. Pressing
+            these keys runs that script's code. Your own shortcuts always win
+            over a script's.
+          </div>
+          <div style={badgeRowStyle}>
+            {s.ownerProvenance === "distributed" && (
+              <span style={pkgBadge} title="The owning code arrived in a distributed package">
+                Package: {s.ownerPackage ?? "unknown"}
+              </span>
+            )}
+            {s.ownerMissing && (
+              <span
+                style={orphanBadge}
+                title="No code in this workbook and no live mount owns this shortcut."
+              >
+                Owner missing
+              </span>
+            )}
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <button
+              style={dangerLinkBtnStyle}
+              disabled={busy === s.id}
+              onClick={() => revokeShortcut(s.id, s.combo, s.ownerName)}
+            >
+              Take back {s.combo}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {state.clipboards.map((c) => (
+        <div key={c.scriptId} style={heldRowStyle} data-script-clipboard-id={c.scriptId}>
+          <div style={unitHeaderRowStyle}>
+            <span style={jobTargetStyle}>
+              {c.cells} cell{c.cells === 1 ? "" : "s"} copied ({c.rows} &times; {c.cols})
+            </span>
+          </div>
+          <div style={jobMetaStyle}>
+            In the private clipboard of{" "}
+            <strong style={{ fontWeight: 600 }}>{c.ownerName}</strong>. This is
+            the script's own buffer — it is not your clipboard, nothing was taken
+            from it, and nothing left Calcula.
+          </div>
+          <div style={badgeRowStyle}>
+            {c.ownerProvenance === "distributed" && (
+              <span style={pkgBadge} title="The owning code arrived in a distributed package">
+                Package: {c.ownerPackage ?? "unknown"}
+              </span>
+            )}
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <button
+              style={dangerLinkBtnStyle}
+              disabled={busy === c.scriptId}
+              onClick={() => clearClipboard(c.scriptId, c.ownerName, c.cells)}
+            >
+              Empty it
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {state.watches.map((w) => (
+        <div key={w.id} style={heldRowStyle} data-background-watch-id={w.id}>
+          <div style={unitHeaderRowStyle}>
+            <span style={jobTargetStyle}>{w.what}</span>
+            <span style={cadenceBadge}>{w.cadence}</span>
+          </div>
+          <div style={jobMetaStyle}>
+            {w.running ? "Running" : "Idle"} &middot; {w.refCount} thing
+            {w.refCount === 1 ? "" : "s"} asked for it &middot; last check{" "}
+            {w.lastPollAt ? new Date(w.lastPollAt).toLocaleTimeString() : "never"}{" "}
+            ({w.lastPollCalls} call{w.lastPollCalls === 1 ? "" : "s"})
+          </div>
+          <div style={jobMetaStyle}>
+            {w.watchedRegionIds.length > 0
+              ? `Watching: ${w.watchedRegionIds.join(", ")}`
+              : "Watching nothing yet."}
+            {w.skippedRegionIds.length > 0 &&
+              ` Skipped (not published by you): ${w.skippedRegionIds.join(", ")}.`}
+          </div>
+          {w.lastError && <div style={jobErrorStyle}>Last check failed: {w.lastError}</div>}
+          <div style={jobMetaStyle}>
+            It stops on its own when nothing needs it — close the Responses pane
+            or stop the script that subscribed.
+          </div>
+        </div>
+      ))}
+
+      {error && <div style={jobErrorStyle}>{error}</div>}
+    </div>
+  );
+}
+
+// ============================================================================
+// Machine-scoped add-in trail — NOT this workbook, and it says so
+// ============================================================================
+
+function AddInTrailRow({ entry }: { entry: ExtensionAuditEntry }): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const when = entry.at ? new Date(entry.at) : null;
+  const label = EXTENSION_AUDIT_ACTION_LABELS[entry.action] ?? entry.action;
+  return (
+    <div style={heldRowStyle} data-addin-audit-action={entry.action}>
+      <div style={unitHeaderRowStyle}>
+        <span style={unitNameStyle}>{entry.name || entry.id || entry.bundleFileName}</span>
+        <span style={{ fontSize: 9.5, color: "#AAA", whiteSpace: "nowrap" }}>
+          {when && !Number.isNaN(when.getTime()) ? when.toLocaleString() : entry.at}
+        </span>
+      </div>
+      <div style={residenceStyle}>{entry.detail}</div>
+      <div style={badgeRowStyle}>
+        <span style={auditActionBadge(entry.action)}>{label}</span>
+        {entry.version && <span style={chipStyle}>v{entry.version}</span>}
+        {entry.trustStatus && (
+          <span
+            style={entry.capabilitiesHonored ? capGrantedBadge : chipStyle}
+            title="The trust status Calcula could prove at the moment you decided — not re-checked now."
+          >
+            {entry.trustStatus}
+          </span>
+        )}
+        {entry.declaredCapabilities.map((c) => (
+          <span
+            key={c}
+            style={entry.capabilitiesHonored ? capCeilingBadge : chipStyle}
+            title={
+              entry.capabilitiesHonored
+                ? "Declared and honored at install time"
+                : "Declared but REFUSED — this add-in was not trusted enough"
+            }
+          >
+            {c}
+            {entry.capabilitiesHonored ? "" : " (refused)"}
+          </span>
+        ))}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <button style={linkBtnStyle} onClick={() => setExpanded((e) => !e)}>
+          {expanded ? "Hide details" : "Details"}
+        </button>
+      </div>
+      {expanded && (
+        <div style={{ ...jobMetaStyle, wordBreak: "break-all" }}>
+          <div>Add-in id: {entry.id || "(unknown)"}</div>
+          <div>File: {entry.bundleFileName || "(unknown)"}</div>
+          <div>Publisher key: {entry.publisherKey || "(unsigned)"}</div>
+          {entry.previousPublisherKey && (
+            <div>Previously trusted key: {entry.previousPublisherKey}</div>
+          )}
+          {entry.sourcePath && <div>Installed from: {entry.sourcePath}</div>}
+          <div>
+            Declared contributions:{" "}
+            {entry.contributions.length > 0 ? entry.contributions.join(", ") : "none"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddInTrailSection({ trail }: { trail: ExtensionAuditTrail | null }): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  if (!trail) {
+    return (
+      <div style={machineSectionStyle}>
+        <div style={machineHeaderStyle}>Add-ins on this computer</div>
+        <div style={heldEmptyStyle}>Reading the add-in record...</div>
+      </div>
+    );
+  }
+
+  const readFailed = trail.lastWriteError !== "" && trail.total === 0 && !trail.missing;
+  const shown = expanded ? trail.entries : trail.entries.slice(0, 5);
+
+  return (
+    <div style={machineSectionStyle}>
+      <div style={machineHeaderStyle}>Add-ins on this computer ({trail.total})</div>
+
+      <div style={machineScopeNoteStyle}>
+        NOT part of this workbook. Add-ins are installed once and load into every
+        file you open afterwards, so this is the record of what you have let onto
+        this machine — what was installed or removed, who signed it, and what
+        Calcula could prove at the moment you said yes. The record is
+        append-only; Calcula never rewrites it.
+      </div>
+
+      {readFailed && (
+        <div style={{ ...heldEmptyStyle, color: "#B00020" }}>
+          The add-in record could not be read: {trail.lastWriteError}. This is not
+          the same as "nothing was ever installed" — check the Extensions panel
+          for what is actually loaded.
+        </div>
+      )}
+
+      {!readFailed && trail.missing && (
+        <div style={heldEmptyStyle}>
+          No add-in has ever been installed or removed on this computer.
+        </div>
+      )}
+
+      {!readFailed && !trail.missing && trail.unreadableLines > 0 && (
+        <div style={{ ...heldEmptyStyle, color: "#B00020" }}>
+          {trail.unreadableLines} line{trail.unreadableLines === 1 ? " was" : "s were"}{" "}
+          damaged and could not be read. Something other than Calcula has written
+          to this file.
+        </div>
+      )}
+
+      {trail.lastWriteError !== "" && !readFailed && (
+        <div style={{ ...heldEmptyStyle, color: "#B00020" }}>
+          The most recent decision may not have been recorded: {trail.lastWriteError}
+        </div>
+      )}
+
+      {shown.map((e, i) => (
+        <AddInTrailRow key={`${e.at}:${e.action}:${e.id}:${i}`} entry={e} />
+      ))}
+
+      {trail.entries.length > 5 && (
+        <div style={{ padding: "6px 8px" }}>
+          <button style={linkBtnStyle} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? "Show fewer" : `Show all ${trail.entries.length}`}
+          </button>
+        </div>
+      )}
+
+      {trail.path && (
+        <div style={{ ...machineScopeNoteStyle, paddingBottom: 8, wordBreak: "break-all" }}>
+          The file itself: {trail.path}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================================
 // Scheduled job row — visibility AND control (pause / cancel)
 // ============================================================================
@@ -512,11 +946,39 @@ function CodeUnitRow({
           </span>
         )}
 
-        {/* What it can touch */}
+        {/* What it can touch.
+            The "Grid-only" badge used to be driven by declaredCapabilities alone,
+            which OVERSTATED the sandbox for the Rust-QuickJS surfaces: a notebook
+            declares no ceiling and acquires bi.query / bi.sql through a JIT
+            consent at run time, so it read "Sandboxed to grid data only" while it
+            was one click from the BI model. The reach is now DERIVED from the
+            interpreter's own op manifest (core/script-engine/src/manifest.rs,
+            mirrored by @api/codeInventory) instead of asserted, and a surface that
+            CAN be granted more says so. */}
         {unit.declaredCapabilities.length === 0 ? (
-          <span style={gridOnlyBadge} title="Sandboxed to grid data only">
-            Grid-only
-          </span>
+          codeUnitMayReachBeyondGrid(unit) ? (
+            <span
+              style={capCeilingBadge}
+              title={
+                `${describeInterpreterReach(unit.interpreterReach ?? [])} ` +
+                `It holds no capability until you grant one, and it can be granted: ` +
+                `${(unit.interpreterCapabilities ?? []).join(", ")}.`
+              }
+            >
+              Grid + on request
+            </span>
+          ) : (
+            <span
+              style={gridOnlyBadge}
+              title={
+                unit.interpreterReach
+                  ? `${describeInterpreterReach(unit.interpreterReach)} No capability can be granted to this surface.`
+                  : "Sandboxed to grid data only"
+              }
+            >
+              Grid-only
+            </span>
+          )
         ) : (
           unit.declaredCapabilities.map((c) => {
             const isGranted = granted.has(c);
@@ -569,12 +1031,31 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
   const [summary, setSummary] = useState<CodeInventorySummary | null>(null);
   const [jobs, setJobs] = useState<ScheduledJobEntry[]>([]);
   const [jobsError, setJobsError] = useState<string | null>(null);
+  const [held, setHeld] = useState<ScriptHeldState>({
+    shortcuts: [],
+    clipboards: [],
+    watches: [],
+  });
+  const [trail, setTrail] = useState<ExtensionAuditTrail | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** Last inventory read, so a schedule refresh can reuse the owner join
    *  instead of rescanning every script on every poll. */
   const unitsRef = useRef<CodeUnit[] | null>(null);
+
+  /** Held state changes without any workbook event — a script can bind a
+   *  shortcut or fill its clipboard at any moment — so it rides the same poll as
+   *  the schedule. Never throws: a held item that cannot be read must not blank
+   *  the section, because "nothing held" is the one answer that must never be
+   *  wrong in the reassuring direction. */
+  const reloadHeld = useCallback(async () => {
+    try {
+      setHeld(await getScriptHeldState(unitsRef.current ?? undefined));
+    } catch (e) {
+      console.warn("[CodeInThisFile] held state unavailable:", e);
+    }
+  }, []);
 
   const reloadJobs = useCallback(async () => {
     try {
@@ -585,7 +1066,8 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     } catch (e) {
       setJobsError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+    await reloadHeld();
+  }, [reloadHeld]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -600,6 +1082,10 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
       setLoading(false);
     }
     await reloadJobs();
+    // The machine trail is not workbook state, so it is read on an explicit
+    // reload only — never on the 15s poll, which would turn a rare, deliberate
+    // record into per-panel background IPC.
+    setTrail(await getExtensionAuditTrail());
   }, [reloadJobs]);
 
   useEffect(() => {
@@ -617,6 +1103,7 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
   }, [reloadJobs]);
 
   const jobSummary = summarizeScheduledJobs(jobs);
+  const heldSummary = summarizeScriptHeldState(held);
   const jobsByScriptId = new Map<string, number>();
   for (const job of jobs) {
     jobsByScriptId.set(job.scriptId, (jobsByScriptId.get(job.scriptId) ?? 0) + 1);
@@ -646,6 +1133,24 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
                 {jobSummary.disabled > 0 ? ` (${jobSummary.disabled} paused)` : ""}
               </span>
             )}
+            {heldSummary.shortcuts > 0 && (
+              <span style={warnChipStyle}>
+                {heldSummary.shortcuts} keyboard shortcut
+                {heldSummary.shortcuts === 1 ? "" : "s"} held
+              </span>
+            )}
+            {heldSummary.clipboardCells > 0 && (
+              <span style={warnChipStyle}>
+                {heldSummary.clipboardCells} cell
+                {heldSummary.clipboardCells === 1 ? "" : "s"} in script clipboards
+              </span>
+            )}
+            {heldSummary.runningWatches > 0 && (
+              <span style={warnChipStyle}>
+                {heldSummary.runningWatches} background check
+                {heldSummary.runningWatches === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
           {summary.beyondGrid > 0 && (
             <div style={reachCalloutStyle}>
@@ -666,6 +1171,11 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
         error={jobsError}
         onChanged={() => void reloadJobs()}
       />
+
+      {/* ...and immediately after it, what scripts are HOLDING. Same family of
+          question ("what is happening that I did not just ask for?"), same rule
+          (every row carries its own way to say no). */}
+      <HeldByScriptsSection state={held} onChanged={() => void reloadHeld()} />
 
       <div style={{ padding: "0 4px 6px" }}>
         <button style={linkBtnStyle} onClick={() => void reload()} disabled={loading}>
@@ -707,6 +1217,12 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
             </div>
           );
         })}
+
+      {/* LAST, and visually separated: the only section here that is not about
+          the open workbook. It answers "what else did I let onto this machine?"
+          — the widest consent Calcula asks for, and the one that used to leave
+          no record anywhere. */}
+      <AddInTrailSection trail={trail} />
     </div>
   );
 }
