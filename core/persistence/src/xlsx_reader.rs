@@ -363,6 +363,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         outlines: Vec::new(),
         sheet_protections: Vec::new(),
         workbook_protection: None,
+        pending_recalc: None,
     };
 
     // Sparklines have no native xlsx form — the meta carry is the only source.

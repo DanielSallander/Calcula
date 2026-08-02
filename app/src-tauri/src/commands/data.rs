@@ -620,7 +620,7 @@ pub fn get_cell_collection(
                 display: if *b { "TRUE" } else { "FALSE" }.to_string(),
             },
             CellValue::Error(e) => CollectionItem::Scalar {
-                display: format!("#{:?}", e).to_uppercase(),
+                display: crate::cell_error_display(e),
             },
         }
     }
@@ -698,7 +698,7 @@ pub fn get_collection_texts(
             CellValue::Text(s) => serde_json::Value::String(s.clone()),
             CellValue::Boolean(b) => serde_json::Value::Bool(*b),
             CellValue::Empty => serde_json::Value::Null,
-            CellValue::Error(e) => serde_json::Value::String(format!("#{:?}", e).to_uppercase()),
+            CellValue::Error(e) => serde_json::Value::String(crate::cell_error_display(e)),
             CellValue::List(items) => {
                 let arr: Vec<serde_json::Value> = items.iter().map(|i| cell_value_to_json(i, depth + 1)).collect();
                 serde_json::Value::Array(arr)
@@ -870,6 +870,28 @@ fn update_cell_impl(
 
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // THE INTERACTIVE SURFACE. This edit and every dependent it cascades into
+    // gets `DEFAULT_CELL_FUEL` — the reference ceiling that every other
+    // cell-writing surface is defined as EQUAL to, so a formula's value never
+    // depends on which code path last recalculated it. Cancellable through the
+    // workbook token, so an edit that turns out to trigger an enormous cascade
+    // can still be stopped.
+    //
+    // Also: an edit that recalculates a cell removes it from any pending set a
+    // cancelled pass left behind, so the stale marker shrinks as the user works
+    // rather than lying about cells that are now fresh.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
+    if let Ok(mut pending) = state.pending_recalc.lock() {
+        if let Some(pr) = pending.as_mut() {
+            pr.remove_cell(row, col);
+            if pr.is_empty() {
+                *pending = None;
+            }
+        }
+    }
     use std::time::Instant;
     let perf_t0 = Instant::now();
 
@@ -1645,6 +1667,13 @@ pub(crate) fn reevaluate_formula_cell(
     cache_misses: &mut u32,
     include_formula: bool,
 ) {
+    // The dependent-cascade body, shared by update_cell, the batch writer and
+    // the control-value cascade. It INHERITS the surface its caller declared
+    // (Interactive for an edit, Background for a `.calp` refresh) rather than
+    // overriding it, so the ceiling stays the caller's and cancellation keeps
+    // reaching down here. Called directly with nothing installed, it declares
+    // Interactive — the right default for a cell that is about to be written.
+    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Interactive);
     // Per-cell EvalContext with the dependent's OWN position — current_row/
     // current_col MUST be set so the preserve semantics can engage (see the
     // fn doc). Mirrors the main-edit EvalContext in update_cell, except
@@ -1917,6 +1946,11 @@ pub(crate) fn cascade_cross_sheet_dependents(
     updated_cells: &mut Vec<CellData>,
     include_formulas: bool,
 ) {
+    // The cross-sheet half of the dependent cascade. Takes no `AppState`, so it
+    // cannot install a token of its own — it inherits its caller's surface,
+    // which is exactly right: this is the same edit, continuing onto another
+    // sheet, and it must not get a different ceiling for having crossed one.
+    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Interactive);
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
     // Work queue contains: (sheet_index, sheet_name, row, col) of cells that changed
@@ -2285,6 +2319,15 @@ pub(crate) fn update_cells_batch_core(
     udf_volatile_cells: Option<Vec<crate::scripting::udf::UdfCellRef>>,
     control_values: Option<std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> Result<Vec<CellData>, String> {
+    // Batch cell writes are still an interactive edit — a paste, a script's
+    // setValues, a fill — and every result is persisted, so the same ceiling as
+    // a single edit. Note the list here is NOT caller-supplied in the sense
+    // that matters for BATCH_FUEL: the cells written are cells, and their
+    // dependents are the workbook's own.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();
@@ -4826,6 +4869,10 @@ pub fn update_cell_on_sheets(
     col: u32,
     value: String,
 ) -> Result<(), String> {
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     // Sheet protection on EVERY targeted sheet, before any other lock is taken.
     // Group edit is refused outright if any one sheet protects the cell — the
     // alternative (writing the sheets that allow it) would silently produce a
@@ -5027,6 +5074,13 @@ pub fn fill_range(
 ) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // Fill/autofill writes and evaluates a whole rectangle of formulas —
+    // Interactive ceiling, cancellable (a fill down a million rows is a
+    // genuinely long operation started by one gesture).
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();

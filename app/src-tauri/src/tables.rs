@@ -2041,6 +2041,14 @@ pub fn set_calculated_column(
     column_name: String,
     formula: String,
 ) -> TableResult {
+    // A calculated column fills every row of the table with an evaluated
+    // formula and PERSISTS the results — Interactive ceiling, and cancellable
+    // because a calculated column over a large table is one of the longer
+    // single operations in the product.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     // GET.CONTROLVALUE snapshot: built BEFORE the table/grid locks below.
     let control_values = crate::control_values::build_control_values(
         &state, &pane_control_state, &ribbon_filter_state,

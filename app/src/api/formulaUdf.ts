@@ -163,7 +163,16 @@ function handleForUdf(def: CustomFunctionDef): ScriptHandle {
 
 /** Run one UDF call through the broker, returning the result as a UdfValue.
  *  Refused code maps to #BLOCKED! (the user must see the code was refused, not a
- *  stale number); other denial/timeout/throw maps to #VALUE!/#NAME?. */
+ *  stale number); other denial/timeout/throw maps to #VALUE!/#NAME?.
+ *
+ *  Deliberately NOT mapped here: #LIMIT!. That literal belongs to the FORMULA
+ *  evaluator's work budget (core/engine/src/budget.rs) — "this formula did more
+ *  work than a cell is allowed to". A UDF body that runs too long is a SCRIPT
+ *  overrun, governed by the script sandbox's own timeout, and it already has an
+ *  answer: #VALUE!. Aliasing the two would make "my JavaScript was slow" and
+ *  "my spreadsheet formula is unbounded" indistinguishable, which is exactly the
+ *  conflation #LIMIT! exists to undo. A UDF that deliberately RETURNS
+ *  cellError("#LIMIT!") is honoured like any other literal. */
 async function resolveUdfCall(call: UdfCall): Promise<UdfValue> {
   const def = getCustomFunction(call.name);
   if (!def) return { kind: "error", value: "#NAME?" };

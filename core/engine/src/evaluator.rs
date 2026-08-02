@@ -18,6 +18,7 @@
 //!              LOWER, TRIM, CONCATENATE, LEFT, RIGHT, MID
 //!
 
+use crate::budget::{BudgetPolicy, CancelToken, EvalBudget, LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_TEXT_LEN};
 use crate::cell::{CellError, CellValue, DictKey};
 use crate::control_values::ControlValue;
 use crate::coord::col_to_index;
@@ -30,6 +31,51 @@ use crate::style::StyleRegistry;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+/// Saturating conversion of a work quantity into fuel units. Element counts
+/// arrive as `usize`/`u64` and can legitimately be astronomical (a whole-grid
+/// rectangle is 1.7e10); `as i64` on those would be fine, but a PRODUCT of two
+/// user-supplied dimensions can overflow, so every call site multiplies with
+/// `saturating_mul` in `u64` and funnels through here.
+#[inline]
+fn fuel_units(n: u64) -> i64 {
+    if n > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        n as i64
+    }
+}
+
+/// `n * ceil(log2 n)`, saturating: the comparison count of a sort. Charged at
+/// the FULL rate rather than the arithmetic rate because the evaluator's
+/// comparators build owned `String` sort keys.
+#[inline]
+fn nlogn_units(n: u64) -> u64 {
+    let logn = (u64::BITS - n.max(2).leading_zeros()) as u64;
+    n.saturating_mul(logn)
+}
+
+/// Charge `n` units of work, returning `#LIMIT!` from the enclosing function if
+/// the budget is exhausted (or the pass was cancelled). Used for work measured
+/// in "node equivalents": range materialization, array element production,
+/// per-element `EvalResult` handling.
+macro_rules! charge {
+    ($self:expr, $units:expr) => {
+        if $self.budget.charge(fuel_units($units)).is_err() {
+            return EvalResult::Error(CellError::Limit);
+        }
+    };
+}
+
+/// Charge `n` units of CHEAP work — raw `f64` inner loops, char-grid matching —
+/// at the discounted rate. Same early return.
+macro_rules! charge_arith {
+    ($self:expr, $units:expr) => {
+        if $self.budget.charge_arith(fuel_units($units)).is_err() {
+            return EvalResult::Error(CellError::Limit);
+        }
+    };
+}
 
 /// Comparison operator for criteria matching in SUMIF/COUNTIF etc.
 #[derive(Debug, Clone)]
@@ -161,7 +207,18 @@ impl EvalResult {
                     "FALSE".to_string()
                 }
             }
-            EvalResult::Error(e) => format!("{:?}", e),
+            // THE CANONICAL LITERAL, not the Rust variant name.
+            //
+            // This used to be `format!("{:?}", e)`, which rendered "#DIV/0!" as
+            // the text `Div0`, "#N/A" as `NA` and "#LIMIT!" as `Limit`. Any
+            // function that coerces its argument to text without propagating
+            // errors first — LEN, LEFT, MID, UPPER, ... — therefore turned an
+            // error into ordinary DATA: `=LEN(1/0)` answered 4, and a formula
+            // that hit the work budget could be laundered into the plausible
+            // number 5. Errors coerced to text are still not Excel's behaviour
+            // (Excel propagates), but they are at least the error the user is
+            // looking at rather than a Rust identifier.
+            EvalResult::Error(e) => e.as_literal().to_string(),
             EvalResult::Array(arr) => {
                 if let Some(first) = arr.first() {
                     first.as_text()
@@ -420,6 +477,13 @@ pub struct Evaluator<'a> {
     /// the single choke point every lambda call goes through. See
     /// `MAX_LAMBDA_DEPTH` for why this exists.
     lambda_depth: std::cell::Cell<u32>,
+    /// The work budget + cancellation flag. ALWAYS present: every constructor
+    /// installs `EvalBudget::default_cell()`, and removing the ceiling requires
+    /// naming `BudgetPolicy::Unmetered` at the call site. A construction path
+    /// nobody remembered to update is therefore protected but not cancellable —
+    /// the worst case is a missing Cancel button, never a wedged application.
+    /// See core/engine/src/budget.rs.
+    budget: EvalBudget,
 }
 
 /// Maximum number of nested LAMBDA invocations before evaluation refuses to
@@ -459,18 +523,20 @@ pub struct Evaluator<'a> {
 /// arbitrarily WIDE without any lambda at all — that stack cost is bounded by
 /// the parser's nesting limit, not by this counter — and a recursion can be
 /// shallow yet exponential (`fib` without memoization). Neither is a stack
-/// hazard; the second is a TIME hazard and the engine has no evaluation-time
-/// budget at all. See the report accompanying this change.
+/// hazard; the second is a COST hazard, and it is now bounded by the work
+/// budget in `core/engine/src/budget.rs`, which charges every node, every
+/// lambda invocation and every bulk materialization against a per-formula fuel
+/// allowance. Depth and cost are separate ceilings on purpose: a 256-deep
+/// recursion can be trivial, and a 3-deep one can be astronomical.
 ///
-/// THE ERROR: Excel reports `#NUM!` when a LAMBDA recursion limit is hit. This
-/// engine has no `#NUM!` variant, and its documented mapping for Excel's
-/// `#NUM!` is `#VALUE!` (see app/src/api/formulaFunctions.ts `normalizeCellErrorLiteral`
-/// and app/src/api/formulaUdf.ts), so that is what is returned here. It is
-/// deliberately NOT `#CIRCULAR!`: that error means "the cell dependency graph
-/// contains a cycle" and is produced by the dependency graph, not by expression
-/// evaluation. Reusing it would make a runaway recursion look like a workbook
-/// structure problem and would collide with the iterative-calculation handling
-/// keyed off that error.
+/// THE ERROR: `CellError::Limit` / `#LIMIT!`, the same error the work budget
+/// produces. Excel reports `#NUM!` here; this engine has no `#NUM!`, and the
+/// old compromise was `#VALUE!` — which made a runaway recursion look exactly
+/// like a mistyped argument. A depth abort IS a runaway-cost abort, so it now
+/// shares the one error that means "this formula exceeded a calculation
+/// limit". Still deliberately NOT `#CIRCULAR!`: that means "the cell dependency
+/// graph contains a cycle", is produced by the dependency graph rather than by
+/// expression evaluation, and iterative calculation keys off it.
 pub const MAX_LAMBDA_DEPTH: u32 = 256;
 
 /// Adapter that lets the evaluator resolve cube arguments through the shared
@@ -498,9 +564,10 @@ impl<'e> CubeResolver for EvalCubeResolver<'e> {
 }
 
 impl<'a> Evaluator<'a> {
-    /// Creates a new Evaluator with a reference to the grid.
-    /// For single-sheet evaluation (backward compatible).
-    pub fn new(grid: &'a Grid) -> Self {
+    /// THE ONE PLACE an `Evaluator` is built. Every public constructor
+    /// delegates here, so the work budget cannot be forgotten by a constructor
+    /// added later: there is no field list to copy and get wrong.
+    fn base(grid: &'a Grid) -> Self {
         Evaluator {
             grid,
             multi_sheet: None,
@@ -512,39 +579,78 @@ impl<'a> Evaluator<'a> {
             udf_fn: None,
             scope: RefCell::new(HashMap::new()),
             lambda_depth: std::cell::Cell::new(0),
+            // METERED BY DEFAULT. See BudgetPolicy for why the asymmetry (safe
+            // default in, explicit word out) is the point.
+            budget: EvalBudget::default_cell(),
         }
+    }
+
+    /// Creates a new Evaluator with a reference to the grid.
+    /// For single-sheet evaluation.
+    pub fn new(grid: &'a Grid) -> Self {
+        Self::base(grid)
     }
 
     /// Creates a new Evaluator with multi-sheet support.
     pub fn with_multi_sheet(grid: &'a Grid, context: MultiSheetContext<'a>) -> Self {
-        Evaluator {
-            grid,
-            multi_sheet: Some(context),
-            context: EvalContext::default(),
-            styles: None,
-            file_reader: None,
-            pivot_data_fn: None,
-            gather_fn: None,
-            udf_fn: None,
-            scope: RefCell::new(HashMap::new()),
-            lambda_depth: std::cell::Cell::new(0),
-        }
+        let mut e = Self::base(grid);
+        e.multi_sheet = Some(context);
+        e
     }
 
     /// Creates a new Evaluator with multi-sheet support and evaluation context.
     pub fn with_context(grid: &'a Grid, multi_sheet: MultiSheetContext<'a>, eval_ctx: EvalContext) -> Self {
-        Evaluator {
-            grid,
-            multi_sheet: Some(multi_sheet),
-            context: eval_ctx,
-            styles: None,
-            file_reader: None,
-            pivot_data_fn: None,
-            gather_fn: None,
-            udf_fn: None,
-            scope: RefCell::new(HashMap::new()),
-            lambda_depth: std::cell::Cell::new(0),
+        let mut e = Self::base(grid);
+        e.multi_sheet = Some(multi_sheet);
+        e.context = eval_ctx;
+        e
+    }
+
+    /// Creates an Evaluator with NO work ceiling.
+    ///
+    /// The name is the documentation: an unmetered evaluator will happily spin
+    /// forever on `=fib(35)` and take the process with it. Legitimate only for
+    /// benchmarks, for tests that deliberately measure unbounded behaviour, and
+    /// for callers evaluating a known-tiny expression they built themselves.
+    /// Anything reachable from a cell, a script, or a file must NOT use this.
+    pub fn unmetered(grid: &'a Grid) -> Self {
+        let mut e = Self::base(grid);
+        e.budget = EvalBudget::from_policy(BudgetPolicy::Unmetered);
+        e
+    }
+
+    /// Replaces the work budget. The policy is a REQUIRED argument with no
+    /// default — see `BudgetPolicy`.
+    pub fn set_budget_policy(&mut self, policy: BudgetPolicy) {
+        let cancel = self.budget.cancel_token().cloned();
+        self.budget = EvalBudget::from_policy(policy);
+        if let Some(t) = cancel {
+            self.budget.set_cancel_token(t);
         }
+    }
+
+    /// Attaches the host's cancellation token. Checked on the SAME amortized
+    /// boundary as the fuel counter, so cancellation costs nothing extra.
+    pub fn set_cancel_token(&mut self, token: CancelToken) {
+        self.budget.set_cancel_token(token);
+    }
+
+    /// Arms a WALL-CLOCK deadline for this evaluator.
+    ///
+    /// ONLY legitimate on a host service boundary whose result is returned over
+    /// IPC and never persisted into a cell (`api.evaluate` and siblings).
+    /// Arming it on a path that writes a cell would make workbook CONTENT
+    /// depend on machine speed. See `EvalBudget::set_deadline`.
+    pub fn set_deadline(&mut self, at: std::time::Instant) {
+        self.budget.set_deadline(at);
+    }
+
+    /// Read-only view of the meter. The host uses `total_consumed()` to enforce
+    /// the per-CALL `BATCH_FUEL` ceiling across a caller-supplied expression
+    /// list, and `trip_reason()` to tell an exhausted formula from a cancelled
+    /// pass.
+    pub fn budget(&self) -> &EvalBudget {
+        &self.budget
     }
 
     /// Sets the style registry reference for GET.CELL.FILLCOLOR.
@@ -623,7 +729,47 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Evaluates an AST expression and returns the result.
+    ///
+    /// This is BOTH the public entry point and the recursive workhorse (~800
+    /// internal call sites), which is why the budget is armed here rather than
+    /// reset here: `arm_if_idle` returns true only for the outermost frame, so
+    /// the ceiling is per top-level formula and a recursive call is a single
+    /// predicted branch. Every internal `self.evaluate(...)` stays exactly as
+    /// it was; the old body moved verbatim into `eval_node`.
     pub fn evaluate(&self, expr: &Expression) -> EvalResult {
+        if self.budget.arm_if_idle() {
+            let result = self.eval_charged(expr);
+            // THE STICKY OVERRIDE, and it is not optional. Aggregates skip
+            // error elements, IFERROR swallows them, TEXTJOIN drops them — any
+            // of which would let a runaway formula return a plausible-looking
+            // number after the engine had already given up on it. Asking the
+            // budget directly at the top frame makes the outcome immune to
+            // whatever the intermediate builtins did, in ONE place instead of
+            // several hundred.
+            let result = if self.budget.tripped() {
+                EvalResult::Error(CellError::Limit)
+            } else {
+                result
+            };
+            self.budget.disarm();
+            result
+        } else {
+            self.eval_charged(expr)
+        }
+    }
+
+    /// Charges one node and dispatches. Split from `evaluate` so the arm check
+    /// happens once per formula and the charge happens once per node.
+    #[inline]
+    fn eval_charged(&self, expr: &Expression) -> EvalResult {
+        if self.budget.charge(1).is_err() {
+            return EvalResult::Error(CellError::Limit);
+        }
+        self.eval_node(expr)
+    }
+
+    /// The AST dispatch itself (the historical body of `evaluate`).
+    fn eval_node(&self, expr: &Expression) -> EvalResult {
         match expr {
             Expression::Literal(value) => self.eval_literal(value),
             Expression::CellRef { sheet, col, row, .. } => self.eval_cell_ref(sheet, col, *row),
@@ -833,7 +979,13 @@ impl<'a> Evaluator<'a> {
         // one pass over the sparse cell map beats a hash probe per coordinate.
         // Output is positionally identical either way: row-major, absent cells
         // materialize as Number(0.0), same conversions.
-        let area = num_rows as u64 * num_cols as u64;
+        let area = (num_rows as u64).saturating_mul(num_cols as u64);
+        // BULK PRE-CHARGE, BEFORE the allocation. `A1:XFD1048576` is 1.7e10
+        // cells; the dense branch below would try to reserve that many
+        // `EvalResult`s and abort the process before any counter could fire.
+        // Charging the area first makes an over-budget rectangle fail in
+        // microseconds, and costs the legitimate case one single add.
+        charge!(self, area);
         let flat: Vec<EvalResult> = if area <= grid.cells.len() as u64 {
             let mut flat = Vec::with_capacity(area as usize);
             for r in min_row..=max_row {
@@ -904,9 +1056,15 @@ impl<'a> Evaluator<'a> {
         //     where a 0..=max_row walk would be a needless O(max_row) cliff.
         // The multi-column branch below still sorts column-major then row-major
         // (that order IS consumed positionally and must be preserved).
+        // BULK PRE-CHARGE, per branch rather than once up front, because the
+        // branches differ by orders of magnitude: charging the populated-cell
+        // count for the DENSE walk would bill `SUM(A:A)` for the whole
+        // workbook when it only probes one column's worth of rows. (The `+1`
+        // keeps a reference into an empty grid from being free.)
         if min_col == max_col {
             if (grid.max_row as usize) <= grid.cells.len() {
                 // Dense enough: the walk costs <= populated-cell count probes.
+                charge!(self, (grid.max_row as u64).saturating_add(1));
                 let mut values = Vec::new();
                 for row in 0..=grid.max_row {
                     if let Some(cell) = grid.get_cell(row, min_col) {
@@ -917,6 +1075,7 @@ impl<'a> Evaluator<'a> {
             }
             // Sparse/tall: iterate only the populated cells of this column + sort
             // by row, avoiding the O(max_row) walk.
+            charge!(self, (grid.cells.len() as u64).saturating_add(1));
             let mut col_cells: Vec<(u32, &crate::cell::Cell)> = grid
                 .cells
                 .iter()
@@ -938,6 +1097,7 @@ impl<'a> Evaluator<'a> {
 
         // OPTIMIZED: Collect cells from the HashMap that fall within the column range
         // This avoids iterating over potentially thousands of empty rows
+        charge!(self, (grid.cells.len() as u64).saturating_add(1));
         let mut cell_list: Vec<(u32, u32, &crate::cell::Cell)> = grid
             .cells
             .iter()
@@ -978,6 +1138,9 @@ impl<'a> Evaluator<'a> {
 
         let min_row = start_row_idx.min(end_row_idx);
         let max_row = start_row_idx.max(end_row_idx);
+
+        // BULK PRE-CHARGE: one scan of the populated cell map, then a sort.
+        charge!(self, (grid.cells.len() as u64).saturating_add(1));
 
         // OPTIMIZED: Collect cells from the HashMap that fall within the row range
         let mut cell_list: Vec<(u32, u32, &crate::cell::Cell)> = grid
@@ -1163,24 +1326,36 @@ impl<'a> Evaluator<'a> {
         // Collect values from each sheet by evaluating the inner reference
         // against that sheet's grid using a temporary single-sheet evaluator.
         //
-        // THE NESTED EVALUATOR INHERITS THE LAMBDA DEPTH. This is the one place
-        // in the engine where evaluation continues inside a FRESH `Evaluator`,
-        // and a fresh one starts at depth 0 — i.e. it would hand back a full
-        // MAX_LAMBDA_DEPTH budget while the outer evaluator's Rust frames are
-        // still on the stack. Today the parser only ever puts a bare reference
-        // in `reference` (`parse_reference_only`), so no lambda can currently
-        // recurse through here; carrying the depth across anyway means the
-        // ceiling stays a ceiling if that ever changes, instead of the guard
-        // quietly becoming per-evaluator.
+        // THE NESTED EVALUATOR INHERITS THE LAMBDA DEPTH **AND THE WORK
+        // BUDGET**. This is the one place in the engine where evaluation
+        // continues inside a FRESH `Evaluator`, and a fresh one starts at depth
+        // 0 with a full, freshly-armed fuel allowance — i.e. a 3D reference
+        // across 50 sheets would hand out 50 complete budgets (and 50 complete
+        // recursion ceilings) while the outer evaluator's Rust frames are still
+        // on the stack. Today the parser only ever puts a bare reference in
+        // `reference` (`parse_reference_only`), so no lambda can currently
+        // recurse through here; carrying both counters across anyway means the
+        // ceilings stay ceilings if that ever changes, instead of quietly
+        // becoming per-evaluator.
+        //
+        // `adopt` copies the live meter in (including the armed flag, so the
+        // nested `evaluate` does NOT re-arm and reset it); `absorb` folds the
+        // consumption back out. The nested call is synchronous and nothing else
+        // touches `self.budget` meanwhile, so the copy in/out is exact.
         let mut all_values = Vec::new();
         for sheet_name in &sheets {
             if let Some(grid) = ctx.get_grid(sheet_name) {
-                let sheet_eval = Evaluator::new(grid);
+                let mut sheet_eval = Evaluator::new(grid);
                 sheet_eval.lambda_depth.set(self.lambda_depth.get());
+                sheet_eval.budget.adopt(&self.budget);
                 let result = sheet_eval.evaluate(reference);
+                self.budget.absorb(&sheet_eval.budget);
                 match result {
                     EvalResult::Array(vals) => all_values.extend(vals),
                     other => all_values.push(other),
+                }
+                if self.budget.tripped() {
+                    return EvalResult::Error(CellError::Limit);
                 }
             }
         }
@@ -1273,7 +1448,33 @@ impl<'a> Evaluator<'a> {
     fn eval_concat(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         let left_str = left.as_text();
         let right_str = right.as_text();
-        EvalResult::Text(format!("{}{}", left_str, right_str))
+        // A SIZE CAP, on the axis the fuel counter cannot see.
+        //
+        // Fuel bounds how much WORK a formula does. It does not bound how much
+        // MEMORY the formula's intermediate values occupy, and `&` decouples the
+        // two completely: doubling a string is one AST node and exactly one
+        // charge however long the string is. `=LET(a,REPT("x",1024), b,a&a,
+        // c,b&b, ... )` with thirty bindings is ~90 charges against an allowance
+        // of 64,000,000 — six orders of magnitude short of noticing — and one
+        // terabyte of allocation. The process is gone before any charge could be
+        // examined, so no counter and no deadline can save it; only a check
+        // BEFORE the allocation can.
+        //
+        // `REPT` and `BASE` already had this guard because they take a length as
+        // an ARGUMENT. `&` takes no length argument at all, which is exactly why
+        // it was missed and exactly why it is the dangerous one: it is the only
+        // string builder in the language a user can nest.
+        let total = (left_str.len() as u64).saturating_add(right_str.len() as u64);
+        if total > MAX_TEXT_LEN as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        // Charged as well as capped, so that a formula which stays UNDER the cap
+        // but concatenates in a long loop still pays for the bytes it moves.
+        charge_arith!(self, total);
+        let mut out = String::with_capacity(total as usize);
+        out.push_str(&left_str);
+        out.push_str(&right_str);
+        EvalResult::Text(out)
     }
 
     fn eval_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
@@ -2748,6 +2949,10 @@ impl<'a> Evaluator<'a> {
         EvalResult::Text(trimmed)
     }
 
+    /// CONCATENATE / CONCAT. Same accumulator hazard as the `&` operator
+    /// reached by a different spelling, so the same cap applies — checked as the
+    /// buffer grows rather than once at the end, because "once at the end" is
+    /// after the allocation that would have killed the process.
     fn fn_concatenate(&self, args: &[Expression]) -> EvalResult {
         let mut result = String::new();
 
@@ -2756,7 +2961,12 @@ impl<'a> Evaluator<'a> {
             if let EvalResult::Error(e) = val {
                 return EvalResult::Error(e);
             }
-            result.push_str(&val.as_text());
+            let part = val.as_text();
+            if (result.len() as u64).saturating_add(part.len() as u64) > MAX_TEXT_LEN as u64 {
+                return EvalResult::Error(CellError::Limit);
+            }
+            charge_arith!(self, part.len() as u64);
+            result.push_str(&part);
         }
 
         EvalResult::Text(result)
@@ -2842,6 +3052,15 @@ impl<'a> Evaluator<'a> {
             None => return EvalResult::Error(CellError::Value),
         };
 
+        // A SIZE CAP, not a counter: `text.repeat(times)` is ONE allocation
+        // with no loop for any budget to interrupt, so REPT("x", 1e12) aborts
+        // the process before the first charge could ever be examined. Checked
+        // before allocating.
+        let bytes = (text.len() as u64).saturating_mul(times as u64);
+        if bytes > MAX_TEXT_LEN as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, bytes);
         EvalResult::Text(text.repeat(times))
     }
 
@@ -3421,6 +3640,18 @@ impl<'a> Evaluator<'a> {
         self.xlookup_wildcard_match_recursive(&pat_chars, 0, &text_chars, 0)
     }
 
+    /// CHARGED PER CALL, because this matcher BACKTRACKS: the `*` arm below
+    /// retries the remainder of the pattern at every suffix, so a pattern like
+    /// `"*a*a*a*a*a*a*a*b"` against a long non-matching string is exponential
+    /// in the number of stars — the classic catastrophic-backtracking bomb, and
+    /// one that a COUNTIF over a million rows re-runs a million times.
+    /// Pre-charging the caller cannot bound it (the cost is not a function of
+    /// the lengths), so the charge has to be here, on every step.
+    ///
+    /// On exhaustion it returns `false` rather than an error, because it
+    /// returns `bool`: the sticky trip recorded on the budget turns the whole
+    /// formula into `#LIMIT!` at the top frame, so the bogus `false` can never
+    /// reach a cell.
     fn xlookup_wildcard_match_recursive(
         &self,
         pattern: &[char],
@@ -3428,6 +3659,9 @@ impl<'a> Evaluator<'a> {
         text: &[char],
         ti: usize,
     ) -> bool {
+        if self.budget.charge_arith(1).is_err() {
+            return false;
+        }
         if pi == pattern.len() {
             return ti == text.len();
         }
@@ -4096,6 +4330,10 @@ impl<'a> Evaluator<'a> {
         if arrays.iter().any(|a| a.len() != len) {
             return EvalResult::Error(CellError::Value);
         }
+        // The materializers above charged each array's length; the nested loop
+        // below is len x arrays.len() and re-enters `evaluate` zero times, so
+        // it is charged here or nowhere.
+        charge_arith!(self, (len as u64).saturating_mul(arrays.len() as u64));
         let mut total = 0.0;
         for i in 0..len {
             let mut product = 1.0;
@@ -4112,6 +4350,7 @@ impl<'a> Evaluator<'a> {
         let xs = self.eval_flat(&args[0]);
         let ys = self.eval_flat(&args[1]);
         if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        charge_arith!(self, xs.len() as u64);
         let mut total = 0.0;
         for i in 0..xs.len() {
             let x = xs[i].as_number().unwrap_or(0.0);
@@ -4126,6 +4365,7 @@ impl<'a> Evaluator<'a> {
         let xs = self.eval_flat(&args[0]);
         let ys = self.eval_flat(&args[1]);
         if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        charge_arith!(self, xs.len() as u64);
         let mut total = 0.0;
         for i in 0..xs.len() {
             let x = xs[i].as_number().unwrap_or(0.0);
@@ -4140,6 +4380,7 @@ impl<'a> Evaluator<'a> {
         let xs = self.eval_flat(&args[0]);
         let ys = self.eval_flat(&args[1]);
         if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        charge_arith!(self, xs.len() as u64);
         let mut total = 0.0;
         for i in 0..xs.len() {
             let x = xs[i].as_number().unwrap_or(0.0);
@@ -4347,7 +4588,9 @@ impl<'a> Evaluator<'a> {
         let n = match self.evaluate(&args[0]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
         let k = match self.evaluate(&args[1]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
         if k > n { return EvalResult::Error(CellError::Value); }
+        // k is derived from arguments: COMBIN(1e18, 5e17) loops 5e17 times.
         let k = k.min(n - k);
+        charge_arith!(self, k);
         let mut result = 1u64;
         for i in 0..k { result = result * (n - i) / (i + 1); }
         EvalResult::Number(result as f64)
@@ -4358,6 +4601,10 @@ impl<'a> Evaluator<'a> {
         match self.evaluate(&args[0]).as_number() {
             Some(n) if n >= 0.0 => {
                 let n = n as u64;
+                // The loop runs `n` times on a number the user typed;
+                // FACT(1e18) saturates its result in the first few iterations
+                // and then spins for centuries.
+                charge_arith!(self, n);
                 let mut result = 1u64;
                 for i in 2..=n { result = result.saturating_mul(i); }
                 EvalResult::Number(result as f64)
@@ -4610,6 +4857,8 @@ impl<'a> Evaluator<'a> {
             }
         }
         let total: u64 = nums.iter().sum();
+        // Both factorial loops are bounded only by the arguments' sum.
+        charge_arith!(self, total.saturating_mul(2));
         let mut numerator = 1u64;
         for i in 2..=total { numerator = numerator.saturating_mul(i); }
         let mut denominator = 1u64;
@@ -4628,6 +4877,7 @@ impl<'a> Evaluator<'a> {
         if n == 0 && k == 0 { return EvalResult::Number(1.0); }
         let nn = n + k - 1;
         let kk = k.min(nn - k);
+        charge_arith!(self, kk);
         let mut result = 1u64;
         for i in 0..kk { result = result * (nn - i) / (i + 1); }
         EvalResult::Number(result as f64)
@@ -4639,6 +4889,7 @@ impl<'a> Evaluator<'a> {
             Some(n) if n >= -1.0 => {
                 let n = n as i64;
                 if n <= 0 { return EvalResult::Number(1.0); }
+                charge_arith!(self, (n as u64) / 2);
                 let mut result = 1u64;
                 let mut i = n as u64;
                 while i > 1 {
@@ -5052,6 +5303,10 @@ impl<'a> Evaluator<'a> {
         let old_text = self.evaluate(&args[1]).as_text();
         let new_text = self.evaluate(&args[2]).as_text();
         if old_text.is_empty() { return EvalResult::Text(text); }
+        // Both branches scan the whole subject string (the `find` loop below,
+        // and `str::replace` in the else branch). The subject can be arbitrarily
+        // long — REPT builds megabytes — and neither loop re-enters `evaluate`.
+        charge_arith!(self, text.len() as u64);
         if args.len() == 4 {
             let instance = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
             let mut count = 0usize;
@@ -5279,6 +5534,13 @@ impl<'a> Evaluator<'a> {
         let holidays: Vec<i64> = if args.len() == 3 {
             self.eval_flat(&args[2]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
         } else { vec![] };
+        // date_serial::networkdays walks ONE ITERATION PER DAY (with a linear
+        // `holidays.contains` inside), so the span is the real work — and both
+        // endpoints are arguments: NETWORKDAYS(1, 1e15) never returns.
+        charge_arith!(
+            self,
+            end.saturating_sub(start).unsigned_abs().saturating_mul(holidays.len() as u64 + 1)
+        );
         EvalResult::Number(date_serial::networkdays(start, end, &holidays) as f64)
     }
 
@@ -5289,6 +5551,11 @@ impl<'a> Evaluator<'a> {
         let holidays: Vec<i64> = if args.len() == 3 {
             self.eval_flat(&args[2]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
         } else { vec![] };
+        // Same per-day walk, bounded by the `days` argument.
+        charge_arith!(
+            self,
+            days.unsigned_abs().saturating_mul(holidays.len() as u64 + 1)
+        );
         EvalResult::Number(date_serial::workday(start, days, &holidays) as f64)
     }
 
@@ -5666,6 +5933,13 @@ impl<'a> Evaluator<'a> {
         // For single cell (no height/width), return the cell value
         let height = if args.len() >= 4 { match self.evaluate(&args[3]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
         let width = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
+        // height/width come from arguments, and the walk below probes the grid
+        // once per cell: OFFSET(A1,0,0,1e6,1e4) is 1e10 probes.
+        let cells = (height as u64).saturating_mul(width as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
         if height == 1 && width == 1 {
             match self.grid.get_cell(new_row as u32, new_col as u32) {
                 Some(cell) => self.cell_value_to_result(&cell.value),
@@ -5889,6 +6163,8 @@ impl<'a> Evaluator<'a> {
         let data = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         let mut bins = match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
         bins.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Linear bin search per data point: data x bins.
+        charge_arith!(self, (data.len() as u64).saturating_mul(bins.len() as u64 + 1));
         let mut counts = vec![0.0; bins.len() + 1];
         for &val in &data {
             let mut placed = false;
@@ -6181,8 +6457,15 @@ impl<'a> Evaluator<'a> {
         // here needs no unwinding.
         let entry_depth = self.lambda_depth.get();
         if entry_depth >= MAX_LAMBDA_DEPTH {
-            return EvalResult::Error(CellError::Value);
+            return EvalResult::Error(CellError::Limit);
         }
+        // COST, alongside DEPTH. An invocation costs materially more than an
+        // ordinary node (scope save/restore + captured-binding clones), and
+        // charging it HERE — the single choke point every lambda call funnels
+        // through — is what bounds the shallow-but-exponential case that the
+        // depth counter above is blind to. `fib(35)` is 29.8M invocations
+        // deep-3; only the fuel sees it.
+        charge!(self, LAMBDA_CALL_FUEL as u64);
         self.lambda_depth.set(entry_depth + 1);
 
         // Collect all keys we need to save/restore: captured keys + param keys
@@ -6413,6 +6696,17 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
+        // The per-axis guards above cap rows at 1,048,576 and cols at 16,384
+        // INDEPENDENTLY, so their product is 1.7e10 lambda invocations. Cap the
+        // product, then charge it: the loop below re-enters `evaluate` once per
+        // element, so the fuel would catch it eventually — but only after the
+        // Vec::with_capacity(rows) had already been attempted.
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+
         if cols == 1 {
             // Single column → flat array
             let mut results = Vec::with_capacity(rows);
@@ -6542,12 +6836,23 @@ impl<'a> Evaluator<'a> {
             self.textjoin_collect(arg, ignore_empty, &mut parts);
         }
 
-        let result = parts.join(&delimiter);
-        // Excel returns #VALUE! if result exceeds 32767 characters
-        if result.len() > 32767 {
+        // Excel returns #VALUE! if the result exceeds 32,767 characters. Compute
+        // the joined length BEFORE joining: `parts.join()` is a single
+        // allocation, so checking its output length afterwards means the
+        // allocation this guard exists to prevent has already happened. The
+        // parts themselves were charged as they were collected; this is the
+        // size axis, which fuel cannot see.
+        let joined_len = parts
+            .iter()
+            .map(|p| p.len() as u64)
+            .fold(0u64, |a, b| a.saturating_add(b))
+            .saturating_add(
+                (delimiter.len() as u64).saturating_mul(parts.len().saturating_sub(1) as u64),
+            );
+        if joined_len > 32_767 {
             return EvalResult::Error(CellError::Value);
         }
-        EvalResult::Text(result)
+        EvalResult::Text(parts.join(&delimiter))
     }
 
     /// Helper for TEXTJOIN: collects string parts from an expression,
@@ -6688,6 +6993,13 @@ impl<'a> Evaluator<'a> {
             false // sort by row (default)
         };
 
+        // The materializer charged rows*cols; the sort adds a log factor with
+        // a String-allocating comparator on top, and never re-enters `evaluate`.
+        charge!(
+            self,
+            nlogn_units(rows.max(cols) as u64).saturating_mul(rows.min(cols) as u64)
+        );
+
         if !by_col {
             // Sort rows by column sort_index
             if sort_index < 1 || sort_index > cols {
@@ -6815,6 +7127,12 @@ impl<'a> Evaluator<'a> {
             };
             sort_keys.push((by_vals, order));
         }
+
+        // Comparison count x key count, with a String-allocating comparator.
+        charge!(
+            self,
+            nlogn_units(rows as u64).saturating_mul(sort_keys.len() as u64)
+        );
 
         // Build row vectors
         let mut row_vecs: Vec<(usize, Vec<EvalResult>)> = (0..rows)
@@ -6999,6 +7317,14 @@ impl<'a> Evaluator<'a> {
             1.0
         };
 
+        // `seq_rows`/`seq_cols` are unbounded `usize` straight off the
+        // arguments — SEQUENCE(1e9, 1e9) is 1e18 elements.
+        let cells = (seq_rows as u64).saturating_mul(seq_cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+
         // Single cell result
         if seq_rows == 1 && seq_cols == 1 {
             return EvalResult::Number(start);
@@ -7081,6 +7407,13 @@ impl<'a> Evaluator<'a> {
         if min_val > max_val {
             return EvalResult::Error(CellError::Value);
         }
+
+        // Unbounded `usize` dimensions off the arguments, same as SEQUENCE.
+        let cells = (ra_rows as u64).saturating_mul(ra_cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
 
         // Use RandomState for random generation (same approach as RAND)
         use std::collections::hash_map::RandomState;
@@ -8285,6 +8618,16 @@ impl<'a> Evaluator<'a> {
                     let r_end = sr_idx.max(er_idx);
                     let c_start = sc_idx.min(ec_idx);
                     let c_end = sc_idx.max(ec_idx);
+                    // THIS WALKS THE RECT ITSELF instead of going through the
+                    // (charged) materializer, so `TEXTJOIN(",",TRUE,A1:XFD1048576)`
+                    // would otherwise be an uncharged 1.7e10-cell walk. Returns
+                    // early on exhaustion; `parts` is then discarded because the
+                    // sticky trip makes the formula `#LIMIT!`.
+                    let area = ((r_end - r_start) as u64 + 1)
+                        .saturating_mul((c_end - c_start) as u64 + 1);
+                    if self.budget.charge(fuel_units(area)).is_err() {
+                        return;
+                    }
                     for r in r_start..=r_end {
                         for c in c_start..=c_end {
                             match self.grid.get_cell(r, c) {
@@ -8299,7 +8642,8 @@ impl<'a> Evaluator<'a> {
                                     }
                                     CellValue::Number(n) => parts.push(format!("{}", n)),
                                     CellValue::Boolean(b) => parts.push(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
-                                    CellValue::Error(e) => parts.push(format!("{:?}", e)),
+                                    // The canonical literal — see EvalResult::as_text.
+                                    CellValue::Error(e) => parts.push(e.as_literal().to_string()),
                                     CellValue::List(items) => parts.push(format!("[List({})]", items.len())),
                                     CellValue::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
                                 },
@@ -8514,6 +8858,11 @@ impl<'a> Evaluator<'a> {
         let holidays: Vec<i64> = if args.len() == 4 {
             self.eval_flat(&args[3]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
         } else { vec![] };
+        // Per-day walk, same as NETWORKDAYS.
+        charge_arith!(
+            self,
+            end.saturating_sub(start).unsigned_abs().saturating_mul(holidays.len() as u64 + 1)
+        );
         EvalResult::Number(date_serial::networkdays_intl(start, end, &weekend_days, &holidays) as f64)
     }
 
@@ -8534,6 +8883,11 @@ impl<'a> Evaluator<'a> {
         let holidays: Vec<i64> = if args.len() == 4 {
             self.eval_flat(&args[3]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
         } else { vec![] };
+        // Per-day walk, same as WORKDAY.
+        charge_arith!(
+            self,
+            days.unsigned_abs().saturating_mul(holidays.len() as u64 + 1)
+        );
         EvalResult::Number(date_serial::workday_intl(start, days, &weekend_days, &holidays) as f64)
     }
 
@@ -10928,6 +11282,8 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
         let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        // The order recurrence below runs `n` times; `n` is an argument.
+        charge_arith!(self, n as u64);
         EvalResult::Number(bessel_k(x, n))
     }
 
@@ -10935,6 +11291,8 @@ impl<'a> Evaluator<'a> {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
         let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
         let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        // The order recurrence below runs `n` times; `n` is an argument.
+        charge_arith!(self, n as u64);
         EvalResult::Number(bessel_y(x, n))
     }
 
@@ -11010,6 +11368,19 @@ impl<'a> Evaluator<'a> {
         let b_rows = b.len();
         if b_rows == 0 || a_cols != b_rows { return EvalResult::Error(CellError::Value); }
         let b_cols = b[0].len();
+        // PRE-CHARGE THE WHOLE PRODUCT. This triple loop is the single
+        // most superlinear thing in the language: two 2000x2000 ranges are
+        // 8e9 multiply-adds and exactly ZERO re-entries into `evaluate`, so
+        // a node counter would never see it. Charging a*k*b up front makes
+        // an over-budget MMULT fail in microseconds instead of grinding
+        // through the whole thing and only then giving up.
+        charge_arith!(
+            self,
+            (a_rows as u64).saturating_mul(a_cols as u64).saturating_mul(b_cols as u64)
+        );
+        if (a_rows as u64).saturating_mul(b_cols as u64) > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
         let mut result = Vec::new();
         for i in 0..a_rows {
             for j in 0..b_cols {
@@ -11029,6 +11400,8 @@ impl<'a> Evaluator<'a> {
         let m = self.eval_as_matrix(&args[0]);
         let n = m.len();
         if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
+        // Gaussian elimination is O(n^3) over a materialized matrix.
+        charge_arith!(self, (n as u64).saturating_mul(n as u64).saturating_mul(n as u64));
         EvalResult::Number(matrix_determinant(&m))
     }
 
@@ -11037,6 +11410,8 @@ impl<'a> Evaluator<'a> {
         let m = self.eval_as_matrix(&args[0]);
         let n = m.len();
         if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
+        // Gauss-Jordan over an n x 2n augmented matrix: O(n^3).
+        charge_arith!(self, (n as u64).saturating_mul(n as u64).saturating_mul(2u64 * n as u64));
         match matrix_inverse(&m) {
             Some(inv) => {
                 let mut result = Vec::new();
@@ -11054,6 +11429,10 @@ impl<'a> Evaluator<'a> {
     fn fn_munit(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 1.0 => v.floor() as usize, _ => return EvalResult::Error(CellError::Value) };
+        // `n` comes straight from an argument: MUNIT(1e6) is 1e12 cells.
+        let cells = (n as u64).saturating_mul(n as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 { return EvalResult::Error(CellError::Limit); }
+        charge!(self, cells);
         let mut result = Vec::new();
         for i in 0..n {
             for j in 0..n {
@@ -11160,6 +11539,13 @@ impl<'a> Evaluator<'a> {
                 // Wildcard match
                 for &i in &indices {
                     let val_text = lookup_array[i].as_text();
+                    // `wildcard_match` allocates and fills a (p+1)x(t+1) bool
+                    // grid PER ELEMENT; the materializer only charged for the
+                    // array's length, not for this factor.
+                    charge_arith!(
+                        self,
+                        (lookup_text.len() as u64 + 1).saturating_mul(val_text.len() as u64 + 1)
+                    );
                     if wildcard_match(&lookup_text, &val_text) {
                         return EvalResult::Number((i + 1) as f64);
                     }
@@ -11266,6 +11652,12 @@ impl<'a> Evaluator<'a> {
         let source_cols = if source.is_empty() { 0 } else { source[0].len() };
         let target_cols = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => source_cols } } else { source_cols };
         let pad = if args.len() == 4 { self.evaluate(&args[3]) } else { EvalResult::Error(CellError::NA) };
+        // Target dimensions come from arguments, not from the source array.
+        let cells = (target_rows as u64).saturating_mul(target_cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
         let mut result: Vec<EvalResult> = Vec::new();
         for r in 0..target_rows {
             let mut row: Vec<EvalResult> = Vec::new();
@@ -11367,7 +11759,14 @@ impl<'a> Evaluator<'a> {
         let flat = self.eval_flat(&args[0]);
         let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
         let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
+        // wrap_count is an argument: WRAPCOLS(A1:A2, 1e9) builds 1e9 rows of
+        // padding out of a two-element vector.
         let num_cols = (flat.len() + wrap_count - 1) / wrap_count;
+        let cells = (wrap_count as u64).saturating_mul(num_cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
         let mut result: Vec<EvalResult> = Vec::new();
         for r in 0..wrap_count {
             let mut row: Vec<EvalResult> = Vec::new();
@@ -11390,6 +11789,14 @@ impl<'a> Evaluator<'a> {
         let flat = self.eval_flat(&args[0]);
         let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
         let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
+        // Same argument-driven padding hazard as WRAPCOLS: each output row is
+        // wrap_count wide regardless of how short the input is.
+        let num_rows = (flat.len() + wrap_count - 1) / wrap_count;
+        let cells = (wrap_count as u64).saturating_mul(num_rows.max(1) as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
         let mut result: Vec<EvalResult> = Vec::new();
         let mut i = 0;
         while i < flat.len() {
@@ -12043,6 +12450,15 @@ impl<'a> Evaluator<'a> {
         if let Some((min_row, max_row, min_col, max_col, rows, cols)) =
             self.literal_range_rect(expr)
         {
+            // BUDGET ELIGIBILITY: an index build over an absurd literal rect
+            // (`A1:XFD1048576`) would allocate before any counter could fire,
+            // and unlike the ordinary materializer it happens inside a
+            // memoized cache closure where a refusal cannot be reported.
+            // Declining the fast path here sends the caller down the legacy
+            // scan, which pre-charges the area and returns `#LIMIT!` properly.
+            if (rows as u64).saturating_mul(cols as u64) > MAX_ARRAY_ELEMENTS as u64 {
+                return None;
+            }
             let rect = lookup_cache::Rect { min_row, max_row, min_col, max_col };
             let axis = if cols == 1 {
                 lookup_cache::Axis::RectCol(min_col)
@@ -12103,6 +12519,29 @@ impl<'a> Evaluator<'a> {
         rect: &lookup_cache::Rect,
         axis: lookup_cache::Axis,
     ) -> Vec<EvalResult> {
+        // THE INDEX BUILD IS CHARGED, not just the probe. The PERF-14 fast
+        // paths skip the ordinary materializer, so without this the FIRST
+        // `COUNTIF` over a 1M-row range would be free and only the (cached,
+        // cheap) later probes would pay — and this runs inside the cache's
+        // build closure, so it is charged exactly ONCE per pass per index, not
+        // once per call. That is the point: 10k COUNTIFs over the same column
+        // must keep paying nothing after the first.
+        //
+        // The charge is RECORDED but never short-circuits: this closure's
+        // result is memoized in the pass cache, so returning a truncated vector
+        // would poison the index for every LATER formula in the same pass. The
+        // sticky trip at the top frame turns the recorded exhaustion into
+        // `#LIMIT!` for the current formula; the work done here is bounded
+        // either by the populated-cell count or by MAX_ARRAY_ELEMENTS (see the
+        // eligibility check in `literal_vector_desc`), so proceeding is safe.
+        let bound = match axis {
+            lookup_cache::Axis::RectCol(_) => (rect.max_row - rect.min_row + 1) as u64,
+            lookup_cache::Axis::RectRow(_) => (rect.max_col - rect.min_col + 1) as u64,
+            lookup_cache::Axis::RectFlat => ((rect.max_row - rect.min_row + 1) as u64)
+                .saturating_mul((rect.max_col - rect.min_col + 1) as u64),
+            lookup_cache::Axis::WholeCol(_) => (grid.cells.len() as u64).saturating_add(1),
+        };
+        let _ = self.budget.charge(fuel_units(bound));
         let fetch = |r: u32, c: u32| match grid.get_cell(r, c) {
             Some(cell) => self.cell_value_to_result(&cell.value),
             None => EvalResult::Number(0.0),
@@ -12908,6 +13347,13 @@ impl<'a> Evaluator<'a> {
             result = result.chars().rev().collect();
         }
 
+        // `min_length` is an argument and `insert(0, _)` shifts the whole
+        // string every iteration, so this is O(min_length^2) on a number the
+        // user typed. Cap it before the first shift.
+        if min_length as u64 > MAX_TEXT_LEN as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, min_length as u64);
         while result.len() < min_length {
             result.insert(0, '0');
         }
@@ -13128,6 +13574,10 @@ impl<'a> Evaluator<'a> {
                     CellError::Ref => 4,
                     CellError::Name => 5,
                     CellError::NA => 7,
+                    // Excel has no #LIMIT!; the failure it reports for a
+                    // runaway LAMBDA recursion is #NUM!, whose ERROR.TYPE code
+                    // is 6. That is the closest true statement available.
+                    CellError::Limit => 6,
                     _ => 3, // Default to #VALUE! type for other errors
                 };
                 EvalResult::Number(type_num as f64)
@@ -17266,7 +17716,7 @@ mod lambda_recursion_depth_tests {
     fn recursion_at_the_ceiling_returns_an_error() {
         assert_eq!(
             eval(&countdown(MAX_LAMBDA_DEPTH)),
-            EvalResult::Error(CellError::Value),
+            EvalResult::Error(CellError::Limit),
             "one level past the ceiling must be refused, not attempted"
         );
     }
@@ -17279,17 +17729,17 @@ mod lambda_recursion_depth_tests {
         // pass silently.
         assert_eq!(
             eval("=LET(F, LAMBDA(N, F(N)), F(1))"),
-            EvalResult::Error(CellError::Value)
+            EvalResult::Error(CellError::Limit)
         );
         // A base case that is never reachable (counts UP, away from it).
         assert_eq!(
             eval("=LET(F, LAMBDA(N, IF(N<=0, 0, F(N+1))), F(1))"),
-            EvalResult::Error(CellError::Value)
+            EvalResult::Error(CellError::Limit)
         );
         // A depth request far beyond anything a stack could serve.
         assert_eq!(
             eval(&countdown(1_000_000)),
-            EvalResult::Error(CellError::Value)
+            EvalResult::Error(CellError::Limit)
         );
     }
 
@@ -17315,7 +17765,7 @@ mod lambda_recursion_depth_tests {
         let eval = Evaluator::new(&grid);
 
         let over = parser::parse(&countdown(MAX_LAMBDA_DEPTH + 50)).unwrap();
-        assert_eq!(eval.evaluate(&over), EvalResult::Error(CellError::Value));
+        assert_eq!(eval.evaluate(&over), EvalResult::Error(CellError::Limit));
 
         let ok = parser::parse(&countdown(10)).unwrap();
         assert_eq!(eval.evaluate(&ok), EvalResult::Number(10.0));
@@ -17386,7 +17836,807 @@ mod lambda_recursion_depth_tests {
                 "=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), LAMBDA(K, F(K))({}))",
                 MAX_LAMBDA_DEPTH
             )),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+}
+
+
+/// THE WORK BUDGET AND CANCELLATION (core/engine/src/budget.rs), exercised
+/// through real formulas rather than through the counter alone.
+///
+/// EVERY assertion here is deterministic. Nothing sleeps, nothing measures
+/// elapsed time, and no test depends on machine speed — which is the whole
+/// reason the ceiling is denominated in fuel rather than in seconds. The soak
+/// and regression oracles compare recalc RESULTS across runs; a budget that
+/// fired on the clock would make those results a function of ambient load, so
+/// "deterministic" is a correctness property here, not tidiness.
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::budget::{BudgetPolicy, CancelToken, TripReason, DEFAULT_CELL_FUEL};
+    use crate::cell::Cell;
+
+    /// A naive doubly-recursive Fibonacci: SHALLOW (nesting is `n`, far inside
+    /// MAX_LAMBDA_DEPTH) but EXPONENTIAL (about 2^n invocations). The depth
+    /// guard is blind to it by construction; only the fuel sees it.
+    fn fib(n: u32) -> String {
+        format!("=LET(F, LAMBDA(N, IF(N<2, N, F(N-1)+F(N-2))), F({n}))")
+    }
+
+    /// Evaluate on an empty grid under an explicit fuel allowance.
+    fn eval_with_fuel(formula: &str, fuel: i64) -> EvalResult {
+        let grid = Grid::new();
+        let ast = parser::parse(formula).expect("formula parses");
+        let mut ev = Evaluator::new(&grid);
+        ev.set_budget_policy(BudgetPolicy::Metered(fuel));
+        ev.evaluate(&ast)
+    }
+
+    /// Evaluate on an empty grid under the REAL production allowance.
+    fn eval_default(formula: &str) -> EvalResult {
+        let grid = Grid::new();
+        let ast = parser::parse(formula).expect("formula parses");
+        Evaluator::new(&grid).evaluate(&ast)
+    }
+
+    // ---- The motivating case: exponential but shallow ----
+
+    #[test]
+    fn an_exponential_lambda_terminates_with_limit_instead_of_hanging() {
+        // fib(40) is ~2e8 invocations: minutes of wall clock and no way out.
+        // A small allowance keeps the TEST fast; the mechanism under test is
+        // identical at DEFAULT_CELL_FUEL (covered below).
+        assert_eq!(
+            eval_with_fuel(&fib(40), 200_000),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn the_exponential_lambda_trip_is_bit_for_bit_deterministic() {
+        // THE PROPERTY THE SOAK ORACLES DEPEND ON: the same formula stops at
+        // the same place every time, on every machine. A wall-clock budget
+        // could not assert this.
+        let grid = Grid::new();
+        let ast = parser::parse(&fib(40)).expect("formula parses");
+        let mut consumed = Vec::new();
+        for _ in 0..3 {
+            let mut ev = Evaluator::new(&grid);
+            ev.set_budget_policy(BudgetPolicy::Metered(200_000));
+            assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+            consumed.push(ev.budget().consumed());
+        }
+        assert_eq!(consumed[0], consumed[1]);
+        assert_eq!(consumed[1], consumed[2]);
+        // ...and it stopped essentially AT the allowance, not long after it:
+        // the overshoot is bounded by the largest single charge in flight.
+        assert!(
+            consumed[0] >= 200_000 && consumed[0] < 200_000 + crate::budget::POLL_INTERVAL,
+            "consumed {} is not a tight stop against a 200_000 allowance",
+            consumed[0]
+        );
+    }
+
+    /// THE HEADLINE CLAIM, AT THE PRODUCTION CONSTANT — and the calibration
+    /// measurement behind it. Do not replace this with a smaller budget: every
+    /// other trip test here uses a test-sized allowance, so this is the only
+    /// place `DEFAULT_CELL_FUEL` itself is exercised end to end.
+    ///
+    /// IT DELIBERATELY COSTS REAL TIME (~4 s in the test profile — engine at
+    /// opt-level 3 with debug-assertions and overflow-checks on; materially
+    /// faster under `--release`, which is what ships). That duration IS the
+    /// datum: it says the allowance corresponds to a few seconds of felt work,
+    /// which is the calibration the constant claims. If this test suddenly gets
+    /// fast, either the constant shrank or a charge stopped being levied.
+    #[test]
+    fn the_real_default_budget_also_stops_the_exponential_lambda() {
+        // fib(40) needs ~3e9 charges; DEFAULT_CELL_FUEL is 64e6, so it stops
+        // about 2% of the way in.
+        let grid = Grid::new();
+        let ast = parser::parse(&fib(40)).expect("formula parses");
+        let ev = Evaluator::new(&grid);
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        assert_eq!(ev.budget().trip_reason(), Some(TripReason::Fuel));
+        // It burned the WHOLE allowance and stopped tight against it, rather
+        // than tripping early on some unrelated guard.
+        let consumed = ev.budget().consumed();
+        assert!(
+            consumed >= DEFAULT_CELL_FUEL
+                && consumed < DEFAULT_CELL_FUEL + crate::budget::POLL_INTERVAL,
+            "consumed {consumed} against an allowance of {DEFAULT_CELL_FUEL}"
+        );
+    }
+
+    #[test]
+    fn a_legitimate_recursion_well_inside_the_budget_still_computes() {
+        // COLLATERAL DAMAGE IS THE REAL RISK of a budget, so this matters at
+        // least as much as the trip: fib(18) is ~8k invocations of genuine,
+        // wanted work and must come out exact.
+        assert_eq!(eval_default(&fib(18)), EvalResult::Number(2584.0));
+    }
+
+    #[test]
+    fn an_unmetered_evaluator_behaves_exactly_as_before_the_budget_existed() {
+        // The explicit opt-out. Same formula, same evaluator API, no ceiling:
+        // it must produce the ANSWER where the metered one produced #LIMIT!.
+        let grid = Grid::new();
+        let ast = parser::parse(&fib(18)).expect("formula parses");
+
+        assert_eq!(
+            eval_with_fuel(&fib(18), 500),
+            EvalResult::Error(CellError::Limit),
+            "500 units cannot possibly cover fib(18)"
+        );
+        assert_eq!(
+            Evaluator::unmetered(&grid).evaluate(&ast),
+            EvalResult::Number(2584.0)
+        );
+    }
+
+    #[test]
+    fn every_constructor_is_metered_unless_the_word_unmetered_appears() {
+        // The PinPolicy discipline: the SAFE state is the default and only the
+        // removal of protection has to be spelled out.
+        let grid = Grid::new();
+        let ctx = MultiSheetContext::new("Sheet1".to_string());
+        assert!(Evaluator::new(&grid).budget().is_metered());
+        assert!(Evaluator::with_multi_sheet(&grid, ctx).budget().is_metered());
+        let ctx2 = MultiSheetContext::new("Sheet1".to_string());
+        assert!(
+            Evaluator::with_context(&grid, ctx2, EvalContext::default())
+                .budget()
+                .is_metered()
+        );
+        assert!(!Evaluator::unmetered(&grid).budget().is_metered());
+    }
+
+    #[test]
+    fn no_constructor_arms_a_wall_clock_deadline() {
+        // Load-bearing: a clock on a cell path would make workbook CONTENT
+        // depend on machine speed. Only a host service boundary may arm one,
+        // and when it does, an ALREADY-ELAPSED Instant proves the wiring with
+        // no sleeping and no timing window.
+        let grid = Grid::new();
+        assert!(Evaluator::new(&grid).budget().trip_reason().is_none());
+        let mut ev = Evaluator::new(&grid);
+        ev.set_deadline(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .expect("an old Instant exists"),
+        );
+        let ast = parser::parse("=1+1").expect("parses");
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        assert_eq!(ev.budget().trip_reason(), Some(TripReason::Deadline));
+    }
+
+    // ---- Wide, not deep: builtins that iterate WITHOUT re-entering evaluate ----
+
+    #[test]
+    fn a_whole_grid_range_trips_before_it_can_allocate() {
+        // `A1:XFD1048576` is 1.7e10 cells. The materializer reserves that many
+        // EvalResults, which aborts the PROCESS — an abort no counter placed
+        // inside the loop could ever prevent. Pre-charging the area is what
+        // turns it into an error, and it happens in microseconds.
+        assert_eq!(
+            eval_default("=SUM(A1:XFD1048576)"),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn sumproduct_over_a_wide_range_is_charged_for_its_width() {
+        // Three AST nodes, a hundred thousand multiplications. THE case a node
+        // counter is blind to.
+        assert_eq!(
+            eval_with_fuel("=SUMPRODUCT(A1:A100000, B1:B100000)", 5_000),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn mmult_pre_charges_the_whole_product_instead_of_grinding_through_it() {
+        // Two 300x300 ranges are 2.7e7 multiply-adds and ZERO re-entries into
+        // `evaluate`. The pre-charge must refuse before the triple loop starts.
+        let mut grid = Grid::new();
+        for r in 0..300u32 {
+            for c in 0..300u32 {
+                grid.set_cell(r, c, Cell::new_number(1.0));
+            }
+        }
+        let ast = parser::parse("=MMULT(A1:KN300, A1:KN300)").expect("parses");
+        let mut ev = Evaluator::new(&grid);
+        ev.set_budget_policy(BudgetPolicy::Metered(200_000));
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+    }
+
+    #[test]
+    fn textjoin_over_a_whole_grid_rect_is_charged() {
+        // TEXTJOIN walks the range RECTANGLE itself instead of going through
+        // the materializer, so it needs its own charge or it is a free
+        // 1.7e10-cell walk.
+        assert_eq!(
+            eval_default("=TEXTJOIN(\",\", TRUE, A1:XFD1048576)"),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn a_wildcard_backtracking_bomb_terminates() {
+        // `xlookup_wildcard_match_recursive` BACKTRACKS: this pattern is
+        // exponential in the number of stars against a non-matching subject.
+        // Pre-charging the caller cannot bound it, so the charge is per step.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_text("a".repeat(40)));
+        let ast = parser::parse("=COUNTIF(A1:A1, \"*a*a*a*a*a*a*a*a*a*a*b\")").expect("parses");
+        let mut ev = Evaluator::new(&grid);
+        ev.set_budget_policy(BudgetPolicy::Metered(500_000));
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+    }
+
+    #[test]
+    fn a_calendar_walk_over_an_absurd_span_terminates() {
+        // NETWORKDAYS loops once per DAY, and both endpoints are arguments.
+        assert_eq!(
+            eval_default("=NETWORKDAYS(1, 100000000000)"),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn extreme_date_arguments_do_not_overflow_the_charge_itself() {
+        // The span charge is `end - start` on values that came from `f64 as
+        // i64`, which SATURATES: 1e300 becomes i64::MAX and -1e300 becomes
+        // i64::MIN, so a plain subtraction would panic under the debug
+        // overflow checks this suite runs with. The guard must not be the crash.
+        assert_eq!(
+            eval_default("=NETWORKDAYS(-POWER(10, 300), POWER(10, 300))"),
+            EvalResult::Error(CellError::Limit)
+        );
+        assert_eq!(
+            eval_default("=WORKDAY(1, POWER(10, 300))"),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    #[test]
+    fn a_whole_column_reference_is_not_billed_for_the_whole_workbook() {
+        // OVER-CHARGING IS A BUG TOO. `SUM(A:A)` on a WIDE, SHALLOW grid takes
+        // the dense branch, which probes one column's worth of ROWS — charging
+        // it the workbook's populated-cell count instead would have made a
+        // handful of ordinary column sums trip the budget on a large sheet.
+        let mut grid = Grid::new();
+        for r in 0..100u32 {
+            for c in 0..100u32 {
+                grid.set_cell(r, c, Cell::new_number(1.0));
+            }
+        }
+        let ast = parser::parse("=SUM(A:A)").expect("parses");
+        let ev = Evaluator::new(&grid);
+        assert_eq!(ev.evaluate(&ast), EvalResult::Number(100.0));
+        assert!(
+            ev.budget().consumed() < 1_000,
+            "charged {} for a 100-row column in a 10,000-cell grid",
+            ev.budget().consumed()
+        );
+    }
+
+    #[test]
+    fn a_factorial_loop_over_an_absurd_argument_terminates() {
+        // FACT(1e18) saturates its u64 result in the first few iterations and
+        // then spins for centuries.
+        assert_eq!(
+            eval_default("=FACT(1000000000000000000)"),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    // ---- Size caps: allocations no counter can interrupt ----
+
+    #[test]
+    fn array_and_text_size_caps_report_limit() {
+        assert_eq!(
+            eval_default("=SEQUENCE(1000000, 1000)"),
+            EvalResult::Error(CellError::Limit),
+            "SEQUENCE dimensions are unbounded usize off the arguments"
+        );
+        assert_eq!(
+            eval_default("=REPT(\"abc\", 1000000000)"),
+            EvalResult::Error(CellError::Limit),
+            "REPT is ONE allocation with no loop to interrupt"
+        );
+        assert_eq!(
+            eval_default("=MUNIT(1000000)"),
+            EvalResult::Error(CellError::Limit)
+        );
+        assert_eq!(
+            eval_default("=MAKEARRAY(1048576, 16384, LAMBDA(r, c, 1))"),
+            EvalResult::Error(CellError::Limit),
+            "MAKEARRAY caps its axes INDEPENDENTLY; the product is 1.7e10"
+        );
+        assert_eq!(
+            eval_default("=BASE(1, 2, 900000000)"),
+            EvalResult::Error(CellError::Limit),
+            "BASE pads with insert(0,_), i.e. O(min_length^2)"
+        );
+    }
+
+    #[test]
+    fn the_size_caps_do_not_touch_ordinary_uses() {
+        assert_eq!(eval_default("=SUM(SEQUENCE(4))"), EvalResult::Number(10.0));
+        assert_eq!(
+            eval_default("=REPT(\"ab\", 3)"),
+            EvalResult::Text("ababab".to_string())
+        );
+        assert_eq!(
+            eval_default("=BASE(255, 16, 4)"),
+            EvalResult::Text("00FF".to_string())
+        );
+    }
+
+    // ---- Scope: per top-level evaluation, re-armed every time ----
+
+    #[test]
+    fn the_budget_is_re_armed_for_every_top_level_evaluation() {
+        // A trip must not poison the evaluator: the NEXT formula starts clean.
+        let grid = Grid::new();
+        let mut ev = Evaluator::new(&grid);
+        ev.set_budget_policy(BudgetPolicy::Metered(20_000));
+
+        let heavy = parser::parse(&fib(30)).expect("parses");
+        assert_eq!(ev.evaluate(&heavy), EvalResult::Error(CellError::Limit));
+
+        let cheap = parser::parse("=1+2*3").expect("parses");
+        assert_eq!(ev.evaluate(&cheap), EvalResult::Number(7.0));
+    }
+
+    #[test]
+    fn iterative_calculation_does_not_accumulate_against_the_budget() {
+        // A DELIBERATE LOOP IS NOT A RUNAWAY. Iterative calculation re-evaluates
+        // the same circular group up to `max_iterations` (32,767) times through
+        // repeated top-level `evaluate` calls, and each one must get a fresh
+        // allowance — otherwise a converging model would be killed at exactly
+        // the moment it was doing what the user asked for. Runaway protection
+        // for iteration already exists at a different layer (max_iterations /
+        // max_change) and the budget must not second-guess it.
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(1.0));
+        let ast = parser::parse("=A1*1.000001+SUM(A1:A1)").expect("parses");
+
+        let mut ev = Evaluator::new(&grid);
+        // A deliberately TIGHT allowance: one iteration fits comfortably, but
+        // 32,767 of them would not if the meter accumulated across calls.
+        ev.set_budget_policy(BudgetPolicy::Metered(10_000));
+        for i in 0..32_767 {
+            match ev.evaluate(&ast) {
+                EvalResult::Number(_) => {}
+                other => panic!("iteration {i} was refused: {other:?}"),
+            }
+        }
+        // The per-call meter still reads a single iteration's worth...
+        assert!(ev.budget().consumed() < 10_000);
+        // ...while the aggregate the HOST uses for its per-call BATCH_FUEL
+        // ceiling has seen all of it.
+        assert!(ev.budget().total_consumed() > 32_767);
+    }
+
+    #[test]
+    fn a_3d_reference_does_not_hand_each_sheet_a_fresh_allowance() {
+        // eval_3d_ref is the one place the engine continues evaluating inside a
+        // FRESH Evaluator. Without inheritance, a reference across N sheets
+        // would multiply the ceiling by N.
+        let mut g1 = Grid::new();
+        g1.set_cell(0, 0, Cell::new_number(10.0));
+        let mut g2 = Grid::new();
+        g2.set_cell(0, 0, Cell::new_number(20.0));
+        let mut g3 = Grid::new();
+        g3.set_cell(0, 0, Cell::new_number(30.0));
+        fn make_ctx<'g>(a: &'g Grid, b: &'g Grid, c: &'g Grid) -> MultiSheetContext<'g> {
+            let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+            ctx.add_grid("Sheet1".to_string(), a);
+            ctx.add_grid("Sheet2".to_string(), b);
+            ctx.add_grid("Sheet3".to_string(), c);
+            ctx.sheet_order = vec![
+                "Sheet1".to_string(),
+                "Sheet2".to_string(),
+                "Sheet3".to_string(),
+            ];
+            ctx
+        }
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                    col_absolute: false,
+                    row_absolute: false,
+                    ref_site_id: Default::default(),
+                }),
+                ref_site_id: Default::default(),
+            }],
+            ref_site_id: Default::default(),
+        };
+
+        let ctx = make_ctx(&g1, &g2, &g3);
+        let mut ev = Evaluator::with_multi_sheet(&g1, ctx);
+        ev.set_budget_policy(BudgetPolicy::Metered(4));
+        assert_eq!(ev.evaluate(&expr), EvalResult::Error(CellError::Limit));
+
+        // With room for all three sheets it computes normally (10+20+30).
+        let ctx = make_ctx(&g1, &g2, &g3);
+        let ev = Evaluator::with_multi_sheet(&g1, ctx);
+        assert_eq!(ev.evaluate(&expr), EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn iferror_cannot_launder_a_budget_trip_into_a_plausible_number() {
+        // Aggregates skip error elements, IFERROR swallows them, TEXTJOIN drops
+        // them. Without the sticky override at the top frame, a runaway formula
+        // would quietly return a WRONG NUMBER — much worse than an error.
+        let body = fib(40)[1..].to_string();
+        assert_eq!(
+            eval_with_fuel(&format!("=IFERROR({body}, 999)"), 50_000),
+            EvalResult::Error(CellError::Limit)
+        );
+        assert_eq!(
+            eval_with_fuel(&format!("=SUM(1, {body})"), 50_000),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    // ---- Cancellation: the Ctrl+Break half ----
+
+    #[test]
+    fn a_pending_cancellation_stops_the_next_evaluation_immediately() {
+        let grid = Grid::new();
+        let token = CancelToken::new();
+        token.cancel();
+        let mut ev = Evaluator::new(&grid);
+        ev.set_cancel_token(token);
+        let ast = parser::parse("=1+1").expect("parses");
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        assert_eq!(ev.budget().trip_reason(), Some(TripReason::Cancelled));
+    }
+
+    #[test]
+    fn cancellation_mid_evaluation_interrupts_the_rest_of_the_formula() {
+        // DETERMINISTIC MID-FLIGHT CANCEL, with no threads and no sleeping: a
+        // UDF closure is invoked BY the evaluator partway through the formula
+        // and cancels the token from there. The work that follows it must be
+        // abandoned within one poll interval.
+        let mut grid = Grid::new();
+        for r in 0..20_000u32 {
+            grid.set_cell(r, 0, Cell::new_number(1.0));
+        }
+        let token = CancelToken::new();
+        let trigger = token.clone();
+        let udf = move |name: &str, _args: &[EvalResult]| -> Option<EvalResult> {
+            if name == "CANCELNOW" {
+                trigger.cancel();
+                Some(EvalResult::Number(0.0))
+            } else {
+                None
+            }
+        };
+        let ast =
+            parser::parse("=CANCELNOW()+SUM(MAP(A1:A20000, LAMBDA(x, x*2)))").expect("parses");
+        let mut ev = Evaluator::new(&grid);
+        ev.set_udf_fn(&udf);
+        ev.set_cancel_token(token);
+
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        assert_eq!(
+            ev.budget().trip_reason(),
+            Some(TripReason::Cancelled),
+            "the host must be able to tell a cancelled pass from an exhausted formula"
+        );
+        // It stopped EARLY: the untouched formula costs far more than this.
+        assert!(
+            ev.budget().consumed() < DEFAULT_CELL_FUEL / 4,
+            "consumed {} — cancellation did not actually shorten the work",
+            ev.budget().consumed()
+        );
+    }
+
+    #[test]
+    fn cancellation_is_observed_within_a_bounded_number_of_charges() {
+        // Asserted in CHARGES, not milliseconds. `budget.rs` owns the
+        // counter-level version of this; here it is proven end to end through
+        // a real formula.
+        let mut grid = Grid::new();
+        for r in 0..50_000u32 {
+            grid.set_cell(r, 0, Cell::new_number(1.0));
+        }
+        let token = CancelToken::new();
+        let trigger = token.clone();
+        let udf = move |name: &str, _args: &[EvalResult]| -> Option<EvalResult> {
+            if name == "CANCELNOW" {
+                trigger.cancel();
+                Some(EvalResult::Number(0.0))
+            } else {
+                None
+            }
+        };
+        let ast =
+            parser::parse("=CANCELNOW()+SUM(MAP(A1:A50000, LAMBDA(x, x*2)))").expect("parses");
+        let mut ev = Evaluator::new(&grid);
+        ev.set_udf_fn(&udf);
+        ev.set_cancel_token(token);
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        // The bound, stated exactly, because the residual is worth being
+        // honest about: one materialization of A1:A50000 (50k), plus up to one
+        // poll stride before the cancel is seen, plus the DRAIN — once tripped,
+        // the enclosing MAP loop still runs to the end of its (already
+        // materialized, already charged) array, and each remaining iteration
+        // costs a single failed LAMBDA_CALL_FUEL charge that returns
+        // immediately without evaluating a body. That drain is O(n) in an array
+        // length the formula already paid for, never O(work avoided), which is
+        // why no builtin needs its own cancellation check.
+        let ceiling = 50_000
+            + crate::budget::POLL_INTERVAL
+            + 50_000 * crate::budget::LAMBDA_CALL_FUEL;
+        assert!(
+            ev.budget().consumed() <= ceiling,
+            "consumed {} > {ceiling}",
+            ev.budget().consumed()
+        );
+    }
+
+    #[test]
+    fn a_cancelled_evaluator_recovers_once_the_token_is_reset() {
+        // The token is the host's; a pass that was abandoned must not leave the
+        // evaluator permanently broken.
+        let grid = Grid::new();
+        let token = CancelToken::new();
+        token.cancel();
+        let mut ev = Evaluator::new(&grid);
+        ev.set_cancel_token(token.clone());
+        let ast = parser::parse("=6*7").expect("parses");
+        assert_eq!(ev.evaluate(&ast), EvalResult::Error(CellError::Limit));
+        token.reset();
+        assert_eq!(ev.evaluate(&ast), EvalResult::Number(42.0));
+    }
+
+    // ---- The error itself ----
+
+    #[test]
+    fn the_limit_error_displays_as_hash_limit_bang() {
+        // Catches the `#{:?}` fallback in cell.rs silently dropping the "!".
+        let mut cell = Cell::new();
+        cell.value = CellValue::Error(CellError::Limit);
+        assert_eq!(cell.display_value(), "#LIMIT!");
+    }
+
+    #[test]
+    fn the_depth_ceiling_now_reports_the_same_limit_error_as_the_budget() {
+        // Depth and cost are separate ceilings but one taxonomy: both mean
+        // "this formula exceeded a calculation limit".
+        let deep = format!(
+            "=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), F({}))",
+            MAX_LAMBDA_DEPTH
+        );
+        assert_eq!(eval_default(&deep), EvalResult::Error(CellError::Limit));
+    }
+
+    #[test]
+    fn error_type_reports_the_limit_error_as_excels_num_code() {
+        // Excel has no #LIMIT!; what it reports for a runaway LAMBDA is #NUM!,
+        // whose ERROR.TYPE code is 6.
+        let deep = format!(
+            "=ERROR.TYPE(LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), F({})))",
+            MAX_LAMBDA_DEPTH
+        );
+        assert_eq!(eval_default(&deep), EvalResult::Number(6.0));
+    }
+
+    // ---- The meter must be invisible to ordinary formulas ----
+
+
+    #[test]
+    fn ordinary_formulas_are_untouched_by_the_budget() {
+        let mut grid = Grid::new();
+        for r in 0..1000u32 {
+            grid.set_cell(r, 0, Cell::new_number(2.0));
+            grid.set_cell(r, 1, Cell::new_number(3.0));
+        }
+        let cases: &[(&str, f64)] = &[
+            ("=SUM(A1:A1000)", 2000.0),
+            ("=SUMPRODUCT(A1:A1000, B1:B1000)", 6000.0),
+            ("=AVERAGE(A1:A1000)", 2.0),
+            ("=COUNTIF(A1:A1000, 2)", 1000.0),
+            ("=SUM(MAP(A1:A1000, LAMBDA(x, x*2)))", 4000.0),
+            ("=REDUCE(0, A1:A1000, LAMBDA(a, x, a+x))", 2000.0),
+            ("=MATCH(2, A1:A1000, 0)", 1.0),
+            ("=VLOOKUP(2, A1:B1000, 2, FALSE)", 3.0),
+            ("=SUM(SORT(A1:A1000))", 2000.0),
+            ("=COUNT(UNIQUE(A1:A1000))", 1.0),
+        ];
+        for (formula, expected) in cases {
+            let ast = parser::parse(formula).expect("parses");
+            assert_eq!(
+                Evaluator::new(&grid).evaluate(&ast),
+                EvalResult::Number(*expected),
+                "{formula} changed under the budget"
+            );
+        }
+    }
+
+    /// COLLATERAL DAMAGE IS THE REAL RISK, and `ordinary_formulas_...` above
+    /// only proves it for 1,000-cell toys. A ceiling that fires on work the user
+    /// legitimately asked for is worse than no ceiling: the runaway case is rare
+    /// and obvious, this one is common and silent.
+    ///
+    /// So: genuinely BIG but finite workloads, at the REAL `DEFAULT_CELL_FUEL`,
+    /// each of which must come out exact. Half a million lambda invocations and
+    /// a million-element pairwise product are past anything a spreadsheet user
+    /// would call small, and they spend well under the allowance — which is the
+    /// margin the constant is claiming to have.
+    #[test]
+    fn big_but_finite_legitimate_work_completes_at_the_real_budget() {
+        const N: u32 = 500_000;
+        let mut grid = Grid::new();
+        for r in 0..N {
+            grid.set_cell(r, 0, Cell::new_number(2.0));
+            grid.set_cell(r, 1, Cell::new_number(3.0));
+        }
+        let cases: &[(&str, f64)] = &[
+            // A whole-column aggregate over half a million populated cells.
+            ("=SUM(A:A)", 1_000_000.0),
+            // A million-element pairwise product — the "wide, not deep" shape.
+            ("=SUMPRODUCT(A1:A500000, B1:B500000)", 3_000_000.0),
+            // 500,000 real lambda invocations, each charged LAMBDA_CALL_FUEL on
+            // top of its body: the single most expensive legitimate thing the
+            // language can express without recursion.
+            ("=SUM(MAP(A1:A500000, LAMBDA(x, x*2)))", 2_000_000.0),
+            // A 500,000-element sort (the materializer charge plus the log
+            // factor).
+            ("=SUM(SORT(A1:A500000))", 1_000_000.0),
+        ];
+        for (formula, expected) in cases {
+            let ast = parser::parse(formula).expect("parses");
+            let ev = Evaluator::new(&grid);
+            assert_eq!(
+                ev.evaluate(&ast),
+                EvalResult::Number(*expected),
+                "{formula} became collateral damage of the work budget"
+            );
+            // And it did not merely squeak in: report the headroom, so a future
+            // charge added to a hot path fails HERE rather than in a workbook.
+            let consumed = ev.budget().consumed();
+            assert!(
+                consumed < DEFAULT_CELL_FUEL / 2,
+                "{formula} consumed {consumed} of {DEFAULT_CELL_FUEL} — under half \
+                 the allowance is the margin this constant claims to have"
+            );
+        }
+    }
+
+    // ---- Adversarial: growth that a WORK counter cannot see ----
+    //
+    // The fuel meter bounds how much work a formula does. It does NOT bound how
+    // much MEMORY a formula's intermediate values occupy, and those two are not
+    // the same axis: doubling a string is one AST node and one charge no matter
+    // how long the string is. `MAX_TEXT_LEN` existed for REPT/BASE/TEXTJOIN —
+    // the builders that take a length as an ARGUMENT — but the `&` operator
+    // takes no length argument at all, and it is the one string builder a user
+    // can nest. These tests pin the closure.
+
+    /// THE ATTACK: repeated doubling through the concatenation operator.
+    ///
+    /// Twelve `&`s is about forty fuel charges and 2^12 x the seed length. The
+    /// budget is 64,000,000 charges, so a work counter never gets within six
+    /// orders of magnitude of noticing; with 30 doublings instead of 12 the
+    /// allocation is a terabyte and the process is gone long before any charge
+    /// is examined. Only a size cap can see this.
+    #[test]
+    fn repeated_doubling_through_the_concat_operator_is_capped() {
+        let f = "=LET(a,REPT(\"x\",1024), b,a&a, c,b&b, d,c&c, e,d&d, f,e&e, \
+                 g,f&f, h,g&g, i,h&h, j,i&i, k,j&j, l,k&k, m,l&l, m)";
+        assert_eq!(eval_default(f), EvalResult::Error(CellError::Limit));
+    }
+
+    /// The same attack through REDUCE, which needs no LET chain at all: the
+    /// accumulator is the growing value and the lambda body is two nodes.
+    #[test]
+    fn repeated_doubling_through_reduce_is_capped() {
+        let f = "=REDUCE(REPT(\"x\",1024), SEQUENCE(20), LAMBDA(acc, i, acc&acc))";
+        assert_eq!(eval_default(f), EvalResult::Error(CellError::Limit));
+    }
+
+    /// COLLATERAL-DAMAGE GUARD, and the reason the cap is 1 MiB rather than
+    /// Excel's 32,767-character cell limit: ordinary concatenation, and even a
+    /// deliberately large intermediate, must still work.
+    #[test]
+    fn ordinary_concatenation_is_unaffected_by_the_text_cap() {
+        assert_eq!(
+            eval_default("=\"ab\"&\"cd\"&\"ef\""),
+            EvalResult::Text("abcdef".to_string())
+        );
+        // 512 KiB built by doubling: under the cap, so it computes exactly.
+        let f = "=LEN(LET(a,REPT(\"x\",1024), b,a&a, c,b&b, d,c&c, e,d&d, f,e&e, \
+                 g,f&f, h,g&g, i,h&h, j,i&i, j))";
+        assert_eq!(eval_default(f), EvalResult::Number(524_288.0));
+    }
+
+    /// CONCATENATE and CONCAT accumulate into one buffer across their argument
+    /// list, so they are the same hazard reached by a different spelling.
+    #[test]
+    fn the_concatenate_family_is_capped_too() {
+        let big = "REPT(\"x\",1000000)";
+        assert_eq!(
+            eval_default(&format!("=CONCATENATE({big},{big})")),
+            EvalResult::Error(CellError::Limit)
+        );
+        assert_eq!(
+            eval_default(&format!("=CONCAT({big},{big})")),
+            EvalResult::Error(CellError::Limit)
+        );
+    }
+
+    /// THE LAUNDERING PATH the four tests above tripped over, pinned in its own
+    /// right because it is worse than the growth bug it hid.
+    ///
+    /// `EvalResult::as_text` used to render an error as its RUST VARIANT NAME,
+    /// so every function that coerces to text without propagating errors first
+    /// turned an error into data: `=LEN(1/0)` answered 4 (the length of
+    /// "Div0"), and a formula stopped by the work budget came back as the
+    /// plausible number 5 (the length of "Limit"). An error that silently
+    /// becomes a number is the exact failure mode this whole feature exists to
+    /// prevent, arriving one layer down.
+    #[test]
+    fn an_error_coerced_to_text_is_its_literal_not_a_rust_variant_name() {
+        let cases: &[(&str, &str)] = &[
+            ("1/0", "#DIV/0!"),
+            ("NA()", "#N/A"),
+            ("REPT(\"x\",99999999)", "#LIMIT!"),
+        ];
+        for (expr, literal) in cases {
+            // LEN of the coerced error is the length of the LITERAL, never of
+            // "Div0" / "NA" / "Limit".
+            assert_eq!(
+                eval_default(&format!("=LEN({expr})")),
+                EvalResult::Number(literal.len() as f64),
+                "{expr} coerced to text as something other than {literal}"
+            );
+        }
+        // And the exact text, so a coincidental length cannot pass this.
+        assert_eq!(
+            eval_default("=UPPER(1/0)"),
+            EvalResult::Text("#DIV/0!".to_string())
+        );
+    }
+
+    /// TEXTJOIN builds one string from N parts. Its ceiling is Excel's own
+    /// 32,767-character result limit (`#VALUE!`, for parity), and the point of
+    /// this test is that the limit is now decided BEFORE `parts.join()` runs:
+    /// checking the length of the allocation afterwards is checking after the
+    /// allocation that would have done the damage.
+    #[test]
+    fn textjoin_rejects_an_oversized_result_without_building_it() {
+        let mut grid = Grid::new();
+        // 300 cells x 4,000 chars = 1.2 MB joined, far past Excel's 32,767.
+        for r in 0..300u32 {
+            grid.set_cell(r, 0, Cell::new_text("y".repeat(4000)));
+        }
+        let ast = parser::parse("=TEXTJOIN(\",\",TRUE,A1:A300)").expect("parses");
+        assert_eq!(
+            Evaluator::new(&grid).evaluate(&ast),
             EvalResult::Error(CellError::Value)
+        );
+        // A result that FITS still joins correctly — the pre-check must not be
+        // off by the delimiters it now has to account for itself.
+        let mut small = Grid::new();
+        for r in 0..3u32 {
+            small.set_cell(r, 0, Cell::new_text("ab".to_string()));
+        }
+        let ok = parser::parse("=TEXTJOIN(\"-\",TRUE,A1:A3)").expect("parses");
+        assert_eq!(
+            Evaluator::new(&small).evaluate(&ok),
+            EvalResult::Text("ab-ab-ab".to_string())
         );
     }
 }

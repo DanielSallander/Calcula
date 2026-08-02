@@ -5720,6 +5720,62 @@ export async function recalculateFormulas(): Promise<CellData[]> {
   return invoke<CellData[]>("calculate_now");
 }
 
+// ============================================================================
+// Calculation cancellation (the Ctrl+Break analogue)
+// ============================================================================
+
+/** One cell a cancelled recalculation never reached. */
+export interface PendingRecalcCell {
+  row: number;
+  col: number;
+}
+
+/** What a cancelled recalculation left un-recalculated. */
+export interface PendingRecalc {
+  sheetIndex: number;
+  cells: PendingRecalcCell[];
+}
+
+/**
+ * Ask the running calculation to stop.
+ *
+ * Safe to call at any time — the backend command takes no lock a recalculation
+ * could be holding, which is the entire reason it can be delivered while one is
+ * running. A Cancel with nothing running is a no-op: the flag is claimed and
+ * cleared by whichever pass owns it, so it can never abort a FUTURE
+ * calculation.
+ */
+export async function cancelCalculation(): Promise<boolean> {
+  return invoke<boolean>("cancel_calculation");
+}
+
+/**
+ * The cells a cancelled recalculation never reached, or `null` when the
+ * workbook is fully calculated.
+ *
+ * This is what makes staleness visible. A cell holding a pre-pass value looks
+ * exactly like a correct one, so "calculation was cancelled" is not a usable
+ * message on its own — the user needs to know WHICH cells.
+ */
+export async function getPendingRecalc(): Promise<PendingRecalc | null> {
+  return invoke<PendingRecalc | null>("get_pending_recalc");
+}
+
+/**
+ * Forget the stale marker WITHOUT recalculating.
+ *
+ * Only a human should call this: dropping the marker is a claim that the stale
+ * cells no longer matter. No save or publish path calls it.
+ */
+export async function clearPendingRecalc(): Promise<boolean> {
+  return invoke<boolean>("clear_pending_recalc");
+}
+
+/** "done" when the workbook is fully calculated, "pending" after a cancel. */
+export async function getCalculationState(): Promise<string> {
+  return invoke<string>("get_calculation_state");
+}
+
 /**
  * Targeted recalculation of GET.CONTROLVALUE dependents after a control or
  * ribbon-filter value change. Pass the changed control names to limit the

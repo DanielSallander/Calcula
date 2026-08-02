@@ -72,6 +72,13 @@ export const AppEvents = {
   // Payload: { scope, cellsUpdated, durationMs }.
   RECALCULATION_COMPLETED: "app:recalculation-completed",
 
+  // A recalculation pass is running (backend, ~100 ms clock). Payload:
+  // { scope, cellsDone, cellsTotal, elapsedMs, done, cancelled, pendingCells }.
+  CALC_PROGRESS: "app:calc-progress",
+  // A recalculation was cancelled; some cells are stale. Payload:
+  // { sheetIndex, cellCount }.
+  RECALC_INCOMPLETE: "app:recalc-incomplete",
+
   // Editing events
   EDIT_STARTED: "app:edit-started",
   EDIT_ENDED: "app:edit-ended",

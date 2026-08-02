@@ -254,6 +254,12 @@ fn evaluate_property(
     styles: &StyleRegistry,
     control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> CellValue {
+    // INTERACTIVE, not Transient, and the distinction is load-bearing: a
+    // computed property can drive a ROW HEIGHT or a COLUMN WIDTH, which are
+    // persisted in the workbook. Anything that ends up in the saved file gets
+    // the reference ceiling. Inherits the enclosing surface when a recalc pass
+    // is what is re-deriving these.
+    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Interactive);
     let ast = match &prop.cached_ast {
         Some(ast) => ast.clone(),
         None => {
@@ -615,7 +621,7 @@ fn cell_value_display(val: &CellValue) -> String {
         CellValue::Number(n) => format!("{}", n),
         CellValue::Text(s) => s.clone(),
         CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-        CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+        CellValue::Error(e) => crate::cell_error_display(e),
         CellValue::Empty => String::new(),
         CellValue::List(items) => format!("[List({})]", items.len()),
         CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),

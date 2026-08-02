@@ -195,6 +195,15 @@ pub fn scenario_show(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ScenarioShowParams,
 ) -> ScenarioShowResult {
+    // BACKGROUND. scenario_show is the TRANSIENT-WRITE pattern: it applies
+    // values and recalculates without entering the undo stack. Transient in the
+    // undo sense is NOT the same as Transient in the budget sense — these
+    // results are written into cells the user reads, so they get the persisting
+    // ceiling, not the tighter one.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!(
         "SCENARIO",
         "Showing scenario '{}' on sheet {}",
@@ -356,6 +365,10 @@ pub fn scenario_summary(
     state: State<AppState>,
     params: ScenarioSummaryParams,
 ) -> ScenarioSummaryResult {
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!("SCENARIO", "Generating summary for sheet {}", params.sheet_index);
 
     let scenarios_store = state.scenarios.lock().unwrap();

@@ -834,7 +834,11 @@ pub(crate) fn evaluate_single_node(
 
     let context = crate::create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
-    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    // TRANSIENT: this is the Evaluate Formula step-through debugger resolving
+    // one AST node for display. Nothing it produces is written into a cell.
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    crate::eval_budget::apply(&mut evaluator);
     let result = evaluator.evaluate(&engine_ast);
 
     eval_result_to_value(&result)
@@ -845,9 +849,7 @@ pub(crate) fn eval_result_to_value(result: &engine::EvalResult) -> Value {
         engine::EvalResult::Number(n) => Value::Number(*n),
         engine::EvalResult::Text(s) => Value::String(s.clone()),
         engine::EvalResult::Boolean(b) => Value::Boolean(*b),
-        engine::EvalResult::Error(e) => {
-            Value::String(format!("#{}", format!("{:?}", e).to_uppercase()))
-        }
+        engine::EvalResult::Error(e) => Value::String(crate::cell_error_display(e)),
         engine::EvalResult::Array(arr) => {
             // For display purposes, show array as first value
             if let Some(first) = arr.first() {

@@ -58,6 +58,19 @@ export const AppEvents = {
   // derived values in bulk.
   RECALCULATION_COMPLETED: "app:recalculation-completed",
 
+  // A recalculation pass is RUNNING. Emitted by the backend on a ~100 ms clock
+  // (never per formula) so the status bar can show progress and, above all,
+  // offer a Cancel button. This is the Ctrl+Break affordance: the pass now runs
+  // off the UI thread precisely so this event can be delivered and the button
+  // can be clicked while it runs. Payload: CalcProgressPayload.
+  CALC_PROGRESS: "app:calc-progress",
+
+  // A recalculation was CANCELLED and some cells still hold pre-pass values.
+  // The workbook is not wrong, but it is not settled either — the status bar
+  // shows "Calculate" (Excel's own word for it) until a recalculation finishes.
+  // Payload: RecalcIncompletePayload.
+  RECALC_INCOMPLETE: "app:recalc-incomplete",
+
   // Data events
   DATA_CHANGED: "app:data-changed",
   CELLS_UPDATED: "app:cells-updated",
@@ -307,6 +320,40 @@ export interface RecalculationCompletedPayload {
   /** How many cells the engine reported as changed. */
   cellsUpdated: number;
   durationMs: number;
+}
+
+/**
+ * Payload of AppEvents.CALC_PROGRESS — mirrors `CalcProgressEvent` in
+ * app/src-tauri/src/eval_budget.rs.
+ *
+ * The wall clock behind `elapsedMs` is the ONLY clock anywhere near
+ * calculation, and it is allowed to exist because it decides when a BUTTON
+ * appears, never what a cell contains.
+ */
+export interface CalcProgressPayload {
+  scope: "workbook" | "sheet";
+  cellsDone: number;
+  cellsTotal: number;
+  elapsedMs: number;
+  /** True on the final event of a pass. */
+  done: boolean;
+  /** True when the pass ended because the user cancelled it. */
+  cancelled: boolean;
+  /** Cells left un-recalculated (non-zero only when `cancelled`). */
+  pendingCells: number;
+}
+
+/** One cell a cancelled recalculation never reached. */
+export interface PendingRecalcCell {
+  row: number;
+  col: number;
+}
+
+/** Payload of AppEvents.RECALC_INCOMPLETE. */
+export interface RecalcIncompletePayload {
+  sheetIndex: number;
+  /** How many cells still hold pre-pass values. */
+  cellCount: number;
 }
 
 /**

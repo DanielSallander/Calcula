@@ -4,6 +4,7 @@
 
 pub mod ast_alignment;
 pub mod ast_render;
+pub mod budget;
 pub mod cell;
 pub mod control_values;
 pub mod coord;
@@ -26,6 +27,10 @@ pub mod theme;
 pub mod undo;
 
 // Re-export commonly used types at the crate root
+pub use budget::{
+    BudgetPolicy, CancelToken, EvalBudget, TripReason, BATCH_FUEL, DEFAULT_CELL_FUEL,
+    LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_TEXT_LEN, POLL_INTERVAL,
+};
 pub use cell::{Cell, CellError, CellValue, DictKey, RichTextRun};
 pub use control_values::ControlValue;
 pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord};

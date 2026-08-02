@@ -109,7 +109,7 @@ The "now" column is the one to trust; each cell names the code that makes it tru
 | Dimension | Was | Now | What changed, and what still isn't there |
 |---|---|---|---|
 | Code reuse / packaging | ❌ Missing | ✅ Competitive | **New dimension, added by Wave H; the "half" was closed by Wave I.** VBA's answer was "copy the module into every workbook, or reference another .xls and inherit its whole trust". Calcula's is a real package manager: `// @uses <alias> <package>@<pin>` resolves against a **signed** .calp registry through the *existing* trust root (Ed25519 + TOFU, no second signer, no second key store), pins into a workbook lockfile (`.calcula/script-deps.json`) that **mount never re-resolves against the registry**, caches the exact bytes content-addressed and re-hashes them on every read. Each library runs in its **own** worker realm at `declared(library) INTERSECT declared(consumer)`, chained one level narrower for a library's own dependency. **What made it "half" is gone: authority is now caller identity, not a bearer token.** `base.callImport` (`allowlist.ts:83`) takes an ALIAS and nothing else; the host resolves it in `scriptImports` — a map keyed by the CALLING handle's mount id that only the linker writes (`host.ts:1210`) — and then caps the call against the caller's OWN grants at CALL time, per-origin for `net.fetch` (`host.ts:1315`). The realm's entry point moved into a host-only namespace `callExposed` refuses before it even looks up the target (`broker.ts:401`), which closes the same-trust hole `public: false` could not. The 128-bit token is deleted, and so is §7.18-C's residual: an ungranted-but-declared consumer is now JIT-prompted on first use through the library, with the library named in the prompt (`viaLibrary`). Also closed: `kind: "library"` is now a publishable package kind, so the manager is complete on the authoring side too.
-| Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction.
+| Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **Wave K closed the last wedge:** the evaluator itself now carries a deterministic WORK budget plus a user-reachable cancellation (`core/engine/src/budget.rs`, `app/src-tauri/src/eval_budget.rs`), so a shallow exponential or a million-cell array formula becomes `#LIMIT!` in one cell instead of hanging the application — measured at under the noise floor of the benchmark machine (§8). **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction.
 | Transparency/audit | ✅ Beyond VBA | ✅ Beyond VBA | §6.2 drift closed: `scriptSurfaces.ts` now has a two-directional completeness guard against the allowlist (`scriptSurfaces.test.ts` "no surface understates"/"overstates"). Scheduled jobs are listed and cancellable per workbook. **The named residual is closed:** the interpreter's reach is now DERIVED — `core/script-engine/src/manifest.rs` boots a real QuickJS runtime, enumerates the registered surface, diffs it against `OP_MANIFEST` in both directions, and proves `model.*` throws without a provider; `api/codeInventory.ts` mirrors it and `api/__tests__/interpreterReachDrift.test.ts` reads the Rust source. It is also SHOWN: the "Code in This File" panel no longer prints "Grid-only" for a notebook that can be granted `bi.query`/`bi.sql` on request. **Wave H closed three more holes:** the three script-held states that had no reader (keybindings, private clipboards, the submission watch) are joined and *revocable* in the panel (`codeInventory.ts:1030` `getScriptHeldState`); add-in installs are audited machine-side (`extension_audit.rs`); and **imported libraries are now code units** (`codeInventory.ts`, surface `script-library`) — third-party code that no script's source contains, but whose bytes live in the workbook, was previously invisible to the one panel whose job is "what code is in this file". |
 | Event observation | ✅ Competitive+ | ✅ Competitive+ | Unchanged, plus sheet-collection and recalculation-completed events. |
 | Event interception | ❌ Missing | ✅ Competitive | `core/lib/lifecycleGuards.ts`: onBeforeSave/onBeforeClose reply with a verdict (3s deadline, default-ALLOW). Missing: onBeforeDoubleClick / onBeforeRightClick exist on no surface. |
@@ -1621,13 +1621,83 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
   at upgrade. Managed installs self-heal (`resolve_effective_policy` re-writes its pre-pin at every
   launch). Deliberately NOT given an upgrade-specific trust status: a state meaning "you upgraded
   once in August 2026" ages badly and would need a row in every presentation map forever.
-- **The engine has no evaluation TIME or step budget.** The depth ceiling does not cover it: a
-  shallow exponential (`fib` without memoization) or a wide `MAP` over a million cells is slow
-  without being deep, and hangs the caller. The QuickJS surfaces have a deadline
-  (`core/script-engine/src/limits.rs`) and writeback validators have one; the formula evaluator does
-  not, so `api.evaluate` inherits nothing. Scoped in `evaluator.rs:459-472`: a `Cell<u64>` step
-  counter checked in `evaluate()` plus an optional `Instant` deadline, wired from the recalc entry
-  points — wider than the evaluator, so it needs an owner for `calculation.rs` / `commands/data.rs`.
+- ~~**The engine has no evaluation TIME or step budget.**~~ — **CLOSED.** The evaluator was the last
+  way to wedge the application; it now has a work ceiling AND a user-reachable stop.
+
+  **Fuel, not a clock.** `core/engine/src/budget.rs` charges a deterministic `EvalBudget`
+  (`DEFAULT_CELL_FUEL = 64_000_000`), armed per TOP-LEVEL evaluation, and exhaustion produces the new
+  `CellError::Limit` / `#LIMIT!`. Deterministic was a correctness requirement, not a taste: a
+  wall-clock budget would make a CELL VALUE a function of machine speed, so the same workbook would
+  compute differently on CI and on a laptop and the soak/regression oracles — which compare recalc
+  results across runs — would go nondeterministic by construction. So **deterministic work produces
+  values; wall-clock produces buttons.** A clock exists on exactly one surface (`api.evaluate` and
+  siblings, 5 s, matching `ScriptLimits::DEFAULT_ONE_OFF_TIMEOUT_MS`) because those results cross IPC
+  and never enter a cell. `e2e/oracles/calculationBudget.ts` fails the soak run if any generated
+  workbook ever produces `#LIMIT!`, and is deliberately not suppressible via the known-issues ledger.
+
+  **Charged in units of WORK, not AST nodes** — `=SUMPRODUCT(A:A,B:B)` is three nodes and a million
+  multiplications, so range materialization, array generation and internally-iterating builtins
+  pre-charge their element count BEFORE allocating. Bulk pre-charging is also what makes it free: the
+  inner loops pay nothing per element, and an over-budget `MMULT` fails in microseconds instead of
+  grinding through 8e9 multiply-adds first. Per-formula (not per-pass) scoping is what keeps the
+  three motivating cases right: one pathological cell becomes `#LIMIT!` while every other cell
+  recalculates, a legitimate 100k-cell recalc completes, and iterative calculation is untouched
+  because 32,767 deliberate iterations are 32,767 cheap evaluations rather than one long one.
+
+  **Cancellation is the Ctrl+Break half, and it was a THREADING change.** `calculate_now` /
+  `calculate_sheet` became `#[tauri::command(async)]`: a synchronous command runs on the WebView2 UI
+  thread, so an `AtomicBool` behind a frozen webview is not cancellation. The `CancelToken` is checked
+  on the SAME amortized boundary as the fuel counter (`POLL_INTERVAL = 65_536`), so it costs nothing
+  extra. The host checks the token BEFORE writing each result — a formula aborted mid-flight must not
+  land a bogus `#LIMIT!` in a cell the user only wanted to STOP.
+
+  **A cancelled pass does not leave silent staleness.** The un-recalculated remainder is recorded
+  (`AppState.pending_recalc`), shown as "Calculate", resumed by the next F9, **persisted into the
+  `.cala`** (`pending_recalc.json`, `PENDING_RECALC_MIN_FORMAT_VERSION = 3` — it takes a link in the
+  stamp chain precisely because a reader that silently DROPPED it would turn a knowingly-stale
+  workbook into one that claims to be calculated), and hard-refused by `.calp` publish.
+
+  **Two adversarial findings closed during integration, both on the axis fuel cannot see.**
+  (1) String growth: `&` doubles a string in ONE node and ONE charge, so
+  `=LET(a,REPT("x",1024), b,a&a, c,b&b, ...)` reached a terabyte in ~90 charges against an allowance
+  of 64,000,000 — six orders of magnitude short of noticing, and the process was gone before any
+  charge could be examined. `MAX_TEXT_LEN` now guards `&`, CONCAT/CONCATENATE and TEXTJOIN (whose
+  length check ran AFTER the join that would have done the damage). (2) Error laundering:
+  `EvalResult::as_text` rendered errors as RUST VARIANT NAMES, so `=LEN(1/0)` answered 4 and a
+  budget-stopped formula came back as the plausible number 5. There is now one authority —
+  `CellError::as_literal` / `from_literal` — shared by display, the UDF wire format and persistence,
+  which also fixed a real data-loss bug: `SavedCellValue::to_value` had been mapping EVERY saved
+  error to `#VALUE!`, so `#DIV/0!`, `#N/A`, `#REF!`, `#CIRCULAR!` and `#BLOCKED!` all came back wrong
+  from a save/reload round trip.
+
+  **Measured, not asserted.** `core/engine/benches/grid_engine.rs` group `budget` runs each workload
+  twice over identical input — `Evaluator::unmetered` (the meter disabled through its OWN
+  `BudgetPolicy`, charges still compiled in and executed) against `Evaluator::new` as shipped — under
+  `profile.bench`. Median of three rounds on a Snapdragon X Elite (12 cores, Dropbox and Defender
+  running, so the noise floor is ~0.5-1%):
+
+  | workload | metered vs unmetered | threshold |
+  |---|---|---|
+  | 100k x `=A1*B1+C1-D1/E1` (worst case for a per-node counter) | −0.50% | ≤3% |
+  | 100k-formula mixed recalc (arithmetic / SUM / IF / VLOOKUP) | −0.08% | <1% |
+  | `=SUMPRODUCT(A1:A1000000,B1:B1000000)` | +0.08% | <0.5% |
+  | `=SUM(A:A)` over 1M rows | −0.22% | <0.5% |
+  | 10k VLOOKUP over 100k rows under a lookup pass | +0.20% | <1% |
+  | recursive-LAMBDA `fib(24)` | −0.05% | <2% |
+
+  Every case is inside its threshold and **no case shows a resolvable regression** — several medians
+  are negative, which means the true cost sits below this machine's noise floor rather than that the
+  meter is free. Calibration, reported rather than gated: burning the whole `DEFAULT_CELL_FUEL`
+  takes **3.53 s** under `profile.bench` (~18M charges/s), which is the "a few seconds of felt work"
+  the constant claims; `consumed` stops at 64,000,020, i.e. tight against the allowance.
+  Collateral damage is pinned by its own test — `=SUM(MAP(A1:A500000, LAMBDA(x,x*2)))` and a
+  1M-element SUMPRODUCT complete exactly, each using under half the allowance.
+
+  Wiring: 18 `Evaluator` construction sites and 22 consumer entry points, declared once per surface
+  by an ambient governor (`app/src-tauri/src/eval_budget.rs`) that can only TIGHTEN — the engine
+  installs the ceiling unconditionally in `Evaluator::base`, so a site nobody remembered still gets
+  `DEFAULT_CELL_FUEL` and the worst case of a missed site is a missing Cancel button, never a wedge.
+  No production code anywhere names `unmetered`. Suites: core workspace 1,136 (engine 466), app-lib 812, vitest 104,248.
 - **A workbook that names an unpinned subscription shows inert writeback and empty GATHER**
   until the recipient subscribes themselves. This is the *intended* fail-closed consequence of the
   Wave J fix above, not a defect, and the Subscriptions pane names it with a "not trusted on this
@@ -1728,6 +1798,18 @@ the code.
    every `cap.pkg*` row is unlocked-tier and `calp::pull` forces pulled scripts to restricted. The
    bound is structural; no consent prompt can grant past it. VBA's equivalent — a macro that writes
    another macro into another workbook — was the mechanism of every macro virus ever written.
+9. **A bounded evaluator, and a Ctrl+Break that is better than Ctrl+Break.** This used to be a
+   TRAILS entry: nothing bounded a shallow exponential (`fib(35)` as a naive recursive LAMBDA) or a
+   very wide array formula, and VBA at least had Ctrl+Break. Both halves are now closed, and the
+   second one improves on the original. The budget is a DETERMINISTIC fuel counter, so a runaway
+   formula stops at the same place on every machine and becomes `#LIMIT!` in the one offending cell
+   while the rest of the workbook recalculates normally — where VBA's Ctrl+Break stopped everything
+   and told you nothing about where. Cancellation is a real button rather than a keyboard poll,
+   which required moving recalculation off the UI thread; a flag behind a frozen webview would not
+   have been cancellation at all. And a cancelled pass does not quietly leave a half-calculated
+   document: the un-recalculated remainder is recorded, shown as "Calculate", resumed by the next
+   F9, carried into the saved file, and refused by `.calp` publish. VBA's answer to "you stopped
+   half way" was silence.
 
 ### Where Calcula still TRAILS VBA
 
@@ -1744,10 +1826,7 @@ the code.
 4. **Two event hooks.** `onBeforeDoubleClick` / `onBeforeRightClick` exist on no surface.
 5. **Range objects in UDFs.** A Calcula UDF receives values; a VBA UDF receives a `Range` and can ask
    it about addresses, formats and formulas.
-6. **Unbounded evaluation.** A recursive LAMBDA is now bounded by depth, but nothing bounds a
-   *shallow exponential* or a very wide array formula: the evaluator has no time or step budget. VBA
-   at least had Ctrl+Break.
-7. **Headless execution.** VBA can be driven by an external host with Excel invisible. Calcula's
+6. **Headless execution.** VBA can be driven by an external host with Excel invisible. Calcula's
    `schedule` runs only while Calcula is open, and the consent string says so.
 
 **The one-line verdict.** Calcula's scripting is now *functionally comparable* to VBA for everything

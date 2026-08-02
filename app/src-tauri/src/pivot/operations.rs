@@ -1486,6 +1486,13 @@ pub(crate) fn recalculate_sheet_formulas(
     pivot_state: &PivotState,
     control_states: Option<(&crate::pane_control::PaneControlState, &crate::ribbon_filter::RibbonFilterState)>,
 ) {
+    // BACKGROUND: a pivot refresh triggers a sheet recalculation the user did
+    // not personally start. It WRITES CELLS, so it gets the same fuel an
+    // interactive edit does (see EvalSurface), and it is cancellable.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     // Only recalculate in automatic mode
     {
         let calc_mode = state.calculation_mode.lock().unwrap();

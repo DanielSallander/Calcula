@@ -40,39 +40,24 @@ pub enum UdfValue {
     Empty,
 }
 
-/// Map a `CellError` to its Excel-standard display string. We deliberately do
-/// NOT reuse the app's `format!("#{:?}", e).to_uppercase()` rendering (which
-/// yields "#DIV0", "#REF", etc.) because the UDF wire format is a contract with
-/// the JS side and must use the canonical Excel error literals that round-trip
-/// cleanly through `parse_cell_error`.
+/// Map a `CellError` to its Excel-standard display string.
+///
+/// THIS TABLE USED TO LIVE HERE, and the duplication was the bug: the engine's
+/// `display_value` rendered the same errors as "#DIV0" / "#NAME" / "#REF" via a
+/// `format!("#{:?}", e)` fallback, and the persistence layer wrote the Rust
+/// variant name into the file, so three spellings of one error existed and only
+/// this one round-tripped. There is now exactly one authority — `as_literal` /
+/// `from_literal` on the engine's `CellError` — and this pair forwards to it, so
+/// the UDF wire format, the cell display and the saved file cannot drift apart
+/// again.
 pub(crate) fn cell_error_to_str(e: &CellError) -> &'static str {
-    match e {
-        CellError::Div0 => "#DIV/0!",
-        CellError::Ref => "#REF!",
-        CellError::Name => "#NAME?",
-        CellError::Value => "#VALUE!",
-        CellError::NA => "#N/A",
-        CellError::Parse => "#VALUE!", // no distinct Excel literal; surface as #VALUE!
-        CellError::Circular => "#CIRCULAR!",
-        CellError::Conflict => "#CONFLICT",
-        CellError::Blocked => "#BLOCKED!",
-    }
+    e.as_literal()
 }
 
 /// Inverse of `cell_error_to_str`. Unrecognized strings fall back to
 /// `CellError::Value` (per spec). Matching is case-insensitive on the literal.
 fn parse_cell_error(s: &str) -> CellError {
-    match s.trim().to_uppercase().as_str() {
-        "#DIV/0!" => CellError::Div0,
-        "#REF!" => CellError::Ref,
-        "#NAME?" => CellError::Name,
-        "#VALUE!" => CellError::Value,
-        "#N/A" => CellError::NA,
-        "#CIRCULAR!" => CellError::Circular,
-        "#CONFLICT" => CellError::Conflict,
-        "#BLOCKED!" => CellError::Blocked,
-        _ => CellError::Value,
-    }
+    CellError::from_literal(s)
 }
 
 /// Convert an evaluated engine result into a wire-format `UdfValue`.
@@ -229,6 +214,17 @@ pub fn collect_udf_calls(
     volatile_udf_names: Vec<String>,
     known: HashMap<String, UdfValue>,
 ) -> Result<UdfCollectResult, String> {
+    // The UDF DISCOVERY pass: a throwaway evaluation of the edited cells whose
+    // only purpose is to find out which UDF calls need pre-fetching. It must
+    // evaluate them EXACTLY as `update_cell`'s apply pass will, or the two
+    // passes disagree about which UDF calls exist — so it declares the same
+    // Interactive surface rather than a tighter one, even though this pass's
+    // results are discarded. A `#LIMIT!` here means the apply pass would have
+    // tripped too, which is the honest answer.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     // GET.CONTROLVALUE snapshot: built BEFORE the grid locks below, so the
     // discovery pass evaluates cells the same way update_cell's apply will.
     let control_values = crate::control_values::build_control_values(
@@ -670,6 +666,7 @@ mod tests {
             (CellError::Circular, "#CIRCULAR!"),
             (CellError::Conflict, "#CONFLICT"),
             (CellError::Blocked, "#BLOCKED!"),
+            (CellError::Limit, "#LIMIT!"),
         ] {
             let u = UdfValue::Error { value: lit.to_string() };
             assert_eq!(

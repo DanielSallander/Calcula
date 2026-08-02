@@ -123,6 +123,14 @@ pub fn goal_seek(
     state: State<AppState>,
     params: GoalSeekParams,
 ) -> GoalSeekResult {
+    // BACKGROUND: up to 100 secant iterations, each a full dependent recalc
+    // whose results are WRITTEN into the grid — the persisting ceiling, per
+    // formula, with no aggregate cap (the 100-iteration bound already exists and
+    // a second ceiling would abort legitimate convergence). Cancellable.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!("GOALSEEK", "Starting: target=({},{}) value={} variable=({},{})",
         params.target_row, params.target_col, params.target_value,
         params.variable_row, params.variable_col);

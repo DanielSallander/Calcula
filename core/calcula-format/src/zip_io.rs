@@ -16,6 +16,7 @@ use crate::features::scheduled_jobs::{
 };
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
+    PENDING_RECALC_MIN_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION,
 };
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
@@ -102,6 +103,13 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if workbook.user_files.contains_key(SCHEDULED_JOBS_FILE) {
         manifest.features.push(SCHEDULED_JOBS_FEATURE.to_string());
         stamp_feature_format_version(&mut manifest, SCHEDULED_JOBS_MIN_FORMAT_VERSION);
+    }
+    // The staleness marker gets a manifest feature id AND a version link for
+    // the same reason the scheduler did: a reader that silently dropped it
+    // would turn a knowingly-stale workbook into one that looks calculated.
+    if workbook.pending_recalc.as_ref().is_some_and(|p| !p.cells.is_empty()) {
+        manifest.features.push("pending_recalc".to_string());
+        stamp_feature_format_version(&mut manifest, PENDING_RECALC_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -333,6 +341,14 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
         let dv_json = serde_json::to_string_pretty(&workbook.data_validations)?;
         zip.start_file("data_validations.json", options.clone())?;
         zip.write_all(dv_json.as_bytes())?;
+    }
+    // The staleness marker left by a cancelled recalculation. Written ONLY when
+    // non-empty, so a fully-calculated workbook carries no entry at all and the
+    // absence of the file is itself the "this workbook is calculated" statement.
+    if let Some(pending) = workbook.pending_recalc.as_ref().filter(|p| !p.cells.is_empty()) {
+        let pending_json = serde_json::to_string_pretty(pending)?;
+        zip.start_file("pending_recalc.json", options.clone())?;
+        zip.write_all(pending_json.as_bytes())?;
     }
     if !workbook.sheet_protections.is_empty() {
         let prot_json = serde_json::to_string_pretty(&workbook.sheet_protections)?;
@@ -846,6 +862,10 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
     let data_validations: Vec<persistence::SavedSheetDataValidations> =
         read_optional_json::<Vec<persistence::SavedSheetDataValidations>>(&mut archive, "data_validations.json")?
             .unwrap_or_default();
+
+    // Absent for any workbook that was fully calculated when it was saved.
+    let pending_recalc: Option<persistence::SavedPendingRecalc> =
+        read_optional_json::<persistence::SavedPendingRecalc>(&mut archive, "pending_recalc.json")?;
     let controls: Vec<persistence::SavedSheetControls> =
         read_optional_json::<Vec<persistence::SavedSheetControls>>(&mut archive, "controls.json")?
             .unwrap_or_default();
@@ -945,6 +965,7 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
         outlines,
         sheet_protections,
         workbook_protection,
+        pending_recalc,
     })
 }
 
@@ -1105,6 +1126,7 @@ mod tests {
             outlines: Vec::new(),
             sheet_protections: Vec::new(),
             workbook_protection: None,
+            pending_recalc: None,
         }
     }
 
@@ -1392,6 +1414,109 @@ mod tests {
         assert_eq!(loaded.data_validations.len(), 1, "DV must survive the .cala round-trip");
         assert_eq!(loaded.data_validations[0].sheet_id, sheet_id);
         assert_eq!(loaded.data_validations[0].ranges, workbook.data_validations[0].ranges);
+    }
+
+    /// THE SILENT-STALENESS REGRESSION TEST.
+    ///
+    /// A cancelled recalculation leaves some cells holding pre-recalculation
+    /// values, and a stale cell looks exactly like a correct one. While the
+    /// session lives, the host's in-memory pending set keeps the status bar
+    /// saying "Calculate". Before this section existed the set died at save, so
+    /// the workbook reopened claiming to be calculated, with wrong numbers and
+    /// nothing anywhere saying so — and `.calp` publish, which refuses to ship a
+    /// pending workbook, saw an empty set and shipped it.
+    #[test]
+    fn test_roundtrip_pending_recalc_staleness_marker() {
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.pending_recalc = Some(persistence::SavedPendingRecalc {
+            sheet_id,
+            cells: vec![
+                persistence::SavedPendingCell { row: 4, col: 2 },
+                persistence::SavedPendingCell { row: 7, col: 0 },
+            ],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        let pending = loaded
+            .pending_recalc
+            .expect("the staleness marker must survive the .cala round-trip");
+        assert_eq!(pending.sheet_id, sheet_id, "keyed by SheetId, not by index");
+        assert_eq!(pending.cells.len(), 2);
+        assert_eq!(pending.cells[0], persistence::SavedPendingCell { row: 4, col: 2 });
+
+        // ...and it takes its link in the format-version chain, so a reader that
+        // would silently DROP it fails the open instead of laundering a stale
+        // workbook into a trustworthy-looking one.
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, PENDING_RECALC_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "pending_recalc"));
+    }
+
+    /// A fully-calculated workbook must carry NO marker and must NOT be stamped
+    /// up the version chain — otherwise every ordinary save would demand a newer
+    /// reader for a section it does not contain.
+    #[test]
+    fn test_a_calculated_workbook_carries_no_staleness_marker() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clean.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+        assert!(loaded.pending_recalc.is_none());
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < PENDING_RECALC_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "pending_recalc"));
+    }
+
+    /// EVERY cell error must survive a save/reload as ITSELF.
+    ///
+    /// This was broken for all of them, not just for the new one: the writer
+    /// stored `format!("{:?}", e)` (the Rust variant name) and the reader
+    /// discarded the string entirely and returned `CellError::Value`. So
+    /// `#DIV/0!`, `#N/A`, `#REF!`, `#CIRCULAR!` and `#BLOCKED!` all came back as
+    /// `#VALUE!` — five different diagnoses collapsed into one wrong one, and
+    /// `#BLOCKED!` (a transparency signal about code the user refused to run)
+    /// silently downgraded into a type error.
+    #[test]
+    fn test_roundtrip_every_cell_error_literal() {
+        use engine::cell::CellError;
+        let variants = [
+            CellError::Div0,
+            CellError::Ref,
+            CellError::Name,
+            CellError::Value,
+            CellError::NA,
+            CellError::Circular,
+            CellError::Conflict,
+            CellError::Blocked,
+            CellError::Limit,
+        ];
+        for e in variants {
+            let saved = persistence::SavedCellValue::from_value(&engine::CellValue::Error(e.clone()));
+            match &saved {
+                persistence::SavedCellValue::Error(s) => {
+                    assert_eq!(s, e.as_literal(), "the canonical literal is what gets written");
+                }
+                other => panic!("expected an Error payload, got {other:?}"),
+            }
+            assert_eq!(
+                saved.to_value(),
+                engine::CellValue::Error(e.clone()),
+                "{} did not survive the save/reload round trip",
+                e.as_literal()
+            );
+        }
+        // `Parse` is the one variant that deliberately does NOT round-trip: it
+        // shares the `#VALUE!` spelling because it has no Excel literal of its
+        // own, so it reloads as `Value` — which is exactly what it already
+        // displayed as. Asserted so the asymmetry is a decision, not a surprise.
+        let parsed = persistence::SavedCellValue::from_value(&engine::CellValue::Error(CellError::Parse));
+        assert_eq!(parsed.to_value(), engine::CellValue::Error(CellError::Value));
     }
 
     #[test]

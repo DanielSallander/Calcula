@@ -38,6 +38,81 @@ pub enum CellError {
     Blocked,    // Code the user refused to run (denied/declined capability) — a
                 // refused value, not a computation error. Transparency: the user
                 // must see #BLOCKED! rather than a stale number or a generic error.
+    /// A CALCULATION LIMIT was exceeded: the formula's work budget ran out
+    /// (`core/engine/src/budget.rs`), it recursed past `MAX_LAMBDA_DEPTH`, or
+    /// it asked for an array/string bigger than the engine will materialize.
+    /// Displays as `#LIMIT!`.
+    ///
+    /// WHY A DISTINCT VARIANT, and not one of the ones above:
+    /// - NOT `#VALUE!` (what the depth guard used to return): `#VALUE!` means
+    ///   "an argument has the wrong type — fix the argument", and it already
+    ///   carries Excel's `#NUM!`. Budget exhaustion means "this formula is too
+    ///   expensive, or it never terminates — simplify it". Those send a user to
+    ///   two different places, and the single most alarming failure in the
+    ///   product must not be indistinguishable from a typo. It also has to be
+    ///   COUNTABLE — error checking and the audit trail want to say "3 cells hit
+    ///   the calculation limit", which needs a distinct value.
+    /// - NOT `#CIRCULAR!`: that is graph-owned ("the dependency graph contains a
+    ///   cycle") and iterative calculation keys off it, so a budget-exhausted
+    ///   cell entering that path would be actively wrong.
+    /// - NOT `#BLOCKED!`: that is a consent outcome, not a cost outcome.
+    ///
+    /// WHY `Limit` AND NOT `Timeout`: the deterministic trigger is WORK, not
+    /// time. On a slow machine nothing timed out — the formula did too much,
+    /// and a user could trivially falsify a "timeout" claim ("it only took two
+    /// seconds"). `#LIMIT!` is also the right umbrella for the whole family:
+    /// fuel exhaustion, the depth ceiling, and the size caps all mean "this
+    /// formula exceeded a calculation limit".
+    Limit,
+}
+
+impl CellError {
+    /// THE ONE canonical Excel-style literal for this error.
+    ///
+    /// Every rendering, every wire format and every persisted form goes through
+    /// this table and its inverse [`CellError::from_literal`]. Before it existed
+    /// there were three competing spellings — the UDF bridge's canonical table,
+    /// a `format!("#{:?}", e).to_uppercase()` fallback in `display_value` that
+    /// produced "#DIV0" / "#NAME" / "#REF" (none of which are the Excel
+    /// literals, and none of which parse back), and a `format!("{:?}", e)` in
+    /// the persistence layer that wrote the Rust variant NAME into the file.
+    /// Divergence between them is not cosmetic: a literal that does not
+    /// round-trip becomes a DIFFERENT ERROR on reload.
+    pub fn as_literal(&self) -> &'static str {
+        match self {
+            CellError::Div0 => "#DIV/0!",
+            CellError::Ref => "#REF!",
+            CellError::Name => "#NAME?",
+            CellError::Value => "#VALUE!",
+            CellError::NA => "#N/A",
+            // No distinct Excel literal; surfaced as #VALUE!. NOTE the
+            // consequence for persistence: `Parse` is the one variant that does
+            // NOT round-trip, because it deliberately shares a spelling. It
+            // reloads as `Value`, which is what it already displayed as.
+            CellError::Parse => "#VALUE!",
+            CellError::Circular => "#CIRCULAR!",
+            CellError::Conflict => "#CONFLICT",
+            CellError::Blocked => "#BLOCKED!",
+            CellError::Limit => "#LIMIT!",
+        }
+    }
+
+    /// Inverse of [`CellError::as_literal`]. Unrecognized text falls back to
+    /// `Value`, matching the UDF bridge's contract with the JS side.
+    pub fn from_literal(s: &str) -> CellError {
+        match s.trim().to_uppercase().as_str() {
+            "#DIV/0!" => CellError::Div0,
+            "#REF!" => CellError::Ref,
+            "#NAME?" => CellError::Name,
+            "#VALUE!" => CellError::Value,
+            "#N/A" => CellError::NA,
+            "#CIRCULAR!" => CellError::Circular,
+            "#CONFLICT" => CellError::Conflict,
+            "#BLOCKED!" => CellError::Blocked,
+            "#LIMIT!" => CellError::Limit,
+            _ => CellError::Value,
+        }
+    }
 }
 
 /// Represents the calculated result or raw data within a cell.
@@ -291,12 +366,7 @@ impl Cell {
             CellValue::Boolean(b) => {
                 if *b { "TRUE" } else { "FALSE" }.to_string()
             }
-            CellValue::Error(e) => match e {
-                CellError::NA => "#N/A".to_string(),
-                CellError::Conflict => "#CONFLICT".to_string(),
-                CellError::Blocked => "#BLOCKED!".to_string(),
-                other => format!("#{:?}", other).to_uppercase(),
-            },
+            CellValue::Error(e) => e.as_literal().to_string(),
             CellValue::List(items) => format!("[List({})]", items.len()),
             CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
         }

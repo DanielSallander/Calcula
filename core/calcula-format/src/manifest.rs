@@ -28,7 +28,25 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 
 /// The highest `format_version` THIS build knows how to read. A file stamped
 /// above this is refused rather than partially understood.
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 2;
+///
+/// v3 adds the cancelled-recalculation staleness marker
+/// (`PENDING_RECALC_MIN_FORMAT_VERSION`), which takes a link for the same
+/// reason the scheduler did: an older reader would not merely ignore it, it
+/// would drop it on the next save and the workbook would come back looking
+/// fully calculated while still holding pre-recalculation values.
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 3;
+
+/// Minimum `.cala` format version a reader must be to handle
+/// `pending_recalc.json` — the record of which cells a cancelled
+/// recalculation never reached.
+///
+/// THE TEST THIS PASSES (and most new sections do not): would an older reader
+/// MISHANDLE the document, rather than merely lose some cosmetic state? Yes.
+/// Dropping this section turns a workbook that is openly, visibly stale into
+/// one that silently claims to be calculated. Refusing the open is the honest
+/// failure; quietly laundering wrong numbers into trustworthy-looking ones is
+/// not.
+pub const PENDING_RECALC_MIN_FORMAT_VERSION: u32 = 3;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

@@ -59,8 +59,8 @@ declare interface ScriptCell {
  */
 declare interface ScriptEvaluatedValue {
   /** number | string | boolean | null. An error carries its Excel literal
-   *  ("#DIV/0!", "#NAME?", "#SYNTAX!"); an array or list result carries its
-   *  rendered text. */
+   *  ("#DIV/0!", "#NAME?", "#SYNTAX!", "#LIMIT!"); an array or list result
+   *  carries its rendered text. */
   value: string | number | boolean | null;
   /** The formatted text this answer would show in a cell. */
   display: string;
@@ -1946,12 +1946,26 @@ declare interface UnlockedAPI {
    * source wired either. Everything else behaves exactly as it would in a cell.
    *
    * A formula that cannot be parsed answers `#SYNTAX!` rather than throwing.
+   *
+   * THERE IS A WORK BUDGET, and it is the same one a cell gets — no more. An
+   * expression that does more work than a single formula is allowed to (an
+   * unbounded recursive LAMBDA, `MMULT` over two whole columns) answers
+   * `#LIMIT!` instead of freezing the application. Evaluation here is also
+   * bounded by the same 5-second wall clock the rest of the script sandbox
+   * lives under, which a cell deliberately does NOT have: a cell's value must
+   * be identical on every machine, and an answer returned to a script is not
+   * stored anywhere, so it can be time-bounded without that risk.
    */
   evaluate(expression: string, options?: { sheetIndex?: number }): Promise<ScriptEvaluatedValue>;
   /**
    * Evaluate several expressions in ONE round trip (max 64, each up to 8192
    * characters). Results come back in the order you asked for them; one bad
    * expression yields `#SYNTAX!` in its own slot and never loses the others.
+   *
+   * The whole CALL also shares one work budget (eight formulas' worth). A batch
+   * that exhausts it answers `#LIMIT!` in its remaining slots and keeps the
+   * answers it already had — so asking for a hundred thousand expressions at
+   * once cannot buy a hundred thousand full allowances.
    */
   evaluateAll(expressions: string[], options?: { sheetIndex?: number }): Promise<ScriptEvaluatedValue[]>;
 

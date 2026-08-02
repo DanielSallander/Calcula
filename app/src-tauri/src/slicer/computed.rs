@@ -75,6 +75,9 @@ fn evaluate_slicer_property(
     styles: &StyleRegistry,
     control_values: Option<&std::sync::Arc<crate::control_values::ControlValuesMap>>,
 ) -> CellValue {
+    // TRANSIENT: a slicer's computed property is chrome recomputed on every
+    // selection change and never persisted into the grid.
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let ast = match &prop.cached_ast {
         Some(ast) => ast.clone(),
         None => {

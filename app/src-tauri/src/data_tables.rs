@@ -102,6 +102,14 @@ pub fn data_table_one_var(
     state: State<AppState>,
     params: DataTableOneVarParams,
 ) -> DataTableResult {
+    // BACKGROUND: a what-if table is rows x cols full evaluations driven by a
+    // caller-supplied rectangle, and every result is WRITTEN into the grid — so
+    // the persisting ceiling, not a tighter one, and cancellable because the
+    // rectangle can be large.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!(
         "DATATABLE",
         "One-var: range=({},{})..({},{}) sheet={}",
@@ -329,6 +337,11 @@ pub fn data_table_two_var(
     state: State<AppState>,
     params: DataTableTwoVarParams,
 ) -> DataTableResult {
+    // See data_table_one_var: same surface, quadratically more of it.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!(
         "DATATABLE",
         "Two-var: range=({},{})..({},{}) sheet={}",
@@ -526,6 +539,7 @@ fn re_evaluate_formulas(
     sheet_idx: usize,
     active_sheet: usize,
 ) {
+    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Background);
     // Walk through all cells in the sheet and re-evaluate any formula cells
     // This is a simple approach; a production system would use the dependency graph
     let max_row = grids[sheet_idx].max_row;

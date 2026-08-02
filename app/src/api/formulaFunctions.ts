@@ -34,6 +34,15 @@ export const UDF_ERROR_KEY = "__calculaError";
  * degrades to #VALUE! — matching `parse_cell_error` in scripting/udf.rs, which
  * is the authority on the wire. (Excel's #NUM!/#NULL! have no engine variant,
  * so they are deliberately absent rather than silently aliased.)
+ *
+ * `#LIMIT!` means the formula exceeded its CALCULATION BUDGET — it did more
+ * work than one cell is allowed to, or it never terminates (an unbounded
+ * recursive LAMBDA, a range far larger than the data). It is deliberately its
+ * own literal rather than another spelling of #VALUE!, because the remedy is
+ * different: #VALUE! sends you to check an argument's type, #LIMIT! sends you
+ * to simplify the formula. Listing it here is what stops
+ * `normalizeCellErrorLiteral` from collapsing it back into #VALUE! and undoing
+ * that distinction on the way through the frontend.
  */
 export const CELL_ERROR_LITERALS = [
   "#DIV/0!",
@@ -44,6 +53,7 @@ export const CELL_ERROR_LITERALS = [
   "#CIRCULAR!",
   "#CONFLICT",
   "#BLOCKED!",
+  "#LIMIT!",
 ] as const;
 
 export type CellErrorLiteral = (typeof CELL_ERROR_LITERALS)[number];

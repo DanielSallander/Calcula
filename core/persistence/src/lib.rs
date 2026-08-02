@@ -139,6 +139,44 @@ pub struct Workbook {
     /// Workbook structure protection (opaque app-owned JSON payload; None when
     /// the workbook is unprotected).
     pub workbook_protection: Option<serde_json::Value>,
+    /// Cells that were still holding PRE-RECALCULATION values when this file
+    /// was written, because the user cancelled a recalculation and saved
+    /// without finishing it. `None` for a fully-calculated workbook.
+    ///
+    /// WHY THIS IS IN THE FILE FORMAT and not merely in session state: a
+    /// cancelled recalculation leaves some cells updated and some stale, and a
+    /// stale cell is VISUALLY IDENTICAL to a correct one. While the session
+    /// lives, the host's in-memory pending set keeps the status bar saying
+    /// "Calculate" and keeps those cells locatable. Save and reopen, and that
+    /// set was gone — the workbook came back looking authoritative, with wrong
+    /// numbers on screen and nothing anywhere saying so. That is strictly worse
+    /// than an error value: an error announces itself, a stale number does not.
+    /// Persisting the remainder closes the laundering path and lets the reopened
+    /// session resume exactly where the cancel stopped.
+    pub pending_recalc: Option<SavedPendingRecalc>,
+}
+
+/// The un-recalculated remainder of a cancelled recalculation, as persisted.
+///
+/// Keyed by `SheetId` rather than by sheet index, per the repo-wide identity
+/// rule: an index is invalidated by any sheet insert, delete or reorder between
+/// the save and the load, and would then point the staleness marker at the
+/// WRONG sheet — which is worse than not recording it at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPendingRecalc {
+    pub sheet_id: SheetId,
+    /// The cells that did not recalculate, in the topological order they would
+    /// have been evaluated in, so a resumed pass can simply walk them.
+    pub cells: Vec<SavedPendingCell>,
+}
+
+/// One cell a cancelled recalculation did not reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPendingCell {
+    pub row: u32,
+    pub col: u32,
 }
 
 /// Conditional-formatting rules for one sheet. `rules` is the opaque app-owned
@@ -511,6 +549,7 @@ impl Workbook {
             outlines: Vec::new(),
             sheet_protections: Vec::new(),
             workbook_protection: None,
+            pending_recalc: None,
         }
     }
 
@@ -550,6 +589,7 @@ impl Workbook {
             outlines: Vec::new(),
             sheet_protections: Vec::new(),
             workbook_protection: None,
+            pending_recalc: None,
         }
     }
 }
@@ -799,7 +839,10 @@ impl SavedCellValue {
             CellValue::Number(n) => SavedCellValue::Number(*n),
             CellValue::Text(s) => SavedCellValue::Text(s.clone()),
             CellValue::Boolean(b) => SavedCellValue::Boolean(*b),
-            CellValue::Error(e) => SavedCellValue::Error(format!("{:?}", e)),
+            // Persist the CANONICAL LITERAL, not the Rust variant name.
+            // `format!("{:?}", e)` wrote "Div0" / "NA" / "Limit" into the file,
+            // which nothing could read back — see `to_value` below.
+            CellValue::Error(e) => SavedCellValue::Error(e.as_literal().to_string()),
             CellValue::List(items) => {
                 SavedCellValue::List(items.iter().map(SavedCellValue::from_value).collect())
             }
@@ -819,7 +862,15 @@ impl SavedCellValue {
             SavedCellValue::Number(n) => CellValue::Number(*n),
             SavedCellValue::Text(s) => CellValue::Text(s.clone()),
             SavedCellValue::Boolean(b) => CellValue::Boolean(*b),
-            SavedCellValue::Error(_) => CellValue::Error(engine::cell::CellError::Value),
+            // THE OTHER HALF OF A REAL DATA-LOSS BUG, not a new-variant chore.
+            // This arm used to discard the saved string entirely and return
+            // `CellError::Value` for EVERY error, so a workbook holding
+            // `#DIV/0!`, `#N/A`, `#REF!`, `#CIRCULAR!` or `#BLOCKED!` came back
+            // from a save/reload round trip showing `#VALUE!` — five different
+            // diagnoses collapsed into one wrong one, and `#BLOCKED!` (a
+            // transparency signal about code the user refused to run) silently
+            // downgraded to a type error. `#LIMIT!` merely inherited it.
+            SavedCellValue::Error(s) => CellValue::Error(engine::cell::CellError::from_literal(s)),
             SavedCellValue::List(items) => {
                 CellValue::List(Box::new(items.iter().map(|i| i.to_value()).collect()))
             }

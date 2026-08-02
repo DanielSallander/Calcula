@@ -5,6 +5,7 @@ use serde::{Serialize, Deserialize};
 use tauri::State;
 use crate::{AppState, evaluate_formula_with_pivot, format_cell_value};
 use crate::api_types::CellData;
+use crate::eval_budget::{self, EvalSurface, PendingCell, PendingRecalc, ProgressEmitter};
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn, log_info};
 use crate::persistence::UserFilesState;
 use crate::pivot::types::PivotState;
@@ -103,13 +104,24 @@ pub fn set_iteration_settings(
 // CALCULATION STATE
 // ============================================================================
 
-/// Get the current calculation state.
-/// Returns "done", "calculating", or "pending".
-/// Currently always returns "done" since calculation is synchronous,
-/// but having this API ready enables future async calculation.
+/// Get the current calculation state: "done" or "pending".
+///
+/// "pending" means a recalculation was CANCELLED and some cells still hold
+/// pre-pass values — Excel's "Calculate" state. The frontend shows that word in
+/// the status bar instead of "Ready", which is the whole affordance for "this
+/// workbook has un-recalculated cells".
+///
+/// "calculating" is not reported here: a running pass publishes itself through
+/// the `app:calc-progress` event stream instead, which is both more informative
+/// (it carries counts and elapsed time) and reachable while the pass runs.
 #[tauri::command]
-pub fn get_calculation_state(_state: State<AppState>) -> String {
-    "done".to_string()
+pub fn get_calculation_state(state: State<AppState>) -> String {
+    let stale = state
+        .pending_recalc
+        .lock()
+        .ok()
+        .is_some_and(|p| p.as_ref().is_some_and(|pr| !pr.is_empty()));
+    if stale { "pending".to_string() } else { "done".to_string() }
 }
 
 // ============================================================================
@@ -316,10 +328,42 @@ fn partition_formula_cells(
 /// Recalculate all formulas in the grid.
 /// When iterative calculation is enabled, circular references are resolved
 /// by repeatedly evaluating the circular group until convergence.
-#[tauri::command]
-pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
+///
+/// # Why this command is `(async)`
+///
+/// **This is the change that makes cancellation exist at all**, and it is a
+/// threading change rather than a token design. A plain `#[tauri::command]` on
+/// a synchronous function runs on the MAIN thread, which on Windows is the
+/// WebView2 UI thread: while a long recalculation ran, the webview could not
+/// paint, could not dispatch a click, and could not deliver
+/// `invoke("cancel_calculation")`. An `AtomicBool` nobody can reach is not
+/// cancellation. `(async)` dispatches this to the async runtime's pool and
+/// frees the UI thread, so the Cancel button can be drawn AND clicked.
+///
+/// The function itself stays synchronous Rust — it holds `std::sync::MutexGuard`s
+/// and must never be suspended across an await. 106 commands in this crate are
+/// already async, so `AppState`'s mutexes being touched off the main thread is
+/// not a new hazard. The consequence to design for (not to discover) is that a
+/// concurrent edit command now BLOCKS on the grid mutex while a recalc runs;
+/// the frontend therefore enters an explicit "calculating" state on invoke,
+/// which it wants anyway, because that is where the Cancel button lives.
+#[tauri::command(async)]
+pub fn calculate_now(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>, cube_results: Option<engine::CubePrefetch>) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // THE PASS OWNS THE CANCEL FLAG. `begin` clears anything a previous pass
+    // left set; the guard clears it again on the way out (including on a panic)
+    // so a cancelled pass cannot poison the resume the user is about to ask for.
+    // Every evaluator built anywhere under this call now carries the pass token
+    // and the Recalc fuel ceiling. See eval_budget.rs for why the surface is
+    // ambient rather than a parameter on ~78 call sites.
+    let pass = eval_budget::begin_pass(EvalSurface::Recalc, &state.calc_cancel);
+    // VERIFICATION HOOK for the `(async)` change above. The claim "this no
+    // longer runs on the WebView2 UI thread" is a claim about framework
+    // behaviour, and the whole Cancel affordance rests on it, so it is logged
+    // rather than asserted from the documentation: compare this thread id
+    // against a UI-thread command's and they must differ.
+    log_info!("CALC", "calculate_now on thread {:?}", std::thread::current().id());
     // Pre-fetched CUBE data for this full recalc (built async by cube_prefetch_all
     // on the frontend before calling). Shared via Arc so each formula's eval gets
     // it cheaply; None => cube cells preserve their last value (see eval_cube).
@@ -393,11 +437,54 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
     let dependencies_map = state.dependencies.lock().unwrap();
 
     // Partition formula cells into non-circular (topological order) and circular groups
-    let (non_circular, circular_groups) = partition_formula_cells(&formula_cells, &dependencies_map);
+    let (mut non_circular, mut circular_groups) = partition_formula_cells(&formula_cells, &dependencies_map);
     drop(dependencies_map);
 
+    // RESUME. If the previous pass on this sheet was cancelled, recalculate only
+    // what it never reached, so an accidental Cancel costs nothing.
+    //
+    // Filtering the FRESH topological order down to the pending set is correct
+    // because the pending set is, by construction, a topological SUFFIX of the
+    // previous order: every precedent of a pending cell is either pending too
+    // (and still precedes it here) or was already recalculated. Cells that an
+    // edit cascade recalculated in the meantime were dropped from the set by
+    // `update_cell`; any that were missed are merely recalculated twice, which
+    // is wasteful and never wrong.
+    let resume: Option<std::collections::HashSet<(u32, u32)>> = {
+        let pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
+        pending
+            .as_ref()
+            .filter(|p| p.sheet_index == active_sheet && !p.is_empty())
+            .map(|p| p.cells.iter().map(|c| (c.row, c.col)).collect())
+    };
+    if let Some(resume_set) = &resume {
+        non_circular.retain(|(r, c, _)| resume_set.contains(&(*r, *c)));
+        // A circular group is atomic: if any member is pending, the group has to
+        // be iterated as a whole — a half-converged group is not a resting state.
+        circular_groups.retain(|g| g.iter().any(|(r, c, _)| resume_set.contains(&(*r, *c))));
+        log_info!("CALC", "resuming cancelled pass: {} cells, {} circular groups",
+            non_circular.len(), circular_groups.len());
+    }
+
+    let total_cells: usize =
+        non_circular.len() + circular_groups.iter().map(|g| g.len()).sum::<usize>();
+    let mut progress = ProgressEmitter::new(Some(window.clone()), "workbook", total_cells);
+    let mut cells_done: usize = 0;
+    let mut cancelled = false;
+    // Everything a cancelled pass did NOT recalculate, in evaluation order.
+    let mut pending_cells: Vec<PendingCell> = Vec::new();
+
     // Phase 1: Evaluate non-circular formulas in topological order (single pass)
-    for (row, col, formula) in &non_circular {
+    for (idx, (row, col, formula)) in non_circular.iter().enumerate() {
+        // Check 1 of 2: before spending any work on this cell.
+        if pass.cancelled() {
+            cancelled = true;
+            pending_cells.extend(
+                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
+            );
+            break;
+        }
+
         let result = evaluate_single_formula(
             *row, *col, formula,
             &grids, &sheet_names, active_sheet,
@@ -407,6 +494,21 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             cube_arc.as_ref(),
             Some(&control_values),
         );
+
+        // Check 2 of 2, and THE LOAD-BEARING ONE: after evaluating, BEFORE
+        // writing. A formula aborted mid-flight by cancellation comes back as
+        // `#LIMIT!` (the engine reports cancellation and exhaustion with the
+        // same value; the host distinguishes them by asking the token it owns).
+        // Writing it would land a bogus error in a cell the user only wanted to
+        // stop computing. `idx` — not `idx + 1` — so this cell is recorded as
+        // un-recalculated, which it is.
+        if pass.cancelled() {
+            cancelled = true;
+            pending_cells.extend(
+                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
+            );
+            break;
+        }
 
         if let Some(cell) = grid.get_cell(*row, *col) {
             let mut updated = cell.clone();
@@ -435,10 +537,26 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 accounting_layout: None,
             });
         }
+        cells_done += 1;
+        progress.tick(cells_done);
     }
 
     // Phase 2: Handle circular groups
-    for group in &circular_groups {
+    for (gi, group) in circular_groups.iter().enumerate() {
+        if cancelled {
+            break;
+        }
+        // A circular group is all-or-nothing: cancelling inside one leaves a
+        // half-converged set of values that is neither the old answer nor the
+        // new one, so the whole group (and every group after it) is recorded as
+        // pending rather than partially written.
+        if pass.cancelled() {
+            cancelled = true;
+            for g in &circular_groups[gi..] {
+                pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+            }
+            break;
+        }
         if !iteration_enabled {
             // Iteration disabled: set all cells in the circular group to #CIRC! error
             for (row, col, _formula) in group {
@@ -474,6 +592,19 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 group.len(), max_iterations, max_change);
 
             for iteration in 0..max_iterations {
+                // ITERATIVE CALCULATION IS UNTOUCHED BY THE BUDGET, on purpose:
+                // each iteration is its own top-level evaluation and re-arms a
+                // fresh allowance, so 32,767 deliberate iterations look like
+                // 32,767 cheap evaluations rather than one long one. Runaway
+                // protection for iteration already exists at a different layer
+                // (max_iterations / max_change) and the budget must not
+                // second-guess it. What the loop DOES honour is Cancel — checked
+                // once per iteration, which is fine-grained enough for a human
+                // and free next to a whole group evaluation.
+                if pass.cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 let mut max_delta: f64 = 0.0;
 
                 for (row, col, formula) in group {
@@ -515,6 +646,16 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 }
             }
 
+            if cancelled {
+                // Stopped mid-convergence. The group's cells hold intermediate
+                // iterates, which are not an answer — record the whole group
+                // and every group after it as un-recalculated.
+                for g in &circular_groups[gi..] {
+                    pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+                }
+                break;
+            }
+
             // Collect final values for all cells in the group
             for (row, col, _formula) in group {
                 if let Some(cell) = grid.get_cell(*row, *col) {
@@ -537,10 +678,16 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 }
             }
         }
+        cells_done += group.len();
+        progress.tick(cells_done);
     }
 
-    // Re-evaluate all computed properties for this sheet
-    {
+    // Re-evaluate all computed properties for this sheet.
+    // Skipped after a cancel: computed properties are re-derived from the whole
+    // sheet, and re-deriving them from a half-recalculated one would bake the
+    // partial state into row heights and column widths — where, unlike a cell
+    // value, the user has no indicator telling them it is stale.
+    if !cancelled {
         let mut cp_storage = state.computed_properties.lock().unwrap();
         let (_dim_changes, _style_refresh) =
             crate::computed_properties::re_evaluate_all_properties(
@@ -558,6 +705,32 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
         // Dimension changes and style refresh are handled by the frontend
         // re-fetching viewport data after recalculation.
     }
+
+    // WHAT THE PASS LEAVES BEHIND.
+    //
+    // On a clean finish the pending set is cleared: the workbook is fully
+    // calculated and the status bar goes back to "Ready".
+    //
+    // On a cancel it records the exact remainder. A partial recalc is otherwise
+    // an invisible hazard — a stale cell looks precisely like a correct one —
+    // and the alternatives were worse: snapshotting the whole grid per recalc is
+    // unaffordable and throws away work the user may want, and a per-cell dirty
+    // bit adds a field to `Cell` plus an invalidation problem. See
+    // eval_budget::PendingRecalc.
+    //
+    // `pending_recalc` is a LEAF mutex — nothing else is locked underneath it —
+    // so taking it here, while the grid locks are still held, cannot deadlock.
+    {
+        let mut pending = state.pending_recalc.lock().map_err(|e| e.to_string())?;
+        if cancelled {
+            log_info!("CALC", "cancelled after {} of {} cells; {} left un-recalculated",
+                cells_done, total_cells, pending_cells.len());
+            *pending = Some(PendingRecalc { sheet_index: active_sheet, cells: pending_cells.clone() });
+        } else {
+            *pending = None;
+        }
+    }
+    progress.finish(cells_done, cancelled, pending_cells.len());
 
     Ok(updated_cells)
 }
@@ -581,6 +754,21 @@ pub(crate) fn recalculate_sheet_values(
 ) {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // BACKGROUND surface: the user did not personally start this pass (.calp
+    // refresh, override revert/accept), but it WRITES CELLS, so it gets exactly
+    // the same fuel an interactive edit gets. That equality is a requirement,
+    // not an oversight — a formula that computed a value on one path and
+    // `#LIMIT!` on another would make the workbook's content depend on which
+    // code path last touched it. See EvalSurface.
+    //
+    // It IS cancellable: these are among the longest passes in the product, and
+    // they inherit whatever token the enclosing operation installed.
+    // `begin_pass` claims the token only if nothing already owns it: this body
+    // is sometimes the whole operation (a bare `.calp` refresh) and sometimes a
+    // step inside a longer one (an animation frame, a pivot refresh). Only the
+    // outermost claimant may clear the flag, or a nested pass would discard a
+    // Cancel the user just issued against the operation containing it.
+    let pass = eval_budget::begin_pass(EvalSurface::Background, &state.calc_cancel);
     // GET.CONTROLVALUE snapshot: built BEFORE any grid locks (canonical lock
     // order). None (states unreachable at the call site) => those formulas
     // evaluate to #N/A for this pass (v1).
@@ -655,7 +843,17 @@ pub(crate) fn recalculate_sheet_values(
     }
     let (non_circular, circular_groups) = partition_formula_cells(&formula_cells, &local_deps);
 
-    for (row, col, formula) in &non_circular {
+    let mut cancelled = false;
+    let mut pending_cells: Vec<PendingCell> = Vec::new();
+
+    for (idx, (row, col, formula)) in non_circular.iter().enumerate() {
+        if pass.cancelled() {
+            cancelled = true;
+            pending_cells.extend(
+                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
+            );
+            break;
+        }
         let result = evaluate_single_formula(
             *row, *col, formula,
             &grids, &sheet_names, sheet_index,
@@ -665,6 +863,15 @@ pub(crate) fn recalculate_sheet_values(
             None,
             control_values.as_ref(),
         );
+        // Same ordering rule as calculate_now: ask the token BEFORE writing, so
+        // a formula aborted mid-flight never lands its `#LIMIT!` in a cell.
+        if pass.cancelled() {
+            cancelled = true;
+            pending_cells.extend(
+                non_circular[idx..].iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }),
+            );
+            break;
+        }
         if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
             let mut updated = cell.clone();
             updated.value = result;
@@ -675,7 +882,17 @@ pub(crate) fn recalculate_sheet_values(
         }
     }
 
-    for group in &circular_groups {
+    for (gi, group) in circular_groups.iter().enumerate() {
+        if cancelled {
+            break;
+        }
+        if pass.cancelled() {
+            cancelled = true;
+            for g in &circular_groups[gi..] {
+                pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+            }
+            break;
+        }
         if !iteration_enabled {
             for (row, col, _formula) in group {
                 if let Some(cell) = grids[sheet_index].get_cell(*row, *col) {
@@ -689,6 +906,10 @@ pub(crate) fn recalculate_sheet_values(
             }
         } else {
             for _iteration in 0..max_iterations {
+                if pass.cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 let mut max_delta: f64 = 0.0;
                 for (row, col, formula) in group {
                     let old_value = grids[sheet_index].get_cell(*row, *col)
@@ -721,20 +942,91 @@ pub(crate) fn recalculate_sheet_values(
                     break;
                 }
             }
+            if cancelled {
+                for g in &circular_groups[gi..] {
+                    pending_cells.extend(g.iter().map(|(r, c, _)| PendingCell { row: *r, col: *c }));
+                }
+                break;
+            }
+        }
+    }
+
+    // Same contract as calculate_now: a cancelled pass records its remainder so
+    // the workbook is never silently half-calculated. A clean pass on this sheet
+    // clears any pending set that belonged to it.
+    if let Ok(mut pending) = state.pending_recalc.lock() {
+        if cancelled {
+            *pending = Some(PendingRecalc { sheet_index, cells: pending_cells });
+        } else if pending.as_ref().is_some_and(|p| p.sheet_index == sheet_index) {
+            *pending = None;
         }
     }
 }
 
 /// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
-#[tauri::command]
-pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
+///
+/// `(async)` for the same reason `calculate_now` is — it delegates straight to
+/// it, and a sync wrapper around an off-main-thread body would put the whole
+/// thing back on the UI thread.
+#[tauri::command(async)]
+pub fn calculate_sheet(window: tauri::Window, state: State<'_, AppState>, user_files_state: State<'_, UserFilesState>, pivot_state: State<'_, PivotState>, pane_control_state: State<'_, crate::pane_control::PaneControlState>, ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, None);
+    let result = calculate_now(window, state, user_files_state, pivot_state, pane_control_state, ribbon_filter_state, None);
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result
+}
+
+// ============================================================================
+// CANCELLATION (the Ctrl+Break analogue)
+// ============================================================================
+
+/// Ask the running calculation to stop.
+///
+/// Does ONE thing: sets an atomic flag. That is the whole point — it must be
+/// callable while a recalculation holds every grid lock in the application, so
+/// it takes no lock the recalculation could be holding and cannot block or
+/// deadlock behind it. The running pass notices at its next poll boundary
+/// (roughly every 65,536 charges inside a formula, and between every two cells
+/// in the pass loop), stops, and records what it did not get to.
+///
+/// Returns true if a calculation was plausibly running. It is harmless to call
+/// when nothing is running: the flag is cleared by the next pass that claims it
+/// (`PassToken::begin`) and by the guard that owns it on the way out, so a
+/// stray Cancel cannot abort a future calculation.
+#[tauri::command]
+pub fn cancel_calculation(state: State<AppState>) -> bool {
+    log_enter_info!("CMD", "cancel_calculation");
+    state.calc_cancel.cancel();
+    true
+}
+
+/// The cells a cancelled recalculation never reached, or `None` when the
+/// workbook is fully calculated.
+///
+/// This is what lets the user SEE which cells are stale rather than being told
+/// only that "calculation was cancelled" — a stale cell is otherwise visually
+/// indistinguishable from a correct one.
+#[tauri::command]
+pub fn get_pending_recalc(state: State<AppState>) -> Option<PendingRecalc> {
+    state.pending_recalc.lock().ok().and_then(|p| p.clone())
+}
+
+/// Forget the pending set WITHOUT recalculating.
+///
+/// Deliberately explicit and deliberately not called from any save or publish
+/// path: dropping the marker is a claim that the stale cells no longer matter,
+/// and only a human gets to make that claim.
+#[tauri::command]
+pub fn clear_pending_recalc(state: State<AppState>) -> bool {
+    if let Ok(mut pending) = state.pending_recalc.lock() {
+        let had = pending.is_some();
+        *pending = None;
+        return had;
+    }
+    false
 }
 
 // ============================================================================

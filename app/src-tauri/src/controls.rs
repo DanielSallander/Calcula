@@ -380,7 +380,9 @@ pub fn resolve_control_properties(
         let current_grid = &grids[sheet_index];
         let current_sheet_name = &sheet_names[sheet_index];
         let context = create_multi_sheet_context(&grids, &sheet_names, current_sheet_name);
-        Some(Evaluator::with_multi_sheet(current_grid, context))
+        let mut ev = Evaluator::with_multi_sheet(current_grid, context);
+        crate::eval_budget::apply(&mut ev);
+        Some(ev)
     } else {
         None
     };

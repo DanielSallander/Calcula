@@ -19,6 +19,8 @@ import type { Page } from "@playwright/test";
 import { captureUndoBaseline, checkUndoRoundTrip } from "./undoRoundTrip";
 import { checkSaveReloadRoundTrip } from "./saveReloadRoundTrip";
 import { checkRecalcConsistency } from "./recalcConsistency";
+import { checkNoCalculationLimit } from "./calculationBudget";
+import { getWorkbookDigest } from "./digest";
 import { filterKnownIssues } from "./knownIssues";
 import type {
   OracleBaseline,
@@ -31,6 +33,7 @@ export { getWorkbookDigest, diffDigests, canonicalStringify, hashValue } from ".
 export { captureUndoBaseline, checkUndoRoundTrip, getUndoState } from "./undoRoundTrip";
 export { checkSaveReloadRoundTrip } from "./saveReloadRoundTrip";
 export { checkRecalcConsistency } from "./recalcConsistency";
+export { checkNoCalculationLimit, LIMIT_LITERAL } from "./calculationBudget";
 export { CHEAP_INVARIANTS, selectionInBounds } from "./cheapInvariants";
 export { KNOWN_ISSUES, filterKnownIssues } from "./knownIssues";
 export type { KnownIssue } from "./knownIssues";
@@ -81,7 +84,18 @@ export class OracleBattery {
   ): Promise<OracleCheckpointResult> {
     this.checkpointCount++;
     const violations: OracleViolation[] = [];
+    const budgetViolations: OracleViolation[] = [];
     let undoBaselineReset = false;
+
+    // 0. Calculation budget — no cell in a generated workbook may ever hold
+    //    `#LIMIT!`. Runs FIRST and off a digest of the current state, because a
+    //    tripped budget makes every oracle below it report confusing secondary
+    //    damage (an error value differs from a number, so the undo and
+    //    save/reload digests diverge too) and the real cause should be named
+    //    before the symptoms. See calculationBudget.ts.
+    budgetViolations.push(
+      ...checkNoCalculationLimit(await getWorkbookDigest(page))
+    );
 
     // 1. Recalc consistency — read-only with respect to undo stack.
     if (!this.disabled.has("recalc-consistency")) {
@@ -109,7 +123,15 @@ export class OracleBattery {
       this.suppressed.push({ violation: s.violation, ledgerId: s.issue.ledgerId });
     }
 
+    // Budget violations bypass the known-issues ledger ON PURPOSE. A ledger
+    // entry would turn "the calculation budget is mis-calibrated and is
+    // silently corrupting ordinary workbooks" into a suppressed line in a
+    // report, which is exactly the signal this gate exists to produce.
     const nextBaseline = await this.begin(page);
-    return { violations: active, undoBaselineReset, nextBaseline };
+    return {
+      violations: [...budgetViolations, ...active],
+      undoBaselineReset,
+      nextBaseline,
+    };
   }
 }

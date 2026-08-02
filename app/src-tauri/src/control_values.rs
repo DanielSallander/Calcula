@@ -405,6 +405,14 @@ pub(crate) fn recalc_control_dependents_core(
 ) -> Result<Vec<CellData>, String> {
     // PERF-03: one lookup-index cache for the whole pass (lookup_cache.rs).
     let _lookup_pass = engine::begin_lookup_pass();
+    // BACKGROUND: moving a slider cascades into every GET.CONTROLVALUE
+    // dependent and WRITES the results, so it gets the persisting ceiling.
+    // Cancellable — dragging a slider over a heavy model is one of the easiest
+    // ways to start a recalculation you immediately regret.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     // Respect manual calculation mode — this is the dependent cascade of a
     // control mutation, and update_cell gates its cascade the same way.
     {

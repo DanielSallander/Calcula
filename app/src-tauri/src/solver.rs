@@ -592,6 +592,13 @@ pub fn solver_solve(
     state: State<AppState>,
     params: SolverParams,
 ) -> SolverResult {
+    // BACKGROUND: GRG/simplex/evolutionary all drive many full recalcs whose
+    // results are written into the grid. Persisting ceiling per formula; the
+    // iteration counts are Solver's own business, and Cancel is the escape.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     crate::log_info!(
         "SOLVER",
         "Starting: objective=({},{}) method={:?} variables={}",
@@ -885,6 +892,10 @@ pub fn solver_revert(
     sheet_index: usize,
     original_values: Vec<SolverVariableValue>,
 ) -> SolverResult {
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     // DELIBERATELY NOT protection-gated. This is the undo of solver_solve, and
     // it restores values the sheet already held. If the sheet were protected
     // between solve and revert, gating here would strand the user with Solver's

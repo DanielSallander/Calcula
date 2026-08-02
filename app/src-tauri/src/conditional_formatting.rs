@@ -1107,6 +1107,12 @@ fn evaluate_rule(
     col: u32,
     stats: Option<&RangeStats>,
 ) -> Option<CellConditionalFormat> {
+    // TRANSIENT. A rule decides whether a cell is highlighted; nothing here is
+    // ever written into a cell, so the tighter ceiling is safe — a trip costs a
+    // highlight, never a value — and it is WANTED, because these run once per
+    // visible cell on every repaint, where a multi-second formula reads as a
+    // frozen scroll rather than as a slow calculation.
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let cell = grid.cells.get(&(row, col));
     let cell_value = cell.map(|c| &c.value);
 
@@ -1482,6 +1488,9 @@ fn evaluate_cf_formula(
     ctx: &CFFormulaContext,
     fallback: f64,
 ) -> f64 {
+    // Transient for the same reason as `evaluate_rule` — this resolves a rule's
+    // threshold expression and feeds a colour decision, not a cell.
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let result = crate::evaluate_formula_multi_sheet(
         ctx.grids,
         ctx.sheet_names,

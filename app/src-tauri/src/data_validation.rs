@@ -689,6 +689,10 @@ pub fn validate_cell(
     row: u32,
     col: u32,
 ) -> CellValidationResult {
+    // TRANSIENT: validation answers "may this value go in", it never writes a
+    // cell, and it runs on every keystroke in the editor — the one place a
+    // four-second formula would read as a frozen keyboard.
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.lock().unwrap();
     let grids = state.grids.lock().unwrap();
@@ -773,6 +777,7 @@ pub fn get_validation_prompt(
 pub fn get_invalid_cells(
     state: State<AppState>,
 ) -> InvalidCellsResult {
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.lock().unwrap();
     let grids = state.grids.lock().unwrap();
@@ -881,6 +886,7 @@ pub fn validate_pending_value(
     col: u32,
     pending_value: String,
 ) -> CellValidationResult {
+    let _governor = crate::eval_budget::install(crate::eval_budget::EvalSurface::Transient);
     let active_sheet = *state.active_sheet.lock().unwrap();
     let validations = state.data_validations.lock().unwrap();
     let grids = state.grids.lock().unwrap();

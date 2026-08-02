@@ -663,6 +663,78 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
     let (sheet_protections, workbook_protection) = collect_protection_for_save(state, sheet_ids);
     workbook.sheet_protections = sheet_protections;
     workbook.workbook_protection = workbook_protection;
+
+    attach_pending_recalc_for_save(state, sheet_ids, workbook);
+}
+
+/// Record, in the saved workbook, which cells a cancelled recalculation never
+/// reached.
+///
+/// THE SILENT-STALENESS CLOSURE. Without this the pending set was session state
+/// only: cancel a recalculation, save, reopen, and the workbook came back with
+/// the status bar saying "Ready" over cells still holding pre-recalculation
+/// values. Nothing on screen distinguished them from correct ones, and `.calp`
+/// publish — which hard-refuses on a pending set — saw an empty one and shipped
+/// them. A wrong number that announces nothing is the worst outcome this feature
+/// can produce: strictly worse than the `#LIMIT!` the rest of the design works
+/// so hard to make visible, because an error argues for itself and a stale
+/// number does not.
+///
+/// Recorded by `SheetId`, not by index: sheets can be inserted, deleted or
+/// reordered between the save and the load, and a marker pointing at the WRONG
+/// sheet is worse than no marker at all.
+pub fn attach_pending_recalc_for_save(
+    state: &AppState,
+    sheet_ids: &[SheetId],
+    workbook: &mut persistence::Workbook,
+) {
+    workbook.pending_recalc = state
+        .pending_recalc
+        .lock()
+        .ok()
+        .and_then(|p| p.clone())
+        .filter(|p| !p.is_empty())
+        .and_then(|p| {
+            sheet_ids.get(p.sheet_index).map(|sheet_id| {
+                persistence::SavedPendingRecalc {
+                    sheet_id: *sheet_id,
+                    cells: p
+                        .cells
+                        .iter()
+                        .map(|c| persistence::SavedPendingCell { row: c.row, col: c.col })
+                        .collect(),
+                }
+            })
+        });
+}
+
+/// Restore — or CLEAR — the staleness marker when a workbook is opened.
+///
+/// Assigned unconditionally, never merged: opening a fully-calculated workbook
+/// must also DROP the previous document's pending set, or the status bar would
+/// keep warning about staleness belonging to a file the user already closed.
+/// The `SheetId` is resolved back to this session's sheet index here, which is
+/// the whole reason it was persisted as an id rather than an index.
+pub fn restore_pending_recalc_on_load(state: &AppState, workbook: &persistence::Workbook) {
+    if let Ok(mut pending) = state.pending_recalc.lock() {
+        *pending = workbook.pending_recalc.as_ref().map(|p| {
+            crate::eval_budget::PendingRecalc {
+                sheet_index: sheet_id_to_index(workbook, p.sheet_id),
+                cells: p
+                    .cells
+                    .iter()
+                    .map(|c| crate::eval_budget::PendingCell { row: c.row, col: c.col })
+                    .collect(),
+            }
+        });
+        if let Some(p) = pending.as_ref() {
+            crate::log_warn!(
+                "CALC",
+                "opened a workbook saved with {} un-recalculated cell(s) — press F9 to finish",
+                p.cells.len()
+            );
+        }
+    }
 }
 
 /// Collect sheet/cell/workbook protection into the persisted SheetId-keyed
@@ -1777,13 +1849,34 @@ pub fn save_file(
     {
         let calc_before_save = *state.calculate_before_save.lock().unwrap();
         if calc_before_save {
+            // This also RESUMES a cancelled pass: calculate_now starts from the
+            // pending set when there is one and clears it on a clean finish, so
+            // "recalculate before saving" really does mean the saved file is
+            // fully calculated.
             let _ = crate::calculation::calculate_now(
+                window.clone(),
                 state.clone(),
                 user_files_state.clone(),
                 pivot_state.clone(),
                 pane_control_state.clone(),
                 ribbon_filter_state.clone(),
                 None,
+            );
+        } else if state
+            .pending_recalc
+            .lock()
+            .ok()
+            .is_some_and(|p| p.as_ref().is_some_and(|pr| !pr.is_empty()))
+        {
+            // Saving a workbook whose recalculation was cancelled. The pending
+            // set is NOT cleared here — it survives in the session so the status
+            // bar keeps saying "Calculate" and the stale cells stay locatable.
+            // Deliberately not a hard refusal: the user turned automatic
+            // recalculation off on purpose, and refusing to save their work
+            // because of it would be the wrong trade.
+            crate::log_warn!(
+                "SAVE",
+                "saving with un-recalculated cells (a cancelled recalculation was not resumed)"
             );
         }
     }
@@ -2279,6 +2372,9 @@ pub fn open_file(
             }
         }
     }
+
+    // Restore (or CLEAR) the staleness left by a cancelled recalculation.
+    restore_pending_recalc_on_load(&state, &workbook);
 
     // Restore protection (sheet-level + per-cell + workbook structure). The
     // stores are cleared FIRST so a file without protection never inherits the

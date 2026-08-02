@@ -48,6 +48,19 @@ describe("cell-error sentinel", () => {
     expect(normalizeCellErrorLiteral(42)).toBe("#VALUE!");
   });
 
+  // The calculation-budget error. If this literal were missing from
+  // CELL_ERROR_LITERALS it would silently normalize to #VALUE! — the exact
+  // conflation the engine gave it a distinct CellError variant to escape, put
+  // back by the frontend on the way through.
+  it("keeps #LIMIT! distinct instead of collapsing it into #VALUE!", () => {
+    expect(normalizeCellErrorLiteral("#LIMIT!")).toBe("#LIMIT!");
+    expect(normalizeCellErrorLiteral(" #limit! ")).toBe("#LIMIT!");
+    expect(CELL_ERROR_LITERALS).toContain("#LIMIT!");
+    // The trailing "!" is load-bearing: the backend's Debug fallback would
+    // render "#LIMIT", and that must NOT be accepted as the same thing.
+    expect(normalizeCellErrorLiteral("#LIMIT")).toBe("#VALUE!");
+  });
+
   it("every advertised literal round-trips through normalize", () => {
     for (const lit of CELL_ERROR_LITERALS) {
       expect(normalizeCellErrorLiteral(lit)).toBe(lit);

@@ -544,6 +544,28 @@ pub fn calp_publish(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // A CANCELLED RECALCULATION MUST NOT BE PUBLISHED.
+    //
+    // This is a hard refusal, unlike the save path, and the asymmetry is
+    // deliberate. Saving a half-calculated workbook keeps the mess on the
+    // author's own machine, where the status bar is still saying "Calculate"
+    // and they can fix it. Publishing SENDS it: every subscriber pulls cells
+    // that look authoritative and are silently stale, with no indicator,
+    // because the pending set is session state that does not travel. A report
+    // nobody can tell is wrong is a data-correctness bug in the distribution
+    // story, not a UI nicety — so the author is told to finish the calculation
+    // (F9) rather than being allowed to ship it by accident.
+    if let Ok(pending) = state.pending_recalc.lock() {
+        if let Some(p) = pending.as_ref().filter(|p| !p.is_empty()) {
+            return Err(format!(
+                "Cannot publish: {} cell(s) still hold values from before a cancelled \
+                 recalculation. Press F9 to finish calculating, then publish.",
+                p.cells.len()
+            ));
+        }
+    }
+
     let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
@@ -3684,9 +3706,24 @@ fn override_display(value: &engine::CellValue) -> String {
         engine::CellValue::Number(n) => n.to_string(),
         engine::CellValue::Text(s) => s.clone(),
         engine::CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-        engine::CellValue::Error(e) => format!("{:?}", e),
+        // THE CANONICAL LITERAL, and it must stay in lockstep with what
+        // `persistence::SavedCellValue::from_value` writes — see
+        // `override_value_from_saved`, which compares the two forms directly.
+        // This was `format!("{:?}", e)` (the Rust variant name) back when
+        // persistence stored the same Debug string; persistence now stores the
+        // literal, so leaving this as Debug would make every error-cell override
+        // a permanent spurious conflict.
+        engine::CellValue::Error(e) => e.as_literal().to_string(),
         other => format!("{:?}", other),
     }
+}
+
+/// Test-only view of [`override_display`], so the override layer's
+/// "live spelling == persisted spelling" invariant can be pinned by a test
+/// rather than by a comment.
+#[cfg(test)]
+pub(crate) fn override_display_for_test(value: &engine::CellValue) -> String {
+    override_display(value)
 }
 
 /// Canonical OverrideValue for an engine cell (None = absent/cleared cell).
@@ -3725,10 +3762,12 @@ pub(crate) fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -
                     persistence::SavedCellValue::Boolean(b) => calp::OverrideValue::Value {
                         display: if *b { "TRUE".to_string() } else { "FALSE".to_string() },
                     },
-                    // SavedCellValue::Error already stores the engine error's
-                    // Debug string (persistence from_value) — same form as
-                    // override_display's `{:?}` of CellError. Wrapping it in
-                    // another Debug would make every error-cell override a
+                    // SavedCellValue::Error stores the CANONICAL LITERAL
+                    // (`#DIV/0!`, `#LIMIT!`, ...) — the same form
+                    // `override_display` produces from an engine `CellError`.
+                    // Both sides must keep agreeing: wrapping this in another
+                    // Debug, or letting either side drift back to the Rust
+                    // variant name, would make every error-cell override a
                     // permanent spurious conflict.
                     persistence::SavedCellValue::Error(s) => {
                         calp::OverrideValue::Value { display: s.clone() }

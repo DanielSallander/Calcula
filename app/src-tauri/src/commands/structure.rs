@@ -3105,6 +3105,12 @@ pub fn relocate_cell_references(
     dest_start_row: u32,
     dest_start_col: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Cut/paste relocation re-evaluates the formulas it rewrites and WRITES the
+    // results, so it is an Interactive surface: same ceiling as typing them.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Interactive,
+        &state.calc_cancel,
+    );
     let src_min_row = src_start_row.min(src_end_row);
     let src_max_row = src_start_row.max(src_end_row);
     let src_min_col = src_start_col.min(src_end_col);

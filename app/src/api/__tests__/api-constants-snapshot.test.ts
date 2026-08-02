@@ -26,7 +26,15 @@ describe('AppEvents', () => {
     // count is bumped deliberately, and the event is a real one — it is raised
     // by the demand-driven publisher-inbox poll in @api/distribution.ts, which
     // exists precisely so this id is not a promise nothing keeps.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`65`);
+    // 67 since the formula evaluation budget added CALC_PROGRESS and
+    // RECALC_INCOMPLETE. Both are load-bearing rather than decorative:
+    // CALC_PROGRESS is what lets a Cancel button be drawn while a
+    // recalculation runs (the pass now runs off the WebView2 UI thread
+    // precisely so this event can be delivered), and RECALC_INCOMPLETE is how
+    // anything downstream — save, .calp publish, a script that just awaited
+    // calculateNow — learns that a pass STOPPED rather than finished, which a
+    // half-recalculated workbook cannot otherwise be distinguished from.
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`67`);
   });
 
   it('all values use the app: prefix', () => {

@@ -11,6 +11,24 @@ use parser::BuiltinFunction;
 use parser::FunctionMeta;
 use parser::parse as parse_formula;
 use engine::{Evaluator, EvalResult};
+use crate::eval_budget::{self, EvalSurface, CALL_BATCH_FUEL, SCRIPT_EVAL_TIMEOUT_MS};
+
+/// The `#LIMIT!` answer a batch slot gets when the per-CALL ceiling is spent.
+///
+/// WHY A PER-CALL CEILING EXISTS AT ALL. The fuel budget is scoped per top-level
+/// evaluation, which is exactly right for a workbook (one pathological cell
+/// trips, the other 100,000 recalculate) and exactly wrong for a caller-supplied
+/// LIST: 100,000 expressions in one `api.evaluate` call would draw 100,000 full
+/// allowances and the per-formula ceiling would bound nothing. So every entry
+/// point in this file that loops over a list the CALLER supplied also spends
+/// against `CALL_BATCH_FUEL`, and a call that exhausts it fails its REMAINING
+/// slots rather than the whole call — the same "one bad expression never loses
+/// the others" contract the syntax-error path already keeps.
+///
+/// `calculate_now` deliberately has no such ceiling: there the list is the
+/// workbook's own formula cells, and a big workbook is legitimate work. The
+/// distinction is who supplied the list.
+const BATCH_EXHAUSTED_LITERAL: &str = "#LIMIT!";
 
 /// Build the complete function catalog from the parser's single source of truth.
 /// Aliases (e.g. AVG, CEIL) are excluded from the user-facing catalog.
@@ -160,13 +178,25 @@ pub fn evaluate_expressions(
         gather_data.get(region_id).cloned().unwrap_or_default()
     };
 
+    // A caller-supplied expression list whose results are spliced into text and
+    // never persisted into a cell: the one class of caller allowed a wall clock.
+    let _pass = eval_budget::begin_service_pass(
+        EvalSurface::Script,
+        &state.calc_cancel,
+        std::time::Duration::from_millis(SCRIPT_EVAL_TIMEOUT_MS),
+    );
+
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
     evaluator.set_file_reader(&reader);
     evaluator.set_gather_fn(&gather_fn);
 
     let results: Vec<String> = expressions
         .iter()
         .map(|expr_str| {
+            if evaluator.budget().total_consumed() >= CALL_BATCH_FUEL {
+                return BATCH_EXHAUSTED_LITERAL.to_string();
+            }
             // Strip leading = if present (user might write {{ =SUM() }} or {{ SUM() }})
             let formula = expr_str.trim();
             let formula = if formula.starts_with('=') { &formula[1..] } else { formula };
@@ -198,7 +228,7 @@ fn eval_result_to_display(result: &EvalResult) -> String {
         }
         EvalResult::Text(s) => s.clone(),
         EvalResult::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-        EvalResult::Error(e) => format!("#{}", format!("{:?}", e).to_uppercase()),
+        EvalResult::Error(e) => crate::cell_error_display(e),
         EvalResult::Array(arr) => {
             if let Some(first) = arr.first() {
                 eval_result_to_display(first)
@@ -322,13 +352,41 @@ pub fn evaluate_formula_typed(
         gather_data.get(region_id).cloned().unwrap_or_default()
     };
 
+    // THE SCRIPT SERVICE BOUNDARY (`api.evaluate` / `api.evaluateAll`).
+    //
+    // Three ceilings, and the reason each one is legitimate here:
+    //   1. per-expression fuel = DEFAULT_CELL_FUEL, i.e. EXACTLY what a cell the
+    //      user typed gets. A script must not be able to buy a bigger formula by
+    //      asking through the bridge instead of writing it into a cell.
+    //   2. CALL_BATCH_FUEL across the whole call — see BATCH_EXHAUSTED_LITERAL.
+    //   3. a SCRIPT_EVAL_TIMEOUT_MS wall clock. Allowed here and NOWHERE that
+    //      writes a cell, because these results cross IPC and are never
+    //      persisted, so no workbook's content can come to depend on machine
+    //      speed. It also matches the 5 s contract sandboxed script code already
+    //      lives under (core/script-engine/src/limits.rs); code that reaches the
+    //      evaluator through the WorksheetFunction bridge should be governed by
+    //      script rules rather than escape them by changing language.
+    let _pass = eval_budget::begin_service_pass(
+        EvalSurface::Script,
+        &state.calc_cancel,
+        std::time::Duration::from_millis(SCRIPT_EVAL_TIMEOUT_MS),
+    );
+
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
     evaluator.set_file_reader(&reader);
     evaluator.set_gather_fn(&gather_fn);
 
     let results: Vec<TypedEvalResult> = expressions
         .iter()
         .map(|expr_str| {
+            if evaluator.budget().total_consumed() >= CALL_BATCH_FUEL {
+                return TypedEvalResult {
+                    value: serde_json::Value::String(BATCH_EXHAUSTED_LITERAL.to_string()),
+                    display: BATCH_EXHAUSTED_LITERAL.to_string(),
+                    r#type: "error".to_string(),
+                };
+            }
             let formula = expr_str.trim();
             let formula = formula.strip_prefix('=').unwrap_or(formula);
             match parse_formula(formula) {
@@ -377,9 +435,7 @@ fn eval_result_to_json(result: &EvalResult) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         EvalResult::Text(s) => serde_json::Value::String(s.clone()),
         EvalResult::Boolean(b) => serde_json::Value::Bool(*b),
-        EvalResult::Error(e) => {
-            serde_json::Value::String(format!("#{}", format!("{:?}", e).to_uppercase()))
-        }
+        EvalResult::Error(e) => serde_json::Value::String(crate::cell_error_display(e)),
         EvalResult::Array(items) | EvalResult::List(items) => {
             serde_json::Value::Array(items.iter().map(eval_result_to_json).collect())
         }
@@ -401,15 +457,41 @@ fn evaluate_scoped_impl(
         Err(_) => return Err("Syntax error in expression".to_string()),
     };
 
+    // Charts call this with one scope PER ROW, so the list is caller-supplied
+    // and needs the same per-CALL ceiling `api.evaluate` gets. Results are
+    // transient (a chart repaints from them and nothing is stored), which is
+    // what makes both the tighter Transient fuel and the wall clock legitimate.
+    //
+    // The aggregate has to be summed by hand here: a fresh `Evaluator` per scope
+    // means a fresh meter per scope, so `total_consumed()` on any one of them
+    // only ever reports that scope. Reusing one evaluator is not an option —
+    // `bind_name` would leak each row's variables into the next.
+    // No `AppState` reaches this command, so it inherits the enclosing token
+    // when there is one and otherwise runs on a private one — either way the
+    // flag is cleared on the way out by `begin_service_pass`.
+    let cancel = eval_budget::active_cancel().unwrap_or_default();
+    let _pass = eval_budget::begin_service_pass(
+        EvalSurface::Transient,
+        &cancel,
+        std::time::Duration::from_millis(SCRIPT_EVAL_TIMEOUT_MS),
+    );
+
     let grid = engine::Grid::new();
+    let mut spent: i64 = 0;
     let results = scopes
         .iter()
         .map(|scope| {
-            let evaluator = Evaluator::new(&grid);
+            if spent >= CALL_BATCH_FUEL {
+                return serde_json::Value::String(BATCH_EXHAUSTED_LITERAL.to_string());
+            }
+            let mut evaluator = Evaluator::new(&grid);
+            eval_budget::apply(&mut evaluator);
             for (name, value) in scope {
                 evaluator.bind_name(name, scope_value_to_eval(value));
             }
-            eval_result_to_json(&evaluator.evaluate(&parsed))
+            let out = eval_result_to_json(&evaluator.evaluate(&parsed));
+            spent = spent.saturating_add(evaluator.budget().total_consumed());
+            out
         })
         .collect();
     Ok(results)
@@ -425,6 +507,16 @@ pub fn evaluate_scoped(
     scopes: Vec<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     evaluate_scoped_impl(&expression, &scopes)
+}
+
+/// Test-only door onto `evaluate_scoped_impl`, so the per-CALL aggregate can be
+/// exercised from the crate's budget tests without going through Tauri.
+#[cfg(test)]
+pub(crate) fn evaluate_scoped_for_test(
+    expression: &str,
+    scopes: &[std::collections::HashMap<String, serde_json::Value>],
+) -> Result<Vec<serde_json::Value>, String> {
+    evaluate_scoped_impl(expression, scopes)
 }
 
 #[cfg(test)]

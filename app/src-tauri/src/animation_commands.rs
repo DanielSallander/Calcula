@@ -114,6 +114,14 @@ fn apply_set_ops_and_recalc(
     locale: &engine::LocaleSettings,
     ops: &[((u32, u32), SetOp)],
 ) -> Vec<CellData> {
+    // BACKGROUND, and the surface a `#LIMIT!` here MUST be transient in the
+    // undo sense: animation advances a driver and recalculates dependents per
+    // FRAME under the transient-write pattern, so nothing it produces — error
+    // or value — may enter the undo graph. It does not: this path writes
+    // through the same snapshot/restore machinery every other frame write uses,
+    // and `anim_stop` restores the pre-animation cells verbatim. The ceiling is
+    // the persisting one because the frames ARE what the user is looking at.
+    let _governor = crate::eval_budget::inherit_or(crate::eval_budget::EvalSurface::Background);
     let mut changed: Vec<(u32, u32)> = Vec::new();
     for ((r, c), op) in ops {
         match op {
@@ -240,6 +248,14 @@ pub fn anim_apply_frame(
     state: State<AppState>,
     params: AnimApplyFrameParams,
 ) -> AnimationFrameResult {
+    // Animation frames recalculate under the transient-write pattern (no undo
+    // entries, restored on stop). They still WRITE cells the user is watching,
+    // so the persisting ceiling; and they carry the workbook cancel token, so
+    // the same Cancel that stops a recalculation stops a runaway frame.
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     let sheet_idx = params.sheet_index;
 
     // Lock order matches scenario_show to avoid cross-path deadlocks.
@@ -302,6 +318,10 @@ pub fn anim_apply_frame(
 /// idempotent.
 #[tauri::command]
 pub fn anim_restore(state: State<AppState>, params: AnimRestoreParams) -> AnimationFrameResult {
+    let _pass = crate::eval_budget::begin_pass(
+        crate::eval_budget::EvalSurface::Background,
+        &state.calc_cancel,
+    );
     let saved = state
         .animation_snapshots
         .lock()

@@ -60,6 +60,7 @@ pub use identity;
 pub mod persistence;
 pub mod api_types;
 pub mod calculation;
+pub mod eval_budget;
 pub mod commands;
 pub mod formula;
 pub mod logging;
@@ -183,6 +184,9 @@ pub use tables::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod eval_budget_tests;
 
 // ============================================================================
 // APPLICATION STATE
@@ -402,6 +406,18 @@ pub struct AppState {
     /// entries before it are hidden ("blank on reload"). Reset at workbook
     /// open/new.
     pub model_writeback_floor: Mutex<String>,
+    /// THE Ctrl+Break flag. Shared with every evaluator a governed pass builds
+    /// (eval_budget.rs), so `cancel_calculation` can stop a running
+    /// recalculation without touching a single lock the recalculation holds.
+    ///
+    /// Deliberately NOT behind a Mutex: the whole point is that the command
+    /// that sets it cannot block on anything the recalc owns. It is an
+    /// `Arc<AtomicBool>` internally.
+    pub calc_cancel: engine::CancelToken,
+    /// Cells a CANCELLED recalculation never reached. `None` = the workbook is
+    /// fully calculated. See `eval_budget::PendingRecalc` for why the remainder
+    /// is recorded rather than rolled back.
+    pub pending_recalc: Mutex<Option<crate::eval_budget::PendingRecalc>>,
 }
 
 impl AppState {
@@ -537,6 +553,8 @@ pub fn create_app_state() -> AppState {
         writeback_layer: Mutex::new(calp::writeback::WritebackLayer::new()),
         model_writeback: Mutex::new(crate::bi::writeback::ModelWritebackStore::default()),
         model_writeback_floor: Mutex::new(chrono::Utc::now().to_rfc3339()),
+        calc_cancel: engine::CancelToken::new(),
+        pending_recalc: Mutex::new(None),
     };
 
     // Register the initial sheet in the IdRegistry
@@ -581,6 +599,34 @@ pub fn format_cell_value(value: &CellValue, style: &CellStyle, locale: &engine::
     format_cell_value_with_color(value, style, locale).text
 }
 
+/// Render a `CellError` the way the GRID renders it.
+///
+/// THE ONE APP-SIDE AUTHORITY on that spelling. It mirrors `Cell::display_value`
+/// in core/engine/src/cell.rs exactly, including that engine's convention of
+/// special-casing the literals whose Debug name is wrong and letting the rest
+/// fall through to `#{Debug}` (so `Div0` still reads "#DIV0" here, as it always
+/// has — this helper is not the place to change that).
+///
+/// The special case that matters: `Limit` MUST be listed. The Debug fallback
+/// would render "#LIMIT" without the trailing "!", which
+/// `normalizeCellErrorLiteral` on the frontend does not recognise and therefore
+/// collapses to "#VALUE!" — turning the one error a user most needs to find
+/// back into the one it was given its own variant to be distinguished from.
+///
+/// NOTE the deliberate asymmetry with `scripting::udf::cell_error_to_str`: that
+/// one produces the canonical EXCEL literals ("#DIV/0!") because it is a wire
+/// contract with JavaScript that must round-trip through `parse_cell_error`.
+/// This one produces what the grid shows. They agree on `#LIMIT!`.
+pub fn cell_error_display(e: &CellError) -> String {
+    match e {
+        CellError::NA => "#N/A".to_string(),
+        CellError::Conflict => "#CONFLICT".to_string(),
+        CellError::Blocked => "#BLOCKED!".to_string(),
+        CellError::Limit => "#LIMIT!".to_string(),
+        other => format!("#{:?}", other).to_uppercase(),
+    }
+}
+
 /// Format a cell value and return both display text and optional color override.
 /// The color is only populated for Custom formats that include [Color] tokens.
 pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> CellDisplayResult {
@@ -616,7 +662,7 @@ pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale
             accounting: None,
         },
         CellValue::Error(e) => CellDisplayResult {
-            text: format!("#{:?}", e).to_uppercase(),
+            text: cell_error_display(e),
             color: None,
             accounting: None,
         },
@@ -639,7 +685,7 @@ pub fn format_cell_value_simple(value: &CellValue) -> String {
         CellValue::Number(n) => format_number_simple(*n),
         CellValue::Text(s) => s.clone(),
         CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+        CellValue::Error(e) => cell_error_display(e),
         CellValue::List(items) => format!("[List({})]", items.len()),
         CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
@@ -2745,7 +2791,8 @@ pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
     match parse_formula(formula) {
         Ok(parser_ast) => {
             let engine_ast = convert_expr(&parser_ast);
-            let evaluator = Evaluator::new(grid);
+            let mut evaluator = Evaluator::new(grid);
+            eval_budget::apply(&mut evaluator);
             let result = evaluator.evaluate(&engine_ast);
             result.to_cell_value()
         }
@@ -2759,7 +2806,8 @@ pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
 /// Evaluates a formula using a pre-parsed AST. More efficient than evaluate_formula
 /// when the AST is already available (e.g., from cell's cached_ast).
 pub fn evaluate_formula_with_ast(grid: &Grid, ast: &EngineExpr) -> CellValue {
-    let evaluator = Evaluator::new(grid);
+    let mut evaluator = Evaluator::new(grid);
+    eval_budget::apply(&mut evaluator);
     let result = evaluator.evaluate(ast);
     result.to_cell_value()
 }
@@ -2783,7 +2831,8 @@ pub fn evaluate_formula_multi_sheet(
 
             let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
-            let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+            let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+            eval_budget::apply(&mut evaluator);
             evaluator.evaluate(&engine_ast).to_cell_value()
         }
         Err(e) => {
@@ -2810,7 +2859,8 @@ pub fn evaluate_formula_multi_sheet_with_ast(
 
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
-    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
     evaluator.evaluate(ast).to_cell_value()
 }
 
@@ -2832,6 +2882,7 @@ pub fn evaluate_formula_with_context(
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
     let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    eval_budget::apply(&mut evaluator);
     if let Some(sr) = style_registry {
         evaluator.set_styles(sr);
     }
@@ -2859,6 +2910,7 @@ pub fn evaluate_formula_with_context_and_files(
         user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     };
     let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    eval_budget::apply(&mut evaluator);
     if let Some(sr) = style_registry {
         evaluator.set_styles(sr);
     }
@@ -2904,6 +2956,7 @@ pub fn evaluate_formula_raw(
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
     let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    eval_budget::apply(&mut evaluator);
     if let Some(sr) = style_registry {
         evaluator.set_styles(sr);
     }
@@ -2950,6 +3003,7 @@ pub fn evaluate_formula_raw_with_files_and_pivot(
         user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     };
     let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    eval_budget::apply(&mut evaluator);
     if let Some(sr) = style_registry {
         evaluator.set_styles(sr);
     }
@@ -2986,7 +3040,9 @@ pub fn create_evaluator_for_sheet<'a>(
     let current_grid = &grids[current_sheet_index];
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
-    Some(Evaluator::with_multi_sheet(current_grid, context))
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
+    Some(evaluator)
 }
 
 /// Creates an Evaluator with multi-sheet context and file reader support.
@@ -3004,6 +3060,7 @@ pub fn create_evaluator_with_files<'a>(
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
     if let Some(reader) = file_reader {
         evaluator.set_file_reader(reader);
     }
@@ -3032,6 +3089,7 @@ pub fn evaluate_formula_multi_sheet_with_files(
                 user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
             };
             let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+            eval_budget::apply(&mut evaluator);
             evaluator.set_file_reader(&reader);
             evaluator.evaluate(&engine_ast).to_cell_value()
         }
@@ -3099,6 +3157,7 @@ pub fn evaluate_formula_raw_with_ast_files_and_cube(
         user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     };
     let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
     evaluator.set_file_reader(&reader);
     if let Some(uf) = udf_fn {
         evaluator.set_udf_fn(uf);
@@ -3157,7 +3216,8 @@ pub fn batch_evaluate_formulas(
 
     // Build context once for all formulas
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
-    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    eval_budget::apply(&mut evaluator);
 
     formulas
         .iter()
@@ -4336,6 +4396,12 @@ pub fn run() {
             calculation::get_iteration_settings,
             calculation::set_iteration_settings,
             calculation::get_calculation_state,
+            // Cancellation (the Ctrl+Break analogue). cancel_calculation takes
+            // no lock a running recalc could hold, so it stays reachable while
+            // the recalc owns the grid.
+            calculation::cancel_calculation,
+            calculation::get_pending_recalc,
+            calculation::clear_pending_recalc,
             calculation::get_precision_as_displayed,
             calculation::set_precision_as_displayed,
             calculation::get_calculate_before_save,

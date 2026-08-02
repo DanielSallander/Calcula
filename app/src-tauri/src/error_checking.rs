@@ -67,18 +67,13 @@ pub fn get_error_indicators(
                 // Cell has a formula and its value is an Error variant
                 if cell.has_formula() {
                     if let CellValue::Error(ref err) = cell.value {
-                        // Match the display format used in cell.rs
-                        let error_display = match err {
-                            engine::CellError::NA => "#N/A".to_string(),
-                            engine::CellError::Conflict => "#CONFLICT".to_string(),
-                            engine::CellError::Blocked => "#BLOCKED!".to_string(),
-                            other => format!("#{:?}", other).to_uppercase(),
-                        };
+                        // One authority on the spelling — see crate::cell_error_display.
+                        let error_display = crate::cell_error_display(err);
                         indicators.push(CellErrorIndicator {
                             row,
                             col,
-                            error_type: "formulaError".to_string(),
-                            message: format!("Formula Error: {}", error_display),
+                            error_type: error_indicator_type(err).to_string(),
+                            message: error_explanation(err, &error_display),
                         });
                     }
                 }
@@ -92,6 +87,37 @@ pub fn get_error_indicators(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// The indicator category for an error value.
+///
+/// `#LIMIT!` gets its OWN category rather than sharing "formulaError". The whole
+/// justification for giving budget exhaustion a distinct `CellError` variant was
+/// that the REMEDY differs — `#VALUE!` means "an argument has the wrong type,
+/// fix the argument", `#LIMIT!` means "this formula is too expensive or never
+/// terminates, simplify it" — and a category the frontend can filter on is what
+/// makes "3 cells hit the calculation limit" answerable.
+fn error_indicator_type(err: &engine::CellError) -> &'static str {
+    match err {
+        engine::CellError::Limit => "calculationLimit",
+        _ => "formulaError",
+    }
+}
+
+/// The message shown next to the indicator. For `#LIMIT!` this must NOT read
+/// like a type error: a user sent to "check your arguments" by a runaway
+/// recursion will not find anything wrong with them.
+fn error_explanation(err: &engine::CellError, display: &str) -> String {
+    match err {
+        engine::CellError::Limit => format!(
+            "{}: this formula exceeded the calculation limit. It is either far \
+             more expensive than a single cell is allowed to be, or it never \
+             finishes (an unbounded recursive LAMBDA, or a range far larger \
+             than the data). Simplify it or narrow its ranges.",
+            display
+        ),
+        _ => format!("Formula Error: {}", display),
+    }
+}
 
 /// Check if a string looks like a number (integer, decimal, scientific notation,
 /// with optional leading +/- sign, or percentage).

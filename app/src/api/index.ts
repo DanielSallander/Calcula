@@ -426,6 +426,20 @@ export type {
 export { emitTauriEvent, listenTauriEvent } from "./backend";
 export type { UnlistenFn } from "./backend";
 
+// Calculation cancellation + staleness (the Ctrl+Break analogue). See
+// app/src-tauri/src/eval_budget.rs for why a running recalculation is
+// reachable at all.
+// NOTE: `getCalculationState` is exported from "./lib" further down (the
+// existing Calculation API block) and is NOT re-exported here — it is the same
+// command, and two exports of one name is a compile error rather than a choice.
+export {
+  cancelCalculation,
+  getPendingRecalc,
+  clearPendingRecalc,
+  listenForEvent,
+} from "./backend";
+export type { PendingRecalc, PendingRecalcCell } from "./backend";
+
 // BI model metadata (for the CUBE formula builder + other model-aware UI)
 export {
   biGetConnections,
