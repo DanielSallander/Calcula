@@ -290,7 +290,13 @@ describe("rule 2 — the script path is the same code as the UI path", () => {
     expect(pullSrc).toContain("verify_and_load_manifest_via");
     expect(pullSrc).toContain("check_min_app_version");
     const refreshSrc = repoFile("../../../../../core/calp/src/refresh.rs");
-    expect(refreshSrc).toContain("pull::pull(registry, &request, profile_dir)");
+    expect(refreshSrc).toContain("pull::pull(registry, &request, profile_dir, policy)");
+    // ...and refresh threads the pin POLICY through rather than choosing one:
+    // "get the latest version of something I subscribed to" is not the trust
+    // decision that Subscribe is, so `calp_refresh_apply` passes RequirePinned
+    // and a never-pulled subscription fails closed instead of being pinned by
+    // an operation the user experiences as an update.
+    expect(refreshSrc).toContain("policy: PinPolicy,");
   });
 });
 

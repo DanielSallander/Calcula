@@ -35,7 +35,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use calp::integrity::TrustStatus;
+use calp::integrity::{PinPolicy, TrustStatus};
 use calp::publish::{self, PublishRequest};
 use calp::pull::{self, PullRequest};
 use calp::registry::LocalRegistry;
@@ -164,7 +164,7 @@ fn subscriber_pull(reg: &LocalRegistry, prof: &Path, version: SemVer) -> pull::P
         version_pin: VersionPin::Exact(version),
         now: "2026-06-15T01:00:00Z".to_string(),
     };
-    pull::pull(reg, &req, prof).expect("pull failed")
+    pull::pull(reg, &req, prof, PinPolicy::PinOnFirstUse).expect("pull failed")
 }
 
 fn identity(name: &str, id: &str) -> SubmitterIdentity {

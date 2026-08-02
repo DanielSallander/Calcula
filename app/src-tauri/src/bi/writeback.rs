@@ -342,7 +342,14 @@ pub(crate) fn collect_distributed_writeback_entries(
         };
         // Declarations MUST come from the signature-verified manifest — they
         // are the governance for what counts (same rule as GATHER).
-        let Ok((_, manifest)) = calp::integrity::verify_and_load_manifest_via(
+        //
+        // ALREADY-TRUSTED (RequirePinned): this feeds the model engine with the
+        // writeback entries of packages the user subscribed to. It used to
+        // create a TOFU pin as a side effect of a model refresh, and it used to
+        // bind the trust answer as `_` and carry on regardless.
+        // `load_pinned_manifest_via` removes both: an unpinned publisher is
+        // skipped, and there is no status left to ignore.
+        let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,

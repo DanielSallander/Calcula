@@ -4,7 +4,7 @@
 //          disclosure (what a .calp can NEVER carry).
 
 import React from "react";
-import type { InspectorOverview } from "@api/distribution";
+import type { CalpTrustStatus, InspectorOverview } from "@api/distribution";
 import {
   Badge,
   KV,
@@ -18,6 +18,45 @@ import {
   tdStyle,
   thStyle,
 } from "./shared";
+
+const DANGER_RED = "#c5221f";
+
+/**
+ * Trust badge per `CalpTrustStatus`. A TABLE, not a ternary.
+ *
+ * This used to be `trustStatus === "verified" ? green : amber "first use — key
+ * newly pinned"`. Inspecting a package no longer pins anything, so that else
+ * branch would now assert a pin that does not exist — telling the user they had
+ * trusted a publisher they had not. Worse, the same shape is what let an
+ * unrecognised signer render as reassuring elsewhere.
+ *
+ * Typed `Record<CalpTrustStatus, ...>`: a new Rust `TrustStatus` variant fails
+ * type-checking here until it has been given a presentation.
+ */
+const TRUST_BADGE: Record<CalpTrustStatus, { label: string; color: string; title: string }> = {
+  verified: {
+    label: "signature verified — publisher trusted",
+    color: OK_GREEN,
+    title:
+      "Signed by the same publisher key you pinned when you subscribed to this package.",
+  },
+  firstUse: {
+    label: "trusted just now — key pinned",
+    color: WARN_AMBER,
+    title:
+      "This publisher key was recorded as trusted by this operation (trust-on-first-use).",
+  },
+  notPinned: {
+    label: "signature valid — publisher NOT trusted yet",
+    color: DANGER_RED,
+    title:
+      "The package is intact and correctly signed, but nobody on this computer has ever agreed " +
+      "to trust this publisher for this package name. Anyone can generate a signing key, so a " +
+      "valid signature only proves the files were not altered after signing — it does not tell " +
+      "you who signed them. Compare the key below against the one the publisher gave you, then " +
+      "subscribe to record it as trusted. Inspecting a package deliberately does not.",
+  },
+};
 
 function CountChip({ label, count }: { label: string; count: number }): React.ReactElement | null {
   if (count === 0) return null;
@@ -67,11 +106,11 @@ export function OverviewSection({
         </KV>
         <KV label="Publisher">
           {m.publisherName || "(unnamed)"}{" "}
-          {m.trustStatus === "verified" ? (
-            <Badge color={OK_GREEN}>signature verified</Badge>
-          ) : (
-            <Badge color={WARN_AMBER}>first use — key newly pinned</Badge>
-          )}
+          <span title={TRUST_BADGE[m.trustStatus]?.title}>
+            <Badge color={TRUST_BADGE[m.trustStatus]?.color ?? DANGER_RED}>
+              {TRUST_BADGE[m.trustStatus]?.label ?? `unrecognised trust state (${m.trustStatus})`}
+            </Badge>
+          </span>
           {m.isPublisher && <Badge color="#5b5fc7">you hold the signing key</Badge>}
         </KV>
         <KV label="Publisher key (Ed25519)">

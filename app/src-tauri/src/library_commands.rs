@@ -35,7 +35,9 @@
 use std::path::Path;
 
 use calp::error::CalpError;
-use calp::integrity::{sha256_hex, VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE};
+use calp::integrity::{
+    sha256_hex, PinPolicy, VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE,
+};
 use calp::manifest::VersionManifest;
 use calp::signing::{load_trusted_publishers, pin_publisher, verify_signature};
 use calp::transport::RegistryTransport;
@@ -101,24 +103,21 @@ pub fn library_trust_is_pinned(status: &str) -> bool {
     matches!(status, LIB_TRUST_FIRST_USE | LIB_TRUST_VERIFIED)
 }
 
-/// Whether this resolution is allowed to CREATE a trust-on-first-use pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinPolicy {
-    /// Look, verify, report. Writes nothing to the pin store, ever. Used by the
-    /// install PLAN, by the update check, and by anything else that resolves in
-    /// order to show the user what would happen.
-    Preview,
-    /// The user has seen the publisher key and the closure and said yes. First
-    /// contact pins here, and only here.
-    Install,
-}
+// The pin policy is NOT declared here. It is `calp::integrity::PinPolicy`, the
+// single vocabulary shared with `.calp` packages and org skins — see the enum's
+// own doc comment for why a passive read may not create a pin, and for the three
+// separate times that bug shipped. Wave I invented a local copy of this enum for
+// libraries; Wave J promoted it into `core/calp` and deleted the copy, because
+// two enums that mean the same thing are two enums that can drift apart.
+//   Preview  -> PinPolicy::VerifyOnly
+//   Install  -> PinPolicy::PinOnFirstUse
 
 /// Verify a library version's manifest signature and answer the TOFU question
 /// WITHOUT necessarily answering it in writing.
 ///
-/// This is `calp::integrity::verify_and_load_manifest_via` with one difference:
-/// that function always pins on first contact, which is exactly the behaviour
-/// being removed from the preview path. Everything else is deliberately
+/// This is `calp::integrity::verify_and_load_manifest_via` specialized to the
+/// library trust vocabulary and to BATCHED pin commits (see `pending_pin`).
+/// Everything else is deliberately
 /// identical, including the property that makes it sound over an untrusted
 /// transport: the manifest bytes are read ONCE, the signature is checked
 /// against exactly those bytes, and the `VersionManifest` every downstream gate
@@ -133,7 +132,7 @@ pub enum PinPolicy {
 /// (`load_trusted_publishers` returns `Err`, which is propagated rather than
 /// treated as "no pin") all produce an error, never a status.
 ///
-/// It never writes the pin store itself: under `PinPolicy::Install` it returns
+/// It never writes the pin store itself: under `PinPolicy::PinOnFirstUse` it returns
 /// the key that SHOULD be pinned, and `resolve_libraries` writes the whole
 /// batch's pins only once every package in the batch has verified. Writing here
 /// would make a batch that fails part way leave pins behind for the packages it
@@ -192,11 +191,22 @@ fn verify_library_manifest(
         }
         Some(_) => (LIB_TRUST_VERIFIED, None),
         None => match policy {
-            PinPolicy::Preview => (LIB_TRUST_NOT_INSTALLED, None),
-            PinPolicy::Install => (
+            PinPolicy::VerifyOnly => (LIB_TRUST_NOT_INSTALLED, None),
+            PinPolicy::PinOnFirstUse => (
                 LIB_TRUST_FIRST_USE,
                 Some(manifest.publisher_key.clone()),
             ),
+            // A library resolve is never an "already trusted, refuse first
+            // contact" operation: a preview is allowed to report `notInstalled`
+            // and an install is allowed to pin. Spelled out rather than swept
+            // into a `_` arm so a future policy variant has to be considered.
+            PinPolicy::RequirePinned => {
+                return Err(CalpError::PublisherNotPinned {
+                    package: package.to_string(),
+                    version: version.to_string(),
+                    got: manifest.publisher_key.clone(),
+                });
+            }
         },
     };
 
@@ -325,9 +335,9 @@ pub fn library_resolve(
 ) -> Result<Vec<ResolvedLibrary>, String> {
     window_guard::require_label(&window, window_guard::MAIN)?;
     let policy = if confirm.unwrap_or(false) {
-        PinPolicy::Install
+        PinPolicy::PinOnFirstUse
     } else {
-        PinPolicy::Preview
+        PinPolicy::VerifyOnly
     };
     let registry = crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
     resolve_libraries(
@@ -375,7 +385,7 @@ pub fn resolve_libraries(
         // THE trust gate: Ed25519 over the raw manifest bytes + TOFU. An
         // unsigned package errors here (MissingSignature) — there is no
         // "install it anyway with an empty ceiling" path in this command.
-        // Under PinPolicy::Preview this READS the pin store and never writes it.
+        // Under PinPolicy::VerifyOnly this READS the pin store and never writes it.
         let verified =
             verify_library_manifest(registry, &request.package, &version, profile_dir, policy)
                 .map_err(|e| format!("{}@{}: {}", request.package, version, e))?;
@@ -389,7 +399,7 @@ pub fn resolve_libraries(
         // Checked here — after the signature verified, so `manifest.publisher_key`
         // is an established fact rather than an assertion, and BEFORE the pin is
         // queued, so a mismatch can never leave a pin behind.
-        if policy == PinPolicy::Install {
+        if policy == PinPolicy::PinOnFirstUse {
             if let Some(expected) = &request.expected_version {
                 if expected != &version {
                     return Err(format!(
@@ -651,7 +661,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "^1.2.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(out.len(), 1);
@@ -679,7 +689,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         let lowered = err.to_lowercase();
@@ -706,7 +716,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.report", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("not a script library"), "got: {err}");
@@ -742,7 +752,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("integrity check"), "got: {err}");
@@ -765,7 +775,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.empty", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("no module scripts"), "got: {err}");
@@ -778,7 +788,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "nonsense"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("invalid version pin"), "got: {err}");
@@ -801,7 +811,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(first[0].trust_status, LIB_TRUST_FIRST_USE);
@@ -809,7 +819,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(second[0].trust_status, LIB_TRUST_VERIFIED);
@@ -831,7 +841,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
 
@@ -853,7 +863,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.1"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(
@@ -899,7 +909,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap();
 
@@ -938,7 +948,7 @@ mod tests {
                 &f.registry,
                 f.profile.path(),
                 &req("acme.stats", "1.0.0"),
-                PinPolicy::Preview,
+                PinPolicy::VerifyOnly,
             )
             .unwrap();
             assert_eq!(out[0].trust_status, LIB_TRUST_NOT_INSTALLED);
@@ -966,7 +976,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(installed[0].trust_status, LIB_TRUST_FIRST_USE);
@@ -981,7 +991,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap();
         assert_eq!(previewed[0].trust_status, LIB_TRUST_VERIFIED);
@@ -1016,7 +1026,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap();
         assert_eq!(squat[0].trust_status, LIB_TRUST_NOT_INSTALLED);
@@ -1041,7 +1051,7 @@ mod tests {
             &genuine_registry,
             f.profile.path(),
             &req("acme.stats", "2.0.0"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .expect("the genuine publisher must not be refused because a squatter was previewed");
         assert_eq!(
@@ -1054,7 +1064,7 @@ mod tests {
             &genuine_registry,
             f.profile.path(),
             &req("acme.stats", "2.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(installed[0].trust_status, LIB_TRUST_FIRST_USE);
@@ -1068,7 +1078,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap_err();
         assert!(
@@ -1095,7 +1105,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
 
@@ -1115,7 +1125,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.stats", "1.0.1"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap_err();
         assert!(err.contains("changed since first use"), "got: {err}");
@@ -1147,7 +1157,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.unsigned", "1.0.0"),
-            PinPolicy::Install
+            PinPolicy::PinOnFirstUse
         )
         .is_err());
 
@@ -1165,7 +1175,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &req("acme.report", "1.0.0"),
-            PinPolicy::Install
+            PinPolicy::PinOnFirstUse
         )
         .is_err());
 
@@ -1215,7 +1225,7 @@ mod tests {
             },
         ];
         assert!(
-            resolve_libraries(&f.registry, f.profile.path(), &batch, PinPolicy::Install).is_err()
+            resolve_libraries(&f.registry, f.profile.path(), &batch, PinPolicy::PinOnFirstUse).is_err()
         );
         assert_eq!(
             pinned_key(f.profile.path(), "acme.good"),
@@ -1238,7 +1248,7 @@ mod tests {
             &[("stats", LIB_SRC)],
             true,
         );
-        for policy in [PinPolicy::Preview, PinPolicy::Install, PinPolicy::Preview] {
+        for policy in [PinPolicy::VerifyOnly, PinPolicy::PinOnFirstUse, PinPolicy::VerifyOnly] {
             let out = resolve_libraries(
                 &f.registry,
                 f.profile.path(),
@@ -1278,7 +1288,7 @@ mod tests {
             "acme.stats",
             "1.0.0",
             mine.path(),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         // The local path proposes the pin and commits it separately; commit it
@@ -1300,6 +1310,7 @@ mod tests {
             "acme.stats",
             "1.0.0",
             theirs.path(),
+            calp::integrity::PinPolicy::PinOnFirstUse,
         )
         .unwrap();
 
@@ -1340,7 +1351,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &approved("acme.stats", "1.0.0", &reviewed_key, "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("changed between review and install"), "got: {err}");
@@ -1377,7 +1388,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &approved("acme.stats", "^1.0.0", &f.keypair.public_key_hex(), "1.0.0"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap_err();
         assert!(err.contains("changed between review and install"), "got: {err}");
@@ -1401,7 +1412,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &approved("acme.stats", "^1.2.0", &f.keypair.public_key_hex(), "1.2.4"),
-            PinPolicy::Install,
+            PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(out[0].trust_status, LIB_TRUST_FIRST_USE);
@@ -1430,7 +1441,7 @@ mod tests {
             &f.registry,
             f.profile.path(),
             &approved("acme.stats", "1.0.0", &"11".repeat(32), "9.9.9"),
-            PinPolicy::Preview,
+            PinPolicy::VerifyOnly,
         )
         .unwrap();
         assert_eq!(out[0].trust_status, LIB_TRUST_NOT_INSTALLED);

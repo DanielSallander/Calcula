@@ -1382,7 +1382,23 @@ declare interface ScriptPackageInspection {
   resolvedVersion: string;
   /** Display name of the VERIFIED signer. */
   publisherName: string;
-  /** "firstUse" (this machine has no pin for this package yet) or "verified". */
+  /** The signer's Ed25519 public key (hex) — the only comparable identity. */
+  publisherKey: string;
+  /**
+   * "verified"  — signed by the key this machine pinned when the USER
+   *               subscribed to this package.
+   * "notPinned" — the signature is valid, but nobody on this computer has ever
+   *               agreed to trust that signer for this package name. This is
+   *               what `inspect()` normally returns: inspecting is PASSIVE and
+   *               deliberately does not create trust, so a script cannot make a
+   *               package trusted merely by asking about it.
+   * "firstUse"  — unreachable from `inspect()`; only a commit point (a pull the
+   *               user performed) can pin.
+   *
+   * AUTHENTIC IS NOT TRUSTED: anyone can generate a key and sign a package, so
+   * a valid signature proves only that the bytes are unaltered. Do not treat
+   * "notPinned" as success.
+   */
   trustStatus: string;
   sheets: Array<{ name: string; description: string }>;
   scripts: ScriptPackagedScript[];
@@ -1403,7 +1419,9 @@ declare interface ScriptPullResult {
    *  approves them. */
   scriptsPulled: number;
   publisherName: string;
-  /** "firstUse" or "verified". */
+  /** "firstUse" (the pin was created by this pull) or "verified" (it matched
+   *  the existing pin). A pull is a commit point, so "notPinned" cannot occur
+   *  here — see ScriptPackageInspection.trustStatus for the full vocabulary. */
   trustStatus: string;
 }
 

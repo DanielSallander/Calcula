@@ -27,7 +27,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use calp::integrity::TrustStatus;
+use calp::integrity::{PinPolicy, TrustStatus};
 use calp::publish::{self, PublishRequest};
 use calp::pull::{self, PullRequest};
 use calp::registry::LocalRegistry;
@@ -176,7 +176,7 @@ fn make_submission(
 /// pull() returns a PullResult with no Debug derive (deep persistence types),
 /// so unwrap_err() is unavailable; match to extract the error instead.
 fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest, prof: &Path) -> CalpError {
-    match pull::pull(reg, req, prof) {
+    match pull::pull(reg, req, prof, PinPolicy::PinOnFirstUse) {
         Ok(_) => panic!("pull unexpectedly succeeded"),
         Err(e) => e,
     }
@@ -203,7 +203,7 @@ fn lifecycle_publish_pull_roundtrip_carries_cells_region_and_trust() {
         Some(vec![region.clone()]),
     );
 
-    let result = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path()).unwrap();
+    let result = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
     // The published sheet's cells survive the round-trip.
     assert_eq!(result.resolved_version, SemVer::new(1, 0, 0));
@@ -498,7 +498,7 @@ fn lifecycle_integrity_gate_rejects_tampered_artifact() {
     );
 
     // An untampered pull succeeds and passes the integrity gate.
-    pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path()).unwrap();
+    pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
     // Overwrite the sheet's data.json on disk with garbage AFTER publish. The
     // manifest's recorded SHA-256 no longer matches, so the integrity gate (run
@@ -542,11 +542,110 @@ fn lifecycle_tofu_first_use_then_verified() {
     );
 
     // First pull pins the publisher key (trust-on-first-use)...
-    let first = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path()).unwrap();
+    let first = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
     // ...a second pull of the same package, against the same TOFU pin store,
     // matches the pinned key and reports Verified.
-    let second = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path()).unwrap();
+    let second = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(second.trust_status, TrustStatus::Verified);
+}
+
+// ---------------------------------------------------------------------------
+// 7. pin policy across the SUBSCRIBE / REFRESH / RESET trio (Wave J).
+//
+//    pull() is shared by three user actions that are NOT the same trust
+//    decision. Only Subscribe may create a pin; Refresh and Reset act on a
+//    package the user already trusts and must refuse first contact instead of
+//    minting the pin under the label "get the latest version".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lifecycle_only_subscribe_may_create_the_pin() {
+    let reg_dir = TempDir::new().unwrap();
+    // The PUBLISHER's profile (holds the signing key).
+    let pubp = TempDir::new().unwrap();
+    // The SUBSCRIBER's own profile (holds the TOFU pin store) — a fresh
+    // machine that has never heard of this package.
+    let subp = TempDir::new().unwrap();
+    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+
+    let wb = make_budget_workbook();
+    let region = make_region_declaration(wb.sheets[0].id);
+    publish_version(&reg, pubp.path(), &wb, "budget", SemVer::new(1, 0, 0), Some(vec![region.clone()]));
+    publish_version(&reg, pubp.path(), &wb, "budget", SemVer::new(1, 1, 0), Some(vec![region]));
+
+    let sub = |version: SemVer| calp::manifest::Subscription {
+        package_name: "budget".to_string(),
+        registry_url: String::new(),
+        version_pin: "^1.0.0".to_string(),
+        resolved_version: version.to_string(),
+        resolved_at: "2026-07-31T00:00:00Z".to_string(),
+        sheets: Vec::new(),
+        channel: String::new(),
+        data_source_configs: Vec::new(),
+        objects: Vec::new(),
+        extra: HashMap::new(),
+    };
+
+    // REFRESH first, on a machine that never subscribed. This is the shape a
+    // `.cala` received by email produces: the FILE claims a subscription the
+    // recipient never made. It must fail closed, and pin nothing.
+    let err = match calp::refresh::pull_all_updates(
+        &reg,
+        &[sub(SemVer::new(1, 0, 0))],
+        subp.path(),
+        PinPolicy::RequirePinned,
+    ) {
+        Ok(_) => panic!("refresh of an unpinned package unexpectedly succeeded"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
+    assert!(
+        calp::signing::load_trusted_publishers(subp.path()).unwrap().is_empty(),
+        "a refused refresh must leave the pin store untouched"
+    );
+
+    // RESET (an exact-version re-pull) is the same: not a first trust decision.
+    let err = match pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        subp.path(),
+        PinPolicy::RequirePinned,
+    ) {
+        Ok(_) => panic!("reset of an unpinned package unexpectedly succeeded"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
+    assert!(calp::signing::load_trusted_publishers(subp.path()).unwrap().is_empty());
+
+    // SUBSCRIBE is the commit point, and it still works.
+    let subscribed = pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        subp.path(),
+        PinPolicy::PinOnFirstUse,
+    )
+    .unwrap();
+    assert_eq!(subscribed.trust_status, TrustStatus::FirstUse);
+
+    // ...and now refresh and reset work, because a human decided they should.
+    let payloads = calp::refresh::pull_all_updates(
+        &reg,
+        &[sub(SemVer::new(1, 0, 0))],
+        subp.path(),
+        PinPolicy::RequirePinned,
+    )
+    .unwrap();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].pull_result.resolved_version, SemVer::new(1, 1, 0));
+    assert_eq!(payloads[0].pull_result.trust_status, TrustStatus::Verified);
+
+    pull::pull(
+        &reg,
+        &pull_version("budget", SemVer::new(1, 0, 0)),
+        subp.path(),
+        PinPolicy::RequirePinned,
+    )
+    .unwrap();
 }

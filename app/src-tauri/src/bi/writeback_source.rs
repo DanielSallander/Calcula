@@ -158,13 +158,18 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
 
         // Region declarations MUST come from the signature-verified manifest —
         // they carry the governance policies enforced below.
-        let ver_manifest = match calp::integrity::verify_and_load_manifest_via(
+        //
+        // ALREADY-TRUSTED (RequirePinned): writeback datasets exposed as model
+        // tables belong to packages the user subscribed to. Verifying no longer
+        // pins, and the manifest-only return means the trust answer cannot be
+        // discarded the way `Ok((_, m))` used to discard it.
+        let ver_manifest = match calp::integrity::load_pinned_manifest_via(
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,
             &calcula_profile_dir(),
         ) {
-            Ok((_, m)) => m,
+            Ok(m) => m,
             Err(_) => continue,
         };
         let regions = match &ver_manifest.writeback_regions {
@@ -209,13 +214,12 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         )> = older_package_versions(registry.as_ref(), &sub.package_name, &sub.resolved_version)
             .iter()
             .filter_map(|version| {
-                let manifest = calp::integrity::verify_and_load_manifest_via(
+                let manifest = calp::integrity::load_pinned_manifest_via(
                     registry.as_ref(),
                     &sub.package_name,
                     version,
                     &calcula_profile_dir(),
                 )
-                .map(|(_, m)| m)
                 .ok()?;
                 let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                     HashMap::new();

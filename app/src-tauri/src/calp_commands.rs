@@ -1911,14 +1911,30 @@ pub fn calp_pull(
         now,
     };
 
-    let mut result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
-        .map_err(|e| e.to_string())?;
+    // COMMIT POINT. Subscribe is the one .calp flow in which the user has
+    // deliberately chosen to trust this publisher for this package name, so it
+    // is the one flow allowed to CREATE the TOFU pin. Every other .calp path --
+    // inspect, workbook open, refresh, reset, writeback, GATHER -- is either
+    // VerifyOnly or RequirePinned. If a package is not yet pinned on this
+    // machine, subscribing here is how it becomes pinned.
+    let mut result = calp::pull::pull(
+        &registry,
+        &request,
+        &calcula_profile_dir(),
+        calp::integrity::PinPolicy::PinOnFirstUse,
+    )
+    .map_err(|e| e.to_string())?;
 
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
+    // EXHAUSTIVE on purpose: a new TrustStatus must not reach the frontend
+    // before someone decides how it is presented. `NotPinned` is unreachable
+    // here (PinOnFirstUse pins instead of reporting it) but is still spelled
+    // out rather than swept into a `_` arm.
     let trust_status = match result.trust_status {
         calp::integrity::TrustStatus::FirstUse => "firstUse",
         calp::integrity::TrustStatus::Verified => "verified",
+        calp::integrity::TrustStatus::NotPinned => "notPinned",
     }
     .to_string();
 
@@ -2624,6 +2640,11 @@ pub struct PackageInspection {
     /// S5 phase 2: the verified publisher's display name. Inspect is a pre-pull
     /// trust surface, so the manifest signature is checked here too.
     pub publisher_name: String,
+    /// S5 phase 2: the verified publisher's Ed25519 public key (hex). Surfaced
+    /// because inspect is PASSIVE — it deliberately does NOT pin — so the key is
+    /// the only thing the reviewer can actually compare against what the
+    /// publisher told them out of band. A name is not an identity.
+    pub publisher_key: String,
     /// "firstUse" (publisher key newly pinned) or "verified" (matched a prior
     /// pin). If verification fails, inspect returns an Err instead.
     pub trust_status: String,
@@ -2691,16 +2712,27 @@ pub fn calp_inspect_package(
     // Transport-agnostic (reads manifest + .sig via the transport) so an HTTP
     // registry is verified exactly like a local one — no local dir required, and
     // no split-view between the signed bytes and the surfaced inventory.
+    //
+    // PASSIVE -- VerifyOnly. This is the "Review" button in SubscribeDialog, the
+    // step whose entire purpose is "nothing is materialized until the user
+    // explicitly accepts", and it is additionally script-reachable through
+    // `distribution_gateway::Action::InspectPackage`. Neither reviewing a
+    // package nor a script asking about one is a decision to trust its
+    // publisher, so first contact reports `notPinned` and writes nothing to the
+    // pin store. The publisher name and key are still returned in full -- that
+    // is what the user is being asked to judge.
     let (trust, manifest) = calp::integrity::verify_and_load_manifest_via(
         registry.as_ref(),
         &package_name,
         &version,
         &calcula_profile_dir(),
+        calp::integrity::PinPolicy::VerifyOnly,
     )
     .map_err(|e| e.to_string())?;
     let trust_status = match trust {
         calp::integrity::TrustStatus::FirstUse => "firstUse",
         calp::integrity::TrustStatus::Verified => "verified",
+        calp::integrity::TrustStatus::NotPinned => "notPinned",
     }
     .to_string();
 
@@ -2820,6 +2852,7 @@ pub fn calp_inspect_package(
         package_name,
         resolved_version: version,
         publisher_name: manifest.publisher_name.clone(),
+        publisher_key: manifest.publisher_key.clone(),
         trust_status,
         sheets: manifest.sheets.iter().map(|s| SheetInfo {
             name: s.name.clone(),
@@ -2880,6 +2913,119 @@ pub fn calp_get_subscriptions(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
     Ok(subs.clone())
+}
+
+/// Per-subscription answer to "does this machine trust this package's
+/// publisher?" — the visible half of the Wave J fail-closed change.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionTrustInfo {
+    pub package_name: String,
+    pub registry_url: String,
+    pub resolved_version: String,
+    /// "verified"  — signed by the key this machine pinned when the user subscribed.
+    /// "firstUse"   — pinned by this very operation (never produced here; this
+    ///                command is VerifyOnly. Present so the wire vocabulary is
+    ///                the same everywhere).
+    /// "notPinned"  — the signature is valid but nobody here ever agreed to
+    ///                trust this publisher for this name. Writeback regions,
+    ///                GATHER and model-writeback columns from this package are
+    ///                INERT until the user subscribes.
+    /// "unavailable"— the registry or the manifest could not be read/verified;
+    ///                `error` says why.
+    pub trust_status: String,
+    /// Publisher display name from the (verified) manifest; empty on error.
+    pub publisher_name: String,
+    /// Publisher Ed25519 public key (hex) from the manifest; empty on error.
+    pub publisher_key: String,
+    /// Whether this package declares writeback regions or model-writeback
+    /// columns — i.e. whether "not pinned" actually costs the user something.
+    pub declares_writeback: bool,
+    /// Human-readable failure text when `trustStatus` is "unavailable".
+    pub error: String,
+}
+
+/// Report, per subscription, whether this machine has ever agreed to trust the
+/// package's publisher.
+///
+/// WHY THIS EXISTS. A `.cala` restores its subscription list on open WITHOUT
+/// pulling. Before Wave J, workbook open (`rebuild_writeback_index`) and every
+/// recalculation (`build_gather_data`) would create a TOFU pin for whatever
+/// package/registry pair the FILE named — so a workbook that arrived by email
+/// could squat the identity of a package the recipient had never heard of.
+/// Those paths are now `RequirePinned` and simply skip an unpinned package.
+///
+/// That is the correct fail-closed behaviour, but on its own it is invisible:
+/// the writeback regions would just sit there inert. This command makes the
+/// state legible, so the Subscriptions pane can say "subscribe to activate"
+/// instead of the user staring at a report that silently does nothing.
+///
+/// PASSIVE — `PinPolicy::VerifyOnly`. Reporting on trust must never create it.
+#[tauri::command]
+pub fn calp_subscription_trust(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<Vec<SubscriptionTrustInfo>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
+    let profile_dir = calcula_profile_dir();
+    let mut out = Vec::with_capacity(subs.subscriptions.len());
+
+    for sub in &subs.subscriptions {
+        // Dev and file-channel subscriptions have no registry manifest to
+        // verify; they are excluded from every other trust path too.
+        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+        let registry_path = subscription_registry_path(sub).to_string();
+        let mut info = SubscriptionTrustInfo {
+            package_name: sub.package_name.clone(),
+            registry_url: sub.registry_url.clone(),
+            resolved_version: sub.resolved_version.clone(),
+            trust_status: "unavailable".to_string(),
+            publisher_name: String::new(),
+            publisher_key: String::new(),
+            declares_writeback: false,
+            error: String::new(),
+        };
+
+        match crate::calp_registry::open_registry(&registry_path) {
+            Ok(registry) => match calp::integrity::verify_and_load_manifest_via(
+                registry.as_ref(),
+                &sub.package_name,
+                &sub.resolved_version,
+                &profile_dir,
+                calp::integrity::PinPolicy::VerifyOnly,
+            ) {
+                Ok((trust, manifest)) => {
+                    info.trust_status = match trust {
+                        calp::integrity::TrustStatus::FirstUse => "firstUse",
+                        calp::integrity::TrustStatus::Verified => "verified",
+                        calp::integrity::TrustStatus::NotPinned => "notPinned",
+                    }
+                    .to_string();
+                    info.publisher_name = manifest.publisher_name.clone();
+                    info.publisher_key = manifest.publisher_key.clone();
+                    info.declares_writeback = manifest
+                        .writeback_regions
+                        .as_ref()
+                        .map(|r| !r.is_empty())
+                        .unwrap_or(false)
+                        || manifest
+                            .model_writebacks
+                            .as_ref()
+                            .map(|m| !m.is_empty())
+                            .unwrap_or(false);
+                }
+                Err(e) => info.error = e.to_string(),
+            },
+            Err(e) => info.error = e.to_string(),
+        }
+
+        out.push(info);
+    }
+
+    Ok(out)
 }
 
 #[derive(Debug, Serialize)]
@@ -3636,8 +3782,19 @@ pub fn calp_refresh_apply(
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
                 .collect();
-            let group_payloads = calp::refresh::pull_all_updates(&registry, &group, &calcula_profile_dir())
-                .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            // ALREADY-TRUSTED: "Apply" in the Refresh dialog means "get the
+            // newer version of something I subscribed to". It is NOT a first
+            // trust decision, so it may not create a pin -- a subscription that
+            // was never locally pulled (restored from a `.cala` that arrived by
+            // email) fails here with PublisherNotPinned instead of having its
+            // publisher silently pinned by an operation labelled "update".
+            let group_payloads = calp::refresh::pull_all_updates(
+                &registry,
+                &group,
+                &calcula_profile_dir(),
+                calp::integrity::PinPolicy::RequirePinned,
+            )
+            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
             for mut payload in group_payloads {
                 // pull_all_updates indexed into the group slice; remap back to
                 // the workbook subscription index.
@@ -5375,9 +5532,21 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
         // OPEN (no pull() in the path), so an HTTP subscription would otherwise
         // re-install regions from an unsigned manifest a hostile server fully
         // controls (moving/expanding selectors to remap which cells GATHER
-        // reads/writes). Verify the Ed25519 signature + TOFU over the single
-        // trusted manifest copy; on failure, skip (never install unsigned decls).
-        if let Ok((_, ver_manifest)) = calp::integrity::verify_and_load_manifest_via(
+        // reads/writes). Verify the Ed25519 signature over the single trusted
+        // manifest copy; on failure, skip (never install unsigned decls).
+        //
+        // REQUIRES AN EXISTING PIN. This was the highest-severity pin site in
+        // the whole distribution stack: opening a `.cala` -- a file that arrives
+        // by email -- walked the subscription list the FILE names and pinned a
+        // publisher key for every (package, registry) pair in it, with no user
+        // gesture whatsoever. A crafted workbook naming `acme.finance` at an
+        // attacker-controlled registry squatted the pin before the victim had
+        // ever heard of the real package, and the genuine publisher's first
+        // release then read as `publisherChanged`. Now an unpinned subscription
+        // is skipped -- its regions stay inert until the user subscribes here
+        // themselves. `calp_subscription_trust` surfaces exactly that state to
+        // the Subscriptions pane so it is visible rather than merely silent.
+        if let Ok(ver_manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
         ) {
             if let Some(ref wb_regions) = ver_manifest.writeback_regions {
@@ -5586,7 +5755,13 @@ fn owning_subscription_for_region(
         // the authoritative submit re-validates too, but locating the target
         // registry from an unsigned manifest would let a hostile registry claim
         // regions it does not legitimately declare.
-        let Ok((_, manifest)) = calp::integrity::verify_and_load_manifest_via(
+        //
+        // ALREADY-TRUSTED: submitting to a region means acting on a package the
+        // user subscribed to. `load_pinned_manifest_via` returns the manifest
+        // ALONE -- under RequirePinned the only possible success is Verified, so
+        // unlike the previous `let Ok((_, manifest))` there is no trust answer
+        // being silently thrown away. An unpinned package owns no region here.
+        let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
         )
         else {
@@ -6894,11 +7069,14 @@ fn submit_region_internal(
     // manifest changed, failed its signature, or became unreadable between the
     // two reads — none of which is a reason to skip every schema, lifecycle and
     // completeness gate and still persist to the shared registry.
-    let decl = calp::integrity::verify_and_load_manifest_via(
+    // ALREADY-TRUSTED (RequirePinned): you can only submit to a package you
+    // subscribed to. The fail-closed `else` below already turns an absent
+    // declaration into a refusal, so an unpinned publisher lands there too.
+    let decl = calp::integrity::load_pinned_manifest_via(
         &*registry, &package_name, &resolved_version, &calcula_profile_dir(),
     )
     .ok()
-    .and_then(|(_, m)| m.writeback_regions)
+    .and_then(|m| m.writeback_regions)
     .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
     let Some(decl) = decl.as_ref() else {
         return Err(format!(
@@ -7186,7 +7364,10 @@ pub fn calp_preview_region_submission(
         let decl = crate::calp_registry::open_registry(&registry_path)
             .ok()
             .and_then(|registry| {
-                calp::integrity::verify_and_load_manifest_via(
+                // ALREADY-TRUSTED (RequirePinned): the consent prompt for a
+                // submit to a subscribed package. Same manifest and same gate
+                // as the submit itself, so what the user approves is what runs.
+                calp::integrity::load_pinned_manifest_via(
                     &*registry,
                     &package_name,
                     &resolved_version,
@@ -7194,7 +7375,7 @@ pub fn calp_preview_region_submission(
                 )
                 .ok()
             })
-            .and_then(|(_, m)| m.writeback_regions)
+            .and_then(|m| m.writeback_regions)
             .and_then(|regions| regions.into_iter().find(|r| r.id == region_id));
         match decl
             .as_ref()
@@ -8048,7 +8229,10 @@ fn owning_subscription_for_model_writeback(
         let Ok(registry) = crate::calp_registry::open_registry(&registry_path) else {
             continue;
         };
-        let Ok((_, manifest)) = calp::integrity::verify_and_load_manifest_via(
+        // ALREADY-TRUSTED (RequirePinned), same reasoning as
+        // `owning_subscription_for_region`: an unpinned package declares
+        // nothing here rather than pinning itself on a cell edit.
+        let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,
@@ -9264,10 +9448,16 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
         // region declaration governs on_approval filtering, own_only/anonymize
         // visibility, and schema + deadline integrity — so it MUST come from the
         // signature-verified manifest, never a raw (split-viewable) HTTP GET.
-        let ver_manifest = match calp::integrity::verify_and_load_manifest_via(
+        //
+        // REQUIRES AN EXISTING PIN. This runs on EVERY RECALC (eight call sites
+        // on the calculation path, behind only a 2s TTL cache). As a pinning
+        // site it re-armed continuously: it would silently RE-CREATE a pin the
+        // user had just deleted from trusted-publishers.json, on the very next
+        // keystroke. GATHER for an unpinned package now yields nothing.
+        let ver_manifest = match calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
         ) {
-            Ok((_, m)) => m,
+            Ok(m) => m,
             Err(_) => continue,
         };
 
@@ -9299,10 +9489,9 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                 .filter_map(|version| {
                     // Older versions' region schemas gate lenient carry-forward;
                     // verify them exactly as the current version.
-                    let manifest = calp::integrity::verify_and_load_manifest_via(
+                    let manifest = calp::integrity::load_pinned_manifest_via(
                         registry.as_ref(), &sub.package_name, version, &calcula_profile_dir(),
                     )
-                    .map(|(_, m)| m)
                     .ok()?;
                     let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                         std::collections::HashMap::new();
@@ -11591,8 +11780,16 @@ pub fn calp_reset_subscription(
             .map_err(|e| e.to_string())?,
         now: chrono::Utc::now().to_rfc3339(),
     };
-    let result = calp::pull::pull(&registry, &request, &calcula_profile_dir())
-        .map_err(|e| e.to_string())?;
+    // ALREADY-TRUSTED: "Reset to published" restores a package the user
+    // subscribed to. Re-pulling the exact resolved version must not be a way to
+    // acquire the pin the subscribe step never granted.
+    let result = calp::pull::pull(
+        &registry,
+        &request,
+        &calcula_profile_dir(),
+        calp::integrity::PinPolicy::RequirePinned,
+    )
+    .map_err(|e| e.to_string())?;
 
     // Match pulled sheets to their local workbook indices via the ledger.
     let pkg_to_local: std::collections::HashMap<SheetId, SheetId> =
@@ -12443,5 +12640,198 @@ mod pane_control_pull_tests {
             std::collections::HashSet::from([format!("pane-{}", name_skipped_id)]),
             "only the name-collision-skipped control's instance id is orphaned"
         );
+    }
+}
+
+#[cfg(test)]
+mod tofu_pin_policy_guard_tests {
+    //! SOURCE-LEVEL DRIFT GUARD for the TOFU pin policy (Wave J).
+    //!
+    //! The type system already stops a caller from FORGETTING the policy —
+    //! `calp::integrity::verify_and_load_manifest_via` takes a required
+    //! `PinPolicy` with no `Default` and no `Option`, so an omission does not
+    //! compile. What the type system cannot express is WHICH policy is correct
+    //! for a given surface. That is a judgement about what the USER just did,
+    //! and it is the judgement that was wrong three waves in a row:
+    //!   * Wave H — extension scanning pinned on every app launch.
+    //!   * Wave I — library resolution pinned on preview.
+    //!   * Wave J — .calp inspection, workbook OPEN, writeback submit and every
+    //!     GATHER recalculation all pinned.
+    //!
+    //! So these tests pin down the ANSWER, not just the shape: which files may
+    //! create a `.calp` pin, and the fact that the passive and already-trusted
+    //! paths use the non-pinning entry points. A new caller that starts pinning
+    //! shows up here as a failing test with the reason attached.
+
+    /// This guard module's own body mentions every string it forbids (in the
+    /// assertion messages), so it must never be scanned by its own rules.
+    fn scan(src: &str) -> String {
+        let body = src
+            .split("mod tofu_pin_policy_guard_tests")
+            .next()
+            .expect("split yields at least one part");
+        // Drop comment lines: a doc comment EXPLAINING a policy is not a USE of
+        // it, and counting explanations would punish documenting the rule.
+        body.lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The ONLY .calp surfaces in the app crate that may create a TOFU pin.
+    ///
+    /// Both are commit points with a human behind them:
+    ///   * `calp_commands::calp_pull`      — Subscribe, after the user reviewed
+    ///     the package and its publisher key in the Subscribe dialog.
+    ///   * `library_commands::library_resolve(confirm: true)` — Install, after
+    ///     the user approved the resolved closure.
+    ///
+    /// `extension_install.rs` and `managed_policy.rs` pin too, but through
+    /// `calp::signing::pin_publisher` directly rather than through the manifest
+    /// verifier, and both are already-audited commit points (a confirmed add-in
+    /// install; an administrator's `%PROGRAMDATA%` policy). They are covered by
+    /// `the_raw_pin_write_has_exactly_two_production_callers` below.
+    #[test]
+    fn only_subscribe_and_install_may_create_a_calp_pin() {
+        let files: [(&str, &str, usize); 6] = [
+            // calp_pull, and nothing else.
+            ("calp_commands.rs", include_str!("calp_commands.rs"), 1),
+            ("calp_inspector.rs", include_str!("calp_inspector.rs"), 0),
+            // library_resolve's `confirm: true` mapping, the arm of
+            // `verify_library_manifest` that acts on it, and the batch
+            // `commit_pending_pins` gate in `resolve_libraries`.
+            ("library_commands.rs", include_str!("library_commands.rs"), 3),
+            ("managed_policy.rs", include_str!("managed_policy.rs"), 0),
+            ("bi/writeback.rs", include_str!("bi/writeback.rs"), 0),
+            ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs"), 0),
+        ];
+
+        for (name, src, expected) in files {
+            // Production only: a test may legitimately exercise the pinning
+            // path, and `library_commands.rs` has many that do.
+            let prod = scan(src.split("#[cfg(test)]").next().unwrap());
+            let pins = prod.matches("PinPolicy::PinOnFirstUse").count();
+            assert_eq!(
+                pins, expected,
+                "{name} contains {pins} PinOnFirstUse use(s) in production code, expected \
+                 {expected}. Creating a TOFU pin is a statement that the USER decided to trust a \
+                 publisher. If you are adding one it must be a commit point with a human behind \
+                 it — and this list must say so."
+            );
+        }
+    }
+
+    /// The passive `.calp` surfaces must stay passive, and the already-trusted
+    /// ones must stay fail-closed.
+    #[test]
+    fn passive_and_already_trusted_calp_surfaces_use_the_non_pinning_entry_points() {
+        let inspector = scan(include_str!("calp_inspector.rs"));
+        assert!(
+            inspector.contains("PinPolicy::VerifyOnly"),
+            "the Package Inspector must verify WITHOUT pinning: PackageInspectorApp loads the \
+             overview automatically on browse/drop, so pointing the inspector at a folder would \
+             otherwise write a pin nobody asked for (the Wave-H scan bug, again)"
+        );
+        assert!(
+            !inspector.contains("PinPolicy::PinOnFirstUse")
+                && !inspector.contains("PinPolicy::RequirePinned"),
+            "every Package Inspector command is VerifyOnly — it must neither create trust nor \
+             refuse to display an untrusted package (displaying it is the whole point)"
+        );
+
+        let cmds = scan(include_str!("calp_commands.rs"));
+        // The already-trusted sites go through `load_pinned_manifest_via`,
+        // which returns the manifest ALONE. That is deliberate: these sites
+        // used to bind the trust answer as `_` and carry on, which is how a
+        // fail-open hole hides. A site that cannot obtain a status cannot
+        // ignore one.
+        let pinned_reads = cmds.matches("load_pinned_manifest_via(").count();
+        assert!(
+            pinned_reads >= 7,
+            "expected the writeback / GATHER / model-writeback sites to use \
+             calp::integrity::load_pinned_manifest_via; found {pinned_reads}"
+        );
+        // ...and none of them may go back to binding a discarded trust status.
+        for discarded in [
+            "Ok((_, ver_manifest)) = calp::integrity::",
+            "Ok((_, manifest)) = calp::integrity::",
+            "Ok((_, m)) => m,",
+            ".map(|(_, m)| m)",
+            ".and_then(|(_, m)|",
+        ] {
+            assert!(
+                !cmds.contains(discarded),
+                "found a discarded trust answer in calp_commands.rs (`{discarded}`). Use \
+                 load_pinned_manifest_via (already-trusted) or handle every TrustStatus."
+            );
+        }
+        // Subscribe / inspect are the only two policy-taking verifier calls
+        // left in this file; everything else is a pinned read.
+        let verifier_calls = cmds.matches("verify_and_load_manifest_via(").count();
+        assert_eq!(
+            verifier_calls, 2,
+            "calp_commands.rs should call the policy-taking verifier exactly twice \
+             (calp_inspect_package = VerifyOnly, calp_subscription_trust = VerifyOnly); \
+             calp_pull goes through calp::pull::pull. Found {verifier_calls}."
+        );
+
+        for (name, src) in [
+            ("bi/writeback.rs", include_str!("bi/writeback.rs")),
+            ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
+        ] {
+            let prod = scan(src);
+            assert!(
+                prod.contains("load_pinned_manifest_via("),
+                "{name} feeds the model engine from subscribed packages: it must require an \
+                 existing pin rather than create one"
+            );
+            assert!(
+                !prod.contains("verify_and_load_manifest_via("),
+                "{name} must not call the policy-taking verifier directly — \
+                 load_pinned_manifest_via is the already-trusted entry point"
+            );
+        }
+    }
+
+    /// `calp::signing::pin_publisher` is the raw pin write. Only the two
+    /// already-audited direct commit points may call it.
+    #[test]
+    fn the_raw_pin_write_has_exactly_two_production_callers() {
+        let sanctioned: [(&str, &str, usize); 2] = [
+            // The user confirmed "Install add-in" (Wave H reference impl).
+            ("extension_install.rs", include_str!("extension_install.rs"), 1),
+            // An administrator authored %PROGRAMDATA%\Calcula\policy.json.
+            ("managed_policy.rs", include_str!("managed_policy.rs"), 1),
+        ];
+        for (name, src, expected) in sanctioned {
+            let prod = scan(src.split("#[cfg(test)]").next().unwrap());
+            assert_eq!(
+                prod.matches("pin_publisher(").count(),
+                expected,
+                "{name} must contain exactly {expected} pin_publisher call(s)"
+            );
+        }
+
+        // Everything else in the .calp trust stack goes through the verifier,
+        // whose policy parameter is the thing that cannot be forgotten.
+        // (library_commands.rs is excluded: it defers an INSTALL's pins to a
+        // batch commit so a partly-failed install leaves no pins behind, and
+        // its own tests cover that.)
+        for (name, src) in [
+            ("calp_commands.rs", include_str!("calp_commands.rs")),
+            ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("bi/writeback.rs", include_str!("bi/writeback.rs")),
+            ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
+        ] {
+            let prod = scan(src.split("#[cfg(test)]").next().unwrap());
+            assert!(
+                !prod.contains("pin_publisher("),
+                "{name} must not write the pin store directly — go through \
+                 calp::integrity::verify_and_load_manifest_via with an explicit PinPolicy"
+            );
+        }
     }
 }

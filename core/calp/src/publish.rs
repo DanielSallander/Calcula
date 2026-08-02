@@ -1495,7 +1495,7 @@ mod tests {
                 ),
                 now: "2026-05-18T01:00:00Z".to_string(),
             };
-            let result = crate::pull::pull(&reg, &req, prof.path()).unwrap();
+            let result = crate::pull::pull(&reg, &req, prof.path(), crate::integrity::PinPolicy::PinOnFirstUse).unwrap();
             assert_eq!(result.sheets.len(), 2);
         }
     }

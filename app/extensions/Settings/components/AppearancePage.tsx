@@ -19,7 +19,49 @@ import {
   type Skin,
   type AccessibilityOverride,
   type EffectiveAppearancePolicy,
+  type SkinTrust,
 } from "@api";
+
+/**
+ * How each org-skin trust state is shown. EVERY member of `SkinTrust` has a row
+ * — the map is typed `Record<SkinTrust, ...>`, so adding a Rust variant without
+ * a presentation here is a TypeScript error rather than an unlabelled badge.
+ *
+ * The rule this enforces: a state that is not "the key I expected" must never
+ * read as reassuring. `notPinned` is a valid signature by an unrecognised
+ * signer — authentic, not trusted — and it says so.
+ */
+const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; color: string; title: string }> = {
+  verified: {
+    label: "verified",
+    color: "#137333",
+    title: "Signed by the publisher key your administrator pinned in policy.json.",
+  },
+  firstUse: {
+    label: "trusted just now",
+    color: "#a05a00",
+    title: "This publisher key was pinned by this operation (trust-on-first-use).",
+  },
+  notPinned: {
+    label: "NOT trusted — unrecognised signer",
+    color: "#c5221f",
+    title:
+      "The skin pack's signature is valid, but this computer has never agreed to trust that " +
+      "publisher. A valid signature only proves the file was not altered after signing — anyone " +
+      "can generate a key and sign. The skin is not applied. Your administrator must set " +
+      "publisherKey in policy.json to the org's key.",
+  },
+  unsigned: {
+    label: "unsigned",
+    color: "#a05a00",
+    title: "No publisher key was expected, so the pack was applied as advisory unsigned data.",
+  },
+  unknown: {
+    label: "rejected — signature missing or invalid",
+    color: "#c5221f",
+    title: "A signature was required but was missing or did not verify. The skin was not applied.",
+  },
+};
 
 /** A small live-preview of a skin built from its resolved (non-applied) values. */
 function SkinSwatch({ skin }: { skin: Skin }): React.ReactElement {
@@ -102,9 +144,16 @@ export function AppearancePage(): React.ReactElement {
             Default appearance suggested by {managed.managedBy || "your organization"}
           </div>
           <div style={styles.managedDetail}>
-            Source: {managed.registryUrl || "(local)"} · Signed: {managed.publisherFingerprint || "—"} · Trust: {managed.trust}
+            Source: {managed.registryUrl || "(local)"} · Signed: {managed.publisherFingerprint || "—"} · Trust:{" "}
+            <span
+              style={{ color: SKIN_TRUST_PRESENTATION[managed.trust]?.color ?? "#c5221f", fontWeight: 600 }}
+              title={SKIN_TRUST_PRESENTATION[managed.trust]?.title ?? `Unrecognised trust state '${managed.trust}'.`}
+            >
+              {SKIN_TRUST_PRESENTATION[managed.trust]?.label ?? `unrecognised (${managed.trust})`}
+            </span>
             {managed.version ? ` · v${managed.version}` : ""}
           </div>
+          {managed.policyError && <div style={styles.managedError}>{managed.policyError}</div>}
           <div style={styles.managedNote}>You can change the appearance freely below — this is only the starting default.</div>
           {managed.registryUrl && (
             <button style={styles.checkButton} onClick={checkForUpdates} disabled={checking}>
@@ -211,6 +260,16 @@ const styles: Record<string, React.CSSProperties> = {
   managedTitle: { fontSize: 12, fontWeight: 600, color: "var(--text-primary)" },
   managedDetail: { fontSize: 10.5, color: "var(--text-secondary)", marginTop: 4, fontFamily: "'Cascadia Code', 'Consolas', monospace" },
   managedNote: { fontSize: 11, color: "var(--text-tertiary)", marginTop: 6 },
+  managedError: {
+    fontSize: 11,
+    color: "#c5221f",
+    marginTop: 6,
+    lineHeight: 1.45,
+    padding: "6px 8px",
+    border: "1px solid #f3c4c2",
+    borderRadius: 4,
+    background: "#fdeceb",
+  },
   checkButton: {
     marginTop: 8,
     padding: "4px 10px",

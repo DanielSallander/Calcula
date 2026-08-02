@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use calp::integrity::{sha256_hex, verify_and_load_manifest_via, TrustStatus};
+use calp::integrity::{sha256_hex, verify_and_load_manifest_via, PinPolicy, TrustStatus};
 use calp::manifest::VersionManifest;
 use calp::transport::RegistryTransport;
 use calp::version::VersionPin;
@@ -50,6 +50,15 @@ use crate::security::window_guard;
 /// (the same gate pull applies) so content-surfacing commands never display
 /// bytes the signature does not cover. The artifact-audit commands pass
 /// `false` — they hash and report per artifact instead of failing outright.
+///
+/// PASSIVE — `PinPolicy::VerifyOnly`. Inspection is the surface that exists so
+/// the user can decide WHETHER to trust a publisher; it must not make that
+/// decision for them. `PackageInspectorApp.tsx` fires the overview
+/// automatically on browse/drop/cross-window handover, so merely POINTING the
+/// inspector at a folder used to write a TOFU pin — the direct analogue of the
+/// Wave-H "scanning pinned on every launch" bug. First contact now reports
+/// `TrustStatus::NotPinned` and the pin store is untouched; the key and its
+/// fingerprint are still displayed in full, which is the whole point.
 fn open_verified(
     registry_path: &str,
     package_name: &str,
@@ -68,6 +77,7 @@ fn open_verified(
         package_name,
         &version,
         &calcula_profile_dir(),
+        PinPolicy::VerifyOnly,
     )
     .map_err(|e| e.to_string())?;
     if check_artifacts {
@@ -88,10 +98,37 @@ fn open_verified(
     Ok((registry, version, trust, manifest))
 }
 
+/// `open_verified` for the SECTION commands (sheet / scripts / model /
+/// writeback / raw artifact), which render already-authenticated CONTENT and
+/// have no trust badge of their own — the Overview tab owns the trust
+/// presentation for the whole window.
+///
+/// It drops the `TrustStatus` here, once, with a reason, instead of five call
+/// sites each binding `_trust` and leaving a reader to wonder whether an answer
+/// was ignored by accident. Dropping it is safe precisely because
+/// `open_verified` is `VerifyOnly`: no trust decision was made, so there is no
+/// decision to fail open on. What these commands DO enforce is unchanged and
+/// non-negotiable — a valid signature, and (for the content commands) the full
+/// per-artifact SHA-256 walk.
+fn open_verified_content(
+    registry_path: &str,
+    package_name: &str,
+    version_pin: &str,
+    check_artifacts: bool,
+) -> Result<(Box<dyn RegistryTransport>, String, VersionManifest), String> {
+    let (registry, version, _trust, manifest) =
+        open_verified(registry_path, package_name, version_pin, check_artifacts)?;
+    Ok((registry, version, manifest))
+}
+
+/// Wire string for `TrustStatus`. EXHAUSTIVE on purpose (no `_` arm): a new
+/// trust state must not reach the frontend until someone has decided how it is
+/// presented.
 fn trust_status_str(trust: TrustStatus) -> String {
     match trust {
         TrustStatus::FirstUse => "firstUse",
         TrustStatus::Verified => "verified",
+        TrustStatus::NotPinned => "notPinned",
     }
     .to_string()
 }
@@ -1039,8 +1076,8 @@ pub fn calp_inspector_sheet(
     window: tauri::Window,
 ) -> Result<InspectorSheetDetail, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
-    let (registry, version, _trust, manifest) =
-        open_verified(&registry_path, &package_name, &version_pin, true)?;
+    let (registry, version, manifest) =
+        open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
 
     let sheet = manifest
@@ -1238,8 +1275,8 @@ pub fn calp_inspector_scripts(
     window: tauri::Window,
 ) -> Result<InspectorScripts, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
-    let (registry, version, _trust, manifest) =
-        open_verified(&registry_path, &package_name, &version_pin, true)?;
+    let (registry, version, manifest) =
+        open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
 
     let object_scripts: Vec<InspectorObjectScriptDetail> = manifest
@@ -1418,8 +1455,8 @@ pub fn calp_inspector_model(
     window: tauri::Window,
 ) -> Result<InspectorModel, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
-    let (registry, version, _trust, manifest) =
-        open_verified(&registry_path, &package_name, &version_pin, true)?;
+    let (registry, version, manifest) =
+        open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
 
     let ds = manifest
@@ -1667,8 +1704,8 @@ pub fn calp_inspector_writeback(
     window: tauri::Window,
 ) -> Result<InspectorWriteback, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
-    let (registry, version, _trust, manifest) =
-        open_verified(&registry_path, &package_name, &version_pin, true)?;
+    let (registry, version, manifest) =
+        open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
     let profile_dir = calcula_profile_dir();
 
@@ -1871,8 +1908,8 @@ pub fn calp_inspector_artifact(
     // No up-front artifact walk: this command hashes the requested artifact
     // itself and REPORTS a mismatch (verified: false) instead of failing —
     // it is the audit surface for exactly that case.
-    let (registry, version, _trust, manifest) =
-        open_verified(&registry_path, &package_name, &version_pin, false)?;
+    let (registry, version, manifest) =
+        open_verified_content(&registry_path, &package_name, &version_pin, false)?;
 
     let expected = manifest
         .artifact_checksums

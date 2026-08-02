@@ -9,7 +9,7 @@ use identity::SheetId;
 use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls, SavedSheetComments, SavedSheetScenarios, SavedSheetOutline, SavedPaneControl, SavedSlicer, SavedRibbonFilter, SavedPivotLayout};
 
 use crate::error::CalpError;
-use crate::integrity::TrustStatus;
+use crate::integrity::{PinPolicy, TrustStatus};
 use crate::manifest::*;
 use crate::transport::RegistryTransport;
 use crate::version::{SemVer, VersionPin};
@@ -215,12 +215,24 @@ pub fn resolve_sheet_name_collisions(
 /// caller to integrate into the workbook.
 ///
 /// `profile_dir` is the per-user profile directory holding the TOFU pin store
-/// (`trusted-publishers.json`); the manifest-signature step pins/compares the
-/// publisher key there (S5 phase 2).
+/// (`trusted-publishers.json`); the manifest-signature step compares — and, when
+/// `policy` allows it, creates — the publisher pin there (S5 phase 2).
+///
+/// `policy` is REQUIRED and has no default because `pull()` is shared by three
+/// user actions that are NOT the same trust decision:
+///   * Subscribe  -> `PinPolicy::PinOnFirstUse`. The user reviewed the package
+///     and its publisher key and said yes; first contact legitimately pins.
+///   * Refresh    -> `PinPolicy::RequirePinned`. "Get the latest version" of
+///     something already trusted. A refresh of a subscription that was never
+///     locally pulled (e.g. restored from a `.cala` a colleague sent) must NOT
+///     silently mint the pin — that is a squat wearing an update's clothes.
+///   * Reset      -> `PinPolicy::RequirePinned`. Same reasoning.
+/// The decision therefore belongs to the caller, not to `pull()`.
 pub fn pull(
     registry: &dyn RegistryTransport,
     request: &PullRequest,
     profile_dir: &Path,
+    policy: PinPolicy,
 ) -> Result<PullResult, CalpError> {
     let resolved = registry.resolve_version(&request.package_name, &request.version_pin)?;
     let version_str = resolved.to_string();
@@ -241,6 +253,7 @@ pub fn pull(
         pkg,
         ver,
         profile_dir,
+        policy,
     )?;
 
     // COMPATIBILITY GATE: refuse a package that needs a newer Calcula than this
@@ -900,7 +913,7 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path()).unwrap();
+        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
         assert_eq!(result.sheets[0].name, "Dashboard");
         assert_eq!(result.sheets[1].name, "Data");
@@ -961,7 +974,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.custom_objects.len(), 1);
         let co = &result.custom_objects[0];
@@ -1021,7 +1034,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The pulled cell carries the published style index, not the
         // data.json-serialized 0.
@@ -1085,7 +1098,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.controls.len(), 1, "only the published sheet's controls travel");
         assert_eq!(result.controls[0].sheet_id, published_sheet_id,
@@ -1171,7 +1184,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-03T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.pane_controls.len(), 2, "both pane controls travel");
 
@@ -1353,7 +1366,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.slicers.len(), 1, "only the published sheet's slicer travels");
         let s = &result.slicers[0];
@@ -1496,7 +1509,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.ribbon_filters.len(), 1);
         let f = &result.ribbon_filters[0];
@@ -1564,7 +1577,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.pivot_layouts.len(), 1);
         let l = &result.pivot_layouts[0];
@@ -1616,7 +1629,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         let theme = result.theme.expect("theme.json is always carried");
         assert_eq!(theme, engine::theme::ThemeDefinition::facet());
@@ -1669,7 +1682,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.extension_data.len(), 2);
         assert_eq!(
@@ -1697,7 +1710,7 @@ mod tests {
         assert!(reg.read_artifact("test-pkg", "1.0.0", "pivot_layouts.json").unwrap().is_none());
         assert!(reg.read_artifact("test-pkg", "1.0.0", "extension_data.json").unwrap().is_none());
 
-        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.slicers.is_empty());
         assert!(result.ribbon_filters.is_empty());
         assert!(result.pivot_layouts.is_empty());
@@ -1718,7 +1731,7 @@ mod tests {
             .read_artifact("test-pkg", "1.0.0", "pane_controls.json")
             .unwrap()
             .is_none());
-        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.pane_controls.is_empty());
     }
 
@@ -1775,7 +1788,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 0, "a dataset package carries no sheets");
         assert_eq!(result.data_sources.len(), 1);
         assert_eq!(result.data_sources[0].definition.name, "Sales");
@@ -1845,7 +1858,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Named ranges ride in the manifest; CF/DV are read from their artifacts.
         // sheet_ids stay as PACKAGE ids here (the Tauri pull remaps to local index).
@@ -1939,7 +1952,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Scenarios + outlines travel per published sheet, PACKAGE sheet ids
         // un-remapped (CF/DV semantics); the unpublished sheet's entries do not.
@@ -1978,7 +1991,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.comments.is_empty(), "no comments may arrive without the opt-in");
     }
 
@@ -1999,7 +2012,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Only the PUBLISHED sheet's comments travel, package sheet id
         // un-remapped, payload byte-identical (opaque to the calp layer).
@@ -2056,7 +2069,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The chart round-trips, with its sheet_id remapped from the package id
         // to the new LOCAL sheet id so it lands on the right sheet.
@@ -2117,7 +2130,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-06-28T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.sparklines.len(), 1, "the sparkline round-trips");
         let sp = &result.sparklines[0];
@@ -2141,7 +2154,7 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path()).unwrap();
+        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let sub = &result.subscription;
         assert_eq!(sub.package_name, "test-pkg");
         assert_eq!(sub.resolved_version, "1.0.0");
@@ -2192,7 +2205,7 @@ mod tests {
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path()).unwrap();
+        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.resolved_version, SemVer::new(1, 1, 0));
     }
 
@@ -2209,7 +2222,7 @@ mod tests {
             now: "2026-05-18T00:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path());
+        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse);
         assert!(result.is_err());
     }
 
@@ -2227,7 +2240,7 @@ mod tests {
     /// unwrap_err() requires Debug on the Ok type; PullResult intentionally
     /// has no Debug derive (deep persistence types), so match instead.
     fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest, prof: &std::path::Path) -> CalpError {
-        match pull(reg, req, prof) {
+        match pull(reg, req, prof, PinPolicy::PinOnFirstUse) {
             Ok(_) => panic!("pull unexpectedly succeeded"),
             Err(e) => e,
         }
@@ -2258,7 +2271,7 @@ mod tests {
         assert!(!ver.artifact_checksums.is_empty());
 
         // ...and an untampered pull passes the integrity gate.
-        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
@@ -2398,7 +2411,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
@@ -2415,7 +2428,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &request, prof.path()).unwrap();
+        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Same number of sheets
         assert_eq!(result.sheets.len(), original_wb.sheets.len());
@@ -2490,7 +2503,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The metadata-rich sheet round-trips fully.
         let pulled = &result.sheets[0].sheet;
@@ -2595,7 +2608,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.module_scripts.len(), 1);
         let m = &result.module_scripts[0];
@@ -2640,7 +2653,7 @@ mod tests {
         assert!(ver.module_scripts.is_empty());
         assert!(ver.notebooks.is_empty());
 
-        let result = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.module_scripts.is_empty());
         assert!(result.notebooks.is_empty());
     }
@@ -2734,7 +2747,7 @@ mod tests {
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path()).unwrap();
+        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.notebooks.len(), 1);
         // Provenance is re-stamped with the ACTUAL package on pull, overriding the
@@ -2805,11 +2818,11 @@ mod tests {
         publish_test_package(&reg, prof.path());
 
         // First pull pins the publisher key.
-        let first = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let first = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
         // Second pull (same package, same key) verifies against the pin.
-        let second = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let second = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(second.trust_status, TrustStatus::Verified);
     }
 
@@ -2821,7 +2834,7 @@ mod tests {
         publish_test_package(&reg, prof.path());
 
         // First pull pins publisher A's key.
-        let first = pull(&reg, &make_pull_request(), prof.path()).unwrap();
+        let first = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
         // Re-sign the SAME package with a DIFFERENT publisher (key B) — as a

@@ -18,8 +18,19 @@ import {
 import { BUILTIN_DEFAULT_SKIN_ID } from "../core/theme/builtInSkins";
 import type { Skin, AccessibilityOverride } from "../core/theme/skin";
 
-/** Trust status of a managed (signed) skin, mirrored from the Rust TrustStatus. */
-export type SkinTrust = "verified" | "firstUse" | "unsigned" | "unknown";
+/**
+ * Trust status of a managed (signed) skin, mirrored EXACTLY from the Rust
+ * `calp::skin_pack::SkinTrust` (see `managed_policy::trust_str`).
+ *
+ * `notPinned` means the pack's signature is cryptographically valid but this
+ * machine holds no TOFU pin for the package — nobody here ever agreed to trust
+ * that signer. It is NOT "verified": the org-skin pull runs at app launch,
+ * before any user interaction, and a registry that nominates its own key is
+ * exactly the squat the pin exists to prevent. Every UI that renders a skin
+ * trust value must have a row for all five of these (see
+ * `SKIN_TRUST_PRESENTATION` in `extensions/Settings/components/AppearancePage.tsx`).
+ */
+export type SkinTrust = "verified" | "firstUse" | "notPinned" | "unsigned" | "unknown";
 
 /**
  * Effective appearance policy returned by the Rust `get_effective_appearance_policy`
@@ -37,6 +48,14 @@ export interface EffectiveAppearancePolicy {
   publisherFingerprint: string;
   /** Resolved version of the org skin package. */
   version: string;
+  /**
+   * Non-empty when policy.json itself is incomplete — today: it names a
+   * `skinPackage` but no `publisherKey`. The org-skin pull requires an existing
+   * pin, and only the admin-authored `publisherKey` can seed it, so without one
+   * there is no org skin. Surfaced so that reads as a misconfiguration rather
+   * than a feature that silently does nothing.
+   */
+  policyError: string;
 }
 
 const MANAGED_CACHE_KEY = "calcula.appearance.managedCache";

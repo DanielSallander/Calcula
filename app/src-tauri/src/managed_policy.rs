@@ -89,10 +89,17 @@ pub struct EffectiveAppearancePolicy {
     pub default_skin_id: String,
     /// The resolved org skin (mirrors the frontend Skin shape), or null.
     pub skin: Option<SkinPack>,
-    /// "verified" | "unsigned" | "unknown".
+    /// "verified" | "firstUse" | "notPinned" | "unsigned" | "unknown".
     pub trust: String,
     pub publisher_fingerprint: String,
     pub version: String,
+    /// Non-empty when the machine policy itself is misconfigured, e.g. it names
+    /// a `skinPackage` + `registryUrl` but no `publisherKey`. Surfaced in the
+    /// Appearance panel rather than swallowed: the org skin pull now runs under
+    /// `PinPolicy::RequirePinned`, so without a `publisherKey` to seed the pin
+    /// there is nothing to trust and the result is NO skin. That must read as
+    /// "your policy.json is incomplete", not as a silent nothing-happened.
+    pub policy_error: String,
 }
 
 impl EffectiveAppearancePolicy {
@@ -106,6 +113,7 @@ impl EffectiveAppearancePolicy {
             trust: "unsigned".to_string(),
             publisher_fingerprint: String::new(),
             version: String::new(),
+            policy_error: String::new(),
         }
     }
 }
@@ -120,9 +128,14 @@ fn programdata_calcula_dir() -> PathBuf {
     PathBuf::from(pd).join("Calcula")
 }
 
+/// Wire string for `SkinTrust`. EXHAUSTIVE (no `_` arm) so a new trust state
+/// cannot reach the Appearance panel before it has a presentation row there —
+/// see `app/src/api/appearancePolicy.ts` (`SkinTrust`) and `AppearancePanel`.
 fn trust_str(t: SkinTrust) -> String {
     match t {
         SkinTrust::Verified => "verified",
+        SkinTrust::FirstUse => "firstUse",
+        SkinTrust::NotPinned => "notPinned",
         SkinTrust::Unsigned => "unsigned",
         SkinTrust::Unknown => "unknown",
     }
@@ -157,9 +170,34 @@ pub fn resolve_effective_policy(
     // Pre-trust: seed the TOFU pin from the admin-authored public key, keyed by
     // the package name EXACTLY as the pull's signature check looks it up, so the
     // signed skin verifies as Verified instead of a scary first-use prompt.
+    //
+    // THIS is the org-skin trust decision, and the only one. `%PROGRAMDATA%` is
+    // admin-writable only, so an administrator authoring `publisherKey` IS the
+    // human deciding to trust that publisher. Everything downstream
+    // (`skin_pull`) therefore runs `PinPolicy::RequirePinned` and can only ever
+    // CHECK this pin.
     if !policy.publisher_key.is_empty() && !policy.skin_package.is_empty() {
         let _ = signing::pin_publisher(profile_dir, &policy.skin_package, &policy.publisher_key);
     }
+
+    // Validate the policy BEFORE trying to use it. Previously a policy naming a
+    // skin package + registry but NO publisher key still produced a skin: the
+    // pre-pin above was skipped and `skin_pull` supplied the missing pin from
+    // whatever the registry served, at app launch, and displayed it as
+    // "verified". Refusing that is correct — but refusing it silently would
+    // just look like a broken feature, so the misconfiguration is named.
+    let policy_error = if !policy.skin_package.is_empty() && policy.publisher_key.is_empty() {
+        let msg = format!(
+            "policy.json names skinPackage '{}' but no publisherKey. Calcula will not trust a \
+             publisher key merely because a registry served it at startup, so no org skin is \
+             applied. Add the org's Ed25519 publisher key (hex) to policy.json.",
+            policy.skin_package
+        );
+        eprintln!("[APPEARANCE] {msg}");
+        msg
+    } else {
+        String::new()
+    };
 
     let (skin, trust) = resolve_skin(policy, profile_dir);
 
@@ -178,6 +216,7 @@ pub fn resolve_effective_policy(
         trust,
         publisher_fingerprint: fingerprint,
         version: policy.skin_version_pin.clone(),
+        policy_error,
     }
 }
 
@@ -189,19 +228,24 @@ fn resolve_skin(policy: &ManagedPolicy, profile_dir: &Path) -> (Option<SkinPack>
         return (None, "unsigned".to_string());
     }
 
-    let cache_path = profile_dir
-        .join("skins-cache")
-        .join(format!("{}.json", policy.skin_package));
+    let cache = SkinCachePaths::for_package(profile_dir, &policy.skin_package);
 
     // 1. Remote registry pull (filesystem / UNC registries only; HTTP is a
     //    future transport). Manual refresh uses the cache unless it is missing.
     if let Some(reg_path) = local_registry_path(&policy.registry_url) {
-        let want_pull = policy.refresh != RefreshMode::Manual || !cache_path.exists();
+        let want_pull = policy.refresh != RefreshMode::Manual || !cache.is_complete();
         if want_pull {
             match try_remote_pull(&reg_path, profile_dir, policy) {
-                Ok(skin) => {
-                    let _ = write_skin_cache(&cache_path, &skin);
-                    return (Some(skin), "verified".to_string());
+                Ok(pulled) => {
+                    // Report the trust the pull actually established, not a
+                    // hard-coded "verified". Under RequirePinned that is always
+                    // `Verified` today — but hard-coding the badge is precisely
+                    // how `skin_pull` used to render a first-contact key as
+                    // verified, so the value now travels instead of being
+                    // asserted.
+                    let trust = trust_str(pulled.trust);
+                    let _ = cache.write(&pulled);
+                    return (Some(pulled.skin), trust);
                 }
                 Err(e) => {
                     eprintln!("[APPEARANCE] org skin pull failed ({e}); falling back to cache/local");
@@ -210,10 +254,24 @@ fn resolve_skin(policy: &ManagedPolicy, profile_dir: &Path) -> (Option<SkinPack>
         }
     }
 
-    // 2. Last-good verified cache (written after a prior successful pull).
-    if let Ok(bytes) = std::fs::read(&cache_path) {
-        if let Ok(skin) = serde_json::from_slice::<SkinPack>(&bytes) {
-            return (Some(skin), "verified".to_string());
+    // 2. Last-good cache from a prior successful pull — RE-VERIFIED, never
+    //    assumed. This directory is in the per-user profile and is writable by
+    //    anything running as the user, so believing it would hand the machine's
+    //    branding to whoever last wrote a file there: the pull above may run
+    //    under RequirePinned, but a fabricated cache used to walk straight past
+    //    it and render as "verified". `verify_cached_skin` re-checks the
+    //    publisher signature and the payload digest against the administrator's
+    //    `publisherKey` from %PROGRAMDATA%, so the cache is only ever as
+    //    trustworthy as the admin-authored key that vouches for it.
+    match cache.read_verified(&policy.publisher_key) {
+        Ok(Some(skin)) => return (Some(skin), "verified".to_string()),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "[APPEARANCE] cached org skin failed verification ({e}); discarding it. \
+                 The cache is not trusted merely because it is local."
+            );
+            cache.discard();
         }
     }
 
@@ -236,20 +294,89 @@ fn try_remote_pull(
     reg_path: &Path,
     profile_dir: &Path,
     policy: &ManagedPolicy,
-) -> Result<SkinPack, calp::CalpError> {
+) -> Result<skin_pack::PulledSkin, calp::CalpError> {
     let registry = LocalRegistry::open(reg_path)?;
     let pin = VersionPin::parse(&policy.skin_version_pin)?;
-    let pulled = skin_pack::skin_pull(&registry, profile_dir, &policy.skin_package, &pin)?;
-    Ok(pulled.skin)
+    // RequirePinned: this runs at APP LAUNCH, before any user interaction. The
+    // administrator's `publisherKey` (pre-pinned in `resolve_effective_policy`)
+    // is the only thing that may authorize the org key; a registry cannot
+    // nominate itself.
+    let pulled = skin_pack::skin_pull(
+        &registry,
+        profile_dir,
+        &policy.skin_package,
+        &pin,
+        calp::integrity::PinPolicy::RequirePinned,
+    )?;
+    Ok(pulled)
 }
 
-fn write_skin_cache(cache_path: &Path, skin: &SkinPack) -> std::io::Result<()> {
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// The three files that make the org-skin cache re-verifiable offline: the raw
+/// published payload, the signed manifest that names its digest, and the
+/// detached signature over that manifest.
+///
+/// Caching only the payload (what this used to do) leaves nothing to check it
+/// against, which is why the read path had no choice but to assert "verified".
+/// Storing the proof alongside the payload is what lets step 2 of `resolve_skin`
+/// be a verification instead of an act of faith.
+struct SkinCachePaths {
+    skin: PathBuf,
+    manifest: PathBuf,
+    signature: PathBuf,
+}
+
+impl SkinCachePaths {
+    fn for_package(profile_dir: &Path, package: &str) -> Self {
+        let dir = profile_dir.join("skins-cache");
+        Self {
+            skin: dir.join(format!("{package}.json")),
+            manifest: dir.join(format!("{package}.manifest.json")),
+            signature: dir.join(format!("{package}.manifest.sig")),
+        }
     }
-    let bytes = serde_json::to_vec_pretty(skin)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(cache_path, bytes)
+
+    /// A cache is usable only if ALL THREE parts are present. A payload without
+    /// its proof is not a cache hit — it is an unverifiable file that happens to
+    /// sit in the cache directory, and treating it as a hit is what let a
+    /// `refresh: "manual"` install skip the registry entirely.
+    fn is_complete(&self) -> bool {
+        self.skin.is_file() && self.manifest.is_file() && self.signature.is_file()
+    }
+
+    fn write(&self, pulled: &skin_pack::PulledSkin) -> std::io::Result<()> {
+        if let Some(parent) = self.skin.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.skin, &pulled.skin_bytes)?;
+        std::fs::write(&self.manifest, &pulled.manifest_bytes)?;
+        std::fs::write(&self.signature, pulled.manifest_sig_hex.as_bytes())
+    }
+
+    /// `Ok(None)` = nothing cached (not an error). `Err` = something IS cached
+    /// and it does not verify, which is a fact worth logging and acting on.
+    fn read_verified(&self, expected_publisher_key: &str) -> Result<Option<SkinPack>, calp::CalpError> {
+        if !self.is_complete() {
+            return Ok(None);
+        }
+        let skin_bytes = std::fs::read(&self.skin)?;
+        let manifest_bytes = std::fs::read(&self.manifest)?;
+        let sig_hex = std::fs::read_to_string(&self.signature)?;
+        skin_pack::verify_cached_skin(
+            &skin_bytes,
+            &manifest_bytes,
+            &sig_hex,
+            expected_publisher_key,
+        )
+        .map(Some)
+    }
+
+    /// Remove a cache that failed verification so it cannot be re-offered (and
+    /// cannot keep suppressing the pull under `refresh: "manual"`).
+    fn discard(&self) {
+        let _ = std::fs::remove_file(&self.skin);
+        let _ = std::fs::remove_file(&self.manifest);
+        let _ = std::fs::remove_file(&self.signature);
+    }
 }
 
 /// Map a policy `registryUrl` to a local filesystem path, or None for an HTTP
@@ -365,7 +492,10 @@ mod tests {
         );
     }
 
-    fn publish_brand(reg_dir: &Path, pub_profile: &Path) {
+    /// Publish the org skin and return the publisher's public key — the value
+    /// a real administrator puts in policy.json's `publisherKey`. Without it
+    /// there is no pin, and `skin_pull` (RequirePinned) refuses.
+    fn publish_brand(reg_dir: &Path, pub_profile: &Path) -> String {
         let registry = calp::registry::LocalRegistry::open(reg_dir).unwrap();
         let mut tokens = std::collections::BTreeMap::new();
         tokens.insert("--accent-primary".to_string(), "#ff6600".to_string());
@@ -381,6 +511,9 @@ mod tests {
             assets: None,
         };
         calp::skin_pack::skin_publish(&registry, pub_profile, "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &skin).unwrap();
+        calp::signing::PublisherKeypair::load_or_create(pub_profile)
+            .unwrap()
+            .public_key_hex()
     }
 
     #[test]
@@ -388,17 +521,21 @@ mod tests {
         let reg = tempfile::TempDir::new().unwrap();
         let pub_profile = tempfile::TempDir::new().unwrap();
         let sub_profile = tempfile::TempDir::new().unwrap();
-        publish_brand(reg.path(), pub_profile.path());
+        let org_key = publish_brand(reg.path(), pub_profile.path());
 
         let mut policy = ManagedPolicy::default();
         policy.default_skin_id = "acme.brand".to_string();
         policy.skin_package = "acme-brand".to_string();
         policy.registry_url = reg.path().to_string_lossy().to_string();
         policy.skin_version_pin = "latest".to_string();
+        // The administrator's trust decision. `resolve_effective_policy`
+        // pre-pins it, and only that pin lets the RequirePinned pull succeed.
+        policy.publisher_key = org_key;
 
         let resolved = resolve_effective_policy(&policy, sub_profile.path());
         assert!(resolved.managed);
         assert_eq!(resolved.trust, "verified");
+        assert_eq!(resolved.policy_error, "", "a complete policy has no error");
         let skin = resolved.skin.expect("skin pulled");
         assert_eq!(skin.id, "acme.brand");
         assert_eq!(skin.base, "dark");
@@ -413,13 +550,14 @@ mod tests {
         let reg = tempfile::TempDir::new().unwrap();
         let pub_profile = tempfile::TempDir::new().unwrap();
         let sub_profile = tempfile::TempDir::new().unwrap();
-        publish_brand(reg.path(), pub_profile.path());
+        let org_key = publish_brand(reg.path(), pub_profile.path());
 
         let mut policy = ManagedPolicy::default();
         policy.default_skin_id = "acme.brand".to_string();
         policy.skin_package = "acme-brand".to_string();
         policy.registry_url = reg.path().to_string_lossy().to_string();
         policy.skin_version_pin = "latest".to_string();
+        policy.publisher_key = org_key;
 
         // First resolve pulls + caches.
         resolve_effective_policy(&policy, sub_profile.path());
@@ -429,5 +567,256 @@ mod tests {
         let resolved = resolve_effective_policy(&policy, sub_profile.path());
         let skin = resolved.skin.expect("cached skin used");
         assert_eq!(skin.id, "acme.brand");
+        assert_eq!(resolved.trust, "verified");
+    }
+
+    /// THE CACHE IS NOT A TRUST ROOT.
+    ///
+    /// `skins-cache/` lives in the per-user profile, so anything running as the
+    /// user can write it. It used to be read back, applied, and labelled
+    /// "verified" with no check at all — a plain JSON file dropped in that
+    /// directory took over the machine's branding under a green badge, walking
+    /// straight past the `PinPolicy::RequirePinned` gate on the pull. The cache
+    /// is now re-verified against the administrator's `publisherKey`.
+    #[test]
+    fn a_forged_cache_file_is_refused_and_discarded() {
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let cache_dir = sub_profile.path().join("skins-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // The attacker forges all three parts, signing the manifest with a key
+        // of their own — cryptographically valid, and irrelevant, because it is
+        // not the key the administrator authored.
+        let evil_profile = tempfile::TempDir::new().unwrap();
+        let evil_kp = calp::signing::PublisherKeypair::load_or_create(evil_profile.path()).unwrap();
+        let evil_skin = br#"{"schemaVersion":1,"id":"evil.brand","name":"Evil","base":"dark"}"#;
+        let mut checksums = std::collections::BTreeMap::new();
+        checksums.insert(
+            "skin-pack.json".to_string(),
+            calp::integrity::sha256_hex(evil_skin),
+        );
+        let manifest = serde_json::json!({
+            "formatVersion": 1,
+            "packageName": "acme-brand",
+            "version": "9.9.9",
+            "kind": "skin",
+            "publishedAt": "2026-07-31T00:00:00Z",
+            "publishedBy": "evil",
+            "publisherKey": evil_kp.public_key_hex(),
+            "publisherName": "evil",
+            "minAppVersion": "",
+            "sheets": [], "namedRanges": [], "tables": [],
+            "lockedSheets": [], "lockedCells": [],
+            "objectScripts": [], "moduleScripts": [], "notebooks": [],
+            "dataSources": [], "customObjects": [],
+            "artifactChecksums": checksums,
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(cache_dir.join("acme-brand.json"), evil_skin).unwrap();
+        std::fs::write(cache_dir.join("acme-brand.manifest.json"), &manifest_bytes).unwrap();
+        std::fs::write(
+            cache_dir.join("acme-brand.manifest.sig"),
+            evil_kp.sign(&manifest_bytes),
+        )
+        .unwrap();
+
+        // The administrator's policy names a DIFFERENT publisher key, and the
+        // registry is unreachable so the cache is the only candidate.
+        let admin_profile = tempfile::TempDir::new().unwrap();
+        let admin_key = calp::signing::PublisherKeypair::load_or_create(admin_profile.path())
+            .unwrap()
+            .public_key_hex();
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = sub_profile.path().join("no-such-registry").to_string_lossy().to_string();
+        policy.publisher_key = admin_key;
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert!(
+            resolved.skin.is_none(),
+            "a cache signed by an unexpected key must not be applied"
+        );
+        assert_ne!(resolved.trust, "verified");
+        // ...and it is gone, so it cannot keep suppressing the pull.
+        assert!(!cache_dir.join("acme-brand.json").exists());
+        assert!(!cache_dir.join("acme-brand.manifest.json").exists());
+        assert!(!cache_dir.join("acme-brand.manifest.sig").exists());
+    }
+
+    /// The payload half of the same chain: a genuine, admin-signed manifest with
+    /// the skin bytes swapped underneath it. The signature still verifies — the
+    /// artifact digest is what catches this.
+    #[test]
+    fn a_cache_with_swapped_payload_bytes_is_refused() {
+        let reg = tempfile::TempDir::new().unwrap();
+        let pub_profile = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let org_key = publish_brand(reg.path(), pub_profile.path());
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = reg.path().to_string_lossy().to_string();
+        policy.publisher_key = org_key;
+
+        // A legitimate pull populates the cache with real proof material.
+        resolve_effective_policy(&policy, sub_profile.path());
+        let cache_dir = sub_profile.path().join("skins-cache");
+        assert!(cache_dir.join("acme-brand.manifest.sig").exists());
+
+        // Swap ONLY the payload, leaving the authentic manifest + signature.
+        std::fs::write(
+            cache_dir.join("acme-brand.json"),
+            br#"{"schemaVersion":1,"id":"evil.brand","name":"Evil","base":"dark"}"#,
+        )
+        .unwrap();
+
+        policy.registry_url = reg.path().join("gone").to_string_lossy().to_string();
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert!(
+            resolved.skin.is_none(),
+            "swapped payload bytes must not be applied under the publisher's signature"
+        );
+    }
+
+    /// Structural guard: the cache read must go through verification, and the
+    /// only literal `"verified"` the resolver may produce for a cache hit must
+    /// sit on the far side of `read_verified`. The old code reached the same
+    /// label by asserting it, which is why this is checked in source and not
+    /// only in behaviour.
+    #[test]
+    fn the_cache_path_cannot_regain_an_asserted_trust_label() {
+        let src = include_str!("managed_policy.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            prod.contains("cache.read_verified(&policy.publisher_key)"),
+            "the cached org skin must be re-verified against the administrator's publisherKey"
+        );
+        // The pre-fix shape: parse the cache file and hand it back as verified.
+        assert!(
+            !prod.contains("serde_json::from_slice::<SkinPack>(&bytes)"),
+            "the cache must not be deserialized straight into a trusted skin"
+        );
+        // A failed verification must DELETE the cache, or a `refresh: manual`
+        // policy keeps skipping the pull because a (bad) cache file exists.
+        assert!(
+            prod.contains("cache.discard()"),
+            "a cache that fails verification must be discarded, not merely ignored"
+        );
+        // And the completeness test gates the pull-suppression decision.
+        assert!(
+            prod.contains("!cache.is_complete()"),
+            "only a COMPLETE (payload + manifest + signature) cache may suppress the pull"
+        );
+    }
+
+    /// A cache that is only PARTLY present is not a cache hit. This matters
+    /// beyond tidiness: under `refresh: "manual"` an existing cache file
+    /// suppresses the registry pull entirely, so a lone attacker-written payload
+    /// would otherwise be able to stop the genuine skin from ever being fetched.
+    #[test]
+    fn a_payload_only_cache_does_not_suppress_the_pull() {
+        let reg = tempfile::TempDir::new().unwrap();
+        let pub_profile = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let org_key = publish_brand(reg.path(), pub_profile.path());
+
+        // Only the payload, no proof — the shape the OLD cache wrote.
+        let cache_dir = sub_profile.path().join("skins-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("acme-brand.json"),
+            br#"{"schemaVersion":1,"id":"evil.brand","name":"Evil","base":"dark"}"#,
+        )
+        .unwrap();
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = reg.path().to_string_lossy().to_string();
+        policy.publisher_key = org_key;
+        policy.refresh = RefreshMode::Manual;
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        let skin = resolved.skin.expect("the genuine skin must still be pulled");
+        assert_eq!(
+            skin.id, "acme.brand",
+            "the real registry skin must win over an unverifiable cache file"
+        );
+    }
+
+    /// A policy that names a skin package + registry but NO publisherKey used
+    /// to work: the pre-pin was skipped and `skin_pull` silently supplied the
+    /// missing pin from whatever key the registry served — at APP LAUNCH,
+    /// before any user interaction, and it was then displayed as "verified".
+    ///
+    /// That is a machine-wide squat with no gesture behind it. It is now
+    /// refused, and — because a silent refusal just looks like a broken
+    /// feature — the incomplete policy is NAMED.
+    #[test]
+    fn a_policy_without_a_publisher_key_gets_no_skin_and_an_explicit_error() {
+        let reg = tempfile::TempDir::new().unwrap();
+        let pub_profile = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        publish_brand(reg.path(), pub_profile.path());
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = reg.path().to_string_lossy().to_string();
+        policy.skin_version_pin = "latest".to_string();
+        // publisher_key deliberately left empty.
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert!(resolved.managed);
+        assert!(resolved.skin.is_none(), "no key means no org skin");
+        assert!(
+            resolved.policy_error.contains("publisherKey"),
+            "the misconfiguration must be surfaced, got: {:?}",
+            resolved.policy_error
+        );
+        // Nothing was pinned, so a later legitimate policy is still a clean
+        // first use rather than a "publisher changed" alarm.
+        assert!(
+            calp::signing::load_trusted_publishers(sub_profile.path())
+                .unwrap()
+                .is_empty(),
+            "startup must never pin a key the administrator did not name"
+        );
+    }
+
+    /// A COMPLETE policy whose publisherKey does not match the key the registry
+    /// serves is a hijack (or a stale policy), and must be refused rather than
+    /// re-pinned.
+    #[test]
+    fn a_registry_serving_a_different_key_than_the_policy_is_refused() {
+        let reg = tempfile::TempDir::new().unwrap();
+        let pub_profile = tempfile::TempDir::new().unwrap();
+        let other_profile = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        publish_brand(reg.path(), pub_profile.path());
+        // The admin pinned a DIFFERENT org key.
+        let other_key = calp::signing::PublisherKeypair::load_or_create(other_profile.path())
+            .unwrap()
+            .public_key_hex();
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = reg.path().to_string_lossy().to_string();
+        policy.skin_version_pin = "latest".to_string();
+        policy.publisher_key = other_key.clone();
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert!(resolved.skin.is_none(), "a key mismatch must not apply a skin");
+        // The admin's pin is intact — the registry did not get to overwrite it.
+        assert_eq!(
+            calp::signing::load_trusted_publishers(sub_profile.path())
+                .unwrap()
+                .get("acme-brand"),
+            Some(&other_key)
+        );
     }
 }

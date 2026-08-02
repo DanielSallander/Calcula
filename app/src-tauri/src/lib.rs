@@ -5008,6 +5008,7 @@ pub fn run() {
             calp_inspector::calp_inspector_verify_artifacts,
             library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
+            calp_commands::calp_subscription_trust,
             calp_commands::calp_get_package_objects,
             calp_commands::calp_get_overrides,
             calp_commands::calp_revert_override,

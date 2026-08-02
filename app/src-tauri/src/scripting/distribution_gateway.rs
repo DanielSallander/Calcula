@@ -901,10 +901,13 @@ fn dispatch(
             serde_json::to_value(preview).map_err(|e| e.to_string())
         }
         Action::RefreshApply => {
-            // Same verification as a first pull: `calp::refresh::pull_all_updates`
-            // calls `calp::pull::pull` per updated subscription, so a version
-            // signed by a changed publisher key fails here exactly as it would
-            // in the Refresh dialog.
+            // Same gates as a first pull EXCEPT the pin policy, which is the
+            // difference that matters: `calp_refresh_apply` passes
+            // `PinPolicy::RequirePinned` to `calp::refresh::pull_all_updates`,
+            // so a version signed by a changed publisher key fails here as it
+            // would in the Refresh dialog — AND a subscription whose publisher
+            // this machine never pinned fails too, rather than acquiring the pin
+            // from an action a script labelled "refresh".
             let result = calp_cmds::calp_refresh_apply(
                 state.clone(),
                 user_files_state.clone(),

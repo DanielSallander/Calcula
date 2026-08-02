@@ -75,6 +75,15 @@ fn default_schema_version() -> u32 {
 pub enum SkinTrust {
     /// Signed and the signature verified against the expected publisher key.
     Verified,
+    /// Signed, valid, and the publisher key was pinned by THIS operation because
+    /// the caller was a deliberate trust decision (`PinPolicy::PinOnFirstUse`).
+    FirstUse,
+    /// Signed and the signature is valid, but this machine holds no pin for the
+    /// package — nobody here ever agreed to trust that signer. Authentic, NOT
+    /// trusted. Kept distinct from `Verified` on purpose: the previous code
+    /// collapsed a trust-on-first-use result into `Verified`, so a first-contact
+    /// squat rendered in the Appearance panel as a green "verified" badge.
+    NotPinned,
     /// No publisher key expected — applied as unsigned (advisory) data.
     Unsigned,
     /// A signature was required but missing or invalid — REJECTED (not applied).
@@ -130,6 +139,11 @@ pub fn load_and_verify_skin(
 // ---------------------------------------------------------------------------
 
 /// A skin pulled + verified from a registry.
+///
+/// The three `*_bytes` fields carry the RAW proof material, not a re-serialized
+/// copy: they are what [`verify_cached_skin`] needs to re-establish the same
+/// chain offline. Re-serializing `skin` would not be byte-identical and would
+/// therefore not hash to the checksum the publisher signed.
 #[derive(Debug, Clone)]
 pub struct PulledSkin {
     pub skin: SkinPack,
@@ -137,6 +151,75 @@ pub struct PulledSkin {
     pub publisher_key: String,
     pub publisher_name: String,
     pub trust: SkinTrust,
+    /// Raw bytes of the `skin-pack.json` artifact, exactly as published.
+    pub skin_bytes: Vec<u8>,
+    /// Raw bytes of `version-manifest.json`, exactly as signed.
+    pub manifest_bytes: Vec<u8>,
+    /// The detached Ed25519 signature (hex) over `manifest_bytes`.
+    pub manifest_sig_hex: String,
+}
+
+/// Re-verify a skin pack held in a LOCAL, UNTRUSTED cache against the publisher
+/// key an administrator authored — the offline twin of [`skin_pull`].
+///
+/// WHY THIS EXISTS. The org-skin cache lives in the per-user profile directory,
+/// which the user (and anything running as the user) can write. It used to be
+/// read back, applied, and labelled `"verified"` with no check of any kind, so
+/// dropping a JSON file into `%LOCALAPPDATA%\Calcula\skins-cache\` was enough to
+/// take over the machine's branding under a green badge — and, because a
+/// `refresh: "manual"` policy skips the registry pull whenever a cache file
+/// exists, without the genuine registry ever being consulted. That made the
+/// cache a way around the `PinPolicy::RequirePinned` gate on the pull itself.
+///
+/// The chain here is rooted in `%PROGRAMDATA%\Calcula\policy.json`, which is
+/// admin-writable only:
+///   1. the detached signature must verify over the cached manifest bytes under
+///      `expected_publisher_key`;
+///   2. the cached skin bytes must hash to the `skin-pack.json` digest recorded
+///      in those now-authenticated manifest bytes.
+/// Anything else — no key to check against, a forged manifest, swapped payload
+/// bytes — is an error, and the caller applies no skin.
+pub fn verify_cached_skin(
+    skin_bytes: &[u8],
+    manifest_bytes: &[u8],
+    sig_hex: &str,
+    expected_publisher_key: &str,
+) -> Result<SkinPack, CalpError> {
+    if expected_publisher_key.is_empty() {
+        // No trust root to check against. A cache is only ever as good as the
+        // key that vouches for it, so an absent key is a refusal, never a pass.
+        return Err(CalpError::MissingSignature {
+            package: "skin-cache".to_string(),
+            version: String::new(),
+        });
+    }
+
+    verify_signature(
+        expected_publisher_key,
+        manifest_bytes,
+        sig_hex.trim(),
+        "skin-cache",
+        "cached",
+    )?;
+
+    // The manifest is authenticated now, so its checksum map can be trusted.
+    let manifest: VersionManifest = serde_json::from_slice(manifest_bytes)?;
+    let expected_digest = manifest
+        .artifact_checksums
+        .get(SKIN_PACK_ARTIFACT)
+        .ok_or_else(|| CalpError::MissingChecksums {
+            package: manifest.package_name.clone(),
+            version: manifest.version.clone(),
+        })?;
+    if &integrity::sha256_hex(skin_bytes) != expected_digest {
+        return Err(CalpError::ChecksumMismatch {
+            package: manifest.package_name.clone(),
+            version: manifest.version.clone(),
+            file: SKIN_PACK_ARTIFACT.to_string(),
+        });
+    }
+
+    Ok(serde_json::from_slice(skin_bytes)?)
 }
 
 /// Publish a skin pack to a registry as a `skin`-kind package version. Mirrors
@@ -229,19 +312,32 @@ pub fn skin_publish(
 /// the Ed25519 manifest signature (with TOFU publisher pinning) and the SHA-256
 /// artifact integrity BEFORE parsing the payload. Any verification failure
 /// (tampered pack, wrong signer, changed key) propagates as a `CalpError`.
+///
+/// `policy` is required, with no default — see [`integrity::PinPolicy`].
+/// `managed_policy::try_remote_pull` (the org-skin path that runs at APP LAUNCH,
+/// before any user interaction) passes `RequirePinned`: the administrator's
+/// `policy.json` supplies the pin via `publisherKey`, and if it does not, the
+/// answer is "no org skin plus a surfaced misconfiguration", never "trust
+/// whatever key this registry happens to serve at startup".
 pub fn skin_pull(
     registry: &dyn RegistryTransport,
     profile_dir: &Path,
     package_name: &str,
     pin: &VersionPin,
+    policy: integrity::PinPolicy,
 ) -> Result<PulledSkin, CalpError> {
     let version = registry.resolve_version(package_name, pin)?;
     let version_str = version.to_string();
 
     // (1) signature + TOFU (over the single trusted manifest copy), then
     // (2) integrity — both before reading the payload.
-    let (trust, manifest) =
-        integrity::verify_and_load_manifest_via(registry, package_name, &version_str, profile_dir)?;
+    let (trust, manifest) = integrity::verify_and_load_manifest_via(
+        registry,
+        package_name,
+        &version_str,
+        profile_dir,
+        policy,
+    )?;
     integrity::verify_version_artifacts_via(registry, package_name, &version_str, &manifest)?;
 
     let bytes = registry
@@ -253,15 +349,43 @@ pub fn skin_pull(
         })?;
     let skin: SkinPack = serde_json::from_slice(&bytes)?;
 
+    // The proof material a later OFFLINE read needs to re-establish this same
+    // chain (see `verify_cached_skin`). Both reads are of artifacts that
+    // `verify_and_load_manifest_via` has already authenticated above.
+    let manifest_bytes = registry
+        .read_artifact(package_name, &version_str, integrity::VERSION_MANIFEST_FILE)?
+        .ok_or_else(|| CalpError::MissingArtifact {
+            package: package_name.to_string(),
+            version: version_str.clone(),
+            file: integrity::VERSION_MANIFEST_FILE.to_string(),
+        })?;
+    let manifest_sig_hex = registry
+        .read_artifact(
+            package_name,
+            &version_str,
+            integrity::VERSION_MANIFEST_SIG_FILE,
+        )?
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .ok_or_else(|| CalpError::MissingSignature {
+            package: package_name.to_string(),
+            version: version_str.clone(),
+        })?;
+
     Ok(PulledSkin {
         skin,
+        skin_bytes: bytes,
+        manifest_bytes,
+        manifest_sig_hex,
         version: version_str,
         publisher_key: manifest.publisher_key.clone(),
         publisher_name: manifest.publisher_name.clone(),
-        // Both FirstUse and Verified mean the signature checked out; managed
-        // installs pre-pin the org key so this is Verified in practice.
+        // One TOFU state maps to one skin-trust state. Collapsing FirstUse (or
+        // NotPinned) into Verified is what let a first-contact squat display a
+        // green "verified" badge — never do that again.
         trust: match trust {
-            TrustStatus::Verified | TrustStatus::FirstUse => SkinTrust::Verified,
+            TrustStatus::Verified => SkinTrust::Verified,
+            TrustStatus::FirstUse => SkinTrust::FirstUse,
+            TrustStatus::NotPinned => SkinTrust::NotPinned,
         },
     })
 }
@@ -378,13 +502,16 @@ mod tests {
             sub_profile.path(),
             "acme-brand",
             &VersionPin::Latest,
+            integrity::PinPolicy::PinOnFirstUse,
         )
         .unwrap();
 
         assert_eq!(pulled.skin.id, "acme.brand");
         assert_eq!(pulled.skin.base, "dark");
         assert_eq!(pulled.version, "1.0.0");
-        assert_eq!(pulled.trust, SkinTrust::Verified);
+        // A fresh subscriber profile has no pin; PinOnFirstUse creates it and
+        // says so. It must NOT masquerade as "Verified".
+        assert_eq!(pulled.trust, SkinTrust::FirstUse);
         assert_eq!(
             pulled.skin.tokens.unwrap().get("--accent-primary").unwrap(),
             "#ff6600"
@@ -403,7 +530,14 @@ mod tests {
         }
 
         // ^1.0 must pick 1.1.0, not 2.0.0.
-        let pulled = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::parse("^1.0").unwrap()).unwrap();
+        let pulled = skin_pull(
+            &registry,
+            sub_profile.path(),
+            "acme-brand",
+            &VersionPin::parse("^1.0").unwrap(),
+            integrity::PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
         assert_eq!(pulled.version, "1.1.0");
     }
 
@@ -421,7 +555,7 @@ mod tests {
             .write_artifact("acme-brand", "1.0.0", SKIN_PACK_ARTIFACT, br#"{"schemaVersion":1,"id":"evil","name":"x","base":"dark"}"#)
             .unwrap();
 
-        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest).unwrap_err();
+        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }), "got {err:?}");
     }
 
@@ -435,12 +569,66 @@ mod tests {
 
         // First publish + pull pins publisher A (TOFU).
         skin_publish(&registry, pub_a.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
-        skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest).unwrap();
+        skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap();
 
         // A DIFFERENT publisher (B) republishes a new version to the same package.
         skin_publish(&registry, pub_b.path(), "acme-brand", "2.0.0", "2026-06-23T01:00:00Z", &make_skin("acme.brand")).unwrap();
 
-        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest).unwrap_err();
+        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
         assert!(matches!(err, CalpError::PublisherKeyChanged { .. }), "got {err:?}");
+    }
+
+    /// The org-skin path runs at APP LAUNCH. Under `RequirePinned` an
+    /// unrecognised signer is refused outright rather than pinned — the machine
+    /// policy's `publisherKey` is the only thing that may seed that pin.
+    #[test]
+    fn require_pinned_refuses_an_unpinned_signer_and_writes_nothing() {
+        let reg_dir = TempDir::new().unwrap();
+        let pub_profile = TempDir::new().unwrap();
+        let sub_profile = TempDir::new().unwrap();
+        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+
+        skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
+
+        let err = skin_pull(
+            &registry,
+            sub_profile.path(),
+            "acme-brand",
+            &VersionPin::Latest,
+            integrity::PinPolicy::RequirePinned,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
+        assert!(
+            crate::signing::load_trusted_publishers(sub_profile.path()).unwrap().is_empty(),
+            "a refused startup pull must leave the pin store untouched"
+        );
+    }
+
+    /// ...and with the administrator's key pre-pinned (what `managed_policy`
+    /// does from `%PROGRAMDATA%\\Calcula\\policy.json`) the same pull succeeds
+    /// and reports the honest `Verified`.
+    #[test]
+    fn require_pinned_succeeds_once_the_admin_key_is_pre_pinned() {
+        let reg_dir = TempDir::new().unwrap();
+        let pub_profile = TempDir::new().unwrap();
+        let sub_profile = TempDir::new().unwrap();
+        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+
+        skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
+        let org_key = PublisherKeypair::load_or_create(pub_profile.path())
+            .unwrap()
+            .public_key_hex();
+        crate::signing::pin_publisher(sub_profile.path(), "acme-brand", &org_key).unwrap();
+
+        let pulled = skin_pull(
+            &registry,
+            sub_profile.path(),
+            "acme-brand",
+            &VersionPin::Latest,
+            integrity::PinPolicy::RequirePinned,
+        )
+        .unwrap();
+        assert_eq!(pulled.trust, SkinTrust::Verified);
     }
 }

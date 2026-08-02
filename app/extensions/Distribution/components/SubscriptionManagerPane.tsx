@@ -4,17 +4,76 @@
 //          so the user can see what they're subscribed to (package, pinned vs
 //          resolved version, registry, sheet count) and detach — instead of
 //          subscriptions being invisible in-memory state.
+//          It also surfaces PUBLISHER TRUST (calp_subscription_trust). A .cala
+//          restores its subscription list on open WITHOUT pulling, so a workbook
+//          received from someone else can name packages this computer never
+//          subscribed to. Those packages' writeback regions / GATHER / model
+//          writeback columns are deliberately INERT: the code paths that read
+//          their declarations require an existing TOFU pin instead of creating
+//          one, because a file that merely arrives must not be able to squat a
+//          publisher identity. Without this pane saying so, that correct
+//          fail-closed behaviour would look like a broken report.
 
 import React, { useState, useEffect, useCallback } from "react";
-import { getSubscriptions, detach, emitAppEvent, onAppEvent, AppEvents, calculateNow } from "@api";
-import { exportPackageHtml, resetSubscription, type Subscription } from "@api/distribution";
+import {
+  getSubscriptions,
+  getSubscriptionTrust,
+  detach,
+  emitAppEvent,
+  onAppEvent,
+  AppEvents,
+  calculateNow,
+} from "@api";
+import {
+  exportPackageHtml,
+  resetSubscription,
+  type Subscription,
+  type SubscriptionTrustInfo,
+} from "@api/distribution";
 import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
 
 const subKey = (s: Subscription) => `${s.packageName}@${s.registryUrl}`;
+const trustKey = (t: SubscriptionTrustInfo) => `${t.packageName}@${t.registryUrl}`;
+
+/**
+ * How each publisher-trust state reads in this pane. A TABLE with a row for
+ * every state the backend can return, including the "unavailable" transport
+ * failure — a security state that renders as nothing looks benign, which is the
+ * failure mode this whole shape exists to avoid.
+ *
+ * `verified` intentionally renders NOTHING: the normal, expected case should not
+ * add noise. Everything else is called out.
+ */
+const TRUST_NOTICE: Record<
+  SubscriptionTrustInfo["trustStatus"],
+  { tone: "ok" | "warn" | "danger"; text: (t: SubscriptionTrustInfo) => string } | null
+> = {
+  verified: null,
+  firstUse: {
+    tone: "warn",
+    text: (t) => `Publisher ${t.publisherName || "(unnamed)"} was trusted just now.`,
+  },
+  notPinned: {
+    tone: "danger",
+    text: (t) =>
+      `Publisher ${t.publisherName || "(unnamed)"} is not trusted on this computer. ` +
+      `This workbook references the package, but nobody here ever subscribed to it, so its ` +
+      (t.declaresWriteback
+        ? "writeback regions and GATHER formulas stay inactive. "
+        : "published declarations are ignored. ") +
+      `Use Data \u2192 Subscribe to Package to review the publisher and activate it.`,
+  },
+  unavailable: {
+    tone: "warn",
+    text: (t) =>
+      `Could not verify this package at ${t.registryUrl || "its registry"}: ${t.error || "unknown error"}`,
+  },
+};
 
 export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
+  const [trust, setTrust] = useState<Record<string, SubscriptionTrustInfo>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
@@ -61,6 +120,14 @@ export function SubscriptionManagerPane(): React.ReactElement {
     try {
       const manifest = await getSubscriptions();
       setSubs(manifest.subscriptions);
+      // Trust is reported separately (and passively — asking never pins).
+      // A failure here must not hide the subscription list itself.
+      try {
+        const rows = await getSubscriptionTrust();
+        setTrust(Object.fromEntries(rows.map((r) => [trustKey(r), r])));
+      } catch {
+        setTrust({});
+      }
     } catch (e: unknown) {
       setError(String(e));
     } finally {
@@ -165,6 +232,32 @@ export function SubscriptionManagerPane(): React.ReactElement {
                 <div style={styles.meta}>
                   {s.sheets.length} sheet{s.sheets.length !== 1 ? "s" : ""} · resolved {s.resolvedAt}
                 </div>
+                {(() => {
+                  const t = trust[subKey(s)];
+                  if (!t) return null;
+                  // `undefined` (a status this build has no row for) and `null`
+                  // (`verified`, deliberately silent) are NOT the same thing, and
+                  // `if (!notice)` used to collapse them — so a backend status
+                  // this frontend had never heard of rendered exactly like the
+                  // reassuring case. An unrecognised trust state is the one that
+                  // most deserves to be shown.
+                  const notice = TRUST_NOTICE[t.trustStatus];
+                  if (notice === undefined) {
+                    return (
+                      <div style={styles.trustDanger}>
+                        {`Unrecognised publisher-trust state '${String(t.trustStatus)}' for ` +
+                          `${t.packageName || "this package"}. This build of Calcula cannot ` +
+                          `interpret it, so do not treat the package as trusted.`}
+                      </div>
+                    );
+                  }
+                  if (notice === null) return null;
+                  return (
+                    <div style={notice.tone === "danger" ? styles.trustDanger : styles.trustWarn}>
+                      {notice.text(t)}
+                    </div>
+                  );
+                })()}
                 <div style={styles.exportRow}>
                   <span style={styles.exportLabel} title="Open this report without Calcula">
                     Share as:
@@ -278,4 +371,6 @@ const styles: Record<string, React.CSSProperties> = {
   empty: { padding: "24px 12px", textAlign: "center" as const, color: "#999", fontSize: 12, lineHeight: 1.5 },
   resetWarning: { fontSize: 11, color: "#c5221f", lineHeight: 1.4, flex: 1 },
   resetStatus: { fontSize: 12, color: "green", padding: "6px 12px", borderTop: "1px solid #e0e0e0", flexShrink: 0 },
+  trustWarn: { fontSize: 11, color: "#a05a00", background: "#fef7e0", border: "1px solid #f2dcae", borderRadius: 3, padding: "5px 7px", marginTop: 5, lineHeight: 1.45 },
+  trustDanger: { fontSize: 11, color: "#c5221f", background: "#fdeceb", border: "1px solid #f3c4c2", borderRadius: 3, padding: "5px 7px", marginTop: 5, lineHeight: 1.45 },
 };

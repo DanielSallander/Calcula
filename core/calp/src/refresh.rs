@@ -14,6 +14,7 @@ use identity::{CellId, SheetId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CalpError;
+use crate::integrity::PinPolicy;
 use crate::manifest::Subscription;
 use crate::overrides::{OverrideLayer, OverrideValue};
 use crate::pull::{self, PullRequest, PullResult};
@@ -234,10 +235,19 @@ pub struct RefreshPayload {
 /// Pull new versions for all subscriptions that have updates available.
 /// Returns payloads ready for atomic application, or an error if any pull fails
 /// (in which case nothing should be applied — all-or-nothing).
+///
+/// `policy` is threaded straight through to `pull()` rather than chosen here,
+/// because "refresh" is not one trust situation. Production (`calp_refresh_apply`)
+/// passes `PinPolicy::RequirePinned`: a refresh is a request for a NEWER version
+/// of something already trusted, so a subscription whose publisher this machine
+/// has never pinned — the shape you get from a `.cala` that arrived by email —
+/// fails with `PublisherNotPinned` instead of quietly minting the pin under the
+/// label "get the latest version".
 pub fn pull_all_updates(
     registry: &dyn RegistryTransport,
     subscriptions: &[Subscription],
     profile_dir: &Path,
+    policy: PinPolicy,
 ) -> Result<Vec<RefreshPayload>, CalpError> {
     let mut payloads = Vec::new();
 
@@ -259,8 +269,10 @@ pub fn pull_all_updates(
 
         // Shares pull()'s ORIGIN + INTEGRITY gates (signature, TOFU,
         // checksums). The same TOFU pin store (profile_dir) is used, so a
-        // refresh to a version signed by a changed publisher key fails here.
-        let result = pull::pull(registry, &request, profile_dir)?;
+        // refresh to a version signed by a changed publisher key fails here —
+        // and, under RequirePinned, so does a refresh of a package this machine
+        // never agreed to trust in the first place.
+        let result = pull::pull(registry, &request, profile_dir, policy)?;
 
         payloads.push(RefreshPayload {
             subscription_index: i,
@@ -499,7 +511,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let payloads = pull_all_updates(&reg, &[sub], prof.path()).unwrap();
+        let payloads = pull_all_updates(&reg, &[sub], prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].pull_result.resolved_version, SemVer::new(1, 1, 0));
     }
@@ -532,7 +544,7 @@ mod tests {
 
         // unwrap_err() requires Debug on the Ok type; RefreshPayload has no
         // Debug derive (wraps PullResult), so match instead.
-        let err = match pull_all_updates(&reg, &[sub], prof.path()) {
+        let err = match pull_all_updates(&reg, &[sub], prof.path(), PinPolicy::PinOnFirstUse) {
             Ok(_) => panic!("refresh pull unexpectedly succeeded"),
             Err(e) => e,
         };
@@ -615,7 +627,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let payloads = pull_all_updates(&reg, &[sub], prof.path()).unwrap();
+        let payloads = pull_all_updates(&reg, &[sub], prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(payloads.len(), 1);
         let controls = &payloads[0].pull_result.pane_controls;
         assert_eq!(controls.len(), 2, "refresh payload carries the FULL v1.1 set");
@@ -644,7 +656,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         }];
 
-        let payloads = pull_all_updates(&reg, &subs, prof.path()).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let mut layer = OverrideLayer::new();
 
         let result = apply_refresh(
@@ -667,7 +679,7 @@ mod tests {
             registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::parse("^1.0").unwrap(),
             now: "2026-01-01T00:00:00Z".to_string(),
-        }, prof.path()).unwrap();
+        }, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let mut subs = vec![pull_result.subscription.clone()];
         // Pin behind so 1.1.0 counts as an update
         subs[0].resolved_version = "1.0.0".to_string();
@@ -690,7 +702,7 @@ mod tests {
             extra: HashMap::new(),
         });
 
-        let payloads = pull_all_updates(&reg, &subs, prof.path()).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         // New upstream value differs from the override's baseline -> conflict.
         let mut upstream = HashMap::new();
         upstream.insert(

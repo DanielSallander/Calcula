@@ -1360,7 +1360,36 @@ by the consent source, and both have a test.
 
 ## 8. What is still open after nine waves
 
-The short, honest list. Everything here is verified absent as of 2026-08-01, not inferred.
+The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Sixth correction (2026-08-02, Wave J verification pass) — the THIRD instance of one bug class,
+> and what now makes a fourth impossible.**
+>
+> "A passive operation creates a TOFU pin" has now been found and fixed **three times, in three
+> unrelated subsystems**: Wave H (extension scanning pinned on every launch), Wave I (library
+> resolution pinned on preview), Wave J (`.calp` inspection — plus workbook open, refresh, reset,
+> writeback submit and *every GATHER recalculation*). Three times is not three bugs; it is one
+> design defect. The shared verification function could pin, and pinning was the DEFAULT behaviour
+> of merely looking, so every new caller inherited the bug by writing no code at all.
+>
+> **What makes a fourth instance impossible is a type, not a review.**
+> `calp::integrity::verify_and_load_manifest_via` takes a required `PinPolicy` — no `Default`, no
+> `Option`, no wildcard match arm — so a caller who does not decide does not compile, and the
+> variants are named after the user's decision (`PinOnFirstUse` / `VerifyOnly` / `RequirePinned`)
+> rather than after the calling subsystem, which is what let "preview" and "install" drift apart in
+> Wave I. Already-trusted callers use `load_pinned_manifest_via`, which returns the manifest with no
+> status at all, because ten sites had been binding the trust answer as `_` and continuing.
+> Source-level guards fail the build if `PinPolicy` gains a default, if `integrity.rs` gains a second
+> pin write, or if a passive/already-trusted module calls the policy-taking verifier directly.
+>
+> **The two defects this pass found by attacking the fix rather than reading it** are both recorded
+> in the closed list below, and both are the *same* lesson at one remove: hardening the primary path
+> leaves the bypasses. The org-skin **cache** was a user-writable file applied as `"verified"` with
+> no check, which walked straight around the `RequirePinned` gate that had just been added three
+> lines above it; and an **unknown** trust status still rendered as the reassuring nothing at the
+> point of use, downstream of a map that was genuinely exhaustive. §0's rule generalizes: a status
+> nobody re-derived from code is not a status — *and a gate nobody tried to walk around is not a
+> gate.*
 
 > **Fifth correction (2026-08-01, Wave I closing pass).** For the first time, **no stage report claim
 > failed re-derivation** — all four Wave I reports were accurate about what they had built, including
@@ -1433,6 +1462,50 @@ The short, honest list. Everything here is verified absent as of 2026-08-01, not
   the Rust source and fails if any status lacks a row, if anything but `verified` uses the word
   "verified", or if the badge and `library_trust_is_pinned` disagree about what "trusted" means.
   Mutation-verified: renaming the `notInstalled` case fails 2 of the 4.
+- ~~**`calp_inspector.rs:66` pins TOFU on every inspection.**~~ — **CLOSED (Wave J), and the
+  audit found it was 11 call sites rather than the 5 listed here, including two nobody had
+  flagged: `core/calp/src/pull.rs:239` reached from refresh/reset, and `core/calp/src/skin_pack.rs`
+  reached from the org-skin pull at APP LAUNCH.** The highest-severity site was not the inspector
+  at all but `calp_commands.rs::rebuild_writeback_index`, reached from **workbook open**: opening a
+  `.cala` that arrived by email pinned a publisher key for every `(package, registry)` pair the
+  *file* named, with no user gesture whatsoever.
+
+  Fixed structurally rather than per-call-site, as this entry proposed:
+  `calp::integrity::verify_and_load_manifest_via` now takes a **required** `PinPolicy` with no
+  `Default` and no `Option`, so a caller that does not think about pinning does not compile. The
+  variants name the DECISION, not the caller — `PinOnFirstUse` (the user just chose to trust:
+  Subscribe / Install / admin policy), `VerifyOnly` (authenticate and report; writes nothing, ever),
+  `RequirePinned` (must run against an existing pin; first contact is `PublisherNotPinned`).
+  `library_commands.rs` deleted its policy-aware copy and imports the shared enum, so there is one
+  vocabulary instead of three. A sibling entry point, `load_pinned_manifest_via`, returns the
+  manifest **alone**: the ten already-trusted writeback/GATHER sites used to write
+  `let Ok((_, m))` and carry on, and a site that cannot obtain a status cannot ignore one.
+  Subscribe (`calp_pull`) is now the single `.calp` commit point.
+
+  Honest first contact reached the UI with it: `TrustStatus::NotPinned` / `SkinTrust::NotPinned`,
+  and the `Verified | FirstUse => Verified` collapse that rendered a first-contact squat as a green
+  "verified" badge in the Appearance panel is gone.
+- ~~**The org-skin CACHE was an unauthenticated way around the pull's pin gate.**~~ — **CLOSED
+  (Wave J verification pass).** Found while attacking the fix above rather than in either report.
+  `managed_policy.rs::resolve_skin` step 2 read `%LOCALAPPDATA%\Calcula\skins-cache\<pkg>.json` —
+  a **user-writable** path — parsed it, applied it, and returned the literal string `"verified"`
+  with no check of any kind. Hardening `try_remote_pull` to `RequirePinned` therefore secured only
+  step 1: dropping a plain JSON file into that directory took over the machine's branding under a
+  green badge, and because `refresh: "manual"` skips the pull whenever a cache file exists, it could
+  do so without the genuine registry ever being consulted. The cache now stores the publisher's
+  proof alongside the payload (`<pkg>.json` + `<pkg>.manifest.json` + `<pkg>.manifest.sig`) and
+  `calp::skin_pack::verify_cached_skin` re-establishes the whole chain offline against the
+  **administrator's** `publisherKey` from admin-only `%PROGRAMDATA%`: signature over the manifest
+  bytes, then the payload's SHA-256 against the digest those authenticated bytes name. A cache that
+  fails is deleted rather than ignored, and a payload without its proof is not a cache hit at all,
+  so it can no longer suppress the pull.
+- ~~**An unrecognised trust status rendered as the reassuring nothing.**~~ — **CLOSED (Wave J
+  verification pass).** The third variant of the failure mode Wave I hit twice, and the subtlest:
+  `SubscriptionManagerPane`'s `TRUST_NOTICE` map *is* exhaustive, and the bug was at the point of
+  USE. `verified` is deliberately `null` (the expected case adds no noise) and an unknown status is
+  `undefined`; `if (!notice) return null` merged them, so a status the backend gained and the
+  frontend had not yet learned rendered exactly like the safe case. `undefined` and `null` are now
+  distinguished, with the unknown branch rendering a danger notice.
 
 **Still open**
 - **The engine has no evaluation TIME or step budget.** The depth ceiling does not cover it: a
@@ -1442,13 +1515,16 @@ The short, honest list. Everything here is verified absent as of 2026-08-01, not
   not, so `api.evaluate` inherits nothing. Scoped in `evaluator.rs:459-472`: a `Cell<u64>` step
   counter checked in `evaluate()` plus an optional `Instant` deadline, wired from the recalc entry
   points — wider than the evaluator, so it needs an owner for `calculation.rs` / `commands/data.rs`.
-- **`calp_inspector.rs:66` pins TOFU on every inspection.** `open_verified` calls
-  `verify_and_load_manifest_via`, so the read-only Package Inspector squats a pin for any package
-  name a browsed registry serves. Same bug class as the library-preview one just closed, on a surface
-  Wave I did not own. The clean fix is a pin-policy parameter on
-  `core/calp/src/integrity.rs:412`, which would also let `library_commands.rs` delete its
-  policy-aware copy. Other preview-shaped call sites worth the same audit: `calp_commands.rs:5368,
-  5577, 8034, 9250, 9285`; `bi/writeback_source.rs:161, 212`.
+- **A workbook that names an unpinned subscription shows inert writeback and empty GATHER**
+  until the recipient subscribes themselves. This is the *intended* fail-closed consequence of the
+  Wave J fix above, not a defect, and the Subscriptions pane names it with a "not trusted on this
+  computer — use Data → Subscribe to Package" notice. Listed here because it is a real user-visible
+  behaviour change that support will hear about, and because the affordance is a notice rather than
+  an in-place "subscribe now" action.
+- **The org-skin trust root is the administrator's `publisherKey`, so a policy that omits it gets
+  no skin at all.** Correct (nothing else can vouch for the key), surfaced as `policyError` rather
+  than a silent nothing — but it means an existing managed install that relied on the old
+  pin-whatever-the-registry-serves behaviour must add `publisherKey` to `policy.json`.
 - **A scripted publish does not collect frontend-provider custom objects.** The caller may not supply
   them and the providers live in the renderer. Disclosed, not dropped silently: every scripted
   publish response carries `SCRIPT_PUBLISH_PAYLOAD_NOTE` in `warnings`.

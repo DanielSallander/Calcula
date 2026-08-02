@@ -77,6 +77,36 @@ export interface PublishPreviewResponse {
   warnings: string[];
 }
 
+/**
+ * TOFU trust outcome for a `.calp` package, mirrored EXACTLY from the Rust
+ * `calp::integrity::TrustStatus`.
+ *
+ * - `"verified"`  — signed by the key this machine pinned when the user
+ *   deliberately trusted this publisher (Subscribe).
+ * - `"firstUse"`  — the key was pinned by THIS operation. Only a commit point
+ *   (Subscribe) can produce it.
+ * - `"notPinned"` — the signature is cryptographically valid, but nobody on
+ *   this computer has ever agreed to trust that signer for this package name.
+ *   AUTHENTIC IS NOT TRUSTED: anyone can generate an Ed25519 key and sign a
+ *   package, so a valid signature proves only that the bytes are unaltered.
+ *   Passive surfaces (inspect, review, the Package Inspector) return this
+ *   instead of quietly creating a pin — a pin created by merely LOOKING at a
+ *   file lets that file squat the identity the real publisher is later measured
+ *   against, which is the bug this vocabulary exists to prevent.
+ *
+ * EVERY UI that switches on one of these MUST have a row for all three. A trust
+ * state that renders as no badge (reads as benign) or falls through to a green
+ * "verified" pill is a security-UX defect, not a cosmetic one.
+ */
+export type CalpTrustStatus = "verified" | "firstUse" | "notPinned";
+
+/** The statuses that mean "this machine has deliberately agreed to trust this
+ *  publisher for this package name". `notPinned` is deliberately absent, exactly
+ *  as `notInstalled` is absent from the library/extension equivalents. */
+export function calpTrustIsPinned(status: string): boolean {
+  return status === "verified" || status === "firstUse";
+}
+
 export interface PullParams {
   registryPath: string;
   packageName: string;
@@ -92,8 +122,10 @@ export interface PullResponse {
   scriptsPulled: number;
   /** Publisher display name from the verified manifest (S5 phase 2). */
   publisherName: string;
-  /** "firstUse" (publisher key newly pinned) or "verified" (matched a pin). */
-  trustStatus: string;
+  /** A `CalpTrustStatus`. Subscribe is a commit point, so this is "firstUse"
+   *  (the pin was created now) or "verified" (it matched the existing pin);
+   *  "notPinned" cannot occur on this path. */
+  trustStatus: CalpTrustStatus;
   /** Custom objects of kinds NOT handled Rust-side (brick 4), for frontend
    *  provider materialization. pullPackage dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
@@ -141,8 +173,15 @@ export interface PackageInspection {
   commentSheetCount: number;
   /** Verified publisher display name (S5 phase 2). */
   publisherName: string;
-  /** "firstUse" or "verified"; failed verification returns an error instead. */
-  trustStatus: string;
+  /** The verified publisher's Ed25519 public key (hex). Reviewing a package
+   *  deliberately does NOT pin it, so this key is the thing the user compares
+   *  against what the publisher told them out of band before subscribing. */
+  publisherKey: string;
+  /** A `CalpTrustStatus`. Review/inspect is PASSIVE, so first contact reports
+   *  "notPinned" and writes nothing to the pin store — inspecting a package is
+   *  not a decision to trust its publisher. A failed signature check returns an
+   *  error instead of a status. */
+  trustStatus: CalpTrustStatus;
 }
 
 export interface InspectedScript {
@@ -453,6 +492,40 @@ export function inspectPackage(
   versionPin: string,
 ): Promise<PackageInspection> {
   return invokeBackend("calp_inspect_package", { registryPath, packageName, versionPin });
+}
+
+/**
+ * Whether this machine trusts each subscription's publisher.
+ *
+ * A `.cala` restores its subscription list on open WITHOUT pulling, so a
+ * workbook received from a colleague can name packages this computer has never
+ * subscribed to. Writeback regions, GATHER and model-writeback columns from such
+ * a package are deliberately INERT — the paths that read their declarations
+ * require an existing TOFU pin rather than creating one, because a workbook that
+ * arrives by email must not be able to squat a publisher identity.
+ *
+ * This call makes that state visible so the UI can say "subscribe to activate"
+ * instead of showing a report that silently does nothing. It is PASSIVE: asking
+ * about trust never creates it.
+ */
+export interface SubscriptionTrustInfo {
+  packageName: string;
+  registryUrl: string;
+  resolvedVersion: string;
+  /** A `CalpTrustStatus`, or "unavailable" when the registry/manifest could not
+   *  be read or verified at all (see `error`). */
+  trustStatus: CalpTrustStatus | "unavailable";
+  publisherName: string;
+  publisherKey: string;
+  /** Whether this package declares writeback regions or model-writeback columns
+   *  — i.e. whether "not pinned" actually costs the user working features. */
+  declaresWriteback: boolean;
+  /** Failure text when `trustStatus` is "unavailable". */
+  error: string;
+}
+
+export function getSubscriptionTrust(): Promise<SubscriptionTrustInfo[]> {
+  return invokeBackend<SubscriptionTrustInfo[]>("calp_subscription_trust");
 }
 
 export function getSubscriptions(): Promise<SubscriptionManifest> {
@@ -1324,8 +1397,10 @@ export interface InspectorManifestInfo {
   /** Lowercase hex Ed25519 public key of the verified signer. */
   publisherKey: string;
   minAppVersion: string;
-  /** "firstUse" | "verified" (TOFU outcome for this inspection). */
-  trustStatus: string;
+  /** A `CalpTrustStatus`. The Package Inspector is PASSIVE (VerifyOnly): merely
+   *  pointing it at a registry folder must never pin a publisher, so an
+   *  unrecognised signer reports "notPinned". */
+  trustStatus: CalpTrustStatus;
   /** Whether THIS machine holds the publisher signing key. */
   isPublisher: boolean;
   artifactCount: number;
@@ -1731,7 +1806,8 @@ export interface InspectorArtifactVerification {
 
 export interface InspectorVerifyReport {
   signatureOk: boolean;
-  trustStatus: string;
+  /** A `CalpTrustStatus` — see `InspectorManifestInfo.trustStatus`. */
+  trustStatus: CalpTrustStatus;
   publisherName: string;
   artifacts: InspectorArtifactVerification[];
   unlisted: string[];

@@ -15,7 +15,13 @@ import {
   setActiveSheetApi,
   type PackageUpdatedPayload,
 } from "@api";
-import { inspectPackage, browseRegistry, type PackageInspection, type PackageInfo } from "@api/distribution";
+import {
+  inspectPackage,
+  browseRegistry,
+  type CalpTrustStatus,
+  type PackageInspection,
+  type PackageInfo,
+} from "@api/distribution";
 import {
   listRegistries,
   addRegistry,
@@ -85,6 +91,58 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
 function capabilityPhrase(id: string): string {
   return CAPABILITY_PHRASE[id as CapabilityId] ?? id;
 }
+
+/**
+ * How each publisher-trust state reads in the REVIEW step.
+ *
+ * A table with a row per `CalpTrustStatus`, typed so a new backend state fails
+ * to type-check here rather than falling through to a friendlier neighbour's
+ * label. (Wave I found both failure modes in the wild: an unknown status that
+ * rendered as a green "verified" pill, and one that rendered as no badge at
+ * all — which reads as "nothing to worry about".)
+ *
+ * `notPinned` is the normal answer here, and the copy has to carry the whole
+ * point: the package is intact and signed, but *signed by whom* is a question
+ * only the user can answer, and clicking Subscribe is the answer.
+ */
+const TRUST_REVIEW: Record<
+  CalpTrustStatus,
+  { label: string; blurb: string; color: string; box: React.CSSProperties }
+> = {
+  verified: {
+    label: "trusted publisher",
+    color: "#137333",
+    box: { background: "#e8f5e9", border: "1px solid #b7dfbb" },
+    blurb:
+      "Signed by the same key you already trusted for this package. Nothing about the publisher's identity has changed.",
+  },
+  firstUse: {
+    label: "trusted just now",
+    color: "#a05a00",
+    box: { background: "#fef7e0", border: "1px solid #f2dcae" },
+    blurb: "This publisher key has just been recorded as trusted for this package name.",
+  },
+  notPinned: {
+    label: "not yet trusted on this computer",
+    color: "#a05a00",
+    box: { background: "#fef7e0", border: "1px solid #f2dcae" },
+    blurb:
+      "The package is intact and correctly signed, but nobody on this computer has agreed to " +
+      "trust this publisher yet — reviewing a package deliberately does not do that. Anyone can " +
+      "create a signing key, so check the key above against the one the publisher gave you. " +
+      "Subscribing records it, and every later version of this package must be signed by the " +
+      "same key or Calcula will refuse it.",
+  },
+};
+
+const TRUST_REVIEW_FALLBACK = {
+  label: "unrecognised trust state",
+  color: "#c5221f",
+  box: { background: "#fdeceb", border: "1px solid #f3c4c2" } as React.CSSProperties,
+  blurb:
+    "Calcula does not recognise the trust state reported for this package. Do not subscribe " +
+    "until you know why.",
+};
 
 export function SubscribeDialog({ onClose }: DialogProps) {
   const win = useDialogWindow({ minWidth: 440, minHeight: 380 });
@@ -409,6 +467,33 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   // Review step: show what the package contains before anything lands.
   const reviewBody = inspection && (
     <>
+      {(() => {
+        // WHO signed this, shown FIRST — before the contents.
+        //
+        // Reviewing a package is passive: the backend verifies the signature and
+        // reports the trust state but never writes a TOFU pin, because merely
+        // looking at a package is not a decision to trust its publisher. That
+        // makes this panel the moment the identity has to be legible. A valid
+        // signature only proves the bytes were not altered after signing —
+        // anyone can generate a key and sign — so the reviewer needs the KEY,
+        // not just a name, and needs to be told that Subscribe is what records
+        // it as trusted.
+        const t = TRUST_REVIEW[inspection.trustStatus] ?? TRUST_REVIEW_FALLBACK;
+        return (
+          <div style={{ ...t.box, fontSize: 12, marginBottom: 10, padding: "8px 10px", borderRadius: 4, lineHeight: 1.5 }}>
+            <div>
+              <strong>Publisher:</strong> {inspection.publisherName || "(unnamed)"}{" "}
+              <span style={{ color: t.color, fontWeight: 600 }}>{t.label}</span>
+            </div>
+            {inspection.publisherKey && (
+              <div style={{ fontFamily: "Consolas, monospace", fontSize: 10.5, wordBreak: "break-all", marginTop: 3 }}>
+                {inspection.publisherKey}
+              </div>
+            )}
+            <div style={{ marginTop: 4 }}>{t.blurb}</div>
+          </div>
+        );
+      })()}
       <div style={{ fontSize: "12px", marginBottom: "8px" }}>
         <strong>Sheets ({inspection.sheets.length})</strong>
         {inspection.sheets.map((s, i) => (
