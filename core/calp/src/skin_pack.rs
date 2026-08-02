@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::CalpError;
 use crate::integrity::{self, TrustStatus};
 use crate::manifest::{PackageManifest, VersionEntry, VersionManifest};
+use crate::registry_id::RegistryScope;
 use crate::signing::{verify_signature, PublisherKeypair};
 use crate::transport::RegistryTransport;
 use crate::version::VersionPin;
@@ -78,12 +79,24 @@ pub enum SkinTrust {
     /// Signed, valid, and the publisher key was pinned by THIS operation because
     /// the caller was a deliberate trust decision (`PinPolicy::PinOnFirstUse`).
     FirstUse,
+    /// Pinned just now for THIS registry, and the same key is already trusted for
+    /// this package from another registry — a migration, a mirror, or a second
+    /// spelling of one location.
+    FirstUseKnownPublisher,
+    /// Pinned just now for this registry even though a DIFFERENT key is pinned
+    /// for the same package name elsewhere, because the user was shown both and
+    /// accepted. Never presented as an ordinary first use.
+    FirstUseAcceptedNameConflict,
     /// Signed and the signature is valid, but this machine holds no pin for the
     /// package — nobody here ever agreed to trust that signer. Authentic, NOT
     /// trusted. Kept distinct from `Verified` on purpose: the previous code
     /// collapsed a trust-on-first-use result into `Verified`, so a first-contact
     /// squat rendered in the Appearance panel as a green "verified" badge.
     NotPinned,
+    /// Not pinned for this registry, and a DIFFERENT key is pinned for the same
+    /// package name from another registry. Two registries claiming one name is
+    /// what a hijack looks like — never quietly "not pinned yet".
+    NotPinnedNameConflict,
     /// No publisher key expected — applied as unsigned (advisory) data.
     Unsigned,
     /// A signature was required but missing or invalid — REJECTED (not applied).
@@ -323,6 +336,7 @@ pub fn skin_pull(
     registry: &dyn RegistryTransport,
     profile_dir: &Path,
     package_name: &str,
+    scope: &RegistryScope,
     pin: &VersionPin,
     policy: integrity::PinPolicy,
 ) -> Result<PulledSkin, CalpError> {
@@ -331,13 +345,15 @@ pub fn skin_pull(
 
     // (1) signature + TOFU (over the single trusted manifest copy), then
     // (2) integrity — both before reading the payload.
-    let (trust, manifest) = integrity::verify_and_load_manifest_via(
-        registry,
-        package_name,
-        &version_str,
-        profile_dir,
-        policy,
-    )?;
+    let integrity::VerifiedManifest { trust, manifest, .. } =
+        integrity::verify_and_load_manifest_via(
+            registry,
+            package_name,
+            &version_str,
+            scope,
+            profile_dir,
+            policy,
+        )?;
     integrity::verify_version_artifacts_via(registry, package_name, &version_str, &manifest)?;
 
     let bytes = registry
@@ -385,7 +401,12 @@ pub fn skin_pull(
         trust: match trust {
             TrustStatus::Verified => SkinTrust::Verified,
             TrustStatus::FirstUse => SkinTrust::FirstUse,
+            TrustStatus::FirstUseKnownPublisher => SkinTrust::FirstUseKnownPublisher,
+            TrustStatus::FirstUseAcceptedNameConflict => {
+                SkinTrust::FirstUseAcceptedNameConflict
+            }
             TrustStatus::NotPinned => SkinTrust::NotPinned,
+            TrustStatus::NotPinnedNameConflict => SkinTrust::NotPinnedNameConflict,
         },
     })
 }
@@ -394,8 +415,14 @@ pub fn skin_pull(
 mod tests {
     use super::*;
     use crate::registry::LocalRegistry;
-    use crate::signing::PublisherKeypair;
+    use crate::registry_id::registry_scope;
+    use crate::signing::{load_pins, PinKey, PublisherKeypair};
     use tempfile::TempDir;
+
+    /// The scope a real call site would derive from the registry's location.
+    fn scope_of(dir: &TempDir) -> RegistryScope {
+        registry_scope(&dir.path().to_string_lossy()).unwrap()
+    }
 
     fn sample_json(id: &str) -> String {
         format!(
@@ -501,6 +528,7 @@ mod tests {
             &registry,
             sub_profile.path(),
             "acme-brand",
+            &scope_of(&reg_dir),
             &VersionPin::Latest,
             integrity::PinPolicy::PinOnFirstUse,
         )
@@ -534,6 +562,7 @@ mod tests {
             &registry,
             sub_profile.path(),
             "acme-brand",
+            &scope_of(&reg_dir),
             &VersionPin::parse("^1.0").unwrap(),
             integrity::PinPolicy::PinOnFirstUse,
         )
@@ -555,7 +584,7 @@ mod tests {
             .write_artifact("acme-brand", "1.0.0", SKIN_PACK_ARTIFACT, br#"{"schemaVersion":1,"id":"evil","name":"x","base":"dark"}"#)
             .unwrap();
 
-        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
+        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &scope_of(&reg_dir), &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }), "got {err:?}");
     }
 
@@ -569,12 +598,12 @@ mod tests {
 
         // First publish + pull pins publisher A (TOFU).
         skin_publish(&registry, pub_a.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
-        skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap();
+        skin_pull(&registry, sub_profile.path(), "acme-brand", &scope_of(&reg_dir), &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap();
 
         // A DIFFERENT publisher (B) republishes a new version to the same package.
         skin_publish(&registry, pub_b.path(), "acme-brand", "2.0.0", "2026-06-23T01:00:00Z", &make_skin("acme.brand")).unwrap();
 
-        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
+        let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &scope_of(&reg_dir), &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
         assert!(matches!(err, CalpError::PublisherKeyChanged { .. }), "got {err:?}");
     }
 
@@ -594,13 +623,14 @@ mod tests {
             &registry,
             sub_profile.path(),
             "acme-brand",
+            &scope_of(&reg_dir),
             &VersionPin::Latest,
             integrity::PinPolicy::RequirePinned,
         )
         .unwrap_err();
         assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
         assert!(
-            crate::signing::load_trusted_publishers(sub_profile.path()).unwrap().is_empty(),
+            load_pins(sub_profile.path()).unwrap().is_empty(),
             "a refused startup pull must leave the pin store untouched"
         );
     }
@@ -619,12 +649,64 @@ mod tests {
         let org_key = PublisherKeypair::load_or_create(pub_profile.path())
             .unwrap()
             .public_key_hex();
-        crate::signing::pin_publisher(sub_profile.path(), "acme-brand", &org_key).unwrap();
+        let scope = scope_of(&reg_dir);
+        crate::signing::pin_publisher(
+            sub_profile.path(),
+            &PinKey::calp(&scope, "acme-brand"),
+            &scope.label,
+            &org_key,
+        )
+        .unwrap();
 
         let pulled = skin_pull(
             &registry,
             sub_profile.path(),
             "acme-brand",
+            &scope,
+            &VersionPin::Latest,
+            integrity::PinPolicy::RequirePinned,
+        )
+        .unwrap();
+        assert_eq!(pulled.trust, SkinTrust::Verified);
+    }
+
+    /// The admin pre-pin must be written under the SAME scope the pull reads.
+    /// If the administrator spells `registryUrl` differently from the way the
+    /// pull opens it, the pin lands in one scope and is looked up in another —
+    /// which under `RequirePinned` means no org skin at all, silently. This is
+    /// the test that catches a second, divergent canonicalizer being introduced.
+    #[test]
+    fn a_pre_pin_written_from_a_different_spelling_still_verifies() {
+        let reg_dir = TempDir::new().unwrap();
+        let pub_profile = TempDir::new().unwrap();
+        let sub_profile = TempDir::new().unwrap();
+        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+
+        skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
+        let org_key = PublisherKeypair::load_or_create(pub_profile.path())
+            .unwrap()
+            .public_key_hex();
+
+        // The administrator typed a forward-slash, upper-case, trailing-slash
+        // spelling of the very same folder.
+        let admin_spelling = format!(
+            "{}/",
+            reg_dir.path().to_string_lossy().replace('\\', "/").to_uppercase()
+        );
+        let admin_scope = registry_scope(&admin_spelling).unwrap();
+        crate::signing::pin_publisher(
+            sub_profile.path(),
+            &PinKey::calp(&admin_scope, "acme-brand"),
+            &admin_scope.label,
+            &org_key,
+        )
+        .unwrap();
+
+        let pulled = skin_pull(
+            &registry,
+            sub_profile.path(),
+            "acme-brand",
+            &scope_of(&reg_dir),
             &VersionPin::Latest,
             integrity::PinPolicy::RequirePinned,
         )

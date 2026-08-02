@@ -37,7 +37,12 @@
 //          widest consent Calcula asks for — and it left no record at all until
 //          app/src-tauri/src/extension_audit.rs. It is rendered last, visually
 //          separated and labelled "this computer", so it can never be mistaken
-//          for something the open file carries.
+//          for something the open file carries. The trusted-publisher list is
+//          the second such section, and the reason it exists here rather than in
+//          a dialog: a publisher pin is a durable machine-wide decision, and
+//          until now there was nowhere to see the whole set. It is also the ONLY
+//          place an ACCEPTED cross-registry name conflict stays visible after
+//          the dialog that accepted it is gone.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -70,6 +75,10 @@ import {
   type ExtensionAuditTrail,
   type ExtensionAuditEntry,
 } from "@api/codeInventory";
+import {
+  listTrustedPublishers,
+  type TrustedPublisherReport,
+} from "@api/distribution";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { ScriptableObjectEvents } from "../index";
@@ -653,6 +662,126 @@ function AddInTrailRow({ entry }: { entry: ExtensionAuditEntry }): React.ReactEl
   );
 }
 
+/**
+ * What does this computer trust, and from where?
+ *
+ * Pins are keyed by (namespace, registry, package). Two registries serving the
+ * same package name therefore hold INDEPENDENT pins — which is the whole point,
+ * because keying on the name alone let whoever reached a name first own it
+ * machine-wide. The cost of that is a state worth showing: one name resolving to
+ * two DIFFERENT publisher keys. That is flagged here, and nowhere else once the
+ * subscribe dialog is closed.
+ */
+function TrustedPublishersSection({
+  report,
+}: {
+  report: TrustedPublisherReport | null;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  if (!report) {
+    return (
+      <div style={machineSectionStyle}>
+        <div style={machineHeaderStyle}>Trusted publishers</div>
+        <div style={heldEmptyStyle}>Reading the trusted-publisher record...</div>
+      </div>
+    );
+  }
+
+  // Conflicts first: the one row a user opens this section to find.
+  const ordered = [...report.names].sort((a, b) =>
+    a.hasKeyConflict === b.hasKeyConflict
+      ? a.name.localeCompare(b.name)
+      : a.hasKeyConflict
+        ? -1
+        : 1,
+  );
+  const shown = expanded ? ordered : ordered.slice(0, 5);
+
+  return (
+    <div style={machineSectionStyle}>
+      <div style={machineHeaderStyle}>
+        Trusted publishers ({report.totalPins})
+      </div>
+
+      <div style={machineScopeNoteStyle}>
+        NOT part of this workbook. These are the publisher keys this COMPUTER has
+        agreed to trust. A package pin belongs to the registry it came from, so
+        the same package name from two registries is two separate decisions —
+        that is what stops whoever reaches a name first from owning it
+        everywhere. Add-ins have no registry and are trusted by id alone.
+      </div>
+
+      {report.error !== "" && (
+        <div style={{ ...heldEmptyStyle, color: "#B00020" }}>
+          The trusted-publisher record could not be read: {report.error}. This is
+          NOT the same as "nothing is trusted" — Calcula refuses to use a pin
+          store it cannot read, so package and add-in trust will fail closed
+          until this is fixed.
+        </div>
+      )}
+
+      {report.error === "" && report.totalPins === 0 && (
+        <div style={heldEmptyStyle}>
+          Nothing is trusted on this computer yet. Subscribing to a package or
+          installing an add-in is what records a publisher key here.
+        </div>
+      )}
+
+      {report.conflictCount > 0 && (
+        <div style={{ ...heldEmptyStyle, color: "#B00020" }}>
+          {report.conflictCount} name
+          {report.conflictCount === 1 ? " is" : "s are"} trusted under MORE THAN
+          ONE publisher key. Two sources claiming one name is what a package
+          hijack looks like — check that you meant to trust both.
+        </div>
+      )}
+
+      {shown.map((n) => (
+        <div
+          key={`${n.namespace}:${n.name}`}
+          style={{
+            padding: "5px 8px",
+            borderTop: "1px solid #EEE",
+            fontSize: 11,
+            color: n.hasKeyConflict ? "#B00020" : "#444",
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            {n.name}{" "}
+            <span style={{ ...chipStyle, backgroundColor: "#ECECEC", color: "#555" }}>
+              {n.namespace === "ext" ? "add-in" : "package"}
+            </span>
+            {n.hasKeyConflict && (
+              <span
+                style={{ ...chipStyle, backgroundColor: "#F3E2E2", color: "#8A3A3A", fontWeight: 600 }}
+              >
+                two publishers
+              </span>
+            )}
+          </div>
+          {n.pins.map((p, i) => (
+            <div key={i} style={{ marginLeft: 8, marginTop: 2, lineHeight: 1.4 }}>
+              <span style={{ fontFamily: "Consolas, monospace", fontSize: 10 }}>
+                {p.publisherKey.slice(0, 16)}…
+              </span>
+              {p.scopeLabel !== "" ? ` from ${p.scopeLabel}` : " (this computer, any source)"}
+              {p.pinnedAt !== "" ? ` · trusted ${p.pinnedAt.slice(0, 10)}` : ""}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {ordered.length > 5 && (
+        <div style={{ padding: "4px 8px 6px" }}>
+          <button style={linkBtnStyle} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? "Show fewer" : `Show all ${ordered.length}`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddInTrailSection({ trail }: { trail: ExtensionAuditTrail | null }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
   if (!trail) {
@@ -1040,6 +1169,7 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     watches: [],
   });
   const [trail, setTrail] = useState<ExtensionAuditTrail | null>(null);
+  const [pins, setPins] = useState<TrustedPublisherReport | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1089,6 +1219,18 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     // reload only — never on the 15s poll, which would turn a rare, deliberate
     // record into per-panel background IPC.
     setTrail(await getExtensionAuditTrail());
+    // Same rule as the trail: machine-scoped, explicit reload only. A failure to
+    // read is reported by the command as `error`, never as an empty list.
+    try {
+      setPins(await listTrustedPublishers());
+    } catch (e) {
+      setPins({
+        names: [],
+        totalPins: 0,
+        conflictCount: 0,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }, [reloadJobs]);
 
   useEffect(() => {
@@ -1226,6 +1368,7 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
           — the widest consent Calcula asks for, and the one that used to leave
           no record anywhere. */}
       <AddInTrailSection trail={trail} />
+      <TrustedPublishersSection report={pins} />
     </div>
   );
 }

@@ -42,14 +42,36 @@ const SKIN_TRUST_PRESENTATION: Record<SkinTrust, { label: string; color: string;
     color: "#a05a00",
     title: "This publisher key was pinned by this operation (trust-on-first-use).",
   },
+  firstUseKnownPublisher: {
+    label: "trusted just now — publisher already known",
+    color: "#a05a00",
+    title:
+      "This registry was not trusted for this skin package before, but the same publisher key " +
+      "is already trusted for it from another registry — a move, a mirror, or the same location " +
+      "spelled differently.",
+  },
+  firstUseAcceptedNameConflict: {
+    label: "trusted DESPITE a name conflict",
+    color: "#c5221f",
+    title:
+      "Another registry holds this skin package name under a DIFFERENT publisher key, and this " +
+      "key was recorded anyway. Two registries claiming one name is what a hijack looks like.",
+  },
   notPinned: {
     label: "NOT trusted — unrecognised signer",
     color: "#c5221f",
     title:
       "The skin pack's signature is valid, but this computer has never agreed to trust that " +
-      "publisher. A valid signature only proves the file was not altered after signing — anyone " +
-      "can generate a key and sign. The skin is not applied. Your administrator must set " +
-      "publisherKey in policy.json to the org's key.",
+      "publisher for this registry. A valid signature only proves the file was not altered after " +
+      "signing — anyone can generate a key and sign. The skin is not applied. Your administrator " +
+      "must set publisherKey in policy.json to the org's key.",
+  },
+  notPinnedNameConflict: {
+    label: "NOT trusted — NAME CONFLICT with another registry",
+    color: "#c5221f",
+    title:
+      "Another registry is already trusted for this skin package name under a DIFFERENT " +
+      "publisher key, and this one is not trusted here. The skin is not applied.",
   },
   unsigned: {
     label: "unsigned",

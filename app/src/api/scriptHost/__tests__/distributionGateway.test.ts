@@ -290,7 +290,13 @@ describe("rule 2 — the script path is the same code as the UI path", () => {
     expect(pullSrc).toContain("verify_and_load_manifest_via");
     expect(pullSrc).toContain("check_min_app_version");
     const refreshSrc = repoFile("../../../../../core/calp/src/refresh.rs");
-    expect(refreshSrc).toContain("pull::pull(registry, &request, profile_dir, policy)");
+    expect(refreshSrc).toContain(
+      "pull::pull(registry, &request, scope, profile_dir, policy)",
+    );
+    // ...and it threads the registry SCOPE through as well: a pin belongs to
+    // the registry it came from, and a refresh must be measured against the pin
+    // the original subscribe wrote, not against some other registry's.
+    expect(refreshSrc).toContain("scope: &RegistryScope,");
     // ...and refresh threads the pin POLICY through rather than choosing one:
     // "get the latest version of something I subscribed to" is not the trust
     // decision that Subscribe is, so `calp_refresh_apply` passes RequirePinned

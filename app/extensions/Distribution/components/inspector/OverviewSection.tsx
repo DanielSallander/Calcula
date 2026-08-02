@@ -46,15 +46,40 @@ const TRUST_BADGE: Record<CalpTrustStatus, { label: string; color: string; title
     title:
       "This publisher key was recorded as trusted by this operation (trust-on-first-use).",
   },
+  firstUseKnownPublisher: {
+    label: "trusted just now — same publisher as another registry",
+    color: WARN_AMBER,
+    title:
+      "This registry was not trusted for this package before, but the SAME publisher key is " +
+      "already trusted for this package name from another registry — a move, a mirror, or the " +
+      "same folder reached by a different path. The key was recorded for this registry too.",
+  },
+  firstUseAcceptedNameConflict: {
+    label: "trusted DESPITE a name conflict — you accepted a second publisher",
+    color: DANGER_RED,
+    title:
+      "Another registry already holds this package name under a DIFFERENT publisher key, and " +
+      "this key was recorded anyway because you accepted the conflict. Two registries claiming " +
+      "one name is what a package hijack looks like. Check the other registry below.",
+  },
   notPinned: {
     label: "signature valid — publisher NOT trusted yet",
     color: DANGER_RED,
     title:
       "The package is intact and correctly signed, but nobody on this computer has ever agreed " +
-      "to trust this publisher for this package name. Anyone can generate a signing key, so a " +
-      "valid signature only proves the files were not altered after signing — it does not tell " +
-      "you who signed them. Compare the key below against the one the publisher gave you, then " +
-      "subscribe to record it as trusted. Inspecting a package deliberately does not.",
+      "to trust this publisher for this package name from this registry. Anyone can generate a " +
+      "signing key, so a valid signature only proves the files were not altered after signing — " +
+      "it does not tell you who signed them. Compare the key below against the one the publisher " +
+      "gave you, then subscribe to record it as trusted. Inspecting a package deliberately does not.",
+  },
+  notPinnedNameConflict: {
+    label: "NAME CONFLICT — another registry holds this name under a different key",
+    color: DANGER_RED,
+    title:
+      "This package name is already trusted on this computer from a DIFFERENT registry, under a " +
+      "DIFFERENT publisher key. The signature here is valid, but a valid signature says nothing " +
+      "about who signed it. Two registries claiming one name is exactly what a package hijack " +
+      "looks like — compare both registries and both keys before trusting this one.",
   },
 };
 
@@ -113,6 +138,26 @@ export function OverviewSection({
           </span>
           {m.isPublisher && <Badge color="#5b5fc7">you hold the signing key</Badge>}
         </KV>
+        {(m.otherScopePins ?? []).length > 0 && (
+          <KV label="Also trusted from">
+            <div style={{ fontSize: 11.5, lineHeight: 1.6 }}>
+              {(m.otherScopePins ?? []).map((p, i) => (
+                <div
+                  key={i}
+                  style={{ color: p.sameKey ? "var(--text-secondary)" : DANGER_RED }}
+                >
+                  <span style={{ fontFamily: "Consolas, monospace" }}>{p.scopeLabel}</span>
+                  {" — "}
+                  {p.sameKey ? "same publisher key" : "DIFFERENT publisher key"}{" "}
+                  <span style={{ fontFamily: "Consolas, monospace" }}>
+                    {p.publisherKey.slice(0, 16)}…
+                  </span>
+                  {p.pinnedAt ? ` (trusted ${p.pinnedAt.slice(0, 10)})` : ""}
+                </div>
+              ))}
+            </div>
+          </KV>
+        )}
         <KV label="Publisher key (Ed25519)">
           <span style={{ fontFamily: "Consolas, monospace", fontSize: 11 }}>
             {m.publisherKey || "(unsigned)"}

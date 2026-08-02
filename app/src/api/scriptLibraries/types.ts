@@ -18,6 +18,16 @@ export interface LibraryRequest {
   package: string;
   /** A calp VersionPin string: "1.2.3", "^1.2.0", "~1.2.0", "latest", "*". */
   pin: string;
+  /**
+   * The user was shown a CROSS-REGISTRY NAME CONFLICT for this package — the
+   * same library name is already trusted from a different registry, under a
+   * DIFFERENT publisher key — and accepted it explicitly.
+   *
+   * Absent/false is the safe default: an install that hits a conflict without
+   * this flag FAILS with an explanation rather than pinning, so a caller that
+   * forgets to ask fails closed.
+   */
+  acceptNameConflict?: boolean;
 }
 
 /** A module of a resolved library, with its integrity-verified source.

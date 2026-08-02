@@ -17,6 +17,7 @@ pub mod overrides;
 pub mod package_kind;
 pub mod refresh;
 pub mod registry;
+pub mod registry_id;
 pub mod signing;
 pub mod skin_pack;
 pub mod transport;
@@ -37,6 +38,7 @@ pub use manifest::{
 };
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
+pub use registry_id::{registry_scope, RegistryScope};
 pub use transport::RegistryTransport;
 pub use version::{VersionPin, SemVer};
 pub use fold::fold_submissions;

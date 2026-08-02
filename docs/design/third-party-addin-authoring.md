@@ -548,6 +548,29 @@ Residual risks, stated plainly:
 - **TOFU is first-contact trust.** No CA, no revocation list, no expiry. A key that was malicious on
   first contact is pinned as such. What TOFU buys is *continuity*: after the first install, a
   substitution is loud.
+- **An extension pin is MACHINE-GLOBAL, and that is a decision — do not "fix" it.** `.calp` package
+  pins are keyed by `(registry, package)`, because keying by name alone let whoever made first
+  contact with a name own it for the whole machine. The obvious symmetry — scope an extension pin by
+  where it was installed FROM — is refused, for four reasons, and this paragraph exists so it is not
+  re-litigated:
+  1. **The only candidate scope is the attacker's own choice.** A bundle dropped in
+     `%USERPROFILE%\Downloads` would get its own pristine scope and therefore a free `firstUse` on an
+     id it does not own. That is precisely the squat Wave H closed by making the launch-time scan
+     non-pinning; folder scoping would re-open it through a different door.
+  2. **It cannot be recorded honestly.** `install_extension` COPIES the three files into
+     `%APPDATA%\com.calcula.app\extensions`. The "scope" evaporates the moment the install
+     completes, so the pin would be filed under a location that no longer means anything.
+  3. **It breaks legitimate reinstalls.** The same add-in reinstalled from a USB stick, a network
+     share or a newer download folder would read as a false first use, teaching users that the
+     first-use question is noise.
+  4. **There is no naming authority behind an extension id anyway.** A registry is a human trust
+     decision with a stable identity; a folder is not. For an id namespace with no authority behind
+     it, machine-global first-contact ownership IS the semantics — and the protection is that only a
+     human at the installer may claim it.
+
+  The key is built by `calp::signing::PinKey::extension(id)`, which takes no scope, and
+  `installTrustChain.test.ts` fails if a scope-derived status ever appears in
+  `EXTENSION_TRUST_STATUSES`.
 - **A stolen private key is a full compromise of that publisher's identity** until every user
   refuses the publisher change. Rotation and theft are indistinguishable at the protocol level —
   both are "a different key" — which is why the accept-publisher-change step refuses to be a
@@ -710,7 +733,8 @@ Replacing a signed install with an unsigned build removes the stale `.sig`, so a
 outlive the manifest it was made for.
 
 **Uninstall** is unchanged (`uninstall_extension`): it deletes the bundle and both sidecars and
-deliberately leaves the TOFU pin, so a later re-install from the same key still verifies.
+deliberately leaves the TOFU pin, so a later re-install from the same key still verifies — from
+ANYWHERE, because an extension pin carries no source scope (§7.2).
 
 ### 7.5 End-to-end, as actually run
 

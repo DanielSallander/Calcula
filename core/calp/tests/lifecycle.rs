@@ -132,10 +132,16 @@ fn publish_version(
 fn pull_version(package: &str, version: SemVer) -> PullRequest {
     PullRequest {
         package_name: package.to_string(),
-        registry_url: "file:///test".to_string(),
         version_pin: VersionPin::Exact(version),
         now: "2026-06-15T01:00:00Z".to_string(),
     }
+}
+
+/// The registry scope a real call site derives from the location the user
+/// configured. Pins are filed under it, so every pull in a test must use the
+/// scope of the registry it is actually reading.
+fn scope_of(dir: &TempDir) -> calp::RegistryScope {
+    calp::registry_scope(&dir.path().to_string_lossy()).unwrap()
 }
 
 /// A per-subscriber numeric submission for one (region, cell) slot. Re-used
@@ -175,8 +181,13 @@ fn make_submission(
 
 /// pull() returns a PullResult with no Debug derive (deep persistence types),
 /// so unwrap_err() is unavailable; match to extract the error instead.
-fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest, prof: &Path) -> CalpError {
-    match pull::pull(reg, req, prof, PinPolicy::PinOnFirstUse) {
+fn expect_pull_err(
+    reg: &LocalRegistry,
+    req: &PullRequest,
+    scope: &calp::RegistryScope,
+    prof: &Path,
+) -> CalpError {
+    match pull::pull(reg, req, scope, prof, PinPolicy::PinOnFirstUse) {
         Ok(_) => panic!("pull unexpectedly succeeded"),
         Err(e) => e,
     }
@@ -203,7 +214,7 @@ fn lifecycle_publish_pull_roundtrip_carries_cells_region_and_trust() {
         Some(vec![region.clone()]),
     );
 
-    let result = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+    let result = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
     // The published sheet's cells survive the round-trip.
     assert_eq!(result.resolved_version, SemVer::new(1, 0, 0));
@@ -498,7 +509,7 @@ fn lifecycle_integrity_gate_rejects_tampered_artifact() {
     );
 
     // An untampered pull succeeds and passes the integrity gate.
-    pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+    pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
     // Overwrite the sheet's data.json on disk with garbage AFTER publish. The
     // manifest's recorded SHA-256 no longer matches, so the integrity gate (run
@@ -509,7 +520,7 @@ fn lifecycle_integrity_gate_rejects_tampered_artifact() {
         .join("data.json");
     std::fs::write(&data_path, b"{\"cells\": \"tampered\"}").unwrap();
 
-    let err = expect_pull_err(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path());
+    let err = expect_pull_err(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path());
     assert!(
         matches!(err, CalpError::ChecksumMismatch { .. }),
         "expected ChecksumMismatch, got {err:?}"
@@ -542,12 +553,12 @@ fn lifecycle_tofu_first_use_then_verified() {
     );
 
     // First pull pins the publisher key (trust-on-first-use)...
-    let first = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+    let first = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
     // ...a second pull of the same package, against the same TOFU pin store,
     // matches the pinned key and reports Verified.
-    let second = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+    let second = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(second.trust_status, TrustStatus::Verified);
 }
 
@@ -594,6 +605,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     let err = match calp::refresh::pull_all_updates(
         &reg,
         &[sub(SemVer::new(1, 0, 0))],
+        &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
     ) {
@@ -602,7 +614,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     };
     assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
     assert!(
-        calp::signing::load_trusted_publishers(subp.path()).unwrap().is_empty(),
+        calp::signing::load_pins(subp.path()).unwrap().is_empty(),
         "a refused refresh must leave the pin store untouched"
     );
 
@@ -610,6 +622,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     let err = match pull::pull(
         &reg,
         &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
     ) {
@@ -617,12 +630,13 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         Err(e) => e,
     };
     assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
-    assert!(calp::signing::load_trusted_publishers(subp.path()).unwrap().is_empty());
+    assert!(calp::signing::load_pins(subp.path()).unwrap().is_empty());
 
     // SUBSCRIBE is the commit point, and it still works.
     let subscribed = pull::pull(
         &reg,
         &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::PinOnFirstUse,
     )
@@ -633,6 +647,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     let payloads = calp::refresh::pull_all_updates(
         &reg,
         &[sub(SemVer::new(1, 0, 0))],
+        &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
     )
@@ -644,6 +659,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     pull::pull(
         &reg,
         &pull_version("budget", SemVer::new(1, 0, 0)),
+        &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
     )

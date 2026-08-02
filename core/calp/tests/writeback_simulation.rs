@@ -157,14 +157,23 @@ fn publish_version(
 }
 
 /// A subscriber (their own TOFU profile) pulls a version of the package.
-fn subscriber_pull(reg: &LocalRegistry, prof: &Path, version: SemVer) -> pull::PullResult {
+fn subscriber_pull(
+    reg: &LocalRegistry,
+    scope: &calp::RegistryScope,
+    prof: &Path,
+    version: SemVer,
+) -> pull::PullResult {
     let req = PullRequest {
         package_name: PKG.to_string(),
-        registry_url: "file:///test".to_string(),
         version_pin: VersionPin::Exact(version),
         now: "2026-06-15T01:00:00Z".to_string(),
     };
-    pull::pull(reg, &req, prof, PinPolicy::PinOnFirstUse).expect("pull failed")
+    pull::pull(reg, &req, scope, prof, PinPolicy::PinOnFirstUse).expect("pull failed")
+}
+
+/// The registry scope a real call site derives from the configured location.
+fn scope_of(dir: &TempDir) -> calp::RegistryScope {
+    calp::registry_scope(&dir.path().to_string_lossy()).unwrap()
 }
 
 fn identity(name: &str, id: &str) -> SubmitterIdentity {
@@ -346,7 +355,7 @@ fn writeback_multi_user_simulation() {
 
     for who in [&alice, &bob, &carol] {
         let prof = TempDir::new().unwrap();
-        let result = subscriber_pull(&reg, prof.path(), SemVer::new(1, 0, 0));
+        let result = subscriber_pull(&reg, &scope_of(&reg_dir), prof.path(), SemVer::new(1, 0, 0));
         assert_eq!(result.resolved_version, SemVer::new(1, 0, 0));
         assert_eq!(result.trust_status, TrustStatus::FirstUse, "fresh profile -> trust-on-first-use");
         // The pulled manifest carries the region declaration the subscriber's

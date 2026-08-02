@@ -23,14 +23,28 @@ import type { Skin, AccessibilityOverride } from "../core/theme/skin";
  * `calp::skin_pack::SkinTrust` (see `managed_policy::trust_str`).
  *
  * `notPinned` means the pack's signature is cryptographically valid but this
- * machine holds no TOFU pin for the package — nobody here ever agreed to trust
- * that signer. It is NOT "verified": the org-skin pull runs at app launch,
- * before any user interaction, and a registry that nominates its own key is
- * exactly the squat the pin exists to prevent. Every UI that renders a skin
- * trust value must have a row for all five of these (see
+ * machine holds no TOFU pin for the package from that registry — nobody here
+ * ever agreed to trust that signer. It is NOT "verified": the org-skin pull runs
+ * at app launch, before any user interaction, and a registry that nominates its
+ * own key is exactly the squat the pin exists to prevent.
+ *
+ * The `*NameConflict` / `*KnownPublisher` states come from pins being scoped to a
+ * REGISTRY rather than to a bare package name. They are unreachable on today's
+ * org-skin path (it runs `RequirePinned`, so only the administrator's key can
+ * create the pin), but the enum is shared with `.calp` packages and the
+ * presentation map must stay TOTAL: an unlabelled security badge reads as benign.
+ * Every UI that renders a skin trust value must have a row for all of these (see
  * `SKIN_TRUST_PRESENTATION` in `extensions/Settings/components/AppearancePage.tsx`).
  */
-export type SkinTrust = "verified" | "firstUse" | "notPinned" | "unsigned" | "unknown";
+export type SkinTrust =
+  | "verified"
+  | "firstUse"
+  | "firstUseKnownPublisher"
+  | "firstUseAcceptedNameConflict"
+  | "notPinned"
+  | "notPinnedNameConflict"
+  | "unsigned"
+  | "unknown";
 
 /**
  * Effective appearance policy returned by the Rust `get_effective_appearance_policy`

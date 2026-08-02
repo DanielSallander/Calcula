@@ -9,15 +9,15 @@ use identity::SheetId;
 use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNotebook, SavedChart, SavedSparkline, SavedSheetConditionalFormats, SavedSheetDataValidations, SavedSheetControls, SavedSheetComments, SavedSheetScenarios, SavedSheetOutline, SavedPaneControl, SavedSlicer, SavedRibbonFilter, SavedPivotLayout};
 
 use crate::error::CalpError;
-use crate::integrity::{PinPolicy, TrustStatus};
+use crate::integrity::{PinPolicy, TrustStatus, VerifiedManifest};
 use crate::manifest::*;
+use crate::registry_id::RegistryScope;
 use crate::transport::RegistryTransport;
 use crate::version::{SemVer, VersionPin};
 
 /// Request to pull (subscribe to) a package.
 pub struct PullRequest {
     pub package_name: String,
-    pub registry_url: String,
     pub version_pin: VersionPin,
     pub now: String,
 }
@@ -120,6 +120,11 @@ pub struct PullResult {
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
     pub trust_status: TrustStatus,
+    /// Pins held for this SAME package name in OTHER registries, so the
+    /// subscribe notice can distinguish "the publisher you already trust,
+    /// reached from a new location" from "a second registry is claiming this
+    /// name under a different key".
+    pub other_scope_pins: Vec<crate::integrity::OtherScopePin>,
     /// The publisher's display name asserted in the (now verified) manifest.
     pub publisher_name: String,
 }
@@ -231,6 +236,7 @@ pub fn resolve_sheet_name_collisions(
 pub fn pull(
     registry: &dyn RegistryTransport,
     request: &PullRequest,
+    scope: &RegistryScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<PullResult, CalpError> {
@@ -248,10 +254,15 @@ pub fn pull(
     // signed manifest for the crypto check and a different one for the payload.
     // A tampered manifest, a wrong/changed publisher key, or an unsigned
     // package all fail here.
-    let (trust_status, ver_manifest) = crate::integrity::verify_and_load_manifest_via(
+    let VerifiedManifest {
+        trust: trust_status,
+        manifest: ver_manifest,
+        other_scope_pins,
+    } = crate::integrity::verify_and_load_manifest_via(
         registry,
         pkg,
         ver,
+        scope,
         profile_dir,
         policy,
     )?;
@@ -608,7 +619,10 @@ pub fn pull(
 
     let subscription = Subscription {
         package_name: request.package_name.clone(),
-        registry_url: request.registry_url.clone(),
+        // The registry as the USER configured it, taken from the scope the pin
+        // was filed under — so subscribe, the stored subscription and every later
+        // refresh all name the registry with ONE string.
+        registry_url: scope.label.clone(),
         version_pin: request.version_pin.to_string(),
         resolved_version: version_str.clone(),
         resolved_at: request.now.clone(),
@@ -745,6 +759,7 @@ pub fn pull(
         theme: pulled_theme,
         extension_data: pulled_extension_data,
         trust_status,
+        other_scope_pins,
         publisher_name: ver_manifest.publisher_name.clone(),
     })
 }
@@ -857,6 +872,42 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The scope a real call site derives from the registry's location.
+    fn scope_of(dir: &TempDir) -> RegistryScope {
+        crate::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap()
+    }
+
+    /// The stored subscription names the registry in the USER'S spelling, taken
+    /// from the scope the pin was filed under — so subscribe, the persisted
+    /// subscription and every later refresh all use ONE string. Two of them
+    /// (a `registry_url` on the request and a separately-derived scope) is how a
+    /// pin gets written under one identity and looked up under another.
+    #[test]
+    fn the_subscription_records_the_registry_the_scope_was_derived_from() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+        publish_test_package(&reg, prof.path());
+
+        let typed = format!("file://{}", dir.path().display());
+        let scope = crate::registry_id::registry_scope(&typed).unwrap();
+        let request = PullRequest {
+            package_name: "test-pkg".to_string(),
+            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            now: "2026-05-18T01:00:00Z".to_string(),
+        };
+        let result = pull(&reg, &request, &scope, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        assert_eq!(result.subscription.registry_url, typed);
+        // ...and that stored string re-derives the SAME scope, so the refresh
+        // that reads it lands on the pin the subscribe wrote.
+        assert_eq!(
+            crate::registry_id::registry_scope(&result.subscription.registry_url)
+                .unwrap()
+                .id,
+            scope.id
+        );
+    }
     use crate::publish::{self, PublishRequest};
     use crate::registry::LocalRegistry;
 
@@ -908,12 +959,11 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
         assert_eq!(result.sheets[0].name, "Dashboard");
         assert_eq!(result.sheets[1].name, "Data");
@@ -970,11 +1020,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "co-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.custom_objects.len(), 1);
         let co = &result.custom_objects[0];
@@ -1030,11 +1079,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "styled-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The pulled cell carries the published style index, not the
         // data.json-serialized 0.
@@ -1094,11 +1142,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "controls-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.controls.len(), 1, "only the published sheet's controls travel");
         assert_eq!(result.controls[0].sheet_id, published_sheet_id,
@@ -1180,11 +1227,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "pane-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-03T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.pane_controls.len(), 2, "both pane controls travel");
 
@@ -1362,11 +1408,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "slicer-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.slicers.len(), 1, "only the published sheet's slicer travels");
         let s = &result.slicers[0];
@@ -1505,11 +1550,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "filter-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.ribbon_filters.len(), 1);
         let f = &result.ribbon_filters[0];
@@ -1573,11 +1617,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "layout-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.pivot_layouts.len(), 1);
         let l = &result.pivot_layouts[0];
@@ -1625,11 +1668,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "theme-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         let theme = result.theme.expect("theme.json is always carried");
         assert_eq!(theme, engine::theme::ThemeDefinition::facet());
@@ -1678,11 +1720,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "ext-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.extension_data.len(), 2);
         assert_eq!(
@@ -1710,7 +1751,7 @@ mod tests {
         assert!(reg.read_artifact("test-pkg", "1.0.0", "pivot_layouts.json").unwrap().is_none());
         assert!(reg.read_artifact("test-pkg", "1.0.0", "extension_data.json").unwrap().is_none());
 
-        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.slicers.is_empty());
         assert!(result.ribbon_filters.is_empty());
         assert!(result.pivot_layouts.is_empty());
@@ -1731,7 +1772,7 @@ mod tests {
             .read_artifact("test-pkg", "1.0.0", "pane_controls.json")
             .unwrap()
             .is_none());
-        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.pane_controls.is_empty());
     }
 
@@ -1784,11 +1825,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "sales-model".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 0, "a dataset package carries no sheets");
         assert_eq!(result.data_sources.len(), 1);
         assert_eq!(result.data_sources[0].definition.name, "Sales");
@@ -1854,11 +1894,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "fidelity-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Named ranges ride in the manifest; CF/DV are read from their artifacts.
         // sheet_ids stay as PACKAGE ids here (the Tauri pull remaps to local index).
@@ -1948,11 +1987,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "wave-b-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Scenarios + outlines travel per published sheet, PACKAGE sheet ids
         // un-remapped (CF/DV semantics); the unpublished sheet's entries do not.
@@ -1987,11 +2025,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: pkg.to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.comments.is_empty(), "no comments may arrive without the opt-in");
     }
 
@@ -2008,11 +2045,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "wave-b-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Only the PUBLISHED sheet's comments travel, package sheet id
         // un-remapped, payload byte-identical (opaque to the calp layer).
@@ -2065,11 +2101,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "charted-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The chart round-trips, with its sheet_id remapped from the package id
         // to the new LOCAL sheet id so it lands on the right sheet.
@@ -2126,11 +2161,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "sparked-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-06-28T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.sparklines.len(), 1, "the sparkline round-trips");
         let sp = &result.sparklines[0];
@@ -2149,12 +2183,11 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            registry_url: "file:///test/registry".to_string(),
             version_pin: VersionPin::Caret(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let sub = &result.subscription;
         assert_eq!(sub.package_name, "test-pkg");
         assert_eq!(sub.resolved_version, "1.0.0");
@@ -2200,12 +2233,11 @@ mod tests {
         // ^1.0 should resolve to 1.1.0
         let request = PullRequest {
             package_name: "versioned".to_string(),
-            registry_url: "file:///test".to_string(),
             version_pin: VersionPin::Caret(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.resolved_version, SemVer::new(1, 1, 0));
     }
 
@@ -2217,12 +2249,11 @@ mod tests {
 
         let request = PullRequest {
             package_name: "ghost".to_string(),
-            registry_url: "file:///test".to_string(),
             version_pin: VersionPin::Latest,
             now: "2026-05-18T00:00:00Z".to_string(),
         };
 
-        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse);
+        let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse);
         assert!(result.is_err());
     }
 
@@ -2231,7 +2262,6 @@ mod tests {
     fn make_pull_request() -> PullRequest {
         PullRequest {
             package_name: "test-pkg".to_string(),
-            registry_url: "file:///test".to_string(),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         }
@@ -2239,8 +2269,13 @@ mod tests {
 
     /// unwrap_err() requires Debug on the Ok type; PullResult intentionally
     /// has no Debug derive (deep persistence types), so match instead.
-    fn expect_pull_err(reg: &LocalRegistry, req: &PullRequest, prof: &std::path::Path) -> CalpError {
-        match pull(reg, req, prof, PinPolicy::PinOnFirstUse) {
+    fn expect_pull_err(
+        reg: &LocalRegistry,
+        req: &PullRequest,
+        scope: &RegistryScope,
+        prof: &std::path::Path,
+    ) -> CalpError {
+        match pull(reg, req, scope, prof, PinPolicy::PinOnFirstUse) {
             Ok(_) => panic!("pull unexpectedly succeeded"),
             Err(e) => e,
         }
@@ -2271,7 +2306,7 @@ mod tests {
         assert!(!ver.artifact_checksums.is_empty());
 
         // ...and an untampered pull passes the integrity gate.
-        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
@@ -2289,7 +2324,7 @@ mod tests {
             .join("data.json");
         fs::write(&data_path, "{\"cells\": \"tampered\"}").unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
         let msg = err.to_string();
         assert!(msg.contains("Package integrity check failed"), "msg: {}", msg);
@@ -2314,7 +2349,7 @@ mod tests {
         let blob = dir.path().join(".blobs").join(&hash[0..2]).join(hash);
         fs::write(&blob, "{\"cells\": \"corrupted\"}").unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
         assert!(err.to_string().contains("data.json"));
     }
@@ -2333,7 +2368,7 @@ mod tests {
         let blob = dir.path().join(".blobs").join(&hash[0..2]).join(hash);
         fs::remove_file(&blob).unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::MissingArtifact { .. }));
         assert!(err.to_string().contains("styles.json"));
     }
@@ -2354,7 +2389,7 @@ mod tests {
         reg.write_version_manifest("test-pkg", "1.0.0", &ver).unwrap();
         resign_manifest(&reg, prof.path(), "test-pkg", "1.0.0");
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::MissingChecksums { .. }));
         let msg = err.to_string();
         assert!(msg.contains("without integrity checksums"), "msg: {}", msg);
@@ -2411,7 +2446,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(result.sheets.len(), 2);
     }
 
@@ -2424,11 +2459,10 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &request, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Same number of sheets
         assert_eq!(result.sheets.len(), original_wb.sheets.len());
@@ -2499,11 +2533,10 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "d9-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // The metadata-rich sheet round-trips fully.
         let pulled = &result.sheets[0].sheet;
@@ -2604,11 +2637,10 @@ mod tests {
         // Pull and assert content round-trips (and passes the integrity gate).
         let pull_req = PullRequest {
             package_name: "c8-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.module_scripts.len(), 1);
         let m = &result.module_scripts[0];
@@ -2653,7 +2685,7 @@ mod tests {
         assert!(ver.module_scripts.is_empty());
         assert!(ver.notebooks.is_empty());
 
-        let result = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert!(result.module_scripts.is_empty());
         assert!(result.notebooks.is_empty());
     }
@@ -2743,11 +2775,10 @@ mod tests {
         // stripped defensively at pull.
         let pull_req = PullRequest {
             package_name: "evil-pkg".to_string(),
-            registry_url: format!("file://{}", dir.path().display()),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
-        let result = pull(&reg, &pull_req, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.notebooks.len(), 1);
         // Provenance is re-stamped with the ACTUAL package on pull, overriding the
@@ -2785,7 +2816,7 @@ mod tests {
         assert_ne!(tampered, text, "expected to find the published_by value to tamper");
         fs::write(&manifest_path, tampered).unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::ManifestSignatureInvalid { .. }), "got {:?}", err);
         assert!(err.to_string().contains("test-pkg@1.0.0"));
     }
@@ -2805,7 +2836,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::MissingSignature { .. }), "got {:?}", err);
         assert!(err.to_string().contains("not signed"));
     }
@@ -2818,11 +2849,11 @@ mod tests {
         publish_test_package(&reg, prof.path());
 
         // First pull pins the publisher key.
-        let first = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let first = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
         // Second pull (same package, same key) verifies against the pin.
-        let second = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let second = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(second.trust_status, TrustStatus::Verified);
     }
 
@@ -2834,7 +2865,7 @@ mod tests {
         publish_test_package(&reg, prof.path());
 
         // First pull pins publisher A's key.
-        let first = pull(&reg, &make_pull_request(), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let first = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
         // Re-sign the SAME package with a DIFFERENT publisher (key B) — as a
@@ -2863,7 +2894,7 @@ mod tests {
 
         // The signature is cryptographically valid (for B), but B != the
         // pinned key A -> PublisherKeyChanged.
-        let err = expect_pull_err(&reg, &make_pull_request(), prof.path());
+        let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::PublisherKeyChanged { .. }), "got {:?}", err);
         let msg = err.to_string();
         assert!(msg.contains("changed since first use"), "msg: {}", msg);

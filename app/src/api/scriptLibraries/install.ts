@@ -34,7 +34,7 @@ import type { CapabilityGrant, ChangedScript } from "../distributedConsent";
 import type { CapabilityId } from "../scriptHost/capabilityIds";
 import { consentKeyFor } from "./consentKey";
 import { commitLockedLibraries, loadLockfile, removeLockedLibrary } from "./lockfile";
-import { resolveClosure, resolveForInstall } from "./registry";
+import { libraryTrustIsNameConflict, resolveClosure, resolveForInstall } from "./registry";
 import { parseModulePragmas } from "./usesPragma";
 import type {
   LibraryClosure,
@@ -56,13 +56,21 @@ export interface InstallPlanNode {
   /**
    * As reported by the PREVIEW resolve, so it is one of:
    *   "notInstalled" — authentic, but this machine has never agreed to trust
-   *                    this publisher for this package name. THE NORMAL STATE
-   *                    OF A PACKAGE THE USER IS ABOUT TO INSTALL, and the only
-   *                    first-contact answer a preview may give.
-   *   "verified"     — matches the key already pinned for this name.
+   *                    this publisher for this package name FROM THIS REGISTRY.
+   *                    THE NORMAL STATE OF A PACKAGE THE USER IS ABOUT TO
+   *                    INSTALL, and the only ordinary first-contact answer a
+   *                    preview may give.
+   *   "notInstalledNameConflict"
+   *                  — as above, AND a DIFFERENT publisher key is already
+   *                    trusted for this same library name from another
+   *                    registry. Two registries claiming one name is what a
+   *                    hijack looks like; installing past it needs a second,
+   *                    explicit answer (`acceptNameConflict`).
+   *   "verified"     — matches the key already pinned for this name in this
+   *                    registry.
    * Never "unsigned" (an unsigned package cannot be resolved at all — the
-   * backend refuses before returning any source) and never "firstUse", which
-   * only `applyInstall` can produce because only it creates a pin.
+   * backend refuses before returning any source) and never any "firstUse*"
+   * state, which only `applyInstall` can produce because only it creates a pin.
    *
    * UI MUST NOT collapse this to a two-way "firstUse or verified" test:
    * "notInstalled" is NOT verified, and presenting it as such tells the user
@@ -209,6 +217,10 @@ export async function planInstall(
  */
 async function pinApprovedPublishers(plan: InstallPlan): Promise<void> {
   if (plan.nodes.length === 0) return;
+  // A cross-registry NAME CONFLICT must have been surfaced in the plan the user
+  // approved, and it is carried forward here as an explicit acceptance. The
+  // backend refuses to pin a conflicting name without it, so an install flow
+  // that never showed the conflict cannot silently trust a second claimant.
   const resolved = await resolveForInstall(
     plan.registry,
     plan.nodes.map((n) => ({
@@ -216,6 +228,7 @@ async function pinApprovedPublishers(plan: InstallPlan): Promise<void> {
       pin: n.pin,
       expectedPublisherKey: n.publisherKey,
       expectedVersion: n.version,
+      acceptNameConflict: libraryTrustIsNameConflict(n.trustStatus),
     })),
   );
 

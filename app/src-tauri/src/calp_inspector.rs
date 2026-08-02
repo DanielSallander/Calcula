@@ -22,7 +22,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use calp::integrity::{sha256_hex, verify_and_load_manifest_via, PinPolicy, TrustStatus};
+use calp::integrity::{
+    sha256_hex, verify_and_load_manifest_via, OtherScopePin, PinPolicy, TrustStatus,
+    VerifiedManifest,
+};
 use calp::manifest::VersionManifest;
 use calp::transport::RegistryTransport;
 use calp::version::VersionPin;
@@ -64,18 +67,35 @@ fn open_verified(
     package_name: &str,
     version_pin: &str,
     check_artifacts: bool,
-) -> Result<(Box<dyn RegistryTransport>, String, TrustStatus, VersionManifest), String> {
-    let registry =
-        crate::calp_registry::open_registry(registry_path).map_err(|e| e.to_string())?;
+) -> Result<
+    (
+        Box<dyn RegistryTransport>,
+        String,
+        TrustStatus,
+        Vec<OtherScopePin>,
+        VersionManifest,
+    ),
+    String,
+> {
+    let (registry, scope) =
+        crate::calp_registry::open_registry_scoped(registry_path).map_err(|e| e.to_string())?;
     let pin = VersionPin::parse(version_pin).map_err(|e| e.to_string())?;
     let resolved = registry
         .resolve_version(package_name, &pin)
         .map_err(|e| e.to_string())?;
     let version = resolved.to_string();
-    let (trust, manifest) = verify_and_load_manifest_via(
+    // The pin is scoped to the registry this inspection is reading, so pointing
+    // the inspector at a second registry serving a familiar package name reports
+    // the name conflict instead of quietly reading as ordinary first contact.
+    let VerifiedManifest {
+        trust,
+        manifest,
+        other_scope_pins,
+    } = verify_and_load_manifest_via(
         registry.as_ref(),
         package_name,
         &version,
+        &scope,
         &calcula_profile_dir(),
         PinPolicy::VerifyOnly,
     )
@@ -95,7 +115,7 @@ fn open_verified(
             )
         })?;
     }
-    Ok((registry, version, trust, manifest))
+    Ok((registry, version, trust, other_scope_pins, manifest))
 }
 
 /// `open_verified` for the SECTION commands (sheet / scripts / model /
@@ -116,7 +136,7 @@ fn open_verified_content(
     version_pin: &str,
     check_artifacts: bool,
 ) -> Result<(Box<dyn RegistryTransport>, String, VersionManifest), String> {
-    let (registry, version, _trust, manifest) =
+    let (registry, version, _trust, _other_scope_pins, manifest) =
         open_verified(registry_path, package_name, version_pin, check_artifacts)?;
     Ok((registry, version, manifest))
 }
@@ -124,13 +144,39 @@ fn open_verified_content(
 /// Wire string for `TrustStatus`. EXHAUSTIVE on purpose (no `_` arm): a new
 /// trust state must not reach the frontend until someone has decided how it is
 /// presented.
-fn trust_status_str(trust: TrustStatus) -> String {
+pub(crate) fn trust_status_str(trust: TrustStatus) -> String {
     match trust {
         TrustStatus::FirstUse => "firstUse",
+        TrustStatus::FirstUseKnownPublisher => "firstUseKnownPublisher",
+        TrustStatus::FirstUseAcceptedNameConflict => "firstUseAcceptedNameConflict",
         TrustStatus::Verified => "verified",
         TrustStatus::NotPinned => "notPinned",
+        TrustStatus::NotPinnedNameConflict => "notPinnedNameConflict",
     }
     .to_string()
+}
+
+/// Wire shape for a pin held for the SAME package name in a DIFFERENT registry.
+/// Only the user's own spelling of the other registry is exposed — never the
+/// normalized scope id, which is key material and not a thing anyone typed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherScopePinInfo {
+    pub scope_label: String,
+    pub publisher_key: String,
+    pub pinned_at: String,
+    pub same_key: bool,
+}
+
+pub fn other_scope_pins_wire(pins: &[OtherScopePin]) -> Vec<OtherScopePinInfo> {
+    pins.iter()
+        .map(|p| OtherScopePinInfo {
+            scope_label: p.scope_label.clone(),
+            publisher_key: p.publisher_key.clone(),
+            pinned_at: p.pinned_at.clone(),
+            same_key: p.same_key,
+        })
+        .collect()
 }
 
 /// Read + parse an optional JSON artifact; None when absent or unparseable
@@ -231,7 +277,10 @@ pub fn calp_inspector_resolve_location(
         });
     }
 
-    let raw = path.strip_prefix("file://").unwrap_or(&path).to_string();
+    // The crate's ONE `file://` stripper — a local `strip_prefix("file://")`
+    // leaves `file:///C:/reg` as `/C:/reg` (an unopenable path) and turns
+    // `file://server/share` into a cwd-relative one.
+    let raw = calp::registry_id::strip_file_scheme(&path);
     let picked = std::path::PathBuf::from(&raw);
 
     // The package name comes from the manifest (authoritative), not the
@@ -314,8 +363,13 @@ pub struct InspectorManifestInfo {
     /// fail verification before this DTO is ever built).
     pub publisher_key: String,
     pub min_app_version: String,
-    /// "firstUse" | "verified" (TOFU outcome for this inspection).
+    /// A `CalpTrustStatus` — the TOFU outcome for this inspection, scoped to the
+    /// registry being inspected.
     pub trust_status: String,
+    /// Pins held for this SAME package name in OTHER registries. Populated for
+    /// every status, so the overview can show "you already trust this publisher
+    /// from elsewhere" as readily as "a different key claims this name".
+    pub other_scope_pins: Vec<OtherScopePinInfo>,
     /// Whether THIS machine holds the signing key (publisher-side view).
     pub is_publisher: bool,
     pub artifact_count: usize,
@@ -573,7 +627,7 @@ pub fn calp_inspector_overview(
     window: tauri::Window,
 ) -> Result<InspectorOverview, String> {
     window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
-    let (registry, version, trust, manifest) =
+    let (registry, version, trust, other_scope_pins, manifest) =
         open_verified(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
     let profile_dir = calcula_profile_dir();
@@ -875,6 +929,7 @@ pub fn calp_inspector_overview(
             publisher_key: manifest.publisher_key.clone(),
             min_app_version: manifest.min_app_version.clone(),
             trust_status: trust_status_str(trust),
+            other_scope_pins: other_scope_pins_wire(&other_scope_pins),
             is_publisher,
             artifact_count: manifest.artifact_checksums.len(),
         },
@@ -1998,7 +2053,7 @@ pub fn calp_inspector_verify_artifacts(
     // otherwise, and the UI surfaces that error as the report). The artifact
     // walk is deliberately NOT run up-front here — this command's whole job
     // is the per-artifact report below.
-    let (registry, version, trust, manifest) =
+    let (registry, version, trust, _other_scope_pins, manifest) =
         open_verified(&registry_path, &package_name, &version_pin, false)?;
     let reg = registry.as_ref();
 

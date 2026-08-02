@@ -1507,7 +1507,120 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
   frontend had not yet learned rendered exactly like the safe case. `undefined` and `null` are now
   distinguished, with the unknown branch rendering a danger notice.
 
+- ~~**A TOFU pin was keyed by PACKAGE NAME ALONE, so first contact owned the name machine-wide.**~~
+  — **CLOSED (Wave K).** The residual left at the end of the Wave J pin-policy work, and the last
+  fail-open shape in the `.calp` trust root. `pin_publisher` wrote a flat `packageName ->
+  publisherKeyHex` map, which had two consequences and neither was cosmetic. **Squat:** a package
+  `acme.finance` served once from `\evil\share` wrote the pin that the GENUINE `acme.finance`
+  would later be measured against, so the real publisher's first legitimate release reported
+  `publisherChanged` — the accusation pointed at the victim. **Collision:** three namespaces shared
+  that one map (report packages, script libraries, registry-published skins), so an administrator's
+  `%PROGRAMDATA%` pre-pin silently overwrote a user's pin for the same name.
+
+  The fix is a **key shape** plus a **cross-scope check**, and it needed both. A pin is now
+  `(namespace, registry scope, name)`, built only by `PinKey::calp(&RegistryScope, name)` or
+  `PinKey::extension(id)` — there is no public constructor taking raw strings, so a call site cannot
+  invent a scope, and the `"ext:" + id` string convention is gone. `RegistryScope`
+  (`core/calp/src/registry_id.rs`) derives a normalized id from the location string **the user
+  configured** — never from the transport, because `managed_policy`'s pre-pin has no transport, an
+  HTTP transport's self-report is server-influenced, and the string used to OPEN a registry must be
+  the string used to SCOPE it. `calp_registry::open_registry_scoped` hands back the transport and the
+  scope together and `open_registry` is private, so the two cannot drift apart.
+
+  Registry scoping ALONE would have traded a loud false alarm for a quiet true miss: a hostile
+  registry serving a familiar name would become an ordinary silent first use. So every first contact
+  also asks *"is this name pinned in another scope, and to which key?"*. Same key elsewhere →
+  `FirstUseKnownPublisher` (a migration, a mirror, or one location spelled two ways). Different key
+  elsewhere → `NotPinnedNameConflict` passively, and `CalpError::PublisherNameConflict` from a plain
+  `PinOnFirstUse` — an **error**, not a status, because an error cannot be bound as `_` and carried
+  on. Only `PinPolicy::PinAcceptingNameConflict`, reachable solely from a UI that displayed both
+  registries and both key fingerprints and got a second, differently-worded confirmation, can write
+  that pin, and it reports `FirstUseAcceptedNameConflict` so the audit trail never calls it an
+  ordinary first use.
+
+  **That cross-check is also what makes an imperfect canonicalizer safe.** `canonicalize` resolves
+  junctions, `subst` drives and relative paths, but it fails for a registry that does not exist yet
+  or a UNC server that is offline, and it cannot always merge a mapped drive with its target. Each
+  of those would be a new scope — and lands in the *same-key* branch, i.e. one redundant pin row and
+  a reassuring notice. Never a false hijack alarm, and never a silent accept of a different key.
+
+  **Extension pins stay machine-global, by decision** (`PinKey::extension`, no scope). There is no
+  registry; the only candidate scope is the source FOLDER, which is the attacker's own choice, so
+  scoping by it would give a bundle dropped in `Downloads` a pristine scope and a free `firstUse` on
+  an id it does not own — re-opening the squat Wave H closed — and it cannot be recorded honestly
+  anyway because the installer copies the files. `installTrustChain.test.ts` now fails if a
+  scope-derived status appears in `EXTENSION_TRUST_STATUSES`, so this is not re-litigated by
+  accident. Managed skins gain no namespace of their own: a registry skin IS a `.calp` package, and
+  the admin pre-pin writes the exact key the pull reads (`managed_policy` no longer carries its own
+  `file://` stripper; `the_prepin_scope_matches_the_scope_the_pull_reads` is the test that catches a
+  second canonicalizer).
+
+  Surfaced everywhere the vocabulary already went — six `TrustStatus` variants with one Rust
+  wire-string map (`calp_inspector::trust_status_str`; `calp_commands` delegates rather than keeping
+  a second copy), rows in `OverviewSection`, `SubscribeDialog`, `SubscriptionManagerPane`,
+  `AppearancePage` and `ScriptMarketplace`, and one net-new surface: a **Trusted publishers** section
+  in the transparency panel, which is the only place an ACCEPTED name conflict stays visible after
+  the dialog is gone.
+
+  **Why this key and not another** (so the next reader does not re-litigate it). *Name-only* refuses
+  a cross-registry key substitution but hands the first contact with a name ownership of it on the
+  whole machine — the bug. *Registry-scoped alone* removes the squat and the false alarm but makes a
+  hostile registry serving a familiar name an ordinary silent first use — the inverse of the
+  `NotPinned` / `notInstalled` / `TRUST_UNAVAILABLE` philosophy this codebase has committed to three
+  times. The *hybrid* — scoped key plus a mandatory cross-scope name check — is the only one of the
+  three with no silent branch, and the check costs one map scan. The scope is derived from the
+  location string the user configured because it must be computable offline, before any transport
+  exists (the admin pre-pin has none), and because a server-influenced identity is not an identity
+  worth pinning to. Origin-only for HTTP is refused: GitHub Pages and S3 routinely serve
+  administratively separate registries from one host, and merging them would re-create the very
+  substitution name-only keying got right.
+
+  **Two defects found by the adversarial verification pass, both fixed.**
+  1. **The `file://` split-view came back through the app crate.** `core` really does have one
+     stripper, but ten app-crate sites ran their own `strip_prefix("file://")` on a subscription's
+     `registry_url` *before* calling `open_registry_scoped`, handing the scope derivation a
+     different string than `pull` had scoped the pin with: `file:///C:/reg` became `/C:/reg` and
+     scoped as `\c:\reg`, and `file://server/share` became a path relative to the process working
+     directory. The pin was written under one identity and read under another, so `RequirePinned`
+     answered `PublisherNotPinned` and writeback, GATHER, model writeback, refresh grouping and
+     package HTML export silently went inert for those subscriptions. A pin that is never consulted
+     is not a pin, and this failed in the direction that produces no message at all. All ten now
+     pass the location through unchanged (or use `calp::registry_id::strip_file_scheme` where a real
+     filesystem path is genuinely wanted), and
+     `tofu_pin_policy_guard_tests::nothing_pre_strips_the_file_scheme_before_deriving_a_scope`
+     fails if a local stripper reappears in any of the eight trust-bearing files.
+     `registry_id::a_locally_pre_stripped_file_url_scopes_to_a_different_registry` pins the
+     divergence numerically so the shortcut cannot look harmless.
+  2. **The cross-scope conflict check could be dodged by re-casing the package name.** The scan
+     compared names byte-for-byte, so a hostile registry serving `ACME.Finance` at a user who
+     already trusted `acme.finance` produced a plain amber `NotPinned` instead of the red
+     two-registries-one-name warning — and on a local (case-insensitive) filesystem registry those
+     are frequently the same package. The scan is now `eq_ignore_ascii_case`; `PinKey` lookups stay
+     exact, so the loosening can only ADD a warning and can never satisfy a pin it did not create
+     (`a_recased_package_name_cannot_dodge_the_cross_registry_conflict` asserts both halves).
+
+  **One over-trust gap closed in the same pass.** `applyInstall` derives `acceptNameConflict` from
+  the reviewed plan, but the Script Marketplace's confirm button still said plain **"Install"**, so
+  one ordinary click accepted a cross-registry name conflict — including one carried by a
+  *transitive* dependency the user never named, whose only warning was a badge partway down a
+  capability list. The plan now states the conflict as an aggregate naming the packages, and the
+  button becomes "Trust these publishers anyway", matching `SubscribeDialog` and
+  `install_extension`'s `acceptPublisherChange`. Guarded by `libraryTrustBadge.test.ts`.
+
 **Still open**
+- **Existing `.calp` pins were DISCARDED, so every current subscription re-prompts once.** The v1
+  store recorded only a package name, and there is no honest way to infer which registry a pin
+  belonged to: the available sources (`registries.json`, subscriptions inside `.cala` files) have no
+  package linkage, and a wrong guess would BIND A PIN TO A REGISTRY IT DOES NOT BELONG TO — the
+  silent-accept outcome the whole change exists to remove, most likely to be wrong in exactly the
+  multi-registry case that motivated it. Extension pins migrate losslessly (`ext:<id>` is the same
+  key with the same meaning); everything else is written to
+  `trusted-publishers.v1.discarded.json` for the user to audit and nothing reads it. Consequence, by
+  design: a subscription reports `notPinned` and its writeback/GATHER stays inert until the user
+  re-subscribes — the same user-visible behaviour the entry below already names, reached once more
+  at upgrade. Managed installs self-heal (`resolve_effective_policy` re-writes its pre-pin at every
+  launch). Deliberately NOT given an upgrade-specific trust status: a state meaning "you upgraded
+  once in August 2026" ages badly and would need a row in every presentation map forever.
 - **The engine has no evaluation TIME or step budget.** The depth ceiling does not cover it: a
   shallow exponential (`fib` without memoization) or a wide `MAP` over a million cells is slow
   without being deep, and hangs the caller. The QuickJS surfaces have a deadline

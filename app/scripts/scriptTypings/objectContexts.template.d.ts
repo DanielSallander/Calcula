@@ -1138,19 +1138,30 @@ declare interface ScriptPackageInspection {
   /** The signer's Ed25519 public key (hex) — the only comparable identity. */
   publisherKey: string;
   /**
+   * A publisher pin belongs to the REGISTRY it came from, not to the package
+   * name alone, so every status below is about this registry.
+   *
    * "verified"  — signed by the key this machine pinned when the USER
-   *               subscribed to this package.
+   *               subscribed to this package from this registry.
    * "notPinned" — the signature is valid, but nobody on this computer has ever
-   *               agreed to trust that signer for this package name. This is
-   *               what `inspect()` normally returns: inspecting is PASSIVE and
-   *               deliberately does not create trust, so a script cannot make a
-   *               package trusted merely by asking about it.
-   * "firstUse"  — unreachable from `inspect()`; only a commit point (a pull the
+   *               agreed to trust that signer for this package name from this
+   *               registry. This is what `inspect()` normally returns:
+   *               inspecting is PASSIVE and deliberately does not create trust,
+   *               so a script cannot make a package trusted merely by asking
+   *               about it.
+   * "notPinnedNameConflict"
+   *             — as above, AND a DIFFERENT publisher key is already trusted
+   *               for this same package name from another registry. Two
+   *               registries claiming one name is what a package hijack looks
+   *               like. Treat it as worse than "notPinned", never as first
+   *               contact.
+   * "firstUse", "firstUseKnownPublisher", "firstUseAcceptedNameConflict"
+   *             — unreachable from `inspect()`; only a commit point (a pull the
    *               user performed) can pin.
    *
    * AUTHENTIC IS NOT TRUSTED: anyone can generate a key and sign a package, so
    * a valid signature proves only that the bytes are unaltered. Do not treat
-   * "notPinned" as success.
+   * "notPinned" — or, especially, "notPinnedNameConflict" — as success.
    */
   trustStatus: string;
   sheets: Array<{ name: string; description: string }>;
@@ -1172,9 +1183,13 @@ declare interface ScriptPullResult {
    *  approves them. */
   scriptsPulled: number;
   publisherName: string;
-  /** "firstUse" (the pin was created by this pull) or "verified" (it matched
-   *  the existing pin). A pull is a commit point, so "notPinned" cannot occur
-   *  here — see ScriptPackageInspection.trustStatus for the full vocabulary. */
+  /** One of the pinning states: "verified" (matched the pin this registry
+   *  already held), "firstUse" (the pin was created by this pull),
+   *  "firstUseKnownPublisher" (created for this registry, same key already
+   *  trusted elsewhere) or "firstUseAcceptedNameConflict" (created despite a
+   *  different key holding this name at another registry). A pull is a commit
+   *  point, so neither "notPinned" state can occur here — see
+   *  ScriptPackageInspection.trustStatus for the full vocabulary. */
   trustStatus: string;
 }
 

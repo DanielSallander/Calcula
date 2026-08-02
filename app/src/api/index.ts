@@ -1871,6 +1871,7 @@ export {
   saveDataSourceConfig,
   getDataSources,
   getSheetIdForIndex,
+  listTrustedPublishers,
 } from "./distribution";
 
 export type {
@@ -1888,6 +1889,10 @@ export type {
   SubscriptionManifest,
   SubscriptionTrustInfo,
   CalpTrustStatus,
+  OtherScopePin,
+  TrustedPublisherPin,
+  TrustedPublisherName,
+  TrustedPublisherReport,
   Subscription,
   SubscribedSheet,
   SubscribedObject,

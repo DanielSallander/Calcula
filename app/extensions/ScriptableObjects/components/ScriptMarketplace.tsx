@@ -36,6 +36,7 @@ import {
   checkUpdates,
   uninstallLibrary,
   listInstalledLibraries,
+  libraryTrustIsNameConflict,
   type RegistryPackageInfo,
   type InstallPlan,
   type LockedLibrary,
@@ -163,6 +164,12 @@ const tag = (bg: string, fg: string): React.CSSProperties => ({
  * it had never seen. Neutral tone, and the word "verified" is reserved for the
  * one status that earns it.
  *
+ * `notInstalledNameConflict` is the scoped-pin twin: another registry is already
+ * trusted for this library NAME under a DIFFERENT publisher key. Pins are keyed by
+ * (registry, package), so a second registry serving a familiar name is first
+ * contact rather than a refusal — and this badge is what stops that from being a
+ * QUIET first contact. It is red, deliberately.
+ *
  * `unknown` exists so a status added in Rust and not added here degrades to a
  * caution badge naming the raw value, rather than silently reading as safe.
  */
@@ -172,14 +179,42 @@ function trustBadge(status: string): { label: string; style: React.CSSProperties
       return { label: "verified publisher", style: tag("#E8F4EA", "#1B6B2C") };
     case "firstUse":
       return { label: "first use — trusting this key now", style: tag("#FFF4E5", "#8A5300") };
+    case "firstUseKnownPublisher":
+      return {
+        label: "first use here — publisher already trusted elsewhere",
+        style: tag("#FFF4E5", "#8A5300"),
+      };
+    case "firstUseAcceptedNameConflict":
+      return {
+        label: "trusted despite a NAME CONFLICT",
+        style: tag("#FDE7E9", "#A80000"),
+      };
     case "notInstalled":
       return {
         label: "publisher not previously trusted",
         style: tag("#F0F0F0", "#444"),
       };
+    case "notInstalledNameConflict":
+      return {
+        label: "NAME CONFLICT — another registry owns this name",
+        style: tag("#FDE7E9", "#A80000"),
+      };
     default:
       return { label: `unrecognized trust state (${status})`, style: tag("#FDE7E9", "#A80000") };
   }
+}
+
+/**
+ * The packages in this plan whose name is already trusted from ANOTHER registry
+ * under a DIFFERENT publisher key.
+ *
+ * `applyInstall` turns exactly this condition into `acceptNameConflict: true` on
+ * the backend request, so it is the thing the confirmation button has to be
+ * about. Computed over the WHOLE closure, not just `roots`: a transitive
+ * dependency the user never named can be the conflicting one.
+ */
+function conflictingPackages(plan: InstallPlan): string[] {
+  return plan.nodes.filter((n) => libraryTrustIsNameConflict(n.trustStatus)).map((n) => n.package);
 }
 
 // ============================================================================
@@ -323,6 +358,39 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
         Install {p.roots.join(", ")}
       </div>
+      {/*
+        THE NAME CONFLICT IS AN AGGREGATE STATEMENT, not a per-row badge.
+        Pins are keyed by (registry, package), so a SECOND registry serving a
+        familiar name is first contact rather than a refusal — and `applyInstall`
+        carries that acceptance to the backend. Two things follow, and both used
+        to be missing here: the conflict must be stated where the decision is
+        made (a badge three lines into a capability list is not that), and it
+        must name the packages, because a plan closure can contain a conflicting
+        TRANSITIVE dependency the user never asked for by name.
+      */}
+      {conflictingPackages(p).length > 0 && (
+        <div
+          style={{
+            ...card,
+            background: "#FDE7E9",
+            border: "1px solid #F0B3B7",
+            color: "#7A1116",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            NAME CONFLICT — another registry already owns{" "}
+            {conflictingPackages(p).length === 1 ? "this name" : "these names"}
+          </div>
+          {conflictingPackages(p).join(", ")}{" "}
+          {conflictingPackages(p).length === 1 ? "is" : "are"} already trusted on this
+          computer from a DIFFERENT registry, under a DIFFERENT publisher key. The
+          signatures here are valid, but a valid signature only proves the bytes were
+          not altered — it does not say who signed them. Two registries claiming one
+          name is exactly what a package hijack looks like. Installing records THIS
+          key for THIS registry as well; both publishers stay trusted, each for its
+          own registry.
+        </div>
+      )}
       {p.upToDate && (
         <div style={{ ...card, borderStyle: "dashed" }}>
           Every package in this closure is already installed and approved in this workbook.
@@ -618,8 +686,38 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
               <button style={btn} onClick={() => setPlan(null)} disabled={busy}>
                 Cancel
               </button>
-              <button style={btnPrimary} onClick={() => void confirmInstall()} disabled={busy}>
-                Install
+              {/*
+                A NAME CONFLICT gets a SECOND, DIFFERENTLY-WORDED question — the
+                same two-step shape the Subscribe dialog uses for `.calp`
+                packages and `install_extension` uses for `acceptPublisherChange`.
+                `applyInstall` sets `acceptNameConflict` from the plan's trust
+                status, so this button IS the acceptance: leaving it worded
+                "Install" would have meant one ordinary click trusting a second
+                claimant to a familiar name.
+              */}
+              <button
+                style={
+                  conflictingPackages(plan).length > 0
+                    ? {
+                        ...btnPrimary,
+                        background: "#FDE7E9",
+                        border: "1px solid #F0B3B7",
+                        color: "#A80000",
+                      }
+                    : btnPrimary
+                }
+                title={
+                  conflictingPackages(plan).length > 0
+                    ? "Another registry already holds this package name under a different " +
+                      "publisher key. Installing records THIS key for THIS registry as well."
+                    : undefined
+                }
+                onClick={() => void confirmInstall()}
+                disabled={busy}
+              >
+                {conflictingPackages(plan).length > 0
+                  ? "Trust these publishers anyway"
+                  : "Install"}
               </button>
             </>
           ) : (

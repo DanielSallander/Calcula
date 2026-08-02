@@ -15,9 +15,11 @@
 //!     also carries the publisher's PUBLIC key (`publisher_key`), so the
 //!     subscriber knows the asserted signer.
 //!   - On pull/refresh/inspect, the signature is verified BEFORE artifact
-//!     checksums, and the publisher key is pinned trust-on-first-use:
-//!     `trusted-publishers.json` maps packageName -> publisherKeyHex. First
-//!     pull pins; later pulls must match the pin, else PublisherKeyChanged.
+//!     checksums, and the publisher key is pinned trust-on-first-use in
+//!     `trusted-publishers.json`, keyed by `(namespace, registry scope, name)`
+//!     — see the `PinKey` doc comment for why the key is not the name alone.
+//!     First pull pins; later pulls must match the pin, else
+//!     PublisherKeyChanged.
 //!
 //! This module owns the keypair, the sign/verify primitives, and the TOFU
 //! store. integrity.rs wires them into the pull/inspect verification step.
@@ -27,7 +29,7 @@
 //! deliberately, so an author has ONE publisher identity and the app has ONE
 //! trust root. The extension-specific pieces (file layout, the `codeHash` field
 //! that extends signature coverage from the manifest to the bundle, and the
-//! `ext:<id>` TOFU namespace) live at the bottom of this file so the signing
+//! `PinNamespace::Ext` TOFU namespace) live at the bottom of this file so the signing
 //! tool (`core/calcula-sign`), the installer and the scan-time verifier all
 //! share one implementation instead of three that can drift.
 
@@ -245,28 +247,150 @@ pub fn verify_signature(
 }
 
 // ---------------------------------------------------------------------------
-// TOFU store (trusted-publishers.json: packageName -> publisherKeyHex)
+// TOFU pin store (trusted-publishers.json)
 // ---------------------------------------------------------------------------
+//
+// WHY THE KEY HAS THREE PARTS. The store used to be a flat `packageName ->
+// publisherKeyHex` map, so a package name mapped to one key for the whole
+// MACHINE and whoever made first contact with a name owned it: `acme.finance`
+// served once from `\\evil\share` wrote the pin that the genuine `acme.finance`
+// was later measured against, and the real publisher's first release reported
+// `PublisherKeyChanged` — an accusation pointed at the victim. The name was also
+// shared across THREE namespaces: a report package, a script library and an org
+// skin called `acme.finance` all wrote the same row, so an administrator's
+// pre-pin silently overwrote a user's.
+//
+// A pin is now `(namespace, registry scope, name)`, built ONLY through
+// `PinKey::calp` / `PinKey::extension`. Nothing anywhere concatenates a key
+// string: the shape that made `"ext:" + id` a convention rather than a type is
+// exactly the shape that let the three namespaces collide.
 
-/// On-disk format for the trust-on-first-use publisher pin store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::registry_id::RegistryScope;
+
+/// Which trust namespace a pin belongs to. A `.calp` package (report, script
+/// library or registry-published skin — all the same artifact over the same
+/// rail) and an installed extension are different kinds of thing with different
+/// naming authorities, and a name in one must never satisfy a lookup in the
+/// other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TrustedPublishersFile {
-    format_version: u32,
-    /// Map of package name -> pinned publisher public key (hex).
-    publishers: BTreeMap<String, String>,
+pub enum PinNamespace {
+    /// Anything pulled from a `.calp` registry: reports, script libraries, skins.
+    Calp,
+    /// An installed third-party extension add-in, keyed by its id.
+    Ext,
 }
 
-impl Default for TrustedPublishersFile {
-    fn default() -> Self {
-        Self {
-            format_version: 1,
-            publishers: BTreeMap::new(),
+impl PinNamespace {
+    /// Stable wire string (also what the on-disk store carries).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PinNamespace::Calp => "calp",
+            PinNamespace::Ext => "ext",
         }
     }
 }
 
-/// Where the TOFU pin map lives. Public so a test can corrupt exactly the file
+/// The identity a pin is filed under. Constructed ONLY by the two functions
+/// below — there is no public constructor taking raw strings, so a call site
+/// cannot invent a scope or a namespace of its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PinKey {
+    namespace: PinNamespace,
+    /// The `RegistryScope::id` (normalized key material), or "" where the
+    /// namespace has no registry.
+    scope: String,
+    name: String,
+}
+
+impl PinKey {
+    /// THE key construction. Every pin key in the codebase is built here.
+    fn new(namespace: PinNamespace, scope_id: &str, name: &str) -> PinKey {
+        PinKey {
+            namespace,
+            scope: scope_id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// A `.calp` package pinned for ONE registry. Two registries serving the
+    /// same package name hold independent pins, so a squat in one cannot own the
+    /// name in another — and `PinStore::other_scopes_for_name` is what makes the
+    /// two visible to each other.
+    pub fn calp(scope: &RegistryScope, package: &str) -> PinKey {
+        Self::new(PinNamespace::Calp, &scope.id, package)
+    }
+
+    /// An extension add-in, pinned MACHINE-GLOBALLY by id.
+    ///
+    /// This is a decision, not an oversight. There is no registry here — an
+    /// extension is installed from a folder, and the only candidate scope is the
+    /// attacker's own choice of location, so scoping by source folder would give
+    /// a bundle dropped in `%USERPROFILE%\Downloads` a pristine scope and a free
+    /// first use on an id it does not own. That is precisely the squat Wave H
+    /// closed. For an id namespace with no naming authority behind it,
+    /// machine-global first-contact ownership IS the semantics; the protection
+    /// is that only a human at the installer can claim it.
+    pub fn extension(id: &str) -> PinKey {
+        Self::new(PinNamespace::Ext, "", id)
+    }
+
+    pub fn namespace(&self) -> PinNamespace {
+        self.namespace
+    }
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// One row of the pin store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinRecord {
+    pub namespace: PinNamespace,
+    /// `RegistryScope::id` — normalized key material. Never displayed.
+    pub scope: String,
+    /// The registry location EXACTLY as the user configured it. The only form a
+    /// UI, an error or an audit entry may show.
+    pub scope_label: String,
+    pub name: String,
+    /// Pinned Ed25519 public key (lowercase hex).
+    pub publisher_key: String,
+    /// RFC3339 timestamp of when this pin was written. Empty for a pin carried
+    /// over from the v1 store, which recorded no time.
+    pub pinned_at: String,
+}
+
+impl PinRecord {
+    fn key(&self) -> PinKey {
+        PinKey::new(self.namespace, &self.scope, &self.name)
+    }
+}
+
+/// On-disk format (v2). An ARRAY rather than a map, so a scope string containing
+/// any character at all is safe as data, and so the file stays greppable and
+/// auditable by a human looking at what their machine trusts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinFile {
+    format_version: u32,
+    pins: Vec<PinRecord>,
+}
+
+/// The v1 shape, read exactly once per profile (at migration) and never again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustedPublishersFileV1 {
+    format_version: u32,
+    publishers: BTreeMap<String, String>,
+}
+
+const PIN_FILE_VERSION: u32 = 2;
+
+/// Where the TOFU pin store lives. Public so a test can corrupt exactly the file
 /// the loader reads (rather than hard-coding the name and drifting from it) —
 /// which is how the "an unreadable pin store must not read as trusted" rule is
 /// proved rather than asserted.
@@ -274,39 +398,243 @@ pub fn trusted_publishers_file_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("trusted-publishers.json")
 }
 
-/// Load the TOFU pin map (packageName -> publisherKeyHex). Returns an empty
-/// map if the store does not exist yet.
-pub fn load_trusted_publishers(
-    profile_dir: &Path,
-) -> Result<BTreeMap<String, String>, CalpError> {
-    let path = trusted_publishers_file_path(profile_dir);
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let content = std::fs::read_to_string(&path)?;
-    let file: TrustedPublishersFile = serde_json::from_str(&content)?;
-    Ok(file.publishers)
+/// Where v1 pins that could not be migrated are written for the user to audit.
+/// NOTHING reads this file; it exists so "what did this machine used to trust?"
+/// has an answer after the format change.
+pub fn discarded_pins_file_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("trusted-publishers.v1.discarded.json")
 }
 
-/// Pin a package's publisher key (trust-on-first-use). Reads the current store,
-/// inserts/updates the entry, and writes it back. The profile directory is
-/// created if needed.
-pub fn pin_publisher(
+/// The machine's publisher pins, indexed by `PinKey`.
+#[derive(Debug, Clone, Default)]
+pub struct PinStore {
+    pins: BTreeMap<PinKey, PinRecord>,
+}
+
+impl PinStore {
+    /// The pin for exactly this (namespace, scope, name), if any.
+    pub fn get(&self, key: &PinKey) -> Option<&PinRecord> {
+        self.pins.get(key)
+    }
+
+    /// Pins for the SAME namespace and name in a DIFFERENT scope.
+    ///
+    /// This is the cross-check that makes registry scoping safe. Without it,
+    /// scoping would trade a loud false alarm (the genuine publisher reported as
+    /// a key change) for a quiet true miss (a hostile registry serving a familiar
+    /// name becoming an ordinary silent first use). With it, first contact in a
+    /// new scope can say which of the two it is: same key elsewhere = a migration
+    /// or a mirror; a different key elsewhere = a name conflict the user must be
+    /// shown before anything is pinned.
+    ///
+    /// THE NAME MATCH IS CASE-INSENSITIVE, and the exact-key lookup in `get` is
+    /// not. That asymmetry is deliberate and only ever points one way:
+    ///
+    ///   * `get` stays exact, so loosening the compare can never GRANT trust —
+    ///     `Acme.Finance` can never satisfy a pin recorded for `acme.finance`.
+    ///   * this scan is loose, so a hostile registry cannot dodge the conflict
+    ///     warning by re-casing a name the user already trusts. Local registries
+    ///     live on a case-insensitive filesystem, so `Acme.Finance` and
+    ///     `acme.finance` are frequently the very same package anyway; without
+    ///     this, one flipped letter turned a red `NotPinnedNameConflict` into an
+    ///     ordinary amber `NotPinned` — the quiet true miss this cross-check
+    ///     exists to prevent.
+    ///
+    /// The cost is that two genuinely distinct packages whose names differ only
+    /// by case (possible on an HTTP registry, where paths are case-sensitive)
+    /// report a conflict and need the second confirmation. That is the
+    /// conservative direction: loud and answerable, not silent.
+    pub fn other_scopes_for_name(
+        &self,
+        namespace: PinNamespace,
+        name: &str,
+        exclude_scope: &str,
+    ) -> Vec<&PinRecord> {
+        self.pins
+            .values()
+            .filter(|r| {
+                r.namespace == namespace
+                    && r.name.eq_ignore_ascii_case(name)
+                    && r.scope != exclude_scope
+            })
+            .collect()
+    }
+
+    /// Every pin, for the transparency surface that answers "what does this
+    /// machine trust, and from where?".
+    pub fn records(&self) -> impl Iterator<Item = &PinRecord> {
+        self.pins.values()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pins.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.pins.len()
+    }
+
+    fn from_records(records: Vec<PinRecord>) -> PinStore {
+        let mut pins = BTreeMap::new();
+        for record in records {
+            pins.insert(record.key(), record);
+        }
+        PinStore { pins }
+    }
+
+    fn to_file(&self) -> PinFile {
+        PinFile {
+            format_version: PIN_FILE_VERSION,
+            pins: self.pins.values().cloned().collect(),
+        }
+    }
+}
+
+/// Load the machine's pins. A store that does not exist yet is an empty store
+/// (a real "nobody here has ever trusted anybody"); a store that EXISTS and
+/// cannot be read or parsed is an `Err` that propagates — fail-closed, because
+/// treating an unreadable pin file as "nothing is pinned" is exactly how a key
+/// substitution becomes a trusted state.
+///
+/// A v1 store is migrated in place on first load: extension pins carry over
+/// losslessly, everything else is discarded (see `migrate_v1_store`).
+pub fn load_pins(profile_dir: &Path) -> Result<PinStore, CalpError> {
+    let path = trusted_publishers_file_path(profile_dir);
+    if !path.exists() {
+        return Ok(PinStore::default());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    let version = value
+        .get("formatVersion")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    match version {
+        PIN_FILE_VERSION_U64 => {
+            let file: PinFile = serde_json::from_value(value)?;
+            Ok(PinStore::from_records(file.pins))
+        }
+        1 => {
+            let file: TrustedPublishersFileV1 = serde_json::from_value(value)?;
+            migrate_v1_store(profile_dir, file)
+        }
+        other => Err(CalpError::Registry(format!(
+            "trusted-publishers.json declares formatVersion {other}, which this build does not \
+             understand. Refusing to read it: an unreadable pin store must never be treated as \
+             'nothing is pinned'."
+        ))),
+    }
+}
+
+const PIN_FILE_VERSION_U64: u64 = PIN_FILE_VERSION as u64;
+
+/// Migrate a v1 (name -> key) store.
+///
+/// **Extension pins migrate exactly.** `ext:<id>` becomes `(Ext, "", id)` — the
+/// same key with the same meaning, no guess involved. Discarding them would cost
+/// every installed add-in its capability ceiling until reinstalled, for no
+/// security gain.
+///
+/// **Bare-name `.calp` pins are DISCARDED.** The v1 store does not record where a
+/// pin came from, and there is no honest way to invent it: the available
+/// inference sources (`registries.json`, subscriptions inside `.cala` files) have
+/// no package linkage, and a wrong guess would BIND A PIN TO A REGISTRY IT DOES
+/// NOT BELONG TO — the silent-trust outcome this whole change exists to
+/// eliminate, most likely to be wrong in precisely the multi-registry case that
+/// motivated it. So they are written to `trusted-publishers.v1.discarded.json`
+/// for the user to audit, and the affected subscriptions re-prompt (they report
+/// `notPinned`, and the Subscriptions pane already says how to fix that).
+fn migrate_v1_store(
     profile_dir: &Path,
-    package: &str,
-    key_hex: &str,
-) -> Result<(), CalpError> {
-    let mut publishers = load_trusted_publishers(profile_dir)?;
-    publishers.insert(package.to_string(), key_hex.to_string());
+    v1: TrustedPublishersFileV1,
+) -> Result<PinStore, CalpError> {
+    let mut records: Vec<PinRecord> = Vec::new();
+    let mut discarded: BTreeMap<String, String> = BTreeMap::new();
+
+    for (name, key_hex) in v1.publishers {
+        match name.strip_prefix("ext:") {
+            Some(id) if !id.is_empty() => records.push(PinRecord {
+                namespace: PinNamespace::Ext,
+                scope: String::new(),
+                scope_label: String::new(),
+                name: id.to_string(),
+                publisher_key: key_hex,
+                // v1 recorded no time. Say so rather than invent one.
+                pinned_at: String::new(),
+            }),
+            _ => {
+                discarded.insert(name, key_hex);
+            }
+        }
+    }
 
     std::fs::create_dir_all(profile_dir)?;
-    let file = TrustedPublishersFile {
-        format_version: 1,
-        publishers,
-    };
-    let content = serde_json::to_string_pretty(&file)?;
+    if !discarded.is_empty() {
+        let note = serde_json::json!({
+            "formatVersion": 1,
+            "discardedAt": now_rfc3339(),
+            "why": "Publisher pins are now scoped to the registry they came from. \
+                    A v1 pin recorded only the package name, so there is no honest way to \
+                    say which registry it belonged to. These pins were discarded rather \
+                    than guessed; the packages will ask again on the next subscribe. \
+                    Nothing reads this file — it is here so you can see what this \
+                    machine used to trust.",
+            "publishers": discarded,
+        });
+        std::fs::write(
+            discarded_pins_file_path(profile_dir),
+            serde_json::to_string_pretty(&note)?,
+        )?;
+    }
+
+    let store = PinStore::from_records(records);
+    write_pins(profile_dir, &store)?;
+    Ok(store)
+}
+
+fn write_pins(profile_dir: &Path, store: &PinStore) -> Result<(), CalpError> {
+    std::fs::create_dir_all(profile_dir)?;
+    let content = serde_json::to_string_pretty(&store.to_file())?;
     std::fs::write(trusted_publishers_file_path(profile_dir), content)?;
     Ok(())
+}
+
+/// RFC3339 timestamp for a pin write. Taken from the clock HERE rather than
+/// threaded through every caller: a call site has no better answer than "now",
+/// and a parameter nobody can get right is a parameter that eventually gets
+/// passed wrong.
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Pin a publisher key under `key` (trust-on-first-use). Reads the current
+/// store, inserts/updates the row, and writes it back. The profile directory is
+/// created if needed.
+///
+/// `scope_label` is the registry location as the USER configured it, carried
+/// alongside the normalized scope id so a later "what does this machine trust?"
+/// view can name the registry in the user's own spelling. Pass "" for a
+/// namespace with no registry.
+pub fn pin_publisher(
+    profile_dir: &Path,
+    key: &PinKey,
+    scope_label: &str,
+    key_hex: &str,
+) -> Result<(), CalpError> {
+    let mut store = load_pins(profile_dir)?;
+    store.pins.insert(
+        key.clone(),
+        PinRecord {
+            namespace: key.namespace,
+            scope: key.scope.clone(),
+            scope_label: scope_label.to_string(),
+            name: key.name.clone(),
+            publisher_key: key_hex.to_string(),
+            pinned_at: now_rfc3339(),
+        },
+    );
+    write_pins(profile_dir, &store)
 }
 
 // ---------------------------------------------------------------------------
@@ -501,12 +829,6 @@ pub fn check_extension_code_hash(
     }
 }
 
-/// The TOFU store key for an extension id. Namespaced so an add-in can never
-/// collide with (or hijack the pin of) a `.calp` package of the same name.
-pub fn extension_tofu_key(id: &str) -> String {
-    format!("ext:{}", id)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -674,27 +996,217 @@ mod tests {
         assert!(!profile_holds_publisher_key(attacker_dir.path(), &victim_key).unwrap());
     }
 
+    fn scope(location: &str) -> RegistryScope {
+        crate::registry_id::registry_scope(location).unwrap()
+    }
+
     #[test]
     fn tofu_store_starts_empty_then_pins() {
         let dir = TempDir::new().unwrap();
-        assert!(load_trusted_publishers(dir.path()).unwrap().is_empty());
+        assert!(load_pins(dir.path()).unwrap().is_empty());
 
-        pin_publisher(dir.path(), "pkg-a", "aabb").unwrap();
-        pin_publisher(dir.path(), "pkg-b", "ccdd").unwrap();
+        let reg = scope(r"C:\reg-one");
+        pin_publisher(dir.path(), &PinKey::calp(&reg, "pkg-a"), &reg.label, "aabb").unwrap();
+        pin_publisher(dir.path(), &PinKey::calp(&reg, "pkg-b"), &reg.label, "ccdd").unwrap();
 
-        let map = load_trusted_publishers(dir.path()).unwrap();
-        assert_eq!(map.get("pkg-a"), Some(&"aabb".to_string()));
-        assert_eq!(map.get("pkg-b"), Some(&"ccdd".to_string()));
+        let store = load_pins(dir.path()).unwrap();
+        assert_eq!(
+            store.get(&PinKey::calp(&reg, "pkg-a")).unwrap().publisher_key,
+            "aabb"
+        );
+        assert_eq!(
+            store.get(&PinKey::calp(&reg, "pkg-b")).unwrap().publisher_key,
+            "ccdd"
+        );
+        // The user's own spelling travels with the pin; the id does not.
+        assert_eq!(
+            store.get(&PinKey::calp(&reg, "pkg-a")).unwrap().scope_label,
+            r"C:\reg-one"
+        );
+        assert!(!store.get(&PinKey::calp(&reg, "pkg-a")).unwrap().pinned_at.is_empty());
         assert!(trusted_publishers_file_path(dir.path()).exists());
     }
 
     #[test]
     fn tofu_pin_updates_existing_entry() {
         let dir = TempDir::new().unwrap();
-        pin_publisher(dir.path(), "pkg", "1111").unwrap();
-        pin_publisher(dir.path(), "pkg", "2222").unwrap();
-        let map = load_trusted_publishers(dir.path()).unwrap();
-        assert_eq!(map.get("pkg"), Some(&"2222".to_string()));
+        let reg = scope(r"C:\reg-one");
+        pin_publisher(dir.path(), &PinKey::calp(&reg, "pkg"), &reg.label, "1111").unwrap();
+        pin_publisher(dir.path(), &PinKey::calp(&reg, "pkg"), &reg.label, "2222").unwrap();
+        let store = load_pins(dir.path()).unwrap();
+        assert_eq!(store.len(), 1, "the same key must update, not accumulate");
+        assert_eq!(
+            store.get(&PinKey::calp(&reg, "pkg")).unwrap().publisher_key,
+            "2222"
+        );
+    }
+
+    /// The headline property of the key shape: two registries serving the same
+    /// package name hold INDEPENDENT pins.
+    #[test]
+    fn two_registries_serving_one_name_do_not_overwrite_each_other() {
+        let dir = TempDir::new().unwrap();
+        let good = scope(r"C:\good-reg");
+        let evil = scope(r"\\evil\share");
+
+        pin_publisher(dir.path(), &PinKey::calp(&evil, "acme.finance"), &evil.label, "evil").unwrap();
+        pin_publisher(dir.path(), &PinKey::calp(&good, "acme.finance"), &good.label, "good").unwrap();
+
+        let store = load_pins(dir.path()).unwrap();
+        assert_eq!(
+            store.get(&PinKey::calp(&good, "acme.finance")).unwrap().publisher_key,
+            "good"
+        );
+        assert_eq!(
+            store.get(&PinKey::calp(&evil, "acme.finance")).unwrap().publisher_key,
+            "evil"
+        );
+
+        // ...and each can SEE the other, which is what the name-conflict warning
+        // is built from.
+        let others =
+            store.other_scopes_for_name(PinNamespace::Calp, "acme.finance", &good.id);
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].publisher_key, "evil");
+        assert_eq!(others[0].scope_label, r"\\evil\share");
+    }
+
+    #[test]
+    fn namespaces_do_not_collide() {
+        let dir = TempDir::new().unwrap();
+        let reg = scope(r"C:\reg");
+        pin_publisher(dir.path(), &PinKey::calp(&reg, "acme.demo"), &reg.label, "calpkey").unwrap();
+        pin_publisher(dir.path(), &PinKey::extension("acme.demo"), "", "extkey").unwrap();
+
+        let store = load_pins(dir.path()).unwrap();
+        assert_eq!(
+            store.get(&PinKey::calp(&reg, "acme.demo")).unwrap().publisher_key,
+            "calpkey"
+        );
+        assert_eq!(
+            store.get(&PinKey::extension("acme.demo")).unwrap().publisher_key,
+            "extkey"
+        );
+        // An extension pin is invisible to a .calp cross-scope check.
+        assert!(store
+            .other_scopes_for_name(PinNamespace::Calp, "acme.demo", "")
+            .iter()
+            .all(|r| r.namespace == PinNamespace::Calp));
+    }
+
+    /// Two spellings of ONE registry share a pin — the property that stops a
+    /// user who typed `c:/reg` in one dialog and `C:\reg\` in another from
+    /// holding two independent trust decisions for the same folder.
+    #[test]
+    fn a_second_spelling_of_one_registry_is_the_same_pin() {
+        let profile = TempDir::new().unwrap();
+        let reg_dir = TempDir::new().unwrap();
+        let typed_a = reg_dir.path().to_string_lossy().to_string();
+        let typed_b = format!("{}\\", typed_a.replace('\\', "/").to_uppercase());
+
+        let a = scope(&typed_a);
+        let b = scope(&typed_b);
+        pin_publisher(profile.path(), &PinKey::calp(&a, "pkg"), &a.label, "kkkk").unwrap();
+
+        let store = load_pins(profile.path()).unwrap();
+        assert_eq!(store.get(&PinKey::calp(&b, "pkg")).unwrap().publisher_key, "kkkk");
+        assert!(
+            store
+                .other_scopes_for_name(PinNamespace::Calp, "pkg", &b.id)
+                .is_empty(),
+            "one registry spelled twice must not look like two registries"
+        );
+    }
+
+    /// A store that EXISTS and cannot be read is an error, never "nothing is
+    /// pinned" — the difference between fail-closed and fail-open.
+    #[test]
+    fn an_unreadable_store_is_an_error_not_an_empty_one() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(trusted_publishers_file_path(dir.path()), "{ not json").unwrap();
+        assert!(load_pins(dir.path()).is_err());
+
+        // A future format version is equally not "nothing is pinned".
+        std::fs::write(
+            trusted_publishers_file_path(dir.path()),
+            r#"{"formatVersion": 99, "pins": []}"#,
+        )
+        .unwrap();
+        assert!(load_pins(dir.path()).is_err());
+    }
+
+    /// THE EXISTING STORE. Extension pins carry over exactly; `.calp` pins
+    /// cannot be honestly placed in a registry scope, so they are DISCARDED (to
+    /// an auditable file) and the packages re-prompt.
+    #[test]
+    fn an_existing_v1_store_keeps_ext_pins_and_discards_the_rest() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let v1 = serde_json::json!({
+            "formatVersion": 1,
+            "publishers": {
+                "pkg-a": "aaaa",
+                "acme.finance": "bbbb",
+                "ext:acme.demo": "cccc",
+            }
+        });
+        std::fs::write(
+            trusted_publishers_file_path(dir.path()),
+            serde_json::to_string_pretty(&v1).unwrap(),
+        )
+        .unwrap();
+
+        let store = load_pins(dir.path()).unwrap();
+
+        // The extension pin survives, with the same meaning and the same key.
+        assert_eq!(
+            store.get(&PinKey::extension("acme.demo")).unwrap().publisher_key,
+            "cccc"
+        );
+        // The bare-name .calp pins resolve in NO scope — the user is re-prompted
+        // rather than silently bound to a registry nobody recorded.
+        for reg in [r"C:\reg", r"\\corp\reg", "https://reg.acme.com/pub"] {
+            let s = scope(reg);
+            assert!(store.get(&PinKey::calp(&s, "pkg-a")).is_none());
+            assert!(store.get(&PinKey::calp(&s, "acme.finance")).is_none());
+        }
+        // ...and they are not silently visible to the cross-scope check either.
+        assert!(store
+            .other_scopes_for_name(PinNamespace::Calp, "acme.finance", "")
+            .is_empty());
+
+        // What was dropped is auditable.
+        let discarded: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(discarded_pins_file_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        let names = discarded.get("publishers").unwrap().as_object().unwrap();
+        assert!(names.contains_key("pkg-a"));
+        assert!(names.contains_key("acme.finance"));
+        assert!(!names.contains_key("ext:acme.demo"));
+
+        // The store has been rewritten as v2 and the v1 shape is never read
+        // again — a second load is a plain v2 load and changes nothing.
+        let raw = std::fs::read_to_string(trusted_publishers_file_path(dir.path())).unwrap();
+        assert!(raw.contains("\"formatVersion\": 2"));
+        assert!(!raw.contains("publishers"));
+        let again = load_pins(dir.path()).unwrap();
+        assert_eq!(again.len(), 1);
+    }
+
+    #[test]
+    fn a_v1_store_with_only_ext_pins_writes_no_discard_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            trusted_publishers_file_path(dir.path()),
+            r#"{"formatVersion":1,"publishers":{"ext:acme.demo":"cccc"}}"#,
+        )
+        .unwrap();
+        let store = load_pins(dir.path()).unwrap();
+        assert_eq!(store.len(), 1);
+        assert!(!discarded_pins_file_path(dir.path()).exists());
     }
 
     // -- Extension add-in layout / code-hash coverage (G0) -------------------
@@ -788,8 +1300,46 @@ mod tests {
         );
     }
 
+    /// An extension pin is MACHINE-GLOBAL by decision (see `PinKey::extension`):
+    /// it carries no scope, so reinstalling the same id from a different folder
+    /// is `verified` rather than a false first use.
     #[test]
-    fn extension_tofu_key_is_namespaced() {
-        assert_eq!(extension_tofu_key("calcula.example.tax-tools"), "ext:calcula.example.tax-tools");
+    fn an_extension_pin_is_machine_global_and_carries_no_scope() {
+        let key = PinKey::extension("calcula.example.tax-tools");
+        assert_eq!(key.namespace(), PinNamespace::Ext);
+        assert_eq!(key.scope(), "");
+        assert_eq!(key.name(), "calcula.example.tax-tools");
+        // ...and it is a different key from a .calp package of the same name.
+        let reg = scope(r"C:\reg");
+        assert_ne!(key, PinKey::calp(&reg, "calcula.example.tax-tools"));
+    }
+
+    /// A pin key can only be built by the two sanctioned constructors, which is
+    /// what stops a call site from inventing a scope (or re-inventing the old
+    /// `"ext:" + id` string convention) of its own.
+    #[test]
+    fn pin_keys_are_built_in_exactly_one_place() {
+        let src = include_str!("signing.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            production.matches("PinKey {\n            namespace,").count(),
+            1,
+            "a PinKey must be BUILT in exactly one place (PinKey::new) — every other \
+             site goes through PinKey::calp / PinKey::extension, so a call site cannot \
+             invent a scope or a namespace of its own"
+        );
+        assert!(
+            !production.contains("pub fn new(namespace"),
+            "PinKey::new must stay private, or callers can bypass the two sanctioned \
+             constructors and hand-roll a scope"
+        );
+        assert!(
+            !production.contains("format!(\"ext:"),
+            "the ext: string convention is gone; PinKey::extension is the namespace"
+        );
+        assert!(
+            production.contains("    fn new(namespace: PinNamespace, scope_id: &str, name: &str) -> PinKey {"),
+            "the single key construction must stay private and take all three parts"
+        );
     }
 }

@@ -220,6 +220,30 @@ describe("the install command is reached through the gated backend door", () => 
     expect(dialog).not.toMatch(/sourcePath\s*=\s*["'`]/);
   });
 
+  it("extension pins stay MACHINE-GLOBAL — no registry/folder scope crept in", () => {
+    // `.calp` pins are keyed by (registry, package) because a registry is a
+    // human trust decision with a stable identity. An extension has neither: it
+    // is installed from a FOLDER, and the folder is the attacker's own choice,
+    // so scoping by it would give a bundle dropped in Downloads a pristine scope
+    // and a free `firstUse` on an id it does not own — re-opening the very squat
+    // Wave H closed. It would also make a reinstall from a USB stick a false
+    // first use, and it cannot be recorded honestly anyway because the installer
+    // copies the files. This is a DECISION; do not "fix" it to match .calp.
+    for (const status of TRUST_STATUSES) {
+      expect(
+        /scope|registry|conflict/i.test(status),
+        `EXTENSION_TRUST_STATUSES gained a scope-derived status "${status}". Extension pins ` +
+          `are machine-global by decision — see PinKey::extension.`,
+      ).toBe(false);
+    }
+    const installRs = read("src-tauri/src/extension_install.rs");
+    expect(installRs).toContain("PinKey::extension(");
+    expect(
+      installRs,
+      "extension_install must not derive a registry scope",
+    ).not.toContain("PinKey::calp(");
+  });
+
   it("asks the publisher-change question separately from the install decision", () => {
     const dialog = read("extensions/ExtensionsManager/InstallAddInDialog.tsx");
     // acceptChange starts false, is only set by an explicit checkbox, and gates

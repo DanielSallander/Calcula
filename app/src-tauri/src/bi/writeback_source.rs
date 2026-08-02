@@ -147,14 +147,14 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
         }
-        let registry_path = sub
-            .registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url);
-        let registry = match crate::calp_registry::open_registry(registry_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+        // RAW `registry_url` — see the note in `bi/writeback.rs`. A local
+        // `file://` strip here would scope the pin differently from the one
+        // written at subscribe, and these datasets would silently disappear.
+        let (registry, scope) =
+            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
 
         // Region declarations MUST come from the signature-verified manifest —
         // they carry the governance policies enforced below.
@@ -167,6 +167,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,
+            &scope,
             &calcula_profile_dir(),
         ) {
             Ok(m) => m,
@@ -218,6 +219,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                     registry.as_ref(),
                     &sub.package_name,
                     version,
+                    &scope,
                     &calcula_profile_dir(),
                 )
                 .ok()?;

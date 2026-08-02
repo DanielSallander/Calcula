@@ -1489,13 +1489,14 @@ mod tests {
         for ver in ["1.0.0", "1.0.1"] {
             let req = crate::pull::PullRequest {
                 package_name: "dedup".to_string(),
-                registry_url: format!("file://{}", dir.path().display()),
                 version_pin: crate::version::VersionPin::Exact(
                     if ver == "1.0.0" { SemVer::new(1, 0, 0) } else { SemVer::new(1, 0, 1) },
                 ),
                 now: "2026-05-18T01:00:00Z".to_string(),
             };
-            let result = crate::pull::pull(&reg, &req, prof.path(), crate::integrity::PinPolicy::PinOnFirstUse).unwrap();
+            let scope =
+                crate::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap();
+            let result = crate::pull::pull(&reg, &req, &scope, prof.path(), crate::integrity::PinPolicy::PinOnFirstUse).unwrap();
             assert_eq!(result.sheets.len(), 2);
         }
     }

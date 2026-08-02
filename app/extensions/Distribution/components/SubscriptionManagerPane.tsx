@@ -45,6 +45,14 @@ const trustKey = (t: SubscriptionTrustInfo) => `${t.packageName}@${t.registryUrl
  * `verified` intentionally renders NOTHING: the normal, expected case should not
  * add noise. Everything else is called out.
  */
+/** The other registries holding this package name, in the user's own spelling. */
+function otherScopeLabels(t: SubscriptionTrustInfo): string {
+  return (t.otherScopePins ?? [])
+    .filter((p) => !p.sameKey)
+    .map((p) => p.scopeLabel)
+    .join(", ");
+}
+
 const TRUST_NOTICE: Record<
   SubscriptionTrustInfo["trustStatus"],
   { tone: "ok" | "warn" | "danger"; text: (t: SubscriptionTrustInfo) => string } | null
@@ -53,6 +61,22 @@ const TRUST_NOTICE: Record<
   firstUse: {
     tone: "warn",
     text: (t) => `Publisher ${t.publisherName || "(unnamed)"} was trusted just now.`,
+  },
+  firstUseKnownPublisher: {
+    tone: "warn",
+    text: (t) =>
+      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this registry"} ` +
+      `just now. The same publisher key was already trusted for this package from ` +
+      `${otherScopeLabels(t) || "another registry"} — a move, a mirror, or the same location ` +
+      `spelled differently.`,
+  },
+  firstUseAcceptedNameConflict: {
+    tone: "danger",
+    text: (t) =>
+      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this registry"} ` +
+      `even though ${otherScopeLabels(t) || "another registry"} holds this package name under a ` +
+      `DIFFERENT publisher key. You accepted that conflict. Two registries claiming one name is ` +
+      `what a package hijack looks like — re-check both publishers if you did not expect this.`,
   },
   notPinned: {
     tone: "danger",
@@ -63,6 +87,19 @@ const TRUST_NOTICE: Record<
         ? "writeback regions and GATHER formulas stay inactive. "
         : "published declarations are ignored. ") +
       `Use Data \u2192 Subscribe to Package to review the publisher and activate it.`,
+  },
+  notPinnedNameConflict: {
+    tone: "danger",
+    text: (t) =>
+      `NAME CONFLICT: this workbook references '${t.packageName}' from ` +
+      `${t.registryUrl || "a registry"}, but ${otherScopeLabels(t) || "another registry"} is ` +
+      `already trusted for that same package name under a DIFFERENT publisher key. The ` +
+      `signature is valid, which only proves the bytes were not altered \u2014 it does not say ` +
+      `who signed them. ` +
+      (t.declaresWriteback
+        ? "Writeback regions and GATHER formulas stay inactive. "
+        : "Published declarations are ignored. ") +
+      `Use Data \u2192 Subscribe to Package to compare both publishers before trusting either.`,
   },
   unavailable: {
     tone: "warn",

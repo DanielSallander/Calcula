@@ -44,7 +44,12 @@ export {
   blobPath,
 } from "./lockfile";
 
-export { searchLibraries, resolveClosure, LIBRARY_PACKAGE_KIND } from "./registry";
+export {
+  searchLibraries,
+  resolveClosure,
+  libraryTrustIsNameConflict,
+  LIBRARY_PACKAGE_KIND,
+} from "./registry";
 export type { RegistryPackageInfo } from "./registry";
 
 export {

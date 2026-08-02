@@ -119,6 +119,16 @@ pub struct PullParams {
     pub registry_path: String,
     pub package_name: String,
     pub version_pin: String,
+    /// The user was shown a CROSS-REGISTRY NAME CONFLICT -- this package name is
+    /// already pinned to a different publisher key from another registry -- and
+    /// answered a second, differently-worded question accepting it anyway.
+    ///
+    /// Absent/false is the safe default: a plain subscribe REFUSES a conflict
+    /// (`CalpError::PublisherNameConflict`) rather than pinning, so a caller that
+    /// forgets this flag fails closed with an explanation instead of quietly
+    /// trusting a second claimant to a familiar name.
+    #[serde(default)]
+    pub accept_name_conflict: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,9 +141,14 @@ pub struct PullResponse {
     pub scripts_pulled: usize,
     /// Publisher display name asserted in the verified manifest (S5 phase 2).
     pub publisher_name: String,
-    /// Trust outcome: "firstUse" (publisher key newly pinned) or "verified"
-    /// (matched a prior pin). The frontend can surface a first-use notice.
+    /// A `CalpTrustStatus` -- the TOFU outcome for THIS registry. Subscribe is a
+    /// commit point, so it is one of the pinning states; the frontend surfaces a
+    /// first-use notice from it.
     pub trust_status: String,
+    /// Pins held for this same package name in OTHER registries, so the notice
+    /// can say "the publisher you already trust, reached from a new location" --
+    /// or, for an accepted conflict, exactly whose key it is competing with.
+    pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
     /// Generic custom objects of kinds NOT handled Rust-side (distribution
     /// brick 4), surfaced so frontend distributable-object providers can
     /// materialize them. Built-in kinds (cellType) are already applied and are
@@ -529,7 +544,7 @@ pub fn calp_publish(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = crate::calp_registry::open_registry(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version = SemVer::parse(&params.version)
@@ -696,7 +711,7 @@ pub fn calp_publish_model(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = crate::calp_registry::open_registry(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -1882,6 +1897,135 @@ fn merge_pulled_extension_data(
     Ok(inserted)
 }
 
+// ============================================================================
+// Trusted publishers: the machine-scoped transparency view
+// ============================================================================
+
+/// One pin, as shown to a human.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedPublisherPin {
+    /// "calp" (a package/library/skin from a registry) or "ext" (an installed
+    /// add-in, which is pinned machine-globally and has no registry).
+    pub namespace: String,
+    pub name: String,
+    /// The registry EXACTLY as the user configured it. Empty for `ext`. The
+    /// normalized scope id is key material and is deliberately never exposed:
+    /// a lowercased canonical path is not a string anyone typed.
+    pub scope_label: String,
+    pub publisher_key: String,
+    /// RFC3339, or "" for a pin carried over from the pre-scoping store.
+    pub pinned_at: String,
+}
+
+/// Every pin this machine holds for one (namespace, name), grouped so the ONE
+/// question this view exists to answer is answerable at a glance: does any name
+/// resolve to more than one publisher key?
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedPublisherName {
+    pub namespace: String,
+    pub name: String,
+    pub pins: Vec<TrustedPublisherPin>,
+    /// More than one DISTINCT publisher key holds this name. This is the only
+    /// surface where an ACCEPTED cross-registry name conflict stays visible
+    /// after the dialog that accepted it is gone.
+    pub has_key_conflict: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedPublisherReport {
+    pub names: Vec<TrustedPublisherName>,
+    pub total_pins: usize,
+    pub conflict_count: usize,
+    /// Non-empty when the pin store EXISTS and could not be read. Fail closed:
+    /// "I cannot tell you what this machine trusts" must never render as "this
+    /// machine trusts nothing".
+    pub error: String,
+}
+
+/// What does this computer trust, and from where?
+///
+/// Read-only and passive: it opens no registry, verifies nothing, and cannot
+/// create or remove a pin. It exists because a pin is a durable machine-wide
+/// decision and, until this view, there was nowhere to see the whole set.
+#[tauri::command]
+pub fn calp_list_trusted_publishers(
+    window: tauri::Window,
+) -> Result<TrustedPublisherReport, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    let store = match calp::signing::load_pins(&calcula_profile_dir()) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(TrustedPublisherReport {
+                names: Vec::new(),
+                total_pins: 0,
+                conflict_count: 0,
+                error: e.to_string(),
+            })
+        }
+    };
+
+    let mut grouped: std::collections::BTreeMap<(String, String), Vec<TrustedPublisherPin>> =
+        std::collections::BTreeMap::new();
+    let mut total_pins = 0usize;
+    for record in store.records() {
+        total_pins += 1;
+        grouped
+            .entry((
+                record.namespace.as_str().to_string(),
+                record.name.clone(),
+            ))
+            .or_default()
+            .push(TrustedPublisherPin {
+                namespace: record.namespace.as_str().to_string(),
+                name: record.name.clone(),
+                scope_label: record.scope_label.clone(),
+                publisher_key: record.publisher_key.clone(),
+                pinned_at: record.pinned_at.clone(),
+            });
+    }
+
+    let mut conflict_count = 0usize;
+    let names: Vec<TrustedPublisherName> = grouped
+        .into_iter()
+        .map(|((namespace, name), pins)| {
+            let distinct: std::collections::BTreeSet<&str> =
+                pins.iter().map(|p| p.publisher_key.as_str()).collect();
+            let has_key_conflict = distinct.len() > 1;
+            if has_key_conflict {
+                conflict_count += 1;
+            }
+            TrustedPublisherName {
+                namespace,
+                name,
+                pins,
+                has_key_conflict,
+            }
+        })
+        .collect();
+
+    Ok(TrustedPublisherReport {
+        names,
+        total_pins,
+        conflict_count,
+        error: String::new(),
+    })
+}
+
+/// The ONE `TrustStatus` -> wire-string map lives in `calp_inspector`
+/// (`trust_status_str`), and this file delegates to it.
+///
+/// A second exhaustive match saying the same thing is a second match that can
+/// DISAGREE, and a trust state that renders as the wrong word is a security bug,
+/// not a cosmetic one. One map also means the frontend presentation tests have
+/// exactly one source of truth to parse.
+fn calp_trust_status_str(trust: calp::integrity::TrustStatus) -> String {
+    crate::calp_inspector::trust_status_str(trust)
+}
+
 /// Pull (subscribe to) a package.
 #[tauri::command]
 pub fn calp_pull(
@@ -1896,7 +2040,7 @@ pub fn calp_pull(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = crate::calp_registry::open_registry(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version_pin = VersionPin::parse(&params.version_pin)
@@ -1906,7 +2050,6 @@ pub fn calp_pull(
 
     let request = calp::pull::PullRequest {
         package_name: params.package_name.clone(),
-        registry_url: format!("file://{}", params.registry_path),
         version_pin,
         now,
     };
@@ -1917,11 +2060,21 @@ pub fn calp_pull(
     // inspect, workbook open, refresh, reset, writeback, GATHER -- is either
     // VerifyOnly or RequirePinned. If a package is not yet pinned on this
     // machine, subscribing here is how it becomes pinned.
+    // A cross-registry NAME CONFLICT is refused unless the user was shown it and
+    // said yes to a second, differently-worded question. `PinOnFirstUse` errors
+    // on a conflict; only the flag set by that confirmation reaches the accepting
+    // policy. Both are commit points with a human behind them.
+    let policy = if params.accept_name_conflict {
+        calp::integrity::PinPolicy::PinAcceptingNameConflict
+    } else {
+        calp::integrity::PinPolicy::PinOnFirstUse
+    };
     let mut result = calp::pull::pull(
         &registry,
         &request,
+        &scope,
         &calcula_profile_dir(),
-        calp::integrity::PinPolicy::PinOnFirstUse,
+        policy,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1931,12 +2084,9 @@ pub fn calp_pull(
     // before someone decides how it is presented. `NotPinned` is unreachable
     // here (PinOnFirstUse pins instead of reporting it) but is still spelled
     // out rather than swept into a `_` arm.
-    let trust_status = match result.trust_status {
-        calp::integrity::TrustStatus::FirstUse => "firstUse",
-        calp::integrity::TrustStatus::Verified => "verified",
-        calp::integrity::TrustStatus::NotPinned => "notPinned",
-    }
-    .to_string();
+    let trust_status = calp_trust_status_str(result.trust_status);
+    let other_scope_pins =
+        crate::calp_inspector::other_scope_pins_wire(&result.other_scope_pins);
 
     let sheets_pulled = result.sheets.len();
 
@@ -2530,6 +2680,7 @@ pub fn calp_pull(
         scripts_pulled,
         publisher_name,
         trust_status,
+        other_scope_pins,
         custom_objects: frontend_custom_objects,
     })
 }
@@ -2545,7 +2696,7 @@ pub fn calp_browse_registry(
         &window,
         crate::security::window_guard::MAIN_AND_PACKAGE_INSPECTOR,
     )?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let names = registry.list_packages().map_err(|e| e.to_string())?;
@@ -2645,9 +2796,15 @@ pub struct PackageInspection {
     /// the only thing the reviewer can actually compare against what the
     /// publisher told them out of band. A name is not an identity.
     pub publisher_key: String,
-    /// "firstUse" (publisher key newly pinned) or "verified" (matched a prior
-    /// pin). If verification fails, inspect returns an Err instead.
+    /// A `CalpTrustStatus` for THIS registry. Inspect is PASSIVE, so first
+    /// contact is `notPinned` — or `notPinnedNameConflict` when another registry
+    /// already holds this package name under a DIFFERENT key. If verification
+    /// fails, inspect returns an Err instead.
     pub trust_status: String,
+    /// Pins held for this same package name in OTHER registries. The Review step
+    /// shows them, because Review must never say nothing and then have Subscribe
+    /// fail on a conflict it never mentioned.
+    pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2696,7 +2853,7 @@ pub fn calp_inspect_package(
     window: tauri::Window,
 ) -> Result<PackageInspection, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let pin = VersionPin::parse(&version_pin).map_err(|e| e.to_string())?;
@@ -2721,20 +2878,21 @@ pub fn calp_inspect_package(
     // publisher, so first contact reports `notPinned` and writes nothing to the
     // pin store. The publisher name and key are still returned in full -- that
     // is what the user is being asked to judge.
-    let (trust, manifest) = calp::integrity::verify_and_load_manifest_via(
+    let calp::integrity::VerifiedManifest {
+        trust,
+        manifest,
+        other_scope_pins,
+    } = calp::integrity::verify_and_load_manifest_via(
         registry.as_ref(),
         &package_name,
         &version,
+        &scope,
         &calcula_profile_dir(),
         calp::integrity::PinPolicy::VerifyOnly,
     )
     .map_err(|e| e.to_string())?;
-    let trust_status = match trust {
-        calp::integrity::TrustStatus::FirstUse => "firstUse",
-        calp::integrity::TrustStatus::Verified => "verified",
-        calp::integrity::TrustStatus::NotPinned => "notPinned",
-    }
-    .to_string();
+    let trust_status = calp_trust_status_str(trust);
+    let other_scope_pins = crate::calp_inspector::other_scope_pins_wire(&other_scope_pins);
 
     // Per-object detail read from the (integrity-checked) artifacts — computed
     // BEFORE the response literal because the literal moves package_name/version.
@@ -2854,6 +3012,7 @@ pub fn calp_inspect_package(
         publisher_name: manifest.publisher_name.clone(),
         publisher_key: manifest.publisher_key.clone(),
         trust_status,
+        other_scope_pins,
         sheets: manifest.sheets.iter().map(|s| SheetInfo {
             name: s.name.clone(),
             description: s.description.clone(),
@@ -2941,6 +3100,9 @@ pub struct SubscriptionTrustInfo {
     /// Whether this package declares writeback regions or model-writeback
     /// columns — i.e. whether "not pinned" actually costs the user something.
     pub declares_writeback: bool,
+    /// Pins held for this same package name in OTHER registries. A different key
+    /// pinned elsewhere is what turns `notPinned` into `notPinnedNameConflict`.
+    pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
     /// Human-readable failure text when `trustStatus` is "unavailable".
     pub error: String,
 }
@@ -2986,24 +3148,24 @@ pub fn calp_subscription_trust(
             publisher_name: String::new(),
             publisher_key: String::new(),
             declares_writeback: false,
+            other_scope_pins: Vec::new(),
             error: String::new(),
         };
 
-        match crate::calp_registry::open_registry(&registry_path) {
-            Ok(registry) => match calp::integrity::verify_and_load_manifest_via(
+        match crate::calp_registry::open_registry_scoped(&registry_path) {
+            Ok((registry, scope)) => match calp::integrity::verify_and_load_manifest_via(
                 registry.as_ref(),
                 &sub.package_name,
                 &sub.resolved_version,
+                &scope,
                 &profile_dir,
                 calp::integrity::PinPolicy::VerifyOnly,
             ) {
-                Ok((trust, manifest)) => {
-                    info.trust_status = match trust {
-                        calp::integrity::TrustStatus::FirstUse => "firstUse",
-                        calp::integrity::TrustStatus::Verified => "verified",
-                        calp::integrity::TrustStatus::NotPinned => "notPinned",
-                    }
-                    .to_string();
+                Ok(verified) => {
+                    let manifest = &verified.manifest;
+                    info.trust_status = calp_trust_status_str(verified.trust);
+                    info.other_scope_pins =
+                        crate::calp_inspector::other_scope_pins_wire(&verified.other_scope_pins);
                     info.publisher_name = manifest.publisher_name.clone();
                     info.publisher_key = manifest.publisher_key.clone();
                     info.declares_writeback = manifest
@@ -3685,10 +3847,25 @@ pub(crate) fn record_subscription_override_edits(
     }
 }
 
-/// Resolve a subscription's registry filesystem path from its stored URL.
-/// Subscriptions store URLs like `file://C:\path\to\registry`.
+/// A subscription's registry location, EXACTLY as the subscription stores it.
+///
+/// This deliberately does no `file://` stripping of its own. A publisher pin is
+/// keyed by `(namespace, registry scope, package)`, and the scope is derived by
+/// `calp::registry_id::registry_scope` from the very string handed to
+/// `open_registry_scoped`. Stripping the scheme here first would hand it a
+/// DIFFERENT string than the one `pull` scoped the pin with:
+///
+///   * `file:///C:/reg`      -> `/C:/reg`      -> scope `\c:\reg`  (not `c:\reg`)
+///   * `file://server/share` -> `server/share` -> a path relative to the process cwd
+///
+/// The pin would then be written under one identity and read under another, and
+/// every `RequirePinned` consumer (writeback, GATHER, model writeback, reset)
+/// would report `PublisherNotPinned` and skip — a feature that silently stops
+/// working, which is worse than the squat this key shape was introduced to fix.
+/// `strip_file_scheme` is the ONE stripper, and it lives behind
+/// `registry_scope`; nothing here needs a second one.
 fn subscription_registry_path(sub: &calp::manifest::Subscription) -> &str {
-    sub.registry_url.strip_prefix("file://").unwrap_or(&sub.registry_url)
+    &sub.registry_url
 }
 
 /// Group refreshable subscriptions by registry path, preserving each
@@ -3734,7 +3911,7 @@ pub fn calp_refresh_preview(
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-        let registry = crate::calp_registry::open_registry(&registry_path)
+        let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
             .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
         let group: Vec<_> = indices.iter()
             .map(|&i| subs.subscriptions[i].clone())
@@ -3777,7 +3954,7 @@ pub fn calp_refresh_apply(
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
         let mut all_payloads = Vec::new();
         for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-            let registry = crate::calp_registry::open_registry(&registry_path)
+            let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
                 .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
@@ -3791,6 +3968,7 @@ pub fn calp_refresh_apply(
             let group_payloads = calp::refresh::pull_all_updates(
                 &registry,
                 &group,
+                &scope,
                 &calcula_profile_dir(),
                 calp::integrity::PinPolicy::RequirePinned,
             )
@@ -5177,6 +5355,7 @@ pub fn calp_dev_subscribe(
         // (not a signed registry package), so there is no publisher to verify.
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
+        other_scope_pins: Vec::new(),
         custom_objects: Vec::new(),
     })
 }
@@ -5224,9 +5403,13 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         let subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
         let idx = subs.subscriptions.iter().position(calp::dev_mode::is_dev_subscription)
             .ok_or_else(|| "No dev subscription found in current workbook".to_string())?;
-        // registry_url is "file://<path>"; strip the prefix to get the raw path.
+        // A DEV subscription's `registry_url` is `file://<path-to-a-.cala-file>`
+        // — not a registry, one workbook on disk — so this is a genuine
+        // filesystem path, not a pin scope. Use the crate's ONE stripper rather
+        // than a local `strip_prefix`, which mishandles `file:///C:/...` and
+        // `file://server/share`.
         let url = &subs.subscriptions[idx].registry_url;
-        let path = url.strip_prefix("file://").unwrap_or(url).to_string();
+        let path = calp::registry_id::strip_file_scheme(url);
         (path, idx)
     };
 
@@ -5357,6 +5540,7 @@ pub fn calp_dev_refresh(state: State<AppState>, window: tauri::Window) -> Result
         // Dev re-pull: local-folder source, no signed publisher to verify.
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
+        other_scope_pins: Vec::new(),
         custom_objects: Vec::new(),
     })
 }
@@ -5523,7 +5707,7 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
             continue;
         }
         let registry_path = subscription_registry_path(sub);
-        let registry = match crate::calp_registry::open_registry(registry_path) {
+        let (registry, scope) = match crate::calp_registry::open_registry_scoped(registry_path) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -5547,7 +5731,7 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
         // themselves. `calp_subscription_trust` surfaces exactly that state to
         // the Subscriptions pane so it is visible rather than merely silent.
         if let Ok(ver_manifest) = calp::integrity::load_pinned_manifest_via(
-            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         ) {
             if let Some(ref wb_regions) = ver_manifest.writeback_regions {
                 all_decls.extend(wb_regions.iter().cloned());
@@ -5746,8 +5930,8 @@ fn owning_subscription_for_region(
             continue;
         }
         let registry_path = subscription_registry_path(sub).to_string();
-        let Ok(registry) =
-            crate::calp_registry::open_registry(&registry_path)
+        let Ok((registry, scope)) =
+            crate::calp_registry::open_registry_scoped(&registry_path)
         else {
             continue;
         };
@@ -5762,7 +5946,7 @@ fn owning_subscription_for_region(
         // unlike the previous `let Ok((_, manifest))` there is no trust answer
         // being silently thrown away. An unpinned package owns no region here.
         let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
-            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         )
         else {
             continue;
@@ -5821,8 +6005,8 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
     let Ok(own) = get_subscriber_identity(state) else {
         return false;
     };
-    let Ok(registry) =
-        crate::calp_registry::open_registry(&registry_path)
+    let Ok((registry, _scope)) =
+        crate::calp_registry::open_registry_scoped(&registry_path)
     else {
         return false;
     };
@@ -6139,8 +6323,8 @@ fn reconcile_writeback_layer_internal(state: &AppState) -> Result<(), String> {
         else {
             continue;
         };
-        let Ok(registry) =
-            crate::calp_registry::open_registry(&registry_path)
+        let Ok((registry, _scope)) =
+            crate::calp_registry::open_registry_scoped(&registry_path)
         else {
             continue;
         };
@@ -7047,7 +7231,7 @@ fn submit_region_internal(
     }
 
     // Write to registry BEFORE mutating local state.
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // RE-VALIDATE on the authoritative submit path (P0). Schema + lifecycle
@@ -7073,7 +7257,7 @@ fn submit_region_internal(
     // subscribed to. The fail-closed `else` below already turns an absent
     // declaration into a refusal, so an unpinned publisher lands there too.
     let decl = calp::integrity::load_pinned_manifest_via(
-        &*registry, &package_name, &resolved_version, &calcula_profile_dir(),
+        &*registry, &package_name, &resolved_version, &scope, &calcula_profile_dir(),
     )
     .ok()
     .and_then(|m| m.writeback_regions)
@@ -7361,9 +7545,9 @@ pub fn calp_preview_region_submission(
     // backend executes. (The in-memory declarations cache is deliberately not
     // used here: it would let a stale/unsigned copy be what the user approves.)
     let (validator, validator_error) = {
-        let decl = crate::calp_registry::open_registry(&registry_path)
+        let decl = crate::calp_registry::open_registry_scoped(&registry_path)
             .ok()
-            .and_then(|registry| {
+            .and_then(|(registry, scope)| {
                 // ALREADY-TRUSTED (RequirePinned): the consent prompt for a
                 // submit to a subscribed package. Same manifest and same gate
                 // as the submit itself, so what the user approves is what runs.
@@ -7371,6 +7555,7 @@ pub fn calp_preview_region_submission(
                     &*registry,
                     &package_name,
                     &resolved_version,
+                    &scope,
                     &calcula_profile_dir(),
                 )
                 .ok()
@@ -7424,10 +7609,9 @@ pub fn calp_export_package_html(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let path = registry_path
-        .strip_prefix("file://")
-        .unwrap_or(&registry_path);
-    let registry = crate::calp_registry::open_registry(path)
+    // RAW location — `open_registry_scoped` owns the `file://` handling (and the
+    // pin scope derived from it). See `subscription_registry_path`.
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     let export_mode = match mode.as_str() {
         "viewer" => calp::HtmlExportMode::Viewer,
@@ -7488,8 +7672,8 @@ pub(crate) fn require_publisher(
 pub(crate) fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
-    let registry =
-        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, _scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
     require_publisher(&*registry, &package_name, &resolved_version)
 }
 
@@ -7507,8 +7691,8 @@ pub(crate) fn require_model_writeback_publisher(
 ) -> Result<(), String> {
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(state, writeback_id)?;
-    let registry =
-        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, _scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
     require_publisher(&*registry, &package_name, &resolved_version)
 }
 
@@ -8221,12 +8405,10 @@ fn owning_subscription_for_model_writeback(
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
         }
-        let registry_path = sub
-            .registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url)
-            .to_string();
-        let Ok(registry) = crate::calp_registry::open_registry(&registry_path) else {
+        // RAW location, and RAW is also what is returned to the caller — which
+        // opens it again. See `subscription_registry_path`.
+        let registry_path = sub.registry_url.clone();
+        let Ok((registry, scope)) = crate::calp_registry::open_registry_scoped(&registry_path) else {
             continue;
         };
         // ALREADY-TRUSTED (RequirePinned), same reasoning as
@@ -8236,6 +8418,7 @@ fn owning_subscription_for_model_writeback(
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,
+            &scope,
             &calcula_profile_dir(),
         ) else {
             continue;
@@ -8331,8 +8514,8 @@ pub(crate) fn submit_model_writeback(
         extra: Default::default(),
     };
 
-    let registry =
-        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, _scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
     registry
         .save_submission(&package_name, &resolved_version, &submission)
         .map_err(|e| e.to_string())?;
@@ -8372,8 +8555,8 @@ pub fn calp_list_model_submissions(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
-    let registry =
-        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, _scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
     // AUTHORIZATION (parity with calp_set_model_submission_state): this returns
     // EVERY submitter's raw values and identity for the column. Publisher only.
     require_publisher(&*registry, &package_name, &resolved_version)?;
@@ -8421,8 +8604,8 @@ pub fn calp_set_model_submission_state(
 
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
-    let registry =
-        crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, _scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0 parity): approve/reject is publisher-only — without
     // this any subscriber could self-approve a masterData value.
@@ -8518,7 +8701,7 @@ pub fn calp_set_submission_state(
 
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0): approve/reject is publisher-only. Without this, any
@@ -8664,7 +8847,7 @@ pub fn calp_load_region_submissions(
     if let Ok((package_name, resolved_version, registry_path)) =
         owning_subscription_for_region(&state, &region_id)
     {
-        if let Ok(registry) = crate::calp_registry::open_registry(&registry_path) {
+        if let Ok((registry, _scope)) = crate::calp_registry::open_registry_scoped(&registry_path) {
             refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
         }
     }
@@ -8681,7 +8864,7 @@ fn load_region_current_submissions(
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let mut versions = vec![resolved_version.clone()];
@@ -9050,7 +9233,7 @@ pub fn calp_get_writeback_rollup(
 ) -> Result<bool, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, _v, registry_path) = owning_subscription_for_region(&state, &region_id)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     Ok(rollup_enabled(&registry, &package_name))
 }
@@ -9068,7 +9251,7 @@ pub fn calp_set_writeback_rollup(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     require_publisher(&registry, &package_name, &resolved_version)?;
 
@@ -9126,7 +9309,7 @@ pub fn calp_region_response_status(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     // AUTHORIZATION: `responded` names every contributor across all submitters
     // — the same cross-submitter disclosure as the inbox, just aggregated.
@@ -9433,12 +9616,9 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
             continue;
         }
 
-        // Extract registry path from URL
-        let registry_path = sub.registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url);
-
-        let registry = match crate::calp_registry::open_registry(registry_path) {
+        // RAW location — see `subscription_registry_path`.
+        let (registry, scope) = match crate::calp_registry::open_registry_scoped(&sub.registry_url)
+        {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -9455,7 +9635,7 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
         // user had just deleted from trusted-publishers.json, on the very next
         // keystroke. GATHER for an unpinned package now yields nothing.
         let ver_manifest = match calp::integrity::load_pinned_manifest_via(
-            registry.as_ref(), &sub.package_name, &sub.resolved_version, &calcula_profile_dir(),
+            registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         ) {
             Ok(m) => m,
             Err(_) => continue,
@@ -9490,7 +9670,7 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                     // Older versions' region schemas gate lenient carry-forward;
                     // verify them exactly as the current version.
                     let manifest = calp::integrity::load_pinned_manifest_via(
-                        registry.as_ref(), &sub.package_name, version, &calcula_profile_dir(),
+                        registry.as_ref(), &sub.package_name, version, &scope, &calcula_profile_dir(),
                     )
                     .ok()?;
                     let mut by_region: std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
@@ -10406,7 +10586,7 @@ pub fn calp_next_version(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let registry = crate::calp_registry::open_registry(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let manifest = registry.get_package_manifest(&package_name)
@@ -11401,14 +11581,12 @@ pub async fn calp_refresh_data(
                 continue;
             }
 
-            let registry_path = sub.registry_url
-                .strip_prefix("file://")
-                .unwrap_or(&sub.registry_url);
-
-            let registry = match crate::calp_registry::open_registry(registry_path) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
+            // RAW location — see `subscription_registry_path`.
+            let (registry, _scope) =
+                match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
 
             let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
                 Ok(m) => m,
@@ -11592,15 +11770,13 @@ pub fn calp_save_data_source_config(
     let mut subs = state.subscriptions.lock().map_err(|e| e.to_string())?;
 
     for sub in &mut subs.subscriptions {
-        // Find any subscription that references this data source
-        let registry_path = sub.registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url);
-
-        let registry = match crate::calp_registry::open_registry(registry_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+        // Find any subscription that references this data source.
+        // RAW location — see `subscription_registry_path`.
+        let (registry, _scope) =
+            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
 
         let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
             Ok(m) => m,
@@ -11644,14 +11820,12 @@ pub fn calp_get_data_sources(
             continue;
         }
 
-        let registry_path = sub.registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url);
-
-        let registry = match crate::calp_registry::open_registry(registry_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
+        // RAW location — see `subscription_registry_path`.
+        let (registry, _scope) =
+            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
 
         let ver_manifest = match registry.get_version_manifest(&sub.package_name, &sub.resolved_version) {
             Ok(m) => m,
@@ -11768,14 +11942,13 @@ pub fn calp_reset_subscription(
 
     // Re-pull the EXACT resolved version (signature + TOFU + checksum gates run
     // again — reset must not materialize content weaker-verified than pull did).
-    let registry_path = params
-        .registry_url
-        .strip_prefix("file://")
-        .unwrap_or(&params.registry_url);
-    let registry = crate::calp_registry::open_registry(registry_path).map_err(|e| e.to_string())?;
+    // The registry as the SUBSCRIPTION recorded it: the scope derived from it is
+    // the one the original subscribe pinned under, which is what RequirePinned
+    // below is measured against.
+    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_url)
+        .map_err(|e| e.to_string())?;
     let request = calp::pull::PullRequest {
         package_name: params.package_name.clone(),
-        registry_url: params.registry_url.clone(),
         version_pin: calp::VersionPin::parse(&format!("={}", resolved_version))
             .map_err(|e| e.to_string())?,
         now: chrono::Utc::now().to_rfc3339(),
@@ -11786,6 +11959,7 @@ pub fn calp_reset_subscription(
     let result = calp::pull::pull(
         &registry,
         &request,
+        &scope,
         &calcula_profile_dir(),
         calp::integrity::PinPolicy::RequirePinned,
     )
@@ -12697,13 +12871,16 @@ mod tofu_pin_policy_guard_tests {
     #[test]
     fn only_subscribe_and_install_may_create_a_calp_pin() {
         let files: [(&str, &str, usize); 6] = [
-            // calp_pull, and nothing else.
-            ("calp_commands.rs", include_str!("calp_commands.rs"), 1),
+            // calp_pull, and nothing else: the two arms that choose between
+            // `PinOnFirstUse` and its conflict-accepting sibling.
+            ("calp_commands.rs", include_str!("calp_commands.rs"), 2),
             ("calp_inspector.rs", include_str!("calp_inspector.rs"), 0),
-            // library_resolve's `confirm: true` mapping, the arm of
-            // `verify_library_manifest` that acts on it, and the batch
-            // `commit_pending_pins` gate in `resolve_libraries`.
-            ("library_commands.rs", include_str!("library_commands.rs"), 3),
+            // library_resolve's `confirm` mapping (1), the per-request
+            // conflict-acceptance upgrade in `resolve_libraries` (3) and the
+            // install-expectations gate next to it (2), plus the three arms of
+            // `verify_library_manifest` that act on the policy (the conflict
+            // refusal and the pair that pins).
+            ("library_commands.rs", include_str!("library_commands.rs"), 8),
             ("managed_policy.rs", include_str!("managed_policy.rs"), 0),
             ("bi/writeback.rs", include_str!("bi/writeback.rs"), 0),
             ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs"), 0),
@@ -12713,10 +12890,17 @@ mod tofu_pin_policy_guard_tests {
             // Production only: a test may legitimately exercise the pinning
             // path, and `library_commands.rs` has many that do.
             let prod = scan(src.split("#[cfg(test)]").next().unwrap());
-            let pins = prod.matches("PinPolicy::PinOnFirstUse").count();
+            // BOTH pinning policies are counted. `PinAcceptingNameConflict` is
+            // `PinOnFirstUse` plus a second, differently-worded confirmation
+            // that the user saw a cross-registry name conflict — it is the same
+            // KIND of statement (the user decided to trust a publisher), so it
+            // belongs to the same budget. Counting only one of them would let a
+            // new pinning call site hide behind the other.
+            let pins = prod.matches("PinPolicy::PinOnFirstUse").count()
+                + prod.matches("PinPolicy::PinAcceptingNameConflict").count();
             assert_eq!(
                 pins, expected,
-                "{name} contains {pins} PinOnFirstUse use(s) in production code, expected \
+                "{name} contains {pins} pinning-policy use(s) in production code, expected \
                  {expected}. Creating a TOFU pin is a statement that the USER decided to trust a \
                  publisher. If you are adding one it must be a commit point with a human behind \
                  it — and this list must say so."
@@ -12755,12 +12939,17 @@ mod tofu_pin_policy_guard_tests {
              calp::integrity::load_pinned_manifest_via; found {pinned_reads}"
         );
         // ...and none of them may go back to binding a discarded trust status.
+        // The verifier now returns a STRUCT (`VerifiedManifest`), which kills the
+        // positional forms below by construction — they are kept so a future
+        // editor who reintroduces a tuple return trips this immediately.
         for discarded in [
             "Ok((_, ver_manifest)) = calp::integrity::",
             "Ok((_, manifest)) = calp::integrity::",
             "Ok((_, m)) => m,",
             ".map(|(_, m)| m)",
             ".and_then(|(_, m)|",
+            "VerifiedManifest { trust: _,",
+            "verified.trust;",
         ] {
             assert!(
                 !cmds.contains(discarded),
@@ -12792,6 +12981,77 @@ mod tofu_pin_policy_guard_tests {
                 !prod.contains("verify_and_load_manifest_via("),
                 "{name} must not call the policy-taking verifier directly — \
                  load_pinned_manifest_via is the already-trusted entry point"
+            );
+        }
+    }
+
+    /// A `.calp` pin is filed under a REGISTRY SCOPE, and the scope has to come
+    /// from the same string the registry was opened with. `open_registry_scoped`
+    /// is what makes those inseparable, so nothing in the app crate may open a
+    /// registry any other way.
+    #[test]
+    fn every_registry_is_opened_together_with_its_pin_scope() {
+        for (name, src) in [
+            ("calp_commands.rs", include_str!("calp_commands.rs")),
+            ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("library_commands.rs", include_str!("library_commands.rs")),
+            ("managed_policy.rs", include_str!("managed_policy.rs")),
+            ("bi/writeback.rs", include_str!("bi/writeback.rs")),
+            ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
+            ("scripting/distribution_gateway.rs", include_str!("scripting/distribution_gateway.rs")),
+        ] {
+            let prod = scan(src.split("#[cfg(test)]").next().unwrap());
+            assert!(
+                !prod.contains("calp_registry::open_registry("),
+                "{name} opens a registry without deriving its pin scope. Use \
+                 calp_registry::open_registry_scoped: a pin written under a scope derived from \
+                 one string and read under a scope derived from another is a pin that silently \
+                 never matches."
+            );
+        }
+    }
+
+    /// THE SCOPE MUST BE DERIVED FROM THE STRING THE USER CONFIGURED — including
+    /// its `file://` prefix.
+    ///
+    /// `open_registry_scoped` makes the transport and the pin scope arrive
+    /// together, but that only helps if it is handed the SAME string `pull`
+    /// scoped the pin with. Ten call sites in this crate ran their own
+    /// `strip_prefix("file://")` on a subscription's `registry_url` first, which
+    /// is not the crate's stripper and does not agree with it:
+    ///
+    ///   * `file:///C:/reg`      -> `/C:/reg`      -> scope `\c:\reg`, not `c:\reg`
+    ///   * `file://server/share` -> `server/share` -> a cwd-relative path
+    ///
+    /// The pin was then written under one identity and looked up under another,
+    /// so `RequirePinned` answered `PublisherNotPinned` and writeback, GATHER
+    /// and model writeback silently went inert for those subscriptions — a pin
+    /// that is never consulted is not a pin. `calp::registry_id::strip_file_scheme`
+    /// is the one stripper, and `registry_scope` already calls it; no caller
+    /// needs a second one.
+    #[test]
+    fn nothing_pre_strips_the_file_scheme_before_deriving_a_scope() {
+        for (name, src) in [
+            ("calp_commands.rs", include_str!("calp_commands.rs")),
+            ("calp_inspector.rs", include_str!("calp_inspector.rs")),
+            ("calp_registry.rs", include_str!("calp_registry.rs")),
+            ("library_commands.rs", include_str!("library_commands.rs")),
+            ("managed_policy.rs", include_str!("managed_policy.rs")),
+            ("bi/writeback.rs", include_str!("bi/writeback.rs")),
+            ("bi/writeback_source.rs", include_str!("bi/writeback_source.rs")),
+            (
+                "scripting/distribution_gateway.rs",
+                include_str!("scripting/distribution_gateway.rs"),
+            ),
+        ] {
+            let prod = scan(src.split("#[cfg(test)]").next().unwrap());
+            assert!(
+                !prod.contains(r#"strip_prefix("file://")"#),
+                "{name} strips the file:// scheme itself. Pass the location through unchanged \
+                 (open_registry_scoped derives the scope from it), or use \
+                 calp::registry_id::strip_file_scheme when a real filesystem path is genuinely \
+                 needed. A hand-rolled strip disagrees with the one the pin was scoped by, and \
+                 the mismatch is silent: the package simply stops being trusted."
             );
         }
     }

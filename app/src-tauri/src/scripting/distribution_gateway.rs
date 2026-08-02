@@ -385,7 +385,11 @@ fn registry_location(payload: &serde_json::Map<String, Value>) -> Result<String,
 /// to `open_registry`, so normalization can never widen what is opened.
 fn normalize_location(raw: &str) -> String {
     let s = raw.trim();
-    let s = s.strip_prefix("file://").unwrap_or(s);
+    // The crate's ONE `file://` stripper. A local `strip_prefix` left
+    // `file:///C:/reg` as `/C:/reg`, which then failed to match the same
+    // registry configured as `C:\reg` — a refusal of the user's own registry,
+    // which is the failure this function exists to avoid.
+    let s = calp::registry_id::strip_file_scheme(s);
     let s = s.replace('\\', "/");
     let s = s.trim_end_matches('/').to_string();
     // Windows paths are case-insensitive, and so are scheme + host of a URL.
@@ -667,8 +671,8 @@ pub fn script_distribution(
         reject_forbidden_publish_fields(&p)?;
         let location = registry_location(&p)?;
         let package_name: String = field(&p, "packageName")?;
-        let registry =
-            crate::calp_registry::open_registry(&location).map_err(|e| e.to_string())?;
+        let (registry, _scope) =
+            crate::calp_registry::open_registry_scoped(&location).map_err(|e| e.to_string())?;
         if let Err(e) = require_publish_identity(registry.as_ref(), &package_name) {
             crate::log_warn!(
                 "SECURITY",
@@ -1542,6 +1546,14 @@ mod tests {
             "verify_signature(",
             "pin_publisher(",
             "check_min_app_version(",
+            // A cross-registry NAME CONFLICT is accepted by a human answering a
+            // second, differently-worded question in the Subscribe dialog. A
+            // SCRIPT has no way to ask that question, so it must never be able
+            // to answer it: the params literal above names exactly three fields
+            // and `acceptNameConflict` defaults to false, which makes a
+            // conflicting scripted pull fail with PublisherNameConflict rather
+            // than pin a second claimant to a familiar package name.
+            "acceptNameConflict",
         ] {
             assert!(
                 !me.contains(forbidden),

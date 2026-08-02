@@ -16,6 +16,7 @@
 use calp::error::CalpError;
 use calp::manifest::{PackageManifest, VersionManifest};
 use calp::registry::LocalRegistry;
+use calp::registry_id::{registry_scope, strip_file_scheme, RegistryScope};
 use calp::transport::RegistryTransport;
 use calp::version::{SemVer, VersionPin};
 use calp::writeback::WritebackSubmission;
@@ -26,21 +27,51 @@ use calp::writeback::WritebackSubmission;
 
 /// Whether a location string denotes an HTTP(S) registry.
 pub fn is_http_location(location: &str) -> bool {
-    location.starts_with("http://") || location.starts_with("https://")
+    calp::registry_id::is_http_location(location)
 }
 
-/// Open a registry transport for a location string, routing by scheme:
+/// Open a registry transport AND derive the pin scope for it, from ONE location
+/// string.
+///
+/// This is the only public way to open a registry, deliberately. A publisher pin
+/// is filed under the registry it came from, so the string used to OPEN a
+/// registry must be the string used to SCOPE it — otherwise a pin is written
+/// under one identity and looked up under another, and the fail-closed paths
+/// (`RequirePinned`) silently stop working. Making the transport and the scope
+/// arrive together means a call site cannot hold one without the other.
+///
+/// Routing is by scheme:
 /// - `http://` / `https://` -> read-only `HttpRegistry`
 /// - `file://<path>` or a bare path -> `LocalRegistry`
 ///
-/// Returned as a boxed trait object; publish/pull/refresh all accept
+/// The transport is a boxed trait object; publish/pull/refresh all accept
 /// `&dyn RegistryTransport`, so callers pass `registry.as_ref()`.
-pub fn open_registry(location: &str) -> Result<Box<dyn RegistryTransport>, CalpError> {
+pub fn open_registry_scoped(
+    location: &str,
+) -> Result<(Box<dyn RegistryTransport>, RegistryScope), CalpError> {
+    let scope = registry_scope(location)?;
+    let transport = open_registry(&scope.label)?;
+    Ok((transport, scope))
+}
+
+/// Derive the pin scope for a location WITHOUT opening it. For the few callers
+/// that need the scope in isolation (the admin pre-pin in `managed_policy`,
+/// which has no transport at all).
+pub fn scope_for_location(location: &str) -> Result<RegistryScope, CalpError> {
+    registry_scope(location)
+}
+
+/// The transport half. PRIVATE: opening a registry without deriving its scope
+/// is exactly the seam this module exists to close.
+fn open_registry(location: &str) -> Result<Box<dyn RegistryTransport>, CalpError> {
     if is_http_location(location) {
         Ok(Box::new(HttpRegistry::new(location)))
     } else {
-        let path = location.strip_prefix("file://").unwrap_or(location);
-        let reg = LocalRegistry::open(std::path::Path::new(path))?;
+        // ONE `file://` stripper for the whole codebase (`calp::registry_id`).
+        // Two divergent copies used to exist and the org skin could be pinned
+        // under one spelling and read under another.
+        let path = strip_file_scheme(location);
+        let reg = LocalRegistry::open(std::path::Path::new(&path))?;
         Ok(Box::new(reg))
     }
 }
@@ -404,8 +435,13 @@ pub fn calp_list_registries() -> Result<Vec<SavedRegistry>, String> {
 }
 
 /// Add (or replace by id) a saved registry. Returns the full list.
+///
+/// A location that cannot be SCOPED is refused here rather than saved and failed
+/// later: the scope is what a publisher pin is filed under, so a registry with no
+/// derivable identity is a registry whose trust decisions could not be recorded.
 #[tauri::command]
 pub fn calp_add_registry(registry: SavedRegistry) -> Result<Vec<SavedRegistry>, String> {
+    scope_for_location(&registry.location).map_err(|e| e.to_string())?;
     let mut list = load_saved_registries_from_disk();
     if let Some(existing) = list.iter_mut().find(|r| r.id == registry.id) {
         *existing = registry;
@@ -436,6 +472,57 @@ mod tests {
         assert!(!is_http_location("file:///c/registry"));
         assert!(!is_http_location("C:/registry"));
         assert!(!is_http_location("/home/user/registry"));
+    }
+
+    /// A registry is ALWAYS opened together with the scope its pins are filed
+    /// under, from ONE string. Two spellings of one directory therefore share a
+    /// scope, and a location with no derivable identity cannot be opened at all.
+    #[test]
+    fn one_registry_spelled_two_ways_opens_under_one_scope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path().to_string_lossy().to_string();
+
+        let (_t1, a) = open_registry_scoped(&base).unwrap();
+        let (_t2, b) = open_registry_scoped(&format!(
+            "file://{}/",
+            base.replace('\\', "/").to_uppercase()
+        ))
+        .unwrap();
+
+        assert_eq!(a.id, b.id, "two spellings of one folder must be one scope");
+        // ...and the LABEL is each caller's own spelling, never the normalized id.
+        assert_ne!(a.label, b.label);
+        assert_eq!(a.label, base);
+    }
+
+    #[test]
+    fn an_http_registry_scopes_by_scheme_host_and_path() {
+        let (_t, scope) = open_registry_scoped("https://REG.Acme.com:443/pub/").unwrap();
+        assert_eq!(scope.id, "https://reg.acme.com/pub");
+        assert_eq!(scope.label, "https://REG.Acme.com:443/pub/");
+    }
+
+    /// A location whose identity cannot be derived is refused at the door.
+    /// Saving it would mean a registry whose trust decisions could not be
+    /// recorded — a pin has to be filed under SOMETHING, and "some fallback" is
+    /// how name-only keying happened in the first place.
+    #[test]
+    fn an_unscopeable_location_can_be_neither_opened_nor_saved() {
+        for bad in ["", "   ", "ftp://host/reg", "https://host/reg?token=1"] {
+            assert!(
+                open_registry_scoped(bad).is_err(),
+                "location {bad:?} must not open"
+            );
+            assert!(
+                calp_add_registry(SavedRegistry {
+                    id: "x".to_string(),
+                    name: "x".to_string(),
+                    location: bad.to_string(),
+                })
+                .is_err(),
+                "location {bad:?} must not be saveable"
+            );
+        }
     }
 
     #[test]

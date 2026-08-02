@@ -39,7 +39,8 @@ use calp::integrity::{
     sha256_hex, PinPolicy, VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE,
 };
 use calp::manifest::VersionManifest;
-use calp::signing::{load_trusted_publishers, pin_publisher, verify_signature};
+use calp::registry_id::RegistryScope;
+use calp::signing::{load_pins, pin_publisher, verify_signature, PinKey, PinNamespace};
 use calp::transport::RegistryTransport;
 use calp::version::VersionPin;
 use calcula_format::features::scripts::ScriptDef;
@@ -83,24 +84,51 @@ pub const LIB_TRUST_FIRST_USE: &str = "firstUse";
 /// VERIFIES against an existing pin and never CREATES one.
 pub const LIB_TRUST_NOT_INSTALLED: &str = "notInstalled";
 
-/// The signature verified against the key already pinned for this package.
+/// The signature verified against the key already pinned for this package, in
+/// this registry.
 pub const LIB_TRUST_VERIFIED: &str = "verified";
+
+/// INSTALL-ONLY. Pinned now for THIS registry, and the same publisher key is
+/// already trusted for this package name from ANOTHER registry — a mirror, a
+/// migration, or a second spelling of one location. Reassurance, not alarm.
+pub const LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER: &str = "firstUseKnownPublisher";
+
+/// INSTALL-ONLY. Pinned now even though a DIFFERENT key is pinned for this same
+/// package name from another registry, because the user was shown both and
+/// accepted. Never presented as an ordinary first use.
+pub const LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT: &str = "firstUseAcceptedNameConflict";
+
+/// PREVIEW-ONLY. Not installed from this registry, AND a different publisher key
+/// is pinned for this package name from another registry. Two registries claiming
+/// one library name is what a hijack looks like: it must be surfaced with both
+/// registries and both keys, never as a plain "not installed yet".
+pub const LIB_TRUST_NOT_INSTALLED_NAME_CONFLICT: &str = "notInstalledNameConflict";
 
 /// Every status `library_resolve` can return. The frontend must have a
 /// presentation row for each — a security state that renders as an unlabelled
 /// box (or, worse, falls through to "verified") is the worst possible failure.
 pub const LIBRARY_TRUST_STATUSES: &[&str] = &[
     LIB_TRUST_FIRST_USE,
+    LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER,
+    LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT,
     LIB_TRUST_NOT_INSTALLED,
+    LIB_TRUST_NOT_INSTALLED_NAME_CONFLICT,
     LIB_TRUST_VERIFIED,
 ];
 
-/// The ONLY status that means "this machine has, at some point, deliberately
-/// agreed to trust this publisher for this package name". `notInstalled` is
-/// deliberately absent: a previewed-but-never-installed library is not trusted,
-/// it is merely authentic.
+/// The ONLY statuses that mean "this machine has, at some point, deliberately
+/// agreed to trust this publisher for this package name from this registry".
+/// Both `notInstalled` states are deliberately absent: a previewed-but-never-
+/// installed library is not trusted, it is merely authentic — and one whose name
+/// is claimed by a second registry is less than that.
 pub fn library_trust_is_pinned(status: &str) -> bool {
-    matches!(status, LIB_TRUST_FIRST_USE | LIB_TRUST_VERIFIED)
+    matches!(
+        status,
+        LIB_TRUST_FIRST_USE
+            | LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER
+            | LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT
+            | LIB_TRUST_VERIFIED
+    )
 }
 
 // The pin policy is NOT declared here. It is `calp::integrity::PinPolicy`, the
@@ -141,6 +169,7 @@ fn verify_library_manifest(
     t: &dyn RegistryTransport,
     package: &str,
     version: &str,
+    scope: &RegistryScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<VerifiedLibraryManifest, CalpError> {
@@ -179,23 +208,62 @@ fn verify_library_manifest(
 
     // (3) TOFU — read always; a WRITE is only ever PROPOSED, and only on an
     //     install (see `VerifiedLibraryManifest::pending_pin`).
-    let pinned = load_trusted_publishers(profile_dir)?;
-    let (status, pending_pin) = match pinned.get(package) {
-        Some(pinned_key) if pinned_key != &manifest.publisher_key => {
+    let store = load_pins(profile_dir)?;
+    let key = PinKey::calp(scope, package);
+    // A pin for this SAME library name in a DIFFERENT registry. Registry scoping
+    // on its own would turn a hostile registry serving a familiar name into an
+    // ordinary silent first use; this is what keeps that loud.
+    let other_scopes = store.other_scopes_for_name(PinNamespace::Calp, package, scope.id.as_str());
+    let conflicting = other_scopes
+        .iter()
+        .find(|r| r.publisher_key != manifest.publisher_key);
+    let same_key_elsewhere = other_scopes
+        .iter()
+        .any(|r| r.publisher_key == manifest.publisher_key);
+
+    let (status, pending_pin) = match store.get(&key) {
+        Some(record) if record.publisher_key != manifest.publisher_key => {
             return Err(CalpError::PublisherKeyChanged {
                 package: package.to_string(),
                 version: version.to_string(),
-                pinned: pinned_key.clone(),
+                pinned: record.publisher_key.clone(),
                 got: manifest.publisher_key.clone(),
             });
         }
         Some(_) => (LIB_TRUST_VERIFIED, None),
         None => match policy {
-            PinPolicy::VerifyOnly => (LIB_TRUST_NOT_INSTALLED, None),
-            PinPolicy::PinOnFirstUse => (
-                LIB_TRUST_FIRST_USE,
-                Some(manifest.publisher_key.clone()),
-            ),
+            PinPolicy::VerifyOnly => {
+                let status = if conflicting.is_some() {
+                    LIB_TRUST_NOT_INSTALLED_NAME_CONFLICT
+                } else {
+                    LIB_TRUST_NOT_INSTALLED
+                };
+                (status, None)
+            }
+            // An install that has NOT been told about a cross-registry name
+            // conflict refuses rather than pinning. An error, not a status: a
+            // status can be rendered as a badge and clicked past.
+            PinPolicy::PinOnFirstUse if conflicting.is_some() => {
+                let other = conflicting.expect("checked by the guard");
+                return Err(CalpError::PublisherNameConflict {
+                    package: package.to_string(),
+                    version: version.to_string(),
+                    scope: scope.label.clone(),
+                    other_scope: other.scope_label.clone(),
+                    pinned: other.publisher_key.clone(),
+                    got: manifest.publisher_key.clone(),
+                });
+            }
+            PinPolicy::PinOnFirstUse | PinPolicy::PinAcceptingNameConflict => {
+                let status = if conflicting.is_some() {
+                    LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT
+                } else if same_key_elsewhere {
+                    LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER
+                } else {
+                    LIB_TRUST_FIRST_USE
+                };
+                (status, Some(manifest.publisher_key.clone()))
+            }
             // A library resolve is never an "already trusted, refuse first
             // contact" operation: a preview is allowed to report `notInstalled`
             // and an install is allowed to pin. Spelled out rather than swept
@@ -204,6 +272,7 @@ fn verify_library_manifest(
                 return Err(CalpError::PublisherNotPinned {
                     package: package.to_string(),
                     version: version.to_string(),
+                    scope: scope.label.clone(),
                     got: manifest.publisher_key.clone(),
                 });
             }
@@ -234,9 +303,18 @@ struct VerifiedLibraryManifest {
 /// Called once, after every package in the batch has passed every gate, so the
 /// pin store moves in step with the caller's all-or-nothing contract: if
 /// `resolve_libraries` returns `Err`, no package in that batch is pinned.
-fn commit_pending_pins(profile_dir: &Path, pins: &[(String, String)]) -> Result<(), CalpError> {
+fn commit_pending_pins(
+    profile_dir: &Path,
+    scope: &RegistryScope,
+    pins: &[(String, String)],
+) -> Result<(), CalpError> {
     for (package, key) in pins {
-        pin_publisher(profile_dir, package, key)?;
+        pin_publisher(
+            profile_dir,
+            &PinKey::calp(scope, package),
+            &scope.label,
+            key,
+        )?;
     }
     Ok(())
 }
@@ -268,6 +346,13 @@ pub struct LibraryRequest {
     /// move between the review and the approval.
     #[serde(default)]
     pub expected_version: Option<String>,
+    /// The user was shown a CROSS-REGISTRY NAME CONFLICT for this package — the
+    /// same library name is already pinned to a different publisher key from
+    /// another registry — and accepted it in a second, differently-worded
+    /// confirmation. Absent/false makes an install with a conflict FAIL rather
+    /// than pin, so a caller that forgets it fails closed.
+    #[serde(default)]
+    pub accept_name_conflict: bool,
 }
 
 /// One module of a resolved library package, with its verified source.
@@ -339,9 +424,11 @@ pub fn library_resolve(
     } else {
         PinPolicy::VerifyOnly
     };
-    let registry = crate::calp_registry::open_registry(&registry_path).map_err(|e| e.to_string())?;
+    let (registry, scope) =
+        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
     resolve_libraries(
         registry.as_ref(),
+        &scope,
         &calcula_profile_dir(),
         &requests,
         policy,
@@ -353,6 +440,7 @@ pub fn library_resolve(
 /// `LocalRegistry` without a Tauri window.
 pub fn resolve_libraries(
     registry: &dyn calp::transport::RegistryTransport,
+    scope: &RegistryScope,
     profile_dir: &std::path::Path,
     requests: &[LibraryRequest],
     policy: PinPolicy,
@@ -386,9 +474,25 @@ pub fn resolve_libraries(
         // unsigned package errors here (MissingSignature) — there is no
         // "install it anyway with an empty ceiling" path in this command.
         // Under PinPolicy::VerifyOnly this READS the pin store and never writes it.
-        let verified =
-            verify_library_manifest(registry, &request.package, &version, profile_dir, policy)
-                .map_err(|e| format!("{}@{}: {}", request.package, version, e))?;
+        // A conflict acceptance is PER REQUEST, and it can only ever UPGRADE an
+        // install — never a preview. A batch may legitimately contain one
+        // package whose name is claimed by a second registry and several that
+        // are unremarkable; a batch-wide flag would either fail the whole
+        // install or quietly relax the gate for packages the user was never
+        // asked about.
+        let request_policy = match (policy, request.accept_name_conflict) {
+            (PinPolicy::PinOnFirstUse, true) => PinPolicy::PinAcceptingNameConflict,
+            (p, _) => p,
+        };
+        let verified = verify_library_manifest(
+            registry,
+            &request.package,
+            &version,
+            scope,
+            profile_dir,
+            request_policy,
+        )
+        .map_err(|e| format!("{}@{}: {}", request.package, version, e))?;
         let VerifiedLibraryManifest {
             status,
             manifest,
@@ -399,7 +503,10 @@ pub fn resolve_libraries(
         // Checked here — after the signature verified, so `manifest.publisher_key`
         // is an established fact rather than an assertion, and BEFORE the pin is
         // queued, so a mismatch can never leave a pin behind.
-        if policy == PinPolicy::PinOnFirstUse {
+        if matches!(
+            request_policy,
+            PinPolicy::PinOnFirstUse | PinPolicy::PinAcceptingNameConflict
+        ) {
             if let Some(expected) = &request.expected_version {
                 if expected != &version {
                     return Err(format!(
@@ -498,7 +605,7 @@ pub fn resolve_libraries(
     // Every package verified. Only now may an INSTALL create pins — so the
     // "never partial success" contract covers the pin store, not just the
     // returned value.
-    commit_pending_pins(profile_dir, &pending_pins).map_err(|e| e.to_string())?;
+    commit_pending_pins(profile_dir, scope, &pending_pins).map_err(|e| e.to_string())?;
 
     Ok(out)
 }
@@ -607,7 +714,15 @@ mod tests {
         _reg_dir: TempDir,
         profile: TempDir,
         registry: LocalRegistry,
+        /// The pin scope the registry's location resolves to — pins are filed
+        /// under (registry, package), so a test that omits it is not testing
+        /// the thing the production call site does.
+        scope: RegistryScope,
         keypair: PublisherKeypair,
+    }
+
+    fn scope_of(dir: &TempDir) -> RegistryScope {
+        calp::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap()
     }
 
     fn fixture() -> Fixture {
@@ -615,10 +730,12 @@ mod tests {
         let profile = TempDir::new().unwrap();
         let registry = LocalRegistry::open(reg_dir.path()).unwrap();
         let keypair = PublisherKeypair::load_or_create(profile.path()).unwrap();
+        let scope = scope_of(&reg_dir);
         Fixture {
             _reg_dir: reg_dir,
             profile,
             registry,
+            scope,
             keypair,
         }
     }
@@ -641,6 +758,7 @@ mod tests {
             pin: pin.to_string(),
             expected_publisher_key: Some(key.to_string()),
             expected_version: Some(version.to_string()),
+            ..Default::default()
         }]
     }
 
@@ -659,6 +777,7 @@ mod tests {
 
         let out = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "^1.2.0"),
             PinPolicy::PinOnFirstUse,
@@ -687,6 +806,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -714,6 +834,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.report", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -750,6 +871,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -773,6 +895,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.empty", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -786,6 +909,7 @@ mod tests {
         let f = fixture();
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "nonsense"),
             PinPolicy::PinOnFirstUse,
@@ -809,6 +933,7 @@ mod tests {
 
         let first = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -817,6 +942,7 @@ mod tests {
         assert_eq!(first[0].trust_status, LIB_TRUST_FIRST_USE);
         let second = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -839,6 +965,7 @@ mod tests {
         );
         resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -861,6 +988,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.1"),
             PinPolicy::PinOnFirstUse,
@@ -888,8 +1016,15 @@ mod tests {
         calp::signing::trusted_publishers_file_path(profile).exists()
     }
 
-    fn pinned_key(profile: &std::path::Path, pkg: &str) -> Option<String> {
-        load_trusted_publishers(profile).unwrap().get(pkg).cloned()
+    fn pinned_key(
+        profile: &std::path::Path,
+        scope: &RegistryScope,
+        pkg: &str,
+    ) -> Option<String> {
+        load_pins(profile)
+            .unwrap()
+            .get(&PinKey::calp(scope, pkg))
+            .map(|r| r.publisher_key.clone())
     }
 
     #[test]
@@ -907,6 +1042,7 @@ mod tests {
 
         let out = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::VerifyOnly,
@@ -925,7 +1061,7 @@ mod tests {
             "notInstalled must not count as a trusted, pinned publisher"
         );
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.stats"),
+            pinned_key(f.profile.path(), &f.scope, "acme.stats"),
             None,
             "a preview must not create a TOFU pin"
         );
@@ -946,6 +1082,7 @@ mod tests {
         for _ in 0..3 {
             let out = resolve_libraries(
                 &f.registry,
+                &f.scope,
                 f.profile.path(),
                 &req("acme.stats", "1.0.0"),
                 PinPolicy::VerifyOnly,
@@ -974,6 +1111,7 @@ mod tests {
 
         let installed = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -981,7 +1119,7 @@ mod tests {
         .unwrap();
         assert_eq!(installed[0].trust_status, LIB_TRUST_FIRST_USE);
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.stats").as_deref(),
+            pinned_key(f.profile.path(), &f.scope, "acme.stats").as_deref(),
             Some(f.keypair.public_key_hex().as_str()),
             "install is the ONE path that pins"
         );
@@ -989,6 +1127,7 @@ mod tests {
         // Now that a human has agreed, a preview can honestly say "verified".
         let previewed = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::VerifyOnly,
@@ -1024,19 +1163,21 @@ mod tests {
         );
         let squat = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::VerifyOnly,
         )
         .unwrap();
         assert_eq!(squat[0].trust_status, LIB_TRUST_NOT_INSTALLED);
-        assert_eq!(pinned_key(f.profile.path(), "acme.stats"), None);
+        assert_eq!(pinned_key(f.profile.path(), &f.scope, "acme.stats"), None);
 
         // The genuine publisher ships. A SEPARATE registry, so this test is
         // purely about the pin store and not about which key signed which
         // version inside one registry.
         let genuine_dir = TempDir::new().unwrap();
         let genuine_registry = LocalRegistry::open(genuine_dir.path()).unwrap();
+        let genuine_scope = scope_of(&genuine_dir);
         publish_library(
             &genuine_registry,
             &f.keypair,
@@ -1049,6 +1190,7 @@ mod tests {
 
         let genuine = resolve_libraries(
             &genuine_registry,
+            &genuine_scope,
             f.profile.path(),
             &req("acme.stats", "2.0.0"),
             PinPolicy::VerifyOnly,
@@ -1062,6 +1204,7 @@ mod tests {
         // Installing the genuine one pins the GENUINE key.
         let installed = resolve_libraries(
             &genuine_registry,
+            &genuine_scope,
             f.profile.path(),
             &req("acme.stats", "2.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -1069,21 +1212,165 @@ mod tests {
         .unwrap();
         assert_eq!(installed[0].trust_status, LIB_TRUST_FIRST_USE);
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.stats").as_deref(),
-            Some(f.keypair.public_key_hex().as_str())
+            pinned_key(f.profile.path(), &genuine_scope, "acme.stats").as_deref(),
+            Some(f.keypair.public_key_hex().as_str()),
+            "the pin belongs to the GENUINE registry"
+        );
+        assert_eq!(
+            pinned_key(f.profile.path(), &f.scope, "acme.stats"),
+            None,
+            "installing from one registry must not pin the name for another"
         );
 
-        // And NOW the squatter is the one who reads as a publisher change.
-        let err = resolve_libraries(
+        // And NOW the squatter's registry reads as a NAME CONFLICT: a different
+        // publisher key is trusted for this same library name elsewhere.
+        //
+        // Note what it is NOT. Under name-only keying this said "publisher
+        // changed", which is a claim about ONE identity mutating; here the truth
+        // is that two registries claim one name, and the user is told exactly
+        // that, with both registries named. A conflict is louder than an
+        // ordinary first contact and quieter than an accusation.
+        let conflict = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::VerifyOnly,
         )
+        .expect("a preview reports the conflict rather than failing");
+        assert_eq!(
+            conflict[0].trust_status, LIB_TRUST_NOT_INSTALLED_NAME_CONFLICT,
+            "the squatter's registry must be flagged as a name conflict"
+        );
+        assert!(!library_trust_is_pinned(&conflict[0].trust_status));
+
+        // An INSTALL from the squatter's registry is refused outright unless the
+        // user was shown the conflict and accepted it.
+        let err = resolve_libraries(
+            &f.registry,
+            &f.scope,
+            f.profile.path(),
+            &req("acme.stats", "1.0.0"),
+            PinPolicy::PinOnFirstUse,
+        )
         .unwrap_err();
         assert!(
-            err.contains("changed since first use"),
-            "the squatter must now be the one flagged, got: {err}"
+            err.contains("already trusted on this computer from a DIFFERENT registry"),
+            "an unacknowledged conflict must refuse, got: {err}"
+        );
+        assert_eq!(pinned_key(f.profile.path(), &f.scope, "acme.stats"), None);
+    }
+
+    /// The ACCEPT path. A user who was shown the conflict — both registries,
+    /// both keys — and answered the second question gets both pins, each
+    /// resolving to its own registry's key.
+    #[test]
+    fn accepting_a_name_conflict_pins_the_second_registry_without_touching_the_first() {
+        let f = fixture();
+        publish_library(
+            &f.registry,
+            &f.keypair,
+            "acme.stats",
+            "1.0.0",
+            "library",
+            &[("stats", LIB_SRC)],
+            true,
+        );
+        resolve_libraries(
+            &f.registry,
+            &f.scope,
+            f.profile.path(),
+            &req("acme.stats", "1.0.0"),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        // A SECOND registry serves the same library name under a different key.
+        let other_dir = TempDir::new().unwrap();
+        let other_registry = LocalRegistry::open(other_dir.path()).unwrap();
+        let other_scope = scope_of(&other_dir);
+        let other_profile = TempDir::new().unwrap();
+        let other_keypair = PublisherKeypair::load_or_create(other_profile.path()).unwrap();
+        publish_library(
+            &other_registry,
+            &other_keypair,
+            "acme.stats",
+            "1.0.0",
+            "library",
+            &[("stats", LIB_SRC)],
+            true,
+        );
+
+        // Without the acknowledgement: refused, and nothing is pinned.
+        assert!(resolve_libraries(
+            &other_registry,
+            &other_scope,
+            f.profile.path(),
+            &req("acme.stats", "1.0.0"),
+            PinPolicy::PinOnFirstUse,
+        )
+        .is_err());
+        assert_eq!(pinned_key(f.profile.path(), &other_scope, "acme.stats"), None);
+
+        // With it: pinned, and honestly labelled.
+        let out = resolve_libraries(
+            &other_registry,
+            &other_scope,
+            f.profile.path(),
+            &req("acme.stats", "1.0.0"),
+            PinPolicy::PinAcceptingNameConflict,
+        )
+        .unwrap();
+        assert_eq!(
+            out[0].trust_status, LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT,
+            "an accepted conflict must never read as an ordinary first use"
+        );
+        assert!(library_trust_is_pinned(&out[0].trust_status));
+
+        // Each registry resolves to its OWN key. Neither overwrote the other.
+        assert_eq!(
+            pinned_key(f.profile.path(), &f.scope, "acme.stats").as_deref(),
+            Some(f.keypair.public_key_hex().as_str())
+        );
+        assert_eq!(
+            pinned_key(f.profile.path(), &other_scope, "acme.stats").as_deref(),
+            Some(other_keypair.public_key_hex().as_str())
+        );
+    }
+
+    /// A registry MIGRATION — the same publisher, a new location — is
+    /// reassurance, not an alarm, and needs no second question.
+    #[test]
+    fn the_same_publisher_at_a_new_registry_is_a_known_publisher_not_a_conflict() {
+        let f = fixture();
+        publish_library(
+            &f.registry, &f.keypair, "acme.stats", "1.0.0", "library",
+            &[("stats", LIB_SRC)], true,
+        );
+        resolve_libraries(
+            &f.registry, &f.scope, f.profile.path(),
+            &req("acme.stats", "1.0.0"), PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        // The SAME publisher key republishes into a new registry.
+        let new_dir = TempDir::new().unwrap();
+        let new_registry = LocalRegistry::open(new_dir.path()).unwrap();
+        let new_scope = scope_of(&new_dir);
+        publish_library(
+            &new_registry, &f.keypair, "acme.stats", "1.0.0", "library",
+            &[("stats", LIB_SRC)], true,
+        );
+
+        let out = resolve_libraries(
+            &new_registry, &new_scope, f.profile.path(),
+            &req("acme.stats", "1.0.0"), PinPolicy::PinOnFirstUse,
+        )
+        .expect("a same-key move must not need a conflict acknowledgement");
+        assert_eq!(out[0].trust_status, LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER);
+        assert_eq!(
+            pinned_key(f.profile.path(), &new_scope, "acme.stats").as_deref(),
+            Some(f.keypair.public_key_hex().as_str())
         );
     }
 
@@ -1103,6 +1390,7 @@ mod tests {
         );
         resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -1123,6 +1411,7 @@ mod tests {
 
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.stats", "1.0.1"),
             PinPolicy::VerifyOnly,
@@ -1131,7 +1420,7 @@ mod tests {
         assert!(err.contains("changed since first use"), "got: {err}");
         // ...and the pin is untouched by the refusal.
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.stats").as_deref(),
+            pinned_key(f.profile.path(), &f.scope, "acme.stats").as_deref(),
             Some(f.keypair.public_key_hex().as_str())
         );
     }
@@ -1155,6 +1444,7 @@ mod tests {
         );
         assert!(resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.unsigned", "1.0.0"),
             PinPolicy::PinOnFirstUse
@@ -1173,6 +1463,7 @@ mod tests {
         );
         assert!(resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &req("acme.report", "1.0.0"),
             PinPolicy::PinOnFirstUse
@@ -1225,10 +1516,10 @@ mod tests {
             },
         ];
         assert!(
-            resolve_libraries(&f.registry, f.profile.path(), &batch, PinPolicy::PinOnFirstUse).is_err()
+            resolve_libraries(&f.registry, &f.scope, f.profile.path(), &batch, PinPolicy::PinOnFirstUse).is_err()
         );
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.good"),
+            pinned_key(f.profile.path(), &f.scope, "acme.good"),
             None,
             "a batch that fails must not leave partial pins behind"
         );
@@ -1251,6 +1542,7 @@ mod tests {
         for policy in [PinPolicy::VerifyOnly, PinPolicy::PinOnFirstUse, PinPolicy::VerifyOnly] {
             let out = resolve_libraries(
                 &f.registry,
+                &f.scope,
                 f.profile.path(),
                 &req("acme.stats", "1.0.0"),
                 policy,
@@ -1287,14 +1579,16 @@ mod tests {
             &f.registry,
             "acme.stats",
             "1.0.0",
+            &f.scope,
             mine.path(),
             PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         // The local path proposes the pin and commits it separately; commit it
-        // here so the two stores can be compared byte for byte.
+        // here so the two stores can be compared.
         commit_pending_pins(
             mine.path(),
+            &f.scope,
             &[(
                 "acme.stats".to_string(),
                 verified.pending_pin.clone().expect("install must propose a pin"),
@@ -1305,23 +1599,30 @@ mod tests {
         let manifest = verified.manifest;
 
         let theirs = TempDir::new().unwrap();
-        let (their_status, their_manifest) = calp::integrity::verify_and_load_manifest_via(
+        let their_verified = calp::integrity::verify_and_load_manifest_via(
             &f.registry,
             "acme.stats",
             "1.0.0",
+            &f.scope,
             theirs.path(),
             calp::integrity::PinPolicy::PinOnFirstUse,
         )
         .unwrap();
 
-        assert_eq!(their_status, calp::integrity::TrustStatus::FirstUse);
+        assert_eq!(their_verified.trust, calp::integrity::TrustStatus::FirstUse);
         assert_eq!(status, LIB_TRUST_FIRST_USE);
-        assert_eq!(manifest.publisher_key, their_manifest.publisher_key);
         assert_eq!(
-            load_trusted_publishers(mine.path()).unwrap(),
-            load_trusted_publishers(theirs.path()).unwrap(),
+            manifest.publisher_key,
+            their_verified.manifest.publisher_key
+        );
+        // The same KEY, filed under the same (namespace, scope, name).
+        assert_eq!(
+            pinned_key(mine.path(), &f.scope, "acme.stats"),
+            pinned_key(theirs.path(), &f.scope, "acme.stats"),
             "the local pinning path must write exactly what calp writes"
         );
+        assert_eq!(load_pins(mine.path()).unwrap().len(), 1);
+        assert_eq!(load_pins(theirs.path()).unwrap().len(), 1);
     }
     // ------------------------------------------------------------------
     // Install-time expectations: the approved identity travels with the
@@ -1349,6 +1650,7 @@ mod tests {
         assert_ne!(reviewed_key, f.keypair.public_key_hex());
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &approved("acme.stats", "1.0.0", &reviewed_key, "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -1386,6 +1688,7 @@ mod tests {
         // "^1.0.0" resolved to 1.0.0 at review time; it now resolves to 1.4.0.
         let err = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &approved("acme.stats", "^1.0.0", &f.keypair.public_key_hex(), "1.0.0"),
             PinPolicy::PinOnFirstUse,
@@ -1410,6 +1713,7 @@ mod tests {
 
         let out = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &approved("acme.stats", "^1.2.0", &f.keypair.public_key_hex(), "1.2.4"),
             PinPolicy::PinOnFirstUse,
@@ -1417,7 +1721,7 @@ mod tests {
         .unwrap();
         assert_eq!(out[0].trust_status, LIB_TRUST_FIRST_USE);
         assert_eq!(
-            pinned_key(f.profile.path(), "acme.stats").as_deref(),
+            pinned_key(f.profile.path(), &f.scope, "acme.stats").as_deref(),
             Some(f.keypair.public_key_hex().as_str())
         );
     }
@@ -1439,6 +1743,7 @@ mod tests {
         );
         let out = resolve_libraries(
             &f.registry,
+            &f.scope,
             f.profile.path(),
             &approved("acme.stats", "1.0.0", &"11".repeat(32), "9.9.9"),
             PinPolicy::VerifyOnly,

@@ -81,36 +81,137 @@ export interface PublishPreviewResponse {
  * TOFU trust outcome for a `.calp` package, mirrored EXACTLY from the Rust
  * `calp::integrity::TrustStatus`.
  *
- * - `"verified"`  — signed by the key this machine pinned when the user
- *   deliberately trusted this publisher (Subscribe).
- * - `"firstUse"`  — the key was pinned by THIS operation. Only a commit point
- *   (Subscribe) can produce it.
- * - `"notPinned"` — the signature is cryptographically valid, but nobody on
- *   this computer has ever agreed to trust that signer for this package name.
- *   AUTHENTIC IS NOT TRUSTED: anyone can generate an Ed25519 key and sign a
- *   package, so a valid signature proves only that the bytes are unaltered.
- *   Passive surfaces (inspect, review, the Package Inspector) return this
- *   instead of quietly creating a pin — a pin created by merely LOOKING at a
- *   file lets that file squat the identity the real publisher is later measured
- *   against, which is the bug this vocabulary exists to prevent.
+ * A pin is scoped to `(registry, package name)`, not to the name alone. Keying
+ * on the name alone meant whoever made first contact with a name owned it on the
+ * whole machine: a package `acme.finance` served once from `\\evil\share` wrote
+ * the pin the GENUINE `acme.finance` was later measured against, so the real
+ * publisher's first release read as "publisher changed" — an accusation pointed
+ * at the victim. Three of the six states below exist because scoping alone would
+ * have traded that loud false alarm for a quiet true miss.
  *
- * EVERY UI that switches on one of these MUST have a row for all three. A trust
+ * - `"verified"` — signed by the key this machine pinned for THIS registry when
+ *   the user deliberately trusted this publisher (Subscribe).
+ * - `"firstUse"` — the key was pinned by THIS operation, and this name was not
+ *   pinned anywhere else. Only a commit point (Subscribe) can produce it.
+ * - `"firstUseKnownPublisher"` — pinned by this operation for a new registry,
+ *   and the SAME key is already trusted for this name elsewhere: a migration, a
+ *   mirror, or a second spelling of one location. Reassurance, not alarm.
+ * - `"firstUseAcceptedNameConflict"` — pinned by this operation even though a
+ *   DIFFERENT key holds this name from another registry, because the user was
+ *   shown both and accepted. Never present this as an ordinary first use.
+ * - `"notPinned"` — the signature is cryptographically valid, but nobody on
+ *   this computer has ever agreed to trust that signer for this package name
+ *   from this registry. AUTHENTIC IS NOT TRUSTED: anyone can generate an Ed25519
+ *   key and sign a package, so a valid signature proves only that the bytes are
+ *   unaltered. Passive surfaces (inspect, review, the Package Inspector) return
+ *   this instead of quietly creating a pin.
+ * - `"notPinnedNameConflict"` — passive first contact AND a different key is
+ *   pinned for this same name from another registry. Two registries claiming one
+ *   name is what a hijack looks like: show BOTH registries and BOTH key
+ *   fingerprints, in a danger tone.
+ *
+ * EVERY UI that switches on one of these MUST have a row for all six. A trust
  * state that renders as no badge (reads as benign) or falls through to a green
  * "verified" pill is a security-UX defect, not a cosmetic one.
  */
-export type CalpTrustStatus = "verified" | "firstUse" | "notPinned";
+export type CalpTrustStatus =
+  | "verified"
+  | "firstUse"
+  | "firstUseKnownPublisher"
+  | "firstUseAcceptedNameConflict"
+  | "notPinned"
+  | "notPinnedNameConflict";
 
 /** The statuses that mean "this machine has deliberately agreed to trust this
- *  publisher for this package name". `notPinned` is deliberately absent, exactly
- *  as `notInstalled` is absent from the library/extension equivalents. */
+ *  publisher for this package name, from this registry". Both `notPinned` states
+ *  are deliberately absent, exactly as `notInstalled` is absent from the
+ *  library/extension equivalents. */
 export function calpTrustIsPinned(status: string): boolean {
-  return status === "verified" || status === "firstUse";
+  return (
+    status === "verified" ||
+    status === "firstUse" ||
+    status === "firstUseKnownPublisher" ||
+    status === "firstUseAcceptedNameConflict"
+  );
+}
+
+/** The two conflict states, which must always render in a danger tone: another
+ *  registry holds this package name under a DIFFERENT publisher key. */
+export function calpTrustIsNameConflict(status: string): boolean {
+  return status === "notPinnedNameConflict" || status === "firstUseAcceptedNameConflict";
+}
+
+/**
+ * A pin held for the SAME package name in a DIFFERENT registry.
+ *
+ * `scopeLabel` is the other registry EXACTLY as the user configured it — the
+ * backend never exposes the normalized scope id, which is key material and not a
+ * string anyone typed.
+ */
+export interface OtherScopePin {
+  scopeLabel: string;
+  publisherKey: string;
+  /** RFC3339, or "" for a pin carried over from the pre-scoping store. */
+  pinnedAt: string;
+  /** Whether that key is the one being offered here (migration/mirror) or a
+   *  different one (name conflict). */
+  sameKey: boolean;
+}
+
+/**
+ * One publisher pin held by THIS COMPUTER.
+ *
+ * `scopeLabel` is the registry exactly as the user configured it, and is empty
+ * for the `ext` namespace: an extension pin is machine-global by decision (there
+ * is no registry, and the only candidate scope — the source folder — is the
+ * attacker's own choice, so scoping by it would hand a dropped bundle a free
+ * first use on an id it does not own).
+ */
+export interface TrustedPublisherPin {
+  /** "calp" | "ext". */
+  namespace: string;
+  name: string;
+  scopeLabel: string;
+  publisherKey: string;
+  /** RFC3339, or "" for a pin carried over from the pre-scoping store. */
+  pinnedAt: string;
+}
+
+export interface TrustedPublisherName {
+  namespace: string;
+  name: string;
+  pins: TrustedPublisherPin[];
+  /** More than one DISTINCT publisher key holds this name on this machine. */
+  hasKeyConflict: boolean;
+}
+
+export interface TrustedPublisherReport {
+  names: TrustedPublisherName[];
+  totalPins: number;
+  conflictCount: number;
+  /** Non-empty when the pin store exists but could not be read. NOT the same as
+   *  "nothing is trusted" — render it as a failure, never as an empty list. */
+  error: string;
+}
+
+/**
+ * What does this computer trust, and from where?
+ *
+ * Read-only and passive: it opens no registry, verifies nothing, and can neither
+ * create nor remove a pin.
+ */
+export async function listTrustedPublishers(): Promise<TrustedPublisherReport> {
+  return invokeBackend<TrustedPublisherReport>("calp_list_trusted_publishers");
 }
 
 export interface PullParams {
   registryPath: string;
   packageName: string;
   versionPin: string;
+  /** The user was shown a cross-registry NAME CONFLICT and accepted it in a
+   *  second, differently-worded confirmation. Omitting it makes a conflicting
+   *  subscribe FAIL with an explanation rather than pin — fail closed. */
+  acceptNameConflict?: boolean;
 }
 
 export interface PullResponse {
@@ -122,10 +223,12 @@ export interface PullResponse {
   scriptsPulled: number;
   /** Publisher display name from the verified manifest (S5 phase 2). */
   publisherName: string;
-  /** A `CalpTrustStatus`. Subscribe is a commit point, so this is "firstUse"
-   *  (the pin was created now) or "verified" (it matched the existing pin);
-   *  "notPinned" cannot occur on this path. */
+  /** A `CalpTrustStatus`. Subscribe is a commit point, so this is one of the
+   *  pinning states ("verified", "firstUse", "firstUseKnownPublisher" or
+   *  "firstUseAcceptedNameConflict"); neither "notPinned" state occurs here. */
   trustStatus: CalpTrustStatus;
+  /** Pins for this same package name in OTHER registries. */
+  otherScopePins: OtherScopePin[];
   /** Custom objects of kinds NOT handled Rust-side (brick 4), for frontend
    *  provider materialization. pullPackage dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
@@ -177,6 +280,10 @@ export interface PackageInspection {
    *  deliberately does NOT pin it, so this key is the thing the user compares
    *  against what the publisher told them out of band before subscribing. */
   publisherKey: string;
+  /** Pins for this same package name in OTHER registries. Shown in the Review
+   *  step, because Review must never say nothing and then have Subscribe fail on
+   *  a conflict it never mentioned. */
+  otherScopePins: OtherScopePin[];
   /** A `CalpTrustStatus`. Review/inspect is PASSIVE, so first contact reports
    *  "notPinned" and writes nothing to the pin store — inspecting a package is
    *  not a decision to trust its publisher. A failed signature check returns an
@@ -515,6 +622,8 @@ export interface SubscriptionTrustInfo {
   /** A `CalpTrustStatus`, or "unavailable" when the registry/manifest could not
    *  be read or verified at all (see `error`). */
   trustStatus: CalpTrustStatus | "unavailable";
+  /** Pins for this same package name in OTHER registries. */
+  otherScopePins: OtherScopePin[];
   publisherName: string;
   publisherKey: string;
   /** Whether this package declares writeback regions or model-writeback columns
@@ -1399,8 +1508,11 @@ export interface InspectorManifestInfo {
   minAppVersion: string;
   /** A `CalpTrustStatus`. The Package Inspector is PASSIVE (VerifyOnly): merely
    *  pointing it at a registry folder must never pin a publisher, so an
-   *  unrecognised signer reports "notPinned". */
+   *  unrecognised signer reports "notPinned" — or "notPinnedNameConflict" when
+   *  another registry holds this name under a different key. */
   trustStatus: CalpTrustStatus;
+  /** Pins for this same package name in OTHER registries. */
+  otherScopePins: OtherScopePin[];
   /** Whether THIS machine holds the publisher signing key. */
   isPublisher: boolean;
   artifactCount: number;

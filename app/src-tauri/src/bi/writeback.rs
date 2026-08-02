@@ -333,11 +333,18 @@ pub(crate) fn collect_distributed_writeback_entries(
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
         }
-        let registry_path = sub
-            .registry_url
-            .strip_prefix("file://")
-            .unwrap_or(&sub.registry_url);
-        let Ok(registry) = crate::calp_registry::open_registry(registry_path) else {
+        // The RAW `registry_url`, exactly as the subscription stores it. Do NOT
+        // pre-strip `file://` here: `open_registry_scoped` derives the pin scope
+        // from the string it is given, and the crate's one stripper
+        // (`calp::registry_id::strip_file_scheme`) understands forms a local
+        // `strip_prefix("file://")` mangles — `file:///C:/reg` would arrive as
+        // `/C:/reg` and scope as `\c:\reg`, `file://server/share` as a path
+        // relative to the process cwd. Either way the pin written at subscribe
+        // is looked up under a different scope, `RequirePinned` reports
+        // `PublisherNotPinned`, and writeback goes inert with no message.
+        let Ok((registry, scope)) =
+            crate::calp_registry::open_registry_scoped(&sub.registry_url)
+        else {
             continue;
         };
         // Declarations MUST come from the signature-verified manifest — they
@@ -353,6 +360,7 @@ pub(crate) fn collect_distributed_writeback_entries(
             registry.as_ref(),
             &sub.package_name,
             &sub.resolved_version,
+            &scope,
             &crate::calp_commands::calcula_profile_dir(),
         ) else {
             continue;

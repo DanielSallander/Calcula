@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use calp::registry::LocalRegistry;
+use calp::registry_id::RegistryScope;
+use calp::signing::{self, PinKey};
 use calp::skin_pack::{self, SkinPack, SkinTrust};
-use calp::signing;
 use calp::version::VersionPin;
 
 /// How often the client should look for org skin updates (future: remote pull).
@@ -135,7 +136,10 @@ fn trust_str(t: SkinTrust) -> String {
     match t {
         SkinTrust::Verified => "verified",
         SkinTrust::FirstUse => "firstUse",
+        SkinTrust::FirstUseKnownPublisher => "firstUseKnownPublisher",
+        SkinTrust::FirstUseAcceptedNameConflict => "firstUseAcceptedNameConflict",
         SkinTrust::NotPinned => "notPinned",
+        SkinTrust::NotPinnedNameConflict => "notPinnedNameConflict",
         SkinTrust::Unsigned => "unsigned",
         SkinTrust::Unknown => "unknown",
     }
@@ -176,8 +180,23 @@ pub fn resolve_effective_policy(
     // human deciding to trust that publisher. Everything downstream
     // (`skin_pull`) therefore runs `PinPolicy::RequirePinned` and can only ever
     // CHECK this pin.
+    //
+    // SCOPED to `registryUrl`, using the SAME derivation `skin_pull` will use to
+    // read it back. If the pre-pin and the pull disagreed about the registry's
+    // identity the pin would be written in one scope and looked up in another,
+    // and under `RequirePinned` that means silently NO org skin. That is exactly
+    // what two divergent `file://` strippers used to risk, which is why there is
+    // now one (`calp::registry_id`) and both sides call it.
+    let registry_scope = registry_scope_for_policy(policy);
     if !policy.publisher_key.is_empty() && !policy.skin_package.is_empty() {
-        let _ = signing::pin_publisher(profile_dir, &policy.skin_package, &policy.publisher_key);
+        if let Some(scope) = registry_scope.as_ref() {
+            let _ = signing::pin_publisher(
+                profile_dir,
+                &PinKey::calp(scope, &policy.skin_package),
+                &scope.label,
+                &policy.publisher_key,
+            );
+        }
     }
 
     // Validate the policy BEFORE trying to use it. Previously a policy naming a
@@ -192,6 +211,21 @@ pub fn resolve_effective_policy(
              publisher key merely because a registry served it at startup, so no org skin is \
              applied. Add the org's Ed25519 publisher key (hex) to policy.json.",
             policy.skin_package
+        );
+        eprintln!("[APPEARANCE] {msg}");
+        msg
+    } else if !policy.skin_package.is_empty()
+        && !policy.registry_url.is_empty()
+        && registry_scope.is_none()
+    {
+        // A publisher pin is filed under the registry it came from, so a
+        // registryUrl with no derivable identity is a registryUrl whose trust
+        // decision could not be recorded. Naming it beats a silent no-op.
+        let msg = format!(
+            "policy.json names registryUrl '{}', which Calcula cannot resolve to a registry \
+             identity, so the org publisher key could not be pre-trusted and no org skin is \
+             applied. Use a filesystem path, a UNC path, or an http(s) URL.",
+            policy.registry_url
         );
         eprintln!("[APPEARANCE] {msg}");
         msg
@@ -232,10 +266,13 @@ fn resolve_skin(policy: &ManagedPolicy, profile_dir: &Path) -> (Option<SkinPack>
 
     // 1. Remote registry pull (filesystem / UNC registries only; HTTP is a
     //    future transport). Manual refresh uses the cache unless it is missing.
-    if let Some(reg_path) = local_registry_path(&policy.registry_url) {
+    if let (Some(reg_path), Some(scope)) = (
+        local_registry_path(&policy.registry_url),
+        registry_scope_for_policy(policy),
+    ) {
         let want_pull = policy.refresh != RefreshMode::Manual || !cache.is_complete();
         if want_pull {
-            match try_remote_pull(&reg_path, profile_dir, policy) {
+            match try_remote_pull(&reg_path, &scope, profile_dir, policy) {
                 Ok(pulled) => {
                     // Report the trust the pull actually established, not a
                     // hard-coded "verified". Under RequirePinned that is always
@@ -292,6 +329,7 @@ fn resolve_skin(policy: &ManagedPolicy, profile_dir: &Path) -> (Option<SkinPack>
 
 fn try_remote_pull(
     reg_path: &Path,
+    scope: &RegistryScope,
     profile_dir: &Path,
     policy: &ManagedPolicy,
 ) -> Result<skin_pack::PulledSkin, calp::CalpError> {
@@ -305,6 +343,7 @@ fn try_remote_pull(
         &registry,
         profile_dir,
         &policy.skin_package,
+        scope,
         &pin,
         calp::integrity::PinPolicy::RequirePinned,
     )?;
@@ -386,16 +425,26 @@ fn local_registry_path(url: &str) -> Option<PathBuf> {
     if url.is_empty() {
         return None;
     }
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
+    if calp::registry_id::is_http_location(url) {
         return None; // HTTP registry transport is a future effort.
     }
-    if let Some(rest) = url.strip_prefix("file://") {
-        // file:///C:/path -> C:/path ; file://server/share -> server/share
-        let trimmed = rest.trim_start_matches('/');
-        return Some(PathBuf::from(trimmed));
+    // ONE `file://` stripper for the whole codebase. This function used to carry
+    // its own, subtly different from the one in `calp_registry` — so the org skin
+    // could be pinned under one spelling of a location and read under another.
+    Some(PathBuf::from(calp::registry_id::strip_file_scheme(url)))
+}
+
+/// The pin scope for a machine policy's `registryUrl`, or `None` when the policy
+/// names no registry (or one with no derivable identity).
+///
+/// Derived from the CONFIGURED STRING, never from a transport: this runs before
+/// any registry is opened (it is what seeds the pin the pull then requires), and
+/// an identity a server could influence is not an identity worth pinning to.
+fn registry_scope_for_policy(policy: &ManagedPolicy) -> Option<RegistryScope> {
+    if policy.registry_url.is_empty() {
+        return None;
     }
-    Some(PathBuf::from(url))
+    calp::registry_id::registry_scope(&policy.registry_url).ok()
 }
 
 /// Frontend entry point — returns the currently-resolved appearance policy.
@@ -447,6 +496,16 @@ pub fn publish_skin_pack(
 mod tests {
     use super::*;
 
+    /// The key pinned for a package in ONE registry, addressed the way
+    /// production addresses it: scope derived from the configured location.
+    fn pinned_key(profile: &Path, registry_location: &str, package: &str) -> Option<String> {
+        let scope = calp::registry_id::registry_scope(registry_location).unwrap();
+        calp::signing::load_pins(profile)
+            .unwrap()
+            .get(&PinKey::calp(&scope, package))
+            .map(|r| r.publisher_key.clone())
+    }
+
     #[test]
     fn missing_policy_is_unmanaged() {
         // An all-default policy resolves to unmanaged.
@@ -489,6 +548,34 @@ mod tests {
         assert_eq!(
             local_registry_path("file:///C:/reg").unwrap(),
             PathBuf::from("C:/reg")
+        );
+    }
+
+    /// THERE IS ONE `file://` STRIPPER.
+    ///
+    /// This module used to carry its own, subtly different from
+    /// `calp_registry`'s: it trimmed ALL leading slashes, so
+    /// `file://server/share` became `server/share` rather than a UNC path. With
+    /// pins scoped to a registry that divergence stops being cosmetic — the
+    /// admin pre-pin would be filed under one identity and the pull would look
+    /// it up under another, and `RequirePinned` would then silently produce no
+    /// org skin at all. Both sides now call `calp::registry_id`.
+    #[test]
+    fn the_file_scheme_is_stripped_by_the_one_shared_implementation() {
+        let src = include_str!("managed_policy.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("strip_prefix(\"file://\")"),
+            "managed_policy must not carry its own file:// stripper — use \
+             calp::registry_id::strip_file_scheme"
+        );
+        assert!(
+            prod.contains("calp::registry_id::strip_file_scheme(url)"),
+            "the shared stripper must be the one used"
+        );
+        assert!(
+            prod.contains("calp::registry_id::registry_scope(&policy.registry_url)"),
+            "the pre-pin scope must be derived from the CONFIGURED registryUrl"
         );
     }
 
@@ -780,9 +867,7 @@ mod tests {
         // Nothing was pinned, so a later legitimate policy is still a clean
         // first use rather than a "publisher changed" alarm.
         assert!(
-            calp::signing::load_trusted_publishers(sub_profile.path())
-                .unwrap()
-                .is_empty(),
+            calp::signing::load_pins(sub_profile.path()).unwrap().is_empty(),
             "startup must never pin a key the administrator did not name"
         );
     }
@@ -813,10 +898,135 @@ mod tests {
         assert!(resolved.skin.is_none(), "a key mismatch must not apply a skin");
         // The admin's pin is intact — the registry did not get to overwrite it.
         assert_eq!(
-            calp::signing::load_trusted_publishers(sub_profile.path())
-                .unwrap()
-                .get("acme-brand"),
-            Some(&other_key)
+            pinned_key(sub_profile.path(), &reg.path().to_string_lossy(), "acme-brand"),
+            Some(other_key)
+        );
+    }
+
+    /// THE PRE-PIN MUST BE WRITTEN UNDER THE SCOPE THE PULL READS.
+    ///
+    /// A publisher pin is now filed under `(registry, package)`. The
+    /// administrator's pre-pin and `skin_pull` derive that registry identity
+    /// independently, from the same `registryUrl` string — so if the two
+    /// derivations ever disagree the pin lands in one scope, the pull looks in
+    /// another, `RequirePinned` finds nothing, and the org skin silently stops
+    /// working. This is the test that catches a second canonicalizer.
+    #[test]
+    fn the_prepin_scope_matches_the_scope_the_pull_reads() {
+        let reg = tempfile::TempDir::new().unwrap();
+        let pub_profile = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let org_key = publish_brand(reg.path(), pub_profile.path());
+
+        // The administrator spells the registry differently from its canonical
+        // form: forward slashes, upper case, a trailing separator, and a
+        // `file://` scheme. All four are things a real policy.json contains.
+        let admin_spelling = format!(
+            "file://{}/",
+            reg.path().to_string_lossy().replace('\\', "/").to_uppercase()
+        );
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = admin_spelling;
+        policy.skin_version_pin = "latest".to_string();
+        policy.publisher_key = org_key.clone();
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert_eq!(
+            resolved.trust, "verified",
+            "a differently-spelled registryUrl must still resolve to the pinned scope"
+        );
+        assert!(resolved.skin.is_some(), "the org skin must be applied");
+        assert_eq!(resolved.policy_error, "");
+
+        // And the canonical spelling reads the SAME pin — one registry, one row.
+        assert_eq!(
+            pinned_key(sub_profile.path(), &reg.path().to_string_lossy(), "acme-brand"),
+            Some(org_key)
+        );
+        assert_eq!(
+            calp::signing::load_pins(sub_profile.path()).unwrap().len(),
+            1,
+            "one registry spelled twice must not produce two pins"
+        );
+    }
+
+    /// TWO registries may hold the same skin package name without colliding —
+    /// an org `acme-brand` at a corporate share and a personal one in a local
+    /// registry used to overwrite each other's row in a flat name -> key map.
+    #[test]
+    fn an_org_and_a_personal_registry_can_hold_the_same_skin_name() {
+        let org_reg = tempfile::TempDir::new().unwrap();
+        let org_pub = tempfile::TempDir::new().unwrap();
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let org_key = publish_brand(org_reg.path(), org_pub.path());
+
+        let mine_reg = tempfile::TempDir::new().unwrap();
+        let mine_pub = tempfile::TempDir::new().unwrap();
+        let my_key = publish_brand(mine_reg.path(), mine_pub.path());
+        assert_ne!(org_key, my_key);
+
+        // The administrator's policy pre-pins the ORG key for the ORG registry.
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = org_reg.path().to_string_lossy().to_string();
+        policy.publisher_key = org_key.clone();
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert_eq!(resolved.trust, "verified");
+
+        // A personal registry serving the same package NAME under a different
+        // key holds its own, independent pin slot — the org pin is untouched.
+        calp::signing::pin_publisher(
+            sub_profile.path(),
+            &PinKey::calp(
+                &calp::registry_id::registry_scope(&mine_reg.path().to_string_lossy()).unwrap(),
+                "acme-brand",
+            ),
+            &mine_reg.path().to_string_lossy(),
+            &my_key,
+        )
+        .unwrap();
+
+        assert_eq!(
+            pinned_key(sub_profile.path(), &org_reg.path().to_string_lossy(), "acme-brand"),
+            Some(org_key)
+        );
+        assert_eq!(
+            pinned_key(sub_profile.path(), &mine_reg.path().to_string_lossy(), "acme-brand"),
+            Some(my_key)
+        );
+    }
+
+    /// A `registryUrl` with no derivable identity cannot be pinned under, so it
+    /// gets no org skin AND an explicit misconfiguration message — the same rule
+    /// as a missing `publisherKey`: refuse, but never refuse silently.
+    #[test]
+    fn an_unscopeable_registry_url_is_named_rather_than_silently_ignored() {
+        let sub_profile = tempfile::TempDir::new().unwrap();
+        let admin_profile = tempfile::TempDir::new().unwrap();
+        let admin_key = calp::signing::PublisherKeypair::load_or_create(admin_profile.path())
+            .unwrap()
+            .public_key_hex();
+
+        let mut policy = ManagedPolicy::default();
+        policy.default_skin_id = "acme.brand".to_string();
+        policy.skin_package = "acme-brand".to_string();
+        policy.registry_url = "ftp://corp/registry".to_string();
+        policy.publisher_key = admin_key;
+
+        let resolved = resolve_effective_policy(&policy, sub_profile.path());
+        assert!(resolved.skin.is_none());
+        assert!(
+            resolved.policy_error.contains("registryUrl"),
+            "the unusable registryUrl must be named, got: {:?}",
+            resolved.policy_error
+        );
+        assert!(
+            calp::signing::load_pins(sub_profile.path()).unwrap().is_empty(),
+            "a location with no identity must not be pinned under some fallback"
         );
     }
 }

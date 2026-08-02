@@ -44,6 +44,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CalpError;
 use crate::manifest::VersionManifest;
+use crate::registry_id::RegistryScope;
+use crate::signing::{PinKey, PinNamespace};
 use crate::transport::RegistryTransport;
 
 /// The version manifest filename — the integrity root. Never listed in its
@@ -311,25 +313,81 @@ pub fn verify_version_artifacts_via(
 /// bug, not a cosmetic one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustStatus {
-    /// This package's publisher key was not pinned before; it has now been
-    /// pinned (trust-on-first-use) because the caller passed
-    /// `PinPolicy::PinOnFirstUse` — i.e. the USER decided to trust this
+    /// This package's publisher key was not pinned before — for this registry or
+    /// any other — and it has now been pinned (trust-on-first-use) because the
+    /// caller passed a pinning policy, i.e. the USER decided to trust this
     /// publisher. The caller should surface this so the user knows they are
     /// trusting a publisher for the first time.
     FirstUse,
     /// The package is signed by the SAME publisher key pinned by an earlier
-    /// deliberate trust decision.
+    /// deliberate trust decision, for THIS registry.
     Verified,
+    /// Not pinned for this registry, but the SAME key is already pinned for this
+    /// name somewhere else — a registry migration, a mirror, a second spelling of
+    /// one path, or a location whose canonical form could not be resolved. Pinned
+    /// now, and reported as reassurance rather than alarm: this is the publisher
+    /// you already trust, reached from a new location.
+    ///
+    /// This variant is what makes an imperfect registry canonicalizer SAFE. The
+    /// worst outcome of a missed match is one redundant pin row and this notice —
+    /// never a false hijack accusation, and never a silent accept of a different
+    /// key.
+    FirstUseKnownPublisher,
+    /// Not pinned for this registry, a DIFFERENT key is pinned for this name
+    /// elsewhere, and the user was shown both and accepted anyway
+    /// (`PinPolicy::PinAcceptingNameConflict`). Pinned. Kept distinct from
+    /// `FirstUse` so the audit trail and the subscriptions pane never describe it
+    /// as an ordinary first use.
+    FirstUseAcceptedNameConflict,
     /// The signature is cryptographically valid, but this machine has never
-    /// agreed to trust this publisher for this package name, and this operation
-    /// was not a trust decision (`PinPolicy::VerifyOnly`), so NOTHING was
-    /// written to the pin store.
+    /// agreed to trust this publisher for this package name from this registry,
+    /// and this operation was not a trust decision (`PinPolicy::VerifyOnly`), so
+    /// NOTHING was written to the pin store.
     ///
     /// AUTHENTIC IS NOT TRUSTED. Anyone can generate an Ed25519 keypair and sign
     /// a package; a valid signature proves only that the bytes were not altered
     /// after signing, never that the signer is who the user expects. Presenting
     /// this as "verified" is exactly the failure this status exists to prevent.
     NotPinned,
+    /// Passive first contact AND a different key is pinned for this same package
+    /// name from another registry. Nothing was written. Two registries claiming
+    /// one name is what a hijack looks like, so this must be surfaced
+    /// prominently — with BOTH registries and BOTH key fingerprints — rather than
+    /// shown as a plain "not pinned yet".
+    NotPinnedNameConflict,
+}
+
+/// A pin held for the SAME package name in a DIFFERENT registry scope.
+///
+/// Travels on every `VerifiedManifest`, including `Verified` ones, so a
+/// transparency surface can show the whole picture rather than only the moment
+/// of conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherScopePin {
+    /// The other registry in the USER'S spelling. Never the normalized id.
+    pub scope_label: String,
+    /// The key pinned there.
+    pub publisher_key: String,
+    /// RFC3339 timestamp, or "" for a pin carried over from the v1 store.
+    pub pinned_at: String,
+    /// Whether that key is the one being offered here. `true` = migration/mirror;
+    /// `false` = a name conflict.
+    pub same_key: bool,
+}
+
+/// What a successful verification established.
+///
+/// A struct rather than a tuple ON PURPOSE: the previous `(TrustStatus,
+/// VersionManifest)` shape made `Ok((_, m))` a one-character way to discard the
+/// trust answer, and ten call sites did exactly that. A named field cannot be
+/// silently dropped by pattern position.
+#[derive(Debug, Clone)]
+pub struct VerifiedManifest {
+    pub trust: TrustStatus,
+    pub manifest: VersionManifest,
+    /// Pins for the SAME name in OTHER scopes — populated for every status,
+    /// including `Verified`.
+    pub other_scope_pins: Vec<OtherScopePin>,
 }
 
 /// Whether a verification is allowed to CREATE a trust-on-first-use pin.
@@ -361,21 +419,42 @@ pub enum TrustStatus {
 /// is a REQUIRED parameter with no `Default` and no `Option`: a caller that does
 /// not think about pinning does not compile. Pick the variant that names what
 /// the USER just did, not what is convenient for the caller.
+///
+/// A PIN IS SCOPED TO THE REGISTRY THE USER CONFIGURED. `verify_and_load_manifest_via`
+/// takes a required `&RegistryScope` for the same reason it takes this enum: a
+/// pin that is not tied to an origin lets whoever reaches a name first own it for
+/// the whole machine. See `registry_id.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinPolicy {
     /// The user has just decided to trust this publisher for this package name
-    /// — Subscribe, Install, or an administrator's machine policy. First contact
-    /// pins here, and ONLY here. Reports `FirstUse` on first contact.
+    /// from this registry — Subscribe, Install, or an administrator's machine
+    /// policy. First contact pins here, and ONLY here (plus its
+    /// conflict-accepting sibling below). Reports `FirstUse`, or
+    /// `FirstUseKnownPublisher` when the same key is already trusted from another
+    /// registry.
+    ///
+    /// If a DIFFERENT key is pinned for this name elsewhere, this policy REFUSES
+    /// with `CalpError::PublisherNameConflict` rather than pinning. An error, not
+    /// a status: an error cannot be bound as `_` and carried on.
     PinOnFirstUse,
+    /// `PinOnFirstUse`, except that the user has been shown the cross-registry
+    /// name conflict — both registries, both key fingerprints — and answered a
+    /// second, differently-worded question. Reachable ONLY from a UI that
+    /// displayed the conflict. Reports `FirstUseAcceptedNameConflict`, which is
+    /// never presented as an ordinary first use.
+    PinAcceptingNameConflict,
     /// Look, authenticate, report. Writes nothing to the pin store, ever. Used
     /// by inspection/preview surfaces that exist precisely so the user can
-    /// decide. First contact reports `NotPinned`.
+    /// decide. First contact reports `NotPinned`, or `NotPinnedNameConflict` when
+    /// another registry holds a different key for this name.
     VerifyOnly,
     /// This operation is only meaningful for a package the user ALREADY trusts
     /// (writeback, GATHER, refresh, reset, an org-managed skin). It must run
-    /// against an EXISTING pin: first contact is an error
+    /// against an EXISTING pin FOR THIS REGISTRY: first contact is an error
     /// (`CalpError::PublisherNotPinned`), never a pin and never a status the
-    /// caller might mistake for success.
+    /// caller might mistake for success. A pin held for another registry is not
+    /// a pin here — deliberately, because "some registry somewhere vouched for
+    /// this name" is not the question this policy asks.
     RequirePinned,
 }
 
@@ -390,9 +469,10 @@ fn verify_manifest_signature_bytes(
     sig_hex: &str,
     manifest: &VersionManifest,
     package: &str,
+    scope: &RegistryScope,
     profile_dir: &Path,
     policy: PinPolicy,
-) -> Result<TrustStatus, CalpError> {
+) -> Result<(TrustStatus, Vec<OtherScopePin>), CalpError> {
     let version = manifest.version.as_str();
 
     // (2) Cryptographic verification against the asserted publisher key.
@@ -410,32 +490,88 @@ fn verify_manifest_signature_bytes(
     // WRITE is gated by the policy.
     //
     // Fails closed in every direction: an unreadable-but-present pin store makes
-    // `load_trusted_publishers` return Err, which propagates rather than being
-    // treated as "nothing is pinned".
-    let pinned = crate::signing::load_trusted_publishers(profile_dir)?;
-    match pinned.get(package) {
-        Some(pinned_key) if pinned_key != &manifest.publisher_key => {
-            Err(CalpError::PublisherKeyChanged {
+    // `load_pins` return Err, which propagates rather than being treated as
+    // "nothing is pinned".
+    let store = crate::signing::load_pins(profile_dir)?;
+    let key = PinKey::calp(scope, package);
+
+    // The cross-scope evidence, gathered for EVERY status (including Verified)
+    // so a transparency surface can show the full picture and not only the
+    // moment of conflict.
+    let other_scope_pins: Vec<OtherScopePin> = store
+        .other_scopes_for_name(PinNamespace::Calp, package, &scope.id)
+        .into_iter()
+        .map(|record| OtherScopePin {
+            scope_label: record.scope_label.clone(),
+            publisher_key: record.publisher_key.clone(),
+            pinned_at: record.pinned_at.clone(),
+            same_key: record.publisher_key == manifest.publisher_key,
+        })
+        .collect();
+
+    if let Some(record) = store.get(&key) {
+        if record.publisher_key != manifest.publisher_key {
+            return Err(CalpError::PublisherKeyChanged {
                 package: package.to_string(),
                 version: version.to_string(),
-                pinned: pinned_key.clone(),
+                pinned: record.publisher_key.clone(),
                 got: manifest.publisher_key.clone(),
-            })
+            });
         }
-        Some(_) => Ok(TrustStatus::Verified),
-        None => match policy {
-            PinPolicy::PinOnFirstUse => {
-                crate::signing::pin_publisher(profile_dir, package, &manifest.publisher_key)?;
-                Ok(TrustStatus::FirstUse)
-            }
-            PinPolicy::VerifyOnly => Ok(TrustStatus::NotPinned),
-            PinPolicy::RequirePinned => Err(CalpError::PublisherNotPinned {
+        return Ok((TrustStatus::Verified, other_scope_pins));
+    }
+
+    // FIRST CONTACT with this (registry, package) pair.
+    let conflicting = other_scope_pins.iter().find(|p| !p.same_key);
+    let same_key_elsewhere = other_scope_pins.iter().any(|p| p.same_key);
+
+    // Decide first, write once. Every non-pinning outcome returns from inside
+    // this match, so the single `pin_publisher` call below is reachable ONLY
+    // through a policy that the user's action authorized.
+    let status = match policy {
+        // A different key for this name in another registry is not a thing to
+        // decide silently. It is an Err rather than a status precisely so it
+        // cannot be bound and carried on.
+        PinPolicy::PinOnFirstUse if conflicting.is_some() => {
+            let other = conflicting.expect("checked by the guard above");
+            return Err(CalpError::PublisherNameConflict {
                 package: package.to_string(),
                 version: version.to_string(),
+                scope: scope.label.clone(),
+                other_scope: other.scope_label.clone(),
+                pinned: other.publisher_key.clone(),
                 got: manifest.publisher_key.clone(),
-            }),
-        },
-    }
+            });
+        }
+        PinPolicy::PinOnFirstUse | PinPolicy::PinAcceptingNameConflict => {
+            if conflicting.is_some() {
+                TrustStatus::FirstUseAcceptedNameConflict
+            } else if same_key_elsewhere {
+                TrustStatus::FirstUseKnownPublisher
+            } else {
+                TrustStatus::FirstUse
+            }
+        }
+        PinPolicy::VerifyOnly => {
+            let status = if conflicting.is_some() {
+                TrustStatus::NotPinnedNameConflict
+            } else {
+                TrustStatus::NotPinned
+            };
+            return Ok((status, other_scope_pins));
+        }
+        PinPolicy::RequirePinned => {
+            return Err(CalpError::PublisherNotPinned {
+                package: package.to_string(),
+                version: version.to_string(),
+                scope: scope.label.clone(),
+                got: manifest.publisher_key.clone(),
+            });
+        }
+    };
+
+    crate::signing::pin_publisher(profile_dir, &key, &scope.label, &manifest.publisher_key)?;
+    Ok((status, other_scope_pins))
 }
 
 /// Transport-agnostic origin gate: read the raw `version-manifest.json` bytes
@@ -456,6 +592,13 @@ fn verify_manifest_signature_bytes(
 /// An absent signature (or an empty asserted `publisher_key`) means the package
 /// is unsigned -> hard error (no backward compat).
 ///
+/// `scope` is the REGISTRY the package is being read from, derived from the
+/// location string the user configured (`calp::registry_id::registry_scope`).
+/// The pin is filed under it, so a squat in one registry cannot own a package
+/// name in another. It is required and never optional, for the same reason
+/// `policy` is: a caller that does not know which registry it is talking to
+/// cannot make a trust statement about it.
+///
 /// `policy` decides what happens on FIRST CONTACT with a publisher key this
 /// machine has never pinned. It is required, and deliberately has no default —
 /// see [`PinPolicy`] for why. If you are adding a call site: the question is not
@@ -465,9 +608,10 @@ pub fn verify_and_load_manifest_via(
     t: &dyn RegistryTransport,
     package: &str,
     version: &str,
+    scope: &RegistryScope,
     profile_dir: &Path,
     policy: PinPolicy,
-) -> Result<(TrustStatus, VersionManifest), CalpError> {
+) -> Result<VerifiedManifest, CalpError> {
     // The single trusted copy of the manifest bytes. Everything downstream
     // (publisher_key, checksums, min_app_version, inventory) is parsed from
     // exactly these bytes AND is what the signature is checked against.
@@ -494,15 +638,20 @@ pub fn verify_and_load_manifest_via(
 
     // (2)+(3) Crypto + TOFU over the SAME bytes we parsed `manifest` from.
     let sig_hex = String::from_utf8_lossy(&sig_bytes);
-    let trust = verify_manifest_signature_bytes(
+    let (trust, other_scope_pins) = verify_manifest_signature_bytes(
         &manifest_bytes,
         sig_hex.trim(),
         &manifest,
         package,
+        scope,
         profile_dir,
         policy,
     )?;
-    Ok((trust, manifest))
+    Ok(VerifiedManifest {
+        trust,
+        manifest,
+        other_scope_pins,
+    })
 }
 
 /// `verify_and_load_manifest_via` for the ALREADY-TRUSTED callers: the manifest
@@ -522,21 +671,23 @@ pub fn load_pinned_manifest_via(
     t: &dyn RegistryTransport,
     package: &str,
     version: &str,
+    scope: &RegistryScope,
     profile_dir: &Path,
 ) -> Result<VersionManifest, CalpError> {
-    let (trust, manifest) = verify_and_load_manifest_via(
+    let verified = verify_and_load_manifest_via(
         t,
         package,
         version,
+        scope,
         profile_dir,
         PinPolicy::RequirePinned,
     )?;
     debug_assert_eq!(
-        trust,
+        verified.trust,
         TrustStatus::Verified,
         "RequirePinned can only succeed against an existing pin"
     );
-    Ok(manifest)
+    Ok(verified.manifest)
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +748,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::registry::LocalRegistry;
-    use crate::signing::{load_trusted_publishers, PublisherKeypair};
+    use crate::registry_id::registry_scope;
+    use crate::signing::{load_pins, PublisherKeypair};
     use crate::skin_pack::{skin_publish, SkinPack};
 
     fn tiny_pack(id: &str) -> SkinPack {
@@ -614,9 +766,22 @@ mod tests {
         }
     }
 
+    /// A published registry, everything a test needs to talk about it.
+    struct Published {
+        _dir: TempDir,
+        _publisher: TempDir,
+        registry: LocalRegistry,
+        /// The scope derived from the registry's own location, exactly as an app
+        /// call site would derive it.
+        scope: RegistryScope,
+        /// The location string a user would have typed.
+        location: String,
+        key: String,
+    }
+
     /// Publish `package` v1.0.0 into a fresh registry, signed by a fresh
-    /// publisher profile. Returns (registry dir, registry, publisher key hex).
-    fn publish_signed(package: &str) -> (TempDir, TempDir, LocalRegistry, String) {
+    /// publisher profile.
+    fn publish_signed(package: &str) -> Published {
         let reg_dir = TempDir::new().unwrap();
         let pub_dir = TempDir::new().unwrap();
         let registry = LocalRegistry::open(reg_dir.path()).unwrap();
@@ -632,7 +797,24 @@ mod tests {
         let key = PublisherKeypair::load_or_create(pub_dir.path())
             .unwrap()
             .public_key_hex();
-        (reg_dir, pub_dir, registry, key)
+        let location = reg_dir.path().to_string_lossy().to_string();
+        let scope = registry_scope(&location).unwrap();
+        Published {
+            _dir: reg_dir,
+            _publisher: pub_dir,
+            registry,
+            scope,
+            location,
+            key,
+        }
+    }
+
+    /// The pinned key for one (registry, package) pair, or None.
+    fn pinned_key(profile: &Path, scope: &RegistryScope, package: &str) -> Option<String> {
+        load_pins(profile)
+            .unwrap()
+            .get(&crate::signing::PinKey::calp(scope, package))
+            .map(|r| r.publisher_key.clone())
     }
 
     /// A PASSIVE operation authenticates and reports, and writes NOTHING —
@@ -640,25 +822,27 @@ mod tests {
     /// inspection, a scan or a background read from minting trust.
     #[test]
     fn verify_only_never_writes_the_pin_store() {
-        let (_rd, _pd, registry, key) = publish_signed("acme.finance");
+        let p = publish_signed("acme.finance");
         let me = TempDir::new().unwrap();
 
         for _ in 0..3 {
-            let (trust, manifest) = verify_and_load_manifest_via(
-                &registry,
+            let v = verify_and_load_manifest_via(
+                &p.registry,
                 "acme.finance",
                 "1.0.0",
+                &p.scope,
                 me.path(),
                 PinPolicy::VerifyOnly,
             )
             .unwrap();
             // Authentic...
-            assert_eq!(manifest.publisher_key, key);
+            assert_eq!(v.manifest.publisher_key, p.key);
             // ...but NOT trusted, and it stays that way. A file cannot promote
             // itself by being looked at repeatedly.
-            assert_eq!(trust, TrustStatus::NotPinned);
+            assert_eq!(v.trust, TrustStatus::NotPinned);
+            assert!(v.other_scope_pins.is_empty());
             assert!(
-                load_trusted_publishers(me.path()).unwrap().is_empty(),
+                load_pins(me.path()).unwrap().is_empty(),
                 "a passive verification must leave the pin store untouched"
             );
         }
@@ -669,32 +853,31 @@ mod tests {
     /// reports the pin it created.
     #[test]
     fn pin_on_first_use_pins_and_then_verifies() {
-        let (_rd, _pd, registry, key) = publish_signed("acme.finance");
+        let p = publish_signed("acme.finance");
         let me = TempDir::new().unwrap();
 
-        let (first, _) = verify_and_load_manifest_via(
-            &registry,
+        let first = verify_and_load_manifest_via(
+            &p.registry,
             "acme.finance",
             "1.0.0",
+            &p.scope,
             me.path(),
             PinPolicy::PinOnFirstUse,
         )
         .unwrap();
-        assert_eq!(first, TrustStatus::FirstUse);
-        assert_eq!(
-            load_trusted_publishers(me.path()).unwrap().get("acme.finance"),
-            Some(&key)
-        );
+        assert_eq!(first.trust, TrustStatus::FirstUse);
+        assert_eq!(pinned_key(me.path(), &p.scope, "acme.finance"), Some(p.key.clone()));
 
-        let (second, _) = verify_and_load_manifest_via(
-            &registry,
+        let second = verify_and_load_manifest_via(
+            &p.registry,
             "acme.finance",
             "1.0.0",
+            &p.scope,
             me.path(),
             PinPolicy::PinOnFirstUse,
         )
         .unwrap();
-        assert_eq!(second, TrustStatus::Verified);
+        assert_eq!(second.trust, TrustStatus::Verified);
     }
 
     /// An ALREADY-TRUSTED operation (writeback, GATHER, refresh, reset, org
@@ -702,13 +885,14 @@ mod tests {
     /// caller could mistake for success.
     #[test]
     fn require_pinned_refuses_first_contact_and_writes_nothing() {
-        let (_rd, _pd, registry, _key) = publish_signed("acme.finance");
+        let p = publish_signed("acme.finance");
         let me = TempDir::new().unwrap();
 
         let err = verify_and_load_manifest_via(
-            &registry,
+            &p.registry,
             "acme.finance",
             "1.0.0",
+            &p.scope,
             me.path(),
             PinPolicy::RequirePinned,
         )
@@ -717,91 +901,384 @@ mod tests {
             matches!(err, CalpError::PublisherNotPinned { .. }),
             "got {err:?}"
         );
-        assert!(load_trusted_publishers(me.path()).unwrap().is_empty());
+        assert!(load_pins(me.path()).unwrap().is_empty());
 
         // `load_pinned_manifest_via` is the same gate with no status to ignore.
         let err2 =
-            load_pinned_manifest_via(&registry, "acme.finance", "1.0.0", me.path()).unwrap_err();
+            load_pinned_manifest_via(&p.registry, "acme.finance", "1.0.0", &p.scope, me.path())
+                .unwrap_err();
         assert!(matches!(err2, CalpError::PublisherNotPinned { .. }));
-        assert!(load_trusted_publishers(me.path()).unwrap().is_empty());
+        assert!(load_pins(me.path()).unwrap().is_empty());
 
         // ...and once the user really does subscribe, it starts working.
         verify_and_load_manifest_via(
-            &registry,
+            &p.registry,
             "acme.finance",
             "1.0.0",
+            &p.scope,
             me.path(),
             PinPolicy::PinOnFirstUse,
         )
         .unwrap();
-        let m = load_pinned_manifest_via(&registry, "acme.finance", "1.0.0", me.path()).unwrap();
+        let m =
+            load_pinned_manifest_via(&p.registry, "acme.finance", "1.0.0", &p.scope, me.path())
+                .unwrap();
         assert_eq!(m.package_name, "acme.finance");
     }
 
-    /// THE BUG THIS WHOLE CHANGE EXISTS FOR.
-    ///
-    /// An attacker publishes `acme.finance` under their own key to a registry
-    /// the victim merely LOOKS at (an inspection, a workbook that names it, a
-    /// background read). Under the old behaviour that look created the pin, so
-    /// when the genuine Acme released their package it reported
-    /// `PublisherKeyChanged` — the attacker owned the identity and the real
-    /// publisher looked like the hijacker.
+    /// A pin in ANOTHER registry is not a pin here. `RequirePinned` asks "did
+    /// the user trust this publisher for THIS registry", and "some registry
+    /// somewhere vouched for this name" is not an answer to it.
     #[test]
-    fn a_squat_seen_passively_does_not_poison_the_genuine_publisher() {
-        let (_erd, _epd, evil_registry, evil_key) = publish_signed("acme.finance");
-        let (_grd, _gpd, good_registry, good_key) = publish_signed("acme.finance");
-        assert_ne!(evil_key, good_key);
-
+    fn require_pinned_ignores_a_pin_in_another_scope() {
+        let good = publish_signed("acme.finance");
+        let mirror = publish_signed("acme.finance");
         let me = TempDir::new().unwrap();
 
-        // The victim's machine encounters the squatted package passively.
-        let (trust, m) = verify_and_load_manifest_via(
-            &evil_registry,
+        verify_and_load_manifest_via(
+            &good.registry,
             "acme.finance",
             "1.0.0",
+            &good.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        let err = load_pinned_manifest_via(
+            &mirror.registry,
+            "acme.finance",
+            "1.0.0",
+            &mirror.scope,
+            me.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CalpError::PublisherNotPinned { .. }), "got {err:?}");
+        assert!(pinned_key(me.path(), &mirror.scope, "acme.finance").is_none());
+    }
+
+    /// THE HEADLINE. A squat at registry A does not own the name at registry B.
+    ///
+    /// The attacker publishes `acme.finance` under their own key to `\\evil\share`
+    /// and the victim actually SUBSCRIBES to it. Under name-only keying that pin
+    /// became the identity the genuine Acme was measured against, so Acme's first
+    /// legitimate release read as `publisherChanged` — the accusation pointed at
+    /// the victim.
+    #[test]
+    fn a_squat_in_one_registry_does_not_own_the_name_in_another() {
+        let evil = publish_signed("acme.finance");
+        let good = publish_signed("acme.finance");
+        assert_ne!(evil.key, good.key);
+        let me = TempDir::new().unwrap();
+
+        // The victim subscribes to the squat. It pins — but only for ITS registry.
+        let squat = verify_and_load_manifest_via(
+            &evil.registry,
+            "acme.finance",
+            "1.0.0",
+            &evil.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+        assert_eq!(squat.trust, TrustStatus::FirstUse);
+
+        // A PASSIVE look at the genuine registry now reports the conflict — with
+        // both registries and both keys — instead of accusing the real publisher.
+        let review = verify_and_load_manifest_via(
+            &good.registry,
+            "acme.finance",
+            "1.0.0",
+            &good.scope,
             me.path(),
             PinPolicy::VerifyOnly,
         )
         .unwrap();
-        assert_eq!(trust, TrustStatus::NotPinned);
-        assert_eq!(m.publisher_key, evil_key);
-        assert!(load_trusted_publishers(me.path()).unwrap().is_empty());
+        assert_eq!(review.trust, TrustStatus::NotPinnedNameConflict);
+        assert_eq!(review.other_scope_pins.len(), 1);
+        assert_eq!(review.other_scope_pins[0].scope_label, evil.location);
+        assert_eq!(review.other_scope_pins[0].publisher_key, evil.key);
+        assert!(!review.other_scope_pins[0].same_key);
+        assert!(!review.other_scope_pins[0].pinned_at.is_empty());
 
-        // Later the victim deliberately subscribes to the GENUINE package. This
-        // must be an ordinary first use — NOT "publisher changed".
-        let (trust2, m2) = verify_and_load_manifest_via(
-            &good_registry,
+        // A plain subscribe REFUSES: a name claimed by two registries is not a
+        // thing to decide silently. It is an Err, so it cannot be bound as `_`.
+        let err = verify_and_load_manifest_via(
+            &good.registry,
             "acme.finance",
             "1.0.0",
+            &good.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap_err();
+        match &err {
+            CalpError::PublisherNameConflict {
+                scope,
+                other_scope,
+                pinned,
+                got,
+                ..
+            } => {
+                // Both registries are named in the USER'S spelling.
+                assert_eq!(scope, &good.location);
+                assert_eq!(other_scope, &evil.location);
+                assert_eq!(pinned, &evil.key);
+                assert_eq!(got, &good.key);
+            }
+            other => panic!("expected PublisherNameConflict, got {other:?}"),
+        }
+        assert!(pinned_key(me.path(), &good.scope, "acme.finance").is_none());
+        // Crucially: NOT a publisherChanged accusation aimed at the real author.
+        assert!(!matches!(err, CalpError::PublisherKeyChanged { .. }));
+
+        // Only after the user is shown the conflict and answers the second
+        // question does the genuine package pin — and it says so.
+        let accepted = verify_and_load_manifest_via(
+            &good.registry,
+            "acme.finance",
+            "1.0.0",
+            &good.scope,
+            me.path(),
+            PinPolicy::PinAcceptingNameConflict,
+        )
+        .unwrap();
+        assert_eq!(accepted.trust, TrustStatus::FirstUseAcceptedNameConflict);
+
+        // Both pins now exist, each resolving to its OWN registry's key.
+        assert_eq!(pinned_key(me.path(), &good.scope, "acme.finance"), Some(good.key.clone()));
+        assert_eq!(pinned_key(me.path(), &evil.scope, "acme.finance"), Some(evil.key.clone()));
+    }
+
+    /// The cross-scope check must not be dodgeable by RE-CASING the name.
+    ///
+    /// `PinKey` lookups are exact, but the conflict SCAN is case-insensitive. A
+    /// hostile registry serving `ACME.Finance` at a user who already trusts
+    /// `acme.finance` would otherwise miss the scan entirely and report a plain
+    /// `NotPinned` — an ordinary amber "not trusted yet" instead of the red
+    /// two-registries-one-name warning. On a local (case-insensitive)
+    /// filesystem registry the two names are frequently the very same package.
+    ///
+    /// The loosening only ever ADDS a warning: `get` stays exact, so a re-cased
+    /// name can never satisfy a pin it did not create (asserted below).
+    #[test]
+    fn a_recased_package_name_cannot_dodge_the_cross_registry_conflict() {
+        let good = publish_signed("acme.finance");
+        let evil = publish_signed("ACME.Finance");
+        assert_ne!(good.key, evil.key);
+        let me = TempDir::new().unwrap();
+
+        verify_and_load_manifest_via(
+            &good.registry,
+            "acme.finance",
+            "1.0.0",
+            &good.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        // Passive look at the re-cased squat: conflict, not a plain first use.
+        let review = verify_and_load_manifest_via(
+            &evil.registry,
+            "ACME.Finance",
+            "1.0.0",
+            &evil.scope,
+            me.path(),
+            PinPolicy::VerifyOnly,
+        )
+        .unwrap();
+        assert_eq!(review.trust, TrustStatus::NotPinnedNameConflict);
+        assert_eq!(review.other_scope_pins.len(), 1);
+        assert_eq!(review.other_scope_pins[0].publisher_key, good.key);
+
+        // And subscribing to it still needs the second, explicit answer.
+        assert!(matches!(
+            verify_and_load_manifest_via(
+                &evil.registry,
+                "ACME.Finance",
+                "1.0.0",
+                &evil.scope,
+                me.path(),
+                PinPolicy::PinOnFirstUse,
+            )
+            .unwrap_err(),
+            CalpError::PublisherNameConflict { .. }
+        ));
+
+        // The exact lookup is untouched: the re-cased name is NOT pinned just
+        // because its lowercase twin is. A loose scan must never grant trust.
+        assert!(pinned_key(me.path(), &evil.scope, "ACME.Finance").is_none());
+        assert!(pinned_key(me.path(), &good.scope, "ACME.Finance").is_none());
+        assert_eq!(
+            pinned_key(me.path(), &good.scope, "acme.finance"),
+            Some(good.key.clone())
+        );
+    }
+
+    /// The gentler half of the same scenario: the victim only LOOKED at the
+    /// squat, so no pin exists anywhere and the genuine publisher is a clean,
+    /// unremarkable first use.
+    #[test]
+    fn a_squat_only_inspected_leaves_the_genuine_publisher_a_clean_first_use() {
+        let evil = publish_signed("acme.finance");
+        let good = publish_signed("acme.finance");
+        let me = TempDir::new().unwrap();
+
+        let seen = verify_and_load_manifest_via(
+            &evil.registry,
+            "acme.finance",
+            "1.0.0",
+            &evil.scope,
+            me.path(),
+            PinPolicy::VerifyOnly,
+        )
+        .unwrap();
+        assert_eq!(seen.trust, TrustStatus::NotPinned);
+        assert!(load_pins(me.path()).unwrap().is_empty());
+
+        let subscribed = verify_and_load_manifest_via(
+            &good.registry,
+            "acme.finance",
+            "1.0.0",
+            &good.scope,
             me.path(),
             PinPolicy::PinOnFirstUse,
         )
         .unwrap();
         assert_eq!(
-            trust2,
+            subscribed.trust,
             TrustStatus::FirstUse,
-            "the genuine publisher must not be reported as a key change"
+            "the genuine publisher must not be reported as a key change OR as a conflict"
         );
-        assert_eq!(m2.publisher_key, good_key);
-        assert_eq!(
-            load_trusted_publishers(me.path()).unwrap().get("acme.finance"),
-            Some(&good_key)
-        );
+        assert!(subscribed.other_scope_pins.is_empty());
+        assert_eq!(pinned_key(me.path(), &good.scope, "acme.finance"), Some(good.key));
     }
 
-    /// The store is READ on every path, including the passive one: a key that
-    /// contradicts an existing pin is refused even when nothing would be
-    /// written. "I am not going to pin" is not "I am not going to check".
+    /// The same registry reached by a second spelling is the SAME scope — one
+    /// pin, no second row, no alarm.
     #[test]
-    fn a_key_contradicting_an_existing_pin_is_refused_even_passively() {
-        let (_grd, _gpd, good_registry, good_key) = publish_signed("acme.finance");
-        let (_erd, _epd, evil_registry, _evil_key) = publish_signed("acme.finance");
+    fn the_same_registry_by_a_second_spelling_is_the_same_scope() {
+        let p = publish_signed("acme.finance");
+        let me = TempDir::new().unwrap();
+
+        verify_and_load_manifest_via(
+            &p.registry,
+            "acme.finance",
+            "1.0.0",
+            &p.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        // The user types the same folder differently in a different dialog.
+        let restyled = registry_scope(&format!(
+            "{}\\",
+            p.location.replace('\\', "/").to_uppercase()
+        ))
+        .unwrap();
+        let again = verify_and_load_manifest_via(
+            &p.registry,
+            "acme.finance",
+            "1.0.0",
+            &restyled,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+        assert_eq!(again.trust, TrustStatus::Verified);
+        assert!(again.other_scope_pins.is_empty());
+        assert_eq!(load_pins(me.path()).unwrap().len(), 1, "one registry, one pin");
+    }
+
+    /// A legitimate registry MIGRATION (the org moves `\\corp\reg` to
+    /// `https://reg.acme.com`, same publisher key) reads as "the publisher you
+    /// already trust, reached from a new location" — not as an attack.
+    ///
+    /// This is also what makes an imperfect canonicalizer safe: a drive-letter
+    /// vs UNC spelling the OS cannot merge lands in exactly this branch.
+    #[test]
+    fn a_registry_migration_reads_as_the_publisher_you_already_trust() {
+        let old_home = publish_signed("acme.finance");
+        // The SAME publisher republishes into a new registry: reuse the same
+        // publisher profile so the key is identical.
+        let new_dir = TempDir::new().unwrap();
+        let new_registry = LocalRegistry::open(new_dir.path()).unwrap();
+        skin_publish(
+            &new_registry,
+            old_home._publisher.path(),
+            "acme.finance",
+            "1.0.0",
+            "2026-08-01T00:00:00Z",
+            &tiny_pack("p"),
+        )
+        .unwrap();
+        let new_scope = registry_scope(&new_dir.path().to_string_lossy()).unwrap();
 
         let me = TempDir::new().unwrap();
         verify_and_load_manifest_via(
-            &good_registry,
+            &old_home.registry,
             "acme.finance",
             "1.0.0",
+            &old_home.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+
+        let migrated = verify_and_load_manifest_via(
+            &new_registry,
+            "acme.finance",
+            "1.0.0",
+            &new_scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+        assert_eq!(
+            migrated.trust,
+            TrustStatus::FirstUseKnownPublisher,
+            "a same-key move must be reassuring, not an alarm"
+        );
+        assert_eq!(migrated.other_scope_pins.len(), 1);
+        assert!(migrated.other_scope_pins[0].same_key);
+        // Both pins are retained; neither location was orphaned.
+        assert_eq!(
+            pinned_key(me.path(), &old_home.scope, "acme.finance"),
+            Some(old_home.key.clone())
+        );
+        assert_eq!(
+            pinned_key(me.path(), &new_scope, "acme.finance"),
+            Some(old_home.key)
+        );
+    }
+
+    /// A key change at the SAME registry is still refused, on every policy —
+    /// including the one that exists to accept a cross-registry conflict.
+    /// "Two registries disagree" and "this registry's own key changed" are
+    /// different facts and only the first is a question for the user.
+    #[test]
+    fn a_key_contradicting_an_existing_pin_is_refused_even_passively() {
+        let good = publish_signed("acme.finance");
+        // A DIFFERENT publisher republishes into the SAME registry directory.
+        let evil_profile = TempDir::new().unwrap();
+        skin_publish(
+            &good.registry,
+            evil_profile.path(),
+            "acme.finance",
+            "2.0.0",
+            "2026-08-01T00:00:00Z",
+            &tiny_pack("p"),
+        )
+        .unwrap();
+
+        let me = TempDir::new().unwrap();
+        verify_and_load_manifest_via(
+            &good.registry,
+            "acme.finance",
+            "1.0.0",
+            &good.scope,
             me.path(),
             PinPolicy::PinOnFirstUse,
         )
@@ -811,11 +1288,13 @@ mod tests {
             PinPolicy::VerifyOnly,
             PinPolicy::RequirePinned,
             PinPolicy::PinOnFirstUse,
+            PinPolicy::PinAcceptingNameConflict,
         ] {
             let err = verify_and_load_manifest_via(
-                &evil_registry,
+                &good.registry,
                 "acme.finance",
-                "1.0.0",
+                "2.0.0",
+                &good.scope,
                 me.path(),
                 policy,
             )
@@ -827,18 +1306,86 @@ mod tests {
         }
         // The pin is unchanged by any of those attempts.
         assert_eq!(
-            load_trusted_publishers(me.path()).unwrap().get("acme.finance"),
-            Some(&good_key)
+            pinned_key(me.path(), &good.scope, "acme.finance"),
+            Some(good.key)
         );
     }
 
+    /// Two registries can each pin the same NAME without touching each other's
+    /// row — the property the flat name->key map could not express.
+    #[test]
+    fn two_registries_pinning_the_same_name_do_not_overwrite_each_other() {
+        let a = publish_signed("acme.finance");
+        let b = publish_signed("acme.finance");
+        let me = TempDir::new().unwrap();
+
+        verify_and_load_manifest_via(
+            &a.registry,
+            "acme.finance",
+            "1.0.0",
+            &a.scope,
+            me.path(),
+            PinPolicy::PinOnFirstUse,
+        )
+        .unwrap();
+        verify_and_load_manifest_via(
+            &b.registry,
+            "acme.finance",
+            "1.0.0",
+            &b.scope,
+            me.path(),
+            PinPolicy::PinAcceptingNameConflict,
+        )
+        .unwrap();
+
+        assert_eq!(pinned_key(me.path(), &a.scope, "acme.finance"), Some(a.key));
+        assert_eq!(pinned_key(me.path(), &b.scope, "acme.finance"), Some(b.key));
+        assert_eq!(load_pins(me.path()).unwrap().len(), 2);
+    }
+
+    /// An unreadable pin store fails CLOSED on every policy, including the
+    /// passive one. "I cannot read what this machine trusts" is not "this
+    /// machine trusts nothing".
+    #[test]
+    fn an_unreadable_pin_store_never_reads_as_untrusted() {
+        let p = publish_signed("acme.finance");
+        let me = TempDir::new().unwrap();
+        std::fs::create_dir_all(me.path()).unwrap();
+        std::fs::write(
+            crate::signing::trusted_publishers_file_path(me.path()),
+            "{ this is not json",
+        )
+        .unwrap();
+
+        for policy in [
+            PinPolicy::VerifyOnly,
+            PinPolicy::RequirePinned,
+            PinPolicy::PinOnFirstUse,
+            PinPolicy::PinAcceptingNameConflict,
+        ] {
+            assert!(
+                verify_and_load_manifest_via(
+                    &p.registry,
+                    "acme.finance",
+                    "1.0.0",
+                    &p.scope,
+                    me.path(),
+                    policy,
+                )
+                .is_err(),
+                "policy {policy:?} treated an unreadable pin store as 'nothing is pinned'"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Structural guard: a caller that forgets to think about pinning must FAIL
-    // TO COMPILE, and this module must remain the only place that can pin.
+    // Structural guard: a caller that forgets to think about pinning — or about
+    // WHICH REGISTRY it is talking to — must FAIL TO COMPILE, and this module
+    // must remain the only place that can pin.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn the_pin_policy_can_never_become_optional_or_defaulted() {
+    fn the_pin_policy_and_the_registry_scope_can_never_become_optional() {
         let src = include_str!("integrity.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
 
@@ -864,20 +1411,62 @@ mod tests {
             "PinPolicy must never derive Default"
         );
 
+        // The registry scope is subject to exactly the same rule, and for the
+        // same reason: a pin that is not tied to an origin lets whoever reaches
+        // a name first own it machine-wide. A `None` scope, or a defaulted one,
+        // would silently become "the empty scope" — i.e. name-only keying,
+        // reintroduced.
+        assert!(
+            production.contains("    scope: &RegistryScope,"),
+            "verify_and_load_manifest_via must take a required `scope: &RegistryScope`"
+        );
+        assert!(
+            !production.contains("Option<RegistryScope>")
+                && !production.contains("Option<&RegistryScope>"),
+            "the registry scope must never be optional"
+        );
+        assert!(
+            !production.contains("impl Default for RegistryScope"),
+            "RegistryScope must never have a Default"
+        );
+
         // And this file must remain the ONLY writer of a .calp publisher pin,
-        // reached from exactly one arm.
+        // reached only through a policy the user's action authorized.
         assert_eq!(
             production.matches("crate::signing::pin_publisher(").count(),
             1,
-            "integrity.rs must contain exactly one pin write, under PinPolicy::PinOnFirstUse"
+            "integrity.rs must contain exactly one pin write"
         );
-        let pin_arm = production
-            .split("PinPolicy::PinOnFirstUse => {")
+        // Every non-pinning outcome must RETURN from inside the policy match, so
+        // the single write below it is unreachable for them. If a future editor
+        // turns one of these into a fallthrough, the write starts happening on a
+        // passive path — the Wave-H/I/J bug, one more time.
+        let decision = production
+            .split("let status = match policy {")
             .nth(1)
-            .expect("the pin must live in the PinOnFirstUse arm");
+            .expect("the policy decision block moved or was renamed")
+            .split("\n    };")
+            .next()
+            .expect("the policy decision block is not delimited as expected");
         assert!(
-            pin_arm.starts_with("\n                crate::signing::pin_publisher("),
-            "the pin write must be the first statement of the PinOnFirstUse arm"
+            !decision.contains("pin_publisher("),
+            "the pin write must happen ONCE, after the decision — not inside a policy arm"
         );
+        assert!(
+            decision.contains("PinPolicy::VerifyOnly => {")
+                && decision.contains("PinPolicy::RequirePinned => {"),
+            "the non-pinning policies must be spelled out, never swept into a `_` arm"
+        );
+        for non_pinning in ["PinPolicy::VerifyOnly => {", "PinPolicy::RequirePinned => {"] {
+            let arm = decision
+                .split(non_pinning)
+                .nth(1)
+                .expect("arm present, just checked");
+            let body = arm.split("\n        }").next().unwrap_or(arm);
+            assert!(
+                body.contains("return "),
+                "the {non_pinning} arm must RETURN, so it can never reach the pin write"
+            );
+        }
     }
 }

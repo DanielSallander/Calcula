@@ -68,8 +68,23 @@ pub enum CalpError {
     #[error("Publisher key for package {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible package hijack)")]
     PublisherKeyChanged { package: String, version: String, pinned: String, got: String },
 
-    #[error("Package {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}'. Subscribe to the package (Data > Subscribe to Package) to review the publisher and trust it — a signature alone is not trust.")]
-    PublisherNotPinned { package: String, version: String, got: String },
+    #[error("Package {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}' from {scope}. Subscribe to the package (Data > Subscribe to Package) to review the publisher and trust it — a signature alone is not trust.")]
+    PublisherNotPinned { package: String, version: String, scope: String, got: String },
+
+    #[error("The package name '{package}' is already trusted on this computer from a DIFFERENT registry: {other_scope} is pinned to publisher {pinned}, but {scope} is offering {package}@{version} signed by {got}. Two registries claiming one name is exactly what a package hijack looks like. Review both publishers before accepting this one.")]
+    PublisherNameConflict {
+        package: String,
+        version: String,
+        /// The registry being contacted now, in the USER'S spelling.
+        scope: String,
+        /// The registry that already holds a pin for this name, in the user's
+        /// spelling.
+        other_scope: String,
+        /// The key pinned for the other registry.
+        pinned: String,
+        /// The key this registry is offering.
+        got: String,
+    },
 
     // -- Compatibility contract --------------------------------------------
 

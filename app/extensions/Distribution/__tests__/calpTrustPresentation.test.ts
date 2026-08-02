@@ -60,43 +60,100 @@ function objectKeys(src: string, declaration: RegExp): string[] {
 describe("the Rust trust vocabulary is complete and honest", () => {
   it("every TrustStatus variant has a wire string", () => {
     const variants = [
-      ...INTEGRITY_RS.matchAll(/^\s{4}(FirstUse|Verified|NotPinned),$/gm),
+      ...INTEGRITY_RS.matchAll(
+        /^\s{4}(FirstUse|FirstUseKnownPublisher|FirstUseAcceptedNameConflict|Verified|NotPinned|NotPinnedNameConflict),$/gm,
+      ),
     ].map((m) => m[1]);
-    expect(new Set(variants).size, "TrustStatus variants changed").toBe(3);
-    expect(RUST_STATUSES.length).toBe(3);
+    expect(new Set(variants).size, "TrustStatus variants changed").toBe(6);
+    expect(RUST_STATUSES.length).toBe(6);
     expect(RUST_STATUSES).toContain("notPinned");
+    expect(RUST_STATUSES).toContain("notPinnedNameConflict");
   });
 
-  it("the passive surfaces map their statuses exhaustively, with no wildcard arm", () => {
+  it("there is exactly ONE Rust map, and nothing hand-rolls a second", () => {
+    // Two exhaustive matches meaning the same thing are two matches that can
+    // DISAGREE, and a trust state rendered with the wrong word is a security
+    // bug. `calp_inspector::trust_status_str` is the map; `calp_commands`
+    // delegates to it rather than repeating it.
+    expect(CALP_CMDS_RS).toMatch(
+      /fn calp_trust_status_str\([\s\S]{0,200}?calp_inspector::trust_status_str\(trust\)/,
+    );
+    expect(
+      CALP_CMDS_RS,
+      "calp_commands must not carry its own TrustStatus -> string match",
+    ).not.toMatch(/TrustStatus::NotPinned => "notPinned"/);
+  });
+
+  it("the one map is exhaustive, with no wildcard arm", () => {
     // A `_ =>` arm is how a new security state silently inherits an old label.
-    for (const [name, src] of [
-      ["calp_inspector::trust_status_str", INSPECTOR_RS],
-      ["calp_commands", CALP_CMDS_RS],
-    ] as const) {
-      const matches = [...src.matchAll(/TrustStatus::NotPinned => "notPinned"/g)];
-      expect(matches.length, `${name} does not spell out NotPinned`).toBeGreaterThan(0);
-      expect(src, `${name} must not use a wildcard TrustStatus arm`).not.toMatch(
-        /match (trust|result\.trust_status)[\s\S]{0,400}?\n\s+_ =>/,
-      );
+    const fn = INSPECTOR_RS.match(
+      /fn trust_status_str\(trust: TrustStatus\) -> String \{[\s\S]*?\n\}/,
+    )![0];
+    expect(fn).toContain('TrustStatus::NotPinned => "notPinned"');
+    expect(fn).toContain('TrustStatus::NotPinnedNameConflict => "notPinnedNameConflict"');
+    expect(fn, "the map must not use a wildcard arm").not.toMatch(/\n\s+_ =>/);
+  });
+
+  it("only `verified` may use the word verified, and both conflicts are distinct", () => {
+    // The recurring failure: a new state inherits the friendliest label. No
+    // status other than `verified` may CONTAIN the word.
+    for (const status of RUST_STATUSES) {
+      if (status === "verified") continue;
+      expect(
+        status.toLowerCase().includes("verified"),
+        `status "${status}" contains the word "verified"`,
+      ).toBe(false);
     }
+    expect(RUST_STATUSES).toContain("firstUseKnownPublisher");
+    expect(RUST_STATUSES).toContain("firstUseAcceptedNameConflict");
   });
 
   it("the TS mirror declares exactly the Rust statuses", () => {
-    const t = DISTRIBUTION_TS.match(/export type CalpTrustStatus = ([^;]+);/);
+    const t = DISTRIBUTION_TS.match(/export type CalpTrustStatus =([^;]+);/);
     expect(t, "CalpTrustStatus moved or was renamed").toBeTruthy();
     const declared = [...t![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
     expect(declared.sort()).toEqual([...RUST_STATUSES].sort());
   });
 
-  it("the 'is this pinned' predicate excludes notPinned", () => {
-    // Mirrors library_trust_is_pinned / TRUST_NOT_INSTALLED: the status that
-    // means "authentic but not trusted" must be absent from the predicate that
+  it("the 'is this pinned' predicate excludes both notPinned states", () => {
+    // Mirrors library_trust_is_pinned / TRUST_NOT_INSTALLED: the statuses that
+    // mean "authentic but not trusted" must be absent from the predicate that
     // answers "has this machine agreed to trust this publisher".
     const fn = DISTRIBUTION_TS.match(/export function calpTrustIsPinned[\s\S]*?\n\}/);
     expect(fn, "calpTrustIsPinned moved or was renamed").toBeTruthy();
     expect(fn![0]).toContain('"verified"');
     expect(fn![0]).toContain('"firstUse"');
+    expect(fn![0]).toContain('"firstUseKnownPublisher"');
+    expect(fn![0]).toContain('"firstUseAcceptedNameConflict"');
     expect(fn![0]).not.toContain('"notPinned"');
+    expect(fn![0]).not.toContain('"notPinnedNameConflict"');
+  });
+
+  it("the pin key is scoped to a registry, and only in one place", () => {
+    // THE BUG THIS WAVE FIXED. A pin keyed by package NAME alone let whoever
+    // made first contact with a name own it machine-wide: a package served once
+    // from a hostile share wrote the pin the genuine publisher was later
+    // measured against, so the real author's first release read as
+    // "publisherChanged". The key is now (namespace, registry scope, name), and
+    // it may only be BUILT by the two sanctioned constructors.
+    const signing = read("../core/calp/src/signing.rs");
+    const production = signing.split("#[cfg(test)]")[0];
+    expect(production).toMatch(/pub fn calp\(scope: &RegistryScope, package: &str\) -> PinKey/);
+    expect(production).toMatch(/pub fn extension\(id: &str\) -> PinKey/);
+    expect(
+      production.match(/PinKey \{\n {12}namespace,/g)?.length ?? 0,
+      "a PinKey must be built in exactly one place",
+    ).toBe(1);
+    expect(
+      production,
+      "the old ext: string convention must be gone",
+    ).not.toContain('format!("ext:');
+
+    // ...and the verifier cannot be called without a scope.
+    const integrityProd = INTEGRITY_RS.split("#[cfg(test)]")[0];
+    expect(integrityProd).toContain("    scope: &RegistryScope,");
+    expect(integrityProd).not.toContain("Option<RegistryScope>");
+    expect(integrityProd).not.toContain("impl Default for RegistryScope");
   });
 });
 
@@ -143,6 +200,18 @@ describe("Package Inspector overview badge", () => {
     const notPinnedRow = OVERVIEW.match(/\n  notPinned: \{[\s\S]*?\n  \},/)![0];
     expect(notPinnedRow).not.toContain("OK_GREEN");
   });
+
+  it("paints both name-conflict states as danger", () => {
+    // A name claimed by two registries under two keys is the loudest thing this
+    // vocabulary can say. Neither state may be painted amber or green.
+    for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
+      const row = OVERVIEW.match(new RegExp(`\\n  ${status}: \\{[\\s\\S]*?\\n  \\},`));
+      expect(row, `no row for ${status}`).toBeTruthy();
+      expect(row![0], `${status} must be DANGER_RED`).toContain("DANGER_RED");
+      expect(row![0]).not.toContain("OK_GREEN");
+      expect(row![0]).not.toContain("WARN_AMBER");
+    }
+  });
 });
 
 describe("Subscribe dialog review step", () => {
@@ -172,6 +241,23 @@ describe("Subscribe dialog review step", () => {
       .replace(/"\s*\+\s*\n?\s*"/g, "");
     expect(row).toMatch(/nobody on this computer has agreed to trust this publisher/i);
     expect(row).toMatch(/Subscribing records it/i);
+  });
+
+  it("paints both name-conflict states as danger and asks a SECOND question", () => {
+    for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
+      const row = SUBSCRIBE.match(new RegExp(`\\n  ${status}: \\{[\\s\\S]*?\\n  \\},`));
+      expect(row, `no row for ${status}`).toBeTruthy();
+      // The danger box + red text, same palette as TRUST_REVIEW_FALLBACK.
+      expect(row![0]).toContain("#c5221f");
+      expect(row![0]).toContain("#fdeceb");
+    }
+    // Accepting a conflict must be a SEPARATE, differently-worded confirmation —
+    // the same two-question pattern as acceptPublisherChange on add-in installs.
+    // The flag may only be set from the state that displayed the conflict.
+    expect(SUBSCRIBE).toMatch(
+      /acceptNameConflict: inspection\?\.trustStatus === "notPinnedNameConflict"/,
+    );
+    expect(SUBSCRIBE).toMatch(/Trust this publisher anyway/);
   });
 
   it("degrades an unknown state to a warning, never to a safe one", () => {

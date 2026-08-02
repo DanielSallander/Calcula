@@ -113,6 +113,19 @@ export interface LibraryInstallRequest extends LibraryRequest {
 }
 
 /**
+ * The trust statuses that mean "another registry already holds this library
+ * name under a DIFFERENT publisher key".
+ *
+ * Pins are keyed by (registry, package), which is what stops a squat in one
+ * registry from owning a name everywhere. The cost is that a SECOND registry
+ * serving a familiar name is first contact rather than a refusal — so the
+ * conflict has to be loud, and installing past it has to be a separate answer.
+ */
+export function libraryTrustIsNameConflict(status: string): boolean {
+  return status === "notInstalledNameConflict" || status === "firstUseAcceptedNameConflict";
+}
+
+/**
  * THE ONE PINNING CALL. Re-verify an APPROVED set of packages with
  * `confirm: true`, which lets the backend create the trust-on-first-use pin for
  * any publisher this machine has not trusted before.

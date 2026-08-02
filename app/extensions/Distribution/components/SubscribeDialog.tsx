@@ -122,6 +122,23 @@ const TRUST_REVIEW: Record<
     box: { background: "#fef7e0", border: "1px solid #f2dcae" },
     blurb: "This publisher key has just been recorded as trusted for this package name.",
   },
+  firstUseKnownPublisher: {
+    label: "trusted just now — publisher already known",
+    color: "#a05a00",
+    box: { background: "#fef7e0", border: "1px solid #f2dcae" },
+    blurb:
+      "This registry was not trusted for this package before, but the same publisher key is " +
+      "already trusted for this package name from another registry — a move, a mirror, or the " +
+      "same location spelled differently. It has now been recorded for this registry too.",
+  },
+  firstUseAcceptedNameConflict: {
+    label: "trusted despite a name conflict",
+    color: "#c5221f",
+    box: { background: "#fdeceb", border: "1px solid #f3c4c2" },
+    blurb:
+      "Another registry already holds this package name under a DIFFERENT publisher key, and " +
+      "you accepted that. Both are now trusted, each for its own registry.",
+  },
   notPinned: {
     label: "not yet trusted on this computer",
     color: "#a05a00",
@@ -132,6 +149,17 @@ const TRUST_REVIEW: Record<
       "create a signing key, so check the key above against the one the publisher gave you. " +
       "Subscribing records it, and every later version of this package must be signed by the " +
       "same key or Calcula will refuse it.",
+  },
+  notPinnedNameConflict: {
+    label: "NAME CONFLICT — a different publisher already owns this name here",
+    color: "#c5221f",
+    box: { background: "#fdeceb", border: "1px solid #f3c4c2" },
+    blurb:
+      "This package name is already trusted on this computer from a DIFFERENT registry, under a " +
+      "DIFFERENT publisher key. The signature here is valid, but a valid signature only proves " +
+      "the bytes were not altered — it does not say who signed them. Two registries claiming one " +
+      "name is exactly what a package hijack looks like. Compare both registries and both keys " +
+      "below; subscribing anyway needs a second, explicit confirmation.",
   },
 };
 
@@ -309,6 +337,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         registryPath,
         packageName,
         versionPin,
+        // Only set when the Review step SHOWED the cross-registry name conflict
+        // and the user answered the second, differently-worded question. The
+        // backend refuses a conflicting subscribe without it, so a UI that
+        // forgets to ask cannot pin past a conflict.
+        acceptNameConflict: inspection?.trustStatus === "notPinnedNameConflict",
       });
 
       // Notify the app that sheets have changed so UI refreshes
@@ -491,6 +524,24 @@ export function SubscribeDialog({ onClose }: DialogProps) {
               </div>
             )}
             <div style={{ marginTop: 4 }}>{t.blurb}</div>
+            {(inspection.otherScopePins ?? []).length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <strong>Already trusted for this name:</strong>
+                {(inspection.otherScopePins ?? []).map((p, i) => (
+                  <div key={i} style={{ marginTop: 2 }}>
+                    <span style={{ fontFamily: "Consolas, monospace", fontSize: 10.5 }}>
+                      {p.scopeLabel}
+                    </span>
+                    {" — "}
+                    {p.sameKey ? "same key" : "DIFFERENT key"}{" "}
+                    <span style={{ fontFamily: "Consolas, monospace", fontSize: 10.5 }}>
+                      {p.publisherKey.slice(0, 24)}…
+                    </span>
+                    {p.pinnedAt ? ` (trusted ${p.pinnedAt.slice(0, 10)})` : ""}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -729,8 +780,32 @@ export function SubscribeDialog({ onClose }: DialogProps) {
               Back
             </button>
             <button onClick={onClose}>Cancel</button>
-            <button onClick={handlePull} style={{ fontWeight: 600 }}>
-              Accept and Subscribe
+            {/*
+              A NAME CONFLICT gets a second, differently-worded question. The
+              first question is "do you want this package"; this one is "do you
+              accept that two registries claim this name under different keys".
+              Same two-step shape as `acceptPublisherChange` on add-in installs —
+              and the reason the Review step needs its own conflict status:
+              Review must never say nothing and then have Subscribe fail.
+            */}
+            <button
+              onClick={handlePull}
+              style={{
+                fontWeight: 600,
+                ...(inspection.trustStatus === "notPinnedNameConflict"
+                  ? { background: "#fdeceb", border: "1px solid #f3c4c2", color: "#c5221f" }
+                  : {}),
+              }}
+              title={
+                inspection.trustStatus === "notPinnedNameConflict"
+                  ? "Another registry already holds this package name under a different " +
+                    "publisher key. Subscribing records THIS key for THIS registry as well."
+                  : undefined
+              }
+            >
+              {inspection.trustStatus === "notPinnedNameConflict"
+                ? "Trust this publisher anyway"
+                : "Accept and Subscribe"}
             </button>
           </>
         ) : (

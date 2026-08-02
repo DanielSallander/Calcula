@@ -39,8 +39,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use calp::signing::{
-    check_extension_code_hash, extension_layout_for_source, extension_tofu_key,
-    load_trusted_publishers, pin_publisher, verify_signature, CodeHashStatus,
+    check_extension_code_hash, extension_layout_for_source, load_pins, pin_publisher,
+    verify_signature, CodeHashStatus, PinKey,
     ExtensionBundleLayout,
 };
 use serde::{Deserialize, Serialize};
@@ -125,7 +125,20 @@ pub fn trust_grants_capabilities(status: &str) -> bool {
 /// Decide the publisher half of trust, FAILING CLOSED when the pin store cannot
 /// be read.
 ///
-/// `load_trusted_publishers` returns `Ok(empty)` for a store that does not exist
+/// EXTENSION PINS ARE MACHINE-GLOBAL, BY DECISION. `PinKey::extension(id)` carries
+/// no registry scope, unlike a `.calp` pin. There is no registry here — an add-in
+/// is installed from a folder — and the only candidate scope would be the source
+/// PATH, which is the attacker's own choice: a bundle dropped in
+/// `%USERPROFILE%\Downloads` would get a pristine scope and therefore a free
+/// first use on an id it does not own, which is precisely the squat Wave H closed.
+/// It would also make a reinstall from a USB stick a false first use, and it
+/// cannot be recorded honestly anyway because the installer COPIES the files, so
+/// the "scope" evaporates the moment the install completes. For an id namespace
+/// with no naming authority behind it, machine-global first-contact ownership IS
+/// the semantics; the protection is that only a human at the installer can claim
+/// it (`decide_extension_trust_for_scan` refuses to pin from a scan).
+///
+/// `load_pins` returns an empty store when the file does not exist
 /// yet — that is a real "never seen anybody", and it pins. `Err` is different:
 /// the file exists and could not be read or parsed. Treating that as "no pin"
 /// (installer) or as "verified" (scan) both let an attacker who can write to the
@@ -133,12 +146,17 @@ pub fn trust_grants_capabilities(status: &str) -> bool {
 /// is the one thing TOFU exists to prevent — and an attacker who can drop a
 /// bundle into `%APPDATA%/…/extensions` can write the profile directory too.
 fn publisher_trust(profile_dir: &Path, id: &str, publisher_key: &str) -> (String, String) {
-    match load_trusted_publishers(profile_dir) {
+    match load_pins(profile_dir) {
         Err(_) => (TRUST_UNAVAILABLE.to_string(), String::new()),
-        Ok(pinned) => match pinned.get(&extension_tofu_key(id)) {
+        Ok(store) => match store.get(&PinKey::extension(id)) {
             None => (TRUST_FIRST_USE.to_string(), String::new()),
-            Some(k) if k == publisher_key => (TRUST_VERIFIED.to_string(), k.clone()),
-            Some(k) => (TRUST_PUBLISHER_CHANGED.to_string(), k.clone()),
+            Some(r) if r.publisher_key == publisher_key => {
+                (TRUST_VERIFIED.to_string(), r.publisher_key.clone())
+            }
+            Some(r) => (
+                TRUST_PUBLISHER_CHANGED.to_string(),
+                r.publisher_key.clone(),
+            ),
         },
     }
 }
@@ -864,7 +882,11 @@ fn install_inspected(
     {
         pin_publisher(
             profile_dir,
-            &extension_tofu_key(&report.id),
+            &PinKey::extension(&report.id),
+            // No registry: an add-in is installed from a folder, and the folder
+            // is the attacker's choice, so it is deliberately NOT recorded as a
+            // scope. See `publisher_trust`.
+            "",
             &report.publisher_key,
         )
         .map_err(|e| format!("Failed to record the publisher key: {}", e))?;
@@ -995,6 +1017,15 @@ pub fn contribution_kinds() -> BTreeMap<&'static str, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pinned key for an extension id, or None. Spelled once so no test
+    /// hand-rolls a key string — `PinKey::extension` is the only construction.
+    fn ext_pin(profile: &std::path::Path, id: &str) -> Option<String> {
+        load_pins(profile)
+            .unwrap()
+            .get(&PinKey::extension(id))
+            .map(|r| r.publisher_key.clone())
+    }
     use calp::signing::PublisherKeypair;
 
     const MANIFEST: &str = r#"{
@@ -1090,7 +1121,7 @@ mod tests {
         assert!(!f.ext.join("demo.js").exists());
         // ...and NOTHING was pinned: a second preview is still first contact.
         assert_eq!(preview(&f).trust_status, "firstUse");
-        assert!(load_trusted_publishers(&f.profile).unwrap().is_empty());
+        assert!(load_pins(&f.profile).unwrap().is_empty());
     }
 
     // -- Unsigned ------------------------------------------------------------
@@ -1122,10 +1153,7 @@ mod tests {
         assert_eq!(r.trust_status, "verified");
         assert!(r.capabilities_honored);
         assert!(r.code_covered_by_signature);
-        assert_eq!(
-            load_trusted_publishers(&f.profile).unwrap().get("ext:acme.demo"),
-            Some(&key)
-        );
+        assert_eq!(ext_pin(&f.profile, "acme.demo"), Some(key));
         assert!(f.ext.join("demo.manifest.sig").is_file());
 
         // A later preview of the same publisher reads as verified, not firstUse.
@@ -1137,11 +1165,7 @@ mod tests {
         let f = fixture();
         sign(&f, &f.profile);
         install(&f, false).unwrap();
-        let first_key = load_trusted_publishers(&f.profile)
-            .unwrap()
-            .get("ext:acme.demo")
-            .cloned()
-            .unwrap();
+        let first_key = ext_pin(&f.profile, "acme.demo").unwrap();
 
         // A DIFFERENT publisher re-signs the same id.
         let other = tempfile::tempdir().unwrap();
@@ -1157,8 +1181,8 @@ mod tests {
         let err = install(&f, false).unwrap_err();
         assert!(err.contains("different publisher"), "unexpected: {err}");
         assert_eq!(
-            load_trusted_publishers(&f.profile).unwrap().get("ext:acme.demo"),
-            Some(&first_key),
+            ext_pin(&f.profile, "acme.demo").as_deref(),
+            Some(first_key.as_str()),
             "a refused install must never re-pin"
         );
 
@@ -1166,8 +1190,8 @@ mod tests {
         let ok = install(&f, true).unwrap();
         assert!(ok.pinned);
         assert_eq!(
-            load_trusted_publishers(&f.profile).unwrap().get("ext:acme.demo"),
-            Some(&second_key)
+            ext_pin(&f.profile, "acme.demo").as_deref(),
+            Some(second_key.as_str())
         );
     }
 
@@ -1242,7 +1266,7 @@ mod tests {
 
         let err = install(&f, false).unwrap_err();
         assert!(err.contains("does not cover its program file"), "unexpected: {err}");
-        assert!(load_trusted_publishers(&f.profile).unwrap().is_empty());
+        assert!(load_pins(&f.profile).unwrap().is_empty());
     }
 
     /// The scan half of the same rule. This is the one that matters: `inspect`
@@ -1279,7 +1303,7 @@ mod tests {
         // ...and it must NOT have pinned the publisher on the way past: a key we
         // are not willing to trust must not become the pin a genuine later
         // release is then measured against.
-        assert!(load_trusted_publishers(&f.profile).unwrap().is_empty());
+        assert!(load_pins(&f.profile).unwrap().is_empty());
     }
 
     /// TOFU must FAIL CLOSED when its own store cannot be read.
@@ -1579,7 +1603,7 @@ mod tests {
         assert_eq!(formulas.ids, vec!["VATRATE".to_string(), "VATAMOUNT".to_string()]);
         assert!(!preview.installed, "a preview must not install");
         assert!(
-            load_trusted_publishers(user_profile.path()).unwrap().is_empty(),
+            load_pins(user_profile.path()).unwrap().is_empty(),
             "a preview must not pin"
         );
 
@@ -1688,11 +1712,7 @@ mod tests {
         let f = fixture();
         sign(&f, &f.profile);
         install(&f, false).unwrap();
-        let first_key = load_trusted_publishers(&f.profile)
-            .unwrap()
-            .get("ext:acme.demo")
-            .cloned()
-            .unwrap();
+        let first_key = ext_pin(&f.profile, "acme.demo").unwrap();
 
         let other = tempfile::tempdir().unwrap();
         let second_key = sign(&f, other.path());
@@ -1748,7 +1768,7 @@ mod tests {
         assert_eq!(scan_status, TRUST_NOT_INSTALLED);
         assert!(!trust_grants_capabilities(&scan_status));
         assert!(
-            load_trusted_publishers(&f.profile).unwrap().is_empty(),
+            load_pins(&f.profile).unwrap().is_empty(),
             "the scan decision must not pin"
         );
     }

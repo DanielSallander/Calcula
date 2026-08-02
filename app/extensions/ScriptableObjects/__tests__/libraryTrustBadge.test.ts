@@ -81,6 +81,31 @@ describe("library install plan discloses every trust state", () => {
     expect(labelFor("notInstalled")).toMatch(/not previously trusted/i);
   });
 
+  it("no status other than 'verified' may contain the word verified", () => {
+    for (const status of RUST_STATUSES) {
+      if (status === "verified") continue;
+      expect(
+        status.toLowerCase().includes("verified"),
+        `status "${status}" borrows the word "verified"`,
+      ).toBe(false);
+    }
+  });
+
+  it("both name-conflict statuses render in the danger palette", () => {
+    // Pins are keyed by (registry, package), so a SECOND registry serving a
+    // familiar library name is first contact rather than a refusal. That is only
+    // safe because the conflict is loud: both of these are red, never neutral.
+    const fn = MARKETPLACE.match(/function trustBadge\(status: string\)[\s\S]*?\n}\n/)![0];
+    for (const status of ["notInstalledNameConflict", "firstUseAcceptedNameConflict"]) {
+      expect(RUST_STATUSES, `${status} missing from LIBRARY_TRUST_STATUSES`).toContain(status);
+      const arm = fn.match(new RegExp(`case "${status}":[\\s\\S]*?\\};`));
+      expect(arm, `no badge for ${status}`).toBeTruthy();
+      expect(arm![0], `${status} must use the danger palette`).toContain("#FDE7E9");
+      expect(arm![0]).not.toContain("#E8F4EA");
+      expect(arm![0]).not.toContain("#F0F0F0");
+    }
+  });
+
   it("degrades an UNKNOWN status to a caution badge, never to a safe one", () => {
     const fn = MARKETPLACE.match(/function trustBadge\(status: string\)[\s\S]*?\n}\n/)![0];
     expect(fn).toMatch(/default:/);
@@ -94,9 +119,51 @@ describe("library install plan discloses every trust state", () => {
     // library_trust_is_pinned is the Rust answer to "has this machine agreed to
     // trust this publisher"; notInstalled must be absent from it, or the badge
     // and the gate would disagree about the same word.
-    const pred = LIBRARY_RS.match(/pub fn library_trust_is_pinned[\s\S]*?matches!\(status,([^)]*)\)/);
+    const pred = LIBRARY_RS.match(
+      /pub fn library_trust_is_pinned[\s\S]*?matches!\(\s*status,([^)]*)\)/,
+    );
     expect(pred, "library_trust_is_pinned moved or was renamed").toBeTruthy();
     expect(pred![1]).not.toContain("LIB_TRUST_NOT_INSTALLED");
     expect(pred![1]).toContain("LIB_TRUST_VERIFIED");
+    // ...and the pinning states created by an install DO count, including the
+    // one that recorded an accepted cross-registry name conflict: the pin
+    // exists, so the ceiling it unlocks exists too. Pretending otherwise would
+    // make the badge and the gate disagree in the other direction.
+    expect(pred![1]).toContain("LIB_TRUST_FIRST_USE_KNOWN_PUBLISHER");
+    expect(pred![1]).toContain("LIB_TRUST_FIRST_USE_ACCEPTED_NAME_CONFLICT");
+  });
+
+  it("accepting a name conflict is a SECOND, differently-worded question", () => {
+    // `install.ts::pinApprovedPublishers` sets `acceptNameConflict` from the
+    // plan's trust status, and the backend refuses to pin a conflicting name
+    // without it. So the confirm button IS the acceptance. It used to say plain
+    // "Install", which meant one ordinary click trusted a second claimant to a
+    // familiar package name — the badge three lines up was the only warning, and
+    // a conflicting TRANSITIVE dependency was never named at all.
+    const install = fs.readFileSync(
+      path.join(APP_ROOT, "src/api/scriptLibraries/install.ts"),
+      "utf8",
+    );
+    expect(
+      install,
+      "applyInstall must derive acceptNameConflict from the reviewed plan",
+    ).toContain("acceptNameConflict: libraryTrustIsNameConflict(n.trustStatus)");
+
+    // The plan panel states the conflict as an aggregate, naming the packages.
+    expect(
+      MARKETPLACE,
+      "ScriptMarketplace must compute the conflicting packages over the whole closure",
+    ).toContain("function conflictingPackages(plan: InstallPlan): string[]");
+    expect(MARKETPLACE).toContain("plan.nodes.filter((n) => libraryTrustIsNameConflict");
+    expect(MARKETPLACE, "the plan must carry a NAME CONFLICT callout").toMatch(
+      /NAME CONFLICT — another registry already owns/,
+    );
+
+    // ...and the confirm button must be re-worded, not merely re-coloured.
+    const footer = MARKETPLACE.slice(MARKETPLACE.indexOf("void confirmInstall()") - 1400);
+    expect(footer, "the confirm button must ask a different question on a conflict").toContain(
+      "Trust these publishers anyway",
+    );
+    expect(footer).toContain("conflictingPackages(plan).length > 0");
   });
 });

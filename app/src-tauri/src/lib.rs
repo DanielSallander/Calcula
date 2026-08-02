@@ -3700,7 +3700,18 @@ mod ext_manifest_tests {
     /// set up "the user already installed this" without re-implementing the
     /// installer. The scan itself no longer pins anything.
     fn pin(profile: &std::path::Path, id: &str, key: &str) {
-        calp::signing::pin_publisher(profile, &format!("ext:{}", id), key).unwrap();
+        calp::signing::pin_publisher(profile, &calp::signing::PinKey::extension(id), "", key)
+            .unwrap();
+    }
+
+    /// The pinned key for an extension id, or None. Extension pins are
+    /// machine-global BY DECISION (`PinKey::extension` carries no registry
+    /// scope) — see the reasoning on `extension_install::publisher_trust`.
+    fn ext_pin(profile: &std::path::Path, id: &str) -> Option<String> {
+        calp::signing::load_pins(profile)
+            .unwrap()
+            .get(&calp::signing::PinKey::extension(id))
+            .map(|r| r.publisher_key.clone())
     }
 
     /// The scan VERIFIES a pin; it never CREATES one.
@@ -3734,10 +3745,7 @@ mod ext_manifest_tests {
             );
         }
         assert!(
-            calp::signing::load_trusted_publishers(profile.path())
-                .unwrap()
-                .get("ext:e.signed")
-                .is_none(),
+            ext_pin(profile.path(), "e.signed").is_none(),
             "the scan must never create a pin — that is the installer's job"
         );
         // ...and the ceiling stays empty, so a hand-copied add-in gets no
@@ -3849,9 +3857,7 @@ mod ext_manifest_tests {
             );
         }
         assert!(
-            calp::signing::load_trusted_publishers(user_profile.path())
-                .unwrap()
-                .is_empty(),
+            calp::signing::load_pins(user_profile.path()).unwrap().is_empty(),
             "the attacker's key must not be pinned for acme.tax-tools"
         );
 
@@ -3902,10 +3908,7 @@ mod ext_manifest_tests {
         assert_eq!(status, crate::extension_install::TRUST_CODE_UNVERIFIED);
         assert!(!crate::extension_install::trust_grants_capabilities(&status));
         assert!(
-            calp::signing::load_trusted_publishers(profile.path())
-                .unwrap()
-                .get("ext:e.nohash")
-                .is_none(),
+            ext_pin(profile.path(), "e.nohash").is_none(),
             "a key we will not trust must not become the pin a later release is measured against"
         );
     }
@@ -5009,6 +5012,7 @@ pub fn run() {
             library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_subscription_trust,
+            calp_commands::calp_list_trusted_publishers,
             calp_commands::calp_get_package_objects,
             calp_commands::calp_get_overrides,
             calp_commands::calp_revert_override,

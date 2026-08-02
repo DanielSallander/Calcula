@@ -91,5 +91,35 @@ describe("org skin trust states", () => {
     expect(labelFor("notPinned")).toMatch(/not trusted/i);
     expect(labelFor("notPinned")).not.toMatch(/^verified/i);
     expect(labelFor("unknown")).not.toMatch(/^verified/i);
+
+    // No status other than `verified` may CONTAIN the reassuring word.
+    for (const status of RUST_STATUSES) {
+      if (status === "verified") continue;
+      expect(
+        labelFor(status).toLowerCase().includes("verified"),
+        `SkinTrust "${status}" borrows the word "verified" in its label`,
+      ).toBe(false);
+    }
+
+    // Both name-conflict states are red. They are reachable only through the
+    // shared `.calp` vocabulary today (the org pull runs RequirePinned), but a
+    // total map with a benign-looking row is exactly how a state added later
+    // ships unnoticed.
+    for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
+      const row = map![0].match(new RegExp(`\\n  ${status}: \\{[\\s\\S]*?\\n  \\},`));
+      expect(row, `no row for ${status}`).toBeTruthy();
+      expect(row![0], `${status} must be red`).toContain('color: "#c5221f"');
+    }
+  });
+
+  it("the skin trust map is exhaustive over the Rust enum, with no wildcard", () => {
+    // `skin_pull` maps TrustStatus -> SkinTrust one-for-one. A `_` arm there is
+    // how a first-contact squat rendered as a green "verified" badge before.
+    const arm = SKIN_PACK_RS.match(/trust: match trust \{[\s\S]*?\n {8}\},/);
+    expect(arm, "the TrustStatus -> SkinTrust map moved").toBeTruthy();
+    expect(arm![0], "the map must not use a wildcard arm").not.toMatch(/\n\s+_ =>/);
+    expect(arm![0]).toContain(
+      "TrustStatus::NotPinnedNameConflict => SkinTrust::NotPinnedNameConflict",
+    );
   });
 });
