@@ -107,6 +107,12 @@ function rustOps(): RustOp[] {
 interface RustSurfaceProfile {
   id: string;
   modelProvider: boolean;
+  /** The capability ids the host can hold FOR THIS SURFACE. Injecting a provider
+   *  is necessary but not sufficient — `bi/script_provider.rs` re-checks the
+   *  capability store per call — so a gated op is reachable only when its
+   *  capability is in here too. `mcp-tool` is why this exists: provider + a
+   *  `bi.query`-only grant, which makes `model.sql` unreachable there. */
+  granted: string[];
   hostGlobalsDeleted: boolean;
   entryPoint: string;
 }
@@ -114,26 +120,47 @@ interface RustSurfaceProfile {
 function rustSurfaceProfiles(): RustSurfaceProfile[] {
   const body = rustSliceBody("pub const SURFACE_PROFILES");
   const profiles: RustSurfaceProfile[] = [];
+  // Comments sit BETWEEN the fields in this struct (the mcp-tool row carries a
+  // long one), so every gap is `[\s\S]*?` rather than `\s*`. `granted` is
+  // REQUIRED: a profile without it cannot be derived, and silently defaulting it
+  // to "everything the provider allows" is precisely the overstatement that
+  // would hide a narrowed host grant.
   const re =
-    /id:\s*"([^"]+)"\s*,\s*model_provider:\s*(true|false)\s*,\s*host_globals_deleted:\s*(true|false)\s*,\s*entry_point:\s*"([^"]*)"/g;
+    /id:\s*"([^"]+)"\s*,[\s\S]*?model_provider:\s*(true|false)\s*,[\s\S]*?granted:\s*&\[([^\]]*)\]\s*,[\s\S]*?host_globals_deleted:\s*(true|false)\s*,[\s\S]*?entry_point:\s*"([^"]*)"/g;
   for (const m of body.matchAll(re)) {
     profiles.push({
       id: m[1],
       modelProvider: m[2] === "true",
-      hostGlobalsDeleted: m[3] === "true",
-      entryPoint: m[4],
+      granted: [...m[3].matchAll(/"([^"]+)"/g)].map((g) => g[1]),
+      hostGlobalsDeleted: m[4] === "true",
+      entryPoint: m[5],
     });
   }
-  expect(profiles.length, "SURFACE_PROFILES parsed as empty").toBeGreaterThan(0);
+  expect(
+    profiles.length,
+    "SURFACE_PROFILES parsed as empty — either the struct gained/renamed a field " +
+      "(this parser requires id, model_provider, granted, host_globals_deleted, entry_point " +
+      "in that order) or the manifest moved.",
+  ).toBeGreaterThan(0);
   return profiles;
 }
 
 /** The TS re-derivation of Rust's `surface_ops()`. Deliberately a re-derivation
  *  rather than a second constant: if the two implementations of the rule ever
- *  disagree, that is itself the drift we want to see. */
+ *  disagree, that is itself the drift we want to see.
+ *
+ *  BOTH halves of the call site's decision are applied, exactly as Rust applies
+ *  them: the provider must be injected AND the op's capability must be one the
+ *  host can hold on this surface. Checking only the provider (which this
+ *  re-derivation used to do, because `granted` did not exist) would advertise
+ *  `model.sql` on `mcp-tool`. */
 function derivedOps(profile: RustSurfaceProfile, ops: RustOp[]): RustOp[] {
   if (profile.hostGlobalsDeleted) return [];
-  return ops.filter((o) => o.reach !== "model" || profile.modelProvider);
+  return ops.filter(
+    (o) =>
+      o.capability === null ||
+      (profile.modelProvider && profile.granted.includes(o.capability)),
+  );
 }
 
 function derivedReach(profile: RustSurfaceProfile, ops: RustOp[]): InterpreterReachClass[] {
@@ -244,20 +271,20 @@ describe("interpreter reach — codeInventory mirrors the Rust op manifest", () 
     },
   );
 
-  it("the grid-only surfaces are grid-only BECAUSE no model provider is injected", () => {
-    // Pins the mechanism, not just the outcome: if someone starts injecting a
-    // provider into run_script or the MCP script tool, this fails and says so.
-    for (const id of ["one-off-script", "mcp-tool"] as const) {
-      const p = PROFILES.find((x) => x.id === id) as RustSurfaceProfile;
-      expect(
-        p.modelProvider,
-        `manifest.rs now records a ModelDataProvider on "${id}" (${p.entryPoint}). That ` +
-          `surface is advertised as grid-only in scriptSurfaces.ts and in the transparency ` +
-          `panel, and it has NO just-in-time consent UI, so injecting a provider there would ` +
-          `hand ungated BI reach to code the user was told could not reach it. Either revert ` +
-          `the injection or build consent + audit for that surface first.`,
-      ).toBe(false);
-    }
+  it("the one-off surface is grid-only BECAUSE no model provider is injected", () => {
+    // Pins the mechanism, not just the outcome. `mcp-tool` is deliberately NOT
+    // in this loop any more: it DOES get a provider (see the entry-point test
+    // below, which is the guard that would have caught the four-wave-long false
+    // claim this list used to encode).
+    const p = PROFILES.find((x) => x.id === "one-off-script") as RustSurfaceProfile;
+    expect(
+      p.modelProvider,
+      `manifest.rs now records a ModelDataProvider on "one-off-script" (${p.entryPoint}). ` +
+        `That surface is advertised as grid-only in scriptSurfaces.ts and in the transparency ` +
+        `panel, and it has NO just-in-time consent UI, so injecting a provider there would ` +
+        `hand ungated BI reach to code the user was told could not reach it. Either revert ` +
+        `the injection or build consent + audit for that surface first.`,
+    ).toBe(false);
     const validator = PROFILES.find((x) => x.id === "writeback-validator") as RustSurfaceProfile;
     expect(
       validator.hostGlobalsDeleted,
@@ -266,6 +293,107 @@ describe("interpreter reach — codeInventory mirrors the Rust op manifest", () 
         `display surface on the respondent's machine. Restore the deletion in ` +
         `app/src-tauri/src/calp_commands.rs (run_validator_batch) or correct the profile.`,
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (A cont.) THE ROOT FIX: the profile's flags are checked against the HOST CODE
+// ---------------------------------------------------------------------------
+//
+// Everything above derives the TypeScript mirrors from manifest.rs. That closes
+// the mirror gap and leaves one open: manifest.rs itself is HAND-WRITTEN about
+// the call sites, and `model_provider` sat at `false` for `mcp-tool` through
+// four waves while `mcp/tools.rs` injected a provider. Every downstream guard
+// passed the whole time, because they all agreed with the wrong number.
+//
+// So this block reads the host sources the profiles NAME and re-derives the two
+// facts from them. It is the only test here whose failure means "the manifest is
+// lying", rather than "a mirror fell behind the manifest".
+
+/** Everything outside a `//` line comment, so a scanner can never be satisfied
+ *  (or alarmed) by prose. `calp_commands.rs` contains the sentence "no
+ *  ModelDataProvider" in a comment, and mcp/tools.rs documents
+ *  `HostModelProvider::model_info` in a doc comment. */
+function withoutLineComments(src: string): string {
+  return src
+    .split("\n")
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join("\n");
+}
+
+/** The `app/src-tauri/...rs` path a profile's entry_point names (the text before
+ *  the first " ->"). Requiring it to resolve is itself part of the guard: an
+ *  entry point nobody can open is an assertion, not a citation. */
+function entryPointFile(profile: RustSurfaceProfile): string {
+  const rel = profile.entryPoint.split("->")[0].trim();
+  expect(
+    rel,
+    `SURFACE_PROFILES entry for "${profile.id}" has an entry_point that does not begin with ` +
+      `a repo-relative .rs path: "${profile.entryPoint}". The path is what makes the ` +
+      `model_provider claim checkable — without it this guard cannot run.`,
+  ).toMatch(/^app\/src-tauri\/src\/.+\.rs$/);
+  const abs = path.join(REPO, rel);
+  expect(fs.existsSync(abs), `entry_point file for "${profile.id}" does not exist: ${rel}`).toBe(
+    true,
+  );
+  return fs.readFileSync(abs, "utf8");
+}
+
+describe("interpreter reach — manifest.rs profiles match the host call sites", () => {
+  it.each(PROFILES.map((p) => p.id))(
+    "%s: model_provider matches whether its entry-point file injects one",
+    (id) => {
+      const p = PROFILES.find((x) => x.id === id) as RustSurfaceProfile;
+      const src = withoutLineComments(entryPointFile(p));
+      // The ONE way a provider reaches the interpreter: constructing the host's
+      // implementation. `NotebookSession::new(Some(...))` is the consumer, but
+      // the construction is what cannot be faked.
+      const injects = /HostModelProvider::new\s*\(/.test(src);
+      expect(
+        injects,
+        injects
+          ? `${p.entryPoint} CONSTRUCTS a HostModelProvider, but SURFACE_PROFILES records ` +
+            `model_provider: false for "${id}". That understates the surface everywhere the ` +
+            `claim is shown — codeInventory.ts, scriptSurfaces.ts and the "Code in This File" ` +
+            `panel all derive from this flag, so the user is told the surface cannot reach ` +
+            `their BI model while it can. Set model_provider: true (and give it a truthful ` +
+            `\`granted\` list), or remove the injection.`
+          : `SURFACE_PROFILES records model_provider: true for "${id}", but ${p.entryPoint} ` +
+            `never constructs a HostModelProvider. Either the flag is stale or the injection ` +
+            `moved to another file — in which case update entry_point, because an entry point ` +
+            `that does not contain the construction cannot be audited.`,
+      ).toBe(p.modelProvider);
+    },
+  );
+
+  it("mcp-tool's granted list is exactly MCP_SCRIPT_CAPABILITIES", () => {
+    // The grant half of the same root cause. A provider alone does not decide
+    // reach: bi/script_provider.rs re-checks the capability store per call, so
+    // the honest ceiling for this surface is the host's hard-coded grant list.
+    const src = withoutLineComments(
+      fs.readFileSync(path.join(REPO, "app/src-tauri/src/mcp/tools.rs"), "utf8"),
+    );
+    const m = src.match(/MCP_SCRIPT_CAPABILITIES\s*:\s*&\[&str\]\s*=\s*&\[([^\]]*)\]/);
+    expect(
+      m,
+      "MCP_SCRIPT_CAPABILITIES not found in app/src-tauri/src/mcp/tools.rs. It is the " +
+        "authoritative grant list for the execute_script surface; if it was renamed, update " +
+        "this guard and manifest.rs's `granted` together.",
+    ).not.toBeNull();
+    const hostGrants = [...(m as RegExpMatchArray)[1].matchAll(/"([^"]+)"/g)].map((g) => g[1]).sort();
+    const profile = PROFILES.find((x) => x.id === "mcp-tool") as RustSurfaceProfile;
+    expect(
+      [...profile.granted].sort(),
+      `SURFACE_PROFILES's \`granted\` for "mcp-tool" disagrees with MCP_SCRIPT_CAPABILITIES ` +
+        `in mcp/tools.rs. Widening the host list without widening the profile understates an ` +
+        `AI-driven surface that has NO consent prompt in front of it; narrowing it without ` +
+        `narrowing the profile overstates it. ${FIX}`,
+    ).toEqual(hostGrants);
+    // And the TS mirror must be that same list.
+    expect(
+      [...QUICKJS_SURFACE_CAPABILITIES["mcp-tool"]].sort(),
+      `QUICKJS_SURFACE_CAPABILITIES["mcp-tool"] disagrees with the host's own grant list. ${FIX}`,
+    ).toEqual(hostGrants);
   });
 });
 

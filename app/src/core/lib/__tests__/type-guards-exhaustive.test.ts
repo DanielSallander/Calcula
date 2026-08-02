@@ -2,6 +2,8 @@
 // PURPOSE: Exhaustive tests for all type guard / type-checking functions in core.
 
 import { describe, it, expect } from "vitest";
+import * as fs from "fs";
+import * as path from "path";
 import { isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../gridRenderer/styles/styleUtils";
 import { isNumericValue, isErrorValue } from "../gridRenderer/styles/cellFormatting";
 import { isIncompleteFormula } from "../formulaCompletion";
@@ -194,6 +196,45 @@ describe("isErrorValue", () => {
     expect(isErrorValue("ERROR")).toBe(false);
     expect(isErrorValue("hello")).toBe(false);
     expect(isErrorValue("#WRONG")).toBe(false);
+  });
+
+  // --------------------------------------------------------------------------
+  // The DRIFT GUARD: every engine CellError variant must be recognized here.
+  // --------------------------------------------------------------------------
+  //
+  // isErrorValue drives the grid's error rendering (red + centred, in
+  // gridRenderer/rendering/cells.ts). Four variants were added to the engine
+  // after this list was written — #LIMIT!, #BLOCKED!, #CIRCULAR!, #CONFLICT —
+  // and every one of them rendered as ordinary left-aligned black text,
+  // indistinguishable from a string the user typed. Reading cell.rs at test time
+  // (the same technique interpreterReachDrift uses) is what makes "we covered
+  // them all" checkable rather than asserted.
+  it("recognizes EVERY CellError literal the engine can produce", () => {
+    const cellRs = fs.readFileSync(
+      path.join(__dirname, "../../../../../core/engine/src/cell.rs"),
+      "utf8",
+    );
+    // The canonical table: `CellError::X => "#LITERAL"` inside as_literal().
+    const start = cellRs.indexOf("pub fn as_literal");
+    expect(start, "as_literal not found in core/engine/src/cell.rs").toBeGreaterThan(-1);
+    const body = cellRs.slice(start, cellRs.indexOf("\n    }", start));
+    const literals = [
+      ...new Set([...body.matchAll(/CellError::\w+\s*=>\s*"([^"]+)"/g)].map((m) => m[1])),
+    ];
+    expect(
+      literals.length,
+      "parsed no literals out of CellError::as_literal — the Rust shape changed",
+    ).toBeGreaterThan(5);
+    for (const literal of literals) {
+      expect(
+        isErrorValue(literal),
+        `isErrorValue does not recognize "${literal}", which core/engine/src/cell.rs ` +
+          `(CellError::as_literal) can put in a cell. The grid would render it as ordinary ` +
+          `left-aligned black text — indistinguishable from a string the user typed. Add it to ` +
+          `CELL_ERROR_LITERALS in gridRenderer/styles/cellFormatting.ts.`,
+      ).toBe(true);
+      expect(isErrorValue(literal.toLowerCase())).toBe(true);
+    }
   });
 });
 

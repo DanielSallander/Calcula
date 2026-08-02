@@ -89,15 +89,30 @@ describe("script-surface taxonomy", () => {
     ]);
   });
 
-  it("capability-bearing surfaces are worker-realm or the Rust-gated notebook", () => {
+  it("capability-bearing surfaces are worker-realm or a Rust-gated QuickJS surface", () => {
+    // Worker-realm surfaces are broker-gated. TWO rust-quickjs surfaces also
+    // carry capabilities, and their gates differ in a way that matters:
+    //
+    //  - notebook-cell : the user's own just-in-time consent, held in the
+    //                    server-side CapabilityStore (notebook-analysis-workbench.md).
+    //  - mcp-tool      : NO consent prompt exists. The grant is host-set
+    //                    (MCP_SCRIPT_CAPABILITIES = ["bi.query"], installed for
+    //                    the run's surface id and dropped when it ends) and the
+    //                    gate in front of it is the AI access tier
+    //                    (check_mcp_access) plus the model's own RLS.
+    //
+    // Listing mcp-tool here is a correction, not a widening: the reach was
+    // always there (mcp/tools.rs has injected a HostModelProvider since the MCP
+    // co-author work) and the taxonomy said "grid-only". A THIRD id appearing in
+    // this list is a real security decision — a QuickJS surface with capabilities
+    // and no broker in front of it — so it must be argued for here, not added.
+    const RUST_GATED_CAPABILITY_SURFACES: ScriptSurfaceId[] = ["notebook-cell", "mcp-tool"];
     for (const s of SCRIPT_SURFACES) {
       if (s.capabilities.length > 0) {
-        // Worker-realm surfaces are broker-gated; the notebook (rust-quickjs)
-        // is the ONE non-worker surface with capabilities — its gate is the
-        // server-side CapabilityStore (see notebook-analysis-workbench.md).
-        const rustGatedNotebook = s.id === "notebook-cell" && s.runtime === "rust-quickjs";
+        const rustGated =
+          s.runtime === "rust-quickjs" && RUST_GATED_CAPABILITY_SURFACES.includes(s.id);
         expect(
-          s.runtime === "worker-realm" || rustGatedNotebook,
+          s.runtime === "worker-realm" || rustGated,
           `unexpected capability-bearing surface: ${s.id} (${s.runtime})`,
         ).toBe(true);
       }
@@ -113,10 +128,18 @@ describe("script-surface taxonomy", () => {
       "bi.query",
       "bi.sql",
     ]);
-    // The one-off / MCP QuickJS surfaces get NO model provider at all
-    // (script-engine/src/model_provider.rs), so they stay capability-free.
+    // The one-off QuickJS surface gets NO model provider at all — its entry
+    // point (ScriptEngine::run_with_options) has no provider parameter — so it
+    // stays capability-free.
     expect(getScriptSurface("one-off-script")?.capabilities).toEqual([]);
-    expect(getScriptSurface("mcp-tool")?.capabilities).toEqual([]);
+    // MCP is NOT in that company, and saying it was is the defect this pin now
+    // guards against. `mcp/tools.rs run_script_with_model` injects a
+    // HostModelProvider for execute_script and grants exactly
+    // MCP_SCRIPT_CAPABILITIES = ["bi.query"] — no bi.sql, so `model.sql` throws
+    // there. Widening this list means an AI client can reach further into the
+    // user's BI model with no consent prompt in the way (this surface has none),
+    // so it is a deliberate security decision, never a drive-by.
+    expect(getScriptSurface("mcp-tool")?.capabilities).toEqual(["bi.query"]);
   });
 
   it("getScriptSurface resolves by id", () => {

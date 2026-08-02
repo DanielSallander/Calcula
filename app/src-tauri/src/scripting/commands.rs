@@ -597,7 +597,8 @@ pub(crate) fn apply_script_modified_grids_core(
     //
     // Deciding first makes a refusal atomic: nothing has been touched yet, so
     // there is nothing to roll back.
-    {
+    let non_active_touched: Vec<(usize, Vec<(u32, u32)>)> = {
+        let mut touched: Vec<(usize, Vec<(u32, u32)>)> = Vec::new();
         let app_grids = state.grids.lock().map_err(|e| e.to_string())?;
         // Borrowed gate form: `grids` is held for the whole loop and
         // std::sync::Mutex is not reentrant, so the locking wrapper would
@@ -625,8 +626,34 @@ pub(crate) fn apply_script_modified_grids_core(
                 idx,
                 diff.iter().map(|u| (u.row, u.col)),
             )?;
+            // Collect the NON-active coordinates for the writeback gate below.
+            // The active sheet is filtered by `update_cells_batch`'s own
+            // writeback pass (partial-success: claimed cells are dropped, never
+            // written); the non-active sheets are installed wholesale and have
+            // no other gate at all.
+            if idx != active_sheet {
+                touched.push((idx, diff.iter().map(|u| (u.row, u.col)).collect()));
+            }
         }
-    }
+        touched
+    };
+
+    // PUBLISHED WRITEBACK CLAIMS, decided before ANY sheet is mutated.
+    //
+    // Deliberately OUTSIDE the block above: the writeback gate takes
+    // `writeback_index` / `writeback_layer` / `sheet_ids`, and the established
+    // acquisition order elsewhere on the edit path (commands/data.rs) is
+    // writeback_index BEFORE grids. Taking them while the grids lock is held
+    // would invert that order.
+    //
+    // Refusing the whole apply (rather than dropping the claimed cells) is the
+    // correct policy here: unlike the interactive batch, a script's writes are
+    // one authored intent, and a silent partial application would leave the
+    // script believing it had written cells it had not.
+    crate::calp_commands::ensure_writeback_draft_before_grid_install(
+        state,
+        &non_active_touched,
+    )?;
 
     // Apply non-active-sheet writes the undoable + parsed + recalc-tracked way,
     // in two phases under one grids lock:
@@ -1416,53 +1443,14 @@ pub fn save_script(
     Ok(())
 }
 
-/// Delete a script module by ID.
-#[tauri::command]
-pub fn delete_script(
-    script_state: State<ScriptState>,
-    id: String,
-) -> Result<(), String> {
-    // Reserved internal records (e.g. the Custom Functions store) are owned by a
-    // feature, not the user — deleting one here would silently wipe that feature.
-    if is_reserved_script_id(&id) {
-        return Err(format!("Script '{}' is reserved and cannot be deleted", id));
-    }
-
-    let mut scripts = script_state
-        .workbook_scripts
-        .lock()
-        .map_err(|e| e.to_string())?;
-
-    if scripts.remove(&id).is_none() {
-        return Err(format!("Script '{}' not found", id));
-    }
-    Ok(())
-}
-
-/// Rename a script module.
-#[tauri::command]
-pub fn rename_script(
-    script_state: State<ScriptState>,
-    id: String,
-    new_name: String,
-) -> Result<(), String> {
-    // Reserved internal records must keep their well-known id/name.
-    if is_reserved_script_id(&id) {
-        return Err(format!("Script '{}' is reserved and cannot be renamed", id));
-    }
-
-    let mut scripts = script_state
-        .workbook_scripts
-        .lock()
-        .map_err(|e| e.to_string())?;
-
-    let script = scripts
-        .get_mut(&id)
-        .ok_or_else(|| format!("Script '{}' not found", id))?;
-
-    script.name = new_name;
-    Ok(())
-}
+// `delete_script` and `rename_script` used to live here. Both were registered in
+// `generate_handler!` and had ZERO callers anywhere in the app — no frontend
+// `invoke`, no gateway action, no MCP tool. They are deleted rather than kept
+// "in case": every `generate_handler!` entry costs main-thread stack in the
+// debug build's dispatch frame (the app already links with /STACK:33554432 for
+// exactly this reason), and an unreachable mutation command is surface a future
+// gateway can be pointed at without anyone re-deriving whether it should exist.
+// The Script Editor deletes and renames through the script-state save path.
 
 #[cfg(test)]
 mod tests {
@@ -1695,6 +1683,14 @@ mod script_apply_tests {
         // Deterministic parsing/rendering regardless of the machine's locale.
         *state.locale.lock().unwrap() = engine::LocaleSettings::invariant();
         state.grids.lock().unwrap().push(sheet1);
+        // `sheet_ids` must mirror `grids`: the writeback claim guard resolves a
+        // sheet INDEX to the stable SheetId the published region is keyed by,
+        // and a missing id would make every claim unresolvable (fail-open).
+        state
+            .sheet_ids
+            .lock()
+            .unwrap()
+            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
         state.sheet_names.lock().unwrap().push("Sheet2".to_string());
         state.sheet_visibility.lock().unwrap().push("visible".to_string());
         state.all_column_widths.lock().unwrap().push(Default::default());
@@ -2092,5 +2088,166 @@ mod script_apply_tests {
             "the grid is untouched"
         );
         assert_eq!(h.state.undo_stack.lock().unwrap().undo_depth(), 0);
+    }
+
+    // --- Published writeback claims are decided before anything is written --
+    //
+    // The script apply path installs whole NON-ACTIVE grids into AppState. That
+    // assignment passes through none of the writeback gates that sit on
+    // `update_cell` / `update_cells_batch` / the range guards, so until this was
+    // wired a script could write a raw value into a published writeback cell of
+    // a background sheet with no draft, no schema check and no validator behind
+    // it — grid and writeback layer silently disagreeing.
+
+    /// Register a published writeback region over a rectangle of SHEET 1 (the
+    /// non-active sheet these tests own).
+    fn claim_on_sheet1(h: &Harness, region_id: &str, r0: u32, r1: u32, c0: u32, c1: u32) {
+        let sheet_id = h.state.sheet_ids.lock().unwrap()[1];
+        let decl = calp::writeback::WritebackRegionDeclaration {
+            id: region_id.to_string(),
+            selector: calp::writeback::RegionSelector {
+                sheet_id,
+                row_start: r0,
+                row_end: r1,
+                col_start: c0,
+                col_end: c1,
+            },
+            mode: None,
+            schema: None,
+            visibility: None,
+            submission_policy: None,
+            version_binding: None,
+            lifecycle: None,
+            aggregation_hint: None,
+            expected_respondents: Vec::new(),
+            extra: Default::default(),
+        };
+        *h.state.writeback_index.lock().unwrap() =
+            calp::WritebackIndex::from_declarations(std::slice::from_ref(&decl))
+                .expect("index builds");
+        h.state.writeback_declarations.lock().unwrap().push(decl);
+    }
+
+    /// A validated draft already in the local writeback layer for one slot.
+    fn draft_for(region_id: &str, row: u32, col: u32) -> calp::writeback::WritebackSubmission {
+        calp::writeback::WritebackSubmission {
+            id: "sub-1".to_string(),
+            region_id: region_id.to_string(),
+            cell_row: row,
+            cell_col: col,
+            cell_id: None,
+            submitter: calp::SubmitterIdentity {
+                display_name: "Tester".to_string(),
+                id: "tester-1".to_string(),
+                extra: Default::default(),
+            },
+            value: calp::writeback::SubmissionValue::Number { value: 42.0 },
+            state: calp::writeback::SubmissionState::Draft,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
+            model_key: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// THE security property: a script write into a CLAIMED cell of a
+    /// non-active sheet is REFUSED, and refused before anything is mutated.
+    #[test]
+    fn a_claimed_writeback_cell_on_a_non_active_sheet_refuses_the_whole_apply() {
+        let mut sheet1 = Grid::new();
+        sheet1.set_cell(3, 2, Cell::new_number(5.0));
+        let h = harness(sheet1.clone());
+        claim_on_sheet1(&h, "region-1", 3, 3, 2, 2);
+
+        let mut after = sheet1;
+        after.set_cell(3, 2, script_wrote(CellValue::Number(999.0)));
+        let grids = modified(&h, after);
+
+        let (result, active_calls) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        let err = result.expect_err("a claimed writeback cell must refuse the write");
+        assert!(
+            err.contains("region-1"),
+            "the refusal must name the region: {}",
+            err
+        );
+        assert!(active_calls.is_empty(), "nothing reached the edit pipeline");
+        assert_eq!(
+            value_at(&h, 1, 3, 2),
+            CellValue::Number(5.0),
+            "the grid is untouched"
+        );
+        assert_eq!(
+            h.state.undo_stack.lock().unwrap().undo_depth(),
+            0,
+            "no undo entry was recorded"
+        );
+        assert!(
+            h.state.audit_log.lock().unwrap().entries.is_empty(),
+            "no grid-mutation audit entry was recorded"
+        );
+    }
+
+    /// The refusal is WHOLE-GESTURE: an unclaimed cell written in the same run
+    /// does not land either. A partial apply would leave the script believing it
+    /// had written cells it had not.
+    #[test]
+    fn one_claimed_cell_refuses_the_unclaimed_cells_of_the_same_run() {
+        let h = harness(Grid::new());
+        claim_on_sheet1(&h, "region-1", 3, 3, 2, 2);
+
+        let mut after = Grid::new();
+        after.set_cell(3, 2, script_wrote(CellValue::Number(999.0))); // claimed
+        after.set_cell(9, 9, script_wrote(CellValue::Number(1.0))); // unclaimed
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 2, "notebook", "nb-1:cell-1");
+        assert!(result.is_err(), "the whole gesture is refused");
+        assert_eq!(
+            value_at(&h, 1, 9, 9),
+            CellValue::Empty,
+            "the unclaimed cell must not land either"
+        );
+    }
+
+    /// An UNCLAIMED cell on a sheet that merely HAS a writeback region still
+    /// writes normally — the gate is per-cell, not per-sheet.
+    #[test]
+    fn an_unclaimed_cell_on_a_claimed_sheet_still_writes() {
+        let h = harness(Grid::new());
+        claim_on_sheet1(&h, "region-1", 3, 3, 2, 2);
+
+        let mut after = Grid::new();
+        after.set_cell(9, 9, script_wrote(CellValue::Number(7.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(value_at(&h, 1, 9, 9), CellValue::Number(7.0));
+    }
+
+    /// A claimed cell that ALREADY has a validated draft behind it is allowed —
+    /// that is the `script_writeback` action `cellGuard` flow, which saves the
+    /// draft first and only then mirrors the value into the grid.
+    #[test]
+    fn a_claimed_cell_with_a_draft_behind_it_is_allowed() {
+        let h = harness(Grid::new());
+        claim_on_sheet1(&h, "region-1", 3, 3, 2, 2);
+        h.state
+            .writeback_layer
+            .lock()
+            .unwrap()
+            .drafts
+            .push(draft_for("region-1", 3, 2));
+
+        let mut after = Grid::new();
+        after.set_cell(3, 2, script_wrote(CellValue::Number(42.0)));
+        let grids = modified(&h, after);
+
+        let (result, _) = apply(&h, &grids, 1, "notebook", "nb-1:cell-1");
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(value_at(&h, 1, 3, 2), CellValue::Number(42.0));
     }
 }

@@ -32,6 +32,7 @@ import {
 } from "./validators";
 import { MAX_DIALOG_FIELDS, MAX_DIALOG_MESSAGE } from "./scriptDialogSpec";
 import { AppEvents } from "../events";
+import { fileNameOf } from "../../core/lib/fileNames";
 import type { CapabilityId } from "./capabilityIds";
 
 // CapabilityId now lives in the single-source-of-truth module (capabilityIds.ts);
@@ -91,33 +92,48 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // ui.html is auto-granted for local scripts; consent-gated for distributed
   // ones (wired in Phase 4 — until then the gate is provenance-based).
   "render.setHtml":        { tier: "restricted", capability: "ui.html", class: "mutate", validate: vHtml, desc: "Render sandboxed HTML inside its shape" },
-  "sheet.getCellValue":    { tier: "restricted", class: "read",   validate: vCellRef,  desc: "Read cells on its own sheet (sheet scripts; clamped to the bound sheet)" },
-  "sheet.setCellValue":    { tier: "restricted", class: "mutate", validate: vCellSet,  desc: "Write cells on its own sheet (sheet scripts; clamped to the bound sheet)" },
-  // Bulk + typed own-sheet I/O. Same reach as the single-cell rows above (own
-  // sheet, clamped) — one call instead of one per cell, and the values keep
-  // their type + formula so a read/write round-trip cannot turn a formula into
-  // text. The write also lands as ONE undo step.
-  "sheet.getCellData":     { tier: "restricted", class: "read",   validate: vCellRef,  desc: "Read one cell on its own sheet with its type and formula" },
+  // ---- restricted grid reach: THE SHEET CURRENTLY SHOWN ----
+  //
+  // WHAT "restricted" ACTUALLY CLAMPS TO, said plainly because it used to be said
+  // wrongly. These rows used to advertise "its own sheet ... clamped to the bound
+  // sheet". There is no bound sheet: `sheet` is a PRIMITIVE object type (one
+  // script per workbook, instanceId always null — its own scaffold opens with
+  // "Sheet Script (applies to ALL sheets)"), and every other object type reaches
+  // this family too. The clamp the host implements — and the only one it CAN
+  // implement — is the ACTIVE sheet: an omitted sheetIndex resolves to it, and
+  // naming a different one is refused at the restricted tier.
+  //
+  // So the honest statement of the reach is "the sheet you are looking at", and
+  // that is what the consent text must say. A restricted script does eventually
+  // see every sheet the user visits; what it can never do is reach a sheet the
+  // user is NOT looking at, which is the property the tier is actually buying.
+  "sheet.getCellValue":    { tier: "restricted", class: "read",   validate: vCellRef,  desc: "Read cells on the sheet currently shown" },
+  "sheet.setCellValue":    { tier: "restricted", class: "mutate", validate: vCellSet,  desc: "Write cells on the sheet currently shown" },
+  // Bulk + typed I/O on the same sheet. Same reach as the single-cell rows above
+  // — one call instead of one per cell, and the values keep their type + formula
+  // so a read/write round-trip cannot turn a formula into text. The write also
+  // lands as ONE undo step.
+  "sheet.getCellData":     { tier: "restricted", class: "read",   validate: vCellRef,  desc: "Read one cell on the sheet currently shown, with its type and formula" },
   "sheet.getRangeValues":  { tier: "restricted", class: "read",   validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
-                             desc: "Read a block of cells on its own sheet in one go (values, types and formulas)" },
+                             desc: "Read a block of cells on the sheet currently shown in one go (values, types and formulas)" },
   "sheet.setRangeValues":  { tier: "restricted", class: "mutate", validate: vRangeWrite, limits: { maxCells: MAX_RANGE_CELLS },
-                             desc: "Write a block of cells on its own sheet in one go (a single undo step)" },
-  // Explicit formula read/write on its OWN sheet, clamped exactly like the two
-  // rows above. Same reach as sheet.setCellValue (a formula IS cell content);
-  // what these add is the R1C1 spelling, which is what makes "write this same
-  // relative formula down the whole column" one line instead of a loop that
-  // rebuilds an address per row.
+                             desc: "Write a block of cells on the sheet currently shown in one go (a single undo step)" },
+  // Explicit formula read/write, clamped exactly like the two rows above. Same
+  // reach as sheet.setCellValue (a formula IS cell content); what these add is
+  // the R1C1 spelling, which is what makes "write this same relative formula
+  // down the whole column" one line instead of a loop that rebuilds an address
+  // per row.
   "sheet.getCellFormula":  { tier: "restricted", class: "read",   validate: vFormulaRead,
-                             desc: "Read the formula in a cell on its own sheet, in ordinary A1 form or in R1C1 form" },
+                             desc: "Read the formula in a cell on the sheet currently shown, in ordinary A1 form or in R1C1 form" },
   "sheet.setCellFormula":  { tier: "restricted", class: "mutate", validate: vFormulaWrite,
-                             desc: "Put a formula into a cell on its own sheet, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it)" },
-  // Own-sheet FORMATTING (B2). Same reach as sheet.setRangeValues — the script's
-  // own sheet, clamped — but it changes appearance instead of content, so it is
-  // strictly less destructive than the write row above it.
+                             desc: "Put a formula into a cell on the sheet currently shown, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it)" },
+  // FORMATTING (B2). Same reach as sheet.setRangeValues — the sheet currently
+  // shown — but it changes appearance instead of content, so it is strictly less
+  // destructive than the write row above it.
   "sheet.setRangeFormat":  { tier: "restricted", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_RANGE_CELLS },
-                             desc: "Change how cells look on its own sheet (font, colour, alignment, number format, borders)" },
+                             desc: "Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders)" },
   "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
-                             desc: "Remove all formatting from a block of cells on its own sheet (the values are kept)" },
+                             desc: "Remove all formatting from a block of cells on the sheet currently shown (the values are kept)" },
   // ---- unlocked: whole-workbook reach ----
   "api.getCellValue":      { tier: "unlocked", class: "read",   validate: vCellRef,  desc: "Read any cell" },
   "api.getCellData":       { tier: "unlocked", class: "read",   validate: vCellRef,  desc: "Read any cell with its type and formula" },
@@ -756,6 +772,47 @@ function redactCellContents(eventName: string, payload: unknown): unknown {
   };
 }
 
+/**
+ * The workbook-lifecycle events whose raw payload is `{ path }` — the FULL
+ * filesystem path of the file that was opened or saved.
+ *
+ * These are subscribable by sandboxed code (they are in
+ * SCRIPT_SUBSCRIBABLE_APP_EVENTS above, and workbook.onOpen / onAfterSave wire
+ * them for every mounted object script and worker add-in), and the path was
+ * crossing untouched — with NO capability behind it. That is the exact leak
+ * `api.workbookFileName` refuses by hand: "C:\Users\<real name>\Consulting\
+ * ClientX" handed to a script that also holds net.fetch is an exfiltration the
+ * fetch consent never covered, and a sandboxed caller has no path-taking API to
+ * feed it to anyway. So the reduction happens HERE, at the one choke point every
+ * sandboxed delivery passes through, rather than at each of the four call sites
+ * that could forget it.
+ */
+export const APP_EVENTS_CARRYING_WORKBOOK_PATH: ReadonlySet<string> = new Set([
+  AppEvents.AFTER_OPEN,
+  AppEvents.AFTER_SAVE,
+]);
+
+/**
+ * Reduce a `{ path }` lifecycle payload to `{ fileName }`, using the same
+ * single implementation `api.workbookFileName` uses. Rebuilt field-by-field, so
+ * a field added to the payload later is absent here by default instead of
+ * leaking by default.
+ */
+function thinWorkbookPathPayload(payload: unknown): { fileName: string | null } {
+  const p = (payload ?? {}) as { path?: unknown };
+  return { fileName: typeof p.path === "string" && p.path ? fileNameOf(p.path) : null };
+}
+
+/**
+ * The public form of the same reduction, for the lifecycle-guard relay — the
+ * cancellable onBeforeSave / onBeforeClose detail, which is pulled through the
+ * guard registry rather than delivered as an app event and therefore never
+ * reaches `thinAppEventForScripts`.
+ */
+export function thinWorkbookPathDetail(detail: unknown): { fileName: string | null } {
+  return thinWorkbookPathPayload(detail);
+}
+
 /** Options for `thinAppEventForScripts`. */
 export interface ThinAppEventOptions {
   /**
@@ -774,8 +831,10 @@ export interface ThinAppEventOptions {
 
 /**
  * Thin an app-event payload before it crosses into a SANDBOXED subscriber
- * (worker realm). Three families:
+ * (worker realm). Four families:
  *
+ *  - the workbook-lifecycle events (APP_EVENTS_CARRYING_WORKBOOK_PATH) carry the
+ *    full filesystem path and are reduced to the file NAME, always;
  *  - the BI model events' full payloads carry object names — model metadata that
  *    otherwise requires the `bi.query` capability to enumerate — so sandboxed
  *    scripts get only what lets them know to re-read through their own
@@ -796,6 +855,12 @@ export function thinAppEventForScripts(
   // and cannot be skipped by a branch added above it later.
   if (options?.redactCellContents && APP_EVENTS_CARRYING_CELL_CONTENTS.has(eventName)) {
     return redactCellContents(eventName, payload);
+  }
+  // UNCONDITIONAL — not behind an option. There is no capability that buys a
+  // sandboxed subscriber the user's folder layout, so there is no caller who
+  // should be able to ask for the raw payload.
+  if (APP_EVENTS_CARRYING_WORKBOOK_PATH.has(eventName)) {
+    return thinWorkbookPathPayload(payload);
   }
   if (eventName === AppEvents.PACKAGE_UPDATED) {
     // A distribution update tells a script "your package moved — re-read".

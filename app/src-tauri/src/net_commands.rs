@@ -163,8 +163,23 @@ pub(crate) fn record_capability_call(
             error.map(|e| format!(" ({})", e)).unwrap_or_default()
         ),
     };
-    if let Ok(mut audit) = audit_log.lock() {
-        audit.record_with_extra(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
+    match audit_log.lock() {
+        Ok(mut audit) => {
+            audit.record_with_extra(calp::audit::AuditEvent::CapabilityCall, &desc, "local", &now, extra);
+        }
+        // A poisoned audit lock silently dropped the entry, which is the one
+        // failure mode an always-on transparency trail must not have: the trail
+        // would read as "this script made no capability calls" while it made
+        // them. It still cannot be persisted, but it is no longer invisible.
+        Err(_) => {
+            crate::log_warn!(
+                "AUDIT",
+                "capability call NOT audited (audit log lock poisoned): capability={} script={} ok={}",
+                capability,
+                if script_id.is_empty() { "<none>" } else { script_id },
+                ok
+            );
+        }
     }
 }
 

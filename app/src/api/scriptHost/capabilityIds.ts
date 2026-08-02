@@ -13,11 +13,26 @@
 // (e.g. net.fetch -> script_http_fetch re-checks the origin per call) needs
 // authoritative Rust-side enforcement IN ADDITION to this frontend gate. A
 // capability that is purely frontend / in-worker (e.g. formula.udf, which only
-// invokes JS already mounted in a worker realm) needs NO Rust entry — Rust has
-// NO enumerated capability list, only the net.fetch origin store
-// (app/src-tauri/src/scripting/capability_store.rs). Do NOT assume adding an id
-// here requires a matching Rust enum entry; only net.fetch-style backend-reaching
-// capabilities do.
+// invokes JS already mounted in a worker realm) reaches no Rust gate and needs
+// only the entry here.
+//
+// SO A BACKEND-REACHING CAPABILITY NEEDS **THREE** ENTRIES, NOT ONE:
+//   1. this vocabulary (`ALL_CAPABILITY_IDS` below) — otherwise the id is not
+//      recognized at all and the broker denies it;
+//   2. `RUST_MIRRORED_CAPABILITIES` in app/src/api/scriptHost/capabilities.ts —
+//      otherwise consent is recorded in the renderer only and never mirrored, so
+//      the Rust gate keeps refusing a capability the user just approved;
+//   3. `GRANTABLE_CAPABILITIES` in
+//      app/src-tauri/src/scripting/capability_store.rs — otherwise the mirror
+//      call is REJECTED by the store's own id allowlist, with the same symptom.
+// A frontend-only capability needs (1) alone.
+//
+// This header used to claim "Rust has NO enumerated capability list, only the
+// net.fetch origin store", and told the reader NOT to assume a matching Rust
+// entry was needed. That has been false since the capability store gained
+// `GRANTABLE_CAPABILITIES`, and the store's own comment names `schedule` as the
+// id this exact omission already broke once — a grant that looked approved in
+// the UI and was refused by the backend forever after.
 
 /**
  * Every recognized capability id, in one place.

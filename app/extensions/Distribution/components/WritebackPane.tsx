@@ -165,9 +165,9 @@ function ValidatorConsentPanel({
         {entry.validators.length === 1
           ? "a check"
           : `${entry.validators.length} checks`}{" "}
-        that decide whether your answers may be sent. It runs sandboxed, with no
-        access to your data, network or files — but nothing is submitted until you
-        have read it and approved it.
+        that decide whether your answers may be sent. It sees only the answers it
+        checks — never the rest of your workbook, the network, or your files. But
+        nothing is submitted until you have read it and approved it.
       </div>
       <button onClick={() => setExpanded((v) => !v)} style={{ fontSize: 11, marginBottom: 6 }}>
         {expanded ? "Hide code" : `Show code (${entry.validators.map((v) => v.name).join(", ")})`}

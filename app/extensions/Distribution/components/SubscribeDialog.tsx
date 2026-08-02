@@ -48,7 +48,13 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "net.fetch": "fetch data from the web",
   "bi.query": "run read-only BI queries",
   "bi.sql": "run raw read-only SQL against your BI database",
-  storage: "store data on this device",
+  // NOT "store data on this device": the store is the workbook's own virtual
+  // filesystem (.calcula/script-data/<scriptId>.json — scriptHost/host.ts), so
+  // it travels inside the .cala to everyone the file is sent to. Word for word
+  // the same phrase as @api/capabilities.ts and the package inspector's
+  // ScriptsSection; three surfaces describing one capability must not diverge.
+  storage:
+    "store its own private data inside this workbook file (256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
   "formula.udf": "define formula functions you can use in cells",
   "bi.model": "change your BI model definitions (measures, relationships, ...)",
@@ -90,6 +96,23 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
 
 function capabilityPhrase(id: string): string {
   return CAPABILITY_PHRASE[id as CapabilityId] ?? id;
+}
+
+/**
+ * The reserved script id of the Custom Functions library
+ * (`savePersistedLibrary` in @api/customFunctions.ts persists under exactly
+ * this id).
+ *
+ * Matched on the ID, not the display name. The name was the first version of
+ * this check, and it was wrong in both directions: any publisher can name a
+ * module "Custom Functions (data)" and wear the label, and the real library
+ * loses it the moment it is renamed. The id is assigned by Calcula, so a
+ * publisher cannot choose it. `InspectedModuleScript.id` exists for this.
+ */
+const CUSTOM_FUNCTIONS_MODULE_ID = "__calcula_custom_functions__";
+
+function isCustomFunctionLibrary(id: string): boolean {
+  return id === CUSTOM_FUNCTIONS_MODULE_ID;
 }
 
 /**
@@ -569,6 +592,49 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                   wants: {s.requestedCapabilities.map(capabilityPhrase).join(", ")}
                 </div>
               )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Module scripts and notebooks are CODE, and the pre-pull review used to
+          render neither: `inspect_package` returns both
+          (calp_commands.rs::PackageInspection) and this screen showed only
+          `scripts`. A reviewer reading "Scripts (2)" had no way to know the
+          package also carried four notebooks and a formula-function library.
+          They land inert — nothing here mounts or runs on subscribe — but the
+          disclosure is the point of this screen. */}
+      {inspection.moduleScripts.length > 0 && (
+        <div style={{
+          fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+        }}>
+          <strong>Module scripts ({inspection.moduleScripts.length})</strong> — executable code.
+          They arrive switched off: subscribing stores them, it does not run them.
+          {inspection.moduleScripts.map((m, i) => (
+            <div key={i} style={{ marginLeft: 8 }}>
+              {m.name} ({m.scope}){m.description ? ` — ${m.description}` : ""}
+              {isCustomFunctionLibrary(m.id) && (
+                <div style={{ marginLeft: 8, fontWeight: 600 }}>
+                  Custom formula functions — run whenever a cell uses them. They stay
+                  unavailable until you approve them separately, after subscribing.
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {inspection.notebooks.length > 0 && (
+        <div style={{
+          fontSize: "12px", marginBottom: "8px", padding: "6px 8px",
+          backgroundColor: "#fff3cd", borderRadius: 4, color: "#664d03",
+        }}>
+          <strong>Notebooks ({inspection.notebooks.length})</strong> — analysis code you can
+          open and run yourself. Subscribing stores them; nothing in them runs on its own.
+          {inspection.notebooks.map((n, i) => (
+            <div key={i} style={{ marginLeft: 8 }}>
+              {n.name} ({n.cellCount} cell{n.cellCount === 1 ? "" : "s"})
             </div>
           ))}
         </div>

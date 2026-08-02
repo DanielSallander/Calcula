@@ -24,6 +24,7 @@ import { initKeybindings } from "../api/keybindings";
 import { getLocaleSettings } from "../api/locale";
 import { listenTauriEvent } from "../api/backend";
 import { onAppEvent, emitAppEvent, AppEvents, type MutationDomain, type MutationRefreshPayload } from "../api/events";
+import { WRITEBACK_INDEX_CHANGED_EVENT } from "../api/distribution";
 
 import {
   registerExtensionRegistryService,
@@ -443,6 +444,19 @@ export function bootstrapShell(): void {
   }).catch(() => {
     // No Tauri runtime (e.g. a non-webview/test context) — the bridge is a
     // no-op there; in-app writes still refresh through their return values.
+  });
+
+  // Workbook OPEN no longer blocks on HTTP registries: it walks local
+  // registries inline and hands the HTTP ones to a worker
+  // (calp_commands::rebuild_writeback_index_deferring_http). This bridge is how
+  // the panes, the cell tints and the script host's cached copy of the index
+  // learn that the deferred half finally landed — without it the regions are
+  // installed in the backend but nothing on screen re-reads them, which looks
+  // exactly like a package that declares no writeback.
+  void listenTauriEvent("distribution:writeback-index-changed", () => {
+    emitAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, {});
+  }).catch(() => {
+    // No Tauri runtime (test context) — no deferred rebuild to bridge.
   });
 
   // Model-extensibility Phase 1: bridge the Rust-emitted BI model lifecycle

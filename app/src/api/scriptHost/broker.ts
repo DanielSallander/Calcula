@@ -185,17 +185,103 @@ function checkPolicy(handle: ScriptHandle, method: string, args: unknown[]): Met
  * server-side audit: success + the gate's own denial). The broker must NOT also
  * persist their invoke results, or each call double-records. It DOES still
  * persist their broker-side POLICY denials (which never reach the gate).
+ *
+ * A MAP, not a set, because the value is the evidence: each entry names the Rust
+ * gate whose `record_capability_call` makes the broker's own write redundant. An
+ * entry with no such gate is a SILENT AUDIT HOLE — the broker skips the write and
+ * nobody else makes it — so the reason has to be checkable, and
+ * `__tests__/serverAuditedMethods.test.ts` checks it.
+ *
+ * THIS SET WENT STALE ONCE. It was written in Wave A/B and never extended, so
+ * every gate Waves C-I added (script_writeback, script_scheduler,
+ * script_distribution, the cube UDFs, the bi.model diagnostics/batch actions)
+ * double-recorded: one row from the Rust gate, one from the broker, for the same
+ * call. The guard test now fails when a `cap.*` row is neither listed here nor
+ * listed as broker-audited below, so the next gate cannot be forgotten.
  */
-const SERVER_AUDITED_METHODS: ReadonlySet<string> = new Set([
-  "cap.fetch", // -> script_http_fetch
-  "cap.biQuery", // -> bi_query
-  "cap.biSql", // -> script_bi_sql
-  "cap.biModelInfo", // -> script_bi_model (info)
-  "cap.biModelUpsert", // -> script_bi_model (upsert)
-  "cap.biModelDelete", // -> script_bi_model (delete)
-  "cap.connectorRegister", // -> bi_script_source (install)
-  "cap.connectorRemove", // -> bi_script_source (removeBind)
+const SERVER_AUDITED_METHODS: ReadonlyMap<string, string> = new Map([
+  ["cap.fetch", "script_http_fetch"],
+  ["cap.biQuery", "bi_query"],
+  ["cap.biSql", "script_bi_sql"],
+  ["cap.biModelInfo", "script_bi_model (info)"],
+  ["cap.biModelUpsert", "script_bi_model (upsert)"],
+  ["cap.biModelDelete", "script_bi_model (delete)"],
+  ["cap.biModelValidate", "script_bi_model (validate)"],
+  ["cap.biModelLineage", "script_bi_model (lineage)"],
+  ["cap.biModelBatch", "script_bi_model (batch)"],
+  ["cap.connectorRegister", "bi_script_source (install)"],
+  ["cap.connectorRemove", "bi_script_source (removeBind)"],
+  ["cap.cubeValue", "cube_udf_value"],
+  ["cap.cubeKpi", "cube_udf_kpi"],
+  ["cap.cubeMembers", "cube_udf_members"],
+  // script_writeback: always-on audit of the outcome (success + failure), plus
+  // its own grant/publisher-key denials.
+  ["cap.writebackListRegions", "script_writeback"],
+  ["cap.writebackGetLayer", "script_writeback"],
+  ["cap.writebackSaveDraft", "script_writeback"],
+  ["cap.writebackSubmit", "script_writeback"],
+  ["cap.writebackPreview", "script_writeback"],
+  ["cap.writebackListSubmissions", "script_writeback"],
+  ["cap.writebackReview", "script_writeback"],
+  // script_distribution: same shape — step (8) audits both outcomes and every
+  // earlier refusal.
+  ["cap.pkgListRegistries", "script_distribution"],
+  ["cap.pkgListSubscriptions", "script_distribution"],
+  ["cap.pkgBrowse", "script_distribution"],
+  ["cap.pkgInspect", "script_distribution"],
+  ["cap.pkgPull", "script_distribution"],
+  ["cap.pkgRefreshPreview", "script_distribution"],
+  ["cap.pkgRefreshApply", "script_distribution"],
+  ["cap.pkgPublishPreview", "script_distribution"],
+  ["cap.pkgNextVersion", "script_distribution"],
+  ["cap.pkgPublish", "script_distribution"],
+  ["cap.pkgPublishModel", "script_distribution"],
+  // script_scheduler records the two REGISTRATION ops on both outcomes.
+  ["cap.scheduleEvery", "script_scheduler (every)"],
+  ["cap.scheduleAt", "script_scheduler (at)"],
+  // KNOWN GAP, deliberately taken: script_scheduler's "cancel" arm records only
+  // when a job was actually removed. A cancel naming a job that does not exist
+  // (or one the caller does not own) therefore goes unrecorded now that the
+  // broker defers to it. That is a no-op with no reach behind it; the alternative
+  // — leaving this out — double-records every REAL cancellation, which corrupts
+  // the trail that matters. The Rust `else` arm is requested separately.
+  ["cap.scheduleCancel", "script_scheduler (cancel; records only on removed=true)"],
 ]);
+
+/**
+ * The capability-bearing methods the BROKER is the only auditor for: they never
+ * reach a Rust gate that records, so `persistCapabilityAudit` must write their
+ * outcome or nothing will. Listed explicitly (with the reason) rather than left
+ * as "everything not above", so adding a `cap.*` row is a decision somebody made
+ * and a test can see, instead of a default nobody looked at.
+ */
+const BROKER_AUDITED_CAPABILITY_METHODS: ReadonlyMap<string, string> = new Map([
+  ["render.setHtml", "renders in the host window; no backend call"],
+  ["formula.udf.invoke", "runs in the UDF worker; no backend call"],
+  ["cap.biListConnections", "bi_get_connections takes no scriptId and records nothing"],
+  ["cap.scheduleList", "script_scheduler's 'list' arm records nothing (a read of own jobs)"],
+  ["cap.dialogAlert", "host-window dialog; no backend call"],
+  ["cap.dialogConfirm", "host-window dialog; no backend call"],
+  ["cap.dialogPrompt", "host-window dialog; no backend call"],
+  ["cap.dialogForm", "host-window dialog; no backend call"],
+  ["cap.fileExportText", "native picker + write, driven from the host; not a gated command"],
+  ["cap.fileImportText", "native picker + read, driven from the host; not a gated command"],
+  ["cap.filePrintPdf", "native picker + host-side render; not a gated command"],
+  ["cap.shortcutBind", "host-side shortcut registry; no backend call"],
+  ["cap.shortcutUnbind", "host-side shortcut registry; no backend call"],
+  ["cap.shortcutList", "host-side shortcut registry; no backend call"],
+  ["cap.storageGet", "workbook VFS read through the host; not a capability-gated command"],
+  ["cap.storageSet", "workbook VFS write through the host; not a capability-gated command"],
+]);
+
+/** Exported for the drift guard: every capability-bearing ALLOWLIST row must
+ *  appear in exactly one of these two maps. */
+export function capabilityAuditClassification(): {
+  serverAudited: ReadonlyMap<string, string>;
+  brokerAudited: ReadonlyMap<string, string>;
+} {
+  return { serverAudited: SERVER_AUDITED_METHODS, brokerAudited: BROKER_AUDITED_CAPABILITY_METHODS };
+}
 
 /** Broker-side policy denial codes — raised by checkPolicy BEFORE any backend gate. */
 const BROKER_POLICY_CODES: ReadonlySet<string> = new Set([

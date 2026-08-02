@@ -34,7 +34,12 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // bi.model is a MUTATION capability (upsert/delete definitions) — reading the
   // model is what bi.query buys. Saying "read" here understated the reach.
   "bi.model": "change the BI model definitions (measures, relationships, ...)",
-  storage: "store data on this device",
+  // NOT "store data on this device": the store is the workbook's own virtual
+  // filesystem (.calcula/script-data/<scriptId>.json — scriptHost/host.ts), so
+  // it travels inside the .cala to everyone the file is sent to. Word for word
+  // the same phrase as @api/capabilities.ts and SubscribeDialog.tsx.
+  storage:
+    "store its own private data inside this workbook file (256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
   "formula.udf": "define formula functions",
   "bi.connector": "feed external data into the BI model",

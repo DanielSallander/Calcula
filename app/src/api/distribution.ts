@@ -240,6 +240,23 @@ export interface PackageInspection {
   resolvedVersion: string;
   sheets: SheetInfo[];
   scripts: InspectedScript[];
+  /**
+   * Standalone module scripts bundled with the package (C8).
+   *
+   * `calp_commands.rs` has returned these since C8; this interface did not
+   * declare them, so the Subscribe review rendered `inspection.scripts` alone
+   * and a package's module scripts — including the reserved
+   * `__calcula_custom_functions__` module, whose functions run whenever a cell
+   * calls them — arrived undisclosed. They land INERT (a separate consent gates
+   * execution: `require_distributed_module_consent`), so this was a disclosure
+   * gap rather than unconsented execution; disclosure before a commit point is
+   * the whole job of this type.
+   */
+  moduleScripts: InspectedModuleScript[];
+  /** Standalone notebooks bundled with the package (C8). Inert until the user
+   *  opens and runs them — but, like moduleScripts, they were arriving with no
+   *  mention in the pre-pull review. */
+  notebooks: InspectedNotebook[];
   dataSources: InspectedDataSource[];
   writebackRegionCount: number;
   tableCount: number;
@@ -297,6 +314,30 @@ export interface InspectedScript {
   description: string | null;
   /** Capability ids the package's manifest declares this script needs (R19). */
   requestedCapabilities: string[];
+}
+
+/** Mirrors `InspectedModuleScript` in app/src-tauri/src/calp_commands.rs. */
+export interface InspectedModuleScript {
+  /**
+   * Stable module-script id, assigned by Calcula (not by the publisher).
+   *
+   * The pre-pull review uses it to recognise the reserved
+   * `__calcula_custom_functions__` library, whose functions run on every
+   * recalculation of a cell that calls them. Matching on `name` instead would
+   * let any publisher wear that label, and would miss the real library if it
+   * were renamed.
+   */
+  id: string;
+  name: string;
+  /** "workbook", or the name of the sheet the module is scoped to. */
+  scope: string;
+  description: string | null;
+}
+
+/** Mirrors `InspectedNotebook` in app/src-tauri/src/calp_commands.rs. */
+export interface InspectedNotebook {
+  name: string;
+  cellCount: number;
 }
 
 export interface InspectedDataSource {
@@ -843,6 +884,40 @@ export interface WritebackRegionEntry {
 /** Fetch the current writeback regions from the backend. */
 export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
   return invokeBackend("calp_get_writeback_regions");
+}
+
+/**
+ * Why one subscription's writeback regions are NOT installed in the index.
+ *
+ * Mirrors `WritebackRebuildSkip` in app/src-tauri/src/calp_commands.rs.
+ *
+ * Before this existed, "this package declares no writeback" and "this package's
+ * writeback regions are UNKNOWN" were the same observable state — an empty
+ * index — so a subscriber whose form protections were silently inactive saw
+ * exactly what a subscriber with no form sees. An empty list here means every
+ * subscription's regions are live.
+ */
+export interface WritebackRebuildSkip {
+  packageName: string;
+  registryUrl: string;
+  /**
+   * `"unreachable"` | `"notPinned"` | `"publisherChanged"` | `"badManifest"`
+   * | `"appTooOld"` | `"deferred"` | `"unknown"`.
+   *
+   * `"deferred"` is not a failure: the workbook-open rebuild walks local
+   * registries inline and hands HTTP ones to a worker, so a subscription reads
+   * `deferred` until that worker lands and fires
+   * {@link WRITEBACK_INDEX_CHANGED_EVENT}.
+   */
+  reason: string;
+  /** Underlying error text, for the pane's details line. */
+  detail: string;
+}
+
+/** Reasons the last writeback-index rebuild could not install a subscription's
+ *  regions. Re-read on {@link WRITEBACK_INDEX_CHANGED_EVENT}. */
+export function getWritebackRebuildSkips(): Promise<WritebackRebuildSkip[]> {
+  return invokeBackend("calp_get_writeback_rebuild_skips");
 }
 
 /** Subscriber identity attached to writeback submissions. */

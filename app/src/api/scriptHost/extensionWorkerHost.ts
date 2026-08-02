@@ -747,6 +747,11 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     // here) so a ceiling change or a revoke bites the next event rather than the
     // next mount. Without grid.read the handler still fires and still learns
     // WHERE the change was; it is the contents that do not cross.
+    // THE PER-DELIVERY QUESTION IS ASKED OF THE GRANT SET, NOT THE CEILING.
+    // declaredCapabilities is the immutable manifest ceiling — it never shrinks,
+    // so checking it made the "a revoke bites the next event" promise above a
+    // lie: revokeCapability() mutates handle.grants only. The ceiling is still
+    // checked at registration (below), because a grant may not exceed it.
     if (APP_EVENTS_CARRYING_CELL_CONTENTS.has(eventName)) {
       // The subscription IS the use of the capability, so write the grant down
       // now — otherwise an add-in that reads the workbook only through events
@@ -769,7 +774,7 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
         t: "appEvent",
         handlerId: reg.handlerId,
         payload: thinAppEventForScripts(eventName, payload, {
-          redactCellContents: !mw.handle.declaredCapabilities.has("grid.read"),
+          redactCellContents: !mw.handle.grants.has("grid.read"),
         }),
       } as HX2W);
     });
@@ -1161,7 +1166,12 @@ function setupCellStyleRegistration(
     // (coordinates with empty values): that would look to the add-in like a
     // workbook full of blanks and to the user like styling that silently
     // stopped matching the data.
+    // BOTH halves are asked: the ceiling (which can never grow) AND the live
+    // grant set (which a transparency-panel revoke shrinks in place). Checking
+    // only the ceiling made "the question is asked again at the moment the
+    // cells would actually cross" untrue for the one answer that can change.
     if (!mw.handle.declaredCapabilities.has("grid.read")) return null;
+    if (!mw.handle.grants.has("grid.read")) return null;
     try {
       const raw = await invokeWorkerHandler(mw, handlerId, [cells]);
       if (!Array.isArray(raw)) return null;

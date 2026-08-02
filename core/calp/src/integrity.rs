@@ -1384,6 +1384,49 @@ mod tests {
     // must remain the only place that can pin.
     // -----------------------------------------------------------------------
 
+    /// 1-based line numbers of the lines of `src` that CONTAIN `needle` as code
+    /// rather than as commentary.
+    ///
+    /// Line comments only, deliberately: the production half of this file has no
+    /// block comments and no string literal naming a pin call, so a scanner that
+    /// claimed to understand `/* */` or quoting would be asserting more rigour
+    /// than it has. If either ever appears here, tighten this — do not relax the
+    /// counts that read it.
+    fn code_line_hits(src: &str, needle: &str) -> Vec<usize> {
+        src.lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && line.contains(needle)
+            })
+            .map(|(i, _)| i + 1)
+            .collect()
+    }
+
+    /// The scanner must not count the prose above the write as a second write —
+    /// nor stop counting a real one because a comment sits on the same line.
+    #[test]
+    fn the_pin_write_scanner_ignores_comments_but_not_code() {
+        let sample = "\
+// crate::signing::pin_publisher(a, b, c, d)?;
+    /// crate::signing::pin_publisher(a, b, c, d)?;
+    crate::signing::pin_publisher(a, b, c, d)?; // the one real write
+";
+        assert_eq!(
+            code_line_hits(sample, "crate::signing::pin_publisher("),
+            vec![3],
+            "only the executable line is a pin write"
+        );
+        assert!(code_line_hits("let x = 1;", "pin_publisher(").is_empty());
+        // The naive scan this replaced counts all three, which is how the guard
+        // would come to report "2 pin writes" from prose alone.
+        assert_eq!(
+            sample.matches("crate::signing::pin_publisher(").count(),
+            3,
+            "the whole point: a substring count cannot tell code from commentary"
+        );
+    }
+
     #[test]
     fn the_pin_policy_and_the_registry_scope_can_never_become_optional() {
         let src = include_str!("integrity.rs");
@@ -1432,10 +1475,20 @@ mod tests {
 
         // And this file must remain the ONLY writer of a .calp publisher pin,
         // reached only through a policy the user's action authorized.
+        //
+        // Counted over CODE lines only. A comment that spelled the call out —
+        // the one right above the write nearly does — would push the count to 2,
+        // and the tempting "fix" for a guard that suddenly reports 2 is to bump
+        // the expected number, which is exactly how a real second pin write
+        // would get waved through. Line numbers are reported so the reader can
+        // tell a comment hit from a code hit without re-deriving the scan.
+        let pin_writes = code_line_hits(production, "crate::signing::pin_publisher(");
         assert_eq!(
-            production.matches("crate::signing::pin_publisher(").count(),
+            pin_writes.len(),
             1,
-            "integrity.rs must contain exactly one pin write"
+            "integrity.rs must contain exactly one pin write; found {} at line(s) {:?}",
+            pin_writes.len(),
+            pin_writes
         );
         // Every non-pinning outcome must RETURN from inside the policy match, so
         // the single write below it is unreachable for them. If a future editor
@@ -1448,9 +1501,11 @@ mod tests {
             .split("\n    };")
             .next()
             .expect("the policy decision block is not delimited as expected");
+        let decision_writes = code_line_hits(decision, "pin_publisher(");
         assert!(
-            !decision.contains("pin_publisher("),
-            "the pin write must happen ONCE, after the decision — not inside a policy arm"
+            decision_writes.is_empty(),
+            "the pin write must happen ONCE, after the decision — not inside a policy arm \
+             (found on decision-block line(s) {decision_writes:?})"
         );
         assert!(
             decision.contains("PinPolicy::VerifyOnly => {")

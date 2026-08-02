@@ -35,8 +35,26 @@ const formulaUdfSrc = fs.readFileSync(
   "utf8",
 );
 
+/**
+ * Everything outside a `//` line comment.
+ *
+ * Both scanners below match on CODE SHAPE, and both of these files are heavily
+ * commented with examples written in that exact shape (`// call(rt,
+ * "sheet.getCellValue", ...)` in the scaffolding notes, `// case "cap.x":` in
+ * the dispatch commentary). Without this, a method that was commented OUT reads
+ * as reachable and the guard reports the opposite of the truth: "the shim calls
+ * it" for a call that no longer exists.
+ */
+function withoutLineComments(src: string): string {
+  return src
+    .split("\n")
+    .filter((l) => !/^\s*\/\//.test(l) && !/^\s*\*/.test(l))
+    .join("\n");
+}
+
 /** Method names the WORKER shims send to the broker. */
-function shimInvokedMethods(src: string): Set<string> {
+function shimInvokedMethods(rawSrc: string): Set<string> {
+  const src = withoutLineComments(rawSrc);
   const found = new Set<string>();
   // contextShims: call(rt, "m", ...) / callFire(rt, "m", ...)
   for (const m of src.matchAll(/\b(?:call|callFire)\(\s*rt\s*,\s*"([^"]+)"/g)) found.add(m[1]);
@@ -46,7 +64,8 @@ function shimInvokedMethods(src: string): Set<string> {
 }
 
 /** `case "m":` labels in a host dispatch switch. */
-function switchCases(src: string): Set<string> {
+function switchCases(rawSrc: string): Set<string> {
+  const src = withoutLineComments(rawSrc);
   return new Set([...src.matchAll(/case\s+"([^"]+)"\s*:/g)].map((m) => m[1]));
 }
 
@@ -116,7 +135,15 @@ describe("broker method coverage (the 5-file pattern)", () => {
     const missing = Object.keys(ALLOWLIST)
       .filter((m) => !hostCases.has(m) && !extensionHostCases.has(m))
       .sort();
-    expect(missing).toEqual([...ROWS_WITH_NO_HOST_CASE].sort());
+    expect(
+      missing,
+      `ALLOWLIST rows with no \`case "<method>":\` in host.ts executeImpl (or in ` +
+        `extensionWorkerHost.ts). A row with no executor is dead consent text: the ` +
+        `transparency panel tells the user a script can do this, and the broker answers ` +
+        `UnknownMethod when it tries. Either add the executor, or — if the work is ` +
+        `dispatched some other way — add the method to ROWS_WITH_NO_HOST_CASE in this file ` +
+        `WITH the reason, so the exemption is a decision somebody made.`,
+    ).toEqual([...ROWS_WITH_NO_HOST_CASE].sort());
     // The one exemption that claims an inline executor really has one.
     expect(formulaUdfSrc).toContain('"formula.udf.invoke"');
   });
@@ -125,7 +152,16 @@ describe("broker method coverage (the 5-file pattern)", () => {
     const unreachable = Object.keys(ALLOWLIST)
       .filter((m) => !shimMethods.has(m))
       .sort();
-    expect(unreachable).toEqual(Object.keys(ROWS_WITH_NO_SHIM_CALLER).sort());
+    expect(
+      unreachable,
+      `ALLOWLIST rows that no worker shim calls by name (scanned from ` +
+        `worker/contextShims.ts and worker/extensionWorkerContext.ts). Each one INFLATES what ` +
+        `the transparency panel says a script can do, so it must be named — with its reason — ` +
+        `in ROWS_WITH_NO_SHIM_CALLER in this file, or the row deleted. NOTE the two entries ` +
+        `already there that must NOT be deleted: "api.onEvent" IS the consent text rendered ` +
+        `for events.subscribe, and "object.declareProperties" is the allowlist face of an ` +
+        `aspect-dispatched op.`,
+    ).toEqual(Object.keys(ROWS_WITH_NO_SHIM_CALLER).sort());
   });
 
   it("every ALLOWLIST row carries user-readable consent text", () => {

@@ -411,9 +411,22 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "net.fetch": "fetch data from the web",
   "bi.query": "run read-only BI queries (model-scoped)",
   "bi.sql": "run read-only RAW SQL against your BI database",
-  storage: "store data on this device",
+  // WHERE it stores, not just that it stores. "on this device" was wrong in the
+  // one direction that misleads: the store is .calcula/script-data/<id>.json
+  // INSIDE the .cala file (host.ts scriptStoragePath), so it is not a private
+  // corner of the user's machine — it travels with the workbook. A user who
+  // approves "store data on this device" and then mails the file has shared
+  // whatever the script kept, which is the opposite of what they were told.
+  storage:
+    "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
-  "formula.udf": "evaluate worksheet formulas (user-defined functions)",
+  // "evaluate worksheet formulas" described the wrong direction — it sounds like
+  // the script gets to READ your sheet through the formula engine, and it is
+  // asking for the reverse: to BE a formula. The consequence that matters is
+  // that its code then runs on every recalculation of every cell that uses it,
+  // without the user invoking anything.
+  "formula.udf":
+    "provide formula functions your cells can call — its code then runs every time such a cell recalculates",
   "bi.model": "modify your BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
   "bi.connector": "feed external data into your BI model as a data connector",
   "ui.dialog": "show you a dialog and receive what you enter",

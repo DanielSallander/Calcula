@@ -123,10 +123,17 @@ export type QuickJsSurfaceId = Extract<
  *
  *  - notebook-cell       : a ModelDataProvider IS injected
  *                          (scripting/notebook_executor.rs), so `model` is in.
- *  - one-off-script      : `ScriptEngine::run_with_options` installs NO provider,
- *  - mcp-tool            : likewise — the model ops are registered on every
- *                          surface and THROW without a provider, so these two
- *                          are grid-only by construction, not by assertion.
+ *  - one-off-script      : `ScriptEngine::run_with_options` installs NO provider
+ *                          (the entry point has no provider parameter at all),
+ *                          so it is grid-only by construction, not by assertion.
+ *  - mcp-tool            : a provider IS injected. `mcp/tools.rs
+ *                          run_script_with_model` builds
+ *                          `NotebookSession::new(Some(HostModelProvider), ...)`
+ *                          for execute_script — the tool that runs AGENT-authored
+ *                          code — with a hard-coded `bi.query` grant. This row
+ *                          said "grid-only, no model provider" for the whole of
+ *                          Waves D-I while that was untrue, which made the
+ *                          transparency panel understate an AI-driven surface.
  *  - writeback-validator : the submit harness deletes the host globals before
  *                          the publisher's code is evaluated, so it reaches
  *                          nothing at all.
@@ -136,7 +143,7 @@ export type QuickJsSurfaceId = Extract<
 export const QUICKJS_SURFACE_REACH: Record<QuickJsSurfaceId, readonly InterpreterReachClass[]> = {
   "notebook-cell": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata", "model"],
   "one-off-script": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata"],
-  "mcp-tool": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata"],
+  "mcp-tool": ["grid", "workbook", "view", "bookmarks", "output", "appMetadata", "model"],
   "writeback-validator": [],
 };
 
@@ -149,11 +156,18 @@ export const QUICKJS_SURFACE_REACH: Record<QuickJsSurfaceId, readonly Interprete
  * These are CEILINGS, not grants: a notebook holds nothing until the user
  * approves a prompt, and the grant then lives in the Rust CapabilityStore (read
  * live into `liveGrants`).
+ *
+ * `mcp-tool` is the row where the ceiling and the provider are NOT the same
+ * question: a provider is injected, but `MCP_SCRIPT_CAPABILITIES` in
+ * app/src-tauri/src/mcp/tools.rs grants `bi.query` alone, so `model.sql` throws
+ * there. Its ceiling is also unlike the notebook's in kind — it is a host-set
+ * grant with no just-in-time prompt behind it, bounded instead by the MCP access
+ * tier (`check_mcp_access`) and by the model's own RLS.
  */
 export const QUICKJS_SURFACE_CAPABILITIES: Record<QuickJsSurfaceId, readonly CapabilityId[]> = {
   "notebook-cell": ["bi.query", "bi.sql"],
   "one-off-script": [],
-  "mcp-tool": [],
+  "mcp-tool": ["bi.query"],
   "writeback-validator": [],
 };
 

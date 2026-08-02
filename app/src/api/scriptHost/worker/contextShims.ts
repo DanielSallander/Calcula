@@ -1463,10 +1463,13 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
       };
 
     case "sheet": {
-      // Canonical-model facet (C3 step 3): a Range/Cell over THIS sheet, backed
-      // by the same restricted, own-sheet broker aspects the flat getCellValue/
-      // setCellValue use — pure sugar, no new privileged surface. Bound to the
-      // own sheet (no sheetIndex passed), so reads/writes stay clamped to it.
+      // Canonical-model facet (C3 step 3): a Range/Cell over the sheet on
+      // screen, backed by the same restricted broker aspects the flat
+      // getCellValue/setCellValue use — pure sugar, no new privileged surface.
+      // No sheetIndex is ever passed, so reads/writes resolve to the ACTIVE
+      // sheet (see RESTRICTED_SHEET_CLAMP_MESSAGE in host.ts: there is no
+      // per-script sheet binding to clamp to, and the tier's real guarantee is
+      // "never a sheet the user is not looking at").
       const sheetTransport: RangeTransport = {
         readCell: (row: number, col: number) =>
           call(rt, "sheet.getCellValue", [row, col]) as Promise<string>,

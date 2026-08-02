@@ -27,6 +27,13 @@ vi.mock("../../scriptConnectors", () => ({
   refreshScriptConnector: (...a: unknown[]) => refreshScriptConnector(...a),
 }));
 vi.mock("../broker", () => ({ listMountedHandles: () => listMountedHandles() }));
+// host.ts is the debugger's owner. Mocked here so the tick's pause check is
+// controllable without spawning a worker realm (and so importing this module
+// does not drag the 5,800-line host into the scheduler's test graph).
+const pausedScriptIds = new Set<string>();
+vi.mock("../host", () => ({
+  isScriptDebugPaused: (scriptId: string) => pausedScriptIds.has(scriptId),
+}));
 
 import { ALL_CAPABILITY_IDS, CAPABILITY_ID_SET, isCapabilityId } from "../capabilityIds";
 import { ALLOWLIST } from "../allowlist";
@@ -138,6 +145,7 @@ describe("the renderer tick", () => {
     callExposedMethod.mockReset().mockResolvedValue(undefined);
     refreshScriptConnector.mockReset().mockResolvedValue(undefined);
     listMountedHandles.mockReset().mockReturnValue([{ scriptId: "s1" }]);
+    pausedScriptIds.clear();
     scheduler = await import("../scheduler");
   });
 
@@ -234,6 +242,46 @@ describe("the renderer tick", () => {
     release?.();
     await vi.advanceTimersByTimeAsync(11_000);
     expect(opsCalled().filter((o) => o === "due").length).toBeGreaterThan(1);
+  });
+
+  it("SKIPS a job whose script is paused in the debugger, and says so", async () => {
+    // A script stopped at a breakpoint cannot run a job. Calling it anyway parks
+    // the relay on the 30s method deadline and — worse — eventually reports
+    // "it ran" to Rust, which is exactly the lie the save/close verdict path
+    // refuses to tell (callWorkbookBeforeLifecycle skips the wait for the same
+    // reason). Report the skip instead: Rust's no-self-overlap slot is released
+    // immediately and the reason lands in the audit trail rather than surfacing
+    // as an unexplained timeout.
+    pausedScriptIds.add("s1");
+    backendWithDue([
+      { id: "sched-1", scriptId: "s1", surface: "object-script", objectType: "shape", instanceId: "i1", handler: "refresh" },
+    ]);
+    await scheduler.syncPump();
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(callExposedMethod, "a paused script must not be invoked").not.toHaveBeenCalled();
+    const complete = requestFor("complete");
+    expect(complete, "the overlap slot must still be released").toMatchObject({
+      jobId: "sched-1",
+      ok: false,
+    });
+    expect(String(complete?.error)).toContain("paused in debugger");
+  });
+
+  it("still runs the OTHER scripts' jobs in the same sweep", async () => {
+    // The skip is per job, not per tick: debugging one script must not silently
+    // stop every other schedule in the workbook.
+    pausedScriptIds.add("s1");
+    listMountedHandles.mockReturnValue([{ scriptId: "s1" }, { scriptId: "s2" }]);
+    backendWithDue([
+      { id: "sched-1", scriptId: "s1", surface: "object-script", objectType: "shape", instanceId: "i1", handler: "paused" },
+      { id: "sched-2", scriptId: "s2", surface: "object-script", objectType: "shape", instanceId: "i2", handler: "fine" },
+    ]);
+    await scheduler.syncPump();
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(callExposedMethod).toHaveBeenCalledTimes(1);
+    expect(callExposedMethod).toHaveBeenCalledWith("shape", "i2", "fine");
   });
 
   it("does not run a timer for a workbook with no scheduled jobs", async () => {

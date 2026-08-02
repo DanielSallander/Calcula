@@ -4,12 +4,12 @@
 //! the live enumeration that PROVES the manifest matches what actually gets
 //! registered.
 //! CONTEXT: The transparency panel (app/src/api/codeInventory.ts) tells the user
-//! that a notebook / one-off script / MCP script / writeback validator is
-//! "grid-only". Until this module existed that claim was ASSERTED by a constant:
-//! nothing checked it against the interpreter, so an op module that grew a new
-//! privileged reach would have widened what those surfaces can do while the
-//! panel kept saying "grid-only". Transparency is a product pillar, so the claim
-//! must be DERIVED.
+//! how far a notebook / one-off script / MCP script / writeback validator can
+//! reach — for most of them, "grid-only". Until this module existed that claim
+//! was ASSERTED by a constant: nothing checked it against the interpreter, so an
+//! op module that grew a new privileged reach would have widened what those
+//! surfaces can do while the panel kept saying "grid-only". Transparency is a
+//! product pillar, so the claim must be DERIVED.
 //!
 //! The chain of custody is:
 //!   1. `enumerate_registered_surface()` boots a real QuickJS runtime through the
@@ -19,13 +19,25 @@
 //!      (and, for the model class, the capability id the host gate demands).
 //!      A test in this file diffs (1) against (2) — a new op fails the build.
 //!   3. `SURFACE_PROFILES` records HOW each host surface constructs the realm
-//!      (is a `ModelDataProvider` injected? are the host globals deleted first?),
-//!      so `surface_reach()` / `surface_capability_ids()` derive per-surface
-//!      reach instead of restating a blanket constant. A second test proves the
-//!      injection gate behaviourally: with no provider, every model op throws.
+//!      (is a `ModelDataProvider` injected? which capabilities can the host hold
+//!      for it? are the host globals deleted first?), so `surface_reach()` /
+//!      `surface_capability_ids()` derive per-surface reach instead of restating
+//!      a blanket constant. A second test proves the injection gate
+//!      behaviourally: with no provider, every model op throws.
 //!   4. The TypeScript side reads THIS FILE and diffs it against the taxonomy
 //!      and the code inventory — see
 //!      app/src/api/__tests__/interpreterReachDrift.test.ts.
+//!
+//! THE PROFILES IN STEP 3 ARE STILL HAND-ASSERTED, and that is this module's one
+//! soft spot. `mcp-tool` claimed `model_provider: false` for a whole program
+//! while `app/src-tauri/src/mcp/tools.rs` injected a `HostModelProvider`, and
+//! because `surface_ops()` filters on that flag, every derivation downstream —
+//! including the transparency panel's "grid-only" claim about the one surface
+//! that runs AI-authored code — inherited the lie. A derivation is only as
+//! honest as the flag it reads. The source-level guard that diffs these flags
+//! against the provider-injecting entry points belongs in
+//! app/src/api/__tests__/interpreterReachDrift.test.ts, which can read
+//! app/src-tauri; core must not depend on the app crate.
 //!
 //! DO NOT hand-edit `OP_MANIFEST` to make a test pass without understanding what
 //! the new op reaches: adding a row is a statement to the user about what their
@@ -254,9 +266,9 @@ pub const OP_MANIFEST: &[OpEntry] = &[
 // ===========================================================================
 
 /// How the host constructs the QuickJS realm for one script surface. These are
-/// the only two knobs that change what the realm can reach, and both are facts
-/// about the CALL SITE, not about the interpreter — which is exactly why the
-/// reach claim has to be per-surface rather than one blanket constant.
+/// the only knobs that change what the realm can reach, and every one of them is
+/// a fact about the CALL SITE, not about the interpreter — which is exactly why
+/// the reach claim has to be per-surface rather than one blanket constant.
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceProfile {
     /// Matches `ScriptSurfaceId` in app/src/api/scriptSurfaces.ts.
@@ -265,6 +277,22 @@ pub struct SurfaceProfile {
     /// `model.*` op is still REGISTERED but throws "not available on this
     /// surface" — so the surface really is grid-only.
     pub model_provider: bool,
+    /// The capability ids this surface's realm may ever hold — the CEILING the
+    /// host's `CapabilityStore` grant is taken from, not a live grant.
+    ///
+    /// Injecting a provider is necessary but NOT sufficient: every provider call
+    /// re-checks the capability store for the run's surface id
+    /// (app/src-tauri/src/bi/script_provider.rs `check_cap`), so an op whose
+    /// capability is not in this list throws on this surface even with a
+    /// provider attached. `mcp-tool` is the case that makes the distinction
+    /// load-bearing: it holds `bi.query` only, so `model.sql` is unreachable
+    /// there while `model.query` is not.
+    ///
+    /// Must be empty when `model_provider` is false (nothing gated is reachable
+    /// without a provider) and non-empty when it is true (a provider injected
+    /// with no grant behind it would make the derivation understate the surface
+    /// instead of describing it).
+    pub granted: &'static [&'static str],
     /// True when the host deletes the registered host globals before evaluating
     /// the author's code, leaving a bare ECMAScript realm.
     pub host_globals_deleted: bool,
@@ -279,24 +307,48 @@ pub const SURFACE_PROFILES: &[SurfaceProfile] = &[
     SurfaceProfile {
         id: "notebook-cell",
         model_provider: true,
+        // The notebook's grants come from the user's own per-notebook consent,
+        // so this is the consent CEILING: both model capabilities may be held.
+        granted: &["bi.query", "bi.sql"],
         host_globals_deleted: false,
         entry_point: "app/src-tauri/src/scripting/notebook_executor.rs -> NotebookSession::new(provider, ...)",
     },
     SurfaceProfile {
         id: "one-off-script",
         model_provider: false,
+        granted: &[],
         host_globals_deleted: false,
-        entry_point: "app/src-tauri/src/scripting/commands.rs -> ScriptEngine::run_with_options",
+        entry_point: "app/src-tauri/src/scripting/commands.rs -> ScriptEngine::run_with_options (no provider parameter exists on this entry point)",
     },
     SurfaceProfile {
         id: "mcp-tool",
-        model_provider: false,
+        // CORRECTED 2026-08-02. This row used to claim there was no model
+        // provider here, and named `ScriptEngine::run` as the entry point; every
+        // mirror repeated "grid-only". Both were false. `execute_script` — the
+        // tool that runs AGENT-AUTHORED code — has injected a
+        // `HostModelProvider` since the MCP co-author work. `ScriptEngine::run`
+        // is still used on this surface, but only by `run_engine_script` for the
+        // app-authored setCellValue/setRange snippets behind write_cell /
+        // write_cell_range, never for agent code, so it is not what this profile
+        // describes.
+        // NB for anyone parsing this file (the TS drift test does): keep the
+        // field names out of the prose, or a field-scanning parser reads the
+        // commentary as the value.
+        model_provider: true,
+        // Hard-coded host grant, not a consent ceiling: `MCP_SCRIPT_CAPABILITIES`
+        // in app/src-tauri/src/mcp/tools.rs is exactly `["bi.query"]`, granted
+        // for the run's surface id and revoked when the run ends. `bi.sql` is
+        // deliberately withheld — there is no MCP SQL tool, so granting it would
+        // make execute_script the way to obtain reach the tool surface denies —
+        // so `model.sql` raises the provider's consent error here.
+        granted: &["bi.query"],
         host_globals_deleted: false,
-        entry_point: "app/src-tauri/src/mcp/tools.rs -> ScriptEngine::run (execute_script tool)",
+        entry_point: "app/src-tauri/src/mcp/tools.rs -> run_script_with_model -> NotebookSession::new(Some(HostModelProvider), ...) (execute_script / execute_script_structured)",
     },
     SurfaceProfile {
         id: "writeback-validator",
         model_provider: false,
+        granted: &[],
         host_globals_deleted: true,
         entry_point: "app/src-tauri/src/calp_commands.rs -> run_validator_batch (harness deletes the host globals)",
     },
@@ -309,13 +361,21 @@ pub fn surface_profile(id: &str) -> Option<&'static SurfaceProfile> {
 
 /// The ops actually reachable on `profile` — derived from the manifest and the
 /// call site's construction, never asserted.
+///
+/// A capability-gated op needs BOTH conditions the call site controls: the
+/// provider has to be injected, and the op's capability has to be one the host
+/// can hold for this surface. Checking only the first would have advertised
+/// `model.sql` on `mcp-tool`, which holds `bi.query` alone.
 pub fn surface_ops(profile: &SurfaceProfile) -> Vec<&'static OpEntry> {
     if profile.host_globals_deleted {
         return Vec::new();
     }
     OP_MANIFEST
         .iter()
-        .filter(|e| !e.reach.needs_model_provider() || profile.model_provider)
+        .filter(|e| match e.capability {
+            None => true,
+            Some(cap) => profile.model_provider && profile.granted.contains(&cap),
+        })
         .collect()
 }
 
@@ -685,10 +745,11 @@ mod tests {
             assert!(
                 last.starts_with("THREW:"),
                 "{call} did NOT throw on a surface with no ModelDataProvider (got {last:?}). \
-                 One-off scripts, MCP scripts and writeback validators are advertised as \
-                 grid-only in app/src/api/scriptSurfaces.ts and the transparency panel PURELY \
-                 because no provider is injected for them. If this op now works without one, \
-                 that claim is false and both must be corrected."
+                 One-off scripts and writeback validators are advertised as grid-only in \
+                 app/src/api/scriptSurfaces.ts and the transparency panel PURELY because no \
+                 provider is injected for them. If this op now works without one, that claim \
+                 is false and both must be corrected. (The MCP tool surface is NOT in that \
+                 list: it does inject a provider — see SURFACE_PROFILES.)"
             );
         }
     }
@@ -716,7 +777,7 @@ mod tests {
         assert_eq!(surface_capability_ids(notebook), vec!["bi.query", "bi.sql"]);
         assert!(surface_reach(notebook).contains(&ReachClass::Model));
 
-        for grid_only in [one_off, mcp] {
+        for grid_only in [one_off, validator] {
             assert!(
                 surface_capability_ids(grid_only).is_empty(),
                 "{} must reach no capability-gated op",
@@ -727,13 +788,106 @@ mod tests {
                 "{} must not reach the BI model",
                 grid_only.id
             );
-            assert!(surface_reach(grid_only).contains(&ReachClass::Grid));
         }
+        assert!(surface_reach(one_off).contains(&ReachClass::Grid));
+
+        // The MCP surface is NOT grid-only, and saying so was the defect.
+        assert!(
+            surface_reach(mcp).contains(&ReachClass::Model),
+            "the mcp-tool surface injects a HostModelProvider, so its reach includes the BI model"
+        );
 
         assert!(
             surface_reach(validator).is_empty(),
             "the writeback validator harness deletes every host global, so its reach is empty"
         );
+    }
+
+    /// REGRESSION GUARD for the defect this profile carried for a whole program:
+    /// `mcp-tool` was recorded as `model_provider: false` / "grid-only — no model
+    /// provider" while `app/src-tauri/src/mcp/tools.rs` had been injecting a
+    /// `HostModelProvider` into `execute_script` all along. The transparency
+    /// panel derives its "what can this code touch?" claim from here, so the
+    /// understatement was a false disclosure about the one surface that runs
+    /// AI-authored code.
+    ///
+    /// The security property asserted is the pair, not just the reach: the MCP
+    /// surface reaches the model through `bi.query` and does NOT reach `bi.sql`.
+    #[test]
+    fn mcp_tool_reaches_the_model_through_bi_query_only() {
+        let mcp = surface_profile("mcp-tool").expect("mcp profile");
+
+        assert!(
+            mcp.model_provider,
+            "SURFACE_PROFILES says the MCP tool surface has no ModelDataProvider. \
+             app/src-tauri/src/mcp/tools.rs `run_script_with_model` builds \
+             NotebookSession::new(Some(HostModelProvider::new(app, rt)), ..) for \
+             execute_script / execute_script_structured. Either the injection was removed \
+             (then also re-derive codeInventory.ts and scriptSurfaces.ts) or this flag is \
+             lying to the transparency panel again."
+        );
+        assert_eq!(
+            mcp.granted,
+            &["bi.query"],
+            "the MCP script grant must mirror MCP_SCRIPT_CAPABILITIES in \
+             app/src-tauri/src/mcp/tools.rs exactly"
+        );
+
+        // Derived, not asserted: bi.query in, bi.sql out.
+        assert_eq!(surface_capability_ids(mcp), vec!["bi.query"]);
+        assert!(surface_reach(mcp).contains(&ReachClass::Model));
+        assert!(surface_reach(mcp).contains(&ReachClass::Grid));
+
+        let paths: Vec<&str> = surface_ops(mcp).iter().map(|e| e.path).collect();
+        assert!(
+            paths.contains(&"model.query"),
+            "model.query is gated on bi.query, which this surface holds"
+        );
+        for withheld in ["model.sql", "__calcula_model_sql"] {
+            assert!(
+                !paths.contains(&withheld),
+                "{withheld} is gated on bi.sql, which the MCP surface deliberately does NOT \
+                 hold — there is no MCP SQL tool, so granting it would make execute_script the \
+                 way to obtain reach the tool surface denies. Advertising it here would \
+                 OVERSTATE the surface in the transparency panel."
+            );
+        }
+    }
+
+    /// The `granted` ceiling cannot drift into meaninglessness: an unknown id
+    /// would silently drop an op out of every derivation, and a provider with no
+    /// grant behind it would understate the surface instead of describing it.
+    #[test]
+    fn every_surface_grant_is_consistent_with_the_manifest() {
+        let manifest_caps: Vec<&str> = OP_MANIFEST.iter().filter_map(|e| e.capability).collect();
+        for profile in SURFACE_PROFILES {
+            for cap in profile.granted {
+                assert!(
+                    manifest_caps.contains(cap),
+                    "surface {} declares grant \"{cap}\", which no OP_MANIFEST row demands. \
+                     A grant no op reads changes nothing and hides the typo it probably is.",
+                    profile.id
+                );
+            }
+            if profile.model_provider {
+                assert!(
+                    !profile.granted.is_empty(),
+                    "surface {} injects a ModelDataProvider but declares no grant, so \
+                     surface_ops() derives no model reach for it — an injected provider with \
+                     an empty ceiling understates the surface rather than describing it.",
+                    profile.id
+                );
+            } else {
+                assert!(
+                    profile.granted.is_empty(),
+                    "surface {} declares grant(s) {:?} with no ModelDataProvider injected. \
+                     Nothing gated is reachable without a provider, so the grant would \
+                     OVERSTATE the surface.",
+                    profile.id,
+                    profile.granted
+                );
+            }
+        }
     }
 
     #[test]

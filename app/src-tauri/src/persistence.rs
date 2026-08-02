@@ -1826,6 +1826,96 @@ fn restore_scheduled_jobs(
     }
 }
 
+/// Restore the four DISTRIBUTION state files carried in `user_files`:
+/// subscriptions, the override layer, the audit log and the writeback drafts.
+///
+/// EVERY branch assigns. The rule this enforces is that a file which is PRESENT
+/// but unparseable resets its state, exactly as an absent file does. The earlier
+/// shape (`if let Some { if let Ok { assign } } else { reset }`) had a third,
+/// silent path — present-and-corrupt — that assigned nothing at all, so the
+/// state of the PREVIOUSLY OPEN workbook survived into this one:
+///
+/// * `subscriptions.json` is the worst of the four. It drives
+///   `rebuild_writeback_index`, GATHER, refresh and registry I/O — so opening a
+///   workbook with a corrupt file made Calcula act on packages only the previous
+///   document had ever subscribed to, including network reads against its
+///   registries.
+/// * `writeback_drafts.json` is next: a draft is the PROOF that a grid cell
+///   passed the writeback gate (`writeback_slot_has_draft`), so an inherited
+///   draft would authorize a write in a workbook that never collected it.
+/// * `overrides.json` would re-apply another document's cell overrides, and
+///   `audit_log.json` would show one workbook's script-activity trail while
+///   reading another.
+///
+/// Written as `match remove(..) { Some => parse-or-default, None => default }`
+/// so the compiler forces a value in every arm — the shape `autofilters.json`
+/// and `restore_scheduled_jobs` already use. Takes `&AppState` (not
+/// `State<AppState>`) so the whole restore is exercisable without a Tauri app.
+fn restore_distribution_user_files(
+    state: &AppState,
+    workbook: &mut Workbook,
+) -> Result<(), String> {
+    let subscriptions = match workbook.user_files.remove("subscriptions.json") {
+        Some(bytes) => serde_json::from_slice::<calp::manifest::SubscriptionManifest>(&bytes)
+            .unwrap_or_else(|e| {
+                crate::log_warn!(
+                    "CALP",
+                    "subscriptions.json is unreadable ({}) - starting with NO subscriptions",
+                    e
+                );
+                calp::manifest::SubscriptionManifest::default()
+            }),
+        None => calp::manifest::SubscriptionManifest::default(),
+    };
+    *state.subscriptions.lock().map_err(|e| e.to_string())? = subscriptions;
+
+    let overrides = match workbook.user_files.remove("overrides.json") {
+        Some(bytes) => {
+            serde_json::from_slice::<calp::OverrideLayer>(&bytes).unwrap_or_else(|e| {
+                crate::log_warn!(
+                    "CALP",
+                    "overrides.json is unreadable ({}) - starting with NO overrides",
+                    e
+                );
+                calp::OverrideLayer::new()
+            })
+        }
+        None => calp::OverrideLayer::new(),
+    };
+    *state.override_layer.lock().map_err(|e| e.to_string())? = overrides;
+
+    let audit = match workbook.user_files.remove("audit_log.json") {
+        Some(bytes) => {
+            serde_json::from_slice::<calp::audit::AuditLog>(&bytes).unwrap_or_else(|e| {
+                crate::log_warn!(
+                    "CALP",
+                    "audit_log.json is unreadable ({}) - starting with an EMPTY audit log",
+                    e
+                );
+                calp::audit::AuditLog::new()
+            })
+        }
+        None => calp::audit::AuditLog::new(),
+    };
+    *state.audit_log.lock().map_err(|e| e.to_string())? = audit;
+
+    let drafts = match workbook.user_files.remove("writeback_drafts.json") {
+        Some(bytes) => serde_json::from_slice::<calp::writeback::WritebackLayer>(&bytes)
+            .unwrap_or_else(|e| {
+                crate::log_warn!(
+                    "CALP",
+                    "writeback_drafts.json is unreadable ({}) - starting with NO drafts",
+                    e
+                );
+                calp::writeback::WritebackLayer::new()
+            }),
+        None => calp::writeback::WritebackLayer::new(),
+    };
+    *state.writeback_layer.lock().map_err(|e| e.to_string())? = drafts;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_file(
     state: State<AppState>,
@@ -2559,58 +2649,14 @@ pub fn open_file(
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
 
-    // Restore subscription metadata from user_files (if present)
-    {
-        if let Some(json_bytes) = workbook.user_files.remove("subscriptions.json") {
-            if let Ok(subs) = serde_json::from_slice::<calp::manifest::SubscriptionManifest>(&json_bytes) {
-                *state.subscriptions.lock().map_err(|e| e.to_string())? = subs;
-            }
-        } else {
-            *state.subscriptions.lock().map_err(|e| e.to_string())? =
-                calp::manifest::SubscriptionManifest::default();
-        }
-    }
-
-    // Restore override layer from user_files (if present)
-    {
-        if let Some(json_bytes) = workbook.user_files.remove("overrides.json") {
-            if let Ok(layer) = serde_json::from_slice::<calp::OverrideLayer>(&json_bytes) {
-                *state.override_layer.lock().map_err(|e| e.to_string())? = layer;
-            }
-        } else {
-            *state.override_layer.lock().map_err(|e| e.to_string())? =
-                calp::OverrideLayer::new();
-        }
-    }
-
-    // Restore audit log from user_files (if present)
-    {
-        if let Some(json_bytes) = workbook.user_files.remove("audit_log.json") {
-            if let Ok(log) = serde_json::from_slice::<calp::audit::AuditLog>(&json_bytes) {
-                *state.audit_log.lock().map_err(|e| e.to_string())? = log;
-            }
-        } else {
-            *state.audit_log.lock().map_err(|e| e.to_string())? =
-                calp::audit::AuditLog::new();
-        }
-    }
+    // Subscriptions, override layer, audit log and writeback drafts. Absent OR
+    // unparseable both reset to empty — see the function for why.
+    restore_distribution_user_files(&state, &mut workbook)?;
 
     // Restore the scheduled-job registry. Deliberately placed AFTER the audit
     // log restore above: the drops this records must land in the log the user
     // will actually read, not in one that is about to be replaced.
     restore_scheduled_jobs(&state.audit_log, &mut workbook);
-
-    // Restore writeback layer (drafts) from user_files (if present)
-    {
-        if let Some(json_bytes) = workbook.user_files.remove("writeback_drafts.json") {
-            if let Ok(layer) = serde_json::from_slice::<calp::writeback::WritebackLayer>(&json_bytes) {
-                *state.writeback_layer.lock().map_err(|e| e.to_string())? = layer;
-            }
-        } else {
-            *state.writeback_layer.lock().map_err(|e| e.to_string())? =
-                calp::writeback::WritebackLayer::new();
-        }
-    }
 
     // Restore author-side writeback DRAFT regions (absent file = none).
     {
@@ -2659,7 +2705,13 @@ pub fn open_file(
     // subscriptions' registry manifests. Without this, writeback regions
     // (guards, tints, GATHER data) stay inert after reopening a subscribed
     // workbook until the next pull/refresh.
-    crate::calp_commands::rebuild_writeback_index(&state);
+    //
+    // DEFERRING variant: local registries are walked inline (microseconds, and
+    // the guards must be armed before the user can type); HTTP registries are
+    // handed to a worker. Each HTTP subscription costs two blocking artifact
+    // reads with a 30-second timeout, so opening a `.cala` that names an
+    // unreachable server used to hang the whole open before a cell was drawn.
+    crate::calp_commands::rebuild_writeback_index_deferring_http(&state);
 
     // Re-seed the id registry from the restored override layer. The registry
     // is in-memory only; without this, the first edit of an overridden cell
@@ -3976,6 +4028,181 @@ pub(crate) fn scheduler_test_guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod distribution_user_file_restore_tests {
+    //! A workbook's DISTRIBUTION state must never be inherited from the
+    //! previously open document.
+    //!
+    //! The regression these cover: `restore_distribution_user_files` used to be
+    //! four `if let Some { if let Ok { assign } } else { reset }` blocks, which
+    //! have THREE paths and only two assignments. A file that was present but
+    //! unparseable fell through both, leaving workbook A's subscriptions,
+    //! override layer, audit log and writeback drafts installed while workbook B
+    //! was on screen.
+
+    use super::*;
+
+    fn a_subscription(package: &str, registry: &str) -> calp::manifest::Subscription {
+        calp::manifest::Subscription {
+            package_name: package.to_string(),
+            registry_url: registry.to_string(),
+            version_pin: "1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            extra: Default::default(),
+        }
+    }
+
+    /// Workbook A's state, as it would stand after opening a subscribed
+    /// document: one subscription, one override, one audit entry, one draft.
+    fn state_of_workbook_a() -> AppState {
+        let state = crate::create_app_state();
+        {
+            let mut subs = state.subscriptions.lock().unwrap();
+            subs.subscriptions.push(a_subscription(
+                "acme.finance",
+                "https://registry.example.com/reg",
+            ));
+        }
+        // ScriptExecuted is one of the ALWAYS-recorded events, so this lands
+        // without having to enable opt-in distribution auditing first.
+        state.audit_log.lock().unwrap().record(
+            calp::audit::AuditEvent::ScriptExecuted,
+            "workbook A ran a script",
+            "local",
+            "2026-01-01T00:00:00Z",
+        );
+        state
+            .writeback_layer
+            .lock()
+            .unwrap()
+            .drafts
+            .push(calp::writeback::WritebackSubmission {
+                id: "sub-a".to_string(),
+                region_id: "region-a".to_string(),
+                cell_row: 1,
+                cell_col: 1,
+                cell_id: None,
+                submitter: calp::SubmitterIdentity {
+                    display_name: "A".to_string(),
+                    id: "a".to_string(),
+                    extra: Default::default(),
+                },
+                value: calp::writeback::SubmissionValue::Number { value: 1.0 },
+                state: calp::writeback::SubmissionState::Draft,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                submitted_at: None,
+                review_reason: None,
+                reviewed_by: None,
+                model_key: None,
+                extra: Default::default(),
+            });
+        state
+    }
+
+    /// Workbook B: every one of the four files present, every one corrupt.
+    fn workbook_b_with_corrupt_files() -> Workbook {
+        let mut wb = Workbook::new();
+        for name in [
+            "subscriptions.json",
+            "overrides.json",
+            "audit_log.json",
+            "writeback_drafts.json",
+        ] {
+            wb.user_files
+                .insert(name.to_string(), b"{ this is not json".to_vec());
+        }
+        wb
+    }
+
+    #[test]
+    fn corrupt_distribution_files_reset_instead_of_inheriting_the_previous_workbook() {
+        let state = state_of_workbook_a();
+        let mut wb = workbook_b_with_corrupt_files();
+
+        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+
+        assert!(
+            state.subscriptions.lock().unwrap().subscriptions.is_empty(),
+            "workbook A's SUBSCRIPTIONS must not survive into workbook B - they \
+             drive rebuild_writeback_index, GATHER, refresh and registry I/O"
+        );
+        assert!(
+            state.override_layer.lock().unwrap().overrides.is_empty(),
+            "workbook A's overrides must not survive"
+        );
+        assert!(
+            state.audit_log.lock().unwrap().entries.is_empty(),
+            "workbook A's audit trail must not be shown for workbook B"
+        );
+        assert!(
+            state.writeback_layer.lock().unwrap().drafts.is_empty(),
+            "workbook A's drafts must not survive - a draft is the proof a cell \
+             passed the writeback gate"
+        );
+    }
+
+    #[test]
+    fn absent_distribution_files_reset_too() {
+        let state = state_of_workbook_a();
+        let mut wb = Workbook::new();
+
+        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+
+        assert!(state.subscriptions.lock().unwrap().subscriptions.is_empty());
+        assert!(state.override_layer.lock().unwrap().overrides.is_empty());
+        assert!(state.audit_log.lock().unwrap().entries.is_empty());
+        assert!(state.writeback_layer.lock().unwrap().drafts.is_empty());
+    }
+
+    #[test]
+    fn well_formed_distribution_files_are_restored() {
+        let state = crate::create_app_state();
+        let mut wb = Workbook::new();
+
+        let mut manifest = calp::manifest::SubscriptionManifest::default();
+        manifest
+            .subscriptions
+            .push(a_subscription("b.pkg", "file:///regs/b"));
+        wb.user_files.insert(
+            "subscriptions.json".to_string(),
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+
+        let mut log = calp::audit::AuditLog::new();
+        log.record(
+            calp::audit::AuditEvent::ScriptExecuted,
+            "workbook B ran a script",
+            "local",
+            "2026-02-01T00:00:00Z",
+        );
+        wb.user_files
+            .insert("audit_log.json".to_string(), serde_json::to_vec(&log).unwrap());
+
+        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+
+        let subs = state.subscriptions.lock().unwrap();
+        assert_eq!(subs.subscriptions.len(), 1);
+        assert_eq!(subs.subscriptions[0].package_name, "b.pkg");
+        assert_eq!(state.audit_log.lock().unwrap().entries.len(), 1);
+    }
+
+    /// The files are CONSUMED, so a later `user_files` sweep cannot re-surface
+    /// them as ordinary workbook files in the virtual-file tree.
+    #[test]
+    fn the_four_files_are_removed_from_user_files() {
+        let state = crate::create_app_state();
+        let mut wb = workbook_b_with_corrupt_files();
+        restore_distribution_user_files(&state, &mut wb).expect("restore succeeds");
+        assert!(wb.user_files.is_empty(), "left over: {:?}", wb.user_files.keys());
+    }
 }
 
 #[cfg(test)]

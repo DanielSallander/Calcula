@@ -259,7 +259,13 @@ interface TrustFile {
 export type WorkbookTrustLapseReason =
   | "sourceChanged"
   | "scriptAdded"
-  | "capabilityEscalation";
+  | "capabilityEscalation"
+  // The inventory of the workbook's own code could not be taken at all. Trust is
+  // a CHANGE-DETECTION gate, so "I could not look" must lapse it: an empty
+  // inventory compares equal to every stored record and would otherwise read as
+  // "nothing changed" — the permissive answer, from the failure of the very
+  // check that exists to be sceptical.
+  | "inventoryUnavailable";
 
 /** The result of checking a workbook's code against its stored trust. */
 export interface WorkbookTrustEvaluation {
@@ -524,19 +530,23 @@ export async function evaluateWorkbookTrust(
  *
  * codeInventory is dynamically imported: it pulls the object-script, module,
  * notebook and broker graphs, and this module is imported by the mount gate.
+ *
+ * THROWS on failure — deliberately. This used to swallow the error and return
+ * `[]`, which is not "no code": it is "the same code as every stored record",
+ * because a missing script never lapses trust (less code cannot be more
+ * dangerous). A previously-trusted workbook whose inventory failed therefore
+ * evaluated as `trusted` and was silently granted a session approval. The whole
+ * point of this gate is to notice change, so it must fail in the direction that
+ * ASKS. Callers turn the throw into a lapse (evaluateCurrentWorkbookTrust) or a
+ * refusal to record trust (trustCurrentWorkbook).
  */
 export async function collectLocalWorkbookScripts(): Promise<TrustableScript[]> {
-  try {
-    const { getWorkbookCodeUnits } = await import("./codeInventory");
-    const units = await getWorkbookCodeUnits();
-    return units
-      .filter((u) => u.provenance === "local")
-      .map((u) => ({ id: `${u.surfaceId}:${u.id}`, name: u.name, source: u.source }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-  } catch (e) {
-    console.warn("[scriptSecurity] could not inventory local workbook code:", e);
-    return [];
-  }
+  const { getWorkbookCodeUnits } = await import("./codeInventory");
+  const units = await getWorkbookCodeUnits();
+  return units
+    .filter((u) => u.provenance === "local")
+    .map((u) => ({ id: `${u.surfaceId}:${u.id}`, name: u.name, source: u.source }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /** Full trust picture for the open workbook, or null when it has no identity. */
@@ -569,7 +579,35 @@ export async function evaluateCurrentWorkbookTrust(
   }
   const record = getWorkbookTrustRecord(identity.key);
   // Skip the (expensive) inventory when there is nothing to compare against.
-  const scripts = record?.runTrust ? await collectLocalWorkbookScripts() : [];
+  let scripts: TrustableScript[] = [];
+  if (record?.runTrust) {
+    try {
+      scripts = await collectLocalWorkbookScripts();
+    } catch (e) {
+      // FAIL CLOSED. An inventory we could not take is not an inventory that
+      // came back empty: comparing `[]` against the stored record finds nothing
+      // added and nothing changed, so the workbook would evaluate as `trusted`
+      // and ensureScriptsAllowed would grant a session approval with no human.
+      // Lapse instead — the user is asked once, sees the reason, and can approve.
+      console.warn("[scriptSecurity] could not inventory local workbook code:", e);
+      const value: CurrentWorkbookTrust = {
+        key: identity.key,
+        displayPath: identity.displayPath,
+        record,
+        scripts: [],
+        evaluation: {
+          status: "lapsed",
+          reason: "inventoryUnavailable",
+          changedScripts: [],
+          addedScripts: [],
+          addedCapabilities: [],
+        },
+      };
+      // NOT cached: the failure may be transient (a backend call that timed out),
+      // and caching it would make one bad moment stick for the whole session.
+      return value;
+    }
+  }
   const evaluation = await evaluateWorkbookTrust(record, scripts);
   const value: CurrentWorkbookTrust = {
     key: identity.key,
@@ -587,12 +625,20 @@ export async function evaluateCurrentWorkbookTrust(
  * the exact source of every local script (so an edit lapses trust and can be
  * diffed) and the capability set those scripts DECLARE — as a baseline for
  * escalation detection, NOT as a grant. Returns false when the workbook has no
- * path to bind to.
+ * path to bind to, or when its code could not be inventoried — a baseline taken
+ * from an inventory that failed would record "this workbook has no code" and
+ * silently trust whatever the inventory could not see.
  */
 export async function trustCurrentWorkbook(): Promise<boolean> {
   const identity = await currentWorkbookTrustKey();
   if (!identity) return false;
-  const scripts = await collectLocalWorkbookScripts();
+  let scripts: TrustableScript[];
+  try {
+    scripts = await collectLocalWorkbookScripts();
+  } catch (e) {
+    console.warn("[scriptSecurity] refusing to record trust — code inventory failed:", e);
+    return false;
+  }
   const hashed: ConsentedScript[] = [];
   for (const script of scripts) {
     hashed.push({
@@ -1073,6 +1119,17 @@ export function formatSourceDiff(oldSource: string, newSource: string): string {
  *  "approve again", always what changed. */
 export function describeTrustLapse(evaluation: WorkbookTrustEvaluation): string {
   if (evaluation.status !== "lapsed") return "";
+  if (evaluation.reason === "inventoryUnavailable") {
+    // Nothing changed as far as we know — we could not look. Say exactly that,
+    // rather than the generic "its code changed", which would be a claim we
+    // cannot support and would send the user hunting for a diff that is not there.
+    return (
+      `This workbook was trusted, but Calcula could not read its scripts to ` +
+      `check whether they changed.\n\n` +
+      `Trust only holds while the code is verifiably the code you approved, so ` +
+      `you are being asked instead.`
+    );
+  }
   const parts: string[] = [];
   if (evaluation.addedScripts.length > 0) {
     parts.push(

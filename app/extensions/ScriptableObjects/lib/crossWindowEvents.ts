@@ -14,6 +14,15 @@ import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptab
 export const ObjectScriptEditorEvents = {
   /** Main -> Editor: initial script ID to open (passed when opening editor) */
   OPEN_WITH_SCRIPT: "objscript:open-with-script",
+  /**
+   * Main -> Editor: an AI-authored DRAFT to review. Deliberately separate from
+   * OPEN_WITH_SCRIPT: that channel carries the id of a SAVED script the editor
+   * resolves through `loadAllObjectScripts`, and a draft has no saved record to
+   * resolve — reusing it would show "no script" instead of the code to review.
+   * The whole draft travels on the wire because the editor window cannot reach
+   * the backend's process-local draft store.
+   */
+  OPEN_WITH_DRAFT: "objscript:open-with-draft",
   /** Editor -> Main: request to save, register, and mount a script */
   SAVE_AND_APPLY: "objscript:save-and-apply",
   /** Editor -> Main: request to register a new script */
@@ -36,6 +45,33 @@ export const ObjectScriptEditorEvents = {
 
 export interface OpenWithScriptPayload {
   scriptId?: string;
+}
+
+/**
+ * One AI-authored object script awaiting human review.
+ *
+ * Mirrors `ScriptDraft` in `app/src-tauri/src/mcp/drafts.rs` field for field
+ * (Rust snake_case -> TypeScript camelCase via the struct-level serde rename).
+ * `mounted` is on the wire on purpose: the backend states the invariant rather
+ * than leaving every consumer to assume it, and this side asserts it.
+ */
+export interface ScriptDraft {
+  /** Draft id — NOT an object-script id. The editor assigns that on save. */
+  id: string;
+  name: string;
+  objectType: string;
+  instanceId: string | null;
+  description: string | null;
+  source: string;
+  /** Capability ids the source declares via `// @capability` pragmas. */
+  declaredCapabilities: string[];
+  createdAt: string;
+  /** Always false. A draft that claims otherwise is not a draft. */
+  mounted: boolean;
+}
+
+export interface OpenWithDraftPayload {
+  draft: ScriptDraft;
 }
 
 export interface SaveAndApplyPayload {
@@ -75,6 +111,10 @@ export async function emitOpenWithScript(scriptId?: string): Promise<void> {
   await emitTauriEvent(ObjectScriptEditorEvents.OPEN_WITH_SCRIPT, { scriptId } satisfies OpenWithScriptPayload);
 }
 
+export async function emitOpenWithDraft(draft: ScriptDraft): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.OPEN_WITH_DRAFT, { draft } satisfies OpenWithDraftPayload);
+}
+
 export async function emitSaveAndApply(script: ObjectScriptDefinition): Promise<void> {
   await emitTauriEvent(ObjectScriptEditorEvents.SAVE_AND_APPLY, { script } satisfies SaveAndApplyPayload);
 }
@@ -111,6 +151,12 @@ export function onOpenWithScript(
   callback: (payload: OpenWithScriptPayload) => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent<OpenWithScriptPayload>(ObjectScriptEditorEvents.OPEN_WITH_SCRIPT, callback);
+}
+
+export function onOpenWithDraft(
+  callback: (payload: OpenWithDraftPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<OpenWithDraftPayload>(ObjectScriptEditorEvents.OPEN_WITH_DRAFT, callback);
 }
 
 export function onSaveAndApply(

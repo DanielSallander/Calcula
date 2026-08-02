@@ -27,8 +27,11 @@ import {
 import {
   exportPackageHtml,
   resetSubscription,
+  getWritebackRebuildSkips,
+  WRITEBACK_INDEX_CHANGED_EVENT,
   type Subscription,
   type SubscriptionTrustInfo,
+  type WritebackRebuildSkip,
 } from "@api/distribution";
 import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
@@ -52,6 +55,56 @@ function otherScopeLabels(t: SubscriptionTrustInfo): string {
     .map((p) => p.scopeLabel)
     .join(", ");
 }
+
+/**
+ * How each `WritebackRebuildSkip.reason` reads.
+ *
+ * The point of this table is a distinction the pane could not previously draw:
+ * "this package declares no writeback" and "this package's writeback regions
+ * could not be read, so its form protections are NOT in force" both produced an
+ * empty index and therefore an identical, silent screen. A subscriber typing
+ * into a form whose deadline, value types and required-field rules were never
+ * loaded deserves to be told.
+ *
+ * Same shape as TRUST_NOTICE, for the same reason: a reason string this build
+ * has no row for must render as a warning, never as nothing.
+ */
+const WRITEBACK_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: string }> = {
+  // Not a failure: the workbook-open rebuild walks local registries inline and
+  // hands HTTP ones to a worker, so this is the normal state for a second or two.
+  deferred: {
+    tone: "warn",
+    text: "Loading this package's form rules from its registry...",
+  },
+  unreachable: {
+    tone: "danger",
+    text:
+      "Registry unreachable, so this package's form rules could not be read. " +
+      "Its deadlines, required fields and value checks are NOT in force.",
+  },
+  notPinned: {
+    tone: "danger",
+    text:
+      "This computer has never agreed to trust this package's publisher, so its " +
+      "form rules are not loaded. Subscribe to it once to activate them.",
+  },
+  publisherChanged: {
+    tone: "danger",
+    text:
+      "The publisher's signing key does not match the one this computer trusted. " +
+      "Calcula is refusing to load this package's form rules.",
+  },
+  badManifest: {
+    tone: "danger",
+    text: "This package's manifest is damaged, so its form rules could not be read.",
+  },
+  appTooOld: {
+    tone: "danger",
+    text: "This package needs a newer version of Calcula; its form rules were not loaded.",
+  },
+};
+
+const skipKey = (s: WritebackRebuildSkip) => `${s.packageName}@${s.registryUrl}`;
 
 const TRUST_NOTICE: Record<
   SubscriptionTrustInfo["trustStatus"],
@@ -111,6 +164,7 @@ const TRUST_NOTICE: Record<
 export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [trust, setTrust] = useState<Record<string, SubscriptionTrustInfo>>({});
+  const [skips, setSkips] = useState<Record<string, WritebackRebuildSkip>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
@@ -165,6 +219,15 @@ export function SubscriptionManagerPane(): React.ReactElement {
       } catch {
         setTrust({});
       }
+      // Which subscriptions' writeback regions the last index rebuild could NOT
+      // install. Reported separately and non-fatally for the same reason trust
+      // is: a failure here must not hide the subscription list itself.
+      try {
+        const rows = await getWritebackRebuildSkips();
+        setSkips(Object.fromEntries(rows.map((r) => [skipKey(r), r])));
+      } catch {
+        setSkips({});
+      }
     } catch (e: unknown) {
       setError(String(e));
     } finally {
@@ -176,7 +239,14 @@ export function SubscriptionManagerPane(): React.ReactElement {
     refresh();
     // Re-list when the workbook changes (pull / refresh / detach touch subscriptions).
     const unsub = onAppEvent(AppEvents.SHEET_CHANGED, refresh);
-    return unsub;
+    // ...and when the writeback index is rebuilt. Workbook open defers HTTP
+    // registries to a worker, so the first paint of this pane legitimately shows
+    // `deferred`; this is how those rows resolve to their real state.
+    const unsubIndex = onAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, refresh);
+    return () => {
+      unsub();
+      unsubIndex();
+    };
   }, [refresh]);
 
   // Reset a subscription's sheets to the pristine published content. The
@@ -292,6 +362,27 @@ export function SubscriptionManagerPane(): React.ReactElement {
                   return (
                     <div style={notice.tone === "danger" ? styles.trustDanger : styles.trustWarn}>
                       {notice.text(t)}
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  const skip = skips[subKey(s)];
+                  if (!skip) return null;
+                  const notice = WRITEBACK_SKIP_NOTICE[skip.reason];
+                  // Unknown reason: warn rather than render nothing. Silence here
+                  // means "your form rules are loaded", which is the one thing a
+                  // skip record proves is not true.
+                  const text =
+                    notice?.text ??
+                    `This package's writeback form rules were not loaded ('${skip.reason}'), ` +
+                      `so its deadlines and value checks are not in force.`;
+                  const tone = notice?.tone ?? "danger";
+                  return (
+                    <div
+                      style={tone === "danger" ? styles.trustDanger : styles.trustWarn}
+                      title={skip.detail || undefined}
+                    >
+                      {text}
                     </div>
                   );
                 })()}

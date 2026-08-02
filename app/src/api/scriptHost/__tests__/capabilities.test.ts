@@ -42,6 +42,36 @@ describe("describeCapability (C7 transparency UI label source)", () => {
   it("falls back to the id for an unknown capability", () => {
     expect(describeCapability("filesystem" as never)).toBe("filesystem");
   });
+
+  // --------------------------------------------------------------------------
+  // Two descriptions that pointed at the wrong risk
+  // --------------------------------------------------------------------------
+
+  it("`storage` names the WORKBOOK, because that is where the data goes", () => {
+    // The store is `.calcula/script-data/<scriptId>.json` in the .cala virtual
+    // filesystem (host.ts scriptStoragePath). "store data on this device" was
+    // wrong in the direction that misleads: a user who approves that and then
+    // mails the file has shared whatever the script kept. The consequence — it
+    // TRAVELS — is the whole point of the sentence.
+    const text = describeCapability("storage");
+    expect(text).toMatch(/workbook/i);
+    expect(text, "the consequence of living in the file must be stated").toMatch(
+      /travels with the file|share/i,
+    );
+    expect(text.toLowerCase(), "the store is not on the device, it is in the file").not.toContain(
+      "on this device",
+    );
+  });
+
+  it("`formula.udf` describes BEING a formula, not reading the sheet through one", () => {
+    // "evaluate worksheet formulas" reads as "it gets to run formulas against
+    // your data". The reverse is what is being asked for, and the consequence a
+    // user needs is that its code then runs on every recalculation.
+    const text = describeCapability("formula.udf");
+    expect(text).toMatch(/your cells can call|formula functions/i);
+    expect(text, "the recalculation consequence must be stated").toMatch(/recalculat/i);
+    expect(text.toLowerCase()).not.toContain("evaluate worksheet formulas");
+  });
 });
 
 describe("parseDeclaredCapabilities", () => {

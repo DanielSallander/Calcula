@@ -47,7 +47,7 @@ import {
   invalidateSlicerBitmaps,
   sanitizeSandboxGeometry,
 } from "./renderCache";
-import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
+import { ALLOWLIST, thinAppEventForScripts, thinWorkbookPathDetail } from "./allowlist";
 import type { CapabilityId } from "./capabilityIds";
 import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
@@ -175,6 +175,24 @@ async function getLib() {
   }
   return _libModule;
 }
+
+/**
+ * The refusal a RESTRICTED script gets for naming a sheet other than the one on
+ * screen. ONE exported constant, because it is a user-facing statement of what
+ * the tier clamps to and it has to agree with the `sheet.*` ALLOWLIST desc rows
+ * — which a test pins.
+ *
+ * It says "the sheet you are looking at" and NOT "its own sheet", because there
+ * is no such thing to point at. `sheet` is a PRIMITIVE object type: one script
+ * per workbook, `instanceId` always null, and its own scaffold opens with
+ * "Sheet Script (applies to ALL sheets)". Every other object type reaches the
+ * same `sheet.*` family. So the clamp the host implements — an omitted
+ * sheetIndex resolving to the active sheet, a named other sheet refused — is
+ * the ACTIVE sheet, and that is the only clamp it could implement.
+ */
+export const RESTRICTED_SHEET_CLAMP_MESSAGE =
+  "Restricted scripts can only reach the sheet you are looking at; " +
+  "naming another sheet requires unlocked access";
 
 // ============================================================================
 // Workbook file lifecycle (G1): rate limit + Before-Save re-entrancy guard
@@ -2230,7 +2248,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         const active = await lib.getActiveSheet();
         if (sheetIndex !== active) {
           if (handle.tier !== "unlocked") {
-            throw new BrokerError("PermissionDenied", "Restricted sheet scripts can only access their own sheet");
+            throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
           }
           const results = await lib.getWatchCells([[sheetIndex, row, col]]);
           return results[0]?.display ?? "";
@@ -2331,7 +2349,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         const active = await lib.getActiveSheet();
         if (sheetIndex !== active) {
           if (handle.tier !== "unlocked") {
-            throw new BrokerError("PermissionDenied", "Restricted sheet scripts can only access their own sheet");
+            throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
           }
           offSheet = true;
         }
@@ -3882,7 +3900,7 @@ async function clampSheetIndex(
   if (sheetIndex === undefined || sheetIndex === null) return undefined;
   const active = await lib.getActiveSheet();
   if (sheetIndex !== active && handle.tier !== "unlocked") {
-    throw new BrokerError("PermissionDenied", "Restricted sheet scripts can only access their own sheet");
+    throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
   }
   return sheetIndex;
 }
@@ -4732,8 +4750,15 @@ export async function callWorkbookBeforeLifecycle(
     );
     return null;
   }
+  // THE DETAIL IS THINNED BEFORE IT CROSSES. `LifecycleDetail.path` is the full
+  // save path — Core hands it to every guard because trusted extension guards
+  // legitimately need it, but a sandboxed onBeforeSave handler must see only the
+  // NAME, exactly like api.workbookFileName and the AFTER_OPEN/AFTER_SAVE
+  // deliveries. onBeforeClose carries no path today; reducing both keeps the
+  // handler contract one shape and means a path added to the close detail later
+  // is dropped by default instead of leaking by default.
   return raceLifecycleVerdict(
-    () => relayMethodCall(mw, LIFECYCLE_RELAY[action], [detail]),
+    () => relayMethodCall(mw, LIFECYCLE_RELAY[action], [thinWorkbookPathDetail(detail)]),
     mw.definition.name,
     action,
   );
@@ -4808,6 +4833,31 @@ function addForwarder(mw: MountedWorker, hook: string, unsub: CleanupFn): void {
   mw.forwarders.set(hook, unsub);
 }
 
+/**
+ * Drop the cell changes a RESTRICTED script may not be shown: the ones that
+ * happened on a sheet other than the one on screen.
+ *
+ * THE PUSH DOOR HAD TO BE CLOSED TOO. `sheet.getCellValue` refuses a restricted
+ * script that names another sheet, but `sheet.onDataChange` / `cell.onEdit`
+ * forwarded the WHOLE CELL_VALUES_CHANGED array — every change's row, col,
+ * oldValue, newValue and formula — including changes on sheets the script could
+ * never have asked for. A cross-sheet fill, a table refresh or an unlocked
+ * script's write on another sheet therefore delivered exactly the contents the
+ * pull door refuses. The tier is a statement about what a script may SEE, not
+ * only about what it may ask for, so it is enforced on delivery as well.
+ *
+ * Unlocked scripts keep the full stream (they may read any sheet anyway).
+ * `range.onChange` / `namedRange.onChange` already filter by their object's
+ * sheet; this is the same rule for the two hooks that had no object to filter by.
+ */
+function clampChangesToTier<T extends { sheetIndex?: number }>(
+  mw: MountedWorker,
+  changes: T[],
+): T[] {
+  if (mw.handle.tier === "unlocked") return changes;
+  return changes.filter((c) => (c.sheetIndex ?? activeSheetIndexForEvents) === activeSheetIndexForEvents);
+}
+
 function wireAppEventForwarder(mw: MountedWorker, hook: string, eventName: string): void {
   if (mw.forwarders.has(hook)) return;
   // Payloads crossing into the sandbox are THINNED for events whose full
@@ -4878,9 +4928,12 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
   switch (`${objectType}.${hook}`) {
     // ---- workbook ----
     case "workbook.onOpen":
+      // THINNED, like every other sandboxed delivery. The raw AFTER_OPEN detail
+      // is `{ path }` — the user's full folder layout — and this forwarder was
+      // the one that handed it over raw.
       addForwarder(mw, hook, onAppEvent(AppEvents.AFTER_OPEN, (d) => {
         pushWorkbookMirror(mw);
-        forwardEvent(mw, hook, d);
+        forwardEvent(mw, hook, thinAppEventForScripts(AppEvents.AFTER_OPEN, d));
       }));
       break;
     // onBeforeSave / onBeforeClose are REPLYING hooks (B5): no event forwarder —
@@ -4944,8 +4997,18 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     }
     case "sheet.onDataChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes?: unknown[] };
-        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, changes: d.changes ?? [] });
+        const d = detail as { changes?: Array<{ sheetIndex?: number } & Record<string, unknown>> };
+        // Per-change sheetIndex is CARRIED, not flattened. The top-level
+        // `sheetIndex` used to be the only sheet in the payload, so a cross-sheet
+        // change (a fill that spilled, a table refresh on another sheet) arrived
+        // stamped with the ACTIVE sheet's index — a script acting on
+        // `{ sheetIndex, change.row, change.col }` then read or wrote the wrong
+        // sheet's cell and had no way to tell.
+        const changes = clampChangesToTier(mw, d.changes ?? []).map((c) => ({
+          ...c,
+          sheetIndex: c.sheetIndex ?? activeSheetIndexForEvents,
+        }));
+        forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, changes });
       }));
       break;
 
@@ -4954,7 +5017,7 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
         const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; oldValue?: string; newValue: string; formula?: string | null }> };
         forwardEvent(mw, hook, {
-          changes: (d.changes ?? []).map((change) => ({
+          changes: clampChangesToTier(mw, d.changes ?? []).map((change) => ({
             row: change.row,
             col: change.col,
             // Per-change sheet when the emitter tagged a cross-sheet edit; else the

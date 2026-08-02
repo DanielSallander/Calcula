@@ -698,6 +698,22 @@ pub fn remove_script_jobs(script_id: &str) {
     inner.jobs.retain(|j| j.script_id != script_id);
 }
 
+/// The workbook's script-security level as the FIRING LOOP must read it.
+///
+/// A POISONED lock reads as `"disabled"`, not `"prompt"`. The only test the
+/// caller performs is `== "disabled"`, so mapping the unreadable case to
+/// `"prompt"` answered an unanswerable security question in the permissive
+/// direction: every scheduled job would keep firing on a machine whose
+/// script-security setting can no longer be read. `check_script_security`
+/// (scripting/commands.rs) already propagates the same poison as an `Err`; the
+/// firing loop must not be softer than the run gate.
+pub(crate) fn scheduler_security_level(level: &Mutex<String>) -> String {
+    level
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_else(|_| "disabled".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // The single multiplexed Tauri command
 // ---------------------------------------------------------------------------
@@ -859,16 +875,24 @@ pub fn script_scheduler(
                 let mut inner = scheduler().lock().unwrap();
                 cancel_job(&mut inner, job_id, request.script_id.as_deref())
             };
-            if removed {
-                record_capability_call(
-                    &app_state.audit_log,
-                    SCHEDULE_CAPABILITY,
-                    request.script_id.as_deref().unwrap_or(""),
-                    true,
-                    Some(&format!("cancelled job {}", job_id)),
-                    None,
-                );
-            }
+            // Recorded UNCONDITIONALLY. `cap.scheduleCancel` is in the broker's
+            // SERVER_AUDITED_METHODS set, so the frontend deliberately does not
+            // write its own row for it — this gate is the only writer. Guarding
+            // the record on `removed` therefore made a cancel that named a
+            // missing job, or another script's job, audited NOWHERE: the exact
+            // shape of probing that an audit trail exists to show.
+            record_capability_call(
+                &app_state.audit_log,
+                SCHEDULE_CAPABILITY,
+                request.script_id.as_deref().unwrap_or(""),
+                removed,
+                Some(&if removed {
+                    format!("cancelled job {}", job_id)
+                } else {
+                    format!("cancel refused: no job {} owned by this script", job_id)
+                }),
+                None,
+            );
             Ok(serde_json::json!({ "cancelled": removed }))
         }
         "setEnabled" => {
@@ -921,11 +945,7 @@ pub fn script_scheduler(
         // ---- The firing loop (renderer-ticked, Rust-authorized) -----------
         "due" => {
             // The global off switch outranks every stored consent.
-            let level = script_state
-                .security_level
-                .lock()
-                .map(|l| l.clone())
-                .unwrap_or_else(|_| "prompt".to_string());
+            let level = scheduler_security_level(&script_state.security_level);
             if level == "disabled" {
                 return Ok(serde_json::json!([]));
             }
@@ -1028,6 +1048,31 @@ mod tests {
 
     const GRANTED: &dyn Fn(&str) -> bool = &|_: &str| true;
     const REVOKED: &dyn Fn(&str) -> bool = &|_: &str| false;
+
+    // --- The poison direction of the global off switch ---------------------
+
+    /// An UNREADABLE script-security setting must stop the firing loop, not let
+    /// it through. The `"due"` arm's only test is `level == "disabled"`, so the
+    /// old `unwrap_or_else(|_| "prompt")` meant a poisoned lock kept every
+    /// scheduled job firing.
+    #[test]
+    fn a_poisoned_security_level_reads_as_disabled() {
+        let level = Mutex::new("trusted".to_string());
+        assert_eq!(scheduler_security_level(&level), "trusted");
+
+        // Poison it the only way a Mutex can be poisoned: panic while holding it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = level.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        assert!(level.is_poisoned(), "the mutex must actually be poisoned");
+
+        assert_eq!(
+            scheduler_security_level(&level),
+            "disabled",
+            "an unreadable security setting must DISARM the scheduler, never arm it"
+        );
+    }
 
     /// The job registry is a process-global singleton, so the tests that drive
     /// it through the REAL persistence entry points have to run one at a time.

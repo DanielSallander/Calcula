@@ -63,6 +63,10 @@ jobs:
       # pivot-engine / script-engine). pivot-bench is excluded from the workspace
       # (out-of-repo path dep), so --workspace skips it.
       - run: cargo test --workspace
-      # Compile-only gate for the grid-scale criterion bench (no run, no linker
-      # env needed): keeps grid_engine.rs + its engine API in sync.
-      - run: cargo check -p engine --benches
+      # Compile-only gate for EVERY criterion bench in the workspace (no run, no
+      # linker env needed). `--workspace` is load-bearing: this step used to be
+      # `-p engine --benches`, which gated grid_engine.rs only — so
+      # pivot-engine/benches/pivot_calculations.rs rotted into 24 compile errors
+      # (integer literals where PivotId became an EntityId newtype) completely
+      # unseen, because benches are outside `cargo check` and `cargo test`.
+      - run: cargo check --workspace --benches

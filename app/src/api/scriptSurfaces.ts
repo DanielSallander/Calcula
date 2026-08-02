@@ -88,7 +88,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Object scripts",
     runtime: "worker-realm",
     containment:
-      "Per-script hardened worker; no DOM/Tauri; every privileged call broker-mediated. The R19 ceiling is AUTHOR-declared (source pragmas / package manifest), so any capability in the vocabulary is reachable once declared, consented and granted. Reading the workbook is governed by the TIER, not by a capability: a restricted script reads and writes its own sheet, an unlocked one any sheet — which is why `grid.read` is absent from this row and present on the sandboxed-extension row. Do not read that absence as 'an object script cannot see your cells'; read it as 'the question is answered by the tier and by who wrote the script'",
+      "Per-script hardened worker; no DOM/Tauri; every privileged call broker-mediated. The R19 ceiling is AUTHOR-declared (source pragmas / package manifest), so any capability in the vocabulary is reachable once declared, consented and granted. Reading the workbook is governed by the TIER, not by a capability: a restricted script reads and writes the sheet currently shown (there is no per-script sheet binding — `sheet` scripts are workbook-wide, and an omitted sheet index resolves to the active sheet), an unlocked one any sheet — which is why `grid.read` is absent from this row and present on the sandboxed-extension row. Do not read that absence as 'an object script cannot see your cells'; read it as 'the question is answered by the tier and by who wrote the script'",
     // Author-declared ceiling => everything the ALLOWLIST can gate. bi.sql is
     // part of that (cap.biSql, tier "restricted"): raw read-only SQL against a
     // connection's database is a HIGHER-trust superset of bi.query, so it must
@@ -344,8 +344,8 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "MCP tools",
     runtime: "rust-quickjs",
     containment:
-      "First-party Rust tool bodies; the execute_script tool runs AGENT-authored JS in the same isolated QuickJS interpreter as one-off scripts (cloned grid state, grid-only — no model provider, no network / filesystem / Tauri), writes replay through the normal undo + recalc pipeline, and sensitive commands stay main-window-guarded",
-    capabilities: [],
+      "First-party Rust tool bodies; the execute_script tool runs AGENT-authored JS in the same isolated QuickJS interpreter as one-off scripts (cloned grid state, no network / filesystem / Tauri), writes replay through the normal undo + recalc pipeline, and sensitive commands stay main-window-guarded. It is NOT grid-only: a ModelDataProvider is injected (mcp/tools.rs run_script_with_model) with a host-set `bi.query` grant for the run, so agent code can READ the BI model — `model.query` / `model.info` / `model.value` work, `model.sql` throws. That reach is bounded by the AI access tier, by the provider's per-call capability re-check, and by the model's own row-level security; it is not bounded by a consent prompt, because this surface has none",
+    capabilities: ["bi.query"],
     gate: "Window-label guard + AI access ceiling (check_mcp_access: read / mutate / script) + session approval (check_script_security) for the script tier; mutating tools audited",
     // execute_script hands arbitrary agent-authored JS to
     // script_engine::ScriptEngine::run — imperative user (agent) code really

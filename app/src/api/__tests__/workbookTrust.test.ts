@@ -42,8 +42,14 @@ interface FakeUnit {
   provenance: "local" | "distributed";
 }
 let inventory: FakeUnit[] = [];
+/** When set, the inventory FAILS instead of returning — the case the gate used
+ *  to swallow (see "the inventory cannot be taken" below). */
+let inventoryError: Error | null = null;
 vi.mock("../codeInventory", () => ({
-  getWorkbookCodeUnits: async () => inventory,
+  getWorkbookCodeUnits: async () => {
+    if (inventoryError) throw inventoryError;
+    return inventory;
+  },
 }));
 
 import {
@@ -109,6 +115,7 @@ beforeEach(() => {
   createVirtualFileMock.mockReset();
   currentPath = "C:\\Books\\Q4 Report.cala";
   inventory = [localUnit(SCRIPT_SRC)];
+  inventoryError = null;
   invalidateTrustCache();
   backend("needsApproval");
 });
@@ -467,5 +474,86 @@ describe("store robustness", () => {
     );
     invalidateTrustCache();
     expect((await evaluateCurrentWorkbookTrust())?.evaluation.status).toBe("untrusted");
+  });
+});
+
+// ===========================================================================
+// The inventory itself failing — the ASYMMETRY that made the gate fail OPEN
+// ===========================================================================
+//
+// The store side of this module already failed closed (see "store robustness"
+// above). The INVENTORY side did the opposite: collectLocalWorkbookScripts
+// caught every error and returned `[]`, and `[]` is not "no code" — it is "the
+// same code as every stored record", because a REMOVED script never lapses
+// trust (less code cannot be more dangerous). So a trusted workbook whose
+// inventory failed evaluated as `trusted`, and ensureScriptsAllowed granted the
+// session approval with no human in the loop.
+//
+// Trust is a CHANGE-DETECTION gate. "I could not look" must lapse it.
+describe("the inventory cannot be taken", () => {
+  const boom = (): Error => new Error("codeInventory: backend call timed out");
+
+  it("LAPSES a trusted workbook instead of reporting it trusted", async () => {
+    await trustCurrentWorkbook();
+    invalidateTrustCache();
+    expect((await evaluateCurrentWorkbookTrust())?.evaluation.status).toBe("trusted");
+
+    inventoryError = boom();
+    invalidateTrustCache();
+    const trust = await evaluateCurrentWorkbookTrust();
+    expect(trust?.evaluation.status).toBe("lapsed");
+    expect(trust?.evaluation.reason).toBe("inventoryUnavailable");
+  });
+
+  it("ASKS the user rather than auto-granting the session approval", async () => {
+    // The security property, stated as the security property: the gate must
+    // reach a human, and must NOT hand out grant_script_session_approval on its
+    // own the way it did when the empty inventory read as "nothing changed".
+    await trustCurrentWorkbook();
+    inventoryError = boom();
+    invalidateTrustCache();
+    invokeMock.mockClear();
+    backend("needsApproval");
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    expect(await ensureScriptsAllowed("Run scripts?")).toBe(false);
+    expect(confirm, "the user must be asked").toHaveBeenCalled();
+    expect(
+      invokeMock.mock.calls.map((c) => c[0]),
+      "no session approval may be granted without an answer",
+    ).not.toContain("grant_script_session_approval");
+  });
+
+  it("explains the lapse honestly — it does not claim the code changed", async () => {
+    await trustCurrentWorkbook();
+    inventoryError = boom();
+    invalidateTrustCache();
+    const trust = await evaluateCurrentWorkbookTrust();
+    const message = describeTrustLapse(trust!.evaluation);
+    expect(message).toContain("could not read its scripts");
+    expect(
+      message,
+      "we do not know that anything changed — saying so would send the user hunting for a diff that is not there",
+    ).not.toContain("its code changed");
+  });
+
+  it("REFUSES to record trust from an inventory that failed", async () => {
+    // A baseline taken from a failed inventory says "this workbook has no code"
+    // and would silently trust whatever the inventory could not see.
+    inventoryError = boom();
+    expect(await trustCurrentWorkbook()).toBe(false);
+    expect(getWorkbookTrustRecord(KEY)?.runTrust ?? null).toBeNull();
+  });
+
+  it("does NOT cache the failure — a transient error must not stick all session", async () => {
+    await trustCurrentWorkbook();
+    inventoryError = boom();
+    invalidateTrustCache();
+    expect((await evaluateCurrentWorkbookTrust())?.evaluation.status).toBe("lapsed");
+
+    inventoryError = null;
+    // No invalidateTrustCache(): the failed evaluation must never have been
+    // cached in the first place.
+    expect((await evaluateCurrentWorkbookTrust())?.evaluation.status).toBe("trusted");
   });
 });

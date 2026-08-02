@@ -45,6 +45,7 @@ import {
   renderWorkbookPdf,
   resetPdfRenderer,
 } from "../../printService";
+import { RESTRICTED_SHEET_CLAMP_MESSAGE } from "../host";
 
 const REPO = nodePath.resolve(__dirname, "../../../../..");
 const readRepo = (rel: string) => nodeFs.readFileSync(nodePath.join(REPO, rel), "utf8");
@@ -235,7 +236,7 @@ describe("explicit formula read/write carries a reference style", () => {
     expect(hostSrc).not.toContain("getReferenceStyle(");
   });
 
-  it("clamps the sheet-scoped write to the script's own sheet BEFORE writing", () => {
+  it("clamps the sheet-scoped write to the sheet on screen BEFORE writing", () => {
     const caseBody = hostSrc.slice(
       hostSrc.indexOf('case "sheet.setCellFormula"'),
       hostSrc.indexOf('case "sheet.setRangeFormat"'),
@@ -244,6 +245,69 @@ describe("explicit formula read/write carries a reference style", () => {
     const writeAt = caseBody.indexOf("writeCellFormula");
     expect(clampAt).toBeGreaterThan(0);
     expect(clampAt, "the tier check must run before the write").toBeLessThan(writeAt);
+  });
+});
+
+// ============================================================================
+// 2b. The restricted clamp SAYS what it DOES
+// ============================================================================
+//
+// The `sheet.*` consent rows advertised "clamped to the bound sheet" and the
+// refusal said "Restricted sheet scripts can only access their own sheet".
+// Neither describes anything that exists. `sheet` is a PRIMITIVE object type —
+// one script per workbook, `instanceId` always null, and its own scaffold opens
+// with "Sheet Script (applies to ALL sheets)" — and every OTHER object type
+// reaches the same `sheet.*` family. The clamp the host implements is the ACTIVE
+// sheet: an omitted index resolves to it and naming another is refused.
+//
+// The gap between the two is not cosmetic. A reader of the old text believed a
+// restricted script was fenced into one particular sheet forever; what it is
+// actually fenced into is "whatever the user is looking at right now", which is
+// a real guarantee but a different one, and it is the one the user must be able
+// to reason about.
+
+describe("the restricted sheet clamp is described accurately", () => {
+  it("is implemented against the ACTIVE sheet, and only that", () => {
+    const clamp = hostSrc.slice(
+      hostSrc.indexOf("async function clampSheetIndex"),
+      hostSrc.indexOf("async function withScriptUndoBatch"),
+    );
+    expect(clamp).toContain("lib.getActiveSheet()");
+    // Nothing about the mount definition is consulted — there is no binding.
+    expect(clamp).not.toContain("definition.instanceId");
+    expect(clamp).not.toContain("boundSheet");
+  });
+
+  it("no consent row claims a per-script sheet BINDING", () => {
+    for (const [method, policy] of Object.entries(ALLOWLIST)) {
+      expect(
+        policy.desc.toLowerCase(),
+        `${method}: "bound sheet" describes a binding that does not exist — ` +
+          `clampSheetIndex compares against getActiveSheet(), and a \`sheet\` script is ` +
+          `workbook-wide (instanceId is always null).`,
+      ).not.toContain("bound sheet");
+    }
+  });
+
+  it("the sheet.* rows name the sheet on screen", () => {
+    const sheetRows = Object.entries(ALLOWLIST).filter(([m]) => m.startsWith("sheet."));
+    expect(sheetRows.length, "the sheet.* family must exist").toBeGreaterThan(5);
+    for (const [method, policy] of sheetRows) {
+      expect(
+        policy.desc,
+        `${method} must say WHICH sheet a restricted script reaches, in the same words the ` +
+          `refusal uses`,
+      ).toContain("the sheet currently shown");
+    }
+  });
+
+  it("the refusal message matches the rows, and is ONE constant", () => {
+    expect(RESTRICTED_SHEET_CLAMP_MESSAGE).toContain("the sheet you are looking at");
+    expect(RESTRICTED_SHEET_CLAMP_MESSAGE.toLowerCase()).not.toContain("their own sheet");
+    // Every refusal site uses the constant — no second wording can drift in.
+    expect(hostSrc).not.toContain('"Restricted sheet scripts can only access their own sheet"');
+    const uses = hostSrc.split("RESTRICTED_SHEET_CLAMP_MESSAGE").length - 1;
+    expect(uses, "declaration + every throw site").toBeGreaterThanOrEqual(4);
   });
 });
 
@@ -579,6 +643,15 @@ describe("Application.enableEvents was removed rather than left hollow", () => {
     "app/src-tauri/src/scripting/notebook_commands.rs",
     "app/src/api/workbookScripts.ts",
     "app/extensions/ScriptNotebook/types.ts",
+    // THE WORKER-REALM HALF, which the original sweep omitted. The removal was
+    // argued as "there is no consumer, so the switch would be a lie" — and the
+    // place a reflexive re-add would land is the OBJECT-SCRIPT surface (an
+    // `application` facet on the context shim and a `case "api.enableEvents"` in
+    // the host executor), not the Rust interpreter these other files cover. A
+    // sweep that cannot see the likeliest re-add site is a sweep that will pass
+    // on the day it matters.
+    "app/src/api/scriptHost/host.ts",
+    "app/src/api/scriptHost/worker/contextShims.ts",
   ];
 
   it("no longer exists as a field, a property or a response member", () => {

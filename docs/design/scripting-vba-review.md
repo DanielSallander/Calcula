@@ -27,7 +27,13 @@ The cost of that was not the missing feature — it was that nobody knew it was 
 is a claim someone will act on six months from now without re-reading the code. If you cannot cite
 the file that makes a status true, the status is PARTIAL.
 
-Statuses below were re-verified against the code on 2026-08-01, not carried over from wave reports.
+Statuses below were re-verified against the code on **2026-08-02** (Wave K), not carried over from
+wave reports. That pass found eleven false statuses in this file and is recorded as the seventh
+correction note in §8; the rule it added is short enough to state here:
+
+> **A claim of ABSENCE decays like any other claim — faster, because nothing in the codebase moves
+> when it becomes false.** "Verified absent" without a date and the exact search that produced it is
+> not a status either.
 
 **THE AUDIT RULE (broken twice; read this before writing any status).** "Script reach" is not the
 `ALLOWLIST` table. A complete enumeration is **five** lists, and a claim derived from fewer is not a
@@ -60,6 +66,15 @@ be executed by a package-supplied button through `run_script`. Neither has a bro
 amount of list-grepping would have surfaced either. When auditing whether "code that arrives in a
 package cannot run without consent" is true, enumerate the **payload kinds a `.calp` carries** and
 name the gate for each — the table in §7.19 is that enumeration.
+
+**Wave K searched that seventh dimension deliberately and found two more of its inhabitants**
+(§7.20 dimension 5): `workbook.onOpen` and the after-save event handed sandboxed code — including an
+add-in with *zero* capabilities — the workbook's **full filesystem path**, at a site three files away
+from an explicit refusal to hand out the containing folder for that exact reason; and
+`sheet.onDataChange` / `cell.onEdit` pushed cross-sheet cell contents to restricted handles whose
+siblings filtered correctly. Neither has a broker method. If you are auditing this dimension, the
+question to ask is not "what can this code call" but **"what arrives in its inbox without it asking,
+and who decided to start it".**
 
 ---
 
@@ -319,7 +334,9 @@ and a genuine category lead over Power BI.
 |---|---|
 | Structured query (`biQuery`), read-only SQL (`biSql`), CUBE helpers (`cube.*`) | object scripts, distributed extensions, UDF bodies (bi.query only via shipped dialog), notebook (`model.*`), MCP (6 read-only BI tools) |
 | Sanitized model info (no roles/sources) | `caps.biModel.info` |
-| **Mutation of exactly 16 kinds** — measure, calcColumn, relationship, hierarchy, kpi, calcGroup, perspective, culture, scriptFunction, calculatedTable, tableVariable, context, contextColumn, metadata, dateTable, extensionData | `caps.biModel.upsert/delete` → `script_bi_model` gateway: Rust re-checked grant, 30 mutations/min, package-subscribed models rejected, rides `apply_model_edit` (user-undoable, audited, attributed `source:"script"`) |
+| **Mutation of exactly 17 kinds** — measure, calcColumn, relationship, hierarchy, kpi, calcGroup, perspective, culture, scriptFunction, calculatedTable, tableVariable, context, contextColumn, **writebackColumn**, metadata, dateTable, extensionData | `caps.biModel.upsert/delete` → `script_bi_model` gateway: Rust re-checked grant, 30 mutations/min, package-subscribed models rejected, rides `apply_model_edit` (user-undoable, audited, attributed `source:"script"`) |
+| **Read-only diagnostics** — `validate`, `validateMeasure`, `dependencyGraph`, `measureLineage`, `testQuery` | `cap.biModelValidate` / `cap.biModelLineage` (`BI_MODEL_LINEAGE_ACTIONS`, `validators.ts`) |
+| **Atomic multi-mutation** — a run of upserts/deletes landing as ONE undo step | `cap.biModelBatch` |
 | Script-fed data sources (`script:*` InMemory connectors, 500k rows/feed, server-side secret injection) | `caps.connector.register/remove` + `caps.fetch` secretHeader |
 | Model events (thinned payloads) | `BI_MODEL_CHANGED` / `BI_REFRESH_COMPLETED` via `api.onEvent` (unlocked tier only) |
 
@@ -328,13 +345,27 @@ and a genuine category lead over Power BI.
 - **RLS**: create/edit/delete security roles, switch active role ("view as") — excluded by design. ✅ Correct posture.
 - **Sources/connections/credentials** — excluded by design. ✅ Correct posture.
 - **Storage mode / refresh policies / force table refresh** — no scriptable `RefreshAll` analog (auto-refresh side-channel + own connector feeds only).
-- **Model undo/redo/atomic batch** — script mutations land one-by-one on the user's undo stack; the trusted CLI gets one-undo-step batches, scripts don't.
-- **Writeback column definition** (`writebackColumn` is not a gateway kind) — see §5.
 - **Table/column property edits, table delete/rename** (`update_table/update_column/delete_table`).
-- **Diagnostics**: validate/validate_measure, dependency_graph, measure_lineage, test_query — a
-  script authoring measures must mutate-and-parse-the-error instead of pre-validating.
-- **Notebook/MCP/one-off mutation**: notebook `model.*` is read-only by contract (documented
-  anti-goal); `run_script`/MCP `execute_script` construct with `model_provider: None` so even reads throw there.
+- **RLS role authoring and "view as"**, **sources/connections/credentials** — as above, by design.
+- **Notebook/one-off mutation**: notebook `model.*` is read-only by contract (a documented
+  anti-goal, not a gap); the one-off / `run_script` surface builds its session with
+  `model_provider: None`, so even a read throws there.
+  **CORRECTED 2026-08-02 — MCP is NOT in that sentence.** This bullet used to read
+  "`run_script`/MCP `execute_script` construct with `model_provider: None` so even reads throw
+  there", and that was false for MCP for the whole life of the document: `mcp/tools.rs`
+  `run_script_with_model` builds `NotebookSession::new(Some(HostModelProvider), …)` with a host-set
+  `bi.query` grant, so agent-authored `execute_script` code **can read the BI model**
+  (`model.query` / `model.info` / `model.value`; `model.sql` throws, because `bi.sql` is not in the
+  grant). §7.13 of this same document already said so, so the document contradicted itself. The
+  reach is bounded — `check_mcp_access` at the script tier, `bi.query` only, `model_info`
+  sanitized, row-level security still applied — but it is reach, and it is *not* consent-gated,
+  because this surface has no prompt. See the seventh correction note in §8, and §7.20.
+
+Three former entries have been REMOVED from this list rather than edited, because they shipped and
+the paragraph below already retracted them: writeback-column definition (`writebackColumn` **is** a
+gateway kind), model diagnostics (`cap.biModelValidate` / `cap.biModelLineage`), and atomic batch
+(`cap.biModelBatch`). Leaving a retraction in a trailing paragraph while the bullets above still
+assert the gap is how a reader ends up rebuilding something that exists.
 
 ### Governance inconsistency found (fix regardless of roadmap)
 
@@ -348,25 +379,48 @@ grant no longer means "more" in a notebook cell than in an object script.
 `refreshEverySecs` is now adopted by the persistent scheduler as a `surface: "connector"` job
 (`api/scriptConnectors.ts:157`), so the two schedulers agree on one 30s floor instead of two.
 
-**Still open in §4:** storage mode / refresh policies / force table refresh (no scriptable
-`RefreshAll`), table/column property edits and table delete/rename, writeback column definition as a
-gateway kind, and notebook `model.*` remaining read-only by contract (a documented anti-goal, not a
-gap). Model diagnostics are no longer in this list — `cap.biModelValidate` and `cap.biModelLineage`
-ship, and script mutations can now be batched into one undo step with `cap.biModelBatch`.
+**Still open in §4 (re-derived from source 2026-08-02):** storage mode / refresh policies / force
+table refresh (no scriptable `RefreshAll`), and table/column property edits + table delete/rename.
+That is the whole list. Notebook `model.*` staying read-only is a documented anti-goal, not a gap.
+Model diagnostics, atomic batch and `writebackColumn` are all SHIPPED and have been removed from the
+bullets above — `BI_MODEL_SCRIPTABLE_KINDS` (`app/src/api/scriptHost/validators.ts`) carries
+seventeen kinds including `writebackColumn`, mirroring `GATEWAY_MUTABLE_KINDS` in
+`app/src-tauri/src/bi/model_editor.rs`.
 
 ---
 
 ## 5. .calp distribution + writeback — script coverage answer
 
-> **CLOSING STATUS (2026-08-01): "zero" became "half".** The `distribution.writeback` capability
-> ships the COLLECTION loop on both sides — `cap.writebackListRegions`, `getLayer`, `saveDraft`,
-> `preview`, `submit` for contributors, and `listSubmissions`, `review` for publishers (gated on
-> Ed25519 possession), Rust-enforced in `scripting/writeback_gateway.rs` with grant re-check, rate
-> buckets and audit. Numbered items 1, 2, 3, 7 and 8 below are CLOSED. **Item 5 closed in Wave G**
-> (see below). **Items 4 and 6 are not:** re-verified 2026-08-01, there is still no
-> publish/pull/subscribe/refresh operation on any script surface and no package-identity read. The
-> original text is kept below because it explains WHY each hole mattered; read it with those
-> verdicts applied.
+> **CLOSING STATUS (rewritten 2026-08-02): "zero" became "all eight".** The
+> `distribution.writeback` capability ships the COLLECTION loop on both sides —
+> `cap.writebackListRegions`, `getLayer`, `saveDraft`, `preview`, `submit` for contributors, and
+> `listSubmissions`, `review` for publishers (gated on Ed25519 possession), Rust-enforced in
+> `scripting/writeback_gateway.rs` with grant re-check, rate buckets and audit. **Every one of the
+> eight numbered items below is now CLOSED.** Items 1, 2, 3, 7 and 8 closed with that capability;
+> item 5 closed in Wave G (see the note below); **items 4 and 6 closed in Wave I.**
+>
+> **CORRECTION (2026-08-02).** The paragraph this replaces said, under a "re-verified 2026-08-01"
+> stamp, that "there is still no publish/pull/subscribe/refresh operation on any script surface and
+> no package-identity read". Both halves were false when written:
+>
+> - **Item 4 — distribution automation SHIPS.** `app/src-tauri/src/scripting/distribution_gateway.rs`
+>   implements the scripted publish / pull / subscribe / refresh actions, reached through eleven
+>   `cap.pkg*` ALLOWLIST rows (`app/src/api/scriptHost/allowlist.ts`), Rust-gated with grant
+>   re-check, rate limiting and server-side audit. It is unlocked-tier only, so a script that
+>   *arrived in a package* still cannot drive distribution — which is the correct posture, not an
+>   absence.
+> - **Item 6 — package identity IS readable.** `context.package` is populated at
+>   `app/src/api/scriptHost/host.ts` and surfaced to sandboxed code by
+>   `app/src/api/scriptHost/worker/contextShims.ts`, so a script shipped in a `.calp` can ask its
+>   own package and version.
+>
+> This is the recorded process failure #1 in its purest form: the re-verification grepped the
+> ALLOWLIST for the words "publish" and "subscribe" and found nothing, because the rows are named
+> `cap.pkgPublish` / `cap.pkgSubscribe`, and because the *gateway* — the thing that would have
+> answered the question — is Rust and was never opened. See the seventh correction note in §8.
+>
+> The original numbered text is kept below because it explains WHY each hole mattered. It is
+> REVIEW-TIME text: read every item with its closing verdict attached, not as current status.
 >
 > **Item 5 — the submission-received event — CLOSED, and it is a poll wearing an event, on
 > purpose.** A true push does not exist and was not faked: a subscriber submits by *appending to a
@@ -396,40 +450,71 @@ ship, and script mutations can now be batched into one undo step with `cap.biMod
 > re-proves publisher-key possession in Rust on every call.
 >
 > Residual: up to one interval of latency (stated on the authoring surface as "expect a delay of up
-> to a minute, not an instant"), nothing is noticed while Calcula is closed, and
-> `getSubmissionWatchStatus()` still has **no UI consumer** — the disclosure exists as an API, not
-> yet as something the user can read (§8).
+> to a minute, not an instant"), and nothing is noticed while Calcula is closed. The
+> "`getSubmissionWatchStatus()` has no UI consumer" clause that used to end this paragraph is
+> STRUCK (2026-08-02): `api/codeInventory.ts` imports and calls it to report the watcher as held
+> state, which is what the transparency panel renders. The disclosure is something the user can
+> read.
 
-The host surface is 68 Tauri commands (54 calp_commands.rs + 8 inspector +
-3 registry + 3 bi_writeback) plus the trusted `@api/distribution` layer. The broker allowlist, the
-QuickJS op modules, the 21 MCP tools, the 3 scriptSafe commands, the Model Editor CLI verb set,
-and the 8-capability vocabulary contain **no publish, pull, subscribe, submit, draft, review, or
-registry operation**. Script reach is three indirect paths: `bi.query` over writeback datasets IF
-the user manually imported them as model tables, reading cells that GATHER aggregates into, and
-the thinned `BI_REFRESH_COMPLETED`/`BI_MODEL_CHANGED` events.
+> **REVIEW-TIME TEXT BELOW — the two paragraphs that followed are struck, not edited.** They read:
+> "The broker allowlist, the QuickJS op modules, the 21 MCP tools, the 3 scriptSafe commands, the
+> Model Editor CLI verb set, and the 8-capability vocabulary contain **no publish, pull, subscribe,
+> submit, draft, review, or registry operation**. Script reach is three indirect paths…" and "The
+> vision's flagship workflow — two-way data collection replacing emailed workbooks — is currently
+> **less automatable than the VBA workflow it replaces**." Both were true at review time and are
+> false now. The allowlist carries `cap.writeback*` (7 rows) and `cap.pkg*` (11 rows); the
+> capability vocabulary is no longer eight; `scripting/writeback_gateway.rs` and
+> `scripting/distribution_gateway.rs` are the Rust gates behind them. The flagship workflow is now
+> *more* automatable than the VBA workflow it replaces, and — unlike VBA — every step of it is
+> capability-gated, rate-limited and audited.
 
-The vision's flagship workflow — two-way data collection replacing emailed workbooks — is currently
-**less automatable than the VBA workflow it replaces**:
+The host surface is 70 Tauri commands plus the trusted `@api/distribution` layer. Re-counted
+2026-08-02 by `grep -c '^#\[tauri::command\]'` rather than carried forward: `calp_commands.rs` 56
+(it was cited as 54 and had already drifted before `calp_get_writeback_rebuild_skips` was added),
+`calp_inspector.rs` 8, `calp_registry.rs` 3, `bi::writeback` 3.
 
-1. **Contributors cannot script the collection loop** — no draft/save/submit API on any surface.
-2. **Worse: silent bypass.** An unlocked script's `api.setCellValue` into a writeback region skips
-   draft capture entirely (the capture lives in a commit guard run only by the interactive editor)
-   — no schema check, no validator, grid diverges from the writeback layer until reconcile.
-   Neither a usable automation path nor cleanly blocked. **This is a defect, not just a gap.**
-3. **Publishers cannot script review** — auto-approve-in-policy / notify-on-reject loops (trivial
-   VBA macros) are impossible; `calp_set_submission_state` is trusted-UI + Ed25519 only.
-4. **No publish/pull/refresh automation** — no scheduled or CI-style publishing; the CLI has zero
-   distribution verbs.
+The eight items below are the review-time finding. **All eight are closed**; each carries its
+verdict inline.
+
+1. ~~**Contributors cannot script the collection loop**~~ — **CLOSED by `distribution.writeback`.**
+   `cap.writebackListRegions` / `GetLayer` / `SaveDraft` / `Preview` / `Submit`.
+2. ~~**Worse: silent bypass.**~~ — **CLOSED in Wave C, and a SECOND instance of the same bypass
+   closed 2026-08-02.** Review-time text: "An unlocked script's `api.setCellValue` into a writeback
+   region skips draft capture entirely (the capture lives in a commit guard run only by the
+   interactive editor) — no schema check, no validator, grid diverges from the writeback layer
+   until reconcile."
+   Wave C routed the script write through the same validated draft path a keystroke takes. The
+   residual, found by this review's cross-wave pass and fixed on 2026-08-02: the QuickJS apply path
+   (`scripting/commands.rs`, `apply_script_modified_grids_core`) installed **non-active** sheets
+   wholesale — `app_grids[i] = prepared` — and consulted the writeback index for none of them, so
+   `setCellValue(row, col, value, sheetIndex)` aimed at any sheet that was not on screen landed in
+   a claimed cell with no draft behind it. Reachable from `run_script`, from the scheduler, and
+   from the MCP `execute_script` tool. The guard's own contract comment asserted that "no grid
+   write path can land a value in a claimed cell without a validated draft behind it" and did not
+   name this path, which is why it survived: **the assertion was maintained by hand, and the hand
+   missed a caller.** It now refuses the whole apply pre-mutation, atomically.
+3. ~~**Publishers cannot script review**~~ — **CLOSED by `distribution.writeback`.**
+   `cap.writebackListSubmissions` / `cap.writebackReview`, still gated on Ed25519 possession
+   re-proved in Rust on every call, so the capability buys automation and not authority.
+4. ~~**No publish/pull/refresh automation**~~ — **CLOSED in Wave I.** `scripting/distribution_gateway.rs`
+   + eleven `cap.pkg*` ALLOWLIST rows give unlocked scripts publish / pull / subscribe / refresh,
+   with a Rust grant re-check, rate limiting and server-side audit. Hardened again 2026-08-02: a
+   scripted `Pull` now runs under `PinPolicy::RequirePinned`, so automation can *use* a publisher
+   this computer already trusts but can never CREATE a trust-on-first-use pin — the pin decision
+   stays at a commit point with a human behind it.
 5. ~~**No lifecycle events for scripts**~~ — **CLOSED for submission-received** (see the boxed note
    above); `calp:scripts-pulled` remains deliberately excluded from SCRIPT_SUBSCRIBABLE_APP_EVENTS,
    and **review decisions still have no event** — deliberately, since a publisher's own click is
    not news to the publisher.
-6. **Distributed scripts get no package-awareness** — a script shipped in a .calp cannot ask its
-   package/version, so publisher-built interactive collection experiences can't be package-adaptive.
-7. **Writeback validators cannot be distributed as code** (name-only metadata; sandbox already
-   solved distributed-code trust for object scripts, validators never got it).
-8. **Writeback columns are not a bi.model gateway kind** — a script can build a whole model but not
-   its data-collection schema.
+6. ~~**Distributed scripts get no package-awareness**~~ — **CLOSED in Wave I.** `context.package`
+   (`scriptHost/host.ts`, handed across the sandbox boundary by `worker/contextShims.ts`) reports
+   the script's own package and version, so a publisher-built collection experience can adapt to
+   the package it shipped in.
+7. ~~**Writeback validators cannot be distributed as code**~~ — **CLOSED in Wave C** (roadmap item
+   11). The validator body travels in the package and runs sandboxed server-side, seeing only the
+   row, column and value of each answer it checks.
+8. ~~**Writeback columns are not a bi.model gateway kind**~~ — **CLOSED.** `writebackColumn` is one
+   of the seventeen kinds in `BI_MODEL_SCRIPTABLE_KINDS` / `GATEWAY_MUTABLE_KINDS` (§4).
 
 Scripts *arriving in* packages are well governed (Ed25519+TOFU, forced-restricted tier,
 manifest-derived ceiling, per-source-hash consent, inert module scripts/notebooks) — the inbound
@@ -582,7 +667,14 @@ half of the story is done; the outbound/automation half doesn't exist.
 ## 7. Ranked improvement roadmap
 
 Ordered by leverage; effort S/M/L. **Every item carries a status re-verified against the code on
-2026-08-01.** Summary: **11 SHIPPED, 4 PARTIAL, 2 DEFERRED.**
+2026-08-02.** Summary: **23 SHIPPED, 2 PARTIAL, 0 DEFERRED** over 25 items.
+
+**This table was regenerated on 2026-08-02, not patched.** The previous version summarised "11
+SHIPPED, 4 PARTIAL, 2 DEFERRED" while listing seventeen rows — it had been left behind by items
+18-25 entirely, four of its statuses (5, 6, 12, 14) contradicted the item bodies below it, and row
+15 read `SLICE 1 SHIPPED`, a fourth status that exists nowhere else in this document and therefore
+sorts and counts as nothing. Only three statuses are legal here: **SHIPPED**, **PARTIAL**,
+**DEFERRED**. A row is PARTIAL only if its own body names what is still missing.
 
 | # | Item | Status |
 |---|---|---|
@@ -590,19 +682,33 @@ Ordered by leverage; effort S/M/L. **Every item carries a status re-verified aga
 | 2 | Bulk typed range I/O + undo everywhere | SHIPPED |
 | 3 | Formatting + structural ops | SHIPPED |
 | 4 | Writeback automation capability | SHIPPED |
-| 5 | Models finishing loop | PARTIAL |
-| 6 | Distribution lifecycle events + package-aware scripts | PARTIAL |
+| 5 | Models finishing loop | SHIPPED |
+| 6 | Distribution lifecycle events + package-aware scripts | SHIPPED |
 | 7 | `ui.dialog` capability | SHIPPED |
 | 8 | Cancellable Before\* hooks + bus events | SHIPPED |
 | 9 | QuickJS interrupt/timeout/memory budget | SHIPPED |
-| 10 | Host-side persistent scheduler | PARTIAL |
+| 10 | Host-side persistent scheduler | PARTIAL — no xlsx-save warning that saving disarms every job |
 | 11 | Sandboxed distributable writeback validators | SHIPPED |
-| 12 | d.ts codegen + TypeScript compile | PARTIAL |
+| 12 | d.ts codegen + TypeScript compile | SHIPPED |
 | 13 | MCP as automation co-author | SHIPPED |
-| 14 | Script package manager | DEFERRED (designed) |
-| 15 | Add-in authoring answer | SLICE 1 SHIPPED |
+| 14 | Script package manager | SHIPPED |
+| 15 | Add-in authoring answer | PARTIAL — slice 1 only; export/panels/dev-mode deferred with reasons |
 | 16 | Trusted-workbook consent persistence + Settings UI | SHIPPED |
 | 17 | UDF fixes | SHIPPED |
+| 18 | Wave G — parity tail + add-in on-ramp | SHIPPED |
+| 19 | Adversarial integration pass (§7.17) | SHIPPED |
+| 20 | Real step-through debugging | SHIPPED |
+| 21 | TypeScript authoring | SHIPPED |
+| 22 | Script package manager implementation (§7.14) | SHIPPED |
+| 23 | Notebook Phase 2+3 (§7.5) | SHIPPED |
+| 24 | Security residuals | SHIPPED |
+| 25 | Closing integration pass (§7.18) | SHIPPED |
+
+Row 10 stays PARTIAL although §2.11 records the same subject as **CLOSED (fully)**. That is not a
+contradiction and is deliberately not reconciled away: §2 grades the *VBA parity gap* ("no OnTime /
+persistent scheduler"), which is closed; this row grades the *roadmap item*, which retains the small
+residual named in its body. Where the two ever disagree about a fact rather than a scope, §2 and
+this table are both wrong until someone re-derives from code.
 
 1. ~~**Resurrect the macro recorder**~~ **SHIPPED (2026-07-31)** — as its own extension,
    `app/extensions/MacroRecorder/`, registered in `extensions/manifest.ts` after ScriptNotebook
@@ -658,7 +764,7 @@ Ordered by leverage; effort S/M/L. **Every item carries a status re-verified aga
    deleteColumns` **with arguments**, not selection-ambient; `api.addSheet/deleteSheet/renameSheet/
    setActiveSheet/setSheetVisibility`; `api.setRowHeight/setColumnWidth`; `api.freezePanes`;
    `api.mergeCells/unmergeCells`. Move/copy sheet and split panes were not part of this item and
-   remain missing (§2.4).
+   were closed later in Wave G (§2.4).
 4. **Writeback automation capability** (`distribution.writeback`) — **SHIPPED.** Seven methods on
    both the object-script and extension-worker surfaces: `writebackListRegions`, `writebackGetLayer`,
    `writebackSaveDraft`, `writebackPreview`, `writebackSubmit` (contributor) and
@@ -666,22 +772,33 @@ Ordered by leverage; effort S/M/L. **Every item carries a status re-verified aga
    in `scripting/writeback_gateway.rs` with grant re-check, rate buckets and audit. The silent
    draft-capture bypass is closed by `scriptHost/writebackWriteGuard.ts`, which every script write
    target passes first (`host.ts:2195`).
-5. **Models finishing loop** — **PARTIAL.** Shipped: `cap.biModelValidate`, `cap.biModelLineage`,
+5. **Models finishing loop** — **SHIPPED.** `cap.biModelValidate`, `cap.biModelLineage`,
    `cap.biModelBatch` (script mutations as one undo step), and the notebook `security_roles` info
    leak closed with a regression test (§4).
-   **Missing:** a read-only gateway analog for `dependency_graph` — `bi_model_dependency_graph`
-   exists as a host command (`bi/model_editor.rs:1075`) and even has a sanitizer
-   (`sanitized_dependency_graph`, `:5542`), but no `cap.biModel*` allowlist row reaches it, so a
-   script can validate a measure and trace its lineage but cannot see the graph. Notebook Phase 3
-   ("Test in notebook") was not started.
-6. **Distribution lifecycle events + package-aware scripts** — **PARTIAL.** Shipped:
-   `AppEvents.PACKAGE_UPDATED` (thinned to `{packageName, version}` for sandboxed subscribers,
-   `allowlist.ts:379-388`) replaced the untyped `calp:scripts-pulled` window event, and
-   `context.package` is seeded from the mount spec (null for local scripts).
-   **Missing: submission-received still does not exist as an event on ANY surface** — verified
-   2026-08-01, there is no `SUBMISSION_RECEIVED` symbol in the repo. Publishers poll. This was
-   scoped as a Wave C item and was not built; it is the missing half of "the flagship workflow
-   should be automatable end to end".
+   **Both "Missing" bullets are DELETED as false (2026-08-02), not downgraded:**
+   - `dependency_graph` was said to have "no `cap.biModel*` allowlist row". It does not need one:
+     it is an ACTION of `cap.biModelLineage`. `BI_MODEL_LINEAGE_ACTIONS`
+     (`app/src/api/scriptHost/validators.ts`) is `{ dependencyGraph, measureLineage, dependents }`.
+     This is dimension (b) of the enumeration rule stated in §0 — reach that is dispatched as an
+     action/aspect and therefore carries no allowlist row of its own — being missed by an audit
+     that only read dimension (a).
+   - Notebook Phase 3 "was not started" — it shipped as roadmap item 23.
+6. **Distribution lifecycle events + package-aware scripts** — **SHIPPED.**
+   `AppEvents.PACKAGE_UPDATED` (thinned to `{packageName, version}` for sandboxed subscribers)
+   replaced the untyped `calp:scripts-pulled` window event; `context.package` is seeded from the
+   mount spec (null for local scripts); and **submission-received EXISTS** as
+   `AppEvents.WRITEBACK_SUBMISSION_RECEIVED` (`app/src/api/events.ts`), script-subscribable via
+   `SCRIPT_SUBSCRIBABLE_APP_EVENTS` and thinned to `{regionId, count}` on the way into a sandbox.
+   **CORRECTION (2026-08-02).** The "Missing" paragraph deleted here read: "submission-received
+   still does not exist as an event on ANY surface — verified 2026-08-01, there is no
+   `SUBMISSION_RECEIVED` symbol in the repo. Publishers poll." The verification was a grep for the
+   bare symbol `SUBMISSION_RECEIVED`; the symbol is **prefixed**, so the grep missed a shipped
+   subsystem and the document then asserted its absence under a verification stamp. Textbook
+   process failure #1. See the seventh correction note in §8.
+   Residual, and it is a caveat rather than a gap: the event is delivered by the refcounted
+   submission-watch poller described in the §5 box, so it carries up to one interval (60 s) of
+   latency and notices nothing while Calcula is closed. Review decisions still have no event, by
+   design — a publisher's own click is not news to the publisher.
 7. **`ui.dialog` capability** — **SHIPPED.** `cap.dialogAlert`, `cap.dialogConfirm`,
    `cap.dialogPrompt`, `cap.dialogForm` on the object-script and extension-worker surfaces, driven by
    a declarative spec (`scriptDialogSpec.ts`, `MAX_DIALOG_FIELDS`) that TRUSTED host code renders —
@@ -758,7 +875,24 @@ Ordered by leverage; effort S/M/L. **Every item carries a status re-verified aga
     the live grant on every firing. No step is asserted; each is a call site above.
 
     Remaining gap, smaller: `has_scheduled_jobs()` warns in the xlsx save-loss report, but there is
-    no equivalent warning anywhere else that saving to xlsx disarms every job.
+    no equivalent warning anywhere else that saving to xlsx disarms every job. **This single bullet
+    is the whole reason row 10 reads PARTIAL.**
+
+    **Three corrections from the 2026-08-02 pass**, all in the same direction — a gate that failed
+    or reported in the permissive direction:
+    - A script **paused in the step debugger** still had its scheduled jobs fired. The renderer's
+      tick pump called `callExposedMethod` with no pause check, so the invocation queued behind the
+      pause and the job's own no-self-overlap guard was satisfied by a run that was not running.
+      `scheduler.ts` `tick()` now skips a paused script and reports `complete { ok: false }` so
+      Rust releases the overlap slot; a one-execution race remains and is documented at the site.
+    - A **poisoned `security_level` mutex** read as `"prompt"`. The scheduler therefore stayed armed
+      after a panic in exactly the state where nothing can be trusted to answer. It now reads as
+      `"disabled"`, with the direction named in a comment.
+    - **`cap.scheduleCancel` recorded nothing when it removed nothing.** Because the method is in
+      the broker's `SERVER_AUDITED_METHODS` set, the frontend deliberately writes no row for it, and
+      the Rust gate guarded its `record_capability_call` on `removed == true` — so a script probing
+      for job ids it does not own, or cancelling another script's job, was audited **nowhere**. That
+      is precisely the traffic an audit trail exists to show. It now records both outcomes.
 11. **Sandboxed distributable writeback validators** — **SHIPPED.** The validator body is read from
     the SAME Ed25519 + TOFU-verified manifest as the rest of the package and evaluated in the
     embedded Rust QuickJS realm on the submit path, behind per-package consent that is keyed on the
@@ -769,20 +903,31 @@ Ordered by leverage; effort S/M/L. **Every item carries a status re-verified aga
     generator and the checked-in file drift, and `app/scripts/**` is now inside `tsconfig.check.json`
     so the generator itself is type-checked. The `caps` namespace IS visible to IntelliSense —
     `caps.dialog`, `caps.schedule`, `caps.writeback`, `caps.fetch`, `caps.storage` are all declared.
-    **Missing: the esbuild transpile-at-save.** Scripts are still JavaScript; the `.d.ts` describes a
-    language the editor cannot compile. Authors get completion and hover, not type ERRORS.
+    **SHIPPED as of Wave H — see items 20 and 21.** The "Missing: the esbuild transpile-at-save.
+    Scripts are still JavaScript; the `.d.ts` describes a language the editor cannot compile.
+    Authors get completion and hover, not type ERRORS." paragraph that stood here was already false
+    when this section was last stamped: `app/src/api/scriptTranspile.ts` ships, and item 21 of this
+    very list says so. A status line that contradicts an item twelve rows below it in the same
+    document is not a status. (Seventh correction note, §8.)
 13. **MCP as automation co-author** — **SHIPPED.** `mcp/objects.rs` carries update/delete for chart,
     named range, table and pivot plus sheet list/add/rename/delete/move; `mcp/tools.rs:1142` installs
     `HostModelProvider` into `execute_script`, so the MCP script surface can read the model; and
     `mcp/drafts.rs` is the consent-gated "draft an object script, open unmounted" tool — with the
     important property that drafts live in a process-local store that the mount path never reads, so
     an AI-authored script cannot become code that runs on next open without a human saving it.
-14. **Script package manager** — **DEFERRED (designed, not built).** Verified 2026-08-01: no `@uses`
-    pragma parser and no `base.callImport` exist anywhere in the repo, so nothing from the design has
-    been implemented. Deferred on effort (**L**) and because every other item in this program either
-    closed a security hole or a stated parity gap, while this one adds a distribution channel that
-    nothing currently depends on. The design below is intact and remains the plan.
-    → **DESIGNED: `docs/design/script-package-manager.md`** (2026-07-31). Decision: a library is a
+14. **Script package manager** — **SHIPPED in Wave H (see item 22).**
+    **CORRECTION (2026-08-02).** This item read: "**DEFERRED (designed, not built).** Verified
+    2026-08-01: no `@uses` pragma parser and no `base.callImport` exist anywhere in the repo, so
+    nothing from the design has been implemented." Every clause of that verification was false.
+    `app/src/api/scriptLibraries/` ships ten modules including `usesPragma.ts` (the pragma parser),
+    `linker.ts`, `registry.ts`, `lockfile.ts` and `ceiling.ts`; `base.callImport` is an ALLOWLIST
+    row in `app/src/api/scriptHost/allowlist.ts`. Item 22 of this same list records the wave that
+    built it. A reader who trusted this row would have rebuilt a shipped subsystem — the most
+    expensive failure mode a status document has. See the seventh correction note in §8.
+    The design paragraph below is retained as the **pre-Wave-H plan**, because the shipped
+    implementation follows it and the reasoning (especially why `base.callImport` and not
+    `base.callMethod`) is the load-bearing part.
+    → **DESIGNED (pre-Wave-H plan): `docs/design/script-package-manager.md`** (2026-07-31). Decision: a library is a
     `.calp` of a new `PackageKind::Library`; imports are *declared* (`// @uses alias pkg@pin`) and
     host-resolved against a workbook lockfile; the shim is a new `base.callImport` over the existing
     `hostCallExposed` relay — **not** `base.callMethod`, whose global `public:true` flag would expose
@@ -1358,9 +1503,198 @@ by the consent source, and both have a test.
 
 ---
 
+### 7.20 Wave K closing pass — the seven dimensions no wave verifier owned
+
+Every wave in this program ran its own adversarial verifier, and between them they found about
+twenty real holes. What none of them could find is a defect that only exists **between** waves, or
+one that lives in the *reporting* rather than in the code. Wave K was scoped to exactly those seven
+dimensions, one per reviewer, deliberately excluding "look for another broker hole" as finished work.
+
+**1. Cross-wave invariant erosion** — an invariant Wave *n* established, and Wave *n+k* quietly
+stopped honouring.
+
+- **The writeback draft gate had a second door.** Wave C established "no grid write path can land a
+  value in a claimed cell without a validated draft behind it", and wrote that sentence into a
+  contract comment enumerating the paths. Wave A's QuickJS apply path installs **non-active** sheets
+  wholesale, consulted the index for none of them, and was not in the enumeration — so
+  `setCellValue(r, c, v, sheetIndex)` aimed off-screen bypassed the schema, the validator and the
+  draft entirely, reachable from `run_script`, the scheduler and the MCP `execute_script` tool.
+  Fixed pre-mutation and atomically; the contract comment now names the path. **The lesson is the
+  comment**: a hand-maintained enumeration of callers is a list, and §0 already says what happens to
+  those.
+- **`grid.read` delivery checked the manifest ceiling, not the live grant**, under a comment reading
+  "FAIL CLOSED" and another promising "a revoke bites the next event". `revokeCapability` mutates
+  the grant set; `declaredCapabilities` is frozen at registration. A revoke provably changed
+  nothing at either door. Both now check `handle.grants`.
+- Three smaller ones: `SERVER_AUDITED_METHODS` was never extended past its eight pre-Wave-C entries,
+  so ~24 methods with Rust-side audit gates were being double-recorded; a scripted `cap.pkgPull`
+  could mint a trust-on-first-use pin with no human at the commit point (the sibling
+  `RefreshApply` action had reasoned about this and used `RequirePinned`; `Pull` had not); and the
+  scheduler fired jobs belonging to a script paused in the step debugger.
+
+**2. Program record versus code** — see the seventh correction note in §8. Eleven false statements in
+this document, all asserting the absence of shipped code.
+
+**3. Drift-guard efficacy** — guards that pass without testing anything.
+
+The `mcp-tool` surface profile in `core/script-engine/src/manifest.rs` declared
+`model_provider: false`. Every mirror inherited that: `codeInventory.ts` listed its reach without
+`model` under a comment reading "grid-only by construction, not by assertion", and
+`scriptSurfaces.ts`'s containment string said "grid-only — no model provider". The interpreter-reach
+drift test asserted the mirrors matched the profile — which they did, all four of them agreeing on
+the same false value. `mcp/tools.rs` injects a `HostModelProvider` with a `bi.query` grant.
+
+Note what was and was not wrong: **the reach is properly gated** (`check_mcp_access` at the script
+tier, `bi.query` only, `model_info` sanitized, row-level security applied). The defect was the
+**disclosure** — the transparency panel made a false reach claim about the one surface driven by an
+AI rather than by a person. The profile is corrected, `SurfaceProfile` gained a `granted` list so the
+derivation stops overstating (`model.sql` is excluded because `bi.sql` is not granted), and the
+root fix is a new source-level guard that resolves each profile's declared entry point to a real file
+and diffs `HostModelProvider::new` against `model_provider`. A guard that compares four hand-written
+mirrors to each other is a consistency check, not a verification.
+
+**4. Consent-text honesty** — what the dialogs promise versus what the code enforces.
+
+The script consent dialog said scripts "cannot read or write arbitrary cells". The entire `sheet.*`
+family is `tier: "restricted"` — every consenting user was told the opposite of the truth about the
+most basic reach there is. The install dialog promised that every declared capability "is asked for
+separately the first time it is used"; `grid.read` and `formula.udf` are auto-granted at
+registration with no prompt, so the user was waiting for a question that never comes. `storage` was
+described as "store data on this device" when the store is inside the workbook file and travels with
+it to anyone the file is sent to — the reassurance pointed at the wrong risk, in the wrong
+direction. All corrected, with tests that derive the premise from the allowlist and from the
+auto-grant call sites rather than pinning a string.
+
+One finding was **corrected during triage rather than implemented as written**: the allowlist
+promised `sheet.*` calls are "clamped to the bound sheet", while the code clamps to the ACTIVE sheet.
+The plan called for making the code match the promise. It cannot: `sheet` is a *primitive* object
+type, workbook-scoped, one script per type — `ObjectScriptDefinition.instanceId` is null for it by
+design, so there is no bound sheet to clamp to. The text was corrected to "the sheet currently
+shown" everywhere instead, and a test now fails on any surface that says "bound sheet" again. This
+is worth recording as the shape it is: **the fix that makes the promise true is not always available,
+and shipping it anyway would have meant inventing a binding that the object model does not have.**
+
+**5. What the host HANDS code, and WHICH code it runs** — dimension (g), where Wave I's worst defects
+lived.
+
+`workbook.onOpen` and the after-save event forwarded their raw detail, which carries the **full
+filesystem path**. `host.ts` already refuses to hand out the containing folder, with the reasoning
+written at the refusal: `C:\Users\<real name>\Consulting\ClientX` handed to a script that also holds
+`net.fetch` is an exfiltration the fetch consent never covered. The event path had no such branch, so
+an add-in with **zero capabilities** received the path anyway. Now thinned to `{ fileName }` on both
+the event route and the lifecycle-guard route (they are different code paths, and only one of them
+passes through the event thinner). Separately, `cell.onEdit` and `sheet.onDataChange` pushed
+cross-sheet cell contents to restricted handles, while their siblings `range.onChange` and
+`namedRange.onChange` filtered by sheet correctly.
+
+**6. Features with no production caller** — the failure that started this program, repeating.
+
+`mcp/drafts.rs` emits `mcp:script-draft` and tells the AI agent the draft "is queued for the user to
+review in the Object Script Editor". **Nothing in the frontend listened to that event**, and no UI
+listed drafts. The agent was told something false, and therefore so was the user. This is the macro
+recorder's exact shape — plumbing with no caller, reported as shipped. Now wired: the draft opens
+the editor in an explicit "AI draft — not saved, not mounted" mode whose Save runs the ordinary
+consent path. Four affordances that would have persisted or run unreviewed AI code by a side door
+(auto-save-on-switch, access-level toggle, template auto-apply, the debug toolbar) are disabled in
+that mode.
+
+Two reviewer claims in this dimension were **refuted** and must not be acted on: the `api.onEvent`
+and `object.declareProperties` allowlist rows are not dead. They are named, reasoned exemptions in
+the coverage guard — `api.onEvent` **is** the consent text the transparency policy table renders for
+`events.subscribe`, and `object.declareProperties` is the allowlist face of an aspect-dispatched op.
+Deleting them would delete user-facing consent text and break a designed dispatch path.
+
+**7. Fail-closed discipline and hot-path cost.**
+
+- **Trust evaluation failed OPEN.** `evaluateWorkbookTrust` caught any error from the code inventory,
+  substituted an empty code list, concluded the workbook contains nothing that could have changed,
+  and auto-granted. A gate whose entire purpose is change detection cannot treat "I could not look"
+  as "nothing to see". It now lapses and prompts, and the lapse is not cached, so a transient
+  backend timeout does not stick for the session.
+- **A corrupt user file inherited the PREVIOUS workbook's state.** Four `.cala` sub-files
+  (`subscriptions.json`, `overrides.json`, `audit_log.json`, `writeback_drafts.json`) used a
+  `if let Some(bytes) { if let Ok(v) { assign } } else { reset }` shape in which a
+  *present-but-unparseable* file takes neither branch. Opening workbook B after workbook A left B
+  running A's subscription list — which drives GATHER, refresh, the writeback index and live
+  registry I/O against packages B never subscribed to. Restructured as a `match` in which every arm
+  must produce a value, so the compiler enforces what review did not.
+- **GATHER did blocking, signature-verifying registry I/O inside every cell edit**, behind a 2-second
+  TTL and a 30-second HTTP timeout — one keystroke could block the UI for half a minute, and again
+  two seconds later. Now served from cache with a background refresh and per-registry failure
+  backoff; workbook open likewise defers HTTP registries to a worker (with a supersession ticket, so
+  a rebuild that finishes after the user opened a different workbook installs nothing).
+
+**One finding came from outside the seven dimensions and is worth its own line.**
+`core/pivot-engine/benches/pivot_calculations.rs` had **24 compile errors** — it still passed the
+integer `1` where `PivotId` became an `EntityId` newtype. It was invisible because benches are
+outside `cargo check` and `cargo test`, and the CI bench gate named one crate explicitly
+(`-p engine`) instead of the workspace. Fixed, and the gate widened to `--workspace --benches`. The
+bench is the only coverage of the 1M-row cache-build → calculate → view path the project's
+performance story rests on, so it was updated rather than deleted.
+
+**What this pass deliberately did NOT do.** Three confirmed-dead items were left in place as churn
+with no user consequence: the `ext.log` broker row, three unused `@api` exports, and two unused
+`AppEvents` constants (one of which is pinned by an API-surface-stability test, so removing it costs
+a test edit to buy nothing). They are recorded here so the next reader knows they were seen and
+priced, not missed.
+
+---
+
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Seventh correction (2026-08-02, Wave K closing pass) — the document was wrong about itself, in
+> the one direction that costs the most.**
+>
+> Every earlier note in this sequence records a *wave report* that did not survive re-derivation.
+> This one records **this document**. A dedicated reviewer re-derived every status claim in it
+> against source and found **eleven false statements**, all of the same shape and all in the same
+> direction: a "verified", "re-verified" or "still missing" claim asserting the ABSENCE of something
+> that had already shipped. In order of what they would have cost a reader:
+>
+> 1. **§7.14 — "no `@uses` pragma parser and no `base.callImport` exist anywhere in the repo."**
+>    `app/src/api/scriptLibraries/` ships ten modules including `usesPragma.ts`, and
+>    `base.callImport` is an ALLOWLIST row. A reader acting on this row would have rebuilt a shipped
+>    subsystem from the design paragraph printed directly beneath it.
+> 2. **§5 box — "no publish/pull/subscribe/refresh operation on any script surface and no
+>    package-identity read."** `scripting/distribution_gateway.rs`, eleven `cap.pkg*` rows and
+>    `context.package` all ship. The claim was stamped "re-verified 2026-08-01".
+> 3. **§4 — "`run_script`/MCP `execute_script` construct with `model_provider: None` so even reads
+>    throw there."** False for MCP: `mcp/tools.rs` injects a `HostModelProvider` with a `bi.query`
+>    grant. §7.13, in this same document, said so correctly — so the document contradicted itself,
+>    and the *understating* half is the one a security reader would have believed.
+> 4. **§7.6 — "there is no `SUBMISSION_RECEIVED` symbol in the repo."** The symbol is
+>    `WRITEBACK_SUBMISSION_RECEIVED`. The verification was a grep for an unprefixed name.
+> 5. **§7.5** — two "Missing" bullets, both shipped: `dependencyGraph` is an action of
+>    `cap.biModelLineage` (it carries no allowlist row **by design** — dimension (b) of §0's
+>    enumeration rule), and Notebook Phase 3 is roadmap item 23.
+> 6. **§7.12 — "Scripts are still JavaScript."** `app/src/api/scriptTranspile.ts` ships and item 21
+>    of the same list says so.
+> 7. **§4 — "exactly 16 kinds"** and a separate bullet asserting "`writebackColumn` is not a gateway
+>    kind". `BI_MODEL_SCRIPTABLE_KINDS` has seventeen, including `writebackColumn`.
+> 8. **§7 summary table** — seventeen rows for a twenty-five-item list, four statuses contradicting
+>    their own item bodies, and a row reading `SLICE 1 SHIPPED`: a fourth status in a
+>    three-status vocabulary, which counts as nothing and sorts as nothing.
+> 9. **§7.3** — "remain missing (§2.4)" for move/copy sheet and split panes, closed in Wave G.
+> 10. **§5 residual** — "`getSubmissionWatchStatus()` still has no UI consumer", with a dangling
+>     `(§8)` pointer to an entry that no longer existed. `api/codeInventory.ts` calls it.
+> 11. **Footer** — suite totals from before Waves J and K.
+>
+> **The mechanism, and why it is the same one §0 already names.** Nine of the eleven were produced
+> by grepping ONE list — usually `ALLOWLIST`, once a bare unprefixed symbol — and reporting the miss
+> as an absence. §0's enumeration rule exists for exactly this, and the rule was not applied *to the
+> document itself*: every wave verified its own wave, and nobody re-derived the standing text.
+> Note that finding 3 above is a case where the document held both the true and the false statement
+> simultaneously, ~370 lines apart, which no amount of grep discipline catches — only re-derivation
+> does.
+>
+> **The rule this adds.** "A status nobody re-derived from code is not a status" already covered
+> this. What it did not say, and now does: **a claim of ABSENCE is a claim, and it decays exactly
+> like a claim of presence — faster, because nothing in the codebase moves when it becomes false.**
+> A shipped feature at least has code that can be read. A "verified absent" line has nothing to
+> contradict it but a fresh search. Every such line in this document now carries the date and the
+> exact search that produced it, so the next reader can tell a fact from a stale one.
 
 > **Sixth correction (2026-08-02, Wave J verification pass) — the THIRD instance of one bug class,
 > and what now makes a fourth impossible.**
@@ -1720,9 +2054,6 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
   wants a helper module behind a button. The sanctioned shape is an object script, which is why this
   is a documented limit rather than a defect; making modules consentable means adding them to the
   ScriptableObjects consent view, which is a change to a mature security flow.
-- **No package-identity read for a distributed script** — with one nuance: a script that subscribes
-  to `PACKAGE_UPDATED` does receive `{packageName, version}`. So identity is reachable *when an
-  update happens*, never on demand.
 - **`onBeforeDoubleClick` / `onBeforeRightClick`** exist on no surface (§2.10) — re-verified absent
   across all five lists (zero occurrences of either identifier anywhere in `app/` or `core/`).
 - **A UDF body still receives values, never a Range object.**
@@ -1752,6 +2083,14 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
   `without_a_model_provider_every_model_op_throws` proves the "grid-only" claim behaviourally rather
   than asserting it, `api/codeInventory.ts` mirrors the result, and
   `api/__tests__/interpreterReachDrift.test.ts` reads the Rust source so the mirror cannot drift.
+  **Reopened and re-closed 2026-08-02 (§7.20 dimension 3), and the re-closing is the interesting
+  part.** The derivation above was real, but it read a hand-asserted `model_provider` flag, and that
+  flag was FALSE for `mcp-tool` while `mcp/tools.rs` injected a provider — so all four mirrors agreed
+  perfectly on a lie and every guard passed. Two things changed: `SurfaceProfile` gained a `granted`
+  list so `surface_ops()` filters on the real grant (`model.sql` is now correctly excluded from
+  `mcp-tool`, which holds `bi.query` only), and a new source-level guard resolves each profile's
+  declared `entry_point` to a real file and diffs `HostModelProvider::new` against the flag. Only
+  three surfaces are grid-only; `mcp-tool` is not one of them.
 - Related hardening in the same area: the writeback-validator harness deletes **every** host global
   the interpreter registers. `ROOTS_LEFT_UNDELETED` is now empty and the test fails if it ever needs
   an entry again.
@@ -1846,15 +2185,109 @@ but "what is the complete set of things the check must cover, and where is that 
 
 ---
 
+## 10. Wave K — the review of the program itself (2026-08-02)
+
+**Why it ran.** Every one of the nine implementation waves shipped with its own adversarial verifier,
+and between them those verifiers found about twenty real holes — an unconsented `.calp`
+custom-function library, a signature that did not cover the signed code, an unreadable pin store
+reading as `verified`, library realms laundering `net.fetch` origins, a user-writable cache returning
+the literal string `"verified"`, unbounded text growth reaching a terabyte in ninety fuel charges.
+That work is finished, and re-running it would only repeat it. But **each verifier checked its own
+wave in isolation**, so three whole classes of defect had no owner: something Wave *n* established
+and Wave *n+k* quietly stopped honouring; something true of the code but false in this document; and
+something wrong with the *guards themselves*.
+
+**What it checked — seven dimensions, one reviewer each.** Cross-wave invariant erosion · program
+record versus code · drift-guard efficacy (guards that pass without testing anything) · consent-text
+honesty (what the dialogs promise versus what the code enforces) · what the host HANDS code and
+WHICH code it decides to run · features with no production caller · fail-closed discipline and
+hot-path cost. Findings and evidence are in §7.20; the eleven false statements about this document
+are the seventh correction note in §8.
+
+**What it found, in one line each.**
+
+| Class | The finding that mattered most |
+|---|---|
+| Invariant erosion | The QuickJS apply path wrote to **non-active sheets** with no writeback-draft check — the Wave C invariant's own contract comment listed the paths and this one was not on it |
+| Guard efficacy | Four mirrors agreed perfectly that the MCP surface is grid-only; it injects a BI model provider. Every guard passed |
+| Consent honesty | "Scripts cannot read or write arbitrary cells" — the whole `sheet.*` family is `restricted` |
+| What the host hands | An add-in with **zero capabilities** received the workbook's full filesystem path |
+| No production caller | `mcp:script-draft` had no listener; the AI was told the draft was "queued for review" and nothing rendered it |
+| Fail-closed | Trust evaluation caught an inventory error, substituted an empty code list, and **auto-granted** |
+| Fail-closed | A present-but-unparseable `.cala` sub-file made the new workbook inherit the **previous** one's subscriptions |
+| Hot path | GATHER did blocking, signature-verifying, 30-second-timeout registry I/O **inside every cell edit** |
+| Outside the seven | `core/pivot-engine`'s benchmark had 24 compile errors, invisible because CI's bench gate named one crate instead of the workspace |
+
+**What was fixed.** All of the above, plus the smaller ones in §7.20, plus the eleven document
+statuses. Each fix carries a test that was verified to FAIL without it, and the two root causes were
+fixed as mechanisms rather than instances: the writeback guard now runs from the shared pre-mutation
+path instead of relying on a hand-kept list of callers; `SurfaceProfile` gained a `granted` list and
+a source-level guard that resolves each profile's entry point to a real file and diffs
+`HostModelProvider::new` against the declared flag; the four corrupt-file sites were restructured as
+`match` arms so the compiler enforces what review did not; and the CI bench gate is now
+`--workspace --benches`.
+
+**What was deliberately left, and why.**
+
+- **Three confirmed-dead items** — the `ext.log` broker row, three unused `@api` exports, two unused
+  `AppEvents` constants. Confirmed dead, zero user consequence, and one of them is pinned by an
+  API-surface-stability test, so removal costs a test edit to buy nothing. Priced, not missed.
+- **Two allowlist rows a reviewer called dead were REFUTED**, and must stay: `api.onEvent` is the
+  consent text the transparency policy table renders for `events.subscribe`, and
+  `object.declareProperties` is the allowlist face of an aspect-dispatched op. Both are named,
+  reasoned exemptions in the coverage guard. Deleting them would delete user-facing consent text.
+- **The "bound sheet" clamp was reworded rather than implemented**, because it cannot be
+  implemented: `sheet` is a primitive object type with a null `instanceId` by design, so there is no
+  bound sheet to clamp to. Inventing one to make a sentence true would have been worse than fixing
+  the sentence.
+- **The pin store is still read once per subscription, not once per rebuild.** Caching it across a
+  multi-second registry walk would mean a pin written mid-walk is not seen, and both loops are now
+  off the interactive path, so the optimisation buys latency that no longer matters at the cost of a
+  staleness window in a security check.
+- **A wall-clock edit-latency benchmark was not written.** It would need a genuinely unreachable host
+  and a 30-second CI timeout. The deterministic structural equivalent shipped instead — a test
+  proving `build_gather_data` serves from cache past its TTL and therefore cannot reach the I/O path
+  at all. This substitution is recorded rather than presented as the benchmark.
+
+**The one thing this pass would tell the next one.** Six of the seven dimensions found real defects,
+but the two that found the *worst* ones were the two that were not about code at all: "what does the
+host hand code that it never asked for", and "is the document telling the truth". A program that
+audits only what code calls will keep shipping both. The gates in this system are, on the evidence
+of nine waves, largely correct — what fails is the enumeration of what the gates must cover, and the
+record of what is already done.
+
+---
+
 *Full agent outputs (per-surface API enumerations with file:line evidence, per-dimension VBA coverage
 grids, 48 verified gap verdicts) were produced in the 2026-07-31 review session. Closing statuses were
-re-verified against the code on 2026-08-01, most recently during the Wave I closing pass (§7.19),
-which walked every `.calp` payload kind rather than every method list — and found two kinds that
-executed unconsented.*
+re-verified against the code on 2026-08-02, most recently during the Wave K pass (§7.20, §10), which
+audited the seven dimensions no wave verifier owned — including this document, in which it found
+eleven false "verified absent" claims (seventh correction note, §8).*
 
-*Verification behind this revision: `npm run check-types` clean · `npm run lint:boundaries` clean ·
-`npm run check:script-typings` `[OK] typings are current` · `npx vitest run` **104,182 passed / 0
-failed (627 files)** · `cargo check` clean in both `app/src-tauri` and `core` · app-lib Rust suite
-**766 passed / 0 failed** · `core` `engine` **413 passed / 0 failed** (the full evaluator suite, run
-because the LAMBDA depth ceiling and the `eval_3d_ref` inheritance touch it) · `core` `persistence` +
-`calp` + `script-engine` + `parser` **446 passed / 0 failed**.*
+*Verification behind this revision (Wave K, all run 2026-08-02, exit code 0 for every command):
+`npm run check-types` clean · `npm run lint:boundaries` clean · `npm run check:script-typings`
+`[OK] 39 interfaces verified, 545 members probed` · `npx vitest run` **104,339 passed / 0 failed
+across 640 files** · `cargo check --workspace --benches` clean in `core` and `cargo check --lib
+--tests` clean in `app/src-tauri` (pre-existing warnings only) · `cargo test --workspace` in `core`
+**1,143 passed / 0 failed** across 21 test binaries, of which the `engine` evaluator suite is **466
+passed / 0 failed** · app-lib Rust suite **837 passed / 0 failed** (built with `cargo test --lib
+--no-run`, `fix-test-manifest.ps1`, then run directly) · `cargo check -p pivot-engine --benches`
+clean, which it had not been for an unknown number of weeks.*
+
+*Counts against the previous revision's recorded baselines — a DROP is treated here as suspicious as
+a failure, so both directions are accounted for: core 1,136 → **1,143** (+7: three new
+`script-engine`/`calp` guard tests from this pass, plus a four-test gap that predates it and is
+reported rather than explained away); app-lib 812 → **837** (+25, all new tests from this pass, each
+verified to fail without its fix); vitest 104,248 / 631 files → **104,339 / 640 files** (+91 tests,
++9 files); `engine` 466 → **466**, unchanged, as expected for a pass that did not touch the
+evaluator; script typings 39 / 545 → **39 / 545**, unchanged, confirming the regenerated
+`objectContexts.d.ts` matches its template.*
+
+*One drift guard was deliberately broken to prove it still bites — the one this pass found passing
+vacuously. Setting `model_provider: false` back on the `mcp-tool` row of
+`core/script-engine/src/manifest.rs` fails three Rust tests in `manifest.rs` and three TypeScript
+tests in `api/__tests__/interpreterReachDrift.test.ts`, and the messages name the fix rather than
+the symptom: "app/src-tauri/src/mcp/tools.rs … CONSTRUCTS a HostModelProvider, but SURFACE_PROFILES
+records model_provider: false for 'mcp-tool' … the user is told the surface cannot reach their BI
+model while it can. Set model_provider: true (and give it a truthful `granted` list), or remove the
+injection." Restored and re-verified green.*

@@ -827,6 +827,34 @@ fn subscribed_packages_summary(state: &AppState) -> String {
     )
 }
 
+/// The `PullParams` a SCRIPTED pull runs with.
+///
+/// The one field the interactive Subscribe dialog does not set is
+/// `requirePinned`. TOFU pinning is a trust COMMIT — it decides which Ed25519
+/// key this machine will accept for this package name from then on — and
+/// `calp_pull` may mint one because a human was shown the publisher in the
+/// Subscribe review and said yes. A script is not that human: left unset,
+/// `cap.pkgPull` would pin whatever key the registry served at that instant,
+/// silently, and the genuine publisher's next release would read as
+/// `publisherChanged`. `Action::RefreshApply` already reasoned its way to
+/// `RequirePinned`; Pull gets the same answer.
+///
+/// A function rather than an inline literal so the guarantee is unit-testable
+/// without a running Tauri app.
+fn scripted_pull_params(
+    registry_path: &str,
+    package_name: &str,
+    version_pin: &str,
+) -> Result<calp_cmds::PullParams, String> {
+    serde_json::from_value(json!({
+        "registryPath": registry_path,
+        "packageName": package_name,
+        "versionPin": version_pin,
+        "requirePinned": true,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 /// Dispatch into the EXISTING commands. Every one of them re-runs its own
 /// window guard and its own verification — this gateway adds constraints, it
 /// never replaces them, and it holds NO copy of the pull/publish logic.
@@ -881,12 +909,18 @@ fn dispatch(
             let registry_path = registry_location(p)?;
             let package_name: String = field(p, "packageName")?;
             let version_pin: String = field(p, "versionPin")?;
-            let params = serde_json::from_value(json!({
-                "registryPath": registry_path,
-                "packageName": package_name,
-                "versionPin": version_pin,
-            }))
-            .map_err(|e| e.to_string())?;
+            //
+            // ONE gate the interactive Subscribe dialog does not have:
+            // `requirePinned`. TOFU pinning is a trust COMMIT — it decides which
+            // Ed25519 key this machine will accept for this package name from
+            // now on — and `calp_pull` is allowed to mint one because a human
+            // was shown the publisher in the Subscribe review and said yes. A
+            // script is not that human. Left unset, `cap.pkgPull` would pin
+            // whatever key the registry served at that instant, silently, and
+            // the genuine publisher's next release would then read as
+            // `publisherChanged`. `Action::RefreshApply` below already reasoned
+            // its way here; Pull gets the same answer.
+            let params = scripted_pull_params(&registry_path, &package_name, &version_pin)?;
             let response = calp_cmds::calp_pull(
                 state.clone(),
                 pivot_state.clone(),
@@ -897,7 +931,22 @@ fn dispatch(
                 slicer_state.clone(),
                 params,
                 window.clone(),
-            )?;
+            )
+            .map_err(|e| {
+                // Only the PIN refusal gets the extra sentence. Appending it to
+                // "version not found" or "app too old" would send the author
+                // chasing a trust problem they do not have.
+                if e.contains("has ever agreed to trust") {
+                    format!(
+                        "{} This call came from a script, which is never allowed to establish \
+                         that trust on your behalf — subscribe to '{}' once from \
+                         Data > Subscribe to Package and the script will work from then on.",
+                        e, package_name
+                    )
+                } else {
+                    e
+                }
+            })?;
             serde_json::to_value(response).map_err(|e| e.to_string())
         }
         Action::RefreshPreview => {
@@ -1023,6 +1072,88 @@ pub const SCRIPT_PUBLISH_PAYLOAD_NOTE: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // A SCRIPTED pull may never create a TOFU pin
+    // -----------------------------------------------------------------------
+
+    /// The security property: `cap.pkgPull` runs under `RequirePinned`, so a
+    /// package this machine has never trusted fails instead of being pinned.
+    ///
+    /// Before this, `Action::Pull` forwarded only registryPath/packageName/
+    /// versionPin, so `calp_pull` selected `PinOnFirstUse` — the policy whose
+    /// whole justification is "a human was shown the publisher and said yes".
+    /// The human in a scripted pull is the SCRIPT AUTHOR, who may not even be
+    /// the person whose machine is deciding whom to trust.
+    #[test]
+    fn a_scripted_pull_runs_under_require_pinned() {
+        let params = scripted_pull_params("file:///regs/main", "acme.finance", "^1.0.0")
+            .expect("params build");
+        assert!(
+            params.require_pinned,
+            "the scripted gateway must not be able to mint a TOFU pin"
+        );
+        assert_eq!(
+            crate::calp_commands::pull_pin_policy(&params),
+            calp::integrity::PinPolicy::RequirePinned,
+            "requirePinned must map to the policy that writes nothing to the pin store"
+        );
+    }
+
+    /// The interactive Subscribe dialog is unchanged: it still pins, because it
+    /// is the one flow with a human reviewing the publisher.
+    #[test]
+    fn the_interactive_pull_still_pins_on_first_use() {
+        let interactive: crate::calp_commands::PullParams = serde_json::from_value(json!({
+            "registryPath": "file:///regs/main",
+            "packageName": "acme.finance",
+            "versionPin": "^1.0.0",
+        }))
+        .expect("params build");
+        assert!(
+            !interactive.require_pinned,
+            "requirePinned must DEFAULT to false so the Subscribe dialog is unaffected"
+        );
+        assert_eq!(
+            crate::calp_commands::pull_pin_policy(&interactive),
+            calp::integrity::PinPolicy::PinOnFirstUse
+        );
+    }
+
+    /// `requirePinned` OUTRANKS `acceptNameConflict`: a script that sets both
+    /// must not get the conflict-accepting pinning policy.
+    #[test]
+    fn require_pinned_outranks_accept_name_conflict() {
+        let both: crate::calp_commands::PullParams = serde_json::from_value(json!({
+            "registryPath": "file:///regs/main",
+            "packageName": "acme.finance",
+            "versionPin": "^1.0.0",
+            "requirePinned": true,
+            "acceptNameConflict": true,
+        }))
+        .expect("params build");
+        assert_eq!(
+            crate::calp_commands::pull_pin_policy(&both),
+            calp::integrity::PinPolicy::RequirePinned
+        );
+    }
+
+    /// And the conflict-accepting policy is still reachable from the UI path,
+    /// which is the only caller that can have shown the conflict.
+    #[test]
+    fn accept_name_conflict_alone_still_reaches_the_accepting_policy() {
+        let ui: crate::calp_commands::PullParams = serde_json::from_value(json!({
+            "registryPath": "file:///regs/main",
+            "packageName": "acme.finance",
+            "versionPin": "^1.0.0",
+            "acceptNameConflict": true,
+        }))
+        .expect("params build");
+        assert_eq!(
+            crate::calp_commands::pull_pin_policy(&ui),
+            calp::integrity::PinPolicy::PinAcceptingNameConflict
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Action allowlist + the capability split

@@ -129,6 +129,21 @@ pub struct PullParams {
     /// trusting a second claimant to a familiar name.
     #[serde(default)]
     pub accept_name_conflict: bool,
+    /// REFUSE to create a TOFU pin: the package must already be pinned on this
+    /// machine or the pull fails.
+    ///
+    /// Set ONLY by the scripted distribution gateway
+    /// (`scripting/distribution_gateway.rs`, `Action::Pull`). Subscribing is the
+    /// one .calp flow allowed to mint a pin, and what makes that sound is that a
+    /// human was shown the publisher and said yes. A script calling
+    /// `cap.pkgPull` is not that human: it would pin whatever key the registry
+    /// happened to be serving at that moment, silently, on the author's
+    /// authority rather than the user's. `Action::RefreshApply` already reasoned
+    /// its way to `RequirePinned` for the same reason; `Pull` did not.
+    ///
+    /// Absent/false keeps the interactive Subscribe dialog's behavior unchanged.
+    #[serde(default)]
+    pub require_pinned: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2048,6 +2063,32 @@ fn calp_trust_status_str(trust: calp::integrity::TrustStatus) -> String {
     crate::calp_inspector::trust_status_str(trust)
 }
 
+/// THE pin policy for a pull, decided from the request alone.
+///
+/// Extracted so the decision is directly testable: it is the single place that
+/// answers "may this pull CREATE a TOFU pin?", and getting it wrong means a
+/// script silently deciding which Ed25519 key this machine trusts for a package
+/// name forever after.
+///
+///   * `require_pinned` -> [`PinPolicy::RequirePinned`]. Set only by the scripted
+///     gateway. Wins over everything: a script may install a package the user
+///     already trusts, never mint the trust. Note it also outranks
+///     `accept_name_conflict`, so a script cannot smuggle a conflict-accepting
+///     pin through by setting both.
+///   * `accept_name_conflict` -> [`PinPolicy::PinAcceptingNameConflict`]. The
+///     user was shown the cross-registry name conflict and accepted it.
+///   * neither -> [`PinPolicy::PinOnFirstUse`]. The ordinary interactive
+///     Subscribe: a human reviewed the publisher.
+pub(crate) fn pull_pin_policy(params: &PullParams) -> calp::integrity::PinPolicy {
+    if params.require_pinned {
+        calp::integrity::PinPolicy::RequirePinned
+    } else if params.accept_name_conflict {
+        calp::integrity::PinPolicy::PinAcceptingNameConflict
+    } else {
+        calp::integrity::PinPolicy::PinOnFirstUse
+    }
+}
+
 /// Pull (subscribe to) a package.
 #[tauri::command]
 pub fn calp_pull(
@@ -2086,11 +2127,9 @@ pub fn calp_pull(
     // said yes to a second, differently-worded question. `PinOnFirstUse` errors
     // on a conflict; only the flag set by that confirmation reaches the accepting
     // policy. Both are commit points with a human behind them.
-    let policy = if params.accept_name_conflict {
-        calp::integrity::PinPolicy::PinAcceptingNameConflict
-    } else {
-        calp::integrity::PinPolicy::PinOnFirstUse
-    };
+    //
+    // TWO CALLERS, TWO POLICIES: see `pull_pin_policy`.
+    let policy = pull_pin_policy(&params);
     let mut result = calp::pull::pull(
         &registry,
         &request,
@@ -2844,6 +2883,15 @@ pub struct InspectedScript {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectedModuleScript {
+    /// Stable module-script id (`PublishedModuleScript::id`).
+    ///
+    /// Carried because the pre-pull review has to recognise the RESERVED
+    /// `__calcula_custom_functions__` library — whose functions run on every
+    /// recalculation of any cell that calls them — and a human-chosen display
+    /// name is not a safe handle for that: a publisher can name any module
+    /// "Custom Functions (data)", and the real library can be renamed. The id
+    /// is assigned by Calcula, not by the publisher.
+    pub id: String,
     pub name: String,
     /// "workbook" or a sheet name.
     pub scope: String,
@@ -3046,6 +3094,7 @@ pub fn calp_inspect_package(
             requested_capabilities: s.capabilities.clone(),
         }).collect(),
         module_scripts: manifest.module_scripts.iter().map(|m| InspectedModuleScript {
+            id: m.id.clone(),
             name: m.name.clone(),
             scope: m.scope.clone(),
             description: m.description.clone(),
@@ -5723,32 +5772,193 @@ pub fn calp_get_writeback_regions(
     Ok(entries)
 }
 
-/// Rebuild the writeback index from the version manifests of all active subscriptions.
-/// Each subscription's manifest is read from its own stored registry URL.
-/// Called internally after pull and refresh, and after workbook load (the
-/// index is in-memory only and would otherwise be stale-empty after reopen).
+/// Why one subscription's writeback regions are NOT installed.
+///
+/// Without this, "no regions" and "regions unknown" were the same observable
+/// state: an unreachable registry, an unreadable pin store and a package that
+/// genuinely declares no writeback all produced an empty index, so a subscriber
+/// whose form protections were silently INACTIVE saw exactly what a subscriber
+/// with no form sees.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WritebackRebuildSkip {
+    pub package_name: String,
+    pub registry_url: String,
+    /// One of: `unreachable`, `notPinned`, `publisherChanged`, `badManifest`,
+    /// `appTooOld`, `deferred`, `unknown`.
+    pub reason: String,
+    /// The underlying error text, for the pane's tooltip / details line.
+    pub detail: String,
+}
+
+/// Classify a manifest-load failure into a [`WritebackRebuildSkip::reason`].
+fn writeback_skip_reason(err: &calp::error::CalpError) -> &'static str {
+    use calp::error::CalpError as E;
+    match err {
+        E::Io(_) | E::Registry(_) | E::PackageNotFound(_) | E::VersionNotFound { .. } => {
+            "unreachable"
+        }
+        E::PublisherNotPinned { .. } => "notPinned",
+        E::PublisherKeyChanged { .. }
+        | E::PublisherNameConflict { .. }
+        | E::ManifestSignatureInvalid { .. }
+        | E::MissingSignature { .. } => "publisherChanged",
+        E::Json(_)
+        | E::Format(_)
+        | E::ChecksumMismatch { .. }
+        | E::MissingArtifact { .. }
+        | E::UnlistedArtifact { .. }
+        | E::MissingChecksums { .. } => "badManifest",
+        E::AppTooOld { .. } => "appTooOld",
+        _ => "unknown",
+    }
+}
+
+/// Monotonic id of the newest writeback-index rebuild REQUEST.
+///
+/// Exists because the deferred (HTTP) half of a rebuild finishes on a worker
+/// thread, and by then the user may have opened a DIFFERENT workbook. Installing
+/// a set of region declarations that belongs to a document which is no longer
+/// open is the same class of defect as inheriting the previous workbook's
+/// `subscriptions.json` (persistence.rs) — one workbook's distribution state
+/// governing another's cells. Every rebuild request takes a ticket here; a
+/// worker installs only if its ticket is still the newest.
+static WRITEBACK_REBUILD_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn next_writeback_rebuild_seq() -> u64 {
+    WRITEBACK_REBUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Rebuild the writeback index from the version manifests of all active
+/// subscriptions. Each subscription's manifest is read from its own stored
+/// registry URL. Called after pull and refresh — both of which need the new
+/// declarations to have landed before they return (refresh diffs old against
+/// new to invalidate drafts), so this walks EVERY registry synchronously.
+///
+/// Workbook OPEN uses [`rebuild_writeback_index_deferring_http`] instead.
 pub(crate) fn rebuild_writeback_index(state: &AppState) {
+    let seq = next_writeback_rebuild_seq();
+    rebuild_writeback_index_inner(state, true, seq);
+}
+
+/// What one pass of [`rebuild_writeback_index_inner`] did.
+struct RebuildOutcome {
+    /// Whether this pass actually installed its result. False means it was
+    /// SUPERSEDED — a newer rebuild request claimed the index while this walk
+    /// was in flight — and nothing was written.
+    installed: bool,
+    /// Whether at least one HTTP subscription was skipped for a later pass.
+    deferred_http: bool,
+}
+
+/// The WORKBOOK-OPEN variant: local (`file://`) registries are walked inline,
+/// HTTP registries are handed to a worker thread and installed when they land.
+///
+/// `open_file` called the synchronous rebuild directly, and each HTTP
+/// subscription costs two blocking artifact reads with a 30-second timeout — so
+/// opening a `.cala` that named an unreachable HTTP registry hung the whole app
+/// on the open, before a single cell was drawn, with no way to cancel. Local
+/// registries stay inline because they cost microseconds and because the
+/// writeback guards must be armed before the user can type.
+pub(crate) fn rebuild_writeback_index_deferring_http(state: &AppState) {
+    let seq = next_writeback_rebuild_seq();
+    if !rebuild_writeback_index_inner(state, false, seq).deferred_http {
+        return;
+    }
+    let Some(app) = crate::bi::writeback_source::app_handle() else {
+        // No worker available (headless/unit-test): the HTTP half would be lost
+        // entirely, so do it inline rather than silently disarming the guards.
+        rebuild_writeback_index_inner(state, true, seq);
+        return;
+    };
+    // A plain OS thread: the registry transports use `reqwest::blocking`, which
+    // must not park an async-runtime worker for the full timeout.
+    std::thread::spawn(move || {
+        use tauri::{Emitter, Manager};
+        let state = app.state::<AppState>();
+        if !rebuild_writeback_index_inner(&state, true, seq).installed {
+            // Superseded: a newer rebuild (another workbook was opened, or a
+            // pull/refresh ran) claimed the index while this walk was in
+            // flight. Installing now would put THIS workbook's regions on THAT
+            // workbook's cells. Nothing was written; say nothing.
+            return;
+        }
+        // The index drives cell tints, the write guards and GATHER geometry.
+        // "grid:refresh" is already bridged to the window event in
+        // shell/bootstrap.ts; the second event is for the Subscriptions /
+        // Writeback panes.
+        let _ = app.emit("grid:refresh", ());
+        let _ = app.emit("distribution:writeback-index-changed", ());
+    });
+}
+
+/// The shared walk.
+///
+/// `include_http = false` skips HTTP registries and records them as `deferred`.
+/// `seq` is the ticket taken by the rebuild REQUEST this pass belongs to: if a
+/// newer request has been made by the time the walk finishes, this pass installs
+/// NOTHING (see [`WRITEBACK_REBUILD_SEQ`]).
+fn rebuild_writeback_index_inner(
+    state: &AppState,
+    include_http: bool,
+    seq: u64,
+) -> RebuildOutcome {
     // The index changes on pull/refresh/open/detach — the cached GATHER map
     // is built from the same declarations and must go with it.
     invalidate_gather_cache(state);
 
-    let subs = match state.subscriptions.lock() {
-        Ok(s) => s,
-        Err(_) => return,
+    // CLONED, not held: the walk below is registry I/O (seconds, over HTTP), and
+    // holding the subscriptions lock across it blocks every reader of the list.
+    let subscriptions = match state.subscriptions.lock() {
+        Ok(s) => s.subscriptions.clone(),
+        Err(_) => {
+            return RebuildOutcome {
+                installed: false,
+                deferred_http: false,
+            }
+        }
     };
 
     let mut all_decls = Vec::new();
     let mut all_model_decls: Vec<calp::ModelWritebackDeclaration> = Vec::new();
+    let mut skips: Vec<WritebackRebuildSkip> = Vec::new();
+    let mut deferred_any = false;
 
-    for sub in &subs.subscriptions {
+    for sub in &subscriptions {
         // Skip dev and file-channel subscriptions (no writeback in those)
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
         }
         let registry_path = subscription_registry_path(sub);
+        if !include_http && crate::calp_registry::is_http_location(registry_path) {
+            deferred_any = true;
+            skips.push(WritebackRebuildSkip {
+                package_name: sub.package_name.clone(),
+                registry_url: registry_path.to_string(),
+                reason: "deferred".to_string(),
+                detail: "loading in the background".to_string(),
+            });
+            continue;
+        }
         let (registry, scope) = match crate::calp_registry::open_registry_scoped(registry_path) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(e) => {
+                crate::log_warn!(
+                    "CALP",
+                    "writeback rebuild: {} skipped ({}): {}",
+                    sub.package_name,
+                    writeback_skip_reason(&e),
+                    e
+                );
+                skips.push(WritebackRebuildSkip {
+                    package_name: sub.package_name.clone(),
+                    registry_url: registry_path.to_string(),
+                    reason: writeback_skip_reason(&e).to_string(),
+                    detail: e.to_string(),
+                });
+                continue;
+            }
         };
         // Trust-bearing read: these region declarations drive GATHER cell
         // geometry AND schema validation, and rebuild runs on plain workbook
@@ -5769,20 +5979,58 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
         // is skipped -- its regions stay inert until the user subscribes here
         // themselves. `calp_subscription_trust` surfaces exactly that state to
         // the Subscriptions pane so it is visible rather than merely silent.
-        if let Ok(ver_manifest) = calp::integrity::load_pinned_manifest_via(
+        match calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         ) {
-            if let Some(ref wb_regions) = ver_manifest.writeback_regions {
-                all_decls.extend(wb_regions.iter().cloned());
+            Ok(ver_manifest) => {
+                if let Some(ref wb_regions) = ver_manifest.writeback_regions {
+                    all_decls.extend(wb_regions.iter().cloned());
+                }
+                // Same trust rule for MODEL writeback columns: only a
+                // signature-verified manifest may declare one. Mirrored here so
+                // refresh can diff the pre/post sets without re-walking every
+                // subscription's registry.
+                if let Some(ref model_wbs) = ver_manifest.model_writebacks {
+                    all_model_decls.extend(model_wbs.iter().cloned());
+                }
             }
-            // Same trust rule for MODEL writeback columns: only a
-            // signature-verified manifest may declare one. Mirrored here so
-            // refresh can diff the pre/post sets without re-walking every
-            // subscription's registry.
-            if let Some(ref model_wbs) = ver_manifest.model_writebacks {
-                all_model_decls.extend(model_wbs.iter().cloned());
+            // NOT silent. An unreachable registry, an unreadable pin store and a
+            // package that was never pinned all used to produce the same empty
+            // index as a package with no writeback at all — so a subscriber
+            // whose form protections were INACTIVE could not tell.
+            Err(e) => {
+                crate::log_warn!(
+                    "CALP",
+                    "writeback rebuild: {}@{} skipped ({}): {}",
+                    sub.package_name,
+                    sub.resolved_version,
+                    writeback_skip_reason(&e),
+                    e
+                );
+                skips.push(WritebackRebuildSkip {
+                    package_name: sub.package_name.clone(),
+                    registry_url: registry_path.to_string(),
+                    reason: writeback_skip_reason(&e).to_string(),
+                    detail: e.to_string(),
+                });
             }
         }
+    }
+
+    // SUPERSESSION CHECK, immediately before the first write. A newer rebuild
+    // request (another workbook was opened, or a pull/refresh ran) means this
+    // walk describes a document that is no longer the one on screen — installing
+    // it would put one workbook's writeback regions on another's cells.
+    if WRITEBACK_REBUILD_SEQ.load(std::sync::atomic::Ordering::SeqCst) != seq {
+        crate::log_warn!(
+            "CALP",
+            "writeback rebuild #{} superseded before install; nothing written",
+            seq
+        );
+        return RebuildOutcome {
+            installed: false,
+            deferred_http: deferred_any,
+        };
     }
 
     let new_index = match calp::WritebackIndex::from_declarations(&all_decls) {
@@ -5804,6 +6052,33 @@ pub(crate) fn rebuild_writeback_index(state: &AppState) {
     if let Ok(mut decls) = state.model_writeback_declarations.lock() {
         *decls = all_model_decls;
     }
+    if let Ok(mut s) = state.writeback_rebuild_skips.lock() {
+        *s = skips;
+    }
+
+    RebuildOutcome {
+        installed: true,
+        deferred_http: deferred_any,
+    }
+}
+
+/// Every subscription whose writeback regions could NOT be installed by the
+/// last rebuild, and why. Empty means every subscription's regions are live.
+///
+/// The Subscriptions / Writeback panes need this to distinguish "this package
+/// declares no writeback" from "this package's writeback regions are UNKNOWN, so
+/// its protections are not in force".
+#[tauri::command]
+pub fn calp_get_writeback_rebuild_skips(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<Vec<WritebackRebuildSkip>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    state
+        .writeback_rebuild_skips
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -6074,11 +6349,18 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
 /// The same events make the BI writeback dataset tables stale, so this also
 /// queues their (async, fire-and-forget) re-provision — one hook covers every
 /// mutation path: submit, clear, approve/reject, pull, refresh, open, detach.
+///
+/// DROPS rather than marks stale: an invalidation means the cached map is known
+/// to be untrue (a region was detached, a submission was withdrawn), and serving
+/// a value the user just deleted is worse than serving none. The rebuild is
+/// queued here rather than performed inline — see `build_gather_data` for why
+/// nothing on this path may block on registry I/O.
 pub(crate) fn invalidate_gather_cache(state: &AppState) {
     crate::bi::writeback_source::invalidate_writeback_bi();
     if let Ok(mut cache) = state.gather_cache.lock() {
         *cache = None;
     }
+    queue_gather_refresh();
 }
 
 /// True when the given deadline (ISO 8601, or datetime-local "YYYY-MM-DDTHH:MM")
@@ -7817,10 +8099,14 @@ pub(crate) fn writeback_slot_has_draft(
 ///
 /// WIRED at the top of `update_cell_impl` (app/src-tauri/src/commands/data.rs),
 /// the ONLY body behind the `update_cell` command. `update_cells_batch` already
-/// skips writeback cells (partial-success), `fill` has its own range guard, and
+/// skips writeback cells (partial-success), `fill` has its own range guard,
 /// `update_cell_on_sheets` (the group/off-sheet write) goes through
-/// `ensure_writeback_draft_before_write_on_sheets` below — so no grid write path
-/// can land a value in a claimed cell without a validated draft behind it.
+/// `ensure_writeback_draft_before_write_on_sheets` below, and the SCRIPT grid
+/// install (`apply_script_modified_grids_core` in
+/// app/src-tauri/src/scripting/commands.rs, which swaps whole non-active grids
+/// into `AppState` and therefore passes through NONE of the above) goes through
+/// `ensure_writeback_draft_before_grid_install` — so no grid write path can land
+/// a value in a claimed cell without a validated draft behind it.
 pub(crate) fn ensure_writeback_draft_before_write(
     state: &AppState,
     row: u32,
@@ -7857,6 +8143,45 @@ pub(crate) fn ensure_writeback_draft_before_write_on_sheets(
     };
     for sid in targets {
         ensure_writeback_draft_on_sheet(state, sid, row, col)?;
+    }
+    Ok(())
+}
+
+/// The WHOLE-GRID-INSTALL twin, for the script apply path.
+///
+/// `apply_script_modified_grids_core` does not write cells one at a time: it
+/// diffs the script's post-run grid against the live one and then INSTALLS the
+/// whole `Grid` into `AppState.grids[idx]` for every non-active sheet. That
+/// assignment consults nothing — not `update_cell_impl`'s single-cell guard, not
+/// `update_cells_batch`'s writeback filter (which only ever covers the ACTIVE
+/// sheet), not the range guards. So a QuickJS/MCP script calling
+/// `setCellValue(row, col, value, sheetIndex)` against a background sheet used
+/// to land a raw value in a published writeback cell with no draft, no schema
+/// check and no validator behind it — the exact silent divergence the
+/// single-cell guard exists to close.
+///
+/// Takes the planned writes as `(sheet_index, cells)` so the empty-index fast
+/// path and the `sheet_ids` resolution are each paid once for the whole apply,
+/// not once per cell. Called from the PLAN phase, BEFORE anything is mutated,
+/// so a refusal is atomic.
+pub(crate) fn ensure_writeback_draft_before_grid_install(
+    state: &AppState,
+    writes: &[(usize, Vec<(u32, u32)>)],
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let sheet_ids: Vec<identity::SheetId> = {
+        let ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        ids.clone()
+    };
+    for (sheet_index, cells) in writes {
+        let Some(&sid) = sheet_ids.get(*sheet_index) else {
+            continue;
+        };
+        for &(row, col) in cells {
+            ensure_writeback_draft_on_sheet(state, sid, row, col)?;
+        }
     }
     Ok(())
 }
@@ -9611,47 +9936,265 @@ pub(crate) fn merge_lenient_submissions(
     submissions
 }
 
-/// Build a GatherRegionData map from the current subscriptions for formula evaluation.
-/// This is the pre-fetch step: load all submission data from the registry once,
-/// so GATHER functions can look it up synchronously during evaluation.
-pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
-    let mut result = std::collections::HashMap::new();
+/// How long a freshly built GATHER map is served before a background refresh is
+/// queued. A TTL (rather than pure event-invalidation) keeps OTHER subscribers'
+/// new submissions appearing without an explicit action; local mutations queue a
+/// refresh eagerly via `invalidate_gather_cache`.
+const GATHER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-    // Fast path: no writeback regions known to this workbook — skip all
-    // registry I/O. This is called on every cell edit and recalculation pass,
-    // so it must be free for ordinary workbooks. (Declarations are rebuilt at
-    // pull, refresh, and workbook open.)
+/// How long an HTTP registry that failed is left alone before it is tried again.
+/// Without this, an unreachable registry pays a full connect timeout on EVERY
+/// rebuild — 30s per artifact, every TTL window, forever.
+const GATHER_REGISTRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Bumped on every invalidation; the worker loops until it has completed a build
+/// that STARTED at the latest generation, so no invalidation is absorbed by a
+/// build that snapshotted state before it. (Same shape as
+/// `bi::writeback_source::invalidate_writeback_bi`.)
+static GATHER_REFRESH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether a refresh worker is running (coalesces bursts into one trailing run).
+static GATHER_REFRESH_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// HTTP registry location -> the instant before which it must not be retried.
+fn gather_registry_backoff(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static BACKOFF: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    BACKOFF.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Whether this registry is currently marked dead. LOCAL registries are never
+/// backed off — a missing directory fails in microseconds, and skipping it would
+/// hide a registry the user just plugged back in.
+fn registry_is_backed_off(location: &str) -> bool {
+    if !crate::calp_registry::is_http_location(location) {
+        return false;
+    }
+    let Ok(map) = gather_registry_backoff().lock() else {
+        return false;
+    };
+    map.get(location)
+        .map(|until| std::time::Instant::now() < *until)
+        .unwrap_or(false)
+}
+
+/// Mark an HTTP registry unreachable for `GATHER_REGISTRY_BACKOFF`.
+fn mark_registry_unreachable(location: &str) {
+    if !crate::calp_registry::is_http_location(location) {
+        return;
+    }
+    if let Ok(mut map) = gather_registry_backoff().lock() {
+        map.insert(
+            location.to_string(),
+            std::time::Instant::now() + GATHER_REGISTRY_BACKOFF,
+        );
+    }
+}
+
+/// Clear the backoff after a successful read.
+fn clear_registry_backoff(location: &str) {
+    if let Ok(mut map) = gather_registry_backoff().lock() {
+        map.remove(location);
+    }
+}
+
+/// Test-only reset so backoff state cannot leak between tests.
+#[cfg(test)]
+pub(crate) fn reset_gather_registry_backoff() {
+    if let Ok(mut map) = gather_registry_backoff().lock() {
+        map.clear();
+    }
+}
+
+/// Order-independent digest of a GATHER map, used to decide whether a completed
+/// background refresh actually CHANGED anything. In the steady state (nobody
+/// submitted since the last build) the digest matches and no recalculation is
+/// triggered at all.
+fn gather_fingerprint(
+    data: &std::collections::HashMap<String, engine::GatherRegionData>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut per_region: Vec<u64> = data
+        .iter()
+        .map(|(region_id, region)| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            region_id.hash(&mut h);
+            let mut rows: Vec<String> = region
+                .submissions
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}|{}|{}|{}|{:?}",
+                        s.submitter_id, s.submitter_name, s.cell_row, s.cell_col, s.value
+                    )
+                })
+                .collect();
+            rows.sort();
+            rows.hash(&mut h);
+            h.finish()
+        })
+        .collect();
+    per_region.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    per_region.hash(&mut h);
+    h.finish()
+}
+
+/// The GATHER pre-fetch map for formula evaluation — NEVER BLOCKING.
+///
+/// This is called from eight places on the calculation path, including
+/// `update_cell` (i.e. every keystroke that commits a cell) and every recalc
+/// pass. It used to build the map INLINE: open every subscribed registry, read
+/// and Ed25519-verify a pinned version manifest per subscription (two artifact
+/// reads plus a pin-store disk read each), then scan the whole submission tree.
+/// For an HTTP-registry subscriber that is `reqwest::blocking` with a 30-second
+/// timeout per request — so a single keystroke could freeze the UI for half a
+/// minute, and the 2-second TTL meant it froze again two seconds later.
+///
+/// Now it only ever reads the cache:
+///
+/// * cache present -> return it immediately, queueing a background refresh if it
+///   is older than [`GATHER_CACHE_TTL`];
+/// * cache absent (workbook just opened, or something invalidated it) -> return
+///   an EMPTY map and queue the refresh. GATHER cells read empty for the
+///   fraction of a second the fetch takes, then the worker recalculates the
+///   workbook and repaints. Serving stale-but-wrong data would be worse: an
+///   invalidation means the previous map is known to be untrue.
+///
+/// The blocking build itself is [`rebuild_gather_cache`], run on a worker
+/// thread by [`queue_gather_refresh`]. With no Tauri app handle installed (unit
+/// tests, headless use) there is no worker to run it on, so it falls back to
+/// building inline — otherwise GATHER would silently never populate.
+pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
+    // Fast path: no writeback regions known to this workbook — no cache, no
+    // worker, no registry I/O. (Declarations are rebuilt at pull, refresh, and
+    // workbook open.)
     if state
         .writeback_declarations
         .lock()
         .map(|d| d.is_empty())
         .unwrap_or(true)
     {
-        return result;
+        return std::collections::HashMap::new();
     }
 
-    // Short-TTL cache: this runs on every edit and recalc pass; without it,
-    // each keystroke rescans every submission file in every subscribed
-    // registry. A TTL (rather than pure event-invalidation) keeps OTHER
-    // subscribers' new submissions appearing without an explicit action;
-    // local mutations invalidate eagerly via invalidate_gather_cache.
-    const GATHER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
-    if let Ok(cache) = state.gather_cache.lock() {
-        if let Some((stamp, cached)) = cache.as_ref() {
-            if stamp.elapsed() < GATHER_CACHE_TTL {
-                return cached.clone();
+    let cached = match state.gather_cache.lock() {
+        Ok(cache) => cache.clone(),
+        Err(_) => None,
+    };
+
+    match cached {
+        Some((stamp, data)) => {
+            if stamp.elapsed() >= GATHER_CACHE_TTL {
+                queue_gather_refresh();
+            }
+            data
+        }
+        None => {
+            if crate::bi::writeback_source::app_handle().is_some() {
+                queue_gather_refresh();
+                std::collections::HashMap::new()
+            } else {
+                // No worker available (unit tests / no app handle yet): build
+                // inline rather than returning permanently empty.
+                rebuild_gather_cache(state)
             }
         }
     }
+}
 
-    let subs = match state.subscriptions.lock() {
-        Ok(s) => s,
+/// Run [`rebuild_gather_cache`] on a background OS thread, then recalculate and
+/// repaint if the data actually changed.
+///
+/// A plain `std::thread`, deliberately: the registry transports use
+/// `reqwest::blocking`, which must not run on the async runtime's worker pool
+/// (it would park a runtime thread for the full 30s timeout).
+pub(crate) fn queue_gather_refresh() {
+    use std::sync::atomic::Ordering;
+    let Some(app) = crate::bi::writeback_source::app_handle() else {
+        return;
+    };
+    GATHER_REFRESH_GEN.fetch_add(1, Ordering::SeqCst);
+    if GATHER_REFRESH_ACTIVE.swap(true, Ordering::SeqCst) {
+        return; // an active worker will observe the bumped generation
+    }
+    std::thread::spawn(move || {
+        use tauri::{Emitter, Manager};
+        loop {
+            let seen = GATHER_REFRESH_GEN.load(Ordering::SeqCst);
+            {
+                let state = app.state::<AppState>();
+                let before = state
+                    .gather_cache
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.as_ref().map(|(_, d)| gather_fingerprint(d)));
+                let fresh = rebuild_gather_cache(&state);
+                let after = gather_fingerprint(&fresh);
+                if before != Some(after) {
+                    // The workbook's GATHER formulas now hold values built from
+                    // data that has since changed. Re-evaluate every sheet (a
+                    // GATHER formula can live on any of them) and repaint.
+                    let user_files = app.state::<crate::persistence::UserFilesState>();
+                    let pivot = app.state::<crate::pivot::types::PivotState>();
+                    let pane = app.state::<crate::pane_control::PaneControlState>();
+                    let ribbon = app.state::<crate::ribbon_filter::RibbonFilterState>();
+                    let sheet_count = state.grids.lock().map(|g| g.len()).unwrap_or(0);
+                    for sheet_index in 0..sheet_count {
+                        crate::calculation::recalculate_sheet_values(
+                            &state,
+                            &user_files,
+                            &pivot,
+                            sheet_index,
+                            Some((&pane, &ribbon)),
+                        );
+                    }
+                    let _ = app.emit("grid:refresh", ());
+                }
+            }
+            if GATHER_REFRESH_GEN.load(Ordering::SeqCst) != seen {
+                continue; // invalidated mid-run — go again
+            }
+            GATHER_REFRESH_ACTIVE.store(false, Ordering::SeqCst);
+            // Close the check-then-clear race: a bump that landed between the
+            // check above and the clear must not be lost.
+            if GATHER_REFRESH_GEN.load(Ordering::SeqCst) == seen
+                || GATHER_REFRESH_ACTIVE.swap(true, Ordering::SeqCst)
+            {
+                break;
+            }
+        }
+    });
+}
+
+/// Build a GatherRegionData map from the current subscriptions for formula
+/// evaluation, doing the actual registry I/O. BLOCKING — run it on a worker
+/// thread (see [`queue_gather_refresh`]), never on the edit path.
+///
+/// Stores the result in `state.gather_cache` before returning it.
+pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
+    let mut result = std::collections::HashMap::new();
+
+    let subscriptions = match state.subscriptions.lock() {
+        // CLONED, not held: the whole build below is seconds of network I/O,
+        // and holding the subscriptions lock across it would block every
+        // command that only wants to read the list.
+        Ok(s) => s.subscriptions.clone(),
         Err(_) => return result,
     };
 
-    for sub in &subs.subscriptions {
+    for sub in &subscriptions {
         // Skip dev and file-channel subscriptions
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            continue;
+        }
+
+        // An HTTP registry that just failed is not asked again for
+        // GATHER_REGISTRY_BACKOFF. Every read below costs a full 30s connect
+        // timeout when the host is down, and there are several per subscription.
+        if registry_is_backed_off(&sub.registry_url) {
             continue;
         }
 
@@ -9659,7 +10202,10 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
         let (registry, scope) = match crate::calp_registry::open_registry_scoped(&sub.registry_url)
         {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => {
+                mark_registry_unreachable(&sub.registry_url);
+                continue;
+            }
         };
 
         // Load the version manifest to get writeback regions. GATHER
@@ -9676,8 +10222,20 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
         let ver_manifest = match calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         ) {
-            Ok(m) => m,
-            Err(_) => continue,
+            Ok(m) => {
+                // Reached the host and read a verified manifest — whatever the
+                // backoff thought, this registry is alive.
+                clear_registry_backoff(&sub.registry_url);
+                m
+            }
+            // Could be an unreadable network OR a legitimately unpinned package.
+            // Backing off either way is correct: the unpinned case yields
+            // nothing however often it is retried, so retrying it every two
+            // seconds over HTTP buys the user only latency.
+            Err(_) => {
+                mark_registry_unreachable(&sub.registry_url);
+                continue;
+            }
         };
 
         let regions = match &ver_manifest.writeback_regions {
@@ -9696,7 +10254,10 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
                     current_by_region.entry(s.region_id.clone()).or_default().push(s);
                 }
             }
-            Err(_) => continue,
+            Err(_) => {
+                mark_registry_unreachable(&sub.registry_url);
+                continue;
+            }
         }
 
         // Strictly OLDER versions, each loaded once: their region
@@ -9770,6 +10331,392 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
     }
 
     result
+}
+
+#[cfg(test)]
+mod gather_hot_path_tests {
+    //! GATHER must never do registry I/O on the edit path, and an unreachable
+    //! registry must not be re-dialed every two seconds.
+
+    use super::*;
+
+    fn declaring_state() -> AppState {
+        let state = crate::create_app_state();
+        // A non-empty declaration set is what takes `build_gather_data` past its
+        // free fast path; the content does not matter here.
+        state
+            .writeback_declarations
+            .lock()
+            .unwrap()
+            .push(calp::WritebackRegionDeclaration {
+                id: "region-1".to_string(),
+                selector: calp::writeback::RegionSelector {
+                    sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+                    row_start: 0,
+                    row_end: 0,
+                    col_start: 0,
+                    col_end: 0,
+                },
+                mode: None,
+                schema: None,
+                visibility: None,
+                submission_policy: None,
+                version_binding: None,
+                lifecycle: None,
+                aggregation_hint: None,
+                expected_respondents: Vec::new(),
+                extra: Default::default(),
+            });
+        state
+    }
+
+    fn one_region_map() -> std::collections::HashMap<String, engine::GatherRegionData> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            "region-1".to_string(),
+            engine::GatherRegionData {
+                submissions: vec![engine::GatherSubmission {
+                    submitter_name: "Ann".to_string(),
+                    submitter_id: "ann".to_string(),
+                    cell_row: 0,
+                    cell_col: 0,
+                    value: engine::EvalResult::Number(7.0),
+                }],
+            },
+        );
+        m
+    }
+
+    /// THE hot-path property: an EXPIRED cache is still served immediately.
+    ///
+    /// This used to fall through to a full rebuild — open every subscribed
+    /// registry, read and Ed25519-verify a pinned manifest, scan the submission
+    /// tree — INSIDE `update_cell`. Over an HTTP registry that is
+    /// `reqwest::blocking` with a 30-second timeout, so one keystroke could
+    /// freeze the UI, and the 2-second TTL meant it froze again two seconds
+    /// later. The refresh is now queued to a worker instead.
+    #[test]
+    fn an_expired_cache_is_served_immediately_instead_of_rebuilding() {
+        let state = declaring_state();
+        let stale_stamp = std::time::Instant::now()
+            - (GATHER_CACHE_TTL + std::time::Duration::from_secs(60));
+        *state.gather_cache.lock().unwrap() = Some((stale_stamp, one_region_map()));
+
+        let data = build_gather_data(&state);
+
+        assert_eq!(
+            data.len(),
+            1,
+            "the last-known-good map must be returned even though the TTL expired"
+        );
+        assert_eq!(data["region-1"].submissions.len(), 1);
+    }
+
+    /// A workbook with no writeback declarations pays nothing at all — no cache
+    /// read, no worker, no I/O.
+    #[test]
+    fn a_workbook_with_no_writeback_regions_returns_empty_without_touching_the_cache() {
+        let state = crate::create_app_state();
+        *state.gather_cache.lock().unwrap() = Some((std::time::Instant::now(), one_region_map()));
+
+        assert!(
+            build_gather_data(&state).is_empty(),
+            "the fast path must not even consult the cache"
+        );
+    }
+
+    /// An invalidation DROPS the map rather than serving something known to be
+    /// untrue (a withdrawn submission, a detached region).
+    #[test]
+    fn invalidation_drops_the_cache() {
+        let state = declaring_state();
+        *state.gather_cache.lock().unwrap() = Some((std::time::Instant::now(), one_region_map()));
+
+        invalidate_gather_cache(&state);
+
+        assert!(state.gather_cache.lock().unwrap().is_none());
+    }
+
+    // --- Per-registry failure backoff --------------------------------------
+
+    #[test]
+    fn an_unreachable_http_registry_is_backed_off_and_local_ones_never_are() {
+        reset_gather_registry_backoff();
+        let http = "https://registry.example.com/reg";
+        let local = "file:///C:/regs/main";
+
+        assert!(!registry_is_backed_off(http), "clean slate");
+
+        mark_registry_unreachable(http);
+        assert!(
+            registry_is_backed_off(http),
+            "an unreachable HTTP registry must not be re-dialed every TTL window"
+        );
+
+        mark_registry_unreachable(local);
+        assert!(
+            !registry_is_backed_off(local),
+            "a LOCAL registry fails in microseconds; backing it off would hide a \
+             drive the user just reconnected"
+        );
+
+        clear_registry_backoff(http);
+        assert!(
+            !registry_is_backed_off(http),
+            "a successful read must clear the backoff"
+        );
+        reset_gather_registry_backoff();
+    }
+
+    /// The change detector that decides whether a completed background refresh
+    /// has to recalculate the workbook.
+    #[test]
+    fn the_fingerprint_tracks_content_not_ordering() {
+        let a = one_region_map();
+        let b = one_region_map();
+        assert_eq!(gather_fingerprint(&a), gather_fingerprint(&b));
+
+        let mut changed = one_region_map();
+        changed.get_mut("region-1").unwrap().submissions[0].value =
+            engine::EvalResult::Number(8.0);
+        assert_ne!(
+            gather_fingerprint(&a),
+            gather_fingerprint(&changed),
+            "a changed submission VALUE must trigger the recalculation"
+        );
+
+        let empty: std::collections::HashMap<String, engine::GatherRegionData> =
+            std::collections::HashMap::new();
+        assert_ne!(gather_fingerprint(&a), gather_fingerprint(&empty));
+    }
+}
+
+#[cfg(test)]
+mod writeback_rebuild_tests {
+    //! Workbook OPEN must not block on HTTP registries, and a subscription whose
+    //! regions could not be installed must say so.
+
+    use super::*;
+
+    /// `WRITEBACK_REBUILD_SEQ` is a PROCESS-GLOBAL ticket counter (that is the
+    /// point of it — it is what makes a superseded worker install nothing), so
+    /// two of these tests running concurrently supersede each other and the
+    /// failures look like logic bugs. Serialize them.
+    fn seq_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn subscription(package: &str, registry: &str) -> calp::manifest::Subscription {
+        calp::manifest::Subscription {
+            package_name: package.to_string(),
+            registry_url: registry.to_string(),
+            version_pin: "1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            extra: Default::default(),
+        }
+    }
+
+    fn state_with(subs: Vec<calp::manifest::Subscription>) -> AppState {
+        let state = crate::create_app_state();
+        state.subscriptions.lock().unwrap().subscriptions = subs;
+        state
+    }
+
+    /// THE open-path property: an HTTP subscription is DEFERRED, not walked.
+    ///
+    /// `open_file` used to call the synchronous rebuild, and each HTTP
+    /// subscription costs two blocking artifact reads with a 30-second timeout —
+    /// so opening a `.cala` naming an unreachable server hung the whole open
+    /// before a single cell was drawn.
+    #[test]
+    fn http_subscriptions_are_deferred_on_the_open_path() {
+        let _seq = seq_guard();
+        let state = state_with(vec![subscription(
+            "acme.finance",
+            "https://registry.example.com/reg",
+        )]);
+
+        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+
+        assert!(
+            outcome.deferred_http,
+            "the caller must be told to schedule the worker"
+        );
+        assert!(outcome.installed, "the local half still installs");
+        let skips = state.writeback_rebuild_skips.lock().unwrap();
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].reason, "deferred");
+        assert_eq!(skips[0].package_name, "acme.finance");
+    }
+
+    /// Local registries stay INLINE — the write guards must be armed before the
+    /// user can type, and a local read costs microseconds.
+    #[test]
+    fn local_subscriptions_are_never_deferred() {
+        let _seq = seq_guard();
+        let dir = tempfile::TempDir::new().unwrap();
+        let location = format!("file:///{}", dir.path().display().to_string().replace('\\', "/"));
+        let state = state_with(vec![subscription("acme.local", &location)]);
+
+        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+
+        assert!(
+            !outcome.deferred_http,
+            "a local registry must be walked inline"
+        );
+        let skips = state.writeback_rebuild_skips.lock().unwrap();
+        assert!(
+            skips.iter().all(|s| s.reason != "deferred"),
+            "a local registry must never be deferred: {:?}",
+            skips
+        );
+    }
+
+    /// A subscription whose regions could not be installed is RECORDED, so the
+    /// Subscriptions pane can distinguish "declares no writeback" from
+    /// "writeback regions unknown - its protections are not in force".
+    #[test]
+    fn an_unopenable_registry_is_recorded_with_a_reason() {
+        let _seq = seq_guard();
+        let state = state_with(vec![subscription(
+            "acme.gone",
+            "file:///C:/definitely/not/a/registry/xyzzy",
+        )]);
+
+        rebuild_writeback_index_inner(&state, true, next_writeback_rebuild_seq());
+
+        let skips = state.writeback_rebuild_skips.lock().unwrap();
+        assert_eq!(skips.len(), 1, "the skip must be visible, not silent");
+        assert_eq!(skips[0].package_name, "acme.gone");
+        assert_ne!(skips[0].reason, "deferred");
+        assert!(!skips[0].detail.is_empty(), "the reason needs a detail line");
+    }
+
+    /// A clean rebuild leaves NO skips — an empty list is what "every
+    /// subscription's regions are live" looks like.
+    #[test]
+    fn a_workbook_with_no_subscriptions_records_no_skips() {
+        let _seq = seq_guard();
+        let state = state_with(Vec::new());
+        assert!(
+            !rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq())
+                .deferred_http
+        );
+        assert!(state.writeback_rebuild_skips.lock().unwrap().is_empty());
+    }
+
+    /// Dev and channel subscriptions carry no writeback and are not reported as
+    /// failures.
+    #[test]
+    fn dev_and_channel_subscriptions_are_skipped_without_a_report() {
+        let _seq = seq_guard();
+        let mut dev = subscription("acme.dev", "https://registry.example.com/reg");
+        dev.version_pin = "dev".to_string();
+        let mut channel = subscription("acme.chan", "https://registry.example.com/reg");
+        channel.version_pin = "channel:test".to_string();
+        let state = state_with(vec![dev, channel]);
+
+        let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
+
+        assert!(!outcome.deferred_http);
+        assert!(state.writeback_rebuild_skips.lock().unwrap().is_empty());
+    }
+
+    /// THE deferred-worker hazard: the HTTP half finishes on a worker thread,
+    /// and by then the user may have opened a DIFFERENT workbook. A superseded
+    /// pass must install NOTHING — otherwise it puts one document's writeback
+    /// regions on another document's cells, which is the same class of defect as
+    /// inheriting the previous workbook's `subscriptions.json`.
+    #[test]
+    fn a_superseded_rebuild_installs_nothing() {
+        let _seq = seq_guard();
+        let dir = tempfile::TempDir::new().unwrap();
+        let location = format!("file:///{}", dir.path().display().to_string().replace('\\', "/"));
+        let state = state_with(vec![subscription("acme.local", &location)]);
+
+        // Workbook A's ticket...
+        let stale_seq = next_writeback_rebuild_seq();
+        // ...then workbook B is opened, taking a newer one.
+        let _newer = next_writeback_rebuild_seq();
+
+        // Prove the install is what gets skipped: seed a marker the pass would
+        // overwrite if it installed.
+        state
+            .writeback_rebuild_skips
+            .lock()
+            .unwrap()
+            .push(WritebackRebuildSkip {
+                package_name: "workbook-b-marker".to_string(),
+                registry_url: String::new(),
+                reason: "unreachable".to_string(),
+                detail: "belongs to the workbook that is actually open".to_string(),
+            });
+
+        let outcome = rebuild_writeback_index_inner(&state, true, stale_seq);
+
+        assert!(
+            !outcome.installed,
+            "a rebuild whose ticket is no longer the newest must not install"
+        );
+        let skips = state.writeback_rebuild_skips.lock().unwrap();
+        assert_eq!(
+            skips.len(),
+            1,
+            "the open workbook's state must be left exactly as it was"
+        );
+        assert_eq!(skips[0].package_name, "workbook-b-marker");
+    }
+
+    #[test]
+    fn skip_reasons_classify_the_failures_the_pane_has_to_tell_apart() {
+        use calp::error::CalpError as E;
+        assert_eq!(
+            writeback_skip_reason(&E::PublisherNotPinned {
+                package: "p".into(),
+                version: "1.0.0".into(),
+                scope: "s".into(),
+                got: "k".into(),
+            }),
+            "notPinned"
+        );
+        assert_eq!(
+            writeback_skip_reason(&E::PublisherKeyChanged {
+                package: "p".into(),
+                version: "1.0.0".into(),
+                pinned: "a".into(),
+                got: "b".into(),
+            }),
+            "publisherChanged"
+        );
+        assert_eq!(
+            writeback_skip_reason(&E::PackageNotFound("p".into())),
+            "unreachable"
+        );
+        assert_eq!(
+            writeback_skip_reason(&E::MissingChecksums {
+                package: "p".into(),
+                version: "1.0.0".into(),
+            }),
+            "badManifest"
+        );
+        assert_eq!(
+            writeback_skip_reason(&E::AppTooOld {
+                package: "p".into(),
+                version: "1.0.0".into(),
+                required: "2.0.0".into(),
+                current: "1.0.0".into(),
+            }),
+            "appTooOld"
+        );
+    }
 }
 
 #[cfg(test)]

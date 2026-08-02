@@ -2890,8 +2890,15 @@ declare interface BaseObjectContext {
 
 /** Context for Workbook-level scripts. */
 declare interface WorkbookContext extends BaseObjectContext {
-  /** Called when the workbook is opened. */
-  onOpen(handler: () => void): () => void;
+  /**
+   * Called when the workbook is opened.
+   *
+   * The detail carries the workbook's FILE NAME only — never its folder. A
+   * sandboxed script has no API that takes a path, so the directory would buy
+   * it nothing, while a path names the user's account and folder layout. Use
+   * `context.api.workbook.fileName()` for the same value on demand.
+   */
+  onOpen(handler: (detail: { fileName: string | null }) => void): () => void;
   /**
    * Called before the workbook is saved — and it can STOP the save.
    *
@@ -2906,8 +2913,11 @@ declare interface WorkbookContext extends BaseObjectContext {
    * ignored and the save goes ahead. That is deliberate — a hung script must
    * never be able to make a workbook unsaveable.
    *
+   * The detail carries the target's FILE NAME only, never its folder — the same
+   * reduction `onOpen` and `onAfterSave` get, and for the same reason.
+   *
    * ```js
-   * workbook.onBeforeSave(async ({ path }) => {
+   * workbook.onBeforeSave(async ({ fileName }) => {
    *   const total = await context.api.getCellValue(20, 3);
    *   if (!total) return { cancel: true, reason: "Fill in the total in D21 first" };
    *   await context.api.setCellValue(0, 5, new Date().toISOString());
@@ -2915,15 +2925,16 @@ declare interface WorkbookContext extends BaseObjectContext {
    * ```
    */
   onBeforeSave(
-    handler: (detail: { path?: string }) =>
+    handler: (detail: { fileName: string | null }) =>
       | void
       | false
       | "cancel"
       | { cancel: true; reason?: string }
       | Promise<void | false | "cancel" | { cancel: true; reason?: string }>,
   ): () => void;
-  /** Called after the workbook is saved. */
-  onAfterSave(handler: () => void): () => void;
+  /** Called after the workbook is saved. The detail carries the FILE NAME only,
+   *  never the folder — see {@link WorkbookContext.onOpen}. */
+  onAfterSave(handler: (detail: { fileName: string | null }) => void): () => void;
   /**
    * Called before the workbook is closed — and it can STOP the close, with the
    * same verdict shapes and the same deadline as
@@ -3037,24 +3048,31 @@ declare interface SheetContext extends BaseObjectContext {
   onDeactivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
   /** Called when the selection changes on any sheet. */
   onSelectionChange(handler: (detail: { sheetIndex: number; row: number; col: number; endRow: number; endCol: number }) => void): () => void;
-  /** Called when data changes on any sheet. */
-  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }> }) => void): () => void;
+  /**
+   * Called when data changes.
+   *
+   * `detail.sheetIndex` is the sheet on screen; each change ALSO carries its own
+   * `sheetIndex`, which is the one to use — a change is never re-stamped with
+   * the active sheet's index. A restricted script is delivered only the changes
+   * on the sheet it can reach, matching what `getCellValue` will let it read.
+   */
+  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; sheetIndex: number; oldValue?: string; newValue: string }> }) => void): () => void;
   /** Read a cell's DISPLAY STRING from the specified (or active) sheet.
    *
-   * Calcula policy (generated): Read cells on its own sheet (sheet scripts; clamped to the bound sheet).
+   * Calcula policy (generated): Read cells on the sheet currently shown.
    * Reach: broker `sheet.getCellValue`, restricted tier, class read.
    */
   getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
   /** Write a cell value.
    *
-   * Calcula policy (generated): Write cells on its own sheet (sheet scripts; clamped to the bound sheet).
+   * Calcula policy (generated): Write cells on the sheet currently shown.
    * Reach: broker `sheet.setCellValue`, restricted tier, class mutate.
    */
   setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
   /** Read one cell WITH its type and formula. Restricted scripts may only name
    *  their own (active) sheet.
    *
-   * Calcula policy (generated): Read one cell on its own sheet with its type and formula.
+   * Calcula policy (generated): Read one cell on the sheet currently shown, with its type and formula.
    * Reach: broker `sheet.getCellData`, restricted tier, class read.
    */
   getCellData(row: number, col: number, sheetIndex?: number): Promise<ScriptCell>;
@@ -3063,7 +3081,7 @@ declare interface SheetContext extends BaseObjectContext {
    * `null` when the cell holds a plain value, is empty, or has its formula
    * hidden by sheet protection.
    *
-   * Calcula policy (generated): Read the formula in a cell on its own sheet, in ordinary A1 form or in R1C1 form.
+   * Calcula policy (generated): Read the formula in a cell on the sheet currently shown, in ordinary A1 form or in R1C1 form.
    * Reach: broker `sheet.getCellFormula`, restricted tier, class read.
    */
   getCellFormula(row: number, col: number, options?: ScriptFormulaOptions): Promise<string | null>;
@@ -3081,7 +3099,7 @@ declare interface SheetContext extends BaseObjectContext {
    * The leading `=` is added if you omit it — this always writes a FORMULA; use
    * `setCellValue` for text. Restricted scripts may only name their own sheet.
    *
-   * Calcula policy (generated): Put a formula into a cell on its own sheet, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it).
+   * Calcula policy (generated): Put a formula into a cell on the sheet currently shown, written either in ordinary A1 form or in R1C1 form (pass nothing to clear it).
    * Reach: broker `sheet.setCellFormula`, restricted tier, class mutate.
    */
   setCellFormula(row: number, col: number, formula: string | null, options?: ScriptFormulaOptions): Promise<void>;
@@ -3089,13 +3107,13 @@ declare interface SheetContext extends BaseObjectContext {
    *  step. Only the properties you set change. Restricted scripts may only name
    *  their own (active) sheet.
    *
-   * Calcula policy (generated): Change how cells look on its own sheet (font, colour, alignment, number format, borders).
+   * Calcula policy (generated): Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders).
    * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
   setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheetIndex?: number): Promise<void>;
   /** Remove ALL formatting from a rectangle on this sheet, keeping the values.
    *
-   * Calcula policy (generated): Remove all formatting from a block of cells on its own sheet (the values are kept).
+   * Calcula policy (generated): Remove all formatting from a block of cells on the sheet currently shown (the values are kept).
    * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
   clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<void>;

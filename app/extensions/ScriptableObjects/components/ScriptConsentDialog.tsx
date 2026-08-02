@@ -343,20 +343,42 @@ export default function ScriptConsentDialog({
                   </li>
                 ))}
               </ul>
+              {/* CONSENT TEXT — held to the same bar as the capability itself.
+                  "Scripts can only reach the objects they're attached to" was
+                  false: the whole `sheet.*` family in scriptHost/allowlist.ts is
+                  `tier: "restricted"`, so cell reads and writes need no
+                  capability at all. What a capability gates is reach BEYOND the
+                  workbook. Say that, and say the grid access plainly, rather
+                  than implying an isolation the sandbox does not provide.
+                  Mirrors CapabilityRequestDialog.tsx, which records the same
+                  correction. */}
               <p style={{ fontSize: 11, color: "#888" }}>
-                Anything not listed stays blocked — scripts can only reach the
-                objects they're attached to. You can inspect the source before
-                allowing. Allowing is remembered with this workbook; if the
-                package changes any script's code or requests new capabilities,
-                you will be asked again.
+                Anything not listed stays blocked. Even with nothing listed,
+                these scripts can read and write the cells of the sheet
+                currently shown — that is what an object script is for — but
+                they reach nothing outside this workbook: no network, no files,
+                no BI data. You can inspect the source before allowing. Allowing
+                is remembered with this workbook; if the package changes any
+                script's code or requests new capabilities, you will be asked
+                again.
               </p>
             </>
           ) : (
             <>
+              {/* "cannot read or write arbitrary cells" was simply not true:
+                  sheet.getCellValue / sheet.setCellValue and the rest of the
+                  sheet.* family are restricted-tier rows in
+                  scriptHost/allowlist.ts, granted to every mounted object
+                  script with no capability involved. Restricted mode limits
+                  which SHEET — the host clamps to the sheet currently shown —
+                  and it blocks everything outside the workbook. It does not
+                  keep a script out of your cells. Wording matches the allowlist
+                  rows' own `desc` on purpose. */}
               <p>
-                Scripts run in <strong>restricted mode</strong> — they can only
-                access the objects they're attached to and cannot read or write
-                arbitrary cells, fetch from the web, or query BI connections.
+                Scripts run in <strong>restricted mode</strong> — they can read
+                and write the cells of the sheet currently shown, and they reach
+                nothing outside this workbook: no network, no files, no BI data.
+                They have asked for no other permissions.
               </p>
               <p style={{ fontSize: 11, color: "#888" }}>
                 You can inspect the script source code before allowing execution.

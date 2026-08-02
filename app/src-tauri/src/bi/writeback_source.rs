@@ -128,9 +128,19 @@ fn selector_range_ref(sel: &calp::writeback::RegionSelector) -> String {
 
 /// Enumerate + load + govern every writeback dataset this workbook can see.
 /// Pure registry I/O — no engine access, no grid locks. Mirrors
-/// `build_gather_data`'s enumeration exactly (same subscription skips, same
+/// `build_gather_data`'s enumeration (same subscription skips, same
 /// signature-verified manifests, same first-subscription-wins per region), so
 /// the dataset tables and GATHER can never disagree about what exists.
+///
+/// ONE DELIBERATE DIVERGENCE: `rebuild_gather_cache` additionally skips HTTP
+/// registries that are inside their unreachable-backoff window
+/// (`GATHER_REGISTRY_BACKOFF`), because GATHER now rebuilds on a worker and must
+/// not re-time-out against a dead host every couple of seconds. This path is
+/// already asynchronous (`queue_model_writeback_refresh`), so it pays the
+/// timeout without blocking anything and keeps the full walk. A GATHER cell can
+/// therefore be briefly empty while the dataset table still resolves — same
+/// declarations, different freshness. Do not "restore parity" by turning this
+/// sentence into a test without carrying the backoff clause with it.
 pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
     let mut result: Vec<WritebackDataset> = Vec::new();
     let mut seen_regions: HashSet<String> = HashSet::new();

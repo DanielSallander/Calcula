@@ -66,10 +66,13 @@ import {
   emitToggleAccess,
   emitEditorClosed,
   onOpenWithScript,
+  onOpenWithDraft,
   onConsoleOutput,
   onScriptError,
   onScriptsChanged,
 } from "../lib/crossWindowEvents";
+import type { ScriptDraft } from "../lib/crossWindowEvents";
+import { draftToScriptDefinition } from "../lib/scriptDrafts";
 
 // ============================================================================
 // Monaco Worker Setup
@@ -262,6 +265,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const [scripts, setScripts] = useState<ObjectScriptDefinition[]>([]);
   const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
   const [source, setSource] = useState("");
+  // The AI-authored draft under review, if any. It is NOT in `scripts`: it has
+  // no backend record, is not registered and is not mounted. Saving it is what
+  // turns it into one of `scripts`, through the same gate as typed code.
+  const [draftDoc, setDraftDoc] = useState<
+    { draft: ScriptDraft; script: ObjectScriptDefinition } | null
+  >(null);
   // Authoring language for the OPEN script. Stored scripts are always
   // JavaScript (that is the only thing the worker can import), so this always
   // starts at "javascript"; switching to TypeScript is an authoring decision
@@ -335,6 +344,19 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       }
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
+    // An AI-authored draft handed over for review. Nothing here saves, registers
+    // or mounts it — it is loaded into the editor as text, under a banner that
+    // says so, and only the Save button can make it real.
+    onOpenWithDraft((payload) => {
+      if (cancelled) return;
+      const script = draftToScriptDefinition(payload.draft);
+      setDraftDoc({ draft: payload.draft, script });
+      setActiveScriptId(script.id);
+      setSource(script.source);
+      setLanguage("javascript");
+      setIsDirty(false);
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+
     // Console output forwarded from main window
     onConsoleOutput((payload) => {
       if (cancelled) return;
@@ -401,15 +423,27 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (script) {
       setSource(script.source);
       setIsDirty(false);
+      return;
     }
-  }, [activeScriptId, scripts]);
+    // The draft is not in `scripts`, so it needs its own restore path — without
+    // it, selecting the draft again from the dropdown would show whatever text
+    // the previous script left behind.
+    if (draftDoc && draftDoc.script.id === activeScriptId) {
+      setSource(draftDoc.script.source);
+      setIsDirty(false);
+    }
+  }, [activeScriptId, scripts, draftDoc]);
 
   // Auto-scroll console
   useEffect(() => {
     consoleEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [consoleEntries]);
 
-  const activeScript = scripts.find((s) => s.id === activeScriptId) ?? null;
+  const savedScript = scripts.find((s) => s.id === activeScriptId) ?? null;
+  /** True while the document in front of the author is an unsaved AI draft. */
+  const isDraft =
+    savedScript === null && draftDoc !== null && draftDoc.script.id === activeScriptId;
+  const activeScript = savedScript ?? (isDraft ? draftDoc!.script : null);
   const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
@@ -443,6 +477,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
 
   // Switch active script
   const handleSelectScript = useCallback(async (scriptId: string) => {
+    // A DRAFT is never auto-saved. Switching away from AI-authored code must
+    // not be the thing that writes it into the workbook — the whole point of a
+    // draft is that only an explicit Save promotes it. Keep the author's edits
+    // in the draft instead, so coming back shows what they were reading.
+    if (isDraft && draftDoc) {
+      setDraftDoc({ ...draftDoc, script: { ...draftDoc.script, source } });
+      setLanguage("javascript");
+      setActiveScriptId(scriptId);
+      return;
+    }
     // Auto-save current. The same gate as the Save button: an auto-save is
     // still a save, and un-runnable text must never reach the store just
     // because the author picked another script from the list.
@@ -458,7 +502,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     setLanguage("javascript");
     setActiveScriptId(scriptId);
-  }, [isDirty, activeScript, source, reportToConsole]);
+  }, [isDirty, isDraft, draftDoc, activeScript, source, reportToConsole]);
 
   // Save & Apply
   const handleSave = useCallback(async () => {
@@ -489,6 +533,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       await emitSaveAndApply(updated);
 
       setIsDirty(false);
+      if (isDraft) {
+        // The draft has become a real, saved, mounted script — it belongs in
+        // the script list now, and the review banner must go away with it.
+        setScripts((prev) => [...prev, updated]);
+        setDraftDoc(null);
+        reportToConsole(
+          `AI draft "${updated.name}" saved as a local object script and mounted. ` +
+            "It runs from now on; delete it if that is not what you wanted.",
+          updated.id,
+          "info",
+        );
+      }
       if (gate.transformed) {
         // Show the author exactly what was stored: the editor must never be
         // out of step with the text that runs, is hashed for consent and is
@@ -516,7 +572,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       ]);
       setShowConsole(true);
     }
-  }, [activeScript, source, reportToConsole]);
+  }, [activeScript, isDraft, source, reportToConsole]);
 
   // Toggle access level. The backend is authoritative: distributed scripts
   // cannot be escalated, so the local state and the cross-window event are
@@ -524,6 +580,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // would still mount with the unlocked API for the session.
   const handleToggleAccess = useCallback(async () => {
     if (!activeScript) return;
+    // A draft has no backend record, so there is nothing to persist yet —
+    // and persisting it HERE would write AI-authored code into the workbook
+    // behind a button the author pressed to read a tier label. Keep the choice
+    // in the draft; the Save that promotes it carries the tier with it.
+    if (isDraft && draftDoc) {
+      const nextLevel: ScriptAccessLevel =
+        draftDoc.script.accessLevel === "restricted" ? "unlocked" : "restricted";
+      setDraftDoc({ ...draftDoc, script: { ...draftDoc.script, accessLevel: nextLevel } });
+      return;
+    }
     if (activeScript.provenance === "distributed") {
       setConsoleEntries((prev) => [
         ...prev,
@@ -558,7 +624,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     emitToggleAccess(updated).catch(console.error);
     setScripts((prev) => prev.map((s) => s.id === updated.id ? updated : s));
-  }, [activeScript]);
+  }, [activeScript, isDraft, draftDoc]);
 
   // Add new primitive script
   const handleAddScript = useCallback(async (objectType: ScriptableObjectType) => {
@@ -803,7 +869,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           value={activeScriptId ?? ""}
           onChange={(e) => { void handleSelectScript(e.target.value); }}
         >
-          {scripts.length === 0 && <option value="">No scripts</option>}
+          {scripts.length === 0 && !draftDoc && <option value="">No scripts</option>}
+          {draftDoc && (
+            <option value={draftDoc.script.id}>
+              AI DRAFT — {draftDoc.script.name} ({draftDoc.script.objectType})
+            </option>
+          )}
           {scripts.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name} ({s.objectType}{s.instanceId ? ` #${s.instanceId.slice(0, 8)}` : ""})
@@ -854,7 +925,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           </select>
         )}
 
-        {activeScript && (
+        {/* Templates are auto-applied to newly created components, so an
+            AI draft must become a script the user approved BEFORE it can be
+            stamped into one. Save it first. */}
+        {activeScript && !isDraft && (
           <button className="ose-btn" onClick={handleSaveAsTemplate} title="Save as reusable template">
             <IconTemplate /> Template
           </button>
@@ -902,12 +976,14 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
 
         {/* Step debugging. Only for an APPLIED script: a session instruments
-            the source at mount, so there has to be a mount. */}
-        {activeScript && (
+            the source at mount, so there has to be a mount. A draft has none —
+            and offering "run it" next to unreviewed AI code would be the one
+            control this window must not have. */}
+        {activeScript && !isDraft && (
           <DebugToolbar state={debug} disabled={isDirty} buttonClassName="ose-btn" />
         )}
 
-        {activeScript && breakpointLines.length > 0 && !debug.session && (
+        {activeScript && !isDraft && breakpointLines.length > 0 && !debug.session && (
           <button
             className="ose-btn"
             onClick={() => activeScriptId && clearBreakpoints(activeScriptId)}
@@ -920,12 +996,61 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
 
         <button className="ose-btn primary" onClick={handleSave}
-          disabled={!isDirty || isReadOnly}
-          title={isReadOnly ? "Distributed scripts are read-only" : "Save and apply (Ctrl+S)"}>
+          // A draft has never been saved, so it is savable the moment it
+          // arrives — requiring an edit first would leave the only way to
+          // accept AI code being to change it.
+          disabled={(!isDirty && !isDraft) || isReadOnly}
+          title={
+            isReadOnly
+              ? "Distributed scripts are read-only"
+              : isDraft
+                ? "Save this AI draft as a real object script and mount it (Ctrl+S)"
+                : "Save and apply (Ctrl+S)"
+          }>
           <IconSave />
-          {isReadOnly ? "Read Only" : "Save & Apply"}
+          {isReadOnly ? "Read Only" : isDraft ? "Save as Script" : "Save & Apply"}
         </button>
       </div>
+
+      {/* AI draft review banner. The MCP tool tells the agent its draft is
+          "queued for the user to review"; this is what the user is shown, and
+          it must state the two facts the agent cannot: nothing was saved, and
+          nothing has run. */}
+      {isDraft && draftDoc && (
+        <div
+          data-testid="ai-draft-banner"
+          style={{
+            padding: "8px 12px",
+            backgroundColor: "#4A3B00",
+            borderBottom: "1px solid #7A6200",
+            color: "#FFD666",
+            fontSize: 11,
+            lineHeight: "1.5",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            AI draft — not saved, not mounted
+          </div>
+          <div>
+            An AI tool wrote this for <strong>{draftDoc.draft.objectType}</strong>
+            {draftDoc.draft.instanceId ? ` #${draftDoc.draft.instanceId.slice(0, 8)}` : ""}. None of
+            it has run. It exists only in this window until you press{" "}
+            <strong>Save as Script</strong>, which stores it, mounts it and lets it run from then
+            on.
+          </div>
+          <div style={{ marginTop: 2 }}>
+            Declares:{" "}
+            {draftDoc.draft.declaredCapabilities.length === 0
+              ? "no capabilities (grid only)"
+              : draftDoc.draft.declaredCapabilities.join(", ")}
+            {" · "}Tier: {draftDoc.script.accessLevel}
+          </div>
+          {draftDoc.draft.description && (
+            <div style={{ marginTop: 2, opacity: 0.85 }}>{draftDoc.draft.description}</div>
+          )}
+        </div>
+      )}
 
       {/* Main area */}
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -1098,6 +1223,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
                 <span>{activeScript.objectType}</span>
                 <span style={{ opacity: 0.7 }}>|</span>
                 <span>{activeScript.accessLevel}</span>
+                {isDraft && <><span style={{ opacity: 0.7 }}>|</span><span>AI draft (not saved, not mounted)</span></>}
                 {isReadOnly && <><span style={{ opacity: 0.7 }}>|</span><span>distributed (read-only)</span></>}
                 {activeScript.packageName && <><span style={{ opacity: 0.7 }}>|</span><span>from "{activeScript.packageName}"</span></>}
               </>
@@ -1109,7 +1235,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               {errorCount} error{errorCount !== 1 && "s"}
             </span>
           )}
-          <span>{isDirty ? "Modified" : "Saved"}</span>
+          <span>{isDraft ? "Never saved" : isDirty ? "Modified" : "Saved"}</span>
         </span>
       </div>
     </div>

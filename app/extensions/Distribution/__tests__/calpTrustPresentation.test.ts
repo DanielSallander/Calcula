@@ -285,7 +285,14 @@ describe("Subscriptions pane trust notice", () => {
     // The fail-closed change is invisible without this: a workbook that names a
     // package nobody here subscribed to shows inert writeback/GATHER, and the
     // user needs to be told that subscribing is what fixes it.
-    const row = SUB_PANE.match(/\n  notPinned: \{[\s\S]*?\n  \},/)![0];
+    // Scoped to TRUST_NOTICE. The unscoped `SUB_PANE.match(/\n  notPinned: \{/)`
+    // this replaced silently retargeted the moment the pane grew a SECOND table
+    // with a `notPinned` row (WRITEBACK_SKIP_NOTICE) — it then asserted the
+    // wording of a table it was never written about, and passed or failed for
+    // reasons unrelated to publisher trust.
+    const table = SUB_PANE.match(/const TRUST_NOTICE: Record<[\s\S]*?\n\};/);
+    expect(table, "TRUST_NOTICE moved or was renamed").toBeTruthy();
+    const row = table![0].match(/\n  notPinned: \{[\s\S]*?\n  \},/)![0];
     expect(row).toMatch(/not trusted on this computer/i);
     expect(row).toMatch(/Subscribe to Package/);
   });

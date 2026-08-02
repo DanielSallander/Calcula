@@ -85,6 +85,11 @@ const HEADERS: [&str; FIELD_COUNT] = [
     "Region", "City", "Product", "Category", "Quarter", "Sales", "Quantity", "Cost",
 ];
 
+/// The bench's pivot identity. `PivotId` is a 16-byte `EntityId` newtype with
+/// no integer conversion, so the id has to be a real one; a fixed literal keeps
+/// every run comparable.
+const BENCH_PIVOT: PivotId = PivotId::from_bytes([1u8; 16]);
+
 /// Build a PivotCache with the given number of rows.
 /// Uses deterministic pseudo-random data so benchmarks are reproducible.
 fn build_cache(pivot_id: PivotId, row_count: usize) -> PivotCache {
@@ -149,7 +154,7 @@ fn bench_cache_build(c: &mut Criterion) {
     for &size in &[1_000, 10_000, 100_000] {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter(|| {
-                black_box(build_cache(1, n));
+                black_box(build_cache(BENCH_PIVOT, n));
             });
         });
     }
@@ -169,8 +174,8 @@ fn bench_calculate_by_size(c: &mut Criterion) {
 
     for &size in &[1_000, 10_000, 100_000] {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
-            let mut cache = build_cache(1, n);
-            let def = build_definition(1, n, row_f, col_f, val_f);
+            let mut cache = build_cache(BENCH_PIVOT, n);
+            let def = build_definition(BENCH_PIVOT, n, row_f, col_f, val_f);
             b.iter(|| {
                 cache.invalidate_aggregates();
                 black_box(calculate_pivot(&def, &mut cache));
@@ -190,9 +195,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 1: Simple - 1 row field, 1 value
     group.bench_function("1row_0col_1val", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region")],
             &[],
@@ -206,9 +211,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 2: Two row fields (hierarchy) + column field
     group.bench_function("2row_1col_1val", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region"), (COL_CITY, "City")],
             &[(COL_QUARTER, "Quarter")],
@@ -222,9 +227,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 3: Three row fields (deep hierarchy) + column field
     group.bench_function("3row_1col_1val", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[
                 (COL_REGION, "Region"),
@@ -242,9 +247,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 4: Multiple value fields
     group.bench_function("2row_1col_3val", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region"), (COL_CATEGORY, "Category")],
             &[(COL_QUARTER, "Quarter")],
@@ -262,9 +267,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 5: High-cardinality row field (City x Product = ~500 combos)
     group.bench_function("high_cardinality_2row_1col", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_CITY, "City"), (COL_PRODUCT, "Product")],
             &[(COL_QUARTER, "Quarter")],
@@ -278,9 +283,9 @@ fn bench_calculate_field_configs(c: &mut Criterion) {
 
     // Config 6: Column-heavy (many column items)
     group.bench_function("1row_2col_1val", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region")],
             &[(COL_PRODUCT, "Product"), (COL_QUARTER, "Quarter")],
@@ -305,9 +310,9 @@ fn bench_calculate_with_attributes(c: &mut Criterion) {
 
     // Baseline: City as GROUP
     group.bench_function("city_group", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region"), (COL_CITY, "City")],
             &[(COL_QUARTER, "Quarter")],
@@ -321,9 +326,9 @@ fn bench_calculate_with_attributes(c: &mut Criterion) {
 
     // With City as LOOKUP (attribute)
     group.bench_function("city_lookup", |b| {
-        let mut cache = build_cache(1, size);
+        let mut cache = build_cache(BENCH_PIVOT, size);
         let mut def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region")],
             &[(COL_QUARTER, "Quarter")],
@@ -360,8 +365,8 @@ fn bench_aggregation_types(c: &mut Criterion) {
         AggregationType::StdDev,
     ] {
         group.bench_with_input(BenchmarkId::from_parameter(format!("{:?}", agg)), agg, |b, &agg| {
-            let mut cache = build_cache(1, size);
-            let def = build_definition(1, size, row_f, col_f, &[(COL_SALES, "Sales", agg)]);
+            let mut cache = build_cache(BENCH_PIVOT, size);
+            let def = build_definition(BENCH_PIVOT, size, row_f, col_f, &[(COL_SALES, "Sales", agg)]);
             b.iter(|| {
                 cache.invalidate_aggregates();
                 black_box(calculate_pivot(&def, &mut cache));
@@ -381,12 +386,12 @@ fn bench_large_dataset(c: &mut Criterion) {
     group.sample_size(10); // Fewer samples for large datasets
 
     let size = 500_000;
-    let mut cache = build_cache(1, size);
+    let mut cache = build_cache(BENCH_PIVOT, size);
 
     // Simple pivot on 500K rows
     group.bench_function("500k_simple", |b| {
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[(COL_REGION, "Region")],
             &[(COL_QUARTER, "Quarter")],
@@ -401,7 +406,7 @@ fn bench_large_dataset(c: &mut Criterion) {
     // Complex pivot on 500K rows
     group.bench_function("500k_complex", |b| {
         let def = build_definition(
-            1,
+            BENCH_PIVOT,
             size,
             &[
                 (COL_REGION, "Region"),

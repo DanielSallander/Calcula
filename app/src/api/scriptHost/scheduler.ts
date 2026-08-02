@@ -107,7 +107,35 @@ async function tick(): Promise<void> {
     // batch of jobs concurrently is the fastest way to make an automated
     // workbook feel like a hung one.
     const { callExposedMethod } = await import("../scriptableObjects");
+    // Dynamic: host.ts imports THIS module dynamically, so a static edge back
+    // would close the cycle (and pull the whole host into the scheduler's graph).
+    const { isScriptDebugPaused } = await import("./host");
     for (const job of due) {
+      // A SCRIPT STOPPED AT A BREAKPOINT CANNOT RUN A JOB. Rust already handed
+      // this job out and is holding its no-self-overlap slot open, so calling a
+      // paused script would park the relay on METHOD_CALL_TIMEOUT_MS (30s) and,
+      // worse, tell Rust "it ran" — the same lie the save/close verdict path
+      // refuses to tell (see callWorkbookBeforeLifecycle). Report the skip
+      // instead: the slot is released immediately, the job re-arms normally, and
+      // the reason is visible in the audit trail rather than showing up as a
+      // mysterious timeout.
+      //
+      // RESIDUAL RACE, stated rather than hidden: a script that pauses BETWEEN
+      // this check and the relay still gets one call, which then times out. That
+      // is the same window every debugger has, and the 30s bound contains it.
+      if (isScriptDebugPaused(job.scriptId)) {
+        try {
+          await schedulerCall({
+            op: "complete",
+            jobId: job.id,
+            ok: false,
+            error: "skipped: script paused in debugger",
+          });
+        } catch {
+          /* The Rust watchdog releases the job if this report is lost. */
+        }
+        continue;
+      }
       let ok = true;
       let error: string | undefined;
       try {

@@ -58,6 +58,7 @@ import ScriptMarketplace from "./components/ScriptMarketplace";
 import { installObjectScriptDebugBridge, reloadPersistedBreakpoints } from "./lib/debugger";
 import type { DialogProps } from "@api/uiTypes";
 import { openObjectScriptEditor } from "./lib/openObjectScriptWindow";
+import { installScriptDraftReview } from "./lib/scriptDrafts";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import {
   onSaveAndApply,
@@ -170,10 +171,18 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   // cell-styling contribution and cell-change subscription DO need it.
   "grid.read":
     "Be shown the contents of your cells — the value of every cell on screen while it decides how to style them, and the old value, new value and formula of every cell that changes",
+  // This map is rendered ONLY by the PACKAGE consent prompt (see
+  // computePackageCapabilities below), and a script that arrived in a package
+  // is forced to the restricted tier while every cap.pkg* row is unlocked-tier.
+  // So these two can be REQUESTED here and never exercised. Saying only what
+  // the capability means would overstate what allowing actually permits; say
+  // what it asked for, then say that this surface refuses it. Same phrasing as
+  // Distribution/components/SubscribeDialog.tsx, which reached this conclusion
+  // first.
   "distribution.publish":
-    "Publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed will receive it — it leaves this machine and cannot be taken back",
+    "Publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed will receive it (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
   "distribution.subscribe":
-    "Bring somebody else's published packages into this workbook, and update the ones you subscribe to — only from registries you added yourself, and any code that arrives stays switched off until you approve it",
+    "Bring somebody else's published packages into this workbook, and update the ones you subscribe to (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */
@@ -778,6 +787,13 @@ async function activate(context: ExtensionContext): Promise<void> {
   // host resolves against its own mount table, and it can only ask for what the
   // host already exposes to trusted UI.
   cleanupFunctions.push(installObjectScriptDebugBridge());
+
+  // ---- AI script-draft review queue (MCP `draft_object_script`) ----
+  // The backend emits `mcp:script-draft` and tells the agent the draft "is
+  // queued for the user to review in the Object Script Editor". This is the
+  // listener that makes that sentence true. It notifies and opens the editor on
+  // the draft; it never saves, registers or mounts it.
+  cleanupFunctions.push(installScriptDraftReview());
 
   // Breakpoints are workbook state (extension-data key calcula.objectScripts.debug).
   // Load this workbook's set now, and re-load whenever the open workbook changes,

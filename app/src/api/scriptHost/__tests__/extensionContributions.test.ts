@@ -788,6 +788,135 @@ describe("extension contribution ceiling", () => {
     expect((payload as { redacted?: string }).redacted).toBeUndefined();
   });
 
+  // --------------------------------------------------------------------------
+  // 2c. A REVOKE MUST BITE — the grant set, not only the ceiling
+  // --------------------------------------------------------------------------
+  //
+  // Both grid.read readers used to ask `handle.declaredCapabilities`, which is
+  // the IMMUTABLE manifest ceiling: it never shrinks. revokeCapability() mutates
+  // `handle.grants` in place (capabilities.ts) and nothing else, so the
+  // transparency panel's "revoke" button changed nothing at all for the two
+  // doors that hand an add-in the user's cells. The comments at both sites
+  // promised "a revoke bites the next event" and "the question is asked again at
+  // the moment the cells would actually cross"; neither was true.
+
+  it("REVOKING grid.read stops the next cell-style batch (not only a ceiling change)", async () => {
+    const styles = await import("../../styleInterceptors");
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: { cellStyles: ["negatives"] },
+    });
+    let calls = 0;
+    const seen: string[] = [];
+    worker.handlers.set(6, (cells) => {
+      calls++;
+      for (const c of cells as Array<{ value: string }>) seen.push(c.value);
+      return (cells as unknown[]).map(() => ({ backgroundColor: "#00ff00" }));
+    });
+    worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 6 });
+    styles.applyStyleInterceptors("before-revoke", {}, { row: 0, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(calls, "the contributor works before the revoke").toBe(1);
+
+    // The USER'S revoke — exactly the transparency-panel action, no ceiling edit.
+    const caps = await import("../capabilities");
+    await caps.revokeCapability("extension:test.addin", "grid.read");
+    // The ceiling is deliberately untouched: this is what made the old check pass.
+    const { listMountedHandles } = await import("../broker");
+    const handle = listMountedHandles().find((h) => h.scriptId === "extension:test.addin")!;
+    expect(handle.declaredCapabilities.has("grid.read")).toBe(true);
+    expect(handle.grants.has("grid.read")).toBe(false);
+
+    styles.applyStyleInterceptors("after-revoke", {}, { row: 1, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(calls, "no batch may reach a contributor whose grant was revoked").toBe(1);
+    expect(seen, "the revoked add-in must never see this cell").not.toContain("after-revoke");
+    // Degraded, not blanked — the cell keeps its base styling.
+    expect(
+      styles.applyStyleInterceptors("after-revoke", {}, { row: 1, col: 0, sheetIndex: 0 })
+        .backgroundColor,
+    ).toBeUndefined();
+  });
+
+  it("REVOKING grid.read redacts the very next cell-content event", async () => {
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: {},
+    });
+    worker.register({
+      kind: "event",
+      regId: 1,
+      eventName: AppEvents.CELL_VALUES_CHANGED,
+      handlerId: 11,
+    });
+    emitAppEvent(AppEvents.CELL_VALUES_CHANGED, {
+      changes: [{ row: 3, col: 4, newValue: "95000" }],
+      source: "user",
+    });
+    expect(
+      (worker.received.find((m) => m.t === "appEvent")!.payload as {
+        changes: Array<{ newValue?: string }>;
+      }).changes[0].newValue,
+    ).toBe("95000");
+
+    const caps = await import("../capabilities");
+    await caps.revokeCapability("extension:test.addin", "grid.read");
+
+    emitAppEvent(AppEvents.CELL_VALUES_CHANGED, {
+      changes: [{ row: 3, col: 4, newValue: "125000" }],
+      source: "user",
+    });
+    const deliveries = worker.received.filter((m) => m.t === "appEvent");
+    expect(deliveries, "the handler still fires — this is redaction, not a mute").toHaveLength(2);
+    const after = deliveries[1].payload as { changes: Array<Record<string, unknown>>; redacted?: string };
+    expect(JSON.stringify(after), "the revoked add-in must not be shown the new value").not.toContain(
+      "125000",
+    );
+    expect(after.changes[0]).toEqual({ row: 3, col: 4, sheetIndex: undefined });
+    expect(after.redacted).toBe("grid.read");
+  });
+
+  // --------------------------------------------------------------------------
+  // 2d. The workbook PATH never crosses into the sandbox
+  // --------------------------------------------------------------------------
+
+  it("AFTER_OPEN / AFTER_SAVE deliver the file NAME, never the folder — with NO capabilities", async () => {
+    // api.workbookFileName withholds the directory by hand ("C:\\Users\\<real
+    // name>\\Consulting\\ClientX handed to a script that also holds net.fetch is
+    // an exfiltration the fetch consent never covered"), and then these two
+    // lifecycle events handed the whole path to any subscriber — including an
+    // add-in that declared NOTHING at all.
+    const { worker } = await mountFake(host, { ...BASE_MANIFEST, capabilities: [] });
+    worker.register({ kind: "event", regId: 1, eventName: AppEvents.AFTER_OPEN, handlerId: 21 });
+    worker.register({ kind: "event", regId: 2, eventName: AppEvents.AFTER_SAVE, handlerId: 22 });
+
+    emitAppEvent(AppEvents.AFTER_OPEN, {
+      path: "C:\\Users\\Jane Doe\\Consulting\\ClientX\\Q4 bid.cala",
+    });
+    emitAppEvent(AppEvents.AFTER_SAVE, { path: "/home/jane/clients/acme/2026 model.cala" });
+
+    const payloads = worker.received.filter((m) => m.t === "appEvent").map((m) => m.payload);
+    expect(payloads, "both handlers must still fire").toHaveLength(2);
+    expect(payloads[0]).toEqual({ fileName: "Q4 bid.cala" });
+    expect(payloads[1]).toEqual({ fileName: "2026 model.cala" });
+    // The property, stated as a property: no separator of either flavour crosses.
+    const wire = JSON.stringify(payloads);
+    expect(wire).not.toContain("Jane Doe");
+    expect(wire).not.toContain("Consulting");
+    expect(wire).not.toContain("acme");
+    expect(wire, "no path separator may cross").not.toMatch(/[\\/]/);
+  });
+
+  it("a workbook that was never saved yields fileName: null, not a stray path", async () => {
+    const { worker } = await mountFake(host, { ...BASE_MANIFEST, capabilities: [] });
+    worker.register({ kind: "event", regId: 1, eventName: AppEvents.AFTER_SAVE, handlerId: 23 });
+    emitAppEvent(AppEvents.AFTER_SAVE, {});
+    const payload = worker.received.find((m) => m.t === "appEvent")!.payload;
+    expect(payload).toEqual({ fileName: null });
+  });
+
   it("a broker method outside EXTENSION_BROKER_METHODS is refused before the broker", async () => {
     const { worker } = await mountFake(host, { ...BASE_MANIFEST });
     // api.setCellValue is a real ALLOWLIST row — it is simply not part of the

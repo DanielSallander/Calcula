@@ -314,10 +314,29 @@ export function InstallAddInDialog({
                       );
                     })}
                   </ul>
+                  {/* "Each one is still asked for separately the first time it
+                      is actually used" was false for two of them. The JIT
+                      prompt (maybeRequestCapabilityGrant in
+                      scriptHost/extensionWorkerHost.ts) only fires on `cap.*`
+                      broker calls; `grid.read` and `formula.udf` are granted by
+                      recordCapabilityGrant at registration, with no prompt,
+                      because they are consumed by contributions the host calls
+                      INTO the add-in rather than calls the add-in makes out.
+                      Install IS the consent for those two, so this screen has
+                      to say so — it is the last screen before it happens. */}
                   <div style={report.capabilitiesHonored ? styles.muted : styles.deniedNote}>
-                    {report.capabilitiesHonored
-                      ? "Each one is still asked for separately the first time it is actually used."
-                      : "All of these will be REFUSED, because the manifest declaring them is not trustworthy. Worksheet functions need one of them, so they will not appear."}
+                    {report.capabilitiesHonored ? (
+                      <>
+                        Network, storage, BI and dialog access are asked for separately the first
+                        time they are actually used. Being shown your cells (
+                        <code style={styles.code}>grid.read</code>) and running as a worksheet
+                        function (<code style={styles.code}>formula.udf</code>) are granted by
+                        installing — they take effect as soon as the add-in loads, with no further
+                        prompt.
+                      </>
+                    ) : (
+                      "All of these will be REFUSED, because the manifest declaring them is not trustworthy. Worksheet functions need one of them, so they will not appear."
+                    )}
                   </div>
                 </>
               )}

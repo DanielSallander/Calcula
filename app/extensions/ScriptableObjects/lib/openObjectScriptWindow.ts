@@ -4,7 +4,8 @@
 //          reuses it if already open.
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { emitOpenWithScript } from "./crossWindowEvents";
+import { emitOpenWithScript, emitOpenWithDraft } from "./crossWindowEvents";
+import type { ScriptDraft } from "./crossWindowEvents";
 
 // ============================================================================
 // State
@@ -19,17 +20,15 @@ let editorWindow: WebviewWindow | null = null;
 // ============================================================================
 
 /**
- * Open the Object Script Editor in a separate OS window.
- * If the window is already open, focuses it and navigates to the given script.
- *
- * @param scriptId - Optional script ID to open/navigate to
+ * Focus the editor window (creating it if needed) and then hand it whatever it
+ * should open. `deliver` runs once the window is guaranteed to be listening.
  */
-export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
-  // If window already exists, focus it and transfer script selection
+async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
+  // If window already exists, focus it and transfer the selection
   if (editorWindow) {
     try {
       await editorWindow.setFocus();
-      await emitOpenWithScript(scriptId);
+      await deliver();
       return;
     } catch {
       // Window was closed externally, clean up reference
@@ -49,10 +48,10 @@ export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
     center: true,
   });
 
-  // Send initial script ID once the window has created and React has mounted
+  // Deliver once the window has created and React has mounted
   editorWindow.once("tauri://created", () => {
-    setTimeout(async () => {
-      await emitOpenWithScript(scriptId);
+    setTimeout(() => {
+      void deliver();
     }, 600);
   });
 
@@ -65,6 +64,27 @@ export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
   editorWindow.once("tauri://destroyed", () => {
     editorWindow = null;
   });
+}
+
+/**
+ * Open the Object Script Editor in a separate OS window.
+ * If the window is already open, focuses it and navigates to the given script.
+ *
+ * @param scriptId - Optional script ID to open/navigate to
+ */
+export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
+  await withEditorWindow(() => emitOpenWithScript(scriptId));
+}
+
+/**
+ * Open the Object Script Editor on an AI-authored DRAFT for review.
+ *
+ * The draft is handed over as data. Nothing on this path saves, registers or
+ * mounts it: it becomes a real script only when the human presses Save in the
+ * editor, which runs the ordinary compile gate + `save_object_script` path.
+ */
+export async function openObjectScriptEditorWithDraft(draft: ScriptDraft): Promise<void> {
+  await withEditorWindow(() => emitOpenWithDraft(draft));
 }
 
 /**

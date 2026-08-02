@@ -975,9 +975,25 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
               ? `It will add to Calcula:\n${contributionLines.join("\n")}\n`
               : `It adds nothing to Calcula's menus, ribbon or formulas.\n`) +
             reachClause +
-            `\nIt runs sandboxed: it cannot reach your machine, and anything outside ` +
-            `this workbook (network, storage, BI queries) is asked for separately ` +
-            `the first time it is used. Only allow extensions you trust.\n\n` +
+            // TWO SENTENCES, BECAUSE THE PROMISE IS NOT UNIFORM. The old single
+            // sentence said everything is "asked for separately the first time it
+            // is used" and listed storage among the things "outside this
+            // workbook". Both halves were wrong:
+            //   * grid.read and formula.udf are granted BY ALLOWING THIS — the
+            //     worker host records them at contribution registration
+            //     (extensionWorkerHost setupCellStyleRegistration /
+            //     setupFormulaRegistration), with no later prompt. Promising a
+            //     per-use ask for them meant the user was waiting for a question
+            //     that never comes.
+            //   * storage is INSIDE the workbook file (.calcula/script-data), so
+            //     listing it as "outside this workbook" pointed at the wrong risk
+            //     — it travels with the file, it does not touch the machine.
+            `\nIt runs sandboxed: it cannot reach your machine. Network access and ` +
+            `BI queries are asked for separately the first time they are used; its ` +
+            `private storage lives inside this workbook file and travels with it. ` +
+            `Being shown your cells and running as a worksheet function are granted ` +
+            `by allowing it here — they take effect as soon as it loads, with no ` +
+            `further prompt. Only allow extensions you trust.\n\n` +
             `Allow "${name}" to load? (You can change this later in Extensions.)`,
         );
       } catch {

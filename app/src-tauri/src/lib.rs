@@ -384,6 +384,13 @@ pub struct AppState {
     /// pre/post snapshot: a column that disappears or narrows silently stops
     /// counting collected submissions, and the user has to be told.
     pub model_writeback_declarations: Mutex<Vec<calp::ModelWritebackDeclaration>>,
+    /// Why the last writeback-index rebuild could NOT install a subscription's
+    /// regions (unreachable registry, unpinned publisher, bad manifest, or an
+    /// HTTP registry still loading in the background). Without this, "declares
+    /// no writeback" and "writeback regions unknown, so its protections are not
+    /// in force" are the same observable state. Surfaced by
+    /// `calp_get_writeback_rebuild_skips`.
+    pub writeback_rebuild_skips: Mutex<Vec<crate::calp_commands::WritebackRebuildSkip>>,
     /// Subscriber identity for writeback submissions.
     pub subscriber_identity: Mutex<Option<calp::SubmitterIdentity>>,
     /// Central cell identity registry for stable CellId tracking.
@@ -393,10 +400,14 @@ pub struct AppState {
     pub writeback_draft_regions: Mutex<Vec<calp::WritebackRegionDeclaration>>,
     /// Writeback layer: local drafts for writeback cells (stored in .cala).
     pub writeback_layer: Mutex<calp::writeback::WritebackLayer>,
-    /// Short-TTL cache of the GATHER pre-fetch map. build_gather_data runs on
-    /// every edit/recalc pass; without this each keystroke rescans every
-    /// registry submission file. Invalidated explicitly on submit/refresh and
-    /// expired by time so other subscribers' new submissions still appear.
+    /// THE GATHER pre-fetch map, and the only thing `build_gather_data` ever
+    /// reads. That function runs on every edit/recalc pass, so it must never do
+    /// registry I/O: it serves whatever is here (even past the TTL) and queues a
+    /// background rebuild instead. `None` means "nothing known yet" — GATHER
+    /// reads empty until the worker lands, which then recalculates and repaints.
+    /// Invalidated explicitly on submit/refresh/pull/open/detach, and refreshed
+    /// on a TTL so other subscribers' new submissions still appear.
+    /// See `calp_commands::build_gather_data` / `queue_gather_refresh`.
     pub gather_cache: Mutex<Option<(std::time::Instant, std::collections::HashMap<String, engine::GatherRegionData>)>>,
     /// Collected entries of model writeback COLUMNS (engine v21), keyed by
     /// writeback column id. Append-only history; persisted in .cala
@@ -546,6 +557,7 @@ pub fn create_app_state() -> AppState {
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
         writeback_declarations: Mutex::new(Vec::new()),
         model_writeback_declarations: Mutex::new(Vec::new()),
+        writeback_rebuild_skips: Mutex::new(Vec::new()),
         gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
@@ -4877,8 +4889,6 @@ pub fn run() {
             scripting::list_scripts,
             scripting::get_script,
             scripting::save_script,
-            scripting::delete_script,
-            scripting::rename_script,
             // Notebook commands
             scripting::notebook_create,
             scripting::notebook_save,
@@ -5077,6 +5087,7 @@ pub fn run() {
             calp_inspector::calp_inspector_verify_artifacts,
             library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
+            calp_commands::calp_get_writeback_rebuild_skips,
             calp_commands::calp_subscription_trust,
             calp_commands::calp_list_trusted_publishers,
             calp_commands::calp_get_package_objects,

@@ -259,6 +259,26 @@ describe("capability grant mirror — frontend mirror vs the Rust grant allowlis
     ).toEqual([]);
   });
 
+  it("capabilityIds.ts tells the next author the THREE-entry rule, not the old two", () => {
+    // capabilityIds.ts is the file somebody opens when adding a capability, and
+    // its CONTRACT header used to end with "Rust has NO enumerated capability
+    // list ... Do NOT assume adding an id here requires a matching Rust entry".
+    // That instruction has been false since GRANTABLE_CAPABILITIES existed, and
+    // following it is precisely how `schedule` shipped dead — the failure the
+    // guard above catches, from the file that told the author not to look.
+    const header = readRepo("app/src/api/scriptHost/capabilityIds.ts").slice(0, 4000);
+    expect(
+      header,
+      "the header must name GRANTABLE_CAPABILITIES as the third required entry",
+    ).toContain("GRANTABLE_CAPABILITIES");
+    expect(header).toContain("RUST_MIRRORED_CAPABILITIES");
+    expect(
+      header,
+      "the retracted claim must not come back — it is an instruction to skip the Rust entry",
+    ).not.toContain("Rust has\n// NO enumerated capability list");
+    expect(header).not.toMatch(/Do NOT assume adding an id\s*\n?\/\/ here requires a matching Rust enum entry/);
+  });
+
   it("grant_script_capability validates through the shared list, not a private copy", () => {
     const gatewayRs = readRepo("app/src-tauri/src/scripting/writeback_gateway.rs");
     expect(
@@ -361,15 +381,28 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
   );
   const objectsRs = readRepo("app/src-tauri/src/mcp/objects.rs");
 
-  /** `#[tool(...)] async fn NAME` — the tools the MCP server advertises. */
+  /**
+   * `#[tool(...)] async fn NAME` — the tools the MCP server advertises.
+   *
+   * Rust line comments are dropped first. `//` and `///` lines in server.rs
+   * document tools in exactly the shape this regex matches, so without the
+   * strip a tool that was commented OUT still reads as advertised — and the
+   * guard would then demand a tier for a tool that does not exist, or (worse)
+   * report a commented-out tool as classified and gated.
+   */
+  const serverRsCode = serverRs
+    .split("\n")
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join("\n");
+
   function advertisedTools(): { name: string; body: string }[] {
     const out: { name: string; body: string }[] = [];
     const re = /#\[tool\(description[\s\S]*?\n\s*async fn (\w+)/g;
-    const hits = [...serverRs.matchAll(re)];
+    const hits = [...serverRsCode.matchAll(re)];
     for (let i = 0; i < hits.length; i++) {
       const start = hits[i].index as number;
-      const end = i + 1 < hits.length ? (hits[i + 1].index as number) : serverRs.length;
-      out.push({ name: hits[i][1], body: serverRs.slice(start, end) });
+      const end = i + 1 < hits.length ? (hits[i + 1].index as number) : serverRsCode.length;
+      out.push({ name: hits[i][1], body: serverRsCode.slice(start, end) });
     }
     return out;
   }

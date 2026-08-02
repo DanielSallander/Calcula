@@ -22,6 +22,7 @@
 
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { invokeBackend } from "./backend";
+import { fileNameOf } from "../core/lib/fileNames";
 
 export {
   newFile,
@@ -179,8 +180,7 @@ function pickerFilters(
 }
 
 /** The last segment of a path, on either separator. Exported for the host and
- *  its tests: "never hand back a path" has exactly one implementation. */
-export function fileNameOf(path: string): string {
-  const parts = path.replace(/\\/g, "/").split("/");
-  return parts[parts.length - 1] || path;
-}
+ *  its tests: "never hand back a path" has exactly one implementation, and it
+ *  now lives in a LEAF module (core/lib/fileNames) so the script host's event
+ *  thinning can reach it without importing this module's Tauri dialog plugin. */
+export { fileNameOf };
