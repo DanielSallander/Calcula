@@ -92,6 +92,9 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   schedule: "Scheduled jobs",
   "file.picker": "Files you pick",
   "ui.shortcut": "Keyboard shortcut",
+  "grid.read": "Shown your cells",
+  "distribution.publish": "Publish packages",
+  "distribution.subscribe": "Subscribe to packages",
 };
 
 const capLabel = (c: CapabilityId): string => CAP_LABEL[c] ?? c;

@@ -73,6 +73,12 @@ pub const GRANTABLE_CAPABILITIES: &[&str] = &[
     "bi.connector",
     "distribution.writeback",
     "schedule",
+    // The .calp distribution gateway (scripting/distribution_gateway.rs) checks
+    // the ACTION'S OWN capability on every call, so both directions have to be
+    // grantable independently — an omission here would make one of them
+    // permanently denied while looking implemented.
+    "distribution.publish",
+    "distribution.subscribe",
 ];
 
 /// Whether `capability` is an id the backend store will accept a grant for.
@@ -405,9 +411,31 @@ mod tests {
             "bi.connector",
             "distribution.writeback",
             "schedule",
+            "distribution.publish",
+            "distribution.subscribe",
         ] {
             assert!(is_grantable(cap), "{} must be grantable", cap);
         }
+    }
+
+    #[test]
+    fn the_two_distribution_directions_are_independent_grants() {
+        // The property the whole B3 split rests on: an inbound grant must never
+        // satisfy an outbound check, or the consent text ("bring somebody
+        // else's packages in") would be paying for something else entirely
+        // ("publish under your name").
+        let store = CapabilityStore::new();
+        store.grant("s1", "distribution.subscribe");
+        assert!(store.is_granted("s1", "distribution.subscribe"));
+        assert!(!store.is_granted("s1", "distribution.publish"));
+        // ...and neither of them is the writeback grant.
+        assert!(!store.is_granted("s1", "distribution.writeback"));
+
+        store.grant("s2", "distribution.publish");
+        assert!(!store.is_granted("s2", "distribution.subscribe"));
+        // No prefix widening in either direction.
+        assert!(!store.is_granted("s2", "distribution"));
+        assert!(!store.is_granted("s2", "distribution.publish.model"));
     }
 
     #[test]
@@ -429,6 +457,13 @@ mod tests {
         // ui.shortcut likewise: the single keydown listener in api/keybindings.ts
         // owns dispatch, and nothing in Rust ever sees a keystroke.
         assert!(!is_grantable("ui.shortcut"));
+        // grid.read is host-mediated in the strictest sense: it does not gate a
+        // CALL at all, it gates whether the FRONTEND host puts cell contents
+        // into a message it is about to post into a sandboxed add-in's worker.
+        // The backend is never in that path — the cells never leave the
+        // renderer — so a backend grant would be a check nothing consults, and
+        // its presence here would wrongly suggest Rust was enforcing it.
+        assert!(!is_grantable("grid.read"));
         // net.fetch is granted per ORIGIN through grant_net_origin, never as a
         // bare capability id.
         assert!(!is_grantable("net.fetch"));

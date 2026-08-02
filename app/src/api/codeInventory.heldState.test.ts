@@ -21,7 +21,12 @@ vi.mock("./moduleScriptBackend", () => ({
   describeModuleScriptScope: () => "Workbook-global",
 }));
 vi.mock("./notebookBackend", () => ({ listNotebooks: vi.fn(), loadNotebook: vi.fn() }));
-vi.mock("./scriptHost/broker", () => ({ listMountedHandles: vi.fn() }));
+// PARTIAL: scriptLibraries/linker.ts reads HOST_ONLY_EXPOSED_PREFIX at module
+// scope, so a total mock of the broker breaks the import graph, not this test.
+vi.mock("./scriptHost/broker", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./scriptHost/broker")>()),
+  listMountedHandles: vi.fn(),
+}));
 vi.mock("./chartTransformScripts", () => ({
   loadPersistedTransformLibraryWithProvenance: vi.fn(),
   CHART_TRANSFORMS_SCRIPT_ID: "__calcula_chart_transforms__",

@@ -41,7 +41,11 @@ import {
 } from "./broker";
 import { appendAudit } from "./auditRing";
 import { CAPABILITY_ID_SET, type CapabilityId } from "./capabilityIds";
-import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
+import {
+  ALLOWLIST,
+  APP_EVENTS_CARRYING_CELL_CONTENTS,
+  thinAppEventForScripts,
+} from "./allowlist";
 import { MAX_FILE_TEXT_CHARS } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
 import {
@@ -734,11 +738,39 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     // crossing into the sandbox are THINNED for events whose full payload
     // carries capability-gated metadata (BI model events).
     const eventName = scriptSubscribeEventName(reg.eventName);
+    // THE SECOND UNDISCLOSED READER (B2). A subscription is not a contribution:
+    // it is never named in the sidecar manifest and never appears in the consent
+    // prompt, so an add-in could subscribe to CELL_VALUES_CHANGED and be handed
+    // every changed cell's old value, new value and formula — the same workbook
+    // data the cell-style contributor gets, through a door nobody had counted.
+    // It is now behind the SAME capability, decided per delivery (not captured
+    // here) so a ceiling change or a revoke bites the next event rather than the
+    // next mount. Without grid.read the handler still fires and still learns
+    // WHERE the change was; it is the contents that do not cross.
+    if (APP_EVENTS_CARRYING_CELL_CONTENTS.has(eventName)) {
+      // The subscription IS the use of the capability, so write the grant down
+      // now — otherwise an add-in that reads the workbook only through events
+      // would be the one holder of grid.read that never appears in the
+      // transparency panel.
+      if (mw.handle.declaredCapabilities.has("grid.read")) {
+        recordCapabilityGrant(mw.handle.scriptId, "grid.read");
+      }
+      appendAudit({
+        ts: Date.now(),
+        scriptId: mw.handle.scriptId,
+        scriptName: mw.handle.scriptName,
+        method: `ext.subscribe.${eventName}`,
+        class: "read",
+        ok: true,
+      });
+    }
     const unsub = onAppEvent(eventName as never, (payload: unknown) => {
       mw.worker.postMessage({
         t: "appEvent",
         handlerId: reg.handlerId,
-        payload: thinAppEventForScripts(eventName, payload),
+        payload: thinAppEventForScripts(eventName, payload, {
+          redactCellContents: !mw.handle.declaredCapabilities.has("grid.read"),
+        }),
       } as HX2W);
     });
     // WRITEBACK_SUBMISSION_RECEIVED does not fire on its own — it is raised by
@@ -1104,6 +1136,15 @@ export function sanitizeStyleOverride(raw: unknown): IStyleOverride | null {
  * one); we cache. The interceptor body is a Map lookup, misses are batched off
  * the paint path, and a hostile or slow extension can therefore delay a
  * highlight by a frame but can never stall a frame.
+ *
+ * GATED BY grid.read (B2). Reaching this function already means the ceiling
+ * check in admitContribution passed — CONTRIBUTION_REQUIRED_CAPABILITY maps
+ * `cellStyle` to grid.read, so an add-in that did not declare it (including
+ * every unsigned one, whose capability list is zeroed) was refused loudly
+ * before a single cell was collected. The re-check in the resolver below is
+ * deliberate belt-and-braces: the render cache outlives the registration
+ * message, so the question "may this add-in be shown these cells?" is asked
+ * again at the moment the cells would actually cross.
  */
 function setupCellStyleRegistration(
   mw: MountedExtension,
@@ -1114,6 +1155,13 @@ function setupCellStyleRegistration(
   const cacheId = `extension:${mw.extId}:${id}`;
   mw.cellStyleCacheIds.add(cacheId);
   const cleanup = registerCellRenderCache(cacheId, async (cells: RenderCellRequest[]) => {
+    // FAIL CLOSED, NOT BLIND. If the capability is gone by the time a batch is
+    // due, return null — the documented "degraded" answer, which keeps the
+    // user's own base styling. We must NOT hand the handler a stripped batch
+    // (coordinates with empty values): that would look to the add-in like a
+    // workbook full of blanks and to the user like styling that silently
+    // stopped matching the data.
+    if (!mw.handle.declaredCapabilities.has("grid.read")) return null;
     try {
       const raw = await invokeWorkerHandler(mw, handlerId, [cells]);
       if (!Array.isArray(raw)) return null;
@@ -1129,6 +1177,13 @@ function setupCellStyleRegistration(
     cleanup();
     mw.cellStyleCacheIds.delete(cacheId);
   });
+  // Record the capability as GRANTED, for the same reason setupFormulaRegistration
+  // does: from here on the contributor really will be handed the cells on
+  // screen, and the transparency panel must show grid.read in use rather than
+  // leaving the reach visible only in this label. The consent behind it is the
+  // install-time package consent, which enumerated both the declared
+  // capabilities and the cellStyles contribution with its reach note.
+  recordCapabilityGrant(mw.handle.scriptId, "grid.read");
   // The label is what the transparency UI prints. A cell-style contributor is
   // the one contribution whose reach is wider than its name (it is shown the
   // DISPLAYED VALUE of every cell it is asked about), so the reach is in the

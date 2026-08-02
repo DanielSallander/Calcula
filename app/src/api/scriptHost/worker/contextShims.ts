@@ -394,6 +394,21 @@ function buildBase(rt: WorkerRuntime): Record<string, unknown> {
       return call(rt, "base.callMethod", [targetType, targetInstanceId, methodName, args]);
     },
 
+    /**
+     * Call an export of a shared library this script declared with `// @uses`.
+     *
+     * The ADDRESS is deliberately absent from this signature. Unlike callMethod,
+     * the script cannot say which realm it wants — it says only which of ITS OWN
+     * aliases it means, and the host resolves that against the import table it
+     * built for this script's id. There is no token, handle or instance id to
+     * hold, and therefore none to leak or be handed one: authority here is
+     * identity, not possession. Scripts normally reach this through the
+     * generated `imports.<alias>.<export>(...)` binding rather than by name.
+     */
+    callImport(alias: string, methodName: string, args: unknown[]): Promise<unknown> {
+      return call(rt, "base.callImport", [alias, methodName, Array.isArray(args) ? args : []]);
+    },
+
     log(...args: unknown[]): void {
       callFire(rt, "base.log", args);
     },
@@ -538,6 +553,36 @@ interface ScriptShortcutBinding {
   label: string;
 }
 
+/** caps.publish.package spec (distribution.publish).
+ *
+ *  NOTE WHAT IS NOT HERE, because each absence is enforced twice (validator +
+ *  Rust gateway) rather than merely undocumented:
+ *   - `publishedBy`    : the byline comes from the identity that SIGNS.
+ *   - `customObjects`  : package payload is Calcula's to collect.
+ *   - `includeComments`: shipping internal discussion is a human's decision. */
+interface ScriptPublishSpec {
+  /** One of the registries `caps.packages.listRegistries()` returned. */
+  registry: string;
+  packageName: string;
+  /** Semver, e.g. "1.4.0" — `caps.publish.nextVersion` suggests one. */
+  version: string;
+  /** "report" (default) | "template" | "dataset" | "library" | a custom kind. */
+  kind?: string;
+  /** Sheets to ship. Omit for the kind's default: every sheet for a report,
+   *  and NO sheets for a library (whose payload is its module scripts). */
+  sheetIndices?: number[];
+}
+
+/** caps.publish.model spec (distribution.publish). Schema only — the model's
+ *  data and credentials never travel. */
+interface ScriptPublishModelSpec {
+  registry: string;
+  packageName: string;
+  version: string;
+  /** Which BI connection's model to publish. */
+  connectionId: string;
+}
+
 /** Connector-secret header injection spec (bi.connector; resolved server-side). */
 interface SecretHeaderShim {
   sourceId: string;
@@ -629,6 +674,21 @@ function buildCapsShim(rt: WorkerRuntime): {
     ): Promise<ScriptShortcutBinding>;
     unbind(combo: string): Promise<boolean>;
     list(): Promise<ScriptShortcutBinding[]>;
+  };
+  packages: {
+    listRegistries(): Promise<unknown[]>;
+    listSubscriptions(): Promise<unknown>;
+    browse(registry: string): Promise<unknown[]>;
+    inspect(registry: string, packageName: string, versionPin: string): Promise<unknown>;
+    pull(registry: string, packageName: string, versionPin: string): Promise<unknown>;
+    refreshPreview(): Promise<unknown>;
+    refreshApply(): Promise<unknown>;
+  };
+  publish: {
+    preview(sheetIndices?: number[]): Promise<unknown>;
+    nextVersion(registry: string, packageName: string, bump: string): Promise<string>;
+    package(spec: ScriptPublishSpec): Promise<unknown>;
+    model(spec: ScriptPublishModelSpec): Promise<unknown>;
   };
 } {
   return {
@@ -901,6 +961,91 @@ function buildCapsShim(rt: WorkerRuntime): {
       /** The shortcuts this script currently holds. */
       async list() {
         return (await call(rt, "cap.shortcutList", [])) as ScriptShortcutBinding[];
+      },
+    },
+    // INBOUND .calp distribution (the `distribution.subscribe` capability):
+    // bring somebody else's published content into this workbook.
+    //
+    // TWO THINGS THIS SHIM CANNOT DO, and they are the reasons it exists in this
+    // shape rather than as "subscribe(anything)":
+    //  * it cannot name a registry the user has not already added — every method
+    //    that takes one is refused in Rust against the machine's saved
+    //    registries and this workbook's subscriptions, so the script's job is to
+    //    CHOOSE from `listRegistries()`, not to invent a location; and
+    //  * it cannot switch pulled code on. A pulled object script arrives
+    //    restricted and unmounted; the user still answers the consent prompt.
+    //    `refreshApply` is the same: a package script whose SOURCE changed is
+    //    switched off again until the user re-approves it, so a script can never
+    //    update itself into running new code.
+    packages: {
+      /** The registries set up on this machine. The only locations the other
+       *  methods will accept. */
+      async listRegistries() {
+        return (await call(rt, "cap.pkgListRegistries", [])) as unknown[];
+      },
+      /** The packages this workbook subscribes to, and the version of each. */
+      async listSubscriptions() {
+        return call(rt, "cap.pkgListSubscriptions", []);
+      },
+      /** The packages available in one of your registries. */
+      async browse(registry: string) {
+        return (await call(rt, "cap.pkgBrowse", [registry])) as unknown[];
+      },
+      /** Look inside a package version — sheets, data sources, every script it
+       *  carries and the capabilities each declares — WITHOUT taking it. */
+      async inspect(registry: string, packageName: string, versionPin: string) {
+        return call(rt, "cap.pkgInspect", [registry, packageName, versionPin]);
+      },
+      /** Subscribe to a package and materialize it. Verified exactly as an
+       *  interactive subscribe is: Ed25519 signature, publisher trust pin,
+       *  per-artifact checksums, minimum app version. */
+      async pull(registry: string, packageName: string, versionPin: string) {
+        return call(rt, "cap.pkgPull", [registry, packageName, versionPin]);
+      },
+      /** What updating every subscription would change — without changing it. */
+      async refreshPreview() {
+        return call(rt, "cap.pkgRefreshPreview", []);
+      },
+      /** Update every subscription to its publisher's newest matching version. */
+      async refreshApply() {
+        return call(rt, "cap.pkgRefreshApply", []);
+      },
+    },
+    // OUTBOUND .calp distribution (the `distribution.publish` capability):
+    // push this workbook to a registry, signed with the USER'S publisher key,
+    // where everyone subscribed will receive it.
+    //
+    // Deliberately a DIFFERENT capability from `packages` above. Publishing puts
+    // the user's name on content other people will run; pulling puts other
+    // people's content in front of the user. A build script that publishes a
+    // nightly report has no business pulling, and a dashboard that refreshes has
+    // no business publishing.
+    //
+    // Holding the capability is NOT enough to publish: this machine must already
+    // have a publisher identity (a script must never mint the key other people
+    // pin as "you"), and for a package name that already exists in the registry
+    // it must be THAT package's key. `publishedBy` is not settable — the byline
+    // comes from the identity that signs.
+    publish: {
+      /** What publishing would ship and what it would leave behind. Sends
+       *  nothing. Omit `sheetIndices` to preview every sheet. */
+      async preview(sheetIndices?: number[]) {
+        return call(rt, "cap.pkgPublishPreview", [sheetIndices]);
+      },
+      /** The next version number for one of your packages ("major" | "minor" |
+       *  "patch"). */
+      async nextVersion(registry: string, packageName: string, bump: string) {
+        return (await call(rt, "cap.pkgNextVersion", [registry, packageName, bump])) as string;
+      },
+      /** Publish this workbook as a new version of `packageName`. Leaves the
+       *  machine; cannot be taken back. */
+      async package(spec: ScriptPublishSpec) {
+        return call(rt, "cap.pkgPublish", [spec]);
+      },
+      /** Publish ONE BI model as a model-only package (schema only — no data
+       *  and no credentials travel). */
+      async model(spec: ScriptPublishModelSpec) {
+        return call(rt, "cap.pkgPublishModel", [spec]);
       },
     },
   };

@@ -159,6 +159,11 @@ export const RUST_MIRRORED_CAPABILITIES: ReadonlySet<CapabilityId> = new Set([
   // "due"), which is the whole point: a revoke has to stop a job that is
   // already persisted in the workbook, not merely block new registrations.
   "schedule",
+  // The .calp distribution gateway (script_distribution) re-checks the ACTION'S
+  // OWN capability per call — and these two are never one grant, so both have
+  // to be mirrored or one of them is silently unusable.
+  "distribution.publish",
+  "distribution.subscribe",
 ] as CapabilityId[]);
 
 /** Mirror one consent-granted capability to the Rust store (called immediately
@@ -386,6 +391,19 @@ export interface CapabilityRequestPayload {
   description: string;
   /** For net.fetch, the concrete origin being requested; null otherwise. */
   origin: string | null;
+  /**
+   * `<package>@<version>` when this prompt was raised because the script is
+   * calling a SHARED LIBRARY that holds the capability, null when the script is
+   * reaching for it directly.
+   *
+   * HONEST CONSENT: the two cases are not the same question. "This script wants
+   * to fetch from the web" and "this script is calling acme.http, which fetches
+   * from the web" have different answers for a user who trusts the script but
+   * has never heard of the library, so the difference must reach the dialog.
+   * `description` already carries it in prose (the dialog renders that verbatim);
+   * this field is the machine-readable form for richer UI and for tests.
+   */
+  viaLibrary: string | null;
 }
 
 /** Human-facing capability descriptions for the JIT dialog. */
@@ -429,6 +447,26 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   // explicitly rather than leave it unmentioned.
   "ui.shortcut":
     "claim a keyboard shortcut of the form Ctrl+Shift+<letter>, so pressing it runs its code. It cannot take a shortcut anything else already uses, it cannot take the keys Calcula needs, and it never sees anything you type — only that its own shortcut was pressed. It appears in your shortcut list and goes away when the script stops",
+  // Phrased as a PUSH, because that is what it is: nothing here asks for a cell
+  // by address. The host hands an add-in the values so it can decide how to
+  // paint them, and hands it each edit so it can react. The two clauses are the
+  // two real paths (cell styling; the cell-change events), and the last clause
+  // is the honest limit — it is shown what is there, it cannot change it, and
+  // it cannot send it anywhere without a separate permission you would also be
+  // asked for.
+  "grid.read":
+    "be shown the contents of your cells — the value of every cell on screen while it decides how to style them, and the old value, new value and formula of every cell that changes. It cannot change your cells with this, and it cannot send them anywhere without separately asking you for network or file access",
+  // OUTBOUND. The two clauses a person needs before saying yes: WHO it goes out
+  // as (you, cryptographically), and that it cannot be recalled. The last clause
+  // is the honest limit that makes this grantable — a script cannot become a
+  // publisher, only act as one you already are.
+  "distribution.publish":
+    "publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed to that package will receive it. It leaves this machine and cannot be taken back. It can only publish to registries you already added, and only if you have published something yourself before — a script cannot create your publisher identity",
+  // INBOUND. Deliberately phrased as "somebody else's code arrives", because
+  // that is the risk, and then the two bounds that contain it: it cannot reach a
+  // registry you did not add, and it cannot switch the code on.
+  "distribution.subscribe":
+    "bring somebody else's published packages into this workbook — their sheets, their data and any code they carry — and update the ones you already subscribe to. It can only use registries you added yourself, everything it brings in is signature-checked exactly as if you had subscribed by hand, and any code that arrives stays switched off until you approve it (including code that CHANGED in an update)",
 };
 
 /** One-line description of a capability id, for transparency UI (extension
@@ -480,6 +518,10 @@ export function requestCapabilityGrant(args: {
   scriptName: string;
   capability: CapabilityId;
   origin: string | null;
+  /** `<package>@<version>` when the request is raised on the way into a shared
+   *  library that holds this capability. Folded into the rendered description so
+   *  the user is told WHY they are being asked now. */
+  viaLibrary?: string | null;
 }): Promise<CapabilityDecision> {
   const lapse = consumeLapsedGrantNotice(args.scriptId);
   if (lapse && typeof window !== "undefined" && typeof window.confirm === "function") {
@@ -494,13 +536,22 @@ export function requestCapabilityGrant(args: {
     }
   }
   const requestId = `cap-${++requestSeq}`;
+  const viaLibrary = args.viaLibrary ?? null;
+  const baseDescription = CAP_DESCRIPTION[args.capability] ?? args.capability;
   const payload: CapabilityRequestPayload = {
     requestId,
     scriptId: args.scriptId,
     scriptName: args.scriptName,
     capability: args.capability,
-    description: CAP_DESCRIPTION[args.capability] ?? args.capability,
+    // The dialog renders this verbatim after `"<script>" wants to `, so the
+    // library clause has to read as a continuation of that sentence. It is
+    // appended rather than substituted: the user must still be told what the
+    // permission DOES, not only who asked for it.
+    description: viaLibrary
+      ? `${baseDescription} — through the shared library ${viaLibrary}, which it imports and which holds this permission`
+      : baseDescription,
     origin: args.origin,
+    viaLibrary,
   };
   return new Promise<CapabilityDecision>((resolve) => {
     let settled = false;

@@ -32,6 +32,9 @@ const CAP_ICON: Record<CapabilityId, string> = {
   schedule: "->S",
   "file.picker": "[/]",
   "ui.shortcut": "[^+]",
+  "grid.read": "[#]",
+  "distribution.publish": "P->",
+  "distribution.subscribe": "<-P",
 };
 
 const overlay: React.CSSProperties = {

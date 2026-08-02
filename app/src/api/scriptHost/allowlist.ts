@@ -6,13 +6,15 @@
 //          see is the object the broker executes, so drift is impossible.
 
 import {
-  vAny, vNotify, vExpose, vUnexpose, vCall, vHook, vGetState, vSetState, vDecl, vNone,
+  vAny, vNotify, vExpose, vUnexpose, vCall, vCallImport, vHook, vGetState, vSetState, vDecl, vNone,
   vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vBiQuery, vBiSql,
   vCubeValue, vCubeKpi, vCubeMembers, vBiModelInfo, vBiModelMutation,
   vBiModelValidate, vBiModelLineage, vBiModelBatch,
   vConnectorRegister, vConnectorRemove,
   vScheduleEvery, vScheduleAt, vScheduleCancel,
   vWritebackRegionId, vWritebackSaveDraft, vWritebackListSubmissions, vWritebackReview,
+  vDistRegistry, vDistPackageRef, vDistNextVersion, vDistPublishPreview,
+  vDistPublish, vDistPublishModel,
   vKey, vKV, vUdf, vRangeRef, vRangeWrite, MAX_RANGE_CELLS,
   vRangeFormat, vRowColOp, vDimension, vFreeze,
   vSheetName, vSheetRename, vSheetVisibility, vSortRange, vFind, vReplace,
@@ -71,6 +73,15 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "base.expose":           { tier: "restricted", class: "emit",   validate: vExpose,   desc: "Expose a method to other scripts" },
   "base.unexpose":         { tier: "restricted", class: "emit",   validate: vUnexpose, desc: "Withdraw a method it had exposed to other scripts" },
   "base.callMethod":       { tier: "restricted", class: "emit",   validate: vCall,     desc: "Call a method exposed by another script (cross-tier requires the target to be public)" },
+  // Shared libraries (design §5.3). NOT a second base.callMethod: the script
+  // names an ALIAS, and the host resolves it against the import table it built
+  // for THIS script from its own `// @uses` pragmas — so authority comes from
+  // who the caller is, not from any value the caller holds. No capability row,
+  // because the reach is exactly whatever the library realm was already granted;
+  // the host additionally caps that per call by the CALLER's own grants (and
+  // prompts the caller for anything it declared but was never granted).
+  "base.callImport":       { tier: "restricted", class: "emit",   validate: vCallImport,
+                             desc: "Call a function of a shared code library this script declared it uses" },
   "events.subscribe":      { tier: "restricted", class: "read",   validate: vHook,     desc: "Listen to its object's events" },
   // ---- own-object scope (instance pinned at mount; a script cannot name another instance) ----
   "object.getState":       { tier: "restricted", class: "read",   validate: vGetState, desc: "Read its own object's properties / selection / spec" },
@@ -437,6 +448,71 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.writebackReview":   { tier: "restricted", capability: "distribution.writeback", class: "net",
                              validate: vWritebackReview, limits: { perMinute: 12 },
                              desc: "Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that package)" },
+  // ---- distribution.subscribe (INBOUND) + distribution.publish (OUTBOUND):
+  //      the .calp package loop, automated. Every row dispatches into the Rust
+  //      `script_distribution` gateway, which re-checks the ROW'S OWN capability
+  //      grant, refuses any registry the user has not already configured,
+  //      demands Ed25519 publisher-key possession before a registry write, and
+  //      then calls the SAME calp_* command the interactive UI calls — so a
+  //      scripted pull is verified identically to a human's (signature, TOFU
+  //      pin, per-artifact SHA-256, min_app_version) and a scripted publish is
+  //      signed with the same key.
+  //
+  //      TWO CAPABILITIES, NOT ONE, because they are different risk classes:
+  //      publishing puts the USER'S NAME on content OTHER PEOPLE will run;
+  //      pulling puts OTHER PEOPLE'S CODE in front of the user. Consent text
+  //      that had to cover both would describe neither honestly.
+  //
+  //      WHY EVERY ROW IS "unlocked" TIER — this is a security property, not a
+  //      classification detail. A DISTRIBUTED script is forced to the restricted
+  //      tier at pull (calp::pull stamps Restricted + Distributed), so the tier
+  //      gate makes this whole family unreachable from code that arrived in a
+  //      package. That is deliberate: a package whose scripts could pull further
+  //      packages is a self-propagating code channel, and no consent prompt can
+  //      make that safe. A distributed report that wants fresh content asks the
+  //      user to press Refresh. Beyond that, `pull` appends sheets to the
+  //      WORKBOOK and `publish` reads EVERY sheet and sends it off the machine,
+  //      which is whole-workbook reach by the same standard api.setCellValue is
+  //      held to.
+  //
+  //      THE ONE THING NONE OF THESE ROWS CAN DO: consent. A pulled object
+  //      script lands unmounted and consent-gated; module scripts and notebooks
+  //      land inert. These methods move DATA, never permission — including when
+  //      a refresh replaces the CALLING script's own package (its consent is
+  //      keyed by source hash, so a changed script re-prompts and does not run).
+  "cap.pkgListRegistries": { tier: "unlocked", capability: "distribution.subscribe", class: "read",
+                             validate: vNone, limits: { perMinute: 60 },
+                             desc: "See which package registries you have set up on this machine" },
+  "cap.pkgListSubscriptions": { tier: "unlocked", capability: "distribution.subscribe", class: "read",
+                             validate: vNone, limits: { perMinute: 60 },
+                             desc: "See which packages this workbook is subscribed to, and which version of each" },
+  "cap.pkgBrowse":         { tier: "unlocked", capability: "distribution.subscribe", class: "net",
+                             validate: vDistRegistry, limits: { perMinute: 20 },
+                             desc: "List the packages available in one of the registries you have set up" },
+  "cap.pkgInspect":        { tier: "unlocked", capability: "distribution.subscribe", class: "net",
+                             validate: vDistPackageRef, limits: { perMinute: 20 },
+                             desc: "Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in" },
+  "cap.pkgPull":           { tier: "unlocked", capability: "distribution.subscribe", class: "net",
+                             validate: vDistPackageRef, limits: { perMinute: 6 },
+                             desc: "Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used)" },
+  "cap.pkgRefreshPreview": { tier: "unlocked", capability: "distribution.subscribe", class: "net",
+                             validate: vNone, limits: { perMinute: 20 },
+                             desc: "Check whether newer versions of the packages you subscribe to are available, and what would change" },
+  "cap.pkgRefreshApply":   { tier: "unlocked", capability: "distribution.subscribe", class: "net",
+                             validate: vNone, limits: { perMinute: 6 },
+                             desc: "Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)" },
+  "cap.pkgPublishPreview": { tier: "unlocked", capability: "distribution.publish", class: "read",
+                             validate: vDistPublishPreview, limits: { perMinute: 60 },
+                             desc: "Work out what publishing this workbook would ship, and what it would leave behind, without sending anything" },
+  "cap.pkgNextVersion":    { tier: "unlocked", capability: "distribution.publish", class: "net",
+                             validate: vDistNextVersion, limits: { perMinute: 20 },
+                             desc: "Ask a registry what the next version number of one of your packages would be" },
+  "cap.pkgPublish":        { tier: "unlocked", capability: "distribution.publish", class: "net",
+                             validate: vDistPublish, limits: { perMinute: 3 },
+                             desc: "Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)" },
+  "cap.pkgPublishModel":   { tier: "unlocked", capability: "distribution.publish", class: "net",
+                             validate: vDistPublishModel, limits: { perMinute: 3 },
+                             desc: "Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)" },
   // ---- ui.dialog (B4): ask the user a question and branch on the answer —
   //      the VBA MsgBox / InputBox / UserForm shape, which until now no script
   //      surface had (base.notify is one-way; render.setHtml only paints inside
@@ -621,15 +697,106 @@ export const SCRIPT_SUBSCRIBABLE_APP_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Thin an app-event payload before it crosses into a SANDBOXED subscriber
- * (worker realm). The BI model events' full payloads carry object names —
- * model metadata that otherwise requires the `bi.query` capability to
- * enumerate — so sandboxed scripts get only what lets them know to re-read
- * through their own sanctioned (capability-gated) path. Trusted main-thread
- * subscribers keep the full payload. Every other event passes through
- * unchanged.
+ * The app events whose payload carries CELL CONTENTS rather than only
+ * coordinates — i.e. the events that are a DELIVERY of workbook data, not a
+ * notification about it.
+ *
+ * This set exists because the reach of a subscription is invisible from its
+ * name: "cell-values-changed" sounds like a coordinate ping, and it actually
+ * carries `oldValue`, `newValue` and `formula` for every cell in a paste, a
+ * fill or a whole-column edit. A subscriber to that has been shown the
+ * workbook's contents just as surely as a cell-style contributor has — which
+ * is why the grid.read gate covers both and not only the one that was easy to
+ * see. Exported so a test can pin it against the payload shapes in events.ts.
  */
-export function thinAppEventForScripts(eventName: string, payload: unknown): unknown {
+export const APP_EVENTS_CARRYING_CELL_CONTENTS: ReadonlySet<string> = new Set([
+  // { changes: [{ row, col, sheetIndex?, oldValue?, newValue, formula? }], source }
+  AppEvents.CELL_VALUES_CHANGED,
+  // { row, col, sheetIndex, value, committed } — `value` is what the user typed.
+  AppEvents.EDIT_ENDED,
+]);
+
+/**
+ * Strip the CONTENTS out of a cell-content-carrying payload, keeping WHERE and
+ * WHEN. A subscriber without grid.read still learns that A1:C40 changed and can
+ * invalidate whatever it caches; it does not learn what the cells say.
+ *
+ * Rebuilt field-by-field rather than deleted key-by-key, so a field added to the
+ * payload later is absent here by default instead of leaking by default.
+ */
+function redactCellContents(eventName: string, payload: unknown): unknown {
+  if (eventName === AppEvents.CELL_VALUES_CHANGED) {
+    const p = (payload ?? {}) as { changes?: unknown; source?: unknown };
+    const changes = Array.isArray(p.changes) ? p.changes : [];
+    return {
+      changes: changes.map((c) => {
+        const change = (c ?? {}) as { row?: unknown; col?: unknown; sheetIndex?: unknown };
+        return { row: change.row, col: change.col, sheetIndex: change.sheetIndex };
+      }),
+      source: p.source,
+      /** Told plainly, so an author debugging "where did newValue go?" is not
+       *  left guessing, and so the absence can never be mistaken for "nothing
+       *  changed". */
+      redacted: "grid.read",
+    };
+  }
+  // EDIT_ENDED: everything except `value`.
+  const p = (payload ?? {}) as {
+    row?: unknown;
+    col?: unknown;
+    sheetIndex?: unknown;
+    committed?: unknown;
+  };
+  return {
+    row: p.row,
+    col: p.col,
+    sheetIndex: p.sheetIndex,
+    committed: p.committed,
+    redacted: "grid.read",
+  };
+}
+
+/** Options for `thinAppEventForScripts`. */
+export interface ThinAppEventOptions {
+  /**
+   * True when the subscriber may NOT be shown cell contents — i.e. a sandboxed
+   * extension that did not declare `grid.read`. Decided by the CALLER at
+   * DELIVERY time (never cached at subscribe time), so a ceiling that changes
+   * between mounts, or a grant that is revoked, bites the very next event.
+   *
+   * Deliberately opt-IN: object scripts pass nothing and keep the full payload,
+   * because their grid reach is governed by the tier model (own sheet at
+   * restricted, any sheet at unlocked) and not by grid.read — see the SCOPE note
+   * in capabilityIds.ts.
+   */
+  redactCellContents?: boolean;
+}
+
+/**
+ * Thin an app-event payload before it crosses into a SANDBOXED subscriber
+ * (worker realm). Three families:
+ *
+ *  - the BI model events' full payloads carry object names — model metadata that
+ *    otherwise requires the `bi.query` capability to enumerate — so sandboxed
+ *    scripts get only what lets them know to re-read through their own
+ *    sanctioned (capability-gated) path;
+ *  - the distribution/writeback events are notifications, not deliveries;
+ *  - the CELL-CONTENT events (APP_EVENTS_CARRYING_CELL_CONTENTS) are redacted
+ *    to coordinates when the caller says the subscriber lacks `grid.read`.
+ *
+ * Trusted main-thread subscribers keep the full payload. Every other event
+ * passes through unchanged.
+ */
+export function thinAppEventForScripts(
+  eventName: string,
+  payload: unknown,
+  options?: ThinAppEventOptions,
+): unknown {
+  // FIRST, so the capability question is answered before any per-event shaping
+  // and cannot be skipped by a branch added above it later.
+  if (options?.redactCellContents && APP_EVENTS_CARRYING_CELL_CONTENTS.has(eventName)) {
+    return redactCellContents(eventName, payload);
+  }
   if (eventName === AppEvents.PACKAGE_UPDATED) {
     // A distribution update tells a script "your package moved — re-read".
     // WHAT it moved (how many sheets landed, how many scripts were replaced,

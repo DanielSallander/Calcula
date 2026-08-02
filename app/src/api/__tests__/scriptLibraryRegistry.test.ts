@@ -30,6 +30,28 @@ const registry = new Map<string, FakePackage>();
 const vfs = new Map<string, string>();
 let resolveCalls = 0;
 
+/**
+ * The backend's TOFU pin store, modelled here because the PREVIEW-vs-INSTALL
+ * split is a frontend contract as much as a Rust one: `planInstall` /
+ * `checkUpdates` must call `library_resolve` WITHOUT `confirm`, and only
+ * `applyInstall` may pass it. A fake that always answered "firstUse" (as this
+ * one used to) could not tell the two apart, which is how the preview-pins bug
+ * survived. The state machine below mirrors `verify_library_manifest` in
+ * app/src-tauri/src/library_commands.rs.
+ */
+const pinStore = new Map<string, string>();
+
+/** Stand-in for the signed artifact SHA-256: content-derived, so a source edit
+ *  changes the artifact identity exactly as a real republish would. */
+function fakeArtifactHash(source: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < source.length; i++) {
+    h ^= source.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0").repeat(8);
+}
+
 function pickVersion(pkg: FakePackage, pin: string): string {
   const versions = Object.keys(pkg.versions).sort();
   if (pin === "latest" || pin === "*") return versions[versions.length - 1];
@@ -57,12 +79,51 @@ const invokeBackend = vi.fn(async (cmd: string, args?: Record<string, unknown>) 
   }
   if (cmd === "library_resolve") {
     resolveCalls++;
-    const requests = (args?.requests ?? []) as Array<{ package: string; pin: string }>;
-    return requests.map((r) => {
+    const confirm = args?.confirm === true;
+    const requests = (args?.requests ?? []) as Array<{
+      package: string;
+      pin: string;
+      expectedPublisherKey?: string;
+      expectedVersion?: string;
+    }>;
+    // Pins are held until the WHOLE batch verifies, mirroring the backend's
+    // "never partial success" contract for the trust store.
+    const pending: Array<[string, string]> = [];
+    const out = requests.map((r) => {
       const pkg = registry.get(r.package);
       if (!pkg) throw new Error(`unknown package '${r.package}'`);
       if (pkg.kind !== "library") throw new Error(`'${r.package}' is a '${pkg.kind}' package`);
       const version = pickVersion(pkg, r.pin);
+      // Install-time expectations are enforced BEFORE anything is pinned, so a
+      // registry that moved between review and approval cannot squat the pin.
+      if (confirm && r.expectedVersion !== undefined && r.expectedVersion !== version) {
+        throw new Error(
+          `${r.package} changed between review and install: ${r.expectedVersion} was reviewed but the pin '${r.pin}' now resolves to ${version}`,
+        );
+      }
+      if (
+        confirm &&
+        r.expectedPublisherKey !== undefined &&
+        r.expectedPublisherKey !== pkg.publisherKey
+      ) {
+        throw new Error(
+          `${r.package}@${version} changed between review and install: it was reviewed as published by ${r.expectedPublisherKey} but this version is signed by ${pkg.publisherKey}`,
+        );
+      }
+      const pinned = pinStore.get(r.package);
+      let trustStatus: string;
+      if (pinned !== undefined && pinned !== pkg.publisherKey) {
+        throw new Error(
+          `${r.package}@${version}: Publisher key changed since first use: pinned ${pinned} but this version is signed by ${pkg.publisherKey}`,
+        );
+      } else if (pinned !== undefined) {
+        trustStatus = "verified";
+      } else if (confirm) {
+        pending.push([r.package, pkg.publisherKey]);
+        trustStatus = "firstUse";
+      } else {
+        trustStatus = "notInstalled";
+      }
       return {
         package: r.package,
         resolvedVersion: version,
@@ -71,16 +132,18 @@ const invokeBackend = vi.fn(async (cmd: string, args?: Record<string, unknown>) 
         author: pkg.author,
         publisherName: "Test Publisher",
         publisherKey: pkg.publisherKey,
-        trustStatus: "firstUse",
+        trustStatus,
         modules: pkg.versions[version].map((m) => ({
           id: m.id,
           name: m.name,
           description: null,
           source: m.source,
-          artifactSha256: "ab".repeat(32),
+          artifactSha256: fakeArtifactHash(m.source),
         })),
       };
     });
+    for (const [name, key] of pending) pinStore.set(name, key);
+    return out;
   }
   return undefined;
 });
@@ -120,9 +183,17 @@ const src = (exportName: string, extra = ""): string =>
 beforeEach(() => {
   registry.clear();
   vfs.clear();
+  pinStore.clear();
   resolveCalls = 0;
   invokeBackend.mockClear();
 });
+
+/** Every `library_resolve` call the frontend made, with its `confirm` flag. */
+function resolveCallsWithConfirm(): Array<boolean> {
+  return invokeBackend.mock.calls
+    .filter((c) => c[0] === "library_resolve")
+    .map((c) => (c[1] as { confirm?: boolean } | undefined)?.confirm === true);
+}
 
 // ===========================================================================
 // Search
@@ -372,6 +443,178 @@ describe("install plan and lockfile", () => {
 });
 
 // ===========================================================================
+// A PREVIEW VERIFIES; ONLY AN INSTALL PINS
+//
+// `library_resolve` used to pin trust-on-first-use on EVERY call, so merely
+// building an install plan (or checking for updates) created the TOFU pin a
+// genuine publisher would later be measured against. Structurally the same bug
+// `decide_extension_trust_for_scan` fixed for extension scanning; these tests
+// pin the frontend half of the fix — which call passes `confirm`.
+// ===========================================================================
+
+describe("preview never pins; install does", () => {
+  beforeEach(() => {
+    registry.set("acme.stats", {
+      kind: "library",
+      description: "Statistics",
+      author: "Acme",
+      publisherKey: "aa".repeat(32),
+      versions: { "1.2.4": [{ id: "stats", name: "Statistics", source: src("mean") }] },
+    });
+  });
+
+  it("planInstall resolves WITHOUT confirm and writes no pin", async () => {
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+
+    expect(resolveCallsWithConfirm()).toEqual([false]);
+    expect(pinStore.size).toBe(0);
+    // First contact reads as its own non-trusting status, NOT as "verified"
+    // (which would claim this machine had vouched for the publisher) and not as
+    // "firstUse" (which would claim a pin now exists).
+    expect(plan.nodes[0].trustStatus).toBe("notInstalled");
+  });
+
+  it("repeated previews never start pinning", async () => {
+    await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(pinStore.size).toBe(0);
+    expect(resolveCallsWithConfirm()).toEqual([false, false, false]);
+  });
+
+  it("applyInstall pins the publisher, and a later preview then reads verified", async () => {
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    await applyInstall(plan);
+
+    expect(pinStore.get("acme.stats")).toBe("aa".repeat(32));
+    expect(resolveCallsWithConfirm()).toEqual([false, true]);
+
+    const second = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(second.nodes[0].trustStatus).toBe("verified");
+  });
+
+  it("a squatter that was only PREVIEWED does not make the genuine publisher look hijacked", async () => {
+    // THE ATTACK. An impostor occupies the name in a registry the user browses.
+    // The user previews it and does not install. Later the genuine publisher
+    // ships the real library. Under the old behaviour the preview had pinned the
+    // impostor's key, so the real author resolved as "publisher changed".
+    registry.get("acme.stats")!.publisherKey = "99".repeat(32); // squatter
+    const squatted = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(squatted.nodes[0].trustStatus).toBe("notInstalled");
+    expect(pinStore.size).toBe(0);
+
+    // The genuine publisher takes over the name.
+    registry.get("acme.stats")!.publisherKey = "aa".repeat(32);
+    const genuine = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(genuine.nodes[0].trustStatus).toBe("notInstalled");
+    expect(genuine.nodes[0].publisherKey).toBe("aa".repeat(32));
+
+    // Installing the genuine one pins the GENUINE key...
+    await applyInstall(genuine);
+    expect(pinStore.get("acme.stats")).toBe("aa".repeat(32));
+
+    // ...and NOW the squatter is the one who is refused.
+    registry.get("acme.stats")!.publisherKey = "99".repeat(32);
+    await expect(
+      planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]),
+    ).rejects.toThrow(/Publisher key changed/i);
+  });
+
+  it("a preview still REFUSES a key that contradicts an existing pin", async () => {
+    // "Does not write the pin store" must not be confused with "does not check
+    // it": once a publisher is pinned, a preview has to enforce the pin.
+    await applyInstall(await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]));
+    registry.get("acme.stats")!.publisherKey = "dd".repeat(32);
+    await expect(
+      planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]),
+    ).rejects.toThrow(/Publisher key changed/i);
+    expect(pinStore.get("acme.stats")).toBe("aa".repeat(32));
+  });
+
+  it("applyInstall refuses code that changed between review and approval", async () => {
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+
+    // Same version, same publisher — the publisher re-signed different module
+    // bytes after the user saw the plan. Only the per-module artifact hash
+    // catches this, because only the frontend knows which bytes were reviewed.
+    registry.get("acme.stats")!.versions["1.2.4"][0].source = src("mean", "// @capability net.fetch");
+
+    await expect(applyInstall(plan)).rejects.toThrow(/changed between review and install/);
+    // NOTHING is consented, locked or cached: the code was not approved.
+    expect(await loadConsents()).toEqual([]);
+    expect((await loadLockfile()).libraries).toEqual([]);
+    expect(vfs.size).toBe(0);
+    // The publisher pin DOES stand, and honestly so: the user approved trusting
+    // this publisher for this name, and the key that got pinned is the key they
+    // were shown. What was refused is the code, not the identity.
+    expect(pinStore.get("acme.stats")).toBe("aa".repeat(32));
+  });
+
+  it("applyInstall refuses — and pins NOTHING — when the publisher key changed between review and approval", async () => {
+    // THE RACE THAT MUST NOT PIN. If the identity check happened after the
+    // confirming call, the swapped-in key would already be pinned by the time
+    // the mismatch was noticed, which is the squat this whole change prevents.
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    registry.get("acme.stats")!.publisherKey = "dd".repeat(32);
+
+    await expect(applyInstall(plan)).rejects.toThrow(/changed between review and install/);
+    expect(pinStore.size).toBe(0);
+    expect(await loadConsents()).toEqual([]);
+  });
+
+  it("applyInstall refuses — and pins NOTHING — when a floating pin moved between review and approval", async () => {
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(plan.nodes[0].version).toBe("1.2.4");
+    registry.get("acme.stats")!.versions["1.9.0"] = [
+      { id: "stats", name: "Statistics", source: src("mean") },
+    ];
+
+    await expect(applyInstall(plan)).rejects.toThrow(/changed between review and install/);
+    expect(pinStore.size).toBe(0);
+    expect(await loadConsents()).toEqual([]);
+  });
+
+  it("applyInstall refuses when a module disappeared between review and approval", async () => {
+    registry.get("acme.stats")!.versions["1.2.4"].push({
+      id: "extra",
+      name: "Extra",
+      source: src("pad"),
+    });
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    registry.get("acme.stats")!.versions["1.2.4"].pop();
+
+    await expect(applyInstall(plan)).rejects.toThrow(/changed between review and install/);
+    expect(await loadConsents()).toEqual([]);
+    expect((await loadLockfile()).libraries).toEqual([]);
+  });
+
+  it("pins every node of a closure, transitive ones included, in ONE confirmed call", async () => {
+    registry.get("acme.stats")!.versions["1.2.4"][0].source = src(
+      "mean",
+      "// @uses fmt acme.format@^1.0.0",
+    );
+    registry.set("acme.format", {
+      kind: "library",
+      description: "",
+      author: "",
+      publisherKey: "cc".repeat(32),
+      versions: { "1.0.1": [{ id: "fmt", name: "fmt", source: src("pad") }] },
+    });
+
+    const plan = await planInstall("C:/reg", [{ package: "acme.stats", pin: "^1.2.0" }]);
+    expect(plan.nodes.every((n) => n.trustStatus === "notInstalled")).toBe(true);
+    invokeBackend.mockClear();
+    await applyInstall(plan);
+
+    // One confirmed round trip covering the whole approved graph — a transitive
+    // dependency must not be pinned by some other, unreviewed path.
+    expect(resolveCallsWithConfirm()).toEqual([true]);
+    expect(pinStore.get("acme.stats")).toBe("aa".repeat(32));
+    expect(pinStore.get("acme.format")).toBe("cc".repeat(32));
+  });
+});
+
+// ===========================================================================
 // Update check
 // ===========================================================================
 
@@ -433,9 +676,32 @@ describe("checkUpdates", () => {
   });
 
   it("flags a publisher key change rather than accepting it silently", async () => {
+    // The package was pinned by the install in this describe's beforeEach, so a
+    // key change is REFUSED by the backend's TOFU gate — `checkUpdates` never
+    // gets a resolved node to compare keys against, and the change surfaces as
+    // the error it is. (`publisherKeyChanged` on the status object is therefore
+    // only reachable if the backend ever starts returning a mismatching key
+    // instead of erroring; it is kept as a belt-and-braces field.)
     registry.get("acme.stats")!.publisherKey = "dd".repeat(32);
     const [status] = await checkUpdates();
-    expect(status.publisherKeyChanged).toBe(true);
+    expect(status.error).toMatch(/Publisher key changed/i);
+    expect(status.available).toBeNull();
+  });
+
+  it("checks for updates WITHOUT pinning anything new", async () => {
+    // An update check is a preview. If it pinned, merely looking for updates
+    // would trust whoever currently occupies the package name.
+    registry.set("acme.newcomer", {
+      kind: "library",
+      description: "",
+      author: "",
+      publisherKey: "ee".repeat(32),
+      versions: { "1.0.0": [{ id: "n", name: "n", source: src("x") }] },
+    });
+    invokeBackend.mockClear();
+    await checkUpdates();
+    expect(resolveCallsWithConfirm()).not.toContain(true);
+    expect(pinStore.has("acme.newcomer")).toBe(false);
   });
 
   it("reports the failure instead of throwing when the package is gone", async () => {

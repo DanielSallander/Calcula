@@ -63,6 +63,19 @@
 //     - cap.cubeValue: Resolve a CUBE value (a measure sliced by member filters) from a BI model
 //   bi.sql
 //     - cap.biSql: Run read-only RAW SQL against a BI connection's database (any reachable table)
+//   distribution.publish
+//     - cap.pkgNextVersion: Ask a registry what the next version number of one of your packages would be
+//     - cap.pkgPublish: Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)
+//     - cap.pkgPublishModel: Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)
+//     - cap.pkgPublishPreview: Work out what publishing this workbook would ship, and what it would leave behind, without sending anything
+//   distribution.subscribe
+//     - cap.pkgBrowse: List the packages available in one of the registries you have set up
+//     - cap.pkgInspect: Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in
+//     - cap.pkgListRegistries: See which package registries you have set up on this machine
+//     - cap.pkgListSubscriptions: See which packages this workbook is subscribed to, and which version of each
+//     - cap.pkgPull: Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used)
+//     - cap.pkgRefreshApply: Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)
+//     - cap.pkgRefreshPreview: Check whether newer versions of the packages you subscribe to are available, and what would change
 //   distribution.writeback
 //     - cap.writebackGetLayer: Read the answers you have entered so far and whether each one is unsent, sent, approved or rejected
 //     - cap.writebackListRegions: List the input areas a subscribed package asks you to fill in (where they are and what kind of value they expect)
@@ -1258,6 +1271,344 @@ declare interface ScriptCapabilities {
    * ```
    */
   shortcut: ScriptShortcutApi;
+  /**
+   * Bring somebody else's published .calp packages into this workbook, and keep
+   * the ones you subscribe to up to date. Requires the
+   * `distribution.subscribe` capability (`// @capability distribution.subscribe`).
+   *
+   * Three things are worth knowing before you design around this:
+   *
+   *  - **You can only use registries the user already added.** Naming a path or
+   *    URL they have not saved is refused, by name, in the backend. Start from
+   *    `listRegistries()`; do not hard-code a location.
+   *  - **You cannot switch pulled code on.** A package's object scripts arrive
+   *    restricted and NOT running; the user answers the consent prompt. That is
+   *    true of `refreshApply()` too — a package script whose source CHANGED is
+   *    switched off again until the user re-approves it, so a script can never
+   *    update itself into running new code.
+   *  - **A script that arrived in a package cannot call any of this.** These
+   *    methods are unlocked-tier and distributed scripts are forced restricted,
+   *    which is what stops a package from pulling further packages.
+   *
+   * ```js
+   * const [reg] = await context.caps.packages.listRegistries();
+   * const info = await context.caps.packages.inspect(reg.location, "vendor-kpis", "latest");
+   * context.log(`${info.packageName} carries ${info.scripts.length} scripts`);
+   * await context.caps.packages.pull(reg.location, "vendor-kpis", "^2.0.0");
+   * ```
+   */
+  packages: ScriptPackagesApi;
+  /**
+   * Publish this workbook to one of your package registries. Requires the
+   * `distribution.publish` capability (`// @capability distribution.publish`) —
+   * deliberately a DIFFERENT permission from `caps.packages`, because
+   * publishing puts YOUR name on content other people will run.
+   *
+   * Holding the capability is not enough. This machine must already have a
+   * publisher identity (Calcula will not let a script create the Ed25519 key
+   * other people pin as "you"), and if the package name already exists in that
+   * registry you must hold ITS key. `publishedBy` is not yours to set: the
+   * byline comes from the identity that signs.
+   *
+   * ```js
+   * const next = await context.caps.publish.nextVersion(reg, "sales-report", "minor");
+   * const dry  = await context.caps.publish.preview();
+   * context.log(`would ship ${dry.sheetNames.length} sheets`);
+   * await context.caps.publish.package({
+   *   registry: reg, packageName: "sales-report", version: next,
+   * });
+   * ```
+   */
+  publish: ScriptPublishApi;
+}
+
+// ============================================================================
+// caps.packages / caps.publish — the .calp package loop, split by DIRECTION.
+// Inbound needs `distribution.subscribe`; outbound needs `distribution.publish`.
+// ============================================================================
+
+/** One registry the user has set up on this machine. */
+declare interface ScriptRegistry {
+  id: string;
+  name: string;
+  /** Pass this to the other methods. A location you did not get from here will
+   *  be refused. */
+  location: string;
+}
+
+/** One package version listed in a registry. */
+declare interface ScriptRegistryVersion {
+  version: string;
+  publishedAt: string;
+  publishedBy: string;
+}
+
+/** One package listed in a registry. */
+declare interface ScriptRegistryPackage {
+  name: string;
+  description: string;
+  /** "report" | "template" | "dataset" | "library" | a publisher's own kind. */
+  kind: string;
+  author: string;
+  versions: ScriptRegistryVersion[];
+}
+
+/** One package this workbook subscribes to. */
+declare interface ScriptSubscription {
+  packageName: string;
+  registryUrl: string;
+  versionPin: string;
+  resolvedVersion: string;
+  resolvedAt: string;
+}
+
+declare interface ScriptSubscriptionList {
+  formatVersion: number;
+  subscriptions: ScriptSubscription[];
+}
+
+/** One script a package carries, as seen BEFORE taking it. */
+declare interface ScriptPackagedScript {
+  name: string;
+  objectType: string;
+  description: string | null;
+  /** What the publisher's signed manifest says this script may use. */
+  requestedCapabilities: string[];
+}
+
+/** What `inspect()` reports — enough to decide, nothing materialized. */
+declare interface ScriptPackageInspection {
+  packageName: string;
+  resolvedVersion: string;
+  /** Display name of the VERIFIED signer. */
+  publisherName: string;
+  /** "firstUse" (this machine has no pin for this package yet) or "verified". */
+  trustStatus: string;
+  sheets: Array<{ name: string; description: string }>;
+  scripts: ScriptPackagedScript[];
+  tableNames: string[];
+  namedRangeNames: string[];
+  writebackRegionCount: number;
+  chartCount: number;
+  pivotCount: number;
+}
+
+/** What a pull materialized. */
+declare interface ScriptPullResult {
+  packageName: string;
+  resolvedVersion: string;
+  sheetsPulled: number;
+  tablesPulled: number;
+  /** Object scripts materialized — RESTRICTED and NOT RUNNING until the user
+   *  approves them. */
+  scriptsPulled: number;
+  publisherName: string;
+  /** "firstUse" or "verified". */
+  trustStatus: string;
+}
+
+/** What one subscription would change on refresh. */
+declare interface ScriptSubscriptionPreview {
+  packageName: string;
+  currentVersion: string;
+  newVersion: string;
+  cellsChanged: number;
+  overridesConflicted: number;
+  overridesAutoCleared: number;
+}
+
+declare interface ScriptRefreshPreview {
+  subscriptionPreviews: ScriptSubscriptionPreview[];
+  totalCellsChanged: number;
+  totalSheetsAdded: number;
+  totalSheetsRemoved: number;
+  totalOverridesConflicted: number;
+  totalOverridesAutoCleared: number;
+}
+
+declare interface ScriptRefreshResult {
+  subscriptionsRefreshed: number;
+  sheetsAdded: number;
+  sheetsRemoved: number;
+  sheetsUpdated: number;
+  conflictsCreated: number;
+  overridesAutoCleared: number;
+}
+
+/**
+ * INBOUND .calp distribution (`distribution.subscribe`).
+ *
+ * Everything here is verified exactly as an interactive subscribe is: the
+ * publisher's Ed25519 signature over the version manifest, the trust-on-first-
+ * use pin, a SHA-256 check of every artifact against the signed checksum map,
+ * and the package's declared minimum app version. There is no "script path"
+ * that skips a check — these call the same backend functions the Subscribe and
+ * Refresh dialogs call.
+ */
+declare interface ScriptPackagesApi {
+  /** The registries set up on this machine — the only locations the rest of
+   *  this API will accept.
+   *
+   * Calcula policy (generated): See which package registries you have set up on this machine.
+   * Reach: broker `cap.pkgListRegistries`, unlocked tier, class read, requires the `distribution.subscribe` capability. Limits: perMinute 60.
+   */
+  listRegistries(): Promise<ScriptRegistry[]>;
+  /** What this workbook currently subscribes to.
+   *
+   * Calcula policy (generated): See which packages this workbook is subscribed to, and which version of each.
+   * Reach: broker `cap.pkgListSubscriptions`, unlocked tier, class read, requires the `distribution.subscribe` capability. Limits: perMinute 60.
+   */
+  listSubscriptions(): Promise<ScriptSubscriptionList>;
+  /** The packages available in one of your registries.
+   *
+   * Calcula policy (generated): List the packages available in one of the registries you have set up.
+   * Reach: broker `cap.pkgBrowse`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
+   */
+  browse(registry: string): Promise<ScriptRegistryPackage[]>;
+  /** Look inside a package version — including every script it carries and the
+   *  capabilities each declares — WITHOUT bringing anything in.
+   *
+   * Calcula policy (generated): Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in.
+   * Reach: broker `cap.pkgInspect`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
+   */
+  inspect(
+    registry: string,
+    packageName: string,
+    versionPin: string,
+  ): Promise<ScriptPackageInspection>;
+  /**
+   * Subscribe to a package and materialize it into this workbook.
+   *
+   * `versionPin` is a semver pin: an exact version ("1.2.0"), a range
+   * ("^1.0.0", "~1.2.0") or "latest".
+   *
+   * Calcula policy (generated): Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used).
+   * Reach: broker `cap.pkgPull`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 6.
+   */
+  pull(
+    registry: string,
+    packageName: string,
+    versionPin: string,
+  ): Promise<ScriptPullResult>;
+  /** What updating every subscription would change — without changing it.
+   *
+   * Calcula policy (generated): Check whether newer versions of the packages you subscribe to are available, and what would change.
+   * Reach: broker `cap.pkgRefreshPreview`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
+   */
+  refreshPreview(): Promise<ScriptRefreshPreview>;
+  /** Update every subscription to its publisher's newest matching version.
+   *
+   * Calcula policy (generated): Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it).
+   * Reach: broker `cap.pkgRefreshApply`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 6.
+   */
+  refreshApply(): Promise<ScriptRefreshResult>;
+}
+
+/** What `caps.publish.package` takes.
+ *
+ *  `publishedBy`, `customObjects` and `includeComments` are deliberately NOT
+ *  members: the byline comes from the key that signs, package payloads are
+ *  Calcula's to collect, and shipping threaded comments to a registry is a
+ *  privacy decision only a person makes. Passing one is an error, not a
+ *  silently ignored field. */
+declare interface ScriptPublishSpec {
+  /** One of the locations `caps.packages.listRegistries()` returned. */
+  registry: string;
+  packageName: string;
+  /** Semver — `nextVersion()` will suggest one. */
+  version: string;
+  /** "report" (default) | "template" | "dataset" | "library" | your own kind. */
+  kind?: string;
+  /** Sheets to ship. Omit for the kind's default: every sheet for a report, and
+   *  NO sheets for a "library" (whose payload is its module scripts). */
+  sheetIndices?: number[];
+}
+
+/** What `caps.publish.model` takes. Schema only — no data, no credentials. */
+declare interface ScriptPublishModelSpec {
+  registry: string;
+  packageName: string;
+  version: string;
+  /** Which BI connection's model to publish. */
+  connectionId: string;
+}
+
+/** One line of the publish transparency report. */
+declare interface ScriptPublishReportItem {
+  category: string;
+  count: number;
+  detail: string;
+}
+
+/** What a publish shipped, and what it could not carry. */
+declare interface ScriptPublishResult {
+  packageName: string;
+  version: string;
+  sheetsPublished: number;
+  tablesPublished: number;
+  namedRangesPublished: number;
+  scriptsPublished: number;
+  modulesPublished: number;
+  notebooksPublished: number;
+  report: {
+    included: ScriptPublishReportItem[];
+    excluded: ScriptPublishReportItem[];
+  };
+  /** Disclosure warnings — read them; they are how a publish says what it could
+   *  not carry instead of dropping it silently. */
+  warnings: string[];
+}
+
+/** What `preview()` reports. Sends nothing. */
+declare interface ScriptPublishPreview {
+  sheetNames: string[];
+  report: {
+    included: ScriptPublishReportItem[];
+    excluded: ScriptPublishReportItem[];
+  };
+  warnings: string[];
+}
+
+/**
+ * OUTBOUND .calp distribution (`distribution.publish`).
+ *
+ * A publish LEAVES THE MACHINE and cannot be taken back: everyone subscribed to
+ * the package receives the new version. Calcula rate-limits this hard, records
+ * every attempt in the workbook's audit trail with the package, the version and
+ * the registry, and refuses outright unless this machine already holds the
+ * publisher key — and, for a package that already exists, unless it holds THAT
+ * package's key.
+ */
+declare interface ScriptPublishApi {
+  /** What publishing would ship and what it would leave behind. Sends nothing.
+   *  Omit `sheetIndices` to preview every sheet.
+   *
+   * Calcula policy (generated): Work out what publishing this workbook would ship, and what it would leave behind, without sending anything.
+   * Reach: broker `cap.pkgPublishPreview`, unlocked tier, class read, requires the `distribution.publish` capability. Limits: perMinute 60.
+   */
+  preview(sheetIndices?: number[]): Promise<ScriptPublishPreview>;
+  /** The next version number for one of your packages.
+   *
+   * Calcula policy (generated): Ask a registry what the next version number of one of your packages would be.
+   * Reach: broker `cap.pkgNextVersion`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 20.
+   */
+  nextVersion(
+    registry: string,
+    packageName: string,
+    bump: "major" | "minor" | "patch",
+  ): Promise<string>;
+  /** Publish this workbook as a new version. Irreversible.
+   *
+   * Calcula policy (generated): Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before).
+   * Reach: broker `cap.pkgPublish`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 3.
+   */
+  package(spec: ScriptPublishSpec): Promise<ScriptPublishResult>;
+  /** Publish ONE BI model as a model-only package.
+   *
+   * Calcula policy (generated): Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel).
+   * Reach: broker `cap.pkgPublishModel`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 3.
+   */
+  model(spec: ScriptPublishModelSpec): Promise<ScriptPublishResult>;
 }
 
 /** One border edge of a cell format. */
@@ -2437,6 +2788,34 @@ declare interface BaseObjectContext {
    * Reach: broker `base.callMethod`, restricted tier, class emit.
    */
   callMethod(targetType: string, targetInstanceId: string | null, methodName: string, ...args: any[]): Promise<any>;
+  /**
+   * Call an export of a shared library this script declared with a
+   * `// @uses <alias> <package>@<pin>` pragma.
+   *
+   * You normally do NOT call this by hand — declaring the pragma generates an
+   * `imports` binding, and `imports.<alias>.<export>(...)` is the same call:
+   *
+   * ```js
+   * // @uses stats acme.stats@^1.2.0
+   * const avg = await imports.stats.mean([1, 2, 3]);
+   * ```
+   *
+   * Note what this method does NOT take: an address. You name one of your own
+   * aliases, and Calcula resolves it against the imports IT recorded for THIS
+   * script. There is no handle or token to pass on, so a library you import
+   * cannot be reached by another script just because it knows something you
+   * know. A library is also never able to do more than you can: it runs with
+   * your declared capabilities narrowed to its own, and a call through it that
+   * needs a permission you have not been granted asks YOU for it first.
+   * @param alias The alias from your `// @uses` pragma.
+   * @param methodName A name the library declared with `// @export`.
+   * @param args Arguments to pass, as an array.
+   * @returns Promise of the library function's return value.
+   *
+   * Calcula policy (generated): Call a function of a shared code library this script declared it uses.
+   * Reach: broker `base.callImport`, restricted tier, class emit.
+   */
+  callImport(alias: string, methodName: string, args: any[]): Promise<any>;
   /** Log to the script console (visible in the Code tab output panel).
    *
    * Calcula policy (generated): Write to the script console.

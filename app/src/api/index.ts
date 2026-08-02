@@ -1180,8 +1180,21 @@ export {
   loadAndInstallCustomFunctions,
   validateFunctionName,
   validateParam,
+  // Distributed-package consent gate for custom functions that arrived in a
+  // .calp (the CustomFunctions extension owns the prompt; the gate itself is
+  // enforced inside the install path, so nothing here can be bypassed).
+  gateCustomFunctionLibrary,
+  grantCustomFunctionConsent,
+  customFunctionConsentKey,
+  customFunctionConsentSource,
+  CUSTOM_FUNCTIONS_CONSENT_NEEDED,
+  CUSTOM_FUNCTIONS_SCRIPT_ID,
 } from "./customFunctions";
-export type { CustomFunctionUdf, CustomFunctionLibrary } from "./customFunctions";
+export type {
+  CustomFunctionUdf,
+  CustomFunctionLibrary,
+  PendingCustomFunctionPackage,
+} from "./customFunctions";
 // Script-fed data connectors (model-extensibility Phase 3): the trusted
 // connector host + the privileged connector-secrets UI wrappers.
 export {

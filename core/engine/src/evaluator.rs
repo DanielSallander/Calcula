@@ -415,7 +415,63 @@ pub struct Evaluator<'a> {
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
+    /// How many lambda invocations are currently on the Rust stack.
+    /// Incremented/decremented ONLY by `invoke_lambda_with_captured`, which is
+    /// the single choke point every lambda call goes through. See
+    /// `MAX_LAMBDA_DEPTH` for why this exists.
+    lambda_depth: std::cell::Cell<u32>,
 }
+
+/// Maximum number of nested LAMBDA invocations before evaluation refuses to
+/// recurse further.
+///
+/// WHY THIS EXISTS (availability, not confidentiality): `invoke_lambda_with_captured`
+/// re-enters `evaluate()`, so a self-recursive LAMBDA — `=LET(F, LAMBDA(N, F(N-1)), F(1e9))`
+/// or a merely mis-written base case — consumed Rust stack without bound and
+/// aborted the WHOLE PROCESS with a stack overflow. A stack overflow is not a
+/// catchable Rust panic: the user loses the workbook, not just the formula.
+///
+/// This is a PRE-EXISTING hazard of the formula language (anyone could always
+/// type such a formula into a cell), but `api.evaluate` — the WorksheetFunction
+/// bridge — now lets sandboxed script code reach the same evaluator directly,
+/// so a script can trip it without a human ever seeing the formula. Sandboxed
+/// code must never be able to take the host process down.
+///
+/// THE CEILING IS MEASURED, NOT GUESSED. One lambda level costs several Rust
+/// frames (the invoke helper, `evaluate`, the ~700-arm builtin dispatch in
+/// `evaluate_function`, plus the argument evaluations under it), and the
+/// dispatch frame is large in debug builds. Calcula's OS main thread is linked
+/// with a 32 MiB reserve (app/src-tauri/build.rs), but ANY thread spawned
+/// without an explicit `stack_size` gets the std 2 MiB default, and evaluation
+/// is reachable from background work as well as from command dispatch — so
+/// 2 MiB is the conservative floor. Measured in a DEBUG build (the expensive
+/// case), 255 nested levels of a body that itself nests several builtin calls
+/// fit in 1 MiB and do NOT fit in 512 KiB — i.e. the deepest allowed recursion
+/// uses at most half that floor. The measurement is pinned by
+/// `the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack`, so a
+/// future increase in evaluator frame size fails a test instead of a workbook.
+///
+/// 256 is also far more depth than legitimate spreadsheet recursion needs
+/// (factorials, tree walks and string scans are tens of levels) and is the same
+/// order of magnitude as Excel's own recursive-LAMBDA depth.
+///
+/// WHAT THIS DOES **NOT** BOUND: a single formula can nest builtin calls
+/// arbitrarily WIDE without any lambda at all — that stack cost is bounded by
+/// the parser's nesting limit, not by this counter — and a recursion can be
+/// shallow yet exponential (`fib` without memoization). Neither is a stack
+/// hazard; the second is a TIME hazard and the engine has no evaluation-time
+/// budget at all. See the report accompanying this change.
+///
+/// THE ERROR: Excel reports `#NUM!` when a LAMBDA recursion limit is hit. This
+/// engine has no `#NUM!` variant, and its documented mapping for Excel's
+/// `#NUM!` is `#VALUE!` (see app/src/api/formulaFunctions.ts `normalizeCellErrorLiteral`
+/// and app/src/api/formulaUdf.ts), so that is what is returned here. It is
+/// deliberately NOT `#CIRCULAR!`: that error means "the cell dependency graph
+/// contains a cycle" and is produced by the dependency graph, not by expression
+/// evaluation. Reusing it would make a runaway recursion look like a workbook
+/// structure problem and would collide with the iterative-calculation handling
+/// keyed off that error.
+pub const MAX_LAMBDA_DEPTH: u32 = 256;
 
 /// Adapter that lets the evaluator resolve cube arguments through the shared
 /// `crate::cube::CubeResolver` machinery, so the evaluator and the async
@@ -455,6 +511,7 @@ impl<'a> Evaluator<'a> {
             gather_fn: None,
             udf_fn: None,
             scope: RefCell::new(HashMap::new()),
+            lambda_depth: std::cell::Cell::new(0),
         }
     }
 
@@ -470,6 +527,7 @@ impl<'a> Evaluator<'a> {
             gather_fn: None,
             udf_fn: None,
             scope: RefCell::new(HashMap::new()),
+            lambda_depth: std::cell::Cell::new(0),
         }
     }
 
@@ -485,6 +543,7 @@ impl<'a> Evaluator<'a> {
             gather_fn: None,
             udf_fn: None,
             scope: RefCell::new(HashMap::new()),
+            lambda_depth: std::cell::Cell::new(0),
         }
     }
 
@@ -1103,10 +1162,21 @@ impl<'a> Evaluator<'a> {
 
         // Collect values from each sheet by evaluating the inner reference
         // against that sheet's grid using a temporary single-sheet evaluator.
+        //
+        // THE NESTED EVALUATOR INHERITS THE LAMBDA DEPTH. This is the one place
+        // in the engine where evaluation continues inside a FRESH `Evaluator`,
+        // and a fresh one starts at depth 0 — i.e. it would hand back a full
+        // MAX_LAMBDA_DEPTH budget while the outer evaluator's Rust frames are
+        // still on the stack. Today the parser only ever puts a bare reference
+        // in `reference` (`parse_reference_only`), so no lambda can currently
+        // recurse through here; carrying the depth across anyway means the
+        // ceiling stays a ceiling if that ever changes, instead of the guard
+        // quietly becoming per-evaluator.
         let mut all_values = Vec::new();
         for sheet_name in &sheets {
             if let Some(grid) = ctx.get_grid(sheet_name) {
                 let sheet_eval = Evaluator::new(grid);
+                sheet_eval.lambda_depth.set(self.lambda_depth.get());
                 let result = sheet_eval.evaluate(reference);
                 match result {
                     EvalResult::Array(vals) => all_values.extend(vals),
@@ -6095,7 +6165,26 @@ impl<'a> Evaluator<'a> {
 
     /// Invoke a lambda with the given argument values bound to its parameters.
     /// Temporarily binds captured scope + params in scope, evaluates body, then restores scope.
+    ///
+    /// THE RECURSION GUARD LIVES HERE and nowhere else. This is the single
+    /// choke point for every lambda call in the engine — `__INVOKE__` (both the
+    /// inline `LAMBDA(x,…)(1)` and the named-function shape), a LET/name-bound
+    /// lambda called as `F(…)`, `invoke_lambda` (MAP/SCAN/BYROW/BYCOL/MAKEARRAY/…)
+    /// and `apply_lambda` (REDUCE and friends) all funnel through it — so a
+    /// counter incremented on entry and restored on exit bounds the Rust stack
+    /// for ALL of them. Placing the guard at the call sites instead would leave
+    /// whichever site is added next unguarded.
     fn invoke_lambda_with_captured(&self, params: &[String], body: &Expression, args: &[EvalResult], captured: &HashMap<String, EvalResult>) -> EvalResult {
+        // Refuse BEFORE any work: a stack overflow is an uncatchable process
+        // abort, so the ceiling has to be checked on the way in, not detected
+        // on the way out. Nothing has been pushed to `scope` yet, so returning
+        // here needs no unwinding.
+        let entry_depth = self.lambda_depth.get();
+        if entry_depth >= MAX_LAMBDA_DEPTH {
+            return EvalResult::Error(CellError::Value);
+        }
+        self.lambda_depth.set(entry_depth + 1);
+
         // Collect all keys we need to save/restore: captured keys + param keys
         let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
         {
@@ -6132,6 +6221,13 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
+
+        // Restore (not decrement) so the counter cannot drift even if a future
+        // edit adds an early return between the two points. `self.evaluate`
+        // never panics-and-continues here — evaluation is total and returns
+        // `EvalResult::Error` for every failure mode — so there is no unwind
+        // path that could skip this.
+        self.lambda_depth.set(entry_depth);
 
         result
     }
@@ -17120,5 +17216,177 @@ mod lookup_cache_differential_tests {
         );
         // Empty cell inside the range -> 0.0.
         assert_eq!(eval_formula(&grid, "=INDEX(A1:A12,6)"), EvalResult::Number(0.0));
+    }
+}
+#[cfg(test)]
+mod lambda_recursion_depth_tests {
+    //! The LAMBDA recursion ceiling (`MAX_LAMBDA_DEPTH`).
+    //!
+    //! WHAT IS BEING PROTECTED: `invoke_lambda_with_captured` re-enters
+    //! `evaluate()`, so an unbounded self-recursive LAMBDA used to exhaust the
+    //! Rust stack. A stack overflow aborts the process — it is not a catchable
+    //! panic — so the user loses the whole workbook, and sandboxed script code
+    //! reaching the evaluator through `api.evaluate` could trigger it without a
+    //! human ever seeing a formula.
+    //!
+    //! These tests deliberately assert the EXACT boundary, not just "deep fails":
+    //! a ceiling nobody pins drifts, and a ceiling that drifts downward silently
+    //! breaks legitimate recursions while one that drifts upward re-opens the
+    //! crash.
+    use super::*;
+
+    /// The canonical self-recursive lambda: counts down to a base case, so
+    /// `F(k)` needs exactly `k + 1` nested invocations and returns `k`.
+    /// Recursion works because LET binds F into the shared scope BEFORE the
+    /// final expression is evaluated, and `invoke_lambda_with_captured` only
+    /// saves/restores the keys it itself binds.
+    fn countdown(depth: u32) -> String {
+        format!("=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), F({depth}))")
+    }
+
+    fn eval(formula: &str) -> EvalResult {
+        let grid = Grid::new();
+        let ast = parser::parse(formula).expect("formula parses");
+        Evaluator::new(&grid).evaluate(&ast)
+    }
+
+    #[test]
+    fn recursion_just_under_the_ceiling_still_computes() {
+        // `F(k)` is invoked at nesting level 0 and the base case `F(0)` at
+        // level k, so the deepest argument that fits is MAX_LAMBDA_DEPTH - 1.
+        let deepest = MAX_LAMBDA_DEPTH - 1;
+        assert_eq!(
+            eval(&countdown(deepest)),
+            EvalResult::Number(deepest as f64),
+            "a legitimate recursion inside the ceiling must still be computed"
+        );
+    }
+
+    #[test]
+    fn recursion_at_the_ceiling_returns_an_error() {
+        assert_eq!(
+            eval(&countdown(MAX_LAMBDA_DEPTH)),
+            EvalResult::Error(CellError::Value),
+            "one level past the ceiling must be refused, not attempted"
+        );
+    }
+
+    #[test]
+    fn a_runaway_recursion_errors_instead_of_crashing_the_process() {
+        // No base case at all: without the guard this recurses until the Rust
+        // stack is gone and the process aborts. The test surviving IS the
+        // assertion; the value is checked so a future "returns Ok(0)" cannot
+        // pass silently.
+        assert_eq!(
+            eval("=LET(F, LAMBDA(N, F(N)), F(1))"),
+            EvalResult::Error(CellError::Value)
+        );
+        // A base case that is never reachable (counts UP, away from it).
+        assert_eq!(
+            eval("=LET(F, LAMBDA(N, IF(N<=0, 0, F(N+1))), F(1))"),
+            EvalResult::Error(CellError::Value)
+        );
+        // A depth request far beyond anything a stack could serve.
+        assert_eq!(
+            eval(&countdown(1_000_000)),
+            EvalResult::Error(CellError::Value)
+        );
+    }
+
+    #[test]
+    fn the_depth_counter_is_restored_so_sibling_calls_do_not_accumulate() {
+        // Two SEQUENTIAL deep recursions in one formula. If the counter were
+        // only incremented (or decremented on some paths only), the second call
+        // would start from a non-zero depth and fail even though it is legal.
+        let d = MAX_LAMBDA_DEPTH - 1;
+        assert_eq!(
+            eval(&format!(
+                "=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), F({d})+F({d}))"
+            )),
+            EvalResult::Number((d as f64) * 2.0)
+        );
+    }
+
+    #[test]
+    fn the_counter_recovers_after_the_ceiling_was_hit() {
+        // A refused recursion must not leave the evaluator poisoned: a legal
+        // recursion evaluated afterwards on the SAME evaluator must succeed.
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+
+        let over = parser::parse(&countdown(MAX_LAMBDA_DEPTH + 50)).unwrap();
+        assert_eq!(eval.evaluate(&over), EvalResult::Error(CellError::Value));
+
+        let ok = parser::parse(&countdown(10)).unwrap();
+        assert_eq!(eval.evaluate(&ok), EvalResult::Number(10.0));
+    }
+
+    /// THE MEASUREMENT BEHIND THE CEILING — do not delete this test.
+    ///
+    /// `MAX_LAMBDA_DEPTH` is only defensible if the deepest recursion it ALLOWS
+    /// actually fits on the smallest stack Calcula might evaluate on. The OS
+    /// main thread carries a 32 MiB reserve (app/src-tauri/build.rs), but any
+    /// thread spawned without an explicit `stack_size` gets the std 2 MiB
+    /// default, so 2 MiB is the conservative floor. This runs the deepest LEGAL
+    /// recursion, with a body that nests several builtin frames per level (a
+    /// bare `F(N-1)` would flatter the number), on a thread with HALF that
+    /// budget.
+    ///
+    /// Measured in a debug build (the expensive case; release frames are much
+    /// smaller): 255 levels of this body fit in 1 MiB and do NOT fit in 512 KiB.
+    ///
+    /// IF THIS TEST EVER FAILS it will do so by ABORTING THE WHOLE TEST BINARY
+    /// with STATUS_STACK_OVERFLOW (0xc00000fd) — a stack overflow is not a
+    /// catchable panic. That is the point: it means evaluator frames have grown
+    /// and `MAX_LAMBDA_DEPTH` must come DOWN, because in production the same
+    /// growth takes the user's workbook with it.
+    #[test]
+    fn the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack() {
+        const HALF_OF_DEFAULT_THREAD_STACK: usize = 1024 * 1024;
+        let deepest = MAX_LAMBDA_DEPTH - 1;
+        let formula = format!(
+            "=LET(F, LAMBDA(N, IF(N<=0, 0, SUM(ABS(MAX(ROUND(F(N-1)+1, 0)))))), F({deepest}))"
+        );
+        let result = std::thread::Builder::new()
+            .stack_size(HALF_OF_DEFAULT_THREAD_STACK)
+            .spawn(move || eval(&formula))
+            .expect("spawn measurement thread")
+            .join()
+            .expect("the deepest allowed recursion must not overflow a 1 MiB stack");
+        assert_eq!(result, EvalResult::Number(deepest as f64));
+    }
+
+    #[test]
+    fn iteration_is_not_depth() {
+        // MAP/REDUCE invoke the lambda once per element SEQUENTIALLY, never
+        // nested, so a long array must not be mistaken for deep recursion.
+        // (Guards against implementing the counter as a plain "calls made".)
+        let mut grid = Grid::new();
+        for r in 0..600u32 {
+            grid.set_cell(r, 0, crate::cell::Cell::new_number(1.0));
+        }
+        let ast = parser::parse("=REDUCE(0, A1:A600, LAMBDA(acc, x, acc+x))").unwrap();
+        assert_eq!(Evaluator::new(&grid).evaluate(&ast), EvalResult::Number(600.0));
+
+        let ast = parser::parse("=SUM(MAP(A1:A600, LAMBDA(x, x*2)))").unwrap();
+        assert_eq!(Evaluator::new(&grid).evaluate(&ast), EvalResult::Number(1200.0));
+    }
+
+    #[test]
+    fn the_inline_invoke_shape_is_guarded_too() {
+        // `LAMBDA(x, ...)(arg)` parses to __INVOKE__, a different call site
+        // from the name-bound `F(...)` shape. Both funnel through
+        // invoke_lambda_with_captured, so both are bounded.
+        assert_eq!(
+            eval("=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), LAMBDA(K, F(K))(10))"),
+            EvalResult::Number(10.0)
+        );
+        assert_eq!(
+            eval(&format!(
+                "=LET(F, LAMBDA(N, IF(N<=0, 0, F(N-1)+1)), LAMBDA(K, F(K))({}))",
+                MAX_LAMBDA_DEPTH
+            )),
+            EvalResult::Error(CellError::Value)
+        );
     }
 }

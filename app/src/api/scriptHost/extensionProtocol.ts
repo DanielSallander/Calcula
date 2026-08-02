@@ -96,16 +96,41 @@ export const CONTRIBUTION_DECLARATION_KEY: Record<
 };
 
 /**
- * Contribution kinds that ALSO require a granted capability. Only `formula`
- * does: a worksheet function is code that runs against the user's data on every
- * recalculation, which is exactly what `formula.udf` describes. The other kinds
- * install a host-rendered affordance whose handler can still do nothing without
- * its own capability, so gating them twice would only add noise to consent.
+ * Contribution kinds that ALSO require a DECLARED capability — declared in the
+ * authoritative (Ed25519-signed, when present) sidecar manifest, which the
+ * ExtensionManager ZEROES for an unsigned or tampered bundle. Two kinds are
+ * here, and they are exactly the two that receive WORKBOOK DATA:
+ *
+ *   - `formula` -> formula.udf : a worksheet function is code the sheet calls;
+ *     its arguments are the user's cells and it re-runs on every recalculation.
+ *
+ *   - `cellStyle` -> grid.read : a styling contributor is asked about the cells
+ *     on screen and is handed each one's DISPLAYED VALUE. It was disclosed in
+ *     consent and in the transparency panel long before it was gated, which is
+ *     better than nothing and still not enough: disclosure tells the user what
+ *     happens, a capability lets them refuse it, lets the signature carry it,
+ *     and lets it be revoked. An unsigned add-in now gets no cell contents at
+ *     all, because an unsigned manifest declares nothing.
+ *
+ * Everything else installs a host-rendered affordance (a menu item, a button, a
+ * shortcut) whose handler is invoked with no workbook data and can still do
+ * nothing without a capability of its own, so gating them twice would only add
+ * noise to consent. `fileFormat` is the deliberate near-miss: its importer IS
+ * handed bytes, but they are the bytes of a FOREIGN file the user just chose to
+ * open — not the workbook — so it is disclosed (CONTRIBUTION_REACH_NOTE) and
+ * bounded by the same "the human picks the file" mechanism as file.picker,
+ * rather than gated by grid.read, which would misname what it reads.
+ *
+ * NOTE FOR THE NEXT KIND ADDED HERE: `admitContribution` checks the DECLARED
+ * ceiling, not the grant set, because that is what the signature covers and
+ * what package consent enumerated. The host writes the grant down on acceptance
+ * so the transparency panel reflects a capability that is genuinely in use.
  */
 export const CONTRIBUTION_REQUIRED_CAPABILITY: Partial<
   Record<ExtContributionKind, CapabilityId>
 > = {
   formula: "formula.udf",
+  cellStyle: "grid.read",
 };
 
 /** Human-readable one-liners for the consent prompt + the manager UI. */
@@ -132,7 +157,8 @@ export const CONTRIBUTION_KIND_LABEL: Record<ExtContributionKind, string> = {
  *     is handed each cell's DISPLAYED VALUE, because styling by content is the
  *     entire use case ("highlight negatives"). "Adds cell styling" reads as
  *     cosmetic; the reach is "reads the cells you are looking at". Saying so is
- *     the whole difference between consent and a consent-shaped click.
+ *     the whole difference between consent and a consent-shaped click. It is
+ *     now also GATED (grid.read, above) rather than only disclosed.
  * A kind with no entry adds a host-rendered affordance whose handler can still
  * do nothing without a capability of its own — nothing extra to disclose.
  */
@@ -140,7 +166,7 @@ export const CONTRIBUTION_REACH_NOTE: Partial<Record<ExtContributionKind, string
   formula:
     "Formulas in your sheets can call them, and its code runs against the values you pass in every time those cells recalculate.",
   cellStyle:
-    "To decide how a cell should look it is shown that cell's contents — so it can read the cells you are currently looking at.",
+    "To decide how a cell should look it is shown that cell's contents — so it can read the cells you are currently looking at. It needs the 'grid.read' permission for that, and without it the styling is refused rather than run blind.",
   fileFormat:
     "When you open a file of that type, its code produces the cells that are put into your workbook.",
   keybinding:
@@ -490,15 +516,35 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Capabilities an extension can hold through a HOST-PUSH path: reach that is
+ * neither a broker method it calls nor a contribution it registers, so neither
+ * of the two derivations below can see it.
+ *
+ * Today there is exactly one: the app-event forwarder in extensionWorkerHost.ts
+ * hands a subscriber the payloads of APP_EVENTS_CARRYING_CELL_CONTENTS in full
+ * when the extension declared `grid.read`, and redacted to coordinates when it
+ * did not. An event SUBSCRIPTION is not in the contribution ceiling (it installs
+ * a listener, not a surface), which is precisely why this third input exists —
+ * without it, deleting the `cellStyle` row from CONTRIBUTION_REQUIRED_CAPABILITY
+ * would silently drop grid.read out of the taxonomy while the event door stayed
+ * wide open.
+ */
+export const EXTENSION_PUSHED_DATA_CAPABILITIES: readonly CapabilityId[] = ["grid.read"];
+
+/**
  * The capabilities a SANDBOXED EXTENSION can actually exercise — derived, never
- * hand-maintained, from the two things that can require one:
+ * hand-maintained, from the three things that can require one:
  *
  *   1. a broker method it is allowed to call (EXTENSION_BROKER_METHODS ∩ the
- *      ALLOWLIST rows that name a capability), and
+ *      ALLOWLIST rows that name a capability),
  *   2. a contribution kind it is allowed to register
- *      (CONTRIBUTION_REQUIRED_CAPABILITY — today `formula` -> `formula.udf`,
- *      which is required by admitContribution and by NO broker method, so
- *      deriving from methods alone would wrongly strip worksheet functions).
+ *      (CONTRIBUTION_REQUIRED_CAPABILITY — `formula` -> `formula.udf` and
+ *      `cellStyle` -> `grid.read`, both required by admitContribution and by NO
+ *      broker method, so deriving from methods alone would wrongly strip
+ *      worksheet functions and cell styling), and
+ *   3. a host-push path (EXTENSION_PUSHED_DATA_CAPABILITIES), where the host
+ *      sends workbook data INTO the sandbox and the capability decides how much
+ *      of it crosses.
  *
  * This is deliberately NOT the whole capability vocabulary. `EXTENSION_BROKER_METHODS`
  * is a strict subset of the shared ALLOWLIST, so ids like `ui.html`,
@@ -518,6 +564,9 @@ export function extensionReachableCapabilities(): ReadonlySet<CapabilityId> {
   }
   for (const capability of Object.values(CONTRIBUTION_REQUIRED_CAPABILITY)) {
     if (capability) reachable.add(capability);
+  }
+  for (const capability of EXTENSION_PUSHED_DATA_CAPABILITIES) {
+    reachable.add(capability);
   }
   return reachable;
 }

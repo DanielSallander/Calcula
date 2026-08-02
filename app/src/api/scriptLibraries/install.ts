@@ -21,13 +21,20 @@
 //   * NO AUTO-UPDATE. `checkUpdates` reports; applying is an explicit action
 //     that re-runs the consent gate. A silent version bump that changes executed
 //     code is the same failure mode as a silent source swap.
+//   * ONLY `applyInstall` PINS A PUBLISHER. `planInstall` and `checkUpdates`
+//     resolve through the preview path, which verifies against an existing TOFU
+//     pin but never creates one; `applyInstall` calls `resolveForInstall` once
+//     the user has approved, and refuses if what the registry serves at that
+//     moment differs in ANY byte from what the plan showed. So the key that gets
+//     pinned is the key the user was shown, and a preview can never squat the
+//     identity a genuine publisher will later be measured against.
 
 import { sha256Hex, loadConsents, recordConsent, getChangedScripts } from "../distributedConsent";
 import type { CapabilityGrant, ChangedScript } from "../distributedConsent";
 import type { CapabilityId } from "../scriptHost/capabilityIds";
 import { consentKeyFor } from "./consentKey";
 import { commitLockedLibraries, loadLockfile, removeLockedLibrary } from "./lockfile";
-import { resolveClosure } from "./registry";
+import { resolveClosure, resolveForInstall } from "./registry";
 import { parseModulePragmas } from "./usesPragma";
 import type {
   LibraryClosure,
@@ -36,6 +43,7 @@ import type {
   LockedLibrary,
   LockedModule,
 } from "./types";
+import { LibraryLinkError } from "./types";
 
 /** One node of an install plan, as shown to the user. */
 export interface InstallPlanNode {
@@ -45,8 +53,21 @@ export interface InstallPlanNode {
   description: string;
   publisherName: string;
   publisherKey: string;
-  /** "firstUse" | "verified" — never "unsigned": an unsigned package cannot be
-   *  resolved at all (the backend rejects it before returning any source). */
+  /**
+   * As reported by the PREVIEW resolve, so it is one of:
+   *   "notInstalled" — authentic, but this machine has never agreed to trust
+   *                    this publisher for this package name. THE NORMAL STATE
+   *                    OF A PACKAGE THE USER IS ABOUT TO INSTALL, and the only
+   *                    first-contact answer a preview may give.
+   *   "verified"     — matches the key already pinned for this name.
+   * Never "unsigned" (an unsigned package cannot be resolved at all — the
+   * backend refuses before returning any source) and never "firstUse", which
+   * only `applyInstall` can produce because only it creates a pin.
+   *
+   * UI MUST NOT collapse this to a two-way "firstUse or verified" test:
+   * "notInstalled" is NOT verified, and presenting it as such tells the user
+   * their machine vouched for a publisher it has never seen.
+   */
   trustStatus: string;
   /** True when this node was pulled in by another package rather than requested. */
   transitive: boolean;
@@ -165,12 +186,86 @@ export async function planInstall(
 }
 
 /**
+ * THE PIN STEP. Re-resolve the approved plan with `confirm: true` — the one
+ * call that may create a trust-on-first-use pin.
+ *
+ * WHY RE-RESOLVE RATHER THAN PIN FROM THE PLAN: the pin store is
+ * Rust-authoritative and must never be written from renderer-supplied values.
+ * `plan` is an ordinary JS object; a compromised renderer could hand
+ * `applyInstall` a publisher key of its choosing. Re-resolving means the key
+ * that gets pinned is a key the BACKEND just verified a signature against.
+ *
+ * WHY THE APPROVED IDENTITY IS SENT WITH THE REQUEST: re-resolving re-opens the
+ * window between review and approval. `expectedPublisherKey` / `expectedVersion`
+ * travel with each request so the BACKEND refuses before pinning if the registry
+ * moved — comparing here, after the call, would mean a swapped publisher was
+ * already pinned by the time we noticed.
+ *
+ * The per-module hash comparison below is the remaining layer the backend
+ * cannot do: it does not know which module bytes the user reviewed. A publisher
+ * re-signing the same version with different module bytes is refused here, and
+ * nothing is consented, locked or cached. (Their key stays pinned — the user did
+ * approve trusting that publisher; what is refused is the code.)
+ */
+async function pinApprovedPublishers(plan: InstallPlan): Promise<void> {
+  if (plan.nodes.length === 0) return;
+  const resolved = await resolveForInstall(
+    plan.registry,
+    plan.nodes.map((n) => ({
+      package: n.package,
+      pin: n.pin,
+      expectedPublisherKey: n.publisherKey,
+      expectedVersion: n.version,
+    })),
+  );
+
+  const byPackage = new Map(resolved.map((r) => [r.package, r]));
+  for (const node of plan.nodes) {
+    const fresh = byPackage.get(node.package);
+    if (!fresh) {
+      throw new LibraryLinkError(
+        "integrity",
+        `"${node.package}" could no longer be resolved from ${plan.registry}. Nothing was installed.`,
+      );
+    }
+    // Belt and braces: the backend already refused a version/key that differs
+    // from the expectation, so reaching this means the backend agreed.
+    if (fresh.resolvedVersion !== node.version || fresh.publisherKey !== node.publisherKey) {
+      throw new LibraryLinkError(
+        "integrity",
+        `"${node.package}" changed between review and install (reviewed ${node.version} by ${node.publisherKey || "an unsigned publisher"}, registry now serves ${fresh.resolvedVersion} by ${fresh.publisherKey}). Nothing was installed — review it again.`,
+      );
+    }
+    if (fresh.modules.length !== node.modules.length) {
+      throw new LibraryLinkError(
+        "integrity",
+        `"${node.package}" changed between review and install: it now has ${fresh.modules.length} modules and ${node.modules.length} were reviewed. Nothing was installed — review it again.`,
+      );
+    }
+    for (const mod of node.modules) {
+      const freshModule = fresh.modules.find((m) => m.id === mod.id);
+      if (!freshModule || freshModule.artifactSha256 !== mod.artifactSha256) {
+        throw new LibraryLinkError(
+          "integrity",
+          `Module "${node.package}/${mod.id}" changed between review and install. Nothing was installed — review it again.`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Record consent for every node of the plan and write the lockfile + the
  * content-addressed source cache. The plan MUST be one `planInstall` produced —
  * consent is recorded against the sources it contains, which are the sources the
  * linker will later mount and re-hash.
+ *
+ * The publisher pin is created FIRST (`pinApprovedPublishers`): if the approved
+ * closure can no longer be verified byte-for-byte, this throws before any
+ * consent, lockfile entry or cached source exists.
  */
 export async function applyInstall(plan: InstallPlan): Promise<void> {
+  await pinApprovedPublishers(plan);
   const closure = derivePlanPragmas(plan);
   const sources = new Map<string, string>();
   const entries: LockedLibrary[] = [];

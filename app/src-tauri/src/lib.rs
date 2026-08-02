@@ -4840,6 +4840,10 @@ pub fn run() {
             // 32MB main-thread stack reserve set in build.rs.
             scripting::grant_script_capability,
             scripting::script_writeback,
+            // .calp distribution gateway (distribution.publish OUTBOUND /
+            // distribution.subscribe INBOUND — two capabilities, one command,
+            // for the same stack-headroom reason).
+            scripting::script_distribution,
             // Persistent consented scheduler (the `schedule` capability — the
             // Application.OnTime replacement). Likewise ONE op-multiplexed
             // command for the same stack-headroom reason.

@@ -859,9 +859,27 @@ mod tests {
     fn grantable_capability_list_is_closed() {
         use crate::scripting::capability_store::is_grantable;
         assert!(is_grantable(WRITEBACK_CAPABILITY));
-        for invented in ["distribution.publish", "fs.write", "distribution", ""] {
+        // `distribution.publish` used to stand here as an INVENTED id. It is a
+        // real capability now (B3, scripting/distribution_gateway.rs), so the
+        // negative case moved to spellings that must stay unreachable — the
+        // namespace root and a plausible-looking sub-id.
+        for invented in [
+            "distribution",
+            "distribution.writeback.submit",
+            "distribution.pull",
+            "fs.write",
+            "",
+        ] {
             assert!(!is_grantable(invented), "'{}' must not be grantable", invented);
         }
+        // ...and holding one distribution capability must never satisfy
+        // another's gate: the store is one exact-match set, not a namespace.
+        assert!(is_grantable("distribution.publish"));
+        assert!(is_grantable("distribution.subscribe"));
+        let store = CapabilityStore::new();
+        store.grant("s1", "distribution.subscribe");
+        assert!(!store.is_granted("s1", WRITEBACK_CAPABILITY));
+        assert!(!store.is_granted("s1", "distribution.publish"));
         // The one that drifted: `script_scheduler` is dead code without it.
         assert!(is_grantable("schedule"));
     }

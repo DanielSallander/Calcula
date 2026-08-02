@@ -9,12 +9,23 @@
 //          SHA-256 and hands back module SOURCES; the transitive walk lives here
 //          because the dependency edges are `// @uses` pragmas, and pragma
 //          semantics must have exactly one implementation (usesPragma.ts).
-// SECURITY: Nothing here mounts, writes, grants or consents. It returns what
-//          WOULD be installed so the consent gate can show the whole closure —
-//          §7's rule that transitive nodes are named, never hidden behind a
-//          count. A cycle is a hard error naming the cycle rather than a silent
-//          truncation, and both the node count and the depth are capped so a
-//          hostile registry cannot make resolution unbounded.
+// SECURITY: Nothing here mounts, grants or consents. It returns what WOULD be
+//          installed so the consent gate can show the whole closure — §7's rule
+//          that transitive nodes are named, never hidden behind a count. A cycle
+//          is a hard error naming the cycle rather than a silent truncation, and
+//          both the node count and the depth are capped so a hostile registry
+//          cannot make resolution unbounded.
+//
+//          RESOLUTION DOES NOT PIN. `resolveClosure` is the PREVIEW path and
+//          calls `library_resolve` without `confirm`, so the backend verifies
+//          against any existing TOFU pin and never creates one. The single
+//          pinning entry point is `resolveForInstall`, used by
+//          `install.ts applyInstall` after the user has approved the plan.
+//          Creating a pin is a promise ("this key is now who this package IS")
+//          that only a human answering a question can keep; a preview that
+//          pinned would let a source SQUAT the identity a genuine publisher is
+//          later measured against — the same bug `decide_extension_trust_for_scan`
+//          fixed for extension scanning.
 
 import { invokeBackend } from "../backend";
 import type { CapabilityId } from "../scriptHost/capabilityIds";
@@ -71,7 +82,13 @@ export async function searchLibraries(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Resolve + verify a batch of packages (one backend round trip). */
+/**
+ * PREVIEW resolve: verify a batch of packages (one backend round trip) and
+ * report what they are. `confirm` is deliberately omitted — the backend
+ * defaults to `PinPolicy::Preview`, which reads the TOFU pin store and never
+ * writes it, so a package nobody has installed comes back as `notInstalled`
+ * rather than being silently pinned.
+ */
 function resolveBatch(
   registryLocation: string,
   requests: LibraryRequest[],
@@ -79,6 +96,47 @@ function resolveBatch(
   return invokeBackend<ResolvedLibrary[]>("library_resolve", {
     registryPath: registryLocation,
     requests,
+  });
+}
+
+/**
+ * A package being installed, carrying the identity the user actually approved.
+ * The backend refuses (and pins nothing) if the registry now serves anything
+ * else — see `LibraryRequest`'s install-time expectations in
+ * app/src-tauri/src/library_commands.rs.
+ */
+export interface LibraryInstallRequest extends LibraryRequest {
+  /** The publisher key shown in the plan the user approved. */
+  expectedPublisherKey: string;
+  /** The concrete version shown in that plan (a floating pin can move). */
+  expectedVersion: string;
+}
+
+/**
+ * THE ONE PINNING CALL. Re-verify an APPROVED set of packages with
+ * `confirm: true`, which lets the backend create the trust-on-first-use pin for
+ * any publisher this machine has not trusted before.
+ *
+ * Only `install.ts applyInstall` may call this, and only after the user has
+ * approved a plan that named every package, its publisher key and its
+ * capabilities. It is a separate function rather than a flag on
+ * `resolveClosure` so that "this call can write to the trust store" is visible
+ * at every call site instead of hiding in a boolean.
+ *
+ * The approved identity travels WITH the request so the check is
+ * Rust-authoritative and race-free: comparing after the call would mean a
+ * publisher swapped between review and approval was already pinned by the time
+ * the mismatch was noticed. The backend also commits the whole batch's pins only
+ * after every package in it has verified, so a partial failure pins nothing.
+ */
+export function resolveForInstall(
+  registryLocation: string,
+  requests: LibraryInstallRequest[],
+): Promise<ResolvedLibrary[]> {
+  return invokeBackend<ResolvedLibrary[]>("library_resolve", {
+    registryPath: registryLocation,
+    requests,
+    confirm: true,
   });
 }
 
@@ -122,7 +180,8 @@ function toNode(
 
 /**
  * Resolve `roots` (and everything they transitively `// @uses`) into a flattened
- * closure, dependencies first.
+ * closure, dependencies first. PREVIEW ONLY — see `resolveForInstall` for the
+ * one path that may write a TOFU pin.
  *
  * A dependency CYCLE is a hard error naming the cycle. A node reached at two
  * different pins is also an error: silently picking one would make a workbook's

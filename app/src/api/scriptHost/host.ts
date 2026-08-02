@@ -48,6 +48,7 @@ import {
   sanitizeSandboxGeometry,
 } from "./renderCache";
 import { ALLOWLIST, thinAppEventForScripts } from "./allowlist";
+import type { CapabilityId } from "./capabilityIds";
 import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
 import type { AutoFilterColumnCriteria } from "../autoFilterService";
@@ -79,7 +80,8 @@ import type {
   ScriptDialogPromptOptions,
   ScriptDialogTextOptions,
 } from "./scriptDialogSpec";
-import { AppEvents, emitAppEvent, onAppEvent } from "../events";
+import { AppEvents, emitAppEvent, onAppEvent, type PackageUpdatedPayload } from "../events";
+import type { PullResponse } from "../distribution";
 import {
   registerLifecycleGuard,
   type LifecycleAction,
@@ -766,6 +768,15 @@ export function hostResetAll(): void {
   // ...and every private clipboard: those hold cells from the workbook that is
   // being replaced, and a style index from it means nothing in the next one.
   clearScriptClipboard();
+  // ...and every library import table. The lockfile belongs to the workbook, so
+  // a binding from the old one names a realm that is gone and a package the new
+  // workbook may not even have installed.
+  //
+  // NOT done in hostUnmountScript, deliberately: a RELINK registers the new
+  // table and then remounts, and mountWorker unmounts the previous worker as its
+  // first step — clearing there would delete the table that was just installed.
+  // Per-script lifetime is owned by the linker's release()/clearScriptImports.
+  resetScriptImports();
 }
 
 /** Faulted scripts (crashed twice within 30s) with their last error. */
@@ -1130,6 +1141,269 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
 }
 
 // ============================================================================
+// Shared script libraries — the CALLER-IDENTITY import table (design §5.3)
+//
+// WHAT THIS REPLACED, AND WHY. Wave H authorized a library call with an
+// unguessable 128-bit token minted per (realm, consumer) and baked into the
+// consumer's generated prelude. That is an object-capability, not an identity
+// check: a consumer that leaked its token delegated its whole library reach to
+// whoever received it, undetectably, and the library could never be told who was
+// actually calling. Both of the feature's documented residuals came from that
+// one gap.
+//
+// The table below is the fix. A script names an ALIAS; the host resolves that
+// alias in the table it built FOR THAT SCRIPT'S ID from that script's own
+// `// @uses` pragmas. Nothing the caller holds, sends or can be given
+// authorizes anything — only who it IS. Consequences:
+//
+//   * There is no credential left to leak. Handing a peer the alias string
+//     achieves nothing: the peer's own table is consulted, not the sender's.
+//   * The target's entry point no longer has to be script-reachable at all. It
+//     is exposed under HOST_ONLY_EXPOSED_PREFIX and `public: false`, so
+//     `callExposed` refuses it for every script and only `hostCallExposed` —
+//     this file — can get in.
+//   * The caller is now known at the moment of the call, which is what makes
+//     `authorizeImportCall` below able to cap the call by the CALLER's grants.
+//
+// This map is HOST STATE. It is written only by trusted linker code
+// (scriptLibraries/linker.ts), keyed by the authoritative mount id, and is never
+// derived from anything a script sends.
+// ============================================================================
+
+/** One resolved `imports.<alias>` binding: where the realm is, what it exports,
+ *  and what it was granted. Recorded by the linker at link time. */
+export interface LibraryImportBinding {
+  /** The name the consumer's `// @uses` bound it to. */
+  alias: string;
+  package: string;
+  version: string;
+  /** The realm's mount id — used to check it is still mounted before dispatch. */
+  libraryScriptId: string;
+  objectType: string;
+  instanceId: string;
+  /** The realm's host-only relay entry point (HOST_ONLY_EXPOSED_PREFIX name). */
+  entryMethod: string;
+  /** Exactly the names the library declared with `// @export`. */
+  exports: readonly string[];
+  /**
+   * The capabilities the realm was actually mounted with, i.e.
+   * `declared(library) INTERSECT declared(consumer)`. This is the set a call
+   * through this binding can reach, and therefore the set the CALLER must hold
+   * grants for before the call is dispatched.
+   */
+  capabilities: readonly CapabilityId[];
+  /** The realm's granted net.fetch origins (already intersected downward). */
+  netOrigins: readonly string[];
+}
+
+/** consumer scriptId -> alias -> binding. */
+const scriptImports = new Map<string, Map<string, LibraryImportBinding>>();
+
+/**
+ * Install the import table for one script. Trusted-caller only (the linker):
+ * this is the whole authorization basis for `base.callImport`, so anything that
+ * can call it can grant library reach.
+ *
+ * Replaces the script's table wholesale — a relink is a fresh set of bindings,
+ * never a merge with a previous mount's.
+ */
+export function registerScriptImports(
+  consumerScriptId: string,
+  bindings: readonly LibraryImportBinding[],
+): void {
+  if (bindings.length === 0) {
+    scriptImports.delete(consumerScriptId);
+    return;
+  }
+  const table = new Map<string, LibraryImportBinding>();
+  for (const b of bindings) {
+    // Frozen (and the arrays copied) so a later mutation of the linker's object
+    // cannot retroactively widen a binding the host already handed out.
+    table.set(
+      b.alias,
+      Object.freeze({
+        ...b,
+        exports: Object.freeze([...b.exports]),
+        capabilities: Object.freeze([...b.capabilities]),
+        netOrigins: Object.freeze([...b.netOrigins]),
+      }),
+    );
+  }
+  scriptImports.set(consumerScriptId, table);
+}
+
+/** Drop a script's import table (release / relink / workbook close). */
+export function clearScriptImports(consumerScriptId: string): void {
+  scriptImports.delete(consumerScriptId);
+}
+
+/** A script's current bindings (transparency panel / tests). */
+export function listScriptImports(consumerScriptId: string): LibraryImportBinding[] {
+  return [...(scriptImports.get(consumerScriptId)?.values() ?? [])];
+}
+
+/** Drop every import table (workbook close / test reset). */
+export function resetScriptImports(): void {
+  scriptImports.clear();
+}
+
+/**
+ * Resolve `alias` for the CALLING script and authorize the call.
+ *
+ * Two gates, in this order:
+ *
+ *  (1) IDENTITY. The alias is looked up in the table registered for
+ *      `handle.scriptId`. A script that did not declare the import has no entry
+ *      and is refused — with the same message whether the alias is unknown to it
+ *      or belongs to a different script, so the refusal is not a directory of
+ *      what other scripts imported. The method name must be one the library
+ *      declared with `// @export`.
+ *
+ *  (2) THE CALLER'S OWN GRANTS CAP THE CALL. The realm holds
+ *      `declared(library) INTERSECT declared(consumer)` — a CEILING intersection.
+ *      Before Wave H's caller-identity work landed there was no way to also
+ *      require the consumer to have been GRANTED those capabilities, so a
+ *      consumer that DECLARED `net.fetch` but had never been prompted for it
+ *      could cause egress through a library the user had approved at install
+ *      time: nothing ungranted happened, but the consumer's own just-in-time
+ *      prompt was skipped. Now the caller is known, so it is required to hold
+ *      the grant itself — and, if it is a local script that declared the
+ *      capability, it is prompted for it HERE, on first use through the library.
+ *
+ *      The check is at CALL time, not link time, and that is essential: a
+ *      consumer legitimately holds no grants at mount time (JIT means the first
+ *      USE is the prompt), so intersecting grants when the realm is mounted
+ *      would either deny every library that needs anything or force a prompt
+ *      before the script has done a thing.
+ *
+ *      A realm holding `net.fetch` is checked per ORIGIN, because that is the
+ *      granularity net.fetch is actually granted at. A realm that holds
+ *      `net.fetch` with NO origins needs no per-origin consent from the caller:
+ *      it cannot reach any host at all (the Rust gate is authoritative and
+ *      matches per origin), so there is nothing to consent to.
+ *
+ * Pure policy — it dispatches nothing. Exported so the security tests can drive
+ * it without a Worker realm.
+ */
+export async function authorizeImportCall(args: {
+  handle: ScriptHandle;
+  /** The CONSUMER's own source — what an "always" grant is bound to. */
+  consumerSource: string;
+  alias: string;
+  methodName: string;
+}): Promise<LibraryImportBinding> {
+  const { handle, alias, methodName } = args;
+  const binding = scriptImports.get(handle.scriptId)?.get(alias);
+  if (!binding) {
+    throw new BrokerError(
+      "PermissionDenied",
+      `This script did not declare a library aliased '${alias}' with a // @uses pragma`,
+    );
+  }
+  if (!binding.exports.includes(methodName)) {
+    throw new BrokerError(
+      "PermissionDenied",
+      `'${methodName}' is not an export of ${binding.package}@${binding.version}. ` +
+        `Declared exports: ${binding.exports.join(", ") || "(none)"}`,
+    );
+  }
+  await requireCallerCoversLibrary(handle, args.consumerSource, binding);
+  return binding;
+}
+
+/** Gate (2) of authorizeImportCall — see its doc comment. */
+async function requireCallerCoversLibrary(
+  handle: ScriptHandle,
+  consumerSource: string,
+  binding: LibraryImportBinding,
+): Promise<void> {
+  const label = `${binding.package}@${binding.version}`;
+  for (const cap of binding.capabilities) {
+    // Belt-and-braces: the linker already intersected against this set, so a
+    // miss here means the ceiling and the realm disagree. Fail closed.
+    if (!handle.declaredCapabilities.has(cap)) {
+      throw new BrokerError(
+        "PermissionDenied",
+        `${label} uses the '${cap}' capability, which this script did not declare`,
+        cap,
+      );
+    }
+    if (cap === "net.fetch") continue; // per-origin, below
+    if (handle.grants.has(cap)) continue;
+    await requestLibraryCapability(handle, consumerSource, cap, null, label);
+    if (!handle.grants.has(cap)) {
+      throw new BrokerError(
+        "CapabilityRequired",
+        `Calling ${label} needs the '${cap}' capability, which this script has not been granted`,
+        cap,
+      );
+    }
+  }
+
+  if (!binding.capabilities.includes("net.fetch")) return;
+  for (const origin of binding.netOrigins) {
+    if (handle.grants.has("net.fetch") && hasFetchOrigin(handle.scriptId, origin)) continue;
+    await requestLibraryCapability(handle, consumerSource, "net.fetch", origin, label);
+    if (!(handle.grants.has("net.fetch") && hasFetchOrigin(handle.scriptId, origin))) {
+      throw new BrokerError(
+        "CapabilityRequired",
+        `Calling ${label} can reach ${origin}, which this script has not been granted`,
+        "net.fetch",
+      );
+    }
+  }
+}
+
+/**
+ * JIT-prompt the CONSUMER for a capability its library holds. Mirrors
+ * maybeRequestCapabilityGrant's policy exactly — local scripts only, one prompt
+ * per session per (capability, origin), "always" persisted against the
+ * CONSUMER's source — and adds the library provenance so the dialog can say why
+ * it is asking now. A denial simply returns; the caller then fails the call.
+ */
+async function requestLibraryCapability(
+  handle: ScriptHandle,
+  consumerSource: string,
+  cap: CapabilityId,
+  origin: string | null,
+  libraryLabel: string,
+): Promise<void> {
+  // A distributed consumer is never JIT-prompted (Phase 4.2): it holds exactly
+  // what package consent recorded, and this path must not become a second way to
+  // acquire capabilities after install.
+  if (handle.origin !== "local") return;
+  if (wasDeniedThisSession(handle.scriptId, cap, origin)) return;
+  const decision = await requestCapabilityGrant({
+    scriptId: handle.scriptId,
+    scriptName: handle.scriptName,
+    capability: cap,
+    origin,
+    viaLibrary: libraryLabel,
+  });
+  if (decision === "deny") return;
+  recordCapabilityGrant(handle.scriptId, cap, origin ?? undefined);
+  if (origin) {
+    try {
+      await grantNetOrigin(handle.scriptId, origin);
+    } catch (e) {
+      console.error("[caps] failed to mirror net.fetch origin to backend:", e);
+    }
+  } else if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
+    await grantBackendCapability(handle.scriptId, cap);
+  }
+  if (decision === "always") {
+    await persistAlwaysGrant({
+      scriptId: handle.scriptId,
+      scriptName: handle.scriptName,
+      source: consumerSource,
+      origin: handle.origin,
+      capability: cap,
+      netOrigin: origin,
+    });
+  }
+}
+
+// ============================================================================
 // RPC dispatch — every worker `call` goes through the broker
 // ============================================================================
 
@@ -1261,6 +1535,54 @@ function scheduleOwnerOf(definition: HostMountDefinition): {
   };
 }
 
+/**
+ * The side effects a .calp pull/refresh has on the RENDERER, run identically
+ * whether the pull was started by the Subscribe dialog or by a script.
+ *
+ * THIS IS NOT A CONVENIENCE — it is how rule 1 ("a script can never consent on
+ * the user's behalf") is kept true on the script path. Rust materializes pulled
+ * object scripts as Restricted + Distributed, i.e. present but UNMOUNTED. Two
+ * things then have to happen for the user to be in control:
+ *
+ *  1. frontend distributable-object providers materialize the custom objects
+ *     Rust does not know about (`applyPulledCustomObjects` — the exact call
+ *     `pullPackage` makes), and
+ *  2. `PACKAGE_UPDATED` fires, which makes the ScriptableObjects extension
+ *     re-read the workbook's scripts. That path mounts ONLY what persisted
+ *     consent already covers — and consent is keyed by SHA-256 OF THE SOURCE,
+ *     so a script whose code this refresh just changed is NOT consent-current,
+ *     is NOT mounted, and raises a consent prompt showing the diff.
+ *
+ * Skipping (2) would be worse than doing it: the pulled code would sit in the
+ * workbook unannounced until the next reload, with nothing telling the user it
+ * had arrived. Announcing is what makes it visible; mounting stays the human's.
+ *
+ * `response` is null for a refresh (which pulls many packages and returns a
+ * summary rather than one package's custom objects).
+ */
+async function announcePulledPackage(response: PullResponse | null): Promise<void> {
+  if (response) {
+    const { applyPulledCustomObjects } = await import("../distribution");
+    await applyPulledCustomObjects(response);
+  }
+  const payload: PackageUpdatedPayload = response
+    ? {
+        packageName: response.packageName,
+        version: response.resolvedVersion,
+        kind: "subscribe",
+        sheetsPulled: response.sheetsPulled,
+        scriptsPulled: response.scriptsPulled,
+      }
+    : {
+        packageName: "",
+        version: null,
+        kind: "refresh",
+        sheetsPulled: 0,
+        scriptsPulled: null,
+      };
+  emitAppEvent(AppEvents.PACKAGE_UPDATED, payload);
+}
+
 /** The IMPL table (design §5): today's context-builder bodies, minus closures. */
 async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): Promise<unknown> {
   const { handle, definition } = mw;
@@ -1299,6 +1621,30 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "base.callMethod": {
       const [targetType, targetInstanceId, methodName, callArgs] = args as [string, string | null, string, unknown[]];
       return callExposed(handle, targetType, targetInstanceId, methodName, callArgs ?? []);
+    }
+    case "base.callImport": {
+      // The consumer names only an alias. WHERE that alias points is host state
+      // keyed by THIS script's mount id, and whether the call may proceed is
+      // decided against THIS script's grants — see authorizeImportCall.
+      const [alias, methodName, callArgs] = args as [string, string, unknown[]];
+      const binding = await authorizeImportCall({
+        handle,
+        consumerSource: definition.source,
+        alias,
+        methodName,
+      });
+      if (!mounted.has(binding.libraryScriptId)) {
+        throw new BrokerError(
+          "HostError",
+          `Library ${binding.package}@${binding.version} is no longer mounted`,
+        );
+      }
+      // hostCallExposed, not callExposed: the realm's entry point lives in the
+      // host-only namespace precisely so this is the ONLY door into it.
+      return await hostCallExposed(binding.objectType, binding.instanceId, binding.entryMethod, [
+        methodName,
+        Array.isArray(callArgs) ? callArgs : [],
+      ]);
     }
 
     // ---- events ----
@@ -2431,6 +2777,121 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         payload: decision,
       });
       return undefined;
+    }
+    // ---- distribution.subscribe / distribution.publish: the .calp package
+    // loop, automated. Everything routes through ONE Rust gateway
+    // (script_distribution) which re-checks the ACTION'S OWN capability (the two
+    // are never one grant), refuses a registry the user has not configured,
+    // gates a registry write on Ed25519 publisher-key possession, rate-limits
+    // per bucket, and dispatches into the very same calp_* commands the
+    // interactive UI calls.
+    //
+    // WHAT THIS BLOCK MUST NEVER DO, and does not: mount, grant or consent. The
+    // two side effects below are the same ones the Subscribe / Refresh dialogs
+    // perform, and they exist precisely so the CONSENT FLOW RUNS: PACKAGE_UPDATED
+    // makes ScriptableObjects re-read the pulled scripts, which mounts only what
+    // consent already covers (keyed by SOURCE HASH) and raises a prompt for
+    // everything else — including a script whose source the refresh just changed.
+    case "cap.pkgListRegistries":
+    case "cap.pkgListSubscriptions":
+    case "cap.pkgRefreshPreview": {
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action:
+          method === "cap.pkgListRegistries"
+            ? "listRegistries"
+            : method === "cap.pkgListSubscriptions"
+              ? "listSubscriptions"
+              : "refreshPreview",
+        payload: {},
+      });
+    }
+    case "cap.pkgBrowse": {
+      const [registry] = args as [string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action: "browseRegistry",
+        payload: { registryPath: registry },
+      });
+    }
+    case "cap.pkgInspect": {
+      const [registry, packageName, versionPin] = args as [string, string, string];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action: "inspectPackage",
+        payload: { registryPath: registry, packageName, versionPin },
+      });
+    }
+    case "cap.pkgPull": {
+      const [registry, packageName, versionPin] = args as [string, string, string];
+      const { invokeBackend } = await import("../backend");
+      const response = await invokeBackend<PullResponse>("script_distribution", {
+        scriptId: definition.id,
+        action: "pull",
+        payload: { registryPath: registry, packageName, versionPin },
+      });
+      await announcePulledPackage(response);
+      return response;
+    }
+    case "cap.pkgRefreshApply": {
+      const { invokeBackend } = await import("../backend");
+      const result = await invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action: "refreshApply",
+        payload: {},
+      });
+      await announcePulledPackage(null);
+      return result;
+    }
+    case "cap.pkgPublishPreview": {
+      const [sheetIndices] = args as [number[] | undefined];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action: "publishPreview",
+        payload: { sheetIndices: sheetIndices ?? null },
+      });
+    }
+    case "cap.pkgNextVersion": {
+      const [registry, packageName, bump] = args as [string, string, string];
+      const { invokeBackend } = await import("../backend");
+      const result = await invokeBackend<{ version: string }>("script_distribution", {
+        scriptId: definition.id,
+        action: "nextVersion",
+        payload: { registryPath: registry, packageName, bump },
+      });
+      return result?.version ?? "";
+    }
+    case "cap.pkgPublish":
+    case "cap.pkgPublishModel": {
+      // The spec is forwarded field by field, never spread: `publishedBy`,
+      // `customObjects` and `includeComments` are refused by the validator AND
+      // by Rust, and spreading would be the one edit that quietly reintroduced
+      // them.
+      const [spec] = args as [Record<string, unknown>];
+      const { invokeBackend } = await import("../backend");
+      return invokeBackend("script_distribution", {
+        scriptId: definition.id,
+        action: method === "cap.pkgPublish" ? "publish" : "publishModel",
+        payload:
+          method === "cap.pkgPublish"
+            ? {
+                registryPath: spec.registry,
+                packageName: spec.packageName,
+                version: spec.version,
+                kind: spec.kind ?? null,
+                sheetIndices: spec.sheetIndices ?? null,
+              }
+            : {
+                registryPath: spec.registry,
+                packageName: spec.packageName,
+                version: spec.version,
+                connectionId: spec.connectionId,
+              },
+      });
     }
     case "cap.connectorRegister": {
       // The connector host records the AUTHORITATIVE script identity (from the

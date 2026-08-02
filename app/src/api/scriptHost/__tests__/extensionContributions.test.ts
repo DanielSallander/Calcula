@@ -15,17 +15,27 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   CONTRIBUTION_DECLARATION_KEY,
+  CONTRIBUTION_REACH_NOTE,
   CONTRIBUTION_REGISTRATION_KINDS,
   CONTRIBUTION_REQUIRED_CAPABILITY,
   EXTENSION_BROKER_METHODS,
   EXTENSION_CONTRIBUTION_KINDS,
+  EXTENSION_PUSHED_DATA_CAPABILITIES,
   countContributions,
+  extensionReachableCapabilities,
   isContributionDeclared,
   normalizeContributionDeclaration,
   type ExtRegistration,
   type WX2H,
 } from "../extensionProtocol";
-import { ALLOWLIST } from "../allowlist";
+import {
+  ALLOWLIST,
+  APP_EVENTS_CARRYING_CELL_CONTENTS,
+  thinAppEventForScripts,
+} from "../allowlist";
+import { ALL_CAPABILITY_IDS, isCapabilityId } from "../capabilityIds";
+import { describeCapability } from "../capabilities";
+import { AppEvents, emitAppEvent } from "../../events";
 
 // showToast reaches into the DOM notification store; a refusal must still be
 // observable, so spy on it rather than silencing it.
@@ -135,6 +145,18 @@ const BASE_MANIFEST = {
   version: "1.0.0",
   workerSupport: true,
 };
+
+/**
+ * Let the cell-style render cache complete one stale-while-revalidate round
+ * trip: the rAF that drains the miss queue, the async resolver, the worker RPC
+ * (the FakeWorker answers on a microtask) and the write-back into the cache.
+ */
+async function settleRenderCache(): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 describe("extension contribution ceiling", () => {
   let host: typeof import("../extensionWorkerHost");
@@ -524,6 +546,7 @@ describe("extension contribution ceiling", () => {
   it("a cell-style contribution declares its REACH in the label the user reads", async () => {
     const { worker } = await mountFake(host, {
       ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
       contributes: { cellStyles: ["negatives"] },
     });
     worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 1 });
@@ -532,6 +555,237 @@ describe("extension contribution ceiling", () => {
     expect(c!.refusedReason).toBeUndefined();
     // "adds cell styling" hides that the handler is handed each cell's value.
     expect(c!.label).toContain("shown the cells it styles");
+  });
+
+  // --------------------------------------------------------------------------
+  // 2b. grid.read — the cells the user is looking at (B2)
+  // --------------------------------------------------------------------------
+
+  it("a cell-style contribution WITHOUT grid.read is refused, and no cell ever reaches it", async () => {
+    // The unsigned/tampered case verbatim: ExtensionManager zeroes `capabilities`,
+    // so this is what an add-in nobody signed looks like when it asks to be shown
+    // the workbook. The contribution is DECLARED — the ceiling alone would admit
+    // it — and it is still refused, because declaring a surface is not consenting
+    // to the data that flows through it.
+    const styles = await import("../../styleInterceptors");
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: [],
+      contributes: { cellStyles: ["negatives"] },
+    });
+    let sawCells: unknown = null;
+    worker.handlers.set(4, (cells) => {
+      sawCells = cells;
+      return [];
+    });
+    worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 4 });
+
+    // THE PROPERTY THAT MATTERS, asserted FIRST so it is what fails if the gate
+    // is ever removed. Paint two cells for real: no style interceptor exists, so
+    // the paint path never even collects the cells to ask about, and nothing
+    // crosses into the worker.
+    expect(
+      styles.getStyleInterceptors().some((i) => i.id.includes("test.addin")),
+      "no interceptor may exist for a refused contribution",
+    ).toBe(false);
+    styles.applyStyleInterceptors("SALARY-99000", {}, { row: 0, col: 0, sheetIndex: 0 });
+    styles.applyStyleInterceptors("-42", {}, { row: 1, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(sawCells, "no cell may have crossed into the worker").toBeNull();
+    expect(
+      JSON.stringify(worker.received),
+      "not one cell value may appear in anything posted into the worker",
+    ).not.toContain("SALARY-99000");
+
+    // ...and the refusal is LOUD: the manager row, the reason, and the toast.
+    const c = host.listExtensionContributions().find((x) => x.kind === "cellStyle");
+    expect(c?.refusedReason, "a refusal must be recorded for the user").toContain("grid.read");
+    expect(toasts.some((t) => t.includes("negatives"))).toBe(true);
+  });
+
+  it("with grid.read the contributor really is handed the cells' values", async () => {
+    const styles = await import("../../styleInterceptors");
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: { cellStyles: ["negatives"] },
+    });
+    const seen: Array<Array<{ value: string }>> = [];
+    worker.handlers.set(5, (cells) => {
+      seen.push(cells as Array<{ value: string }>);
+      return (cells as Array<{ value: string }>).map((cell) =>
+        cell.value.startsWith("-") ? { textColor: "#ff0000" } : null,
+      );
+    });
+    worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 5 });
+
+    // Drive the REAL paint path: first frame is a cache miss (base style), the
+    // batch goes out off the paint path, the second frame serves the answer.
+    styles.applyStyleInterceptors("-42", {}, { row: 0, col: 0, sheetIndex: 0 });
+    styles.applyStyleInterceptors("7", {}, { row: 1, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+
+    // This is the disclosure the capability is FOR: the add-in was shown the
+    // cells' displayed values, not merely their coordinates.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].map((cell) => cell.value).sort()).toEqual(["-42", "7"]);
+
+    expect(
+      styles.applyStyleInterceptors("-42", {}, { row: 0, col: 0, sheetIndex: 0 }).textColor,
+    ).toBe("#ff0000");
+    expect(
+      styles.applyStyleInterceptors("7", {}, { row: 1, col: 0, sheetIndex: 0 }).textColor,
+    ).toBeUndefined();
+
+    // ...and the capability is written down, so the transparency panel shows a
+    // reach that is genuinely in use rather than only a label on a contribution.
+    const { getScriptGrants } = await import("../capabilities");
+    expect(getScriptGrants("extension:test.addin").caps).toContain("grid.read");
+  });
+
+  it("a cell-style batch re-checks grid.read at delivery, not only at registration", async () => {
+    // The render cache outlives the registration message. If the ceiling is gone
+    // by the time a batch is due, the batch must not go out — and the answer must
+    // be the documented DEGRADED one (keep base styling), never a batch of
+    // blanked cells that would look to the add-in like an empty workbook.
+    const styles = await import("../../styleInterceptors");
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: { cellStyles: ["negatives"] },
+    });
+    let calls = 0;
+    worker.handlers.set(6, (cells) => {
+      calls++;
+      return (cells as unknown[]).map(() => ({ backgroundColor: "#00ff00" }));
+    });
+    worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 6 });
+    styles.applyStyleInterceptors("x", {}, { row: 0, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(calls).toBe(1);
+
+    // Simulate the ceiling being lost (revoke / remount with a bad signature).
+    const { listMountedHandles } = await import("../broker");
+    const handle = listMountedHandles().find((h) => h.scriptId === "extension:test.addin")!;
+    (handle.declaredCapabilities as Set<string>).delete("grid.read");
+
+    styles.applyStyleInterceptors("y", {}, { row: 1, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(calls, "no further batch may reach the worker").toBe(1);
+    // Degraded, not blanked: the cell keeps whatever the base style says.
+    expect(
+      styles.applyStyleInterceptors("y", {}, { row: 1, col: 0, sheetIndex: 0 }).backgroundColor,
+    ).toBeUndefined();
+  });
+
+  it("cell-change EVENTS are the second reader, and they are redacted without grid.read", async () => {
+    // An event subscription is NOT a contribution: it is never named in the
+    // sidecar manifest and never shown in the consent prompt. So an add-in that
+    // subscribes to cell-values-changed was being handed every changed cell's
+    // old value, new value and formula through a door nobody had counted.
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: [],
+      contributes: {},
+    });
+    worker.register({
+      kind: "event",
+      regId: 1,
+      eventName: AppEvents.CELL_VALUES_CHANGED,
+      handlerId: 11,
+    });
+    emitAppEvent(AppEvents.CELL_VALUES_CHANGED, {
+      changes: [{ row: 3, col: 4, sheetIndex: 0, oldValue: "40000", newValue: "95000", formula: null }],
+      source: "user",
+    });
+    const delivered = worker.received.filter((m) => m.t === "appEvent");
+    expect(delivered, "the handler must still fire — this is redaction, not a mute").toHaveLength(1);
+    const payload = delivered[0].payload as {
+      changes: Array<Record<string, unknown>>;
+      source: string;
+      redacted: string;
+    };
+    // WHERE survives; WHAT does not.
+    expect(payload.changes[0]).toEqual({ row: 3, col: 4, sheetIndex: 0 });
+    expect(JSON.stringify(payload)).not.toContain("95000");
+    expect(JSON.stringify(payload)).not.toContain("40000");
+    // Not silent: the absence is named, so it cannot read as "nothing changed".
+    expect(payload.redacted).toBe("grid.read");
+    expect(payload.source).toBe("user");
+  });
+
+  it("with grid.read the same subscription receives the values in full", async () => {
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: {},
+    });
+    worker.register({
+      kind: "event",
+      regId: 1,
+      eventName: AppEvents.CELL_VALUES_CHANGED,
+      handlerId: 11,
+    });
+    emitAppEvent(AppEvents.CELL_VALUES_CHANGED, {
+      changes: [{ row: 3, col: 4, newValue: "95000" }],
+      source: "user",
+    });
+    const payload = worker.received.find((m) => m.t === "appEvent")!.payload as {
+      changes: Array<{ newValue?: string }>;
+    };
+    expect(payload.changes[0].newValue).toBe("95000");
+    // Subscribing IS the use, so the grant is recorded even though this add-in
+    // registers no contribution at all — otherwise it would be the one holder of
+    // grid.read that never appears in the transparency panel.
+    const { getScriptGrants } = await import("../capabilities");
+    expect(getScriptGrants("extension:test.addin").caps).toContain("grid.read");
+  });
+
+  it("EDIT_ENDED loses the typed value but keeps the coordinates", async () => {
+    const { worker } = await mountFake(host, { ...BASE_MANIFEST, capabilities: [] });
+    worker.register({ kind: "event", regId: 1, eventName: AppEvents.EDIT_ENDED, handlerId: 12 });
+    emitAppEvent(AppEvents.EDIT_ENDED, {
+      row: 2,
+      col: 1,
+      sheetIndex: 0,
+      value: "=SUM(Payroll!A:A)",
+      committed: true,
+    });
+    const payload = worker.received.find((m) => m.t === "appEvent")!.payload as Record<
+      string,
+      unknown
+    >;
+    expect(payload).toEqual({
+      row: 2,
+      col: 1,
+      sheetIndex: 0,
+      committed: true,
+      redacted: "grid.read",
+    });
+  });
+
+  it("a coordinate-only event is untouched — redaction is scoped to cell CONTENTS", async () => {
+    const { worker } = await mountFake(host, { ...BASE_MANIFEST, capabilities: [] });
+    worker.register({
+      kind: "event",
+      regId: 1,
+      eventName: AppEvents.SELECTION_CHANGED,
+      handlerId: 13,
+    });
+    emitAppEvent(AppEvents.SELECTION_CHANGED, {
+      row: 5,
+      col: 6,
+      startRow: 5,
+      startCol: 6,
+      endRow: 5,
+      endCol: 6,
+    });
+    const payload = worker.received.find((m) => m.t === "appEvent")!.payload as Record<
+      string,
+      unknown
+    >;
+    expect(payload.endRow).toBe(5);
+    expect((payload as { redacted?: string }).redacted).toBeUndefined();
   });
 
   it("a broker method outside EXTENSION_BROKER_METHODS is refused before the broker", async () => {
@@ -614,10 +868,36 @@ describe("contribution layer coverage (derived from source)", () => {
     }
   });
 
-  it("every capability a contribution requires is a real ALLOWLIST capability", () => {
+  it("every capability a contribution requires is a real capability id", () => {
+    // NOT "is used by an ALLOWLIST row" any more. That was the right check while
+    // every capability gated a CALL; `grid.read` gates a PUSH (the host handing
+    // a cellStyle contributor the cells on screen), so it deliberately has no
+    // method row, and the old assertion would have forced a fake one.
     for (const [kind, cap] of Object.entries(CONTRIBUTION_REQUIRED_CAPABILITY)) {
-      const used = Object.values(ALLOWLIST).some((p) => p.capability === cap);
-      expect(used, `${kind} requires '${cap}', which no ALLOWLIST row mentions`).toBe(true);
+      expect(isCapabilityId(cap), `${kind} requires '${cap}', which is not a capability id`).toBe(
+        true,
+      );
+    }
+    // The two that exist today, pinned by name: both are the "receives workbook
+    // data" kinds, and no third kind may join them without this test changing.
+    expect(CONTRIBUTION_REQUIRED_CAPABILITY).toEqual({
+      formula: "formula.udf",
+      cellStyle: "grid.read",
+    });
+  });
+
+  it("a contribution-required capability is reflected in what the surface can reach", () => {
+    // extensionReachableCapabilities feeds the taxonomy row for this surface, so
+    // a capability required by a contribution but missing from it would let the
+    // transparency panel understate the add-in surface.
+    const reachable = extensionReachableCapabilities();
+    for (const cap of Object.values(CONTRIBUTION_REQUIRED_CAPABILITY)) {
+      expect(reachable.has(cap!), `${cap} is required by a contribution but not reachable`).toBe(
+        true,
+      );
+    }
+    for (const cap of EXTENSION_PUSHED_DATA_CAPABILITIES) {
+      expect(reachable.has(cap), `${cap} is pushed to this surface but not reachable`).toBe(true);
     }
   });
 
@@ -628,5 +908,107 @@ describe("contribution layer coverage (derived from source)", () => {
     expect(hostSrc).toContain("EXTENSION_BROKER_METHODS.has(method)");
     expect(EXTENSION_BROKER_METHODS.has("ext.invalidateCellStyles")).toBe(true);
     expect(ALLOWLIST["ext.invalidateCellStyles"]).toBeDefined();
+  });
+});
+
+// ============================================================================
+// 4. grid.read — the disclosure half (B2)
+//
+// A capability whose consent text does not name its reach is worse than no
+// capability at all: it converts an undisclosed risk into a disclosed-looking
+// one. These tests hold the text to the reach, and hold the redaction to the
+// payload shapes it claims to cover.
+// ============================================================================
+
+describe("grid.read consent text and coverage", () => {
+  it("the consent sentence names the real reach, in the user's words", () => {
+    const text = describeCapability("grid.read");
+    // What it is: being SHOWN cell contents. Not "access", not "grid".
+    expect(text).toMatch(/shown/i);
+    expect(text).toMatch(/cells/i);
+    // Both paths, because a sentence that named only one would understate:
+    // the cells on screen (styling) and the cells that change (events).
+    expect(text).toMatch(/style|colou?r/i);
+    expect(text).toMatch(/changes|formula/i);
+    // And the honest limit, so a reader is not left imagining a data exfil.
+    expect(text).toMatch(/cannot change/i);
+    expect(text).toMatch(/network|file access/i);
+  });
+
+  it("the cellStyle contribution note tells the user it is now GATED, not just disclosed", () => {
+    const note = CONTRIBUTION_REACH_NOTE.cellStyle!;
+    expect(note).toMatch(/contents|reading|read/i);
+    expect(note).toContain("grid.read");
+    // Refused, not degraded-in-place: the user must not picture a styler that
+    // keeps running with the values blanked out.
+    expect(note).toMatch(/refused/i);
+  });
+
+  it("every capability id has a consent phrase in this module's map", () => {
+    // describeCapability falls back to the raw id; a capability that reached a
+    // user as "grid.read" would be a bare token in a security prompt.
+    for (const id of ALL_CAPABILITY_IDS) {
+      expect(describeCapability(id), id).not.toBe(id);
+      expect(describeCapability(id).length, id).toBeGreaterThan(20);
+    }
+  });
+
+  it("redaction strips every CONTENT field of a full cell-change payload", () => {
+    // Rebuilt-not-deleted: this asserts the property that survives a payload
+    // gaining a new field later. Anything that is not a coordinate must go.
+    const payload = {
+      changes: [
+        {
+          row: 1,
+          col: 2,
+          sheetIndex: 0,
+          oldValue: "SECRET-OLD",
+          newValue: "SECRET-NEW",
+          formula: "=SECRET-FORMULA",
+        },
+      ],
+      source: "paste",
+    };
+    const redacted = thinAppEventForScripts(AppEvents.CELL_VALUES_CHANGED, payload, {
+      redactCellContents: true,
+    });
+    const json = JSON.stringify(redacted);
+    expect(json).not.toContain("SECRET");
+    expect(json).toContain('"row":1');
+    // Without the option nothing is stripped: object scripts, whose grid reach
+    // is tier-governed, must keep the payload they have always received.
+    expect(thinAppEventForScripts(AppEvents.CELL_VALUES_CHANGED, payload)).toBe(payload);
+  });
+
+  it("the cell-content event set is exactly the events whose payload carries values", () => {
+    // Pinned by NAME. The trap this guards: SELECTION_CHANGED and EDIT_STARTED
+    // look like they belong here (they name a cell) and must not be redacted,
+    // while EDIT_ENDED looks like a twin of EDIT_STARTED and carries the typed
+    // value. Getting that backwards would either break coordinate-only
+    // subscribers or leak the workbook.
+    expect([...APP_EVENTS_CARRYING_CELL_CONTENTS].sort()).toEqual(
+      [AppEvents.CELL_VALUES_CHANGED, AppEvents.EDIT_ENDED].sort(),
+    );
+    expect(APP_EVENTS_CARRYING_CELL_CONTENTS.has(AppEvents.SELECTION_CHANGED)).toBe(false);
+    expect(APP_EVENTS_CARRYING_CELL_CONTENTS.has(AppEvents.EDIT_STARTED)).toBe(false);
+  });
+
+  it("the OTHER contribution kinds receive no workbook data (the enumeration, pinned)", () => {
+    // The B2 audit, written down so a new kind cannot quietly join the list of
+    // readers. For each kind: what its handler is invoked WITH.
+    //   command / menuItem / ribbonButton / keybinding -> a click; no data.
+    //   formula   -> the cell values passed as arguments  (formula.udf)
+    //   cellStyle -> the displayed value of every cell    (grid.read)
+    //   fileFormat-> the bytes of a FOREIGN file the user just chose to open;
+    //                not the workbook, so it is disclosed rather than gated.
+    const dataBearing: Record<string, string | undefined> = {
+      formula: "formula.udf",
+      cellStyle: "grid.read",
+    };
+    for (const kind of EXTENSION_CONTRIBUTION_KINDS) {
+      expect(CONTRIBUTION_REQUIRED_CAPABILITY[kind], kind).toBe(dataBearing[kind]);
+    }
+    // fileFormat is the deliberate exclusion, and it must stay DISCLOSED.
+    expect(CONTRIBUTION_REACH_NOTE.fileFormat).toMatch(/file/i);
   });
 });

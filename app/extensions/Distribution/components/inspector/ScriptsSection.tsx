@@ -61,6 +61,16 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // else you type.
   "ui.shortcut":
     "take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, and it never sees anything else you type",
+  // Reviewed WITHOUT running anything, so this line may be the only warning
+  // that a package hands somebody else's code the contents of the workbook it
+  // lands in. It names the push ("is shown"), because nothing in the code reads
+  // as a cell read: the host volunteers the values.
+  "grid.read":
+    "be shown the contents of your cells — the displayed value of every cell on screen when it styles them, and the old value, new value and formula of every cell that changes",
+  "distribution.publish":
+    "publish workbooks to your package registries, signed with YOUR publisher key — only to registries you added, and only if you already have a publisher identity",
+  "distribution.subscribe":
+    "pull other packages into the workbook and refresh the ones it subscribes to — only from registries you added, verified exactly as an interactive subscribe is",
 };
 
 function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {

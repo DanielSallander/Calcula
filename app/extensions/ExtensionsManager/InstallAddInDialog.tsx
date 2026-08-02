@@ -49,7 +49,7 @@ const CONTRIBUTION_REACH: Record<string, string> = {
   formulas:
     "Formulas in your sheets can call them, and the add-in's code runs against your data every time those cells recalculate.",
   cellStyles:
-    "The add-in is shown the displayed value of every visible cell it styles.",
+    "The add-in is shown the displayed value of every visible cell it styles. That needs the 'grid.read' permission, so an add-in without it is refused rather than shown blanks.",
   fileFormats:
     "The add-in is given the contents of files you choose to import (Calcula opens them; the add-in never picks a file).",
 };
@@ -83,7 +83,7 @@ export const TRUST_PRESENTATION: Record<
     title: "Not signed",
     tone: "warn",
     blurb:
-      "Calcula cannot tell you who wrote this. Every capability it declares will be refused — including worksheet functions. Only what it adds to menus, the ribbon and cell styling will work.",
+      "Calcula cannot tell you who wrote this. Every capability it declares will be refused — including worksheet functions, and including being shown the contents of your cells, so its cell styling will not run either. Only what it adds to menus and the ribbon will work.",
     installable: true,
   },
   publisherChanged: {

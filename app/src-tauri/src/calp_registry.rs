@@ -92,6 +92,53 @@ impl HttpRegistry {
         format!("{}/{}", self.base_url, rel.trim_start_matches('/'))
     }
 
+    /// Validate the caller-supplied path components a request is built from.
+    ///
+    /// SECURITY (parity with LocalRegistry). `LocalRegistry` runs every
+    /// package/version/artifact component through `calp::registry::validate_component`
+    /// before joining it into a path, so a name like `..` cannot escape the
+    /// registry root. This transport builds a URL by string concatenation, and
+    /// URL parsing RESOLVES `..` — so without the same check, a package name of
+    /// `../..` would silently turn `https://host/reg/<pkg>/calp-manifest.json`
+    /// into `https://host/calp-manifest.json` and treat a location the user
+    /// never configured as a registry. It cannot change the HOST (the authority
+    /// is fixed by base_url and redirects are disabled), so this is a bounded
+    /// escape rather than an SSRF — but "only registries you configured" is the
+    /// rule the whole script-distribution gateway rests on, and a rule enforced
+    /// on one transport and not the other is not enforced.
+    ///
+    /// Applied to package name, version, and every segment of an artifact's
+    /// relative path — the same three inputs LocalRegistry validates.
+    fn check_component(component: &str, kind: &str) -> Result<(), CalpError> {
+        calp::registry::validate_component(component, kind)
+    }
+
+    fn check_package(package_name: &str) -> Result<(), CalpError> {
+        Self::check_component(package_name, "package name")
+    }
+
+    fn check_package_version(package_name: &str, version: &str) -> Result<(), CalpError> {
+        Self::check_package(package_name)?;
+        Self::check_component(version, "version")
+    }
+
+    fn check_rel_path(rel_path: &str) -> Result<(), CalpError> {
+        let mut any = false;
+        for component in rel_path.split('/') {
+            if component.is_empty() {
+                continue;
+            }
+            Self::check_component(component, "artifact path component")?;
+            any = true;
+        }
+        if !any {
+            return Err(CalpError::Registry(format!(
+                "Invalid artifact path '{rel_path}': must name a file"
+            )));
+        }
+        Ok(())
+    }
+
     /// GET a URL, returning the body bytes, or None on 404.
     fn get_bytes(&self, rel: &str) -> Result<Option<Vec<u8>>, CalpError> {
         let resp = self
@@ -141,6 +188,7 @@ impl RegistryTransport for HttpRegistry {
     }
 
     fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
+        Self::check_package(package_name)?;
         self.get_json(&format!("{package_name}/calp-manifest.json"))?
             .ok_or_else(|| CalpError::PackageNotFound(package_name.to_string()))
     }
@@ -156,6 +204,7 @@ impl RegistryTransport for HttpRegistry {
         package_name: &str,
         version: &str,
     ) -> Result<VersionManifest, CalpError> {
+        Self::check_package_version(package_name, version)?;
         self.get_json(&format!("{package_name}/{version}/version-manifest.json"))?
             .ok_or_else(|| CalpError::VersionNotFound {
                 package: package_name.to_string(),
@@ -173,6 +222,9 @@ impl RegistryTransport for HttpRegistry {
     }
 
     fn version_exists(&self, package_name: &str, version: &str) -> bool {
+        if Self::check_package_version(package_name, version).is_err() {
+            return false;
+        }
         self.get_bytes(&format!("{package_name}/{version}/version-manifest.json"))
             .map(|opt| opt.is_some())
             .unwrap_or(false)
@@ -218,6 +270,8 @@ impl RegistryTransport for HttpRegistry {
         version: &str,
         rel_path: &str,
     ) -> Result<Option<Vec<u8>>, CalpError> {
+        Self::check_package_version(package_name, version)?;
+        Self::check_rel_path(rel_path)?;
         self.get_bytes(&format!("{package_name}/{version}/{rel_path}"))
     }
 
@@ -424,5 +478,73 @@ mod tests {
         let reg = HttpRegistry::new("https://host/base/");
         assert_eq!(reg.url("pkg/1.0.0/data.json"), "https://host/base/pkg/1.0.0/data.json");
         assert_eq!(reg.url("/pkg/x.json"), "https://host/base/pkg/x.json");
+    }
+
+    // -----------------------------------------------------------------------
+    // Path-component validation (parity with LocalRegistry)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_traversing_package_name_never_becomes_a_url() {
+        // `url()` concatenates, and a URL parser RESOLVES `..` — so without the
+        // component check these would silently address a location OUTSIDE the
+        // registry the user configured. Refused before any request is built.
+        for bad in ["..", "../..", "a/b", r"a\b", "C:evil", ".", ""] {
+            assert!(
+                HttpRegistry::check_package(bad).is_err(),
+                "package name {:?} must be refused",
+                bad
+            );
+        }
+        // Real package names survive: dots are ordinary (only "." and ".." are
+        // reserved), and so are dashes and underscores.
+        for good in ["acme.http", "sales-report", "vendor_kpis", "a.b.c"] {
+            assert!(
+                HttpRegistry::check_package(good).is_ok(),
+                "package name {:?} must be allowed",
+                good
+            );
+        }
+    }
+
+    #[test]
+    fn a_traversing_version_or_artifact_path_is_refused() {
+        assert!(HttpRegistry::check_package_version("pkg", "..").is_err());
+        assert!(HttpRegistry::check_package_version("pkg", "1.0.0/../2.0.0").is_err());
+        assert!(HttpRegistry::check_package_version("pkg", "1.0.0").is_ok());
+        assert!(HttpRegistry::check_package_version("pkg", "1.0.0-beta.1").is_ok());
+
+        // rel_path is PUBLISHER-controlled (it comes out of the signed manifest's
+        // checksum map), so it gets the same treatment segment by segment.
+        assert!(HttpRegistry::check_rel_path("sheets/abc/data.json").is_ok());
+        assert!(HttpRegistry::check_rel_path("object_scripts/s1.json").is_ok());
+        for bad in [
+            "../../etc/passwd",
+            "sheets/../../../x.json",
+            "",
+            "/",
+            "sheets/./x.json",
+        ] {
+            assert!(
+                HttpRegistry::check_rel_path(bad).is_err(),
+                "artifact path {:?} must be refused",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn the_transport_methods_refuse_before_they_reach_the_network() {
+        // Each of these would otherwise perform a GET. They must fail on the
+        // component check, which needs no server — so the test is hermetic AND
+        // proves the refusal happens before egress.
+        let reg = HttpRegistry::new("https://host/reg");
+        assert!(reg.get_package_manifest("../..").is_err());
+        assert!(reg.get_version_manifest("../..", "1.0.0").is_err());
+        assert!(reg.get_version_manifest("pkg", "..").is_err());
+        assert!(reg.read_artifact("pkg", "1.0.0", "../../secret.json").is_err());
+        assert!(reg.read_artifact("../..", "1.0.0", "x.json").is_err());
+        // version_exists has no error channel; it must answer "no", never probe.
+        assert!(!reg.version_exists("../..", "1.0.0"));
     }
 }

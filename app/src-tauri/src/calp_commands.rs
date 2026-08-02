@@ -541,7 +541,19 @@ pub fn calp_publish(
     // applies, so the dry-run report can never describe a different package
     // than the publish that follows it (previously an empty selection
     // previewed the whole workbook but published a zero-sheet package).
-    let sheet_indices = resolve_publish_sheet_indices(&state, params.sheet_indices)?;
+    //
+    // ONE EXCEPTION, and it is the reason libraries were unpublishable: a
+    // LIBRARY package's payload is the workbook's standalone MODULE SCRIPTS
+    // (modules/{id}.json — see library_commands.rs), not its sheets. Defaulting
+    // an empty selection to "every sheet" is right for a report and wrong here:
+    // it would ship the author's entire workbook — data and all — to a shared
+    // registry as a side effect of publishing a function library. A library
+    // therefore publishes ZERO sheets unless the author names sheets explicitly.
+    let sheet_indices = if params.kind.eq_ignore_ascii_case(crate::library_commands::LIBRARY_KIND) {
+        params.sheet_indices
+    } else {
+        resolve_publish_sheet_indices(&state, params.sheet_indices)?
+    };
 
     let assembly = assemble_publish_workbook(
         &state,
@@ -6182,7 +6194,7 @@ fn window_app_handle(window: &tauri::Window) -> &tauri::AppHandle {
 
 /// Read the workbook's distributed-script consent store. `None` when the
 /// workbook carries no consent file or it is not parseable JSON.
-fn read_script_consent_file(app: &tauri::AppHandle) -> Option<serde_json::Value> {
+pub(crate) fn read_script_consent_file(app: &tauri::AppHandle) -> Option<serde_json::Value> {
     use tauri::Manager;
     let user_files = app.state::<crate::persistence::UserFilesState>();
     let files = user_files.files.lock().ok()?;
@@ -7261,7 +7273,12 @@ pub fn calp_export_package_html(
 /// every subscriber holding the workbook, so the promise was not kept.
 /// "They can read the shared registry folder anyway" is not a defense: the
 /// app must not be the tool that does it.
-fn require_publisher(
+/// `pub(crate)` so the SCRIPT distribution gateway
+/// (`scripting::distribution_gateway`) can run the SAME publisher gate before
+/// dispatching a scripted publish — the alternative was a second ownership
+/// check written from scratch, which is exactly the drift this function exists
+/// to prevent.
+pub(crate) fn require_publisher(
     registry: &dyn calp::RegistryTransport,
     package_name: &str,
     version: &str,

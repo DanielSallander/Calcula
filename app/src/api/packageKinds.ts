@@ -70,6 +70,30 @@ const BUILTIN_KINDS: PackageKindDefinition[] = [
       preserveConsumerData: false,
     },
   },
+  // The AUTHORING half of the script package manager. `library_commands.rs`
+  // (LIBRARY_KIND) and @api/scriptLibraries (LIBRARY_PACKAGE_KIND) have always
+  // been able to CONSUME a `kind: "library"` package, but no publish path could
+  // emit one — so a library author could not actually ship. Listing it here is
+  // what puts it in the publish picker; `calp_publish` treats it specially in
+  // exactly one way (an empty sheet selection means ZERO sheets, not "all", so
+  // publishing a function library does not ship the author's whole workbook).
+  //
+  // It is a built-in rather than an extension registration because the kind
+  // string is already hard-coded in the Rust resolver: a library that only
+  // existed while some extension was loaded would be a package whose kind
+  // depended on the publisher's installed add-ins.
+  {
+    id: "library",
+    label: "Script library",
+    description:
+      "Reusable script modules other workbooks import with `// @uses`. Ships code, not sheets.",
+    refreshDefaults: {
+      refreshFormulas: false,
+      refreshData: false,
+      refreshStructure: false,
+      preserveConsumerData: true,
+    },
+  },
 ];
 
 const registry = new Map<string, PackageKindDefinition>(

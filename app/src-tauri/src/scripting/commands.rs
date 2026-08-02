@@ -295,6 +295,107 @@ pub(crate) fn check_script_security(script_state: &ScriptState) -> Result<(), St
     }
 }
 
+/// Error sentinel for a one-off run refused because the source belongs to a
+/// package whose code the user has not approved.
+pub const DISTRIBUTED_SCRIPT_NOT_CONSENTED: &str = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
+
+/// Refuse to run a MODULE SCRIPT THAT ARRIVED IN A .calp PACKAGE.
+///
+/// THE HOLE. `run_script` is handed raw source and gates only on the GLOBAL
+/// Script Security floor (`check_script_security`) plus this workbook's trust
+/// record — and per-workbook trust is computed over LOCAL code only
+/// (@api/scriptSecurity), so a distributed module never lapses it and never
+/// appears in it. Meanwhile a package CAN ship a pane control or a button cell
+/// type, and both button paths (Controls/Button/interceptors.ts,
+/// CellTypes/types/button.ts) resolve a workbook script by name and hand its
+/// source straight to `run_script`. So a report the user trusted for their OWN
+/// scripts would execute a stranger's module the moment they clicked its button
+/// — with no package consent anywhere in the path.
+///
+/// THE DESIGN ALREADY SAYS THIS SHOULD NOT WORK. `core/calp/src/pull.rs` states
+/// that pane-control payloads carry no inline code "by design (D6) — custom-
+/// control / button scripts travel separately as consent-gated object_scripts",
+/// and pull materializes module scripts as inert data with no provenance or
+/// access-level stamping precisely because nothing is supposed to execute them
+/// implicitly. This function makes that true instead of assumed.
+///
+/// FAILS CLOSED, and is RUST-AUTHORITATIVE (the renderer is assumed hostile, so
+/// the check cannot live in the button interceptors that build the call). The
+/// consent evidence is the SAME store the object-script and validator gates read
+/// — a record under the package name naming this script id and this exact source
+/// hash. A package that ships only module scripts has no such record, so its
+/// modules do not run; the error names the sanctioned alternative.
+///
+/// A local script whose source happens to match a distributed one still runs:
+/// the refusal requires that NO local (subscriber-authored) script carries the
+/// same source, so copying a distributed module to your own script — the
+/// documented way to adapt distributed content — keeps working.
+fn require_distributed_module_consent(
+    script_state: &ScriptState,
+    window: &tauri::Window,
+    source: &str,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let scripts: Vec<(Option<String>, String, String)> = {
+        let map = script_state
+            .workbook_scripts
+            .lock()
+            .map_err(|e| e.to_string())?;
+        map.values()
+            .map(|s| (s.source_package.clone(), s.id.clone(), s.source.clone()))
+            .collect()
+    };
+    let consent_file =
+        crate::calp_commands::read_script_consent_file(Manager::app_handle(window));
+    match distributed_module_refusal(&scripts, consent_file.as_ref(), source) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
+/// The decision half of {@link require_distributed_module_consent}: `Some(msg)`
+/// to refuse, `None` to allow. Pure over `(source_package, id, source)` triples
+/// and the parsed consent file, so every branch is unit-testable without a
+/// Tauri window or a workbook.
+fn distributed_module_refusal(
+    scripts: &[(Option<String>, String, String)],
+    consent_file: Option<&serde_json::Value>,
+    source: &str,
+) -> Option<String> {
+    // A LOCAL script with this exact source authorises the run outright — this
+    // is what keeps "copy the distributed module to your own script" working.
+    if scripts
+        .iter()
+        .any(|(pkg, _, src)| src == source && pkg.is_none())
+    {
+        return None;
+    }
+    let owners: Vec<(&String, &String)> = scripts
+        .iter()
+        .filter(|(_, _, src)| src == source)
+        .filter_map(|(pkg, id, _)| pkg.as_ref().map(|p| (p, id)))
+        .collect();
+    if owners.is_empty() {
+        return None; // Not a stored module at all — an ad-hoc/editor run.
+    }
+    let source_hash = calp::integrity::sha256_hex(source.as_bytes());
+    for (package, script_id) in &owners {
+        if let Some(file) = consent_file {
+            if crate::calp_commands::consent_granted_in(file, package, script_id, &source_hash) {
+                return None;
+            }
+        }
+    }
+    let (package, script_id) = &owners[0];
+    Some(format!(
+        "{}: '{}' arrived in the package '{}' and you have not approved that package's code, \
+         so it will not run. Code that a package wants you to be able to trigger travels as an \
+         object script, which asks for your consent before it is switched on.",
+        DISTRIBUTED_SCRIPT_NOT_CONSENTED, script_id, package
+    ))
+}
+
 /// Error sentinel for an AI tool call blocked by the MCP access ceiling.
 pub const MCP_ACCESS_RESTRICTED: &str = "MCP_ACCESS_RESTRICTED";
 
@@ -869,6 +970,10 @@ pub fn run_script(
 ) -> Result<RunScriptResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     check_script_security(&script_state)?;
+    // ...and, on top of the global floor, refuse code that ARRIVED IN A PACKAGE
+    // and was never consented. The floor is about "may user code run at all";
+    // this is about "whose code is this".
+    require_distributed_module_consent(&script_state, &window, &request.source)?;
 
     // 1. Clone data from AppState for isolated execution
     let grids = state.grids.lock().map_err(|e| e.to_string())?.clone();
@@ -1373,6 +1478,99 @@ mod tests {
         assert!(is_reserved_script_id("__calcula_anything"));
         assert!(!is_reserved_script_id("my_script"));
         assert!(!is_reserved_script_id("calcula_helper")); // no leading "__"
+    }
+
+    // -----------------------------------------------------------------------
+    // run_script: code that ARRIVED IN A PACKAGE must not run unconsented
+    // -----------------------------------------------------------------------
+
+    fn consent_file_for(package: &str, script_id: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "consents": [{
+                "packageName": package,
+                "scripts": [{
+                    "id": script_id,
+                    "sourceHash": calp::integrity::sha256_hex(source.as_bytes()),
+                    "source": source,
+                }],
+                "grantedCapabilities": [],
+                "grantedAt": "2026-01-01T00:00:00Z",
+            }],
+        })
+    }
+
+    #[test]
+    fn a_packaged_module_script_is_refused_with_no_consent_record() {
+        // The attack: a .calp ships a pane-control button plus module "helper".
+        // The subscriber trusts their OWN workbook (which covers only local
+        // code), clicks the button, and the interceptor hands this source to
+        // run_script. Nothing in the old path asked whose code it was.
+        let src = "Calcula.setCellValue(0, 0, 'pwned');";
+        let scripts = vec![(Some("evil-pkg".to_string()), "helper".to_string(), src.to_string())];
+        let refusal = distributed_module_refusal(&scripts, None, src).expect("must refuse");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+        assert!(refusal.contains("evil-pkg"), "{}", refusal);
+        assert!(refusal.contains("helper"), "{}", refusal);
+        // The refusal names the sanctioned shape, so an author reading it knows
+        // what to do instead of hunting for a way to turn the check off.
+        assert!(refusal.contains("object script"), "{}", refusal);
+    }
+
+    #[test]
+    fn a_consent_record_for_that_exact_source_admits_it() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let scripts = vec![(Some("good-pkg".to_string()), "helper".to_string(), src.to_string())];
+        let file = consent_file_for("good-pkg", "helper", src);
+        assert!(distributed_module_refusal(&scripts, Some(&file), src).is_none());
+    }
+
+    #[test]
+    fn consent_does_not_survive_the_publisher_changing_the_code() {
+        // Same package, same id, different body — the hash no longer matches, so
+        // an upstream refresh cannot inherit yesterday's approval.
+        let approved = "Calcula.setCellValue(0, 0, 1);";
+        let changed = "Calcula.setCellValue(0, 0, 999);";
+        let scripts = vec![(
+            Some("good-pkg".to_string()),
+            "helper".to_string(),
+            changed.to_string(),
+        )];
+        let file = consent_file_for("good-pkg", "helper", approved);
+        assert!(distributed_module_refusal(&scripts, Some(&file), changed).is_some());
+    }
+
+    #[test]
+    fn one_packages_consent_never_covers_another_packages_module() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let scripts = vec![(Some("evil-pkg".to_string()), "helper".to_string(), src.to_string())];
+        let file = consent_file_for("good-pkg", "helper", src);
+        assert!(distributed_module_refusal(&scripts, Some(&file), src).is_some());
+    }
+
+    #[test]
+    fn a_local_script_with_the_same_source_still_runs() {
+        // "Copy it to a new id and edit it" is the documented way to adapt
+        // distributed content; a byte-identical copy must not be collateral.
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let scripts = vec![
+            (Some("pkg".to_string()), "helper".to_string(), src.to_string()),
+            (None, "my-copy".to_string(), src.to_string()),
+        ];
+        assert!(distributed_module_refusal(&scripts, None, src).is_none());
+    }
+
+    #[test]
+    fn an_ad_hoc_run_that_matches_no_stored_script_is_untouched() {
+        // The Script Editor / notebook path hands over source that is not a
+        // stored module. This gate is about provenance, not about scripting.
+        let scripts = vec![(
+            Some("pkg".to_string()),
+            "helper".to_string(),
+            "return 1;".to_string(),
+        )];
+        assert!(distributed_module_refusal(&scripts, None, "return 2;").is_none());
+        assert!(distributed_module_refusal(&[], None, "return 2;").is_none());
     }
 
     /// A changed literal value produces an update carrying the new literal,

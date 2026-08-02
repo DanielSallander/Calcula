@@ -12,6 +12,7 @@ pub mod capability_store;
 pub mod scheduler;
 pub mod udf;
 pub mod writeback_gateway;
+pub mod distribution_gateway;
 
 pub use commands::*;
 pub use notebook_commands::*;
@@ -25,4 +26,7 @@ pub use scheduler::*;
 // Glob so the `#[tauri::command]`-generated `__cmd__*` macros come along —
 // `generate_handler!` resolves those, not just the functions.
 pub use writeback_gateway::*;
+// Same reason: `script_distribution`'s `__cmd__` macro has to be nameable from
+// `generate_handler!`.
+pub use distribution_gateway::*;
 pub use types::{ScriptState, ScriptSummary, WorkbookScript, NotebookDocument, NotebookSummary};

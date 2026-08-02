@@ -163,6 +163,17 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
     "Ask you to pick a file to save data into or to read — you choose the file every time, and it is never told where your files are",
   "ui.shortcut":
     "Take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, and it never sees anything else you type",
+  // Object scripts do not reach the grid through this capability — their grid
+  // access is governed by the TIER (own sheet at restricted, any sheet at
+  // unlocked). It is phrased here because this map must cover the whole
+  // vocabulary, and because a package may carry a sandboxed add-in whose
+  // cell-styling contribution and cell-change subscription DO need it.
+  "grid.read":
+    "Be shown the contents of your cells — the value of every cell on screen while it decides how to style them, and the old value, new value and formula of every cell that changes",
+  "distribution.publish":
+    "Publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed will receive it — it leaves this machine and cannot be taken back",
+  "distribution.subscribe":
+    "Bring somebody else's published packages into this workbook, and update the ones you subscribe to — only from registries you added yourself, and any code that arrives stays switched off until you approve it",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */

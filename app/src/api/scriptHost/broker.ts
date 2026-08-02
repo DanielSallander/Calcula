@@ -323,6 +323,26 @@ interface ExposedMethod {
 
 const exposedMethods = new Map<string, ExposedMethod>();
 
+/**
+ * Name prefix reserved for entry points that ONLY trusted host code may invoke.
+ *
+ * WHY IT EXISTS. `expose(name, fn, { public: false })` is enough for ordinary
+ * script-to-script policy — a non-public method is reachable only by a script of
+ * the SAME tier AND the SAME trust origin. That is not enough for a HOST RELAY
+ * entry point, because "same origin" is a package name: a distributed script
+ * shipped in package `acme.http` and a library realm mounted for package
+ * `acme.http` share an origin, so the script would be same-trust with the realm
+ * and could call the relay directly, jumping over the host-side authorization
+ * that the relay exists to enforce (host.ts `authorizeImportCall`).
+ *
+ * So the shared-library relay is named with this prefix and `callExposed` — the
+ * SCRIPT-facing door — refuses the whole namespace unconditionally, before it
+ * even looks the method up (an "unknown name" and a "forbidden name" must not be
+ * distinguishable, or the refusal becomes a probe). `hostCallExposed`, the
+ * TRUSTED door, is unaffected: that is the only way in.
+ */
+export const HOST_ONLY_EXPOSED_PREFIX = "__calcula_host__";
+
 function exposedKey(objectType: string, instanceId: string | null, methodName: string): string {
   return `${objectType}:${instanceId || ""}:${methodName}`;
 }
@@ -374,6 +394,16 @@ export async function callExposed(
   methodName: string,
   args: unknown[],
 ): Promise<unknown> {
+  // Host-only namespace: refused for EVERY script, before the lookup, whatever
+  // its tier/origin and whatever the target's `public` flag says. Refusing
+  // before the lookup keeps "no such method" and "not yours to call" the same
+  // observation, so the rule cannot be used to enumerate host relays.
+  if (methodName.startsWith(HOST_ONLY_EXPOSED_PREFIX)) {
+    throw new BrokerError(
+      "PermissionDenied",
+      `Method '${methodName}' is a host-only entry point and cannot be called by a script`,
+    );
+  }
   const key = exposedKey(targetType, targetInstanceId, methodName);
   const target = exposedMethods.get(key);
   if (!target) {

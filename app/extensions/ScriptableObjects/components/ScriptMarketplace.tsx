@@ -150,6 +150,38 @@ const tag = (bg: string, fg: string): React.CSSProperties => ({
   marginLeft: 6,
 });
 
+/**
+ * One presentation row per trust status the backend can return
+ * (`library_commands.rs::LIBRARY_TRUST_STATUSES`), because a security state that
+ * falls through to the friendliest label is worse than one with no label at all.
+ *
+ * `notInstalled` is the status that made this a table. It means the signature is
+ * authentic but THIS MACHINE HAS NEVER AGREED TO TRUST THIS PUBLISHER — a preview
+ * verifies and deliberately does not pin (`library_commands.rs:82`). It used to
+ * fall through the `firstUse ? … : "verified"` ternary to **"verified"**, in an
+ * unconditionally green badge, telling the user their machine vouched for a key
+ * it had never seen. Neutral tone, and the word "verified" is reserved for the
+ * one status that earns it.
+ *
+ * `unknown` exists so a status added in Rust and not added here degrades to a
+ * caution badge naming the raw value, rather than silently reading as safe.
+ */
+function trustBadge(status: string): { label: string; style: React.CSSProperties } {
+  switch (status) {
+    case "verified":
+      return { label: "verified publisher", style: tag("#E8F4EA", "#1B6B2C") };
+    case "firstUse":
+      return { label: "first use — trusting this key now", style: tag("#FFF4E5", "#8A5300") };
+    case "notInstalled":
+      return {
+        label: "publisher not previously trusted",
+        style: tag("#F0F0F0", "#444"),
+      };
+    default:
+      return { label: `unrecognized trust state (${status})`, style: tag("#FDE7E9", "#A80000") };
+  }
+}
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -300,9 +332,9 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
         <div key={n.package} style={card}>
           <div style={{ fontWeight: 600 }}>
             {n.package} {n.version}
-            <span style={tag("#E8F4EA", "#1B6B2C")}>
+            <span style={trustBadge(n.trustStatus).style}>
               signed · {n.publisherName || "unnamed publisher"} ·{" "}
-              {n.trustStatus === "firstUse" ? "first use" : "verified"}
+              {trustBadge(n.trustStatus).label}
             </span>
             {n.transitive && (
               <span style={tag("#FFF4E5", "#8A5300")}>

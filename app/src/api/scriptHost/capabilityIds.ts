@@ -104,6 +104,90 @@
  *                   the dispatch are all trusted main-thread code, so there is
  *                   NO Rust CapabilityStore entry and it is NOT in
  *                   RUST_MIRRORED_CAPABILITIES.
+ *  - grid.read    : be SHOWN the contents of the user's cells. Named for what
+ *                   the user loses, not for a mechanism, because the mechanism
+ *                   is the part that hid it: nothing here is a call the code
+ *                   makes. The host PUSHES workbook data into third-party code
+ *                   that never asked for a cell by address — a cell-style
+ *                   contributor is handed the displayed value of every visible
+ *                   cell so it can decide how to paint it, and a subscriber to
+ *                   the cell-change events is handed each changed cell's old
+ *                   value, new value and formula.
+ *
+ *                   SCOPE — read this before applying it anywhere new. This
+ *                   capability gates the surfaces where workbook DATA reaches
+ *                   code THE USER DID NOT WRITE, i.e. a distributed add-in's
+ *                   contributions and event subscriptions. It deliberately does
+ *                   NOT gate an OBJECT SCRIPT reading cells (sheet.getRange* /
+ *                   api.getCell*): those are pull-style calls the script's own
+ *                   author spelled out, they are already governed by the tier
+ *                   model (own-sheet at restricted, any sheet at unlocked) and
+ *                   by per-package consent for distributed scripts, and
+ *                   retrofitting a capability there would force a mass
+ *                   re-consent of shipped behavior while buying no containment
+ *                   the tier does not already give. Two different questions,
+ *                   two different answers:
+ *                     "may this script go and read a cell?"   -> tier
+ *                     "may this add-in be shown my cells?"    -> grid.read
+ *                   The taxonomy (scriptSurfaces.ts) therefore lists grid.read
+ *                   ONLY on the sandboxed-extension surface, and the
+ *                   object-script row says in prose that grid reads there are
+ *                   tier-governed — so the omission cannot be misread as "an
+ *                   object script cannot see your cells".
+ *
+ *                   Purely frontend / host-mediated (same shape as ui.dialog,
+ *                   file.picker and ui.shortcut): the gate is the host deciding
+ *                   whether to put cell contents into a message, so there is NO
+ *                   Rust CapabilityStore entry and it is NOT in
+ *                   RUST_MIRRORED_CAPABILITIES. It still belongs in the
+ *                   vocabulary (and in KNOWN_CAPABILITY_IDS) because it must be
+ *                   declarable in a signed sidecar manifest, consent-visible,
+ *                   and revocable like every other id.
+ *  - distribution.publish
+ *                 : OUTBOUND. Push this workbook to a .calp registry as a
+ *                   published package version, UNDER THE USER'S PUBLISHER
+ *                   IDENTITY, where other people will pull it. Rust-enforced
+ *                   authoritatively in script_distribution.
+ *  - distribution.subscribe
+ *                 : INBOUND. Bring SOMEBODY ELSE'S published content — sheets,
+ *                   object scripts, module scripts, notebooks, model overlays,
+ *                   writeback regions — into this workbook, by pulling a
+ *                   package or refreshing the ones already subscribed.
+ *                   Rust-enforced authoritatively in script_distribution.
+ *
+ *                   WHY THESE ARE TWO IDS AND NOT ONE "distribution" — read
+ *                   this before anyone "simplifies" them together. They are
+ *                   different risk classes with different victims:
+ *                     outbound puts the USER'S NAME on content OTHER PEOPLE
+ *                       will run, signed with the user's Ed25519 key, in a
+ *                       place the user cannot recall it from;
+ *                     inbound puts OTHER PEOPLE'S CODE in front of the USER.
+ *                   A build script that publishes a nightly report has no
+ *                   business pulling packages, and a dashboard that refreshes
+ *                   its data has no business publishing. One id would have
+ *                   forced every consenting user to grant both, and the consent
+ *                   sentence could then only have described the union — which
+ *                   is the definition of dishonest consent text.
+ *
+ *                   THREE BOUNDS hold on both, and they are what make these
+ *                   grantable at all (app/src-tauri/src/scripting/
+ *                   distribution_gateway.rs):
+ *                     1. NO CONSENT BY PROXY. A pulled object script still
+ *                        lands forced-restricted, distributed and UNMOUNTED;
+ *                        module scripts and notebooks still land inert. The
+ *                        capability moves DATA, never permission.
+ *                     2. ONLY REGISTRIES THE USER CONFIGURED. Every action that
+ *                        names a registry is refused unless that location is
+ *                        already a saved registry or an existing subscription.
+ *                        Adding a registry, and dev-subscribing to a loose
+ *                        .cala path, stay human-only — otherwise this is a
+ *                        code-delivery channel rather than a capability.
+ *                     3. PUBLISHING NEEDS THE KEY, NOT JUST THE GRANT. The
+ *                        profile must already hold a publisher keypair (a
+ *                        script must never MINT the identity others pin), and
+ *                        for an existing package name it must hold THAT
+ *                        package's key — the same require_publisher gate the
+ *                        writeback review actions pass.
  */
 export const ALL_CAPABILITY_IDS = [
   "net.fetch",
@@ -119,6 +203,9 @@ export const ALL_CAPABILITY_IDS = [
   "schedule",
   "file.picker",
   "ui.shortcut",
+  "grid.read",
+  "distribution.publish",
+  "distribution.subscribe",
 ] as const;
 
 export type CapabilityId = (typeof ALL_CAPABILITY_IDS)[number];

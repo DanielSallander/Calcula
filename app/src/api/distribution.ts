@@ -305,6 +305,52 @@ export async function publishPackage(params: PublishParams): Promise<PublishResp
 }
 
 /**
+ * The manifest `kind` that makes a .calp usable as a SCRIPT LIBRARY — the same
+ * string `library_commands.rs` (`LIBRARY_KIND`) and `@api/scriptLibraries`
+ * (`LIBRARY_PACKAGE_KIND`) compare against. Re-stated here because this is the
+ * publishing side: until now the package manager could CONSUME libraries and no
+ * publish path could EMIT one, so a library author had no way to ship.
+ */
+export const LIBRARY_PACKAGE_KIND = "library";
+
+export interface PublishLibraryParams {
+  registryPath: string;
+  packageName: string;
+  version: string;
+  publishedBy: string;
+  /** Sheets to ship ALONGSIDE the modules (docs, examples). Omit for the normal
+   *  case: a library is code, so it ships zero sheets. */
+  sheetIndices?: number[];
+}
+
+/**
+ * Publish this workbook's standalone module scripts as a `kind: "library"`
+ * package — the authoring half of the script package manager.
+ *
+ * A library's payload is `modules/{id}.json`, not sheets, so this deliberately
+ * defaults `sheetIndices` to `[]`. The backend honours that literally for the
+ * library kind (`calp_publish`): every other kind reads an empty selection as
+ * "all sheets", which for a library would ship the author's entire workbook —
+ * data and all — to a shared registry as a side effect of publishing a function
+ * library.
+ *
+ * Everything else is the ordinary publish path: same Ed25519 signature, same
+ * TOFU identity, same version manifest, same artifact checksums. A library is
+ * an ordinary package with a different `kind`, which is exactly why consuming
+ * one needs no second trust root.
+ */
+export function publishLibrary(params: PublishLibraryParams): Promise<PublishResponse> {
+  return publishPackage({
+    registryPath: params.registryPath,
+    packageName: params.packageName,
+    version: params.version,
+    kind: LIBRARY_PACKAGE_KIND,
+    sheetIndices: params.sheetIndices ?? [],
+    publishedBy: params.publishedBy,
+  });
+}
+
+/**
  * Dry-run of publishPackage: assemble the exact carrier a publish would use
  * and report what would ship vs stay behind — without writing anything.
  * Omit sheetIndices (or pass []) to preview publishing every sheet.
@@ -373,13 +419,26 @@ export function getPackageObjects(packageName: string): Promise<PackageObjectsRe
   return invokeBackend("calp_get_package_objects", { packageName });
 }
 
-export async function pullPackage(params: PullParams): Promise<PullResponse> {
-  const response = await invokeBackend<PullResponse>("calp_pull", { params });
-  // Dispatch custom objects of non-built-in kinds to their frontend providers
-  // (brick 4). Built-in kinds (cell types) were already materialized Rust-side.
+/**
+ * Dispatch a pull's custom objects of non-built-in kinds to their frontend
+ * providers (brick 4). Built-in kinds (cell types) were already materialized
+ * Rust-side.
+ *
+ * Exported because there are now TWO callers: `pullPackage` (the Subscribe
+ * dialog's path) and the script broker's `cap.pkgPull` handler, which receives
+ * the very same `PullResponse` from the Rust distribution gateway. One
+ * implementation on purpose — a second copy is how a scripted pull would start
+ * quietly dropping the objects an interactive pull materializes.
+ */
+export async function applyPulledCustomObjects(response: PullResponse): Promise<void> {
   if (response.customObjects && response.customObjects.length > 0) {
     await materializePulledObjects(response.customObjects);
   }
+}
+
+export async function pullPackage(params: PullParams): Promise<PullResponse> {
+  const response = await invokeBackend<PullResponse>("calp_pull", { params });
+  await applyPulledCustomObjects(response);
   return response;
 }
 

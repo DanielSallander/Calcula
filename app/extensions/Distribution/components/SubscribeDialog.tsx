@@ -64,6 +64,22 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // what it cannot reach — otherwise "keyboard" reads as "keylogger".
   "ui.shortcut":
     "take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, it appears in your shortcut list, and it never sees anything else you type",
+  // Last screen before somebody else's code enters this workbook. Written in
+  // the passive-with-a-subject form ("be shown") because there is no call to
+  // point at: the host hands the values over. "Read your data" would be shorter
+  // and would let a reader picture a file being opened; this is the workbook in
+  // front of them, as they look at it.
+  "grid.read":
+    "be shown what is in your cells — the value of every cell on screen while it decides how to colour them, and the old value, new value and formula of every cell that changes while it is running",
+  // These two can only be REQUESTED here, never exercised: a script that
+  // arrives in a package is forced to the restricted tier, and every cap.pkg*
+  // row is unlocked-tier. A package declaring them is asking for something this
+  // surface will refuse — so say what it asked for, plainly, and let the reader
+  // draw their own conclusion about a report that wants to publish.
+  "distribution.publish":
+    "publish workbooks to your package registries under your own publisher key (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
+  "distribution.subscribe":
+    "pull further packages into this workbook and refresh them (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
 };
 
 function capabilityPhrase(id: string): string {

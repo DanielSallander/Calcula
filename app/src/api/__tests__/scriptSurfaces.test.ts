@@ -30,6 +30,7 @@ import { buildHandleFromDefinition } from "../scriptHost/broker";
 import {
   EXTENSION_BROKER_METHODS,
   CONTRIBUTION_REQUIRED_CAPABILITY,
+  EXTENSION_PUSHED_DATA_CAPABILITIES,
 } from "../scriptHost/extensionProtocol";
 import {
   computeExtensionCeiling,
@@ -162,11 +163,44 @@ describe("script-surface capability completeness", () => {
       if (policy.capability) fromPolicies.add(policy.capability);
     }
     expect(new Set(derived)).toEqual(fromPolicies);
-    // Today every capability in the vocabulary has at least one gated method,
-    // so the derived set is the whole vocabulary (bi.sql via cap.biSql
-    // included — the row that used to go missing on object scripts).
-    expect(derived.slice().sort()).toEqual([...ALL_CAPABILITY_IDS].sort());
+    // bi.sql via cap.biSql — the row that used to go missing on object scripts.
     expect(derived).toContain("bi.sql");
+  });
+
+  it("every capability in the vocabulary is enforced SOMEWHERE, by a named gate", () => {
+    // This replaces a stricter assertion that no longer describes the design:
+    // "brokerGatedCapabilities() === ALL_CAPABILITY_IDS", i.e. every capability
+    // is a broker method's capability. That held only while every capability
+    // gated a CALL. `grid.read` does not: nothing calls anything: the HOST
+    // pushes cell contents into a sandboxed add-in (a cellStyle contributor's
+    // batch, a cell-change event payload) and the capability decides whether
+    // the contents go in. There is no method to hang it on, and inventing a
+    // `cap.gridRead` row that nothing dispatches would have been a lie told to
+    // a test.
+    //
+    // What must still be true — and what this pins — is that no capability id
+    // can exist without an enforcement site. An id in the vocabulary that no
+    // gate consults would be pure consent theatre: it would appear in the
+    // prompt, be granted, be shown in the transparency panel, and mean nothing.
+    const brokerGated = new Set(brokerGatedCapabilities());
+    const contributionGated = new Set(
+      Object.values(CONTRIBUTION_REQUIRED_CAPABILITY).filter(Boolean) as CapabilityId[],
+    );
+    const hostPushGated = new Set<CapabilityId>(EXTENSION_PUSHED_DATA_CAPABILITIES);
+    const unenforced = [...ALL_CAPABILITY_IDS].filter(
+      (id) => !brokerGated.has(id) && !contributionGated.has(id) && !hostPushGated.has(id),
+    );
+    expect(
+      unenforced,
+      "these capability ids are in the vocabulary but no gate reads them — consent theatre",
+    ).toEqual([]);
+
+    // And the specific shape of grid.read, pinned so a future refactor cannot
+    // quietly turn it back into an ungated disclosure:
+    expect(brokerGated.has("grid.read"), "grid.read gates no CALL, by design").toBe(false);
+    expect(contributionGated.has("grid.read"), "cellStyle must require it").toBe(true);
+    expect(hostPushGated.has("grid.read"), "the event forwarder must require it").toBe(true);
+    expect(CONTRIBUTION_REQUIRED_CAPABILITY.cellStyle).toBe("grid.read");
   });
 
   it("no surface understates what the enforcing code can grant it", () => {
@@ -197,11 +231,12 @@ describe("script-surface capability completeness", () => {
   });
 
   it("the sandboxed-extension row lists EXACTLY what a sandboxed extension can reach", () => {
-    // Derived from the two things that can require a capability on this surface:
-    // a method it may call, and a contribution kind it may register. Reconstructed
-    // here from the enforcing constants rather than imported, so a change to
-    // extensionReachableCapabilities that silently widened the set would still
-    // have to be reflected in BOTH places.
+    // Derived from the THREE things that can require a capability on this
+    // surface: a method it may call, a contribution kind it may register, and a
+    // host-push path where the host sends workbook data INTO the sandbox.
+    // Reconstructed here from the enforcing constants rather than imported, so a
+    // change to extensionReachableCapabilities that silently widened the set
+    // would still have to be reflected in BOTH places.
     const reachable = new Set<CapabilityId>();
     for (const method of EXTENSION_BROKER_METHODS) {
       const cap = ALLOWLIST[method]?.capability;
@@ -209,6 +244,9 @@ describe("script-surface capability completeness", () => {
     }
     for (const cap of Object.values(CONTRIBUTION_REQUIRED_CAPABILITY)) {
       if (cap) reachable.add(cap);
+    }
+    for (const cap of EXTENSION_PUSHED_DATA_CAPABILITIES) {
+      reachable.add(cap);
     }
 
     for (const id of METHOD_NARROWED_SURFACES) {

@@ -88,7 +88,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Object scripts",
     runtime: "worker-realm",
     containment:
-      "Per-script hardened worker; no DOM/Tauri; every privileged call broker-mediated. The R19 ceiling is AUTHOR-declared (source pragmas / package manifest), so any capability in the vocabulary is reachable once declared, consented and granted",
+      "Per-script hardened worker; no DOM/Tauri; every privileged call broker-mediated. The R19 ceiling is AUTHOR-declared (source pragmas / package manifest), so any capability in the vocabulary is reachable once declared, consented and granted. Reading the workbook is governed by the TIER, not by a capability: a restricted script reads and writes its own sheet, an unlocked one any sheet — which is why `grid.read` is absent from this row and present on the sandboxed-extension row. Do not read that absence as 'an object script cannot see your cells'; read it as 'the question is answered by the tier and by who wrote the script'",
     // Author-declared ceiling => everything the ALLOWLIST can gate. bi.sql is
     // part of that (cap.biSql, tier "restricted"): raw read-only SQL against a
     // connection's database is a HIGHER-trust superset of bi.query, so it must
@@ -109,6 +109,14 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "schedule",
       "file.picker",
       "ui.shortcut",
+      // The .calp package loop, split OUTBOUND / INBOUND. Both are broker-gated
+      // (cap.pkg*) and therefore part of any author-declared ceiling, so
+      // omitting either would understate this surface. The tier is what really
+      // bounds them: every cap.pkg* row is "unlocked", and a DISTRIBUTED script
+      // is forced restricted at pull — so a package's own scripts can never
+      // publish or pull, which is what stops a package from propagating itself.
+      "distribution.publish",
+      "distribution.subscribe",
     ],
     gate: "Tier broker + R19 declared ceiling + per-package consent (JIT prompt for local scripts); net.fetch / bi.query / bi.sql / bi.model / bi.connector / distribution.writeback / schedule are re-checked authoritatively in Rust (schedule on every firing, so a revoke stops a job persisted in the workbook); file.picker is host-mediated — the broker gates the call and a native picker the USER drives chooses the file, so no path ever crosses; ui.shortcut is host-mediated too — the broker gates the binding and the ONE keydown listener in the app (api/keybindings.ts) owns dispatch, so a script is told only that its own Ctrl+Shift+<letter> fired",
     executesUserCode: true,
@@ -138,6 +146,14 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "schedule",
       "file.picker",
       "ui.shortcut",
+      // The .calp package loop, split OUTBOUND / INBOUND. Both are broker-gated
+      // (cap.pkg*) and therefore part of any author-declared ceiling, so
+      // omitting either would understate this surface. The tier is what really
+      // bounds them: every cap.pkg* row is "unlocked", and a DISTRIBUTED script
+      // is forced restricted at pull — so a package's own scripts can never
+      // publish or pull, which is what stops a package from propagating itself.
+      "distribution.publish",
+      "distribution.subscribe",
     ],
     gate: "Ed25519 signature + TOFU publisher pin at resolve (the SAME .calp trust root as report packages, no second signer), per-workbook consent keyed `lib:<package>` over the exact module sources, a version pin in .calcula/script-deps.json that mount never re-resolves against the registry, and then the tier broker + the INTERSECTED R19 ceiling. Calls in are authorized by an unguessable host-issued token, which is delegation-transparent but not caller-identifying — see docs/design/script-package-manager.md §10.4",
     executesUserCode: true,
@@ -163,6 +179,16 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     // honesty: they appeared in the consent prompt's "Capabilities it can use"
     // line. Distributed provenance also means NO auto ui.html.
     //
+    //
+    // `grid.read` is on this row and on NO other, because this is the one
+    // surface where the HOST PUSHES workbook data into code the user did not
+    // write: a cellStyle contributor is handed the displayed value of every
+    // visible cell, and a subscriber to the cell-change events is handed each
+    // change's old value, new value and formula. Both are now gated on it
+    // (CONTRIBUTION_REQUIRED_CAPABILITY + EXTENSION_PUSHED_DATA_CAPABILITIES),
+    // and both are derived into `enforceableCapabilities`, so this row cannot
+    // go quietly stale if either gate is removed.
+    //
     // `enforceableCapabilities` derives this exact set for this surface id, so
     // the audit below compares the row against the code rather than against a
     // second copy of this comment.
@@ -177,8 +203,9 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "distribution.writeback",
       "schedule",
       "file.picker",
+      "grid.read",
     ],
-    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling; the signature must also cover the BUNDLE via codeHash, re-checked on every scan) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing); file.picker is host-mediated (native picker, user chooses the file, no path crosses). ui.shortcut is NOT reachable here: an extension's keyboard path is the declarative keybinding contribution, held to the same Ctrl+Shift+<letter> rule",
+    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling; the signature must also cover the BUNDLE via codeHash, re-checked on every scan) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing); file.picker is host-mediated (native picker, user chooses the file, no path crosses). grid.read is host-mediated too and gates the two paths by which the host hands this surface the user's cell contents: a cellStyle contribution is REFUSED outright without it (loudly — console, toast, manager row, audit), and a subscription to the cell-change events is delivered redacted to coordinates. Because an unsigned or tampered sidecar arrives with its capability list zeroed, an add-in nobody signed is never shown a single cell value. ui.shortcut is NOT reachable here: an extension's keyboard path is the declarative keybinding contribution, held to the same Ctrl+Shift+<letter> rule",
     executesUserCode: true,
   },
   {
@@ -205,6 +232,14 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "schedule",
       "file.picker",
       "ui.shortcut",
+      // The .calp package loop, split OUTBOUND / INBOUND. Both are broker-gated
+      // (cap.pkg*) and therefore part of any author-declared ceiling, so
+      // omitting either would understate this surface. The tier is what really
+      // bounds them: every cap.pkg* row is "unlocked", and a DISTRIBUTED script
+      // is forced restricted at pull — so a package's own scripts can never
+      // publish or pull, which is what stops a package from propagating itself.
+      "distribution.publish",
+      "distribution.subscribe",
     ],
     gate: "Broker (declared + granted): formula.udf gates the invocation, the library mount's own R19 ceiling + grants gate what the body may touch",
     executesUserCode: true,
@@ -262,6 +297,14 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "schedule",
       "file.picker",
       "ui.shortcut",
+      // The .calp package loop, split OUTBOUND / INBOUND. Both are broker-gated
+      // (cap.pkg*) and therefore part of any author-declared ceiling, so
+      // omitting either would understate this surface. The tier is what really
+      // bounds them: every cap.pkg* row is "unlocked", and a DISTRIBUTED script
+      // is forced restricted at pull — so a package's own scripts can never
+      // publish or pull, which is what stops a package from propagating itself.
+      "distribution.publish",
+      "distribution.subscribe",
     ],
     gate: "Broker + R19 ceiling (the library's declaration) + per-package consent (distributed)",
     executesUserCode: true,

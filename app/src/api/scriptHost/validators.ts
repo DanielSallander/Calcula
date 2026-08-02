@@ -90,6 +90,27 @@ export const vCall: Validator = ([targetType, targetInstanceId, methodName]) => 
   return true;
 };
 
+/**
+ * base.callImport: [alias, methodName, args].
+ *
+ * SHAPE ONLY, on purpose. Neither the alias nor the method name is trusted here
+ * — the alias is resolved against the HOST-side import table keyed by the
+ * CALLING script's id (host.ts `authorizeImportCall`), and the method name is
+ * checked against the exports that table recorded. A validator cannot do that
+ * job: it never reads state, and it runs before the tier check, so anything it
+ * decided would leak policy into an error message.
+ */
+export const vCallImport: Validator = ([alias, methodName, args]) => {
+  if (!isBoundedString(alias, MAX_KEY) || (alias as string).length === 0) {
+    return "alias must be a non-empty string";
+  }
+  if (!isBoundedString(methodName, MAX_KEY) || (methodName as string).length === 0) {
+    return "methodName must be a non-empty string";
+  }
+  if (args !== undefined && !Array.isArray(args)) return "args must be an array";
+  return true;
+};
+
 export const vHook: Validator = ([name]) =>
   isBoundedString(name, MAX_EVENT_NAME) && (name as string).length > 0
     ? true
@@ -1347,6 +1368,152 @@ export const vWritebackReview: Validator = ([decision]) => {
     if (!isBoundedString(d.submissionId, MAX_KEY) || (d.submissionId as string).length === 0) {
       return "a model-column decision needs submissionId (a non-empty string)";
     }
+  }
+  return true;
+};
+
+// ============================================================================
+// distribution.publish / distribution.subscribe — the .calp package loop (B3)
+// ============================================================================
+//
+// Every shape here is a CHEAP pre-flight. The authoritative gate is the Rust
+// `script_distribution` gateway, which re-checks the ACTION'S OWN capability
+// (outbound and inbound never share a grant), refuses any registry the user has
+// not already configured, demands Ed25519 publisher-key possession before a
+// registry write, rate-limits per bucket, and then dispatches into the very same
+// calp_* commands the interactive UI calls — so a scripted pull passes exactly
+// the signature, TOFU, artifact-integrity and min_app_version checks a human's
+// does, and a scripted publish signs with exactly the same key.
+
+/** Registry locations, package names and version strings are identifiers, not
+ *  documents — a megabyte-long "package name" is a bug or an attack. */
+const MAX_REGISTRY_LOCATION = 2048;
+const MAX_PACKAGE_NAME = 256;
+const MAX_VERSION_TEXT = 128;
+
+/** The version-bump levels `calp_next_version` understands. */
+const VERSION_BUMPS: ReadonlySet<string> = new Set(["major", "minor", "patch"]);
+
+/** Fields a script must never set on a publish. Each is rejected BY NAME (the
+ *  Rust gateway rejects them again, authoritatively) rather than ignored,
+ *  because silently overriding an argument leaves the author believing it
+ *  worked:
+ *   - publishedBy    : the byline other people read. Server-supplied from the
+ *                      machine's publisher identity, so an automation cannot
+ *                      publish under somebody else's name.
+ *   - customObjects  : package payload. Collected by Calcula from registered
+ *                      providers, never handed in by the caller.
+ *   - includeComments: threaded comments are internal discussion; shipping them
+ *                      to a registry is a privacy decision only a human makes. */
+const FORBIDDEN_PUBLISH_FIELDS: ReadonlyArray<readonly [string, string]> = [
+  ["publishedBy", "the byline is taken from this machine's publisher identity"],
+  ["customObjects", "package payloads are collected by Calcula, never supplied by the caller"],
+  [
+    "includeComments",
+    "shipping threaded comments to a registry is a privacy decision only a person can make",
+  ],
+];
+
+function registryLocationError(location: unknown): string | null {
+  if (!isBoundedString(location, MAX_REGISTRY_LOCATION) || (location as string).trim().length === 0) {
+    return "registry must be a non-empty location string (use caps.packages.listRegistries() — a script may only use registries you already added)";
+  }
+  return null;
+}
+
+function packageNameError(name: unknown): string | null {
+  if (!isBoundedString(name, MAX_PACKAGE_NAME) || (name as string).trim().length === 0) {
+    return "packageName must be a non-empty string";
+  }
+  return null;
+}
+
+function versionTextError(v: unknown, label: string): string | null {
+  if (!isBoundedString(v, MAX_VERSION_TEXT) || (v as string).trim().length === 0) {
+    return `${label} must be a non-empty string`;
+  }
+  return null;
+}
+
+/** cap.pkgBrowse args: [registry]. */
+export const vDistRegistry: Validator = ([registry]) => registryLocationError(registry) ?? true;
+
+/** cap.pkgInspect / cap.pkgPull args: [registry, packageName, versionPin]. */
+export const vDistPackageRef: Validator = ([registry, packageName, versionPin]) =>
+  registryLocationError(registry) ??
+  packageNameError(packageName) ??
+  versionTextError(versionPin, "versionPin") ??
+  true;
+
+/** cap.pkgNextVersion args: [registry, packageName, bump]. */
+export const vDistNextVersion: Validator = ([registry, packageName, bump]) => {
+  const err = registryLocationError(registry) ?? packageNameError(packageName);
+  if (err) return err;
+  if (!isBoundedString(bump, 16) || !VERSION_BUMPS.has(bump as string)) {
+    return `bump must be one of: ${[...VERSION_BUMPS].join(", ")}`;
+  }
+  return true;
+};
+
+/** A list of workbook sheet indices, or nothing (meaning "the default for this
+ *  package kind"). Bounded because it is a selection, not a data structure. */
+function sheetIndicesError(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v)) return "sheetIndices must be an array of sheet indices";
+  if (v.length > 4096) return "sheetIndices has too many entries (max 4096)";
+  for (const i of v) {
+    if (!Number.isInteger(i) || (i as number) < 0) {
+      return "sheetIndices entries must be non-negative integers";
+    }
+  }
+  return null;
+}
+
+/** cap.pkgPublishPreview args: [sheetIndices?]. */
+export const vDistPublishPreview: Validator = ([sheetIndices]) =>
+  sheetIndicesError(sheetIndices) ?? true;
+
+/** cap.pkgPublish args: [spec] where spec is
+ *  `{ registry, packageName, version, kind?, sheetIndices? }`. */
+export const vDistPublish: Validator = ([spec]) => {
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+    return "publish takes one object: { registry, packageName, version, kind?, sheetIndices? }";
+  }
+  const s = spec as Record<string, unknown>;
+  for (const [key, why] of FORBIDDEN_PUBLISH_FIELDS) {
+    if (key in s) return `'${key}' cannot be set from a script: ${why}`;
+  }
+  const err =
+    registryLocationError(s.registry) ??
+    packageNameError(s.packageName) ??
+    versionTextError(s.version, "version") ??
+    sheetIndicesError(s.sheetIndices);
+  if (err) return err;
+  if (s.kind !== undefined && s.kind !== null) {
+    if (!isBoundedString(s.kind, 64) || (s.kind as string).trim().length === 0) {
+      return "kind must be a non-empty string (e.g. \"report\", \"template\", \"dataset\", \"library\")";
+    }
+  }
+  return true;
+};
+
+/** cap.pkgPublishModel args: [spec] where spec is
+ *  `{ registry, packageName, version, connectionId }`. */
+export const vDistPublishModel: Validator = ([spec]) => {
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+    return "publishModel takes one object: { registry, packageName, version, connectionId }";
+  }
+  const s = spec as Record<string, unknown>;
+  for (const [key, why] of FORBIDDEN_PUBLISH_FIELDS) {
+    if (key in s) return `'${key}' cannot be set from a script: ${why}`;
+  }
+  const err =
+    registryLocationError(s.registry) ??
+    packageNameError(s.packageName) ??
+    versionTextError(s.version, "version");
+  if (err) return err;
+  if (!isBoundedString(s.connectionId, MAX_KEY) || (s.connectionId as string).length === 0) {
+    return "connectionId must be a non-empty string";
   }
   return true;
 };

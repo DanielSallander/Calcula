@@ -22,22 +22,41 @@
 //          which is the honest outcome, because that declaration is what the
 //          transparency panel and the .calp consent prompt both read.
 //
-// WHAT THIS RULE DOES *NOT* SAY — the residual, stated plainly.
-//          It intersects DECLARED CEILINGS, not GRANTS. The library realm's
-//          actual grant comes from the LIBRARY's own install consent (install.ts
-//          records `declaredCapabilities` against the package), capped by this
-//          intersection; it is not additionally gated on the consumer having
-//          been granted the capability. So a consumer that DECLARES `net.fetch`
-//          but has never been JIT-prompted for it can still cause egress by
-//          calling a library the user approved for `net.fetch` at install time.
-//          Nothing is granted that the user did not approve — they approved it
-//          for the library, by name, with its source shown — but the CONSUMER's
-//          own just-in-time prompt is bypassed on that path. Closing it properly
-//          needs per-call caller identity at the target, i.e. the
-//          `base.callImport` broker method of design §5.3; the bearer-token
-//          relay used today cannot tell the library who called it. Do not
-//          describe this rule as "the consumer must be consented for it" until
-//          that lands.
+// WHAT THIS FILE COMPUTES, AND WHAT COMPLETES IT ELSEWHERE.
+//          This file intersects DECLARED CEILINGS, not GRANTS, and it cannot do
+//          otherwise: it runs at LINK time, and a consumer legitimately holds no
+//          grants at link time — grants are just-in-time, so the first USE is
+//          the prompt. Intersecting grants here would either deny every library
+//          that needs anything or force a prompt before the script had done
+//          anything at all.
+//
+//          The grant half of the rule therefore lives at CALL time, in
+//          `authorizeImportCall` (scriptHost/host.ts), which the
+//          `base.callImport` relay runs on every call:
+//
+//              a call through imports.<alias> is admitted only if the CALLER
+//              holds a grant for every capability the realm was mounted with
+//              (and, for net.fetch, for every origin it was granted) — with the
+//              caller's own JIT prompt raised right there if it declared the
+//              capability but was never asked.
+//
+//          Together: DECLARED(consumer) caps what the realm may hold, and
+//          GRANTED(consumer) caps what any individual call may use. This closes
+//          the residual Wave H documented here — a consumer that declared
+//          `net.fetch` but had never been prompted causing egress through a
+//          library the user approved at install time, skipping the consumer's
+//          own prompt. It was unfixable then only because the bearer-token relay
+//          could not tell the target who was calling; `base.callImport` resolves
+//          the alias against host state keyed by the CALLING script's id, so the
+//          caller is now known per call.
+//
+//          What this file's rule still does NOT say: a call is admitted on the
+//          caller's grants for the realm's WHOLE capability set, not on the
+//          capabilities that one export actually goes on to use. That is
+//          deliberately conservative (it over-asks rather than under-asks) and
+//          is a consequence of the realm being shared: per-call attribution
+//          inside the realm would need the worker protocol to carry the calling
+//          identity through to the realm's own outbound broker calls.
 //
 // WHY THE OTHER DIRECTION IS ALSO CLOSED.
 //          The converse (a library borrowing the CONSUMER's grants) is closed by
@@ -53,10 +72,12 @@
 //          `buildHandleFromDefinition` (scriptHost/broker.ts) turns into
 //          `handle.declaredCapabilities`, after which `checkPolicy` denies any
 //          capability outside it with PermissionDenied *before* the grant check
-//          — so it is not even JIT-promptable. There is no second enforcement
-//          point, and a library's own source cannot widen it, because
-//          `buildHandleFromDefinition` takes the ceiling from its CALLER (this
-//          module, trusted host code) and never from the script.
+//          — so it is not even JIT-promptable. A library's own source cannot
+//          widen it, because `buildHandleFromDefinition` takes the ceiling from
+//          its CALLER (this module, trusted host code) and never from the
+//          script. The second enforcement point is the per-call grant check in
+//          `authorizeImportCall` described above; the same computed set is what
+//          the linker records on each import binding for it to measure against.
 
 import type { CapabilityId } from "../scriptHost/capabilityIds";
 import type { ScriptAccessLevel } from "../scriptableObjects";

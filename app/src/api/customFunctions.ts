@@ -10,6 +10,13 @@
 // Sandboxing: the body runs in the hardened Worker realm (no DOM/Tauri/network
 // except declared capabilities), NOT on the main thread. Privileged reach is
 // limited to the library's declaredCapabilities (e.g. "bi.query" for cube.*).
+//
+// DISTRIBUTED CODE: a .calp package may ship its own functions, which the
+// backend MERGES per function into this one subscriber-owned library record
+// (calp_commands.rs merge_custom_function_library) and stamps `sourcePackage` +
+// `sourceDigest` on. Those functions are somebody else's CODE, so they are
+// consent-gated here before anything mounts — see the "distributed-package
+// consent gate" section below.
 
 import { invoke } from "@tauri-apps/api/core";
 import { registerFunction, UDF_ERROR_KEY } from "./formulaFunctions";
@@ -17,6 +24,8 @@ import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
 import { callExposedMethod } from "./scriptableObjects";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
 import { linkScript, type LibraryUseDeclaration } from "./scriptLibraries";
+import { loadConsents, isConsentCurrent, recordConsent } from "./distributedConsent";
+import { emitAppEvent } from "./events";
 
 /** A user-authored custom formula function. */
 export interface CustomFunctionUdf {
@@ -32,6 +41,20 @@ export interface CustomFunctionUdf {
   /** Recalculate on every edit (Excel's Application.Volatile). Default false:
    *  the cell recalculates only when one of its arguments changes. */
   volatile?: boolean;
+  /**
+   * The .calp package this function ARRIVED IN, stamped by the backend merge.
+   * Absent/empty means the subscriber wrote it themselves. Present means it is
+   * distributed code and must clear {@link gateCustomFunctionLibrary} before it
+   * is allowed to mount.
+   */
+  sourcePackage?: string;
+  /**
+   * Content hash the backend merge stamps alongside `sourcePackage`, so a later
+   * refresh can tell "the subscriber edited this" from "the publisher changed
+   * it". Not part of the consent hash — consent is over the CODE, and this key
+   * is derived from it.
+   */
+  sourceDigest?: string;
 }
 
 /** A library of custom functions sharing one sandbox + capability set. */
@@ -288,15 +311,172 @@ async function rawInstall(lib: CustomFunctionLibrary, source: string): Promise<v
   }
 }
 
+// ---------------------------------------------------------------------------
+// The distributed-package consent gate
+// ---------------------------------------------------------------------------
+//
+// THE HOLE THIS CLOSES. A .calp package can ship a custom-function library. The
+// backend merges it, per function, into the ONE reserved library record this
+// module installs (calp_commands.rs merge_custom_function_library) and then
+// emits "custom-functions:refresh" so it goes live without a reopen. Until this
+// gate existed, that meant a package's JavaScript mounted and ran — on pull, on
+// refresh and on every subsequent workbook open — with no prompt at all, while
+// three consent strings the user had just read promised the opposite ("any code
+// that arrives stays switched off until you approve it").
+//
+// Worse than "unprompted": the merged record shares the SUBSCRIBER'S script id
+// and therefore the subscriber's live capability grants. A subscriber who had
+// granted their own functions bi.query was, without being asked, running a
+// stranger's code with it. That is the confused deputy this project exists to
+// refuse.
+//
+// SHAPE. Identical to the chart-transform / chart-mark gate
+// (Charts/lib/distributedLibraryGate.ts) and stored in the SAME shared consent
+// store (@api/distributedConsent), namespaced so it can never collide with the
+// object-script record for the same .calp:
+//
+//   * consent is per PACKAGE, over that package's functions only — a second
+//     package cannot ride in on the first one's approval;
+//   * the consent source carries a `// @capability` pragma per capability the
+//     SHARED realm holds, so the store's own expansion check re-prompts when the
+//     subscriber later widens the library. Without this, a package function
+//     approved when the library was inert would silently acquire net.fetch the
+//     day the subscriber granted it for their own function;
+//   * the hash is over the code, so an upstream edit re-prompts too.
+//
+// FAIL CLOSED BY CONSTRUCTION. The filter lives inside `doInstall`, the single
+// choke point every install path funnels through (startup, AFTER_OPEN, the
+// backend refresh event, and the authoring dialog's Save). Putting it in the
+// extension instead would leave whichever caller is added next ungated.
+
+/** Consent-store key for one package's contribution to the shared library. */
+export function customFunctionConsentKey(packageName: string): string {
+  return `custom-functions:${packageName}`;
+}
+
+/** Provenance-stripped canonical form of one function — what consent is over. */
+function canonicalFunction(f: CustomFunctionUdf): string {
+  return JSON.stringify({
+    name: normalizeName(f.name),
+    params: f.params.map((p) => p.trim()).filter(Boolean),
+    body: f.body,
+    description: f.description ?? "",
+    volatile: f.volatile === true,
+  });
+}
+
+/**
+ * The canonical "consent source" for one package's functions: one
+ * `// @capability <id>` pragma per capability the SHARED library realm holds,
+ * then the package's functions in a stable order. Hashing over this (rather
+ * than the raw JSON) is what makes the shared distributed-consent store work
+ * verbatim — a code edit changes the hash, and a capability expansion changes
+ * both the hash and the store's declared-capability comparison.
+ */
+export function customFunctionConsentSource(
+  functions: CustomFunctionUdf[],
+  capabilities: CapabilityId[],
+): string {
+  const pragmas = [...capabilities].sort().map((c) => `// @capability ${c}`).join("\n");
+  const canon = functions.map(canonicalFunction).sort().join("\n");
+  return (pragmas ? pragmas + "\n" : "") + canon;
+}
+
+/** One package's functions awaiting the user's answer. */
+export interface PendingCustomFunctionPackage {
+  /** The .calp package the functions arrived in. */
+  packageName: string;
+  /** Upper-cased function names, for the prompt. */
+  functionNames: string[];
+  /** What the shared realm holds — i.e. what approving really grants this code. */
+  capabilities: CapabilityId[];
+  /** The exact string consent is recorded against (opaque to the caller). */
+  consentSource: string;
+}
+
+/** App event carrying the packages whose functions were withheld. */
+export const CUSTOM_FUNCTIONS_CONSENT_NEEDED = "customfunctions:consent-needed";
+
+/**
+ * Split a library into what may mount now and what is waiting on the user.
+ * Locally-authored functions (no `sourcePackage`) always pass; every package's
+ * functions pass only while a persisted consent covers that exact code AND that
+ * exact capability set. Pure apart from the consent read — exported so the
+ * extension can render the prompt and the tests can drive it.
+ */
+export async function gateCustomFunctionLibrary(
+  lib: CustomFunctionLibrary,
+): Promise<{ library: CustomFunctionLibrary; pending: PendingCustomFunctionPackage[] }> {
+  const caps = [...(lib.capabilities ?? [])].sort();
+  const all = lib.functions ?? [];
+  const byPackage = new Map<string, CustomFunctionUdf[]>();
+  for (const f of all) {
+    const pkg = typeof f.sourcePackage === "string" ? f.sourcePackage.trim() : "";
+    if (!pkg) continue;
+    const list = byPackage.get(pkg) ?? [];
+    list.push(f);
+    byPackage.set(pkg, list);
+  }
+  if (byPackage.size === 0) return { library: lib, pending: [] };
+
+  const consents = await loadConsents();
+  const withheld = new Set<CustomFunctionUdf>();
+  const pending: PendingCustomFunctionPackage[] = [];
+  for (const pkg of [...byPackage.keys()].sort()) {
+    const fns = byPackage.get(pkg) as CustomFunctionUdf[];
+    const consentSource = customFunctionConsentSource(fns, caps);
+    const current = await isConsentCurrent(consents, customFunctionConsentKey(pkg), [
+      { id: CUSTOM_FUNCTIONS_SCRIPT_ID, source: consentSource },
+    ]);
+    if (current) continue;
+    for (const f of fns) withheld.add(f);
+    pending.push({
+      packageName: pkg,
+      functionNames: fns.map((f) => normalizeName(f.name)),
+      capabilities: caps,
+      consentSource,
+    });
+  }
+  if (withheld.size === 0) return { library: lib, pending: [] };
+  // Original order preserved: the generated source, and therefore the mounted
+  // realm, must not reshuffle just because a package was withheld.
+  return { library: { ...lib, functions: all.filter((f) => !withheld.has(f)) }, pending };
+}
+
+/**
+ * Record the user's approval of one package's functions and re-run the install
+ * so they go live immediately. Persisted in the workbook, keyed by code hash +
+ * capability set, so a later open does not re-prompt but an upstream change (or
+ * a capability expansion) does.
+ */
+export async function grantCustomFunctionConsent(
+  p: PendingCustomFunctionPackage,
+): Promise<void> {
+  await recordConsent(
+    customFunctionConsentKey(p.packageName),
+    [{ id: CUSTOM_FUNCTIONS_SCRIPT_ID, source: p.consentSource }],
+    p.capabilities.map((capability) => ({ capability })),
+  );
+  await loadAndInstallCustomFunctions();
+}
+
 async function doInstall(lib: CustomFunctionLibrary): Promise<void> {
-  const defs = lib.functions.filter((d) => d.name.trim() && d.body.trim());
+  // THE GATE. Everything below this line operates on the consented subset only.
+  const { library: gated, pending } = await gateCustomFunctionLibrary(lib);
+  if (pending.length > 0) {
+    // Announce, do not block: the withheld functions simply are not mounted, so
+    // their cells resolve to #NAME? until the user says yes. A listener (the
+    // CustomFunctions extension) turns this into the prompt.
+    emitAppEvent(CUSTOM_FUNCTIONS_CONSENT_NEEDED, { pending });
+  }
+  const defs = gated.functions.filter((d) => d.name.trim() && d.body.trim());
   // Generate (and VALIDATE) first — a bad name/param throws here, BEFORE any
   // teardown, so an invalid edit never tears down a working library.
-  const source = defs.length ? generateLibrarySource(defs, lib.uses ?? []) : "";
+  const source = defs.length ? generateLibrarySource(defs, gated.uses ?? []) : "";
   const prev = lastGood;
   try {
-    await rawInstall(lib, source);
-    lastGood = { lib, source };
+    await rawInstall(gated, source);
+    lastGood = { lib: gated, source };
   } catch (e) {
     // Mount/compile failed — restore the previous good library rather than
     // leaving the user with NO functions.

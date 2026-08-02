@@ -1340,7 +1340,7 @@ impl Default for ScriptProvenance {
 /// the script is denied a capability it correctly declared. The origin argument
 /// of a `// @capability net.fetch <origin>` pragma is a runtime grant hint, not
 /// part of the ceiling, so only the cap id set is collected here.
-pub const KNOWN_CAPABILITY_IDS: [&str; 13] = [
+pub const KNOWN_CAPABILITY_IDS: [&str; 16] = [
     "net.fetch",
     "bi.query",
     "bi.sql",
@@ -1354,6 +1354,20 @@ pub const KNOWN_CAPABILITY_IDS: [&str; 13] = [
     "schedule",
     "file.picker",
     "ui.shortcut",
+    // Frontend/host-mediated (no Rust gate): it decides whether the host puts
+    // CELL CONTENTS into a message bound for a sandboxed add-in. It is here
+    // because it must be DECLARABLE — a capability missing from this list is
+    // stripped out of a local script's ceiling at save and out of a .calp at
+    // publish, which would silently disarm the declaration the gate reads.
+    "grid.read",
+    // The .calp package loop, split by DIRECTION (outbound publish vs inbound
+    // pull/refresh). Both are Rust-enforced in `script_distribution`, and both
+    // must be declarable: a capability missing from this list is stripped out
+    // of a local script's ceiling at save and out of a .calp at publish, so a
+    // library that declared `// @capability distribution.subscribe` would ship
+    // with an empty ceiling and be denied at the broker with no clue why.
+    "distribution.publish",
+    "distribution.subscribe",
 ];
 
 /// Parse a script source for `// @capability <id> [origin]` line-comment
