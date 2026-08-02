@@ -29,7 +29,8 @@ out/
 xlsx-workbooks/
 
 # Documentation
-docs/
+docs/*
+!docs/design/
 
 # Logs
 logs
