@@ -16,6 +16,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionRegistry, AppEvents } from "@api";
 import { showDialog } from "@api/ui";
+import { showToast } from "@api/notifications";
 import { onAppEvent } from "@api/events";
 import { StartRecordingDialog } from "./components/StartRecordingDialog";
 import { RecordedMacroDialog } from "./components/RecordedMacroDialog";
@@ -171,7 +172,13 @@ function activate(context: ExtensionContext): void {
     if (e.ctrlKey && e.shiftKey && (e.key === "R" || e.key === "r")) {
       e.preventDefault();
       void context.commands.execute(COMMANDS.START).catch((err) => {
+        // A keyboard shortcut that fails silently is a shortcut the user will
+        // press again, harder. Console output is not feedback.
         console.error("[MacroRecorder] Ctrl+Shift+R failed:", err);
+        showToast(
+          `Record Macro (Ctrl+Shift+R) failed: ${err instanceof Error ? err.message : String(err)}`,
+          { type: "error" },
+        );
       });
     }
   };

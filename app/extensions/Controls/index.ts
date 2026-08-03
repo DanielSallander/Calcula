@@ -32,6 +32,7 @@ import {
   getRowHeight as getRowHeightSync,
 } from "@api/dimensions";
 import { emitAppEvent, onAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
 import {
   overlayGetRowHeaderWidth,
@@ -118,6 +119,7 @@ import {
   toggleDesignMode,
   onDesignModeChange,
 } from "./lib/designMode";
+import { diagnoseButtonClick } from "./lib/buttonClickDiagnosis";
 import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
@@ -1150,7 +1152,13 @@ function activate(context: ExtensionContext): void {
         detail: { row: r, col: c },
       }));
     } catch (err) {
+      // mountScript throws now (a declined Script Security prompt included), so
+      // this is reachable for a reason the user caused and can undo.
       console.error("[Controls] Failed to apply template:", err);
+      showToast(
+        `The shape template could not be applied: ${err instanceof Error ? err.message : String(err)}`,
+        { type: "error" },
+      );
     } finally {
       applyingTemplates.delete(d.instanceId);
     }
@@ -1740,6 +1748,15 @@ function setupFloatingObjectEvents(): void {
       // Design mode, shape, or image: select the control and show properties
       // (shapes and images are always selectable regardless of design mode)
 
+      // A button clicked in Design Mode gets SELECTED, not run. That branch was
+      // silent, so a user who left Design Mode on an hour ago clicks their macro
+      // button and sees nothing happen — with no way to guess why. A save-time
+      // hint cannot reach them; the click has to say it. Throttled, because
+      // arranging controls is a legitimate reason to click many of them.
+      if (ctrlType === "button" && getDesignMode()) {
+        announceDesignModeClick();
+      }
+
       if (ctrlKey) {
         // Ctrl+Click: toggle selection (multi-select)
         toggleFloatingControlSelection(controlId);
@@ -1775,9 +1792,23 @@ function setupFloatingObjectEvents(): void {
     } else {
       // Run mode: only buttons execute scripts
       if (ctrlType === "button") {
-        executeFloatingButtonAction(controlSheet, controlRow, controlCol);
-        // Fire the scriptable button's onClick hook (the #1 VBA entry point).
+        // Fire the scriptable button's onClick hook (the #1 VBA entry point)
+        // FIRST, synchronously, so a mounted object script starts without
+        // waiting on the metadata round trip the inline path needs.
         emitAppEvent("button:clicked", { instanceId: controlId, x: 0, y: 0 });
+        // Not fire-and-forget: an unhandled rejection here used to be the whole
+        // story a user got for a button that did nothing.
+        void runFloatingButtonClick(
+          controlSheet,
+          controlRow,
+          controlCol,
+          controlId,
+        ).catch((err) => {
+          showToast(
+            `The button could not run: ${err instanceof Error ? err.message : String(err)}`,
+            { type: "error" },
+          );
+        });
       }
       // Emit shape click event for scriptable objects (run mode too)
       if (ctrlType === "shape") {
@@ -2045,9 +2076,20 @@ function sanitizeScriptName(name: string): string {
   return sanitized || "_unnamed";
 }
 
+/** Module ids already reported as unusable, so a click does not re-toast. */
+const reportedBadModules = new Set<string>();
+
 /**
  * Build a preamble that wraps all script modules as callable functions.
  * Each module's source is wrapped as: function ModuleName() { ...source... }
+ *
+ * ONE BAD MODULE MUST NOT BREAK EVERY BUTTON. The preamble is CONCATENATED, so
+ * a module that does not parse as a function body — a hand-edited script with a
+ * top-level `await`, a half-finished edit — turns the whole preamble into a
+ * syntax error and every inline button in the workbook stops working with a
+ * message about a line the user never wrote. Each module is therefore compiled
+ * on its own first; one that cannot be is left out and REPORTED (once), instead
+ * of quietly taking the others down with it.
  */
 async function buildScriptPreamble(): Promise<string> {
   // Script runtime via the @api door — no longer reaches into the ScriptEditor extension.
@@ -2056,44 +2098,133 @@ async function buildScriptPreamble(): Promise<string> {
 
   const parts: string[] = [];
   for (const summary of summaries) {
+    let script: { name: string; source: string } | null = null;
     try {
-      const script = await getWorkbookScript(summary.id);
-      if (script && script.source) {
-        const fnName = sanitizeScriptName(script.name);
-        parts.push(`function ${fnName}() {\n${script.source}\n}`);
-      }
-    } catch {
-      // Skip modules that fail to load
+      script = await getWorkbookScript(summary.id);
+    } catch (e) {
+      reportBadModule(
+        summary.id,
+        summary.name,
+        `it could not be read (${e instanceof Error ? e.message : String(e)})`,
+      );
+      continue;
     }
+    if (!script || !script.source) continue;
+
+    const fnName = sanitizeScriptName(script.name);
+    const wrapped = `function ${fnName}() {\n${script.source}\n}`;
+    try {
+      // eslint-disable-next-line no-new-func
+      new Function(wrapped);
+    } catch (e) {
+      reportBadModule(
+        summary.id,
+        script.name,
+        `it is not valid on the workbook script runtime (${e instanceof Error ? e.message : String(e)})`,
+      );
+      continue;
+    }
+    parts.push(wrapped);
   }
   return parts.length > 0 ? parts.join("\n") + "\n" : "";
+}
+
+function reportBadModule(id: string, name: string, why: string): void {
+  console.warn(`[Controls] Script module "${name}" excluded from buttons: ${why}`);
+  if (reportedBadModules.has(id)) return;
+  reportedBadModules.add(id);
+  showToast(
+    `The script module "${name}" is not available to buttons because ${why}. ` +
+      "Buttons that call it will report that it is not defined.",
+    { type: "warning" },
+  );
+}
+
+/** Last time the Design-Mode explanation was shown (throttle, ms since epoch). */
+let lastDesignModeNoticeAt = 0;
+
+/** Tell the user, at most once every few seconds, why their click selected
+ *  instead of ran. */
+function announceDesignModeClick(): void {
+  const now = Date.now();
+  if (now - lastDesignModeNoticeAt < 4000) return;
+  lastDesignModeNoticeAt = now;
+  showToast(
+    "Design Mode is on, so clicking a button selects it instead of running it. " +
+      "Turn it off (Developer ▸ Design Mode) to run the button's macro.",
+    { type: "info" },
+  );
 }
 
 /**
  * Execute a floating button's OnSelect action.
  * The onSelect value is inline code that runs directly in the script engine.
  * Custom script modules from the Script Editor are available as callable functions.
+ *
+ * Returns whether inline source actually RAN, so the caller can tell "this
+ * button did something" apart from "this button has no inline action" — the
+ * distinction the no-op diagnosis below is built on. Throws on failure rather
+ * than logging: the caller turns it into a message the user can read.
  */
-async function executeFloatingButtonAction(sheetIndex: number, row: number, col: number): Promise<void> {
+async function executeFloatingButtonAction(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<boolean> {
   const metadata = await getControlMetadata(sheetIndex, row, col);
-  if (!metadata) return;
+  if (!metadata) return false;
 
   const onSelect = metadata.properties["onSelect"];
-  if (!onSelect || !onSelect.value) return;
+  if (!onSelect || !onSelect.value) return false;
 
-  try {
-    // Prepend script modules as callable functions, then append the OnSelect code
-    const preamble = await buildScriptPreamble();
-    const fullSource = preamble + onSelect.value;
-    const result = await runWorkbookScript(fullSource, "button_onSelect.js");
-    if (result.type === "success" && result.cellsModified > 0) {
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
-    } else if (result.type === "error") {
-      console.error(`[Controls] Button OnSelect error: ${result.message}`);
-    }
-  } catch (err) {
-    console.error("[Controls] Failed to execute floating button OnSelect:", err);
+  // Prepend script modules as callable functions, then append the OnSelect code
+  const preamble = await buildScriptPreamble();
+  const fullSource = preamble + onSelect.value;
+  const result = await runWorkbookScript(fullSource, "button_onSelect.js");
+  if (result.type === "error") {
+    throw new Error(result.message);
   }
+  // Refresh unconditionally on success: `cellsModified > 0` is the backend's
+  // count of cells IT wrote, and a script can change the grid through paths it
+  // does not tally. A redundant refetch costs one round trip; a missed one
+  // leaves the user looking at stale numbers and calling the button broken.
+  window.dispatchEvent(new CustomEvent("grid:refresh"));
+  return true;
+}
+
+/**
+ * A run-mode click on a floating button: run whatever is bound to it, and — if
+ * NOTHING is — say so.
+ *
+ * "Nothing happened" has been the report on this feature twice. A click that
+ * finds no inline action and no mounted object script is not a quiet no-op; it
+ * is the single most informative moment available, because the user is looking
+ * right at the control they expected to work. Each branch names the cause and
+ * what to do about it.
+ */
+async function runFloatingButtonClick(
+  sheetIndex: number,
+  row: number,
+  col: number,
+  instanceId: string,
+): Promise<void> {
+  const ranInline = await executeFloatingButtonAction(sheetIndex, row, col);
+
+  // Dynamic, like the other ObjectScriptManager use in this file: the script
+  // host pulls in the worker bootstrap, and Controls activates long before any
+  // script does.
+  const { ObjectScriptManager, mountedScriptHasHook } = await import("@api");
+  const script = ObjectScriptManager.getScript("button", instanceId);
+  const mounted = script ? ObjectScriptManager.isScriptMounted(script.id) : false;
+
+  const diagnosis = diagnoseButtonClick({
+    ranInline,
+    script: script ? { id: script.id, name: script.name } : null,
+    mounted,
+    hasClickHandler:
+      script && mounted ? mountedScriptHasHook(script.id, "button.onClick") : false,
+  });
+  if (diagnosis) showToast(diagnosis.message, { type: diagnosis.variant });
 }
 
 // ============================================================================
@@ -2319,7 +2450,16 @@ async function loadFloatingControls(): Promise<void> {
 
     syncFloatingControlRegions();
   } catch (err) {
+    // The visible consequence is "my buttons are gone after reopening the
+    // file". Logging that to the console tells the person who can fix it
+    // nothing, because they are not looking at the console.
     console.error("[Controls] Failed to load floating controls:", err);
+    showToast(
+      "This workbook's on-grid controls (buttons, shapes, images) could not be " +
+        `loaded: ${err instanceof Error ? err.message : String(err)} ` +
+        "They are missing from the sheet until this is resolved.",
+      { type: "error", duration: 0 },
+    );
   }
 }
 

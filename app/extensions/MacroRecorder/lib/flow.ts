@@ -19,6 +19,7 @@
 
 import { showDialog } from "@api/ui";
 import type { Selection } from "@api";
+import { getActiveSheet } from "@api/lib";
 import { getCachedLocale } from "@api/locale";
 import type { MacroTarget, RecordedAction } from "./types";
 import { RESULT_DIALOG_ID } from "./ids";
@@ -65,22 +66,41 @@ export function setCurrentSelection(next: Selection | null): void {
   selection = next;
 }
 
-/** The cell a generated button should be anchored at: the active cell, or A1. */
-export function getAnchorCell(): { sheetIndex: number; row: number; col: number } {
-  if (!selection) return { sheetIndex: 0, row: 0, col: 0 };
+/**
+ * The cell a generated button should be anchored at: the active cell, or A1.
+ *
+ * NO SHEET INDEX HERE, deliberately. Core's `Selection` declares `sheetIndex?`
+ * but nothing in the grid reducer ever sets it, so reading it yielded `0` for
+ * every selection on every sheet: a button recorded on Sheet2 wrote its control
+ * metadata to Sheet1 and only *looked* right because the floating-control store
+ * does not filter by sheet. The sheet is authoritative state, so it is asked
+ * for — see `resolveAnchorSheetIndex`.
+ */
+export function getAnchorCell(): { row: number; col: number } {
+  if (!selection) return { row: 0, col: 0 };
   return {
-    sheetIndex: selection.sheetIndex ?? 0,
     row: selection.activeRow ?? selection.endRow,
     col: selection.activeCol ?? selection.endCol,
   };
 }
 
+/** The sheet a generated button belongs on: whichever one is actually active. */
+export async function resolveAnchorSheetIndex(): Promise<number> {
+  return getActiveSheet();
+}
+
 /**
  * The source that gets STORED for a recording, in the flavour of the runtime the
- * user chose at the start. Object-script recordings store the standalone
- * function ("bare"); the button entry point is generated on demand when the
- * user actually attaches one, so the stored module stays the readable, editable
- * artifact rather than a click handler.
+ * user chose at the start.
+ *
+ * ONE ARTIFACT, BOTH USES. This used to store a "bare" variant — the macro
+ * function followed by a comment saying how someone might call it — while the
+ * button path generated a *second*, click-handler variant on demand. Two
+ * sources for one recording is two things to keep in step, and the one that got
+ * stored was the one that could not run: pressing Run defined a function and
+ * stopped. The object-script wrapper now emits a single `setup(context)` that
+ * covers both (click handler on a button, immediate run anywhere else), so the
+ * stored module IS the button script and there is nothing to keep in step.
  */
 export function generateStoredSource(options: {
   actions: RecordedAction[];
@@ -91,11 +111,33 @@ export function generateStoredSource(options: {
   const { actions, target, name, recordedAt } = options;
   return generateMacroSource(actions, {
     target,
-    wrapper: target === "notebook" ? "notebookCell" : "bare",
+    wrapper: target === "notebook" ? "notebookCell" : "objectScript",
     name,
     decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
     recordedAt,
   }).source;
+}
+
+/**
+ * Whether every recorded action can be expressed in the QuickJS MODULE runtime,
+ * and what stops it when it cannot.
+ *
+ * Used to tell the user, at review time, that a recording they chose to store as
+ * an object script could ALSO have been stored as a module the workbook script
+ * runtime runs directly — and, in the other direction, exactly which actions
+ * rule that out. Computed from the recorded actions, never guessed from source.
+ */
+export function moduleRuntimeSupport(actions: RecordedAction[]): {
+  supported: boolean;
+  reasons: string[];
+} {
+  const { unsupported } = generateMacroSource(actions, {
+    target: "notebook",
+    wrapper: "notebookCell",
+    name: "probe",
+    header: false,
+  });
+  return { supported: unsupported.length === 0, reasons: unsupported };
 }
 
 /**

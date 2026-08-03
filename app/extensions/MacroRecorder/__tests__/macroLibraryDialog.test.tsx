@@ -1,10 +1,11 @@
 //! FILENAME: app/extensions/MacroRecorder/__tests__/macroLibraryDialog.test.tsx
-// PURPOSE: The listing surface actually shows a saved macro, and offers the
-//          action that can really run it for the runtime it was recorded for.
+// PURPOSE: The listing surface shows a saved macro and RUNS it — in whichever
+//          runtime its source was written for — and every control it refuses to
+//          offer looks refused.
 // CONTEXT: "The macro must be findable afterwards" is the requirement the whole
-//          auto-save rests on — a store with no window over it would recreate
-//          the failure this change is fixing. This renders the real dialog over
-//          a fake module store and asserts what the user sees.
+//          auto-save rests on. "Run must actually run" is the requirement the
+//          user filed twice. This renders the real dialog over a fake module
+//          store and asserts what the user sees and what gets invoked.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import React, { act } from "react";
@@ -19,6 +20,9 @@ interface StoredScript {
   source: string;
 }
 const store = new Map<string, StoredScript>();
+
+/** The one-shot object-script mount the dialog uses for `api.*` macros. */
+const runOnce = vi.fn(async (_options: unknown) => undefined);
 
 vi.mock("@api", () => ({
   listWorkbookScripts: async () =>
@@ -41,9 +45,11 @@ vi.mock("@api", () => ({
     durationMs: 3,
     screenUpdating: true,
   }),
+  runObjectScriptOnce: (options: unknown) => runOnce(options),
 }));
 
 vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
+vi.mock("@api/grid", () => ({ refreshGridData: vi.fn() }));
 
 vi.mock("@api/dialogWindow", () => ({
   useDialogWindow: () => ({
@@ -56,7 +62,8 @@ vi.mock("@api/dialogWindow", () => ({
 }));
 
 vi.mock("../lib/flow", () => ({
-  getAnchorCell: () => ({ sheetIndex: 0, row: 0, col: 0 }),
+  getAnchorCell: () => ({ row: 0, col: 0 }),
+  resolveAnchorSheetIndex: async () => 0,
 }));
 
 const hasProvider = { value: true };
@@ -67,7 +74,7 @@ vi.mock("@api/buttonControlService", () => ({
   },
 }));
 
-import { MacroLibraryDialog, buttonEntryPoint, functionNameOf } from "../components/MacroLibraryDialog";
+import { MacroLibraryDialog } from "../components/MacroLibraryDialog";
 import { buildMacroDescription } from "../lib/macroLibrary";
 
 // --- Harness ------------------------------------------------------------------
@@ -101,8 +108,25 @@ function buttonNamed(label: string): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
+async function selectFirstRow(): Promise<void> {
+  await act(async () => {
+    rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function press(button: HTMLButtonElement): Promise<void> {
+  await act(async () => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 beforeEach(() => {
   store.clear();
+  runOnce.mockClear();
   hasProvider.value = true;
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -154,12 +178,7 @@ describe("MacroLibraryDialog", () => {
       source: "Calcula.setCellValue(0, 0, '42');\n",
     });
     await render();
-
-    await act(async () => {
-      rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await selectFirstRow();
 
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     expect(textarea.value).toContain("Calcula.setCellValue(0, 0, '42');");
@@ -177,25 +196,24 @@ describe("MacroLibraryDialog", () => {
       source: "Calcula.setCellValue(0, 0, '42');\n",
     });
     await render();
-    await act(async () => {
-      rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await selectFirstRow();
 
     const run = buttonNamed("Run");
     expect(run).toBeDefined();
     expect(run!.disabled).toBe(false);
 
-    await act(async () => {
-      run!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await press(run!);
     expect(container.textContent).toContain("2 cell(s) changed");
   });
 
-  it("does NOT offer Run for an object-script macro, and explains why", async () => {
+  it("RUNS an object-script macro through a one-shot object-script mount", async () => {
+    // THE REGRESSION UNDER TEST. Run used to be `disabled` for this flavour —
+    // and because the footer styles background/colour/cursor inline, the
+    // disabled button rendered exactly like an enabled one. Clicking it
+    // produced no event, no toast and no error: "nothing happens", twice.
+    const source =
+      "async function m(api) { await api.setCellValue(0, 0, 'x'); }\n" +
+      "function setup(context) { return m(context.api); }\n";
     store.set("macro-m", {
       id: "macro-m",
       name: "M",
@@ -204,20 +222,75 @@ describe("MacroLibraryDialog", () => {
         actionCount: 1,
         recordedAt: "x",
       }),
-      source: "async function m(api) {}\n",
+      source,
     });
     await render();
-    await act(async () => {
-      rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await selectFirstRow();
 
-    expect(buttonNamed("Run")!.disabled).toBe(true);
-    expect(container.textContent).toContain("Attach it to a button");
+    const run = buttonNamed("Run (object script)");
+    expect(run).toBeDefined();
+    expect(run!.disabled).toBe(false);
+    // The reason it takes the other route is ON SCREEN, not only in a tooltip.
+    expect(container.textContent).toMatch(/OBJECT-SCRIPT runtime/i);
+    expect(
+      container.querySelector('[data-macro-run-route="objectScript"]'),
+    ).not.toBeNull();
+
+    await press(run!);
+
+    expect(runOnce).toHaveBeenCalledTimes(1);
+    const arg = runOnce.mock.calls[0][0] as {
+      source: string;
+      accessLevel: string;
+      objectType: string;
+    };
+    expect(arg.source).toBe(source);
+    expect(arg.accessLevel).toBe("unlocked");
+    expect(arg.objectType).toBe("workbook");
+    expect(container.textContent).toContain("[OK] Finished in");
   });
 
-  it("disables Add Button when the Controls extension is absent", async () => {
+  it("reports a failed object-script run instead of claiming success", async () => {
+    runOnce.mockRejectedValueOnce(
+      new Error("blocked by the Script Security setting"),
+    );
+    store.set("macro-m", {
+      id: "macro-m",
+      name: "M",
+      description: buildMacroDescription({
+        runtime: "objectScript",
+        actionCount: 1,
+        recordedAt: "x",
+      }),
+      source: "function setup(context) {}\n",
+    });
+    await render();
+    await selectFirstRow();
+    await press(buttonNamed("Run (object script)")!);
+
+    expect(container.textContent).toContain(
+      "blocked by the Script Security setting",
+    );
+    expect(container.textContent).not.toContain("[OK]");
+  });
+
+  it("gives every DISABLED footer button a visible disabled state", async () => {
+    // Nothing selected: Delete / Add Button / Save / Run are all disabled. A
+    // disabled button fires no onClick, so it must not look pressable — that
+    // exact mismatch is what made the previous "fix" invisible.
+    await render();
+    for (const label of ["Delete", "Add Button", "Save", "Run"]) {
+      const btn = buttonNamed(label)!;
+      expect(btn.disabled).toBe(true);
+      expect(btn.style.cursor).toBe("not-allowed");
+      expect(Number(btn.style.opacity)).toBeLessThan(1);
+    }
+    // Close is never disabled and must stay fully legible.
+    expect(buttonNamed("Close")!.disabled).toBe(false);
+    expect(buttonNamed("Close")!.style.cursor).toBe("pointer");
+  });
+
+  it("disables Add Button when the Controls extension is absent — and says why on screen", async () => {
     hasProvider.value = false;
     store.set("macro-m", {
       id: "macro-m",
@@ -226,33 +299,33 @@ describe("MacroLibraryDialog", () => {
       source: "x",
     });
     await render();
-    await act(async () => {
-      rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    await selectFirstRow();
 
     const add = buttonNamed("Add Button")!;
     expect(add.disabled).toBe(true);
     expect(add.title).toContain("Controls extension is not loaded");
-  });
-});
-
-describe("buttonEntryPoint", () => {
-  it("calls the function the recorded module actually declares", () => {
-    const source = "async function macro1245(api) {\n  await api.setCellValue(0,0,'x');\n}\n";
-    const wrapped = buttonEntryPoint(source, "Macro1245");
-    expect(wrapped).toContain("await macro1245(button.api);");
-    expect(wrapped).toContain("function setup(button) {");
-    expect(wrapped).toContain(source.trimEnd());
+    expect(add.style.cursor).toBe("not-allowed");
+    // A tooltip is not a message: the refusal has to be readable without
+    // hovering the control that is refusing.
+    expect(container.querySelector("[data-macro-no-buttons]")).not.toBeNull();
   });
 
-  it("finds the entry point of a hand-edited module", () => {
-    expect(functionNameOf("function doIt(api) {}", "X")).toBe("doIt");
-  });
+  it("surfaces a module whose record cannot be read, instead of listing it as ordinary", async () => {
+    store.set("broken", {
+      id: "broken",
+      name: "Broken",
+      description: null,
+      source: "x",
+    });
+    // Make the detail read fail while the summary still lists it.
+    const original = store.get.bind(store);
+    vi.spyOn(store, "get").mockImplementation((id: string) => {
+      if (id === "broken") return undefined;
+      return original(id);
+    });
 
-  it("falls back to a usable identifier when nothing is declared", () => {
-    expect(functionNameOf("// nothing here", "Macro 12:45")).toBe("Macro1245");
-    expect(functionNameOf("// nothing here", "12:45")).toBe("recordedMacro");
+    await render();
+    expect(container.textContent).toContain("unreadable");
+    vi.restoreAllMocks();
   });
 });

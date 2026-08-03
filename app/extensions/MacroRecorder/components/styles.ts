@@ -7,6 +7,32 @@ import type React from "react";
 
 const v = (name: string) => `var(${name})`;
 
+/**
+ * A button style that LOOKS disabled when it is disabled.
+ *
+ * Not cosmetic. `btn`/`btnPrimary` set `background`, `color`, `border` and
+ * `cursor` as INLINE styles, which override the user agent's `button:disabled`
+ * appearance in every property that would have greyed the control out. The
+ * result shipped once: a disabled Run button that rendered byte-identically to
+ * an enabled one, complete with a pointer cursor — and a disabled button fires
+ * no `onClick`, so the user clicked a normal-looking button and got literally
+ * nothing. No event, no toast, no error. "Nothing happens" was the bug report.
+ *
+ * Any refusal is allowed to be a refusal; a refusal that is invisible is not.
+ */
+export function disabledIf(
+  base: React.CSSProperties,
+  disabled: boolean,
+): React.CSSProperties {
+  if (!disabled) return base;
+  return {
+    ...base,
+    opacity: 0.45,
+    cursor: "not-allowed",
+    filter: "grayscale(1)",
+  };
+}
+
 export const styles: Record<string, React.CSSProperties> = {
   backdrop: {
     position: "fixed",

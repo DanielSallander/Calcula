@@ -15,7 +15,11 @@ const objectScripts: Array<Record<string, unknown>> = [];
 const manager = {
   registered: [] as string[],
   mounted: [] as string[],
+  /** Set to make the next mountScript throw, as the real one now does. */
+  mountError: null as Error | null,
 };
+/** Set to make the rollback removeButton fail too. */
+const removeError = { value: null as Error | null };
 
 vi.mock("@api", () => ({
   saveObjectScript: async (definition: Record<string, unknown>) => {
@@ -25,6 +29,7 @@ vi.mock("@api", () => ({
   ObjectScriptManager: {
     registerScript: (d: { id: string }) => manager.registered.push(d.id),
     mountScript: async (id: string) => {
+      if (manager.mountError) throw manager.mountError;
       manager.mounted.push(id);
     },
     isScriptMounted: (id: string) => manager.mounted.includes(id),
@@ -36,7 +41,11 @@ import {
   resetButtonControlProvider,
 } from "@api/buttonControlService";
 import type { CreateButtonControlRequest } from "@api/buttonControlService";
-import { saveAsButtonScript, saveAsInlineButton } from "../lib/buttonScript";
+import {
+  describeMountFailure,
+  saveAsButtonScript,
+  saveAsInlineButton,
+} from "../lib/buttonScript";
 
 const created: CreateButtonControlRequest[] = [];
 const removed: Array<{ sheetIndex: number; row: number; col: number }> = [];
@@ -60,6 +69,7 @@ function installProvider(): void {
     },
     async removeButton(anchor) {
       removed.push(anchor);
+      if (removeError.value) throw removeError.value;
     },
   });
 }
@@ -70,6 +80,8 @@ beforeEach(() => {
   removed.length = 0;
   manager.registered.length = 0;
   manager.mounted.length = 0;
+  manager.mountError = null;
+  removeError.value = null;
   resetButtonControlProvider();
 });
 
@@ -151,6 +163,58 @@ describe("saveAsButtonScript", () => {
     expect(manager.registered).toEqual(["macro-control-0-1-1"]);
     expect(manager.mounted).toEqual(["macro-control-0-1-1"]);
     expect(result.mounted).toBe(true);
+    expect(result.mountError).toBeNull();
+  });
+
+  it("REPORTS a mount failure instead of swallowing it into a console.warn", async () => {
+    // The bug this pins: mount failures were caught and logged, and the caller
+    // turned `mounted: false` into "It runs after the workbook is reloaded" —
+    // a claim nothing verified, and a false one when the cause was a declined
+    // Script Security prompt (a reload declines it again).
+    installProvider();
+    manager.mountError = new Error(
+      '"Macro1245" was not started: the Script Security setting blocked it.',
+    );
+
+    const result = await saveAsButtonScript({
+      name: "Macro1245",
+      source: "function setup(context) {}",
+      sheetIndex: 0,
+      row: 1,
+      col: 1,
+    });
+
+    expect(result.mounted).toBe(false);
+    expect(result.mountError).toContain("Script Security");
+    // The button and the script both still exist; only the RUNNING part failed.
+    expect(objectScripts).toHaveLength(1);
+    expect(created).toHaveLength(1);
+  });
+
+  it("describeMountFailure names the cause and what to do about it", () => {
+    const message = describeMountFailure("B7", "Macro1245", "the prompt was declined.");
+    expect(message).toContain("B7");
+    expect(message).toContain("Macro1245");
+    expect(message).toContain("the prompt was declined.");
+    expect(message).toContain("clicking the button does nothing");
+    expect(message).toMatch(/Object Scripts/);
+    // Never the old lie.
+    expect(message).not.toMatch(/after the workbook is reloaded/i);
+  });
+
+  it("reports BOTH failures when the rollback of a half-made button also fails", async () => {
+    installProvider();
+    removeError.value = new Error("control metadata is locked");
+
+    await expect(
+      saveAsButtonScript({
+        name: "Macro1245",
+        source: "function setup(context) {}",
+        sheetIndex: 0,
+        row: 9,
+        col: 9,
+      }),
+    ).rejects.toThrow(/script store is full[\s\S]*control metadata is locked/);
   });
 
   it("rolls the button back when the script cannot be stored", async () => {

@@ -2046,7 +2046,14 @@ export {
   listExposedMethods,
   SCRIPT_API_VERSION,
   isApiVersionCompatible,
+  ScriptSecurityRefusedError,
 } from "./scriptableObjects";
+
+// One-shot execution of object-script source in a real worker realm. The only
+// way to reach the `context.api` vocabulary without owning an on-grid object —
+// see the module header for why that gap made "Run" unimplementable.
+export { runObjectScriptOnce } from "./objectScriptRunner";
+export type { RunObjectScriptOnceOptions } from "./objectScriptRunner";
 
 export type {
   ScriptAccessLevel,
@@ -2119,6 +2126,10 @@ export type { ScriptHandle, RpcErrorCode } from "./scriptHost/broker";
 export {
   hostValidateScript,
   listFaultedScripts,
+  // "Is a mounted script actually listening for this hook?" — the difference
+  // between a click that has a handler and a click that goes nowhere.
+  mountedScriptHasHook,
+  hostIsMounted,
   getShapeBitmap,
   hasShapeBitmapRenderer,
   getSlicerItemBitmap,

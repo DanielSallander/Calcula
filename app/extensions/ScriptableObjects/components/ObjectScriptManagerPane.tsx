@@ -192,7 +192,18 @@ export default function ObjectScriptManagerPane(_props: TaskPaneViewProps): Reac
       ObjectScriptManager.unmountScript(script.id);
       showToast(`Unmounted "${script.name}"`, { type: "info" });
     } else {
-      await ObjectScriptManager.mountScript(script.id);
+      try {
+        await ObjectScriptManager.mountScript(script.id);
+      } catch (e) {
+        // The user pressed a button; the button must answer. Reporting
+        // "Mounted" for a mount that threw is how a dead script looks alive.
+        showToast(
+          `"${script.name}" did not start: ${e instanceof Error ? e.message : String(e)}`,
+          { type: "error", duration: 0 },
+        );
+        refresh();
+        return;
+      }
       showToast(`Mounted "${script.name}"`, { type: "success" });
     }
     refresh();

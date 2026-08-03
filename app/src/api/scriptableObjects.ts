@@ -11,6 +11,21 @@
 /** Script access level — controls what API surface the script can reach. */
 export type ScriptAccessLevel = "restricted" | "unlocked";
 
+/**
+ * Thrown by `ObjectScriptManager.mountScript` when the global Script Security
+ * setting (or a declined prompt) refused the mount.
+ *
+ * A distinct type because the remedy is distinct: nothing is broken, the user
+ * said no — or the policy says no — and the message a caller shows should say
+ * so instead of blaming the script.
+ */
+export class ScriptSecurityRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScriptSecurityRefusedError";
+  }
+}
+
 // ============================================================================
 // Object Script Definition (storage representation)
 // ============================================================================
@@ -1471,7 +1486,16 @@ export interface IObjectScriptAPI {
   /** Get all registered object scripts. */
   getAllScripts(): ObjectScriptDefinition[];
 
-  /** Execute a specific object script (mounts its lifecycle). */
+  /**
+   * Execute a specific object script (mounts its lifecycle).
+   *
+   * THROWS on every failure — unknown id, a Script-Security refusal, a broken
+   * library import, a `setup()` that raised. It used to `return` quietly on the
+   * first two, which let callers report a phantom success ("the button will
+   * work after a reload") for a script that was never going to run. A caller
+   * that cannot act on the failure must still SHOW it; `console.warn` is not
+   * user feedback.
+   */
   mountScript(scriptId: string): Promise<void>;
 
   /** Unmount a running script. */
@@ -1560,8 +1584,9 @@ export const ObjectScriptManager: IObjectScriptAPI = {
   async mountScript(scriptId: string): Promise<void> {
     const definition = registeredScripts.get(scriptId);
     if (!definition) {
-      console.warn(`[ObjectScriptManager] Script not found: ${scriptId}`);
-      return;
+      throw new Error(
+        `No object script is registered under the id "${scriptId}", so there is nothing to mount.`,
+      );
     }
 
     // SECURITY GATE (B1): honor the global "Script Security" setting on EVERY
@@ -1576,10 +1601,13 @@ export const ObjectScriptManager: IObjectScriptAPI = {
       `Allow the object script "${definition.name}" to run? It can read and change workbook data.`,
     );
     if (!allowed) {
-      console.warn(
-        `[ObjectScriptManager] Mount of "${definition.name}" blocked by the Script Security setting.`,
+      // A refusal the USER made (or a policy they set) — the one failure the
+      // caller most needs to repeat back, because "nothing happened" after
+      // declining a prompt is indistinguishable from a broken feature.
+      throw new ScriptSecurityRefusedError(
+        `"${definition.name}" was not started: the Script Security setting blocked it ` +
+          `(File ▸ Options ▸ Script Security, or the prompt was declined).`,
       );
-      return;
     }
 
     // Already mounted? Unmount first.
@@ -1659,6 +1687,10 @@ export const ObjectScriptManager: IObjectScriptAPI = {
       for (const fn of mounted.cleanupFns) {
         try { fn(); } catch { /* ignore */ }
       }
+      // Rethrow: the `objectscript:error` event only reaches whoever is
+      // listening (historically just the editor window, normally closed), so it
+      // cannot be the only channel. The caller decides how to say it.
+      throw error instanceof Error ? error : new Error(errorMsg);
     }
   },
 

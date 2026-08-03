@@ -46,16 +46,40 @@ describe("ObjectScriptManager.mountScript — Script Security gate (B1)", () => 
     hostUnmountScript.mockReset();
   });
 
-  it("does NOT mount when the Script Security gate denies", async () => {
+  it("does NOT mount when the Script Security gate denies — and THROWS so", async () => {
     ensureScriptsAllowed.mockResolvedValueOnce(false);
     const script = makeScript();
     ObjectScriptManager.registerScript(script);
 
-    await ObjectScriptManager.mountScript(script.id);
+    // The refusal must reach the caller. It used to `return` quietly, which is
+    // how a button-creation flow came to report "it will run after a reload"
+    // for a script the user had just declined — the same reload would decline
+    // it again.
+    await expect(ObjectScriptManager.mountScript(script.id)).rejects.toThrow(
+      /Script Security/i,
+    );
 
     expect(ensureScriptsAllowed).toHaveBeenCalledTimes(1);
     expect(hostMountScript).not.toHaveBeenCalled();
     expect(ObjectScriptManager.isScriptMounted(script.id)).toBe(false);
+  });
+
+  it("THROWS when the worker mount itself fails", async () => {
+    ensureScriptsAllowed.mockResolvedValueOnce(true);
+    hostMountScript.mockRejectedValueOnce(new Error("setup() blew up"));
+    const script = makeScript();
+    ObjectScriptManager.registerScript(script);
+
+    await expect(ObjectScriptManager.mountScript(script.id)).rejects.toThrow(
+      /setup\(\) blew up/,
+    );
+    expect(ObjectScriptManager.isScriptMounted(script.id)).toBe(false);
+  });
+
+  it("THROWS for an id nothing is registered under", async () => {
+    await expect(ObjectScriptManager.mountScript("no-such-script")).rejects.toThrow(
+      /no-such-script/,
+    );
   });
 
   it("mounts when the gate allows", async () => {

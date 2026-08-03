@@ -619,12 +619,25 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     if (ObjectScriptManager.isScriptMounted(updated.id)) {
       ObjectScriptManager.unmountScript(updated.id);
     }
-    await ObjectScriptManager.mountScript(updated.id);
+    let mountError: string | null = null;
+    try {
+      await ObjectScriptManager.mountScript(updated.id);
+    } catch (e) {
+      // Still SAVE it — the author's text must not be lost because it does not
+      // start — but never let the save toast claim it was "applied".
+      mountError = e instanceof Error ? e.message : String(e);
+      reportToConsole(mountError, updated.id);
+    }
 
     try {
       await saveObjectScript(updated);
       setIsDirty(false);
-      if (gate.transformed) {
+      if (mountError) {
+        showToast(`Saved, but "${updated.name}" is not running: ${mountError}`, {
+          type: "error",
+          duration: 0,
+        });
+      } else if (gate.transformed) {
         // Show the author exactly what was stored. The alternative — keeping
         // the TypeScript on screen while the store holds something else —
         // would put the editor out of step with the text that runs, is

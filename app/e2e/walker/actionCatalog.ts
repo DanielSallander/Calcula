@@ -1300,7 +1300,14 @@ const scriptShapeMount: ActionDef<{ slotIndex: number; fill: string }> = {
         };
         mgr.registerScript(def);
         if (mgr.isScriptMounted(id)) mgr.unmountScript(id); // remount = teardown + respawn
-        await mgr.mountScript(id);
+        // mountScript THROWS on refusal/failure. The walker is a fuzzer, not a
+        // mount test: a Script Security decision must not abort the run, but it
+        // must be visible in the log rather than mistaken for a clean mount.
+        try {
+          await mgr.mountScript(id);
+        } catch (e) {
+          console.warn("[walker] script mount refused/failed:", e);
+        }
       },
       { slotIndex: p.slotIndex, fill: p.fill },
     );

@@ -256,8 +256,28 @@ async function loadAndMountScripts(): Promise<void> {
   for (const script of localScripts) {
     ObjectScriptManager.registerScript(script);
   }
+  // mountScript THROWS now. One broken script must not stop the other twenty
+  // from starting — but it must not vanish either, so the failures are
+  // collected and reported together at the end. (Each one also emits
+  // `objectscript:error`, which this extension routes to its own toast; the
+  // summary below is what tells the user HOW MANY of their scripts are dead.)
+  const mountFailures: string[] = [];
   for (const script of localScripts) {
-    await ObjectScriptManager.mountScript(script.id);
+    try {
+      await ObjectScriptManager.mountScript(script.id);
+    } catch (e) {
+      mountFailures.push(
+        `${script.name}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  if (mountFailures.length > 0) {
+    showToast(
+      `${mountFailures.length} of this workbook's ${localScripts.length} object ` +
+        `script(s) could not start, so the objects they drive will not respond: ` +
+        mountFailures.join(" | "),
+      { type: "error", duration: 0 },
+    );
   }
 
   // For distributed scripts, group by package and check consent
@@ -297,7 +317,16 @@ async function loadAndMountScripts(): Promise<void> {
         for (const script of pkgScripts) {
           const declared = parseDeclaredCapabilities(script.source);
           await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
-          await ObjectScriptManager.mountScript(script.id);
+          try {
+            await ObjectScriptManager.mountScript(script.id);
+          } catch (e) {
+            // Keep mounting the package's other scripts; the failure is already
+            // travelling as `objectscript:error` -> toast.
+            console.error(
+              `[ScriptableObjects] "${script.name}" from "${pkg}" failed to mount:`,
+              e,
+            );
+          }
         }
       } else {
         // Emit consent request event — the UI will show a prompt. Include the
@@ -606,7 +635,15 @@ async function activate(context: ExtensionContext): Promise<void> {
         if (!ObjectScriptManager.isScriptMounted(script.id)) {
           const declared = parseDeclaredCapabilities(script.source);
           await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
-          await ObjectScriptManager.mountScript(script.id);
+          try {
+            await ObjectScriptManager.mountScript(script.id);
+          } catch (e) {
+            // One failure must not strand the rest of a just-consented package.
+            console.error(
+              `[ScriptableObjects] "${script.name}" failed to mount after consent:`,
+              e,
+            );
+          }
         }
       }
       // Persist the consent in the workbook (durable once the file is saved),
@@ -810,11 +847,21 @@ async function activate(context: ExtensionContext): Promise<void> {
     const script = payload.script;
     ObjectScriptManager.registerScript(script);
 
-    // Remount to apply changes
+    // Remount to apply changes. A mount failure must not be reported as
+    // "Script saved and applied." — it was saved, it was NOT applied.
     if (ObjectScriptManager.isScriptMounted(script.id)) {
       ObjectScriptManager.unmountScript(script.id);
     }
-    await ObjectScriptManager.mountScript(script.id);
+    try {
+      await ObjectScriptManager.mountScript(script.id);
+    } catch (e) {
+      showToast(
+        `"${script.name}" was saved, but it is not running: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+        { type: "error", duration: 0 },
+      );
+      return;
+    }
 
     // The payload carries the AUTHOR'S source, never an instrumented copy: since
     // the step debugger landed, instrumentation happens only inside the worker at
@@ -844,8 +891,25 @@ async function activate(context: ExtensionContext): Promise<void> {
 
   cleanupFunctions.push(
     onAppEvent("objectscript:error", (detail) => {
-      const d = detail as { scriptId: string; scriptName: string; error: string; stack?: string };
+      const d = detail as {
+        scriptId: string;
+        scriptName: string;
+        error: string;
+        stack?: string;
+        phase?: string;
+      };
       emitScriptError({ scriptId: d.scriptId, scriptName: d.scriptName, error: d.error, stack: d.stack });
+      // ALSO in front of the user. `emitScriptError` reaches the code-editor
+      // WINDOW, which is closed in every situation that matters: a button whose
+      // script failed to mount produced a console line and an event nobody was
+      // listening to, and then a click that did nothing. A script that cannot
+      // start is a fact about the document, not a detail of the editor.
+      showToast(
+        d.phase === "snapshot"
+          ? `Object script "${d.scriptName}" started with incomplete data: ${d.error}`
+          : `Object script "${d.scriptName}" failed to start: ${d.error}`,
+        { type: "error" },
+      );
     }),
   );
 
@@ -941,15 +1005,26 @@ async function activate(context: ExtensionContext): Promise<void> {
               const stamped = stampFromTemplate(template, instanceId, objectName);
               ObjectScriptManager.registerScript(stamped);
               await saveObjectScript(stamped);
-              await ObjectScriptManager.mountScript(stamped.id);
-              showToast(`Applied template "${template.name}" to ${objectName}`, { type: "info" });
+              try {
+                await ObjectScriptManager.mountScript(stamped.id);
+                showToast(`Applied template "${template.name}" to ${objectName}`, { type: "info" });
+              } catch (e) {
+                showToast(
+                  `Template "${template.name}" was stored on ${objectName} but is not ` +
+                    `running: ${e instanceof Error ? e.message : String(e)}`,
+                  { type: "error" },
+                );
+              }
             }
           } else if (matching.length > 1) {
             // Multiple templates — notify the user they can edit the script
             showToast(`${matching.length} script templates available for ${objectType}s. Right-click to edit script.`, { type: "info" });
           }
-        } catch {
-          // Templates not loaded yet, skip
+        } catch (e) {
+          // Template ENUMERATION failed (the store is not ready, or the file is
+          // unreadable). Not fatal to the object that was just created, but it
+          // silently skipped auto-applying a template the user configured.
+          console.warn("[ScriptableObjects] Template auto-apply skipped:", e);
         }
       }),
     );

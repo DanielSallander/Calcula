@@ -56,12 +56,23 @@ export type MacroTarget =
    *  the `Calcula.*` op set: values, sheets and fills only. */
   | "notebook";
 
-/** How the generated body is packaged. */
+/**
+ * How the generated body is packaged.
+ *
+ * ONE object-script shape, not two. There used to be a "bare" variant (the
+ * macro function and a COMMENT telling you how to call it) and a "buttonScript"
+ * variant (the same function plus a click handler). The bare one was what got
+ * stored, so the saved macro was a definition nothing ever invoked — pressing
+ * Run defined a function and stopped. Two shapes for one recording is also two
+ * things to keep in step; the surviving shape's `setup(context)` covers both
+ * uses by asking the context what it is:
+ *
+ *   mounted on a BUTTON  -> `context.onClick` exists -> run on each click
+ *   run on its own       -> no `onClick`             -> run immediately
+ */
 export type MacroWrapper =
-  /** A standalone `async function name(api) { … }` to paste anywhere. */
-  | "bare"
-  /** The bare function plus a `setup(button)` that runs it on click. */
-  | "buttonScript"
+  /** `async function name(api) { … }` plus the `setup(context)` that runs it. */
+  | "objectScript"
   /** Top-level statements for one notebook cell. */
   | "notebookCell";
 

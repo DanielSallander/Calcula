@@ -23,13 +23,19 @@ import { generateMacroSource } from "../lib/actionCodegen";
 import {
   getAnchorCell,
   getFinishedRecording,
+  moduleRuntimeSupport,
+  resolveAnchorSheetIndex,
   setFinishedSavedModule,
 } from "../lib/flow";
-import { designModeHint, saveAsButtonScript } from "../lib/buttonScript";
-import { saveMacroModule } from "../lib/macroLibrary";
+import {
+  describeMountFailure,
+  designModeHint,
+  saveAsButtonScript,
+} from "../lib/buttonScript";
+import { describeMacroRuntime, saveMacroModule } from "../lib/macroLibrary";
 import { formatA1, parseA1 } from "../lib/a1";
-import type { MacroTarget, MacroWrapper } from "../lib/types";
-import { styles } from "./styles";
+import type { MacroTarget } from "../lib/types";
+import { disabledIf, styles } from "./styles";
 
 export function RecordedMacroDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose } = props;
@@ -38,7 +44,6 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
   const recording = isOpen ? getFinishedRecording() : null;
 
   const [target, setTarget] = useState<MacroTarget>("objectScript");
-  const [wrapper, setWrapper] = useState<MacroWrapper>("bare");
   const [edited, setEdited] = useState<string | null>(null);
   const [anchor, setAnchor] = useState("A1");
   const [busy, setBusy] = useState(false);
@@ -49,9 +54,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
     if (!isOpen) return;
     win.reset();
     const rec = getFinishedRecording();
-    const initialTarget = rec?.target ?? "objectScript";
-    setTarget(initialTarget);
-    setWrapper(initialTarget === "notebook" ? "notebookCell" : "bare");
+    setTarget(rec?.target ?? "objectScript");
     setEdited(null);
     setError(null);
     const cell = getAnchorCell();
@@ -64,7 +67,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
     try {
       return generateMacroSource(recording.actions, {
         target,
-        wrapper,
+        wrapper: target === "notebook" ? "notebookCell" : "objectScript",
         name: recording.name,
         decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
         // Pinned to the recording, not `now`: the source shown here has to be
@@ -78,13 +81,25 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         unsupported: [] as string[],
       };
     }
-  }, [recording, target, wrapper]);
+  }, [recording, target]);
 
   const source = edited ?? generated.source;
 
+  /**
+   * Whether the QuickJS MODULE runtime could express this whole recording.
+   *
+   * The user picked the target BEFORE recording anything, so they could not
+   * have known. Saying it now — rather than silently rewriting their choice —
+   * is what lets them make a module the workbook script runtime runs directly,
+   * without the recorder second-guessing them behind their back.
+   */
+  const moduleRuntime = useMemo(
+    () => (recording ? moduleRuntimeSupport(recording.actions) : null),
+    [recording],
+  );
+
   const switchTarget = useCallback((next: MacroTarget) => {
     setTarget(next);
-    setWrapper(next === "notebook" ? "notebookCell" : "bare");
     setEdited(null); // regenerated code replaces hand edits; say so by clearing
     setError(null);
   }, []);
@@ -112,14 +127,16 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
       setError(`"${anchor}" is not a cell reference.`);
       return;
     }
-    // The button entry point lives in the buttonScript wrapper; generate it
-    // fresh rather than hoping the user's edits still define setup().
+    // ONE artifact: the object-script wrapper's `setup(context)` already wires
+    // `context.onClick` when the context is a button, so whatever is in the box
+    // — generated or hand-edited — is what gets bound. There is no second,
+    // separately generated "button flavour" to drift from this one.
     const wrapped =
-      wrapper === "buttonScript" && edited !== null
+      target === "objectScript"
         ? source
         : generateMacroSource(recording.actions, {
             target: "objectScript",
-            wrapper: "buttonScript",
+            wrapper: "objectScript",
             name: recording.name,
             decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
             recordedAt: recording.recordedAt,
@@ -131,24 +148,35 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
       const result = await saveAsButtonScript({
         name: recording.name,
         source: wrapped,
-        sheetIndex: getAnchorCell().sheetIndex,
+        sheetIndex: await resolveAnchorSheetIndex(),
         row: cell.row,
         col: cell.col,
       });
-      showToast(
-        (result.mounted
-          ? `Button created at ${anchor} — click it to replay "${recording.name}".`
-          : `Button created at ${anchor}. It runs after the workbook is reloaded.`) +
-          designModeHint(),
-        { type: "success" },
+      if (result.mounted) {
+        showToast(
+          `Button created at ${anchor} — click it to replay "${recording.name}".` +
+            designModeHint(),
+          { type: "success" },
+        );
+        onClose();
+        return;
+      }
+      // NOT "it runs after a reload". Nothing checked that, and it is false
+      // whenever the cause was a declined Script Security prompt — a reload
+      // would decline it again. The dialog stays OPEN so the message is read.
+      const message = describeMountFailure(
+        anchor,
+        recording.name,
+        result.mountError ?? "the script host gave no reason.",
       );
-      onClose();
+      setError(message);
+      showToast(message, { type: "error", duration: 0 });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [recording, anchor, wrapper, edited, source, onClose]);
+  }, [recording, anchor, target, source, onClose]);
 
   /**
    * Push the edited source back into the module that was auto-saved.
@@ -228,6 +256,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
       <div style={styles.backdrop} onMouseDown={onClose} />
       <div
         ref={win.ref}
+        data-macro-result-dialog=""
         style={{ ...styles.dialog, width: 720, height: 600, ...win.style }}
       >
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
@@ -244,8 +273,10 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
           {recording.saved ? (
             <div style={styles.saved} data-macro-saved-banner="">
               Saved as the workbook module script{" "}
-              <strong>{recording.saved.name}</strong>. Find it again under{" "}
-              <strong>Developer ▸ Macros…</strong> — closing this window keeps it.
+              <strong>{recording.saved.name}</strong> (
+              {describeMacroRuntime(recording.saved.runtime)}). Find it again
+              under <strong>Developer ▸ Macros…</strong>, where{" "}
+              <strong>Run</strong> executes it — closing this window keeps it.
             </div>
           ) : (
             <div style={styles.error} data-macro-save-error="">
@@ -276,44 +307,44 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
               <span>Notebook cell</span>
             </label>
 
-            {target === "objectScript" ? (
-              <>
-                <span style={{ ...styles.label, alignSelf: "center" }}>|</span>
-                <label style={styles.radioLabel}>
-                  <input
-                    type="radio"
-                    name="macro-out-wrapper"
-                    checked={wrapper === "bare"}
-                    onChange={() => {
-                      setWrapper("bare");
-                      setEdited(null);
-                    }}
-                  />
-                  <span>Standalone function</span>
-                </label>
-                <label style={styles.radioLabel}>
-                  <input
-                    type="radio"
-                    name="macro-out-wrapper"
-                    checked={wrapper === "buttonScript"}
-                    onChange={() => {
-                      setWrapper("buttonScript");
-                      setEdited(null);
-                    }}
-                  />
-                  <span>Button click handler</span>
-                </label>
-              </>
-            ) : null}
           </div>
 
           {generated.unsupported.length > 0 ? (
-            <div style={styles.warning}>
+            <div style={styles.warning} data-macro-unsupported="">
               {generated.unsupported.length} recorded action
               {generated.unsupported.length === 1 ? "" : "s"} cannot run on this
               runtime and {generated.unsupported.length === 1 ? "is" : "are"}{" "}
               left in the source as comments. Switch to the object-script target
               for formatting and structural actions.
+            </div>
+          ) : null}
+
+          {target === "objectScript" && moduleRuntime ? (
+            <div
+              style={moduleRuntime.supported ? styles.hint : styles.warning}
+              data-macro-module-runtime={moduleRuntime.supported ? "yes" : "no"}
+            >
+              {moduleRuntime.supported ? (
+                <>
+                  Every action in this recording is also expressible in the
+                  workbook script runtime — switching to{" "}
+                  <strong>Notebook cell</strong> and pressing{" "}
+                  <strong>Update Module</strong> would store a module that
+                  runtime runs directly. Either way, <strong>Run</strong> in
+                  Developer ▸ Macros… works.
+                </>
+              ) : (
+                <>
+                  This recording cannot be stored for the workbook script
+                  runtime: {moduleRuntime.reasons.length}{" "}
+                  {moduleRuntime.reasons.length === 1 ? "action has" : "actions have"}{" "}
+                  no equivalent there ({moduleRuntime.reasons[0]}
+                  {moduleRuntime.reasons.length > 1 ? ", …" : ""}). It stays an
+                  object script — <strong>Run</strong> mounts it as a temporary
+                  unlocked object script, and <strong>Save as Button Script</strong>{" "}
+                  binds the same source to a button.
+                </>
+              )}
             </div>
           ) : null}
 
@@ -343,17 +374,27 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         </div>
 
         <div style={styles.footer}>
-          <button type="button" style={styles.btn} onClick={onClose}>
+          <button
+            type="button"
+            data-macro-result-close=""
+            style={styles.btn}
+            onClick={onClose}
+          >
             Close
           </button>
           <button type="button" style={styles.btn} onClick={() => void copy()}>
             Copy
           </button>
-          {recording.saved && edited !== null ? (
+          {recording.saved ? (
             <button
               type="button"
-              style={styles.btn}
-              disabled={busy}
+              style={disabledIf(styles.btn, busy || edited === null)}
+              disabled={busy || edited === null}
+              title={
+                edited === null
+                  ? "Nothing to update — the box still matches the stored module."
+                  : "Write the text above back into the stored module."
+              }
               onClick={() => void updateModule()}
             >
               {busy ? "Saving…" : "Update Module"}
@@ -366,7 +407,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
           ) : (
             <button
               type="button"
-              style={styles.btnPrimary}
+              style={disabledIf(styles.btnPrimary, busy)}
               disabled={busy}
               onClick={() => void toButton()}
             >

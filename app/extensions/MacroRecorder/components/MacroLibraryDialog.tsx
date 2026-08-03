@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/MacroRecorder/components/MacroLibraryDialog.tsx
 // PURPOSE: Developer ▸ Macros… — the place a saved macro can actually be FOUND,
-//          read, run, edited, renamed, attached to a button, and deleted.
+//          read, RUN, edited, renamed, attached to a button, and deleted.
 // CONTEXT: Recording auto-saves into the workbook's module-script store. Saving
 //          into a store with no UI on top of it would be the same failure the
 //          recorder just had — code that exists with nothing reaching it — so
@@ -9,13 +9,21 @@
 //          because the workbook only has one module store and hiding half of it
 //          would just move the invisibility somewhere else.
 //
-// WHY "RUN" IS NOT ALWAYS OFFERED. The module store's runtime is the isolated
-// Rust QuickJS interpreter (`run_script`), whose vocabulary is `Calcula.*`. A
-// macro recorded for the OBJECT-SCRIPT target is written against the async
-// object-script `api`, which does not exist there — running it would throw a
-// ReferenceError every time. Such a macro gets "Add Button" instead, which mounts
-// it as an object script on a real button, the runtime it was written for. An
-// enabled button that always fails is worse than an honest one that is not there.
+// "RUN" RUNS. IT DOES NOT NEGOTIATE.
+// The workbook module store's own runtime is the isolated Rust QuickJS
+// interpreter, whose vocabulary is `Calcula.*`. A macro recorded for the
+// OBJECT-SCRIPT target is written against the async `api`, which does not exist
+// there. The previous answer to that was to DISABLE Run for such macros — and
+// because these dialogs style buttons with inline CSS that overrides the UA's
+// disabled appearance, the disabled Run rendered exactly like an enabled one.
+// The user clicked a normal-looking primary button and nothing happened at all:
+// no event, no message, no error. That is a worse bug than the one it replaced.
+//
+// Run now ROUTES instead of refusing (see macroLibrary.runMacroModule): a
+// `Calcula.*` module goes to `run_script`, an `api.*` module is mounted as a
+// transient unlocked object script — the same mount a button uses — and the
+// label plus the note under the editor say which, before it is pressed. When a
+// control genuinely cannot act it is greyed out AND says why, on screen.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
@@ -23,22 +31,28 @@ import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
 import { hasButtonControlProvider } from "@api/buttonControlService";
 import {
+  refreshGridData,
+} from "@api/grid";
+import {
   deleteMacroModule,
   describeMacroRuntime,
+  describeRunRoute,
   listMacroModules,
   loadMacroModule,
+  macroRunRoute,
   runMacroModule,
   updateMacroModule,
   type MacroModuleEntry,
 } from "../lib/macroLibrary";
 import {
+  describeMountFailure,
   designModeHint,
   saveAsButtonScript,
   saveAsInlineButton,
 } from "../lib/buttonScript";
-import { getAnchorCell } from "../lib/flow";
+import { getAnchorCell, resolveAnchorSheetIndex } from "../lib/flow";
 import { formatA1, parseA1 } from "../lib/a1";
-import { styles } from "./styles";
+import { disabledIf, styles } from "./styles";
 
 interface LoadedModule {
   id: string;
@@ -157,21 +171,32 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
         id: loaded.id,
         name: loaded.name,
         source: draftSource,
+        description: loaded.description,
       });
       if (result.type === "error") {
         setError(result.message);
         setOutput(result.output.join("\n") || null);
+        showToast(`"${loaded.name}" failed: ${result.message}`, { type: "error" });
       } else {
+        // The canvas does not watch the backend: without this, a macro that
+        // wrote cells leaves the grid showing the OLD values until something
+        // else happens to refetch. Every other run-a-script caller in the app
+        // does this; this dialog was the one that did not.
+        refreshGridData();
         setOutput(
           [
             ...result.output,
-            `[OK] ${result.cellsModified} cell(s) changed in ${result.durationMs} ms.`,
+            result.cellsModified < 0
+              ? `[OK] Finished in ${result.durationMs} ms (the object-script runtime does not count cells).`
+              : `[OK] ${result.cellsModified} cell(s) changed in ${result.durationMs} ms.`,
           ].join("\n"),
         );
         showToast(`Ran "${loaded.name}".`, { type: "success" });
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      showToast(`"${loaded.name}" could not run: ${message}`, { type: "error" });
     } finally {
       setBusy(false);
     }
@@ -205,27 +230,36 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
     setBusy(true);
     setError(null);
     try {
-      const sheetIndex = getAnchorCell().sheetIndex;
+      const sheetIndex = await resolveAnchorSheetIndex();
       // Two runtimes, two binding mechanisms — see the note in buttonScript.ts.
       // Object-script macros mount as an object script on the control's
       // instanceId; QuickJS modules run inline from the control's own onSelect.
       if (selectedEntry?.runtime === "objectScript") {
+        // The stored module IS the button script: its `setup(context)` wires
+        // `context.onClick` when the context is a button. Nothing is appended
+        // here, so there is no second source to drift from this one.
         const result = await saveAsButtonScript({
           name: loaded.name,
-          // The stored module is the standalone function; the click entry point
-          // is appended here so the module itself stays readable and editable.
-          source: buttonEntryPoint(draftSource, loaded.name),
+          source: draftSource,
           sheetIndex,
           row: cell.row,
           col: cell.col,
         });
-        showToast(
-          (result.mounted
-            ? `Button created at ${anchor} — click it to run "${loaded.name}".`
-            : `Button created at ${anchor}. It runs after the workbook is reloaded.`) +
-            designModeHint(),
-          { type: "success" },
-        );
+        if (result.mounted) {
+          showToast(
+            `Button created at ${anchor} — click it to run "${loaded.name}".` +
+              designModeHint(),
+            { type: "success" },
+          );
+        } else {
+          const message = describeMountFailure(
+            anchor,
+            loaded.name,
+            result.mountError ?? "the script host gave no reason.",
+          );
+          setError(message);
+          showToast(message, { type: "error", duration: 0 });
+        }
       } else {
         await saveAsInlineButton({
           name: loaded.name,
@@ -261,14 +295,23 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
 
   if (!isOpen) return null;
 
-  const runnable = selectedEntry?.runnable ?? true;
-  const objectScript = selectedEntry?.runtime === "objectScript";
+  // The route is derived from the module the user is LOOKING at, not from the
+  // list row, so an edited description takes effect the moment it is saved.
+  const route = macroRunRoute(loaded?.description ?? selectedEntry?.description);
+  const routeNote = describeRunRoute(loaded?.description ?? selectedEntry?.description);
+  const buttonsAvailable = hasButtonControlProvider();
+
+  const runDisabled = busy || !loaded;
+  const deleteDisabled = busy || !loaded;
+  const addButtonDisabled = busy || !loaded || !buttonsAvailable;
+  const saveDisabled = busy || !dirty;
 
   return (
     <>
       <div style={styles.backdrop} onMouseDown={onClose} />
       <div
         ref={win.ref}
+        data-macro-library-dialog=""
         style={{ ...styles.dialog, width: 860, height: 620, ...win.style }}
       >
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
@@ -318,7 +361,11 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
                       {entry.name}
                     </span>
                     <span style={styles.badge}>
-                      {entry.runtime ? describeMacroRuntime(entry.runtime) : "Module"}
+                      {entry.loadError
+                        ? "unreadable"
+                        : entry.runtime
+                          ? describeMacroRuntime(entry.runtime)
+                          : "Module"}
                     </span>
                   </div>
                 ))
@@ -350,6 +397,14 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
                   />
                 </div>
 
+                {selectedEntry?.loadError ? (
+                  <div style={styles.error} data-macro-load-error="">
+                    This module&apos;s record could not be read:{" "}
+                    {selectedEntry.loadError} Its runtime is therefore unknown,
+                    and Run will use the workbook script runtime.
+                  </div>
+                ) : null}
+
                 {selectedEntry?.description ? (
                   <div style={styles.hint}>{selectedEntry.description}</div>
                 ) : null}
@@ -361,29 +416,39 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
                   onChange={(e) => setDraftSource(e.target.value)}
                 />
 
-                {objectScript ? (
-                  <div style={styles.hint}>
-                    This macro is written for the object-script runtime
-                    (<code>api.*</code>), which only exists inside a mounted
-                    object script — so it cannot be run from here. Attach it to a
-                    button and click that instead.
-                  </div>
-                ) : null}
+                <div style={styles.hint} data-macro-run-route={route}>
+                  {routeNote}
+                </div>
 
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={styles.label}>Place a button at</span>
                   <input
                     style={{ ...styles.input, width: 90 }}
+                    data-macro-anchor-input=""
                     value={anchor}
                     onChange={(e) => setAnchor(e.target.value)}
                   />
-                  <span style={styles.hint}>
-                    on the sheet the selection is on.
-                  </span>
+                  <span style={styles.hint}>on the active sheet.</span>
                 </div>
 
-                {output ? <div style={styles.output}>{output}</div> : null}
-                {error ? <div style={styles.error}>{error}</div> : null}
+                {!buttonsAvailable ? (
+                  <div style={styles.warning} data-macro-no-buttons="">
+                    Buttons are unavailable: the Controls extension is not
+                    loaded, so &quot;Add Button&quot; is switched off. Enable it
+                    to bind this macro to a button.
+                  </div>
+                ) : null}
+
+                {output ? (
+                  <div style={styles.output} data-macro-output="">
+                    {output}
+                  </div>
+                ) : null}
+                {error ? (
+                  <div style={styles.error} data-macro-error="">
+                    {error}
+                  </div>
+                ) : null}
               </>
             )}
           </div>
@@ -395,18 +460,19 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
           </button>
           <button
             type="button"
-            style={styles.btn}
-            disabled={busy || !loaded}
+            style={disabledIf(styles.btn, deleteDisabled)}
+            disabled={deleteDisabled}
             onClick={() => void remove()}
           >
             Delete
           </button>
           <button
             type="button"
-            style={styles.btn}
-            disabled={busy || !loaded || !hasButtonControlProvider()}
+            data-macro-add-button=""
+            style={disabledIf(styles.btn, addButtonDisabled)}
+            disabled={addButtonDisabled}
             title={
-              hasButtonControlProvider()
+              buttonsAvailable
                 ? "Create a button on the grid that runs this macro"
                 : "Buttons are unavailable: the Controls extension is not loaded."
             }
@@ -416,24 +482,21 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
           </button>
           <button
             type="button"
-            style={styles.btn}
-            disabled={busy || !dirty}
+            style={disabledIf(styles.btn, saveDisabled)}
+            disabled={saveDisabled}
             onClick={() => void save()}
           >
             {busy ? "Working…" : "Save"}
           </button>
           <button
             type="button"
-            style={styles.btnPrimary}
-            disabled={busy || !loaded || !runnable}
-            title={
-              runnable
-                ? "Run this module in the workbook script runtime"
-                : "Object-script macros run from a button, not from here."
-            }
+            data-macro-run-button=""
+            style={disabledIf(styles.btnPrimary, runDisabled)}
+            disabled={runDisabled}
+            title={routeNote}
             onClick={() => void run()}
           >
-            Run
+            {route === "objectScript" ? "Run (object script)" : "Run"}
           </button>
         </div>
 
@@ -441,45 +504,4 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
       </div>
     </>
   );
-}
-
-/**
- * The identifier of the macro function a stored object-script module defines, so
- * a generated `setup(button)` can call it.
- *
- * The recorder emits exactly one top-level `async function <name>(api)`, so the
- * first such declaration is the entry point. The macro name is the fallback for
- * a module the user has since rewritten by hand — better a call the user can see
- * and fix in the object-script editor than a silent no-op.
- */
-export function functionNameOf(source: string, fallbackName: string): string {
-  const match = /\basync\s+function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/.exec(source);
-  if (match) return match[1];
-  const plain = /\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/.exec(source);
-  if (plain) return plain[1];
-  const sanitized = fallbackName.replace(/[^A-Za-z0-9_$]/g, "");
-  return /^[A-Za-z_$]/.test(sanitized) ? sanitized : "recordedMacro";
-}
-
-/** An object-script module plus the `setup(button)` that runs it on click. */
-export function buttonEntryPoint(source: string, macroName: string): string {
-  const fn = functionNameOf(source, macroName);
-  return [
-    source.replace(/\s*$/, ""),
-    "",
-    "function setup(button) {",
-    "  button.onClick(async () => {",
-    "    if (!button.api) {",
-    '      button.notify("This macro needs an unlocked script.", "error");',
-    "      return;",
-    "    }",
-    "    try {",
-    `      await ${fn}(button.api);`,
-    "    } catch (e) {",
-    '      button.notify(String(e && e.message ? e.message : e), "error");',
-    "    }",
-    "  });",
-    "}",
-    "",
-  ].join("\n");
 }

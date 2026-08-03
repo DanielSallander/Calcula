@@ -19,6 +19,11 @@ function ToastItem({ toast }: { toast: ToastItem }): React.ReactElement {
 
   return (
     <div
+      // Addressable from E2E: a toast is the ONLY channel several failure paths
+      // have (a Design-Mode click, an unbound button, a mount refusal), so a
+      // test that cannot read one cannot prove those paths speak at all.
+      data-toast=""
+      data-toast-variant={toast.variant}
       style={{
         display: "flex",
         alignItems: "center",

@@ -33,6 +33,14 @@ found four bugs in five minutes, none of which any of those tests could have see
 correction). **A test count is a claim about a component, not about a feature** — if a status cites
 tests, it must say which component they cover, and name what was never exercised by a person.
 
+And *that* was still not enough. The four bugs were fixed, the suite went green again, and the same
+user ran it a second time and reported the same sentence: nothing happens. **Two of the feature's
+three entry points had never worked and no test could tell**, because every test asserted that the
+right code was produced and stored and **not one asserted that running it changed a cell** (§8,
+ninth correction). If a feature has more than one way to be invoked, the status line must enumerate
+them and mark each separately — and at least one assertion must be phrased the way the user would
+phrase it: *press this, and the thing on screen changes.*
+
 Statuses below were re-verified against the code on **2026-08-02** (Wave K), not carried over from
 wave reports. That pass found eleven false statuses in this file and is recorded as the seventh
 correction note in §8; the rule it added is short enough to state here:
@@ -278,6 +286,20 @@ Each now carries its closing status, re-checked against the code on 2026-08-01.
     the tests that existed, because every one of those tests exercised `generateMacroSource`, a
     PURE function, and all four bugs were in the wiring around it. See roadmap item 1 in §7 for the
     corrected scope and §8's eighth correction for the testing-strategy conclusion.
+
+    **The first re-closure was premature too.** On the SECOND human run the same user reported the
+    same sentence — *"When I click 'Run' in 'Macros' menu nothing happens. Also nothing happens when
+    I click the button that I created along with it."* Of the three entry points (notebook, Run,
+    button) only the notebook had ever worked. **Run** was `disabled` but inline-styled to look
+    enabled, guarding a stored module that declared a function and ended in a *comment* instead of
+    calling it — in a runtime (`run_script`, globals `Calcula.*`) that has no `api` binding anyway.
+    **The button** ran perfectly and was invisible: `api.setCellValue` / `api.updateCellsBatch` were
+    the only cell-writing broker handlers that never dispatched `grid:refresh`, the sole event that
+    makes the canvas re-fetch. Both are now fixed and share **one** execution path
+    (`runObjectScriptOnce`, an `@api` primitive that mounts the source in a real worker realm and
+    awaits `setup`), and the closure is backed by an e2e spec that **ran against the live app** and
+    asserts the cleared values come back from Run *and* from a real canvas click on the button
+    (`app/e2e/tests/macro-recorder-journey.spec.ts`). See §8's **ninth** correction.
 
 ### UDF-specific confirmed gaps (Custom Functions)
 
@@ -692,7 +714,7 @@ sorts and counts as nothing. Only three statuses are legal here: **SHIPPED**, **
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Macro recorder | SHIPPED (re-verified against a human using it, 2026-08-03) |
+| 1 | Macro recorder | SHIPPED — all THREE entry points (notebook / Run / button) now verified; Run and button were still dead after the first human round and were fixed in the second, proven by a live-app e2e spec (§8 ninth correction) |
 | 2 | Bulk typed range I/O + undo everywhere | SHIPPED |
 | 3 | Formatting + structural ops | SHIPPED |
 | 4 | Writeback automation capability | SHIPPED |
@@ -826,6 +848,24 @@ this table are both wrong until someone re-derives from code.
      register/require/reset contract, a `seamWiring` test asserting Controls actually registers a
      provider and that `createButtonControlAt` is the single factory, the menu-label state machine,
      the auto-save-before-dialog ordering, and the macro library dialog.
+   - **ENTRY-POINT STATUS (2026-08-03, second human run).** A macro has three ways to execute and
+     for two rounds only one of them was ever verified. Each is now listed separately, which is the
+     rule §8's ninth correction adds:
+
+     | Entry point | Status | Verified by |
+     |---|---|---|
+     | Add as Notebook Cell | WORKS | unit + human (round 1) |
+     | Developer ▸ Macros… ▸ **Run** | **FIXED round 2** — was a `disabled` button styled to look enabled, over a module that ended in a comment instead of a call | `macro-recorder-journey.spec.ts` step 5, **run against the live app** |
+     | **Clicking the created button** | **FIXED round 2** — ran correctly but never dispatched `grid:refresh`, so the canvas kept drawing stale values | same spec, step 7, **run against the live app** |
+
+     Both fixed paths now execute through **one** primitive, `runObjectScriptOnce`
+     (`app/src/api/objectScriptRunner.ts`): mount the source in a real worker realm, await
+     `setup(context)`, unmount. The mount *is* the run, so Script Security, the unlocked tier, the
+     broker allowlist and the audit ring all apply unchanged, and Run cannot diverge from the
+     button. The stored module is a single artifact whose `setup` branches on whether the context
+     has `onClick`. All ten cell-writing broker methods end in a grid refresh, coalesced per frame
+     (`scriptWriteRefresh.test.ts` is a source-level drift guard so a new cell writer without a
+     refresh fails there rather than in a bug report).
    - **Known gaps:** fills cannot be expressed on the objectScript target (no fill in
      UnlockedAPI) and formatting/structure cannot be expressed on the notebook target — both are
      reported rather than silently dropped. ~~`sortRange` lives in `api/backend.ts`, outside the
@@ -1728,6 +1768,91 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Ninth correction (2026-08-03, SECOND human use of the macro recorder) — the fix for the eighth
+> correction was declared complete while two of the feature's three entry points still did nothing.**
+>
+> The eighth correction, directly below, ends with "something has to be exercised by a human before
+> SHIPPED". That rule was followed: a human ran it, four bugs were fixed, the suite went green, and
+> item 14 was closed a second time. **The same human ran it again and reported the same sentence:**
+> *"When I click 'Run' in 'Macros' menu nothing happens. Also nothing happens when I click the button
+> that I created along with it."* Of the three ways to execute a recorded macro — send it to a
+> notebook, press Run, click the button — **only the notebook worked.** The two the user actually
+> reached for were both dead, for two entirely unrelated reasons:
+>
+> 1. **Run was disabled and styled to look enabled.** The auto-saved module held the object-script
+>    flavour, whose stored source *declared* `async function macro1426(api)` and then ended in a
+>    **comment** suggesting someone call it. Nothing invoked it, and the module store executes
+>    through `run_script` — the Rust QuickJS runtime, whose global is `Calcula.*` and which has no
+>    `api` binding at all — so even appending a call would have thrown. The previous round noticed
+>    the symptom and "fixed" it by setting `disabled` on the Run button. But `styles.btnPrimary`
+>    sets `background`, `color`, `border` and `cursor:"pointer"` as **inline** styles, which
+>    override the UA `button:disabled` appearance in every property that would have greyed it out.
+>    The control rendered byte-identically to an enabled primary button, with a pointer cursor, and
+>    fired no event. **Disabling a control is not a fix for a control that cannot work; it is the
+>    same silence with an extra step.**
+> 2. **The button ran correctly and the screen never showed it.** `api.setCellValue` and
+>    `api.updateCellsBatch` — the only two write ops a recorded macro emits — were the only
+>    cell-writing broker handlers in the entire script host that skipped the refresh choreography
+>    (`afterCellDataChange` → `refreshGridData()` → the window `grid:refresh` event that is the ONLY
+>    thing making `GridCanvas` re-fetch cell data; `app:grid-refresh` merely repaints the cache).
+>    The macro ran, the backend updated, the .cala dirtied, and the canvas kept drawing the old
+>    values. Aggravating it: a recorded macro replays the exact writes the user had just typed into
+>    those exact cells, so even a manual refresh looked like nothing had happened.
+>
+> **Why the suite could not see either one, stated exactly: every test asserted that the right code
+> was produced and stored; not one asserted that running it changed a cell.** The eighth correction
+> diagnosed "tests of a pure function say nothing about the feature" and the response was to add
+> tests around the *wiring* — codegen shape, store round-trip, seam registration, menu labels. Those
+> are still assertions about **artifacts at rest**: the string is correct, the module is saved, the
+> provider is registered. The one assertion nobody wrote was the user's actual sentence — *press
+> this, and a cell changes.* A test suite can be exhaustive about what a feature **produces** and
+> still be completely silent about whether it **executes**. The e2e test that nominally covered the
+> button (`button-onclick.spec.ts`) asserted its result with `invoke("get_cell")` — evidence about
+> the **backend**, which was never the broken part; it passed throughout, while the screen stayed
+> stale. That is §8's own "evidence about the wrong component", one layer up.
+>
+> **What now works, and how it is known.** Both entry points execute through **one** code path. The
+> two object-script wrappers collapsed into a single stored artifact whose `setup(context)` asks the
+> context what it is — `context.onClick` present → run on click; absent → `return macro(context.api)`
+> immediately — so Run and the button cannot drift apart. Run routes on the stored runtime marker:
+> `Calcula.*` modules to `run_script`, `api.*` modules to `runObjectScriptOnce`, a new `@api`
+> primitive that mounts the source in a real worker realm, awaits `setup`, and unmounts (the mount
+> *is* the run: `hostMountScript` resolves only after `setup` is awaited, and rejects with the
+> script's own error). All ten cell-writing broker methods now end in a grid refresh, coalesced to
+> one per animation frame so a 10k-write loop cannot flood the canvas.
+>
+> **This one was verified by driving the real application, not by a green number.** A new e2e spec,
+> `app/e2e/tests/macro-recorder-journey.spec.ts`, **was written and RAN against a live
+> `cargo tauri dev` build over WebView2 CDP** — nine steps: record, three cell edits (one a
+> formula), auto-save, find it in the library, **Run and assert the cleared values come BACK**, add
+> a button, **click the button on the real canvas and assert the values come back again**, Design
+> Mode ON → the click selects and says so, Design Mode OFF → it runs again. On its **first** run it
+> failed at step 6 and found a further real bug: `mountedScriptHasHook` keyed forwarders by the bare
+> hook name, so `Controls`' query for `"button.onClick"` always returned `false` and every
+> **successful** macro-button click popped a toast accusing the script of never registering a click
+> handler — a diagnosis added in this very round to explain silence had started slandering working
+> code. Fixed, and the spec passes all nine steps.
+>
+> **The rules this adds.**
+> - **A feature's test suite must contain at least one assertion in the user's own words.** Not
+>   "the generated source contains `updateCellsBatch`" and not "`invoke('get_cell')` returns 42",
+>   but *press the thing the user presses, then read the thing the user reads.* Everything else is
+>   evidence about a component.
+> - **Never disable a control as a substitute for making it work.** A disabled control is only
+>   honest if it is *visibly* disabled and says why; inline styles routinely defeat the UA disabled
+>   appearance, so "I set `disabled`" is not the same claim as "the user can tell". If the refusal
+>   cannot be seen and read, the control is still silent.
+> - **A stored artifact must be runnable by the runtime it is stored in.** Saving object-script
+>   source into the module store — a store whose executor has no `api` binding — produced a file
+>   that could only ever fail. Whatever generates an artifact owns the question "which interpreter
+>   will be handed this, and does that interpreter have these globals?"
+> - **"Fixed" for a multi-entry-point feature means every entry point.** Three ways to run a macro
+>   shipped as "the macro recorder works" with one of the three verified. Enumerate the entry points
+>   in the status line and mark each one separately.
+> - **The second report of the same sentence outranks any test count.** When a user repeats a
+>   complaint verbatim after a fix, the correct first move is to reproduce their exact path, not to
+>   re-read the code that was just changed.
 
 > **Eighth correction (2026-08-03, first human use of the macro recorder) — 116 passing unit tests
 > on a pure codegen function said nothing at all about whether the feature worked.**

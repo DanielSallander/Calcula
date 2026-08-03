@@ -34,8 +34,9 @@ import type {
 export interface MacroCodegenOptions {
   /** Which runtime the emitted source must run in. Required — never guessed. */
   target: MacroTarget;
-  /** How the body is packaged. Defaults: objectScript -> "bare",
-   *  notebook -> "notebookCell". */
+  /** How the body is packaged. Defaults: objectScript -> "objectScript",
+   *  notebook -> "notebookCell". There is exactly one shape per target, so this
+   *  is only ever passed to be explicit. */
   wrapper?: MacroWrapper;
   /** Macro name; drives the header and the generated function's identifier. */
   name?: string;
@@ -891,31 +892,35 @@ function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
     `}`,
   ];
 
-  if (o.wrapper === "bare") {
-    return [
-      ...fn,
-      ``,
-      `// Run it from any unlocked object script:`,
-      `//   function setup(context) { ${o.fnName}(context.api); }`,
-    ];
-  }
-
-  // buttonScript: the same function plus the click entry point.
+  // ONE entry point, both uses. `setup` is what Calcula calls when this script
+  // is mounted, so ending the file with it is what makes the macro RUN rather
+  // than merely exist. A module that only declared the function above — with a
+  // comment explaining how someone else might call it — is what "I pressed Run
+  // and nothing happened" actually was.
   return [
     ...fn,
     ``,
-    `function setup(button) {`,
-    `  button.onClick(async () => {`,
-    `    if (!button.api) {`,
-    `      button.notify("This macro needs an unlocked script.", "error");`,
-    `      return;`,
-    `    }`,
-    `    try {`,
-    `      await ${o.fnName}(button.api);`,
-    `    } catch (e) {`,
-    `      button.notify(String(e && e.message ? e.message : e), "error");`,
-    `    }`,
-    `  });`,
+    `// Entry point. Calcula calls setup() when this script is mounted:`,
+    `//   • on a BUTTON  -> the macro runs on every click`,
+    `//   • run directly (Developer > Macros... > Run) -> it runs once, now`,
+    `function setup(context) {`,
+    `  if (!context.api) {`,
+    `    context.notify(${jsString(`"${o.name}" needs an UNLOCKED script; this one is restricted.`)}, "error");`,
+    `    return;`,
+    `  }`,
+    `  if (typeof context.onClick === "function") {`,
+    `    context.onClick(async () => {`,
+    `      try {`,
+    `        await ${o.fnName}(context.api);`,
+    `      } catch (e) {`,
+    `        context.notify(String(e && e.message ? e.message : e), "error");`,
+    `      }`,
+    `    });`,
+    `    return;`,
+    `  }`,
+    `  // Returned, not fired-and-forgotten: the mount resolves only after this`,
+    `  // promise settles, so "the macro finished" is something the caller knows.`,
+    `  return ${o.fnName}(context.api);`,
     `}`,
   ];
 }
@@ -925,7 +930,7 @@ function wrapObjectScript(body: string[], o: ResolvedOptions): string[] {
 // ============================================================================
 
 function defaultWrapper(target: MacroTarget): MacroWrapper {
-  return target === "notebook" ? "notebookCell" : "bare";
+  return target === "notebook" ? "notebookCell" : "objectScript";
 }
 
 function resolveOptions(options: MacroCodegenOptions): ResolvedOptions {
@@ -937,9 +942,9 @@ function resolveOptions(options: MacroCodegenOptions): ResolvedOptions {
       `Wrapper "${wrapper}" is an object-script shape; the notebook target only emits "notebookCell".`,
     );
   }
-  if (target === "objectScript" && wrapper === "notebookCell") {
+  if (target === "objectScript" && wrapper !== "objectScript") {
     throw new Error(
-      'Wrapper "notebookCell" is a notebook shape; the objectScript target emits "bare" or "buttonScript".',
+      `Wrapper "${wrapper}" is a notebook shape; the objectScript target emits "objectScript".`,
     );
   }
 

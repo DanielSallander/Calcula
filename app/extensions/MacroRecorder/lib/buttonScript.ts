@@ -54,7 +54,11 @@ export function designModeHint(): string {
 export interface SaveAsButtonOptions {
   /** Macro name — becomes the button label and the script name. */
   name: string;
-  /** Generated source; must be the "buttonScript" wrapper (it defines setup()). */
+  /**
+   * Generated object-script source. Must define `setup(context)` — that is the
+   * entry point Calcula calls on mount, and the recorder's single object-script
+   * wrapper emits one that wires `context.onClick` when it is given a button.
+   */
   source: string;
   sheetIndex: number;
   row: number;
@@ -65,9 +69,33 @@ export interface SaveAsButtonResult {
   /** The control's instance id, as the Controls extension assigned it. */
   instanceId: string;
   scriptId: string;
-  /** False when the script was stored but could not be mounted right now
-   *  (it will mount on the next workbook load). */
+  /** True only when the script is RUNNING right now — i.e. the next click works. */
   mounted: boolean;
+  /**
+   * Why it is not running, when it is not. Non-null exactly when `mounted` is
+   * false.
+   *
+   * This field exists because the previous version reported the same outcome
+   * two different ways and both were wrong: mount failures were swallowed into
+   * a `console.warn`, and the UI turned `mounted: false` into the reassuring
+   * "It runs after the workbook is reloaded" — a claim nothing verified, and a
+   * false one whenever the cause was a declined Script Security prompt (which a
+   * reload will decline again).
+   */
+  mountError: string | null;
+}
+
+/**
+ * What to TELL the user about a button that was created but is not running.
+ *
+ * Deliberately prescriptive: every branch ends in something to do.
+ */
+export function describeMountFailure(anchor: string, name: string, mountError: string): string {
+  return (
+    `Button created at ${anchor}, but "${name}" is NOT running yet: ${mountError} ` +
+    `Until that is resolved, clicking the button does nothing. ` +
+    `Fix it and remount from Developer ▸ Object Scripts.`
+  );
 }
 
 /**
@@ -110,25 +138,41 @@ export async function saveAsButtonScript(
   try {
     await saveObjectScript(definition);
   } catch (e) {
-    // Roll the control back so the user is not left with a dead button.
+    // Roll the control back so the user is not left with a dead button. If the
+    // rollback ALSO fails the user now has an orphan button on their sheet, and
+    // being told only about the save error would leave them staring at a
+    // control nothing explains — so both failures travel together.
+    const saveMessage = e instanceof Error ? e.message : String(e);
     try {
       await buttons.removeButton({ sheetIndex, row, col });
-    } catch {
-      /* best effort — the save error below is the one that matters */
+    } catch (rollbackError) {
+      const rollbackMessage =
+        rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      throw new Error(
+        `${saveMessage} — and the half-made button could not be removed again ` +
+          `(${rollbackMessage}). Delete the control at row ${row + 1}, column ` +
+          `${col + 1} by hand.`,
+      );
     }
     throw e;
   }
 
   let mounted = false;
+  let mountError: string | null = null;
   try {
     ObjectScriptManager.registerScript(definition);
     await ObjectScriptManager.mountScript(scriptId);
     mounted = ObjectScriptManager.isScriptMounted(scriptId);
+    if (!mounted) {
+      mountError =
+        "the script host reported no running realm for it after the mount returned.";
+    }
   } catch (e) {
-    console.warn("[MacroRecorder] button script stored but not mounted:", e);
+    // NOT a console.warn. The caller renders this; see describeMountFailure.
+    mountError = e instanceof Error ? e.message : String(e);
   }
 
-  return { instanceId, scriptId, mounted };
+  return { instanceId, scriptId, mounted, mountError };
 }
 
 export interface SaveAsInlineButtonOptions {

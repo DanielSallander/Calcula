@@ -58,7 +58,9 @@ import {
   autoSaveRecordedMacro,
   buildMacroDescription,
   deleteMacroModule,
-  isModuleRunnable,
+  isModuleRuntimeRunnable,
+  describeRunRoute,
+  macroRunRoute,
   listMacroModules,
   loadMacroModule,
   macroScriptId,
@@ -132,26 +134,36 @@ describe("the runtime marker", () => {
   it("treats an unmarked module as QuickJS (what run_script runs)", () => {
     expect(parseMacroRuntime(null)).toBeNull();
     expect(parseMacroRuntime("hand-written helper")).toBeNull();
-    expect(isModuleRunnable(null)).toBe(true);
-    expect(isModuleRunnable("hand-written helper")).toBe(true);
+    expect(isModuleRuntimeRunnable(null)).toBe(true);
+    expect(isModuleRuntimeRunnable("hand-written helper")).toBe(true);
+    expect(macroRunRoute(null)).toBe("moduleRuntime");
   });
 
-  it("holds object-script macros back from the module runtime", () => {
+  it("marks an object-script macro as NOT module-runtime runnable, with a reason", () => {
     const description = buildMacroDescription({
       runtime: "objectScript",
       actionCount: 2,
       recordedAt: "x",
     });
-    expect(isModuleRunnable(description)).toBe(false);
+    expect(isModuleRuntimeRunnable(description)).toBe(false);
+    expect(macroRunRoute(description)).toBe("objectScript");
+    // The reason is not optional decoration: a control the user cannot use as
+    // they expect must say WHY on screen, and it must name the actual cause.
+    const note = describeRunRoute(description);
+    expect(note).toMatch(/object-script runtime/i);
+    expect(note).toMatch(/`api\.\*`/);
+    expect(note).toMatch(/temporary unlocked object script/i);
   });
 
-  it("marks notebook macros runnable", () => {
+  it("marks notebook macros runnable by the module runtime", () => {
     const description = buildMacroDescription({
       runtime: "notebook",
       actionCount: 2,
       recordedAt: "x",
     });
-    expect(isModuleRunnable(description)).toBe(true);
+    expect(isModuleRuntimeRunnable(description)).toBe(true);
+    expect(macroRunRoute(description)).toBe("moduleRuntime");
+    expect(describeRunRoute(description)).toMatch(/workbook script runtime/i);
   });
 });
 
@@ -239,7 +251,12 @@ describe("the listing the library window renders", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].name).toBe("Macro1245");
     expect(entries[0].runtime).toBe("objectScript");
-    expect(entries[0].runnable).toBe(false);
+    expect(entries[0].loadError).toBeNull();
+    // Asserted through the functions the DIALOG calls, on the description the
+    // dialog passes them — not through precomputed copies no screen reads.
+    expect(isModuleRuntimeRunnable(entries[0].description)).toBe(false);
+    expect(macroRunRoute(entries[0].description)).toBe("objectScript");
+    expect(describeRunRoute(entries[0].description)).not.toBe("");
   });
 
   it("lists hand-authored modules too, as runnable", async () => {
@@ -252,7 +269,8 @@ describe("the listing the library window renders", () => {
     const entries = await listMacroModules();
     expect(entries.map((e) => e.name)).toEqual(["Helper"]);
     expect(entries[0].runtime).toBeNull();
-    expect(entries[0].runnable).toBe(true);
+    expect(isModuleRuntimeRunnable(entries[0].description)).toBe(true);
+    expect(macroRunRoute(entries[0].description)).toBe("moduleRuntime");
   });
 
   it("never lists reserved internal records", async () => {

@@ -82,7 +82,11 @@ export function StartRecordingDialog(props: DialogProps): React.ReactElement | n
   return (
     <>
       <div style={styles.backdrop} onMouseDown={onClose} />
-      <div ref={win.ref} style={{ ...styles.dialog, width: 480, ...win.style }}>
+      <div
+        ref={win.ref}
+        data-macro-start-dialog=""
+        style={{ ...styles.dialog, width: 480, ...win.style }}
+      >
         <div style={styles.header} onMouseDown={win.onHeaderMouseDown}>
           <span style={styles.title}>Record Macro</span>
           <button type="button" style={styles.closeBtn} onClick={onClose}>
@@ -95,6 +99,7 @@ export function StartRecordingDialog(props: DialogProps): React.ReactElement | n
             <div style={styles.label}>Macro name</div>
             <input
               style={styles.input}
+              data-macro-name-input=""
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
@@ -109,6 +114,7 @@ export function StartRecordingDialog(props: DialogProps): React.ReactElement | n
                   <input
                     type="radio"
                     name="macro-target"
+                    data-macro-target={t.id}
                     checked={target === t.id}
                     onChange={() => setTarget(t.id)}
                   />
@@ -134,7 +140,12 @@ export function StartRecordingDialog(props: DialogProps): React.ReactElement | n
           <button type="button" style={styles.btn} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" style={styles.btnPrimary} onClick={() => void start()}>
+          <button
+            type="button"
+            data-macro-start-button=""
+            style={styles.btnPrimary}
+            onClick={() => void start()}
+          >
             Start Recording
           </button>
         </div>

@@ -538,10 +538,27 @@ const faulted = new Map<string, string>();
  * and the host wired the forwarder). Cell-behavior dispatch uses this so a
  * binding never claims a gesture its script doesn't even handle — an
  * onChange-only behavior must not swallow clicks.
+ *
+ * BOTH SPELLINGS ARE ACCEPTED, and that is not politeness — it is the fix for a
+ * bug this asymmetry actually caused. Forwarders are keyed by the BARE hook
+ * name the worker registers and the host echoes back on every event
+ * ("onClick"); the objectType prefix exists only so `wireHookForwarder` can
+ * switch on `${objectType}.${hook}`. A caller who reads that switch — the
+ * obvious place to learn the hook names — naturally writes the QUALIFIED form,
+ * and used to get a flat `false` for a hook that is wired and firing.
+ *
+ * That is exactly what happened to the run-mode button-click diagnosis: it
+ * asked for "button.onClick", never got it, and so told the user
+ * "it never registered a click handler" on every SUCCESSFUL click of a working
+ * macro button. A predicate that answers "no" for a live hook does not just
+ * fail to help; it accuses working code.
  */
 export function mountedScriptHasHook(scriptId: string, hook: string): boolean {
   const mw = mounted.get(scriptId);
-  return !!mw && mw.forwarders.has(hook);
+  if (!mw) return false;
+  if (mw.forwarders.has(hook)) return true;
+  const prefix = `${mw.definition.objectType}.`;
+  return hook.startsWith(prefix) && mw.forwarders.has(hook.slice(prefix.length));
 }
 
 // ============================================================================
@@ -2046,7 +2063,15 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // then let the grid show the value. A rejection throws and nothing is
       // written. See writebackWriteGuard.ts.
       await captureWritebackWrite(definition.id, { sheetIndex, row, col, value });
-      await lib.updateCell(row, col, value);
+      const written = await lib.updateCell(row, col, value);
+      // THE CANVAS DOES NOT WATCH THE BACKEND. update_cell changes the engine
+      // and returns the recalculated cells; nothing re-fetches them until
+      // something dispatches `grid:refresh`. Without this line a script write
+      // lands in the document and stays invisible until the user scrolls,
+      // reloads or edits a cell by hand — which is exactly what "I clicked the
+      // macro button and nothing happened" looked like. Every other mutate
+      // handler in this broker already does it; these two were the omission.
+      await afterCellDataChange(written.cells);
       return undefined;
     }
     case "api.updateCellsBatch": {
@@ -2060,15 +2085,22 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         definition.id,
         updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
       );
+      const changed: CellData[] = [];
       if (plain.length > 0) {
-        await lib.updateCellsBatch(plain.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+        changed.push(
+          ...(await lib.updateCellsBatch(
+            plain.map((u) => ({ row: u.row, col: u.col, value: u.value })),
+          )),
+        );
       }
       // update_cells_batch DROPS writeback cells (partial-success semantics in
       // commands/data.rs), so a cell whose draft was just saved has to be
       // written on its own or the grid would show nothing at all.
       for (const u of drafted) {
-        await lib.updateCell(u.row, u.col, u.value);
+        changed.push(...(await lib.updateCell(u.row, u.col, u.value)).cells);
       }
+      // One refresh for the whole batch — see api.setCellValue above.
+      await afterCellDataChange(changed);
       return undefined;
     }
     case "api.getCellData": {
@@ -2097,7 +2129,13 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "api.setActiveSheet": {
       const [index] = args as [number];
       const lib = await getLib();
-      await lib.setActiveSheet(index);
+      const result = await lib.setActiveSheet(index);
+      // The BACKEND's active sheet moved; Core's did not. Announcing it is what
+      // keeps the tab bar, the canvas and every subsequent active-sheet write in
+      // the same place — a recorded macro's very first statement is
+      // `api.setActiveSheet(...)`, so a silent divergence here made the rest of
+      // the macro write to a sheet the user was not looking at.
+      await announceSheetsChanged(result);
       return undefined;
     }
     case "api.emitEvent": {
@@ -2717,9 +2755,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       await captureWritebackWrite(definition.id, { sheetIndex: target, row, col, value });
       if (offSheet) {
         await lib.updateCellOnSheets([sheetIndex as number], row, col, value);
+        // No visible cell moved, but an active-sheet formula may depend on it.
+        scheduleGridDataRefresh();
         return undefined;
       }
-      await lib.updateCell(row, col, value);
+      // Re-fetch the canvas — see the note on api.setCellValue.
+      await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
       return undefined;
     }
 
@@ -4333,13 +4374,20 @@ async function writeCellsOnSheet(
     updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
   );
   if (sheetIndex === activeSheet) {
+    const changed: CellData[] = [];
     if (plain.length > 0) {
-      await lib.updateCellsBatch(plain.map((u) => ({ row: u.row, col: u.col, value: u.value })));
+      changed.push(
+        ...(await lib.updateCellsBatch(
+          plain.map((u) => ({ row: u.row, col: u.col, value: u.value })),
+        )),
+      );
     }
     // updateCellsBatch drops writeback cells, so drafted ones go singly.
     for (const u of drafted) {
-      await lib.updateCell(u.row, u.col, u.value);
+      changed.push(...(await lib.updateCell(u.row, u.col, u.value)).cells);
     }
+    // The visible sheet changed: re-fetch it (see api.setCellValue).
+    await afterCellDataChange(changed);
     return;
   }
   await withScriptUndoBatch(lib, `Script write (${updates.length} cells)`, async () => {
@@ -4347,6 +4395,10 @@ async function writeCellsOnSheet(
       await lib.updateCellOnSheets([sheetIndex], u.row, u.col, u.value);
     }
   });
+  // Another sheet: no visible cell moved, but a formula on the ACTIVE sheet may
+  // depend on one, and the style caches key on the whole workbook. Refresh
+  // without the per-cell event (we have no CellData for an off-sheet write).
+  scheduleGridDataRefresh();
 }
 
 // ============================================================================
@@ -4402,6 +4454,36 @@ async function assertActiveSheet(
   );
 }
 
+/**
+ * Ask the canvas to re-fetch cell data, AT MOST ONCE PER FRAME.
+ *
+ * Coalesced on purpose. A script that loops `await api.setCellValue(...)` ten
+ * thousand times would otherwise dispatch ten thousand `grid:refresh` events,
+ * each of which starts its own viewport fetch — turning the fix for an
+ * invisible write into a stall. Every scheduled refresh is TRAILING, so the
+ * last one always runs and the final state is what the user ends up looking at.
+ *
+ * Kept separate from the per-cell `cellEvents` batch, which is NOT coalesced:
+ * those carry semantics (which cells changed) that downstream features need in
+ * full, and they cost nothing but a synchronous fan-out.
+ */
+let gridRefreshScheduled = false;
+
+function scheduleGridDataRefresh(): void {
+  if (gridRefreshScheduled) return;
+  gridRefreshScheduled = true;
+  const fire = (): void => {
+    gridRefreshScheduled = false;
+    emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+    void import("../grid").then((grid) => grid.refreshGridData());
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(fire);
+  } else {
+    setTimeout(fire, 16);
+  }
+}
+
 /** Push a batch of changed cells to the grid + style caches (the same refresh
  *  choreography the Home tab performs after applyFormatting). */
 async function afterCellDataChange(cells: CellData[]): Promise<void> {
@@ -4409,8 +4491,7 @@ async function afterCellDataChange(cells: CellData[]): Promise<void> {
     const { cellEvents, cellToChange } = await import("../../core/lib/cellEvents");
     cellEvents.emitBatch(cells.map(cellToChange), "script");
   }
-  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
-  (await import("../grid")).refreshGridData();
+  scheduleGridDataRefresh();
 }
 
 /** Rows/columns moved: the canvas must re-fetch cells AND re-read dimensions
@@ -4913,9 +4994,11 @@ async function writeCellOnSheet(
   await captureWritebackWrite(scriptId, { sheetIndex, row, col, value });
   const active = await lib.getActiveSheet();
   if (sheetIndex === active) {
-    await lib.updateCell(row, col, value);
+    // Re-fetch the canvas — see the note on api.setCellValue.
+    await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
   } else {
     await lib.updateCellOnSheets([sheetIndex], row, col, value);
+    scheduleGridDataRefresh();
   }
 }
 
@@ -5986,8 +6069,26 @@ async function buildSnapshot(definition: HostMountDefinition, mw: MountedWorker)
         break;
       }
     }
-  } catch {
-    // Snapshot failures degrade to defaults — scripts still mount.
+  } catch (err) {
+    // Snapshot failures degrade to defaults — the script still mounts, because
+    // a missing property mirror is far less bad than a dead object. But it is
+    // NOT nothing: every `context.properties.*` read below the failure point
+    // silently returns a default, so a script reads 0 rows from a real table
+    // and does the wrong thing quietly. Say it in the console AND on the
+    // objectscript:error channel the extension routes to a toast.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[scriptHost] snapshot for "${definition.name}" (${definition.objectType}) failed:`,
+      err,
+    );
+    emitAppEvent("objectscript:error", {
+      scriptId: definition.id,
+      scriptName: definition.name,
+      phase: "snapshot",
+      error:
+        `its object properties could not be read (${message}), so ` +
+        `context.properties.* will read defaults`,
+    });
   }
 
   return { properties, selection };

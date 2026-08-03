@@ -24,15 +24,30 @@
 //                   mounted object script's worker realm. `run_script` has no
 //                   `api` binding, so running it there would throw.
 //
-// The library must therefore know which it is holding, and saying so out loud
-// ("attach it to a button") beats offering a Run button that always fails. The
-// marker rides in the module's `description`, which round-trips through
-// save/get and is visible to the user in the same breath.
+// The library must therefore know which it is holding. The marker rides in the
+// module's `description`, which round-trips through save/get and is visible to
+// the user in the same breath.
+//
+// BOTH FLAVOURS RUN. Knowing the runtime is not the same as refusing to run —
+// that was the previous round's mistake: Run was disabled for objectScript
+// modules, which turned an honest error into a control that looked enabled and
+// did nothing at all. `runMacroModule` now ROUTES on the marker:
+//
+//   notebook / unmarked -> runWorkbookScript  (the QuickJS module runtime)
+//   objectScript        -> runObjectScriptOnce (a transient unlocked object
+//                          script — the runtime the source was written for)
+//
+// The second path is not a workaround; it is the same mount a button uses, so
+// "Run" and "click the button" execute through ONE code path with one set of
+// guarantees (Script Security gate, unlocked tier, broker allowlist, audit).
+// If one works the other works, which is exactly the property this feature
+// failed to have twice.
 
 import {
   deleteWorkbookScript,
   getWorkbookScript,
   listWorkbookScripts,
+  runObjectScriptOnce,
   runWorkbookScript,
   saveWorkbookScript,
 } from "@api";
@@ -89,9 +104,43 @@ export function parseMacroRuntime(
   return match ? (match[1] as MacroRuntime) : null;
 }
 
-/** Whether a stored module can be executed by the module runtime (`run_script`). */
-export function isModuleRunnable(description: string | null | undefined): boolean {
+/** Whether the QuickJS MODULE runtime (`run_script`) can execute this module. */
+export function isModuleRuntimeRunnable(
+  description: string | null | undefined,
+): boolean {
   return parseMacroRuntime(description) !== "objectScript";
+}
+
+/** Which executor `runMacroModule` will use for a stored module. */
+export type MacroRunRoute = "moduleRuntime" | "objectScript";
+
+export function macroRunRoute(
+  description: string | null | undefined,
+): MacroRunRoute {
+  return isModuleRuntimeRunnable(description) ? "moduleRuntime" : "objectScript";
+}
+
+/**
+ * The sentence the library puts ON SCREEN next to Run, naming the runtime the
+ * macro will execute in — and, when the module runtime is not it, exactly why.
+ *
+ * Never null: a user pressing a button is owed a statement of what it is about
+ * to do, not only of what it refuses to do.
+ */
+export function describeRunRoute(description: string | null | undefined): string {
+  if (macroRunRoute(description) === "moduleRuntime") {
+    return (
+      "Run executes this module in the workbook script runtime (the isolated " +
+      "QuickJS interpreter that speaks `Calcula.*`)."
+    );
+  }
+  return (
+    "This macro is written for the OBJECT-SCRIPT runtime (`api.*`), which the " +
+    "workbook script runtime does not have — it speaks `Calcula.*` and has no " +
+    "`api` binding at all. Run therefore mounts the macro as a temporary " +
+    "unlocked object script, the runtime it was written for, and unmounts it " +
+    "when it finishes. Script Security applies, exactly as it does for a button."
+  );
 }
 
 // ============================================================================
@@ -135,10 +184,26 @@ export interface MacroModuleEntry {
   id: string;
   name: string;
   description: string | null;
-  /** The recorder runtime marker, or null for a module the recorder did not write. */
+  /**
+   * The recorder runtime marker, or null for a module the recorder did not write.
+   *
+   * This is the ONLY runtime-ish field on an entry, deliberately. The route, its
+   * on-screen note and "can the module runtime run it" are all 1:1 derivations of
+   * this marker (`macroRunRoute` / `describeRunRoute` / `isModuleRuntimeRunnable`),
+   * and the dialog calls those on the module the user is LOOKING at — which is the
+   * edited description, not the stale list row. Precomputing them here too gave
+   * every entry three fields no screen ever read: a second source of truth that
+   * could only ever be the wrong one.
+   */
   runtime: MacroRuntime | null;
-  /** Whether `runModule` can execute it (see isModuleRunnable). */
-  runnable: boolean;
+  /**
+   * Why the module could not be READ, when it could not.
+   *
+   * A module whose record fails to load is still listed — hiding it would be
+   * the invisible-code failure again — but it is listed WITH the failure, not
+   * as an ordinary entry whose runtime happens to be unknown.
+   */
+  loadError: string | null;
 }
 
 /** Where a recording was auto-saved. */
@@ -225,18 +290,22 @@ export async function listMacroModules(): Promise<MacroModuleEntry[]> {
   const entries: MacroModuleEntry[] = [];
   for (const summary of summaries) {
     let description: string | null = null;
+    let loadError: string | null = null;
     try {
       description = (await getWorkbookScript(summary.id)).description ?? null;
-    } catch {
-      // A module whose source cannot be read is still listed — hiding it would
-      // be the invisible-code failure again, just with a different cause.
+    } catch (e) {
+      // A module whose record cannot be read is still listed — hiding it would
+      // be the invisible-code failure again, just with a different cause — but
+      // the failure travels with it. Swallowing it used to make an unreadable
+      // module look like an ordinary runnable one.
+      loadError = e instanceof Error ? e.message : String(e);
     }
     entries.push({
       id: summary.id,
       name: summary.name,
       description,
       runtime: parseMacroRuntime(description),
-      runnable: isModuleRunnable(description),
+      loadError,
     });
   }
   return entries;
@@ -269,11 +338,49 @@ export async function deleteMacroModule(id: string): Promise<void> {
   await deleteWorkbookScript(id);
 }
 
-/** Run a module in the QuickJS module runtime. */
+/**
+ * Run a stored macro module, in whichever runtime its source is written for.
+ *
+ * Both branches return the SAME shape, so the caller has one success path and
+ * one failure path. The object-script branch has no cell counter (the broker
+ * does not tally writes), so it reports what it does know rather than inventing
+ * a number: `cellsModified: -1` means "not measured", and the dialog prints the
+ * elapsed time instead of a count. An invented "0 cell(s) changed" on a macro
+ * that changed three cells is precisely the lie this feature kept telling.
+ */
 export async function runMacroModule(entry: {
   id: string;
   name: string;
   source: string;
+  /** The stored description, i.e. where the runtime marker lives. */
+  description: string | null;
 }): Promise<ScriptRunResult> {
-  return runWorkbookScript(entry.source, `${entry.id}.js`);
+  if (macroRunRoute(entry.description) === "moduleRuntime") {
+    return runWorkbookScript(entry.source, `${entry.id}.js`);
+  }
+
+  const started = Date.now();
+  try {
+    await runObjectScriptOnce({
+      name: entry.name,
+      source: entry.source,
+      objectType: "workbook",
+      instanceId: null,
+      accessLevel: "unlocked",
+      idPrefix: `macro_${entry.id}`,
+    });
+  } catch (e) {
+    return {
+      type: "error",
+      message: e instanceof Error ? e.message : String(e),
+      output: [],
+    };
+  }
+  return {
+    type: "success",
+    output: [],
+    cellsModified: -1,
+    durationMs: Date.now() - started,
+    screenUpdating: true,
+  };
 }

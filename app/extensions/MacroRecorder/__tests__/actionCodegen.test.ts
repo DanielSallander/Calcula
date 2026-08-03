@@ -606,7 +606,7 @@ async function runGenerated(
 
   const { source } = generateMacroSource(actions, {
     target: "objectScript",
-    wrapper: "bare",
+    wrapper: "objectScript",
     header: false,
     undoBatch: false,
     emitInitialSheetActivate: false,
@@ -808,30 +808,78 @@ describe("commands", () => {
 // ============================================================================
 
 describe("wrappers", () => {
-  it("bare emits a standalone async function taking the api", () => {
+  it("emits the macro function AND the setup() that invokes it", () => {
     const { source } = generateMacroSource([act(writes([[0, 0, "x"]]))], {
       target: "objectScript",
-      wrapper: "bare",
+      wrapper: "objectScript",
       name: "Monthly close",
       header: false,
       undoBatch: false,
     });
     expect(source).toContain("async function monthlyClose(api) {");
-    expect(source).toContain("function setup(context) { monthlyClose(context.api); }");
+    expect(source).toContain("function setup(context) {");
+    // THE REGRESSION THAT SHIPPED: the stored module used to end in a COMMENT
+    // describing how one might call the macro, so running it defined a function
+    // and stopped. The last statement must be an INVOCATION.
+    expect(source).toContain("return monthlyClose(context.api);");
+    expect(source.trimEnd().endsWith("}")).toBe(true);
   });
 
-  it("buttonScript adds a setup() that runs the macro on click", () => {
+  it("the same setup() wires a click when the context is a button", () => {
     const { source } = generateMacroSource([act(writes([[0, 0, "x"]]))], {
       target: "objectScript",
-      wrapper: "buttonScript",
+      wrapper: "objectScript",
       name: "Refresh",
       header: false,
       undoBatch: false,
     });
-    expect(source).toContain("function setup(button) {");
-    expect(source).toContain("button.onClick(async () => {");
-    expect(source).toContain("await refresh(button.api);");
-    expect(source).toContain("This macro needs an unlocked script.");
+    expect(source).toContain('if (typeof context.onClick === "function") {');
+    expect(source).toContain("context.onClick(async () => {");
+    expect(source).toContain("await refresh(context.api);");
+    expect(source).toContain("needs an UNLOCKED script");
+  });
+
+  it("setup() RUNS the macro when the context is not a button", async () => {
+    const { source } = generateMacroSource([act(writes([[3, 4, "hi"]]))], {
+      target: "objectScript",
+      wrapper: "objectScript",
+      name: "Direct run",
+      header: false,
+      undoBatch: false,
+      emitInitialSheetActivate: false,
+    });
+    const calls: Array<[number, number, string]> = [];
+    const api = {
+      setCellValue: (row: number, col: number, value: string) => {
+        calls.push([row, col, value]);
+        return Promise.resolve();
+      },
+    };
+    // eslint-disable-next-line no-new-func
+    const factory = new Function(`${source}
+return setup;`) as () => (
+      ctx: unknown,
+    ) => Promise<void> | void;
+    await factory()({ api, notify: () => {} });
+    expect(calls).toEqual([[3, 4, "hi"]]);
+  });
+
+  it("setup() refuses, out loud, when the tier gives it no api", () => {
+    const { source } = generateMacroSource([act(writes([[0, 0, "x"]]))], {
+      target: "objectScript",
+      wrapper: "objectScript",
+      name: "Needs api",
+      header: false,
+      undoBatch: false,
+    });
+    const messages: string[] = [];
+    // eslint-disable-next-line no-new-func
+    const factory = new Function(`${source}
+return setup;`) as () => (
+      ctx: unknown,
+    ) => void;
+    factory()({ api: null, notify: (m: string) => messages.push(m) });
+    expect(messages.join(" ")).toContain("UNLOCKED");
   });
 
   it("wraps the body in a single undo transaction by default", () => {
@@ -857,7 +905,7 @@ describe("wrappers", () => {
 
   it("rejects an object-script wrapper on the notebook target", () => {
     expect(() =>
-      generateMacroSource([], { target: "notebook", wrapper: "buttonScript" }),
+      generateMacroSource([], { target: "notebook", wrapper: "objectScript" }),
     ).toThrow(/notebook target only emits/);
   });
 
@@ -916,8 +964,7 @@ describe("edge cases", () => {
       act({ kind: "command", commandId: "x.y", args: { a: 1 } }, 1),
     ];
     for (const opts of [
-      { target: "objectScript" as const, wrapper: "bare" as const },
-      { target: "objectScript" as const, wrapper: "buttonScript" as const },
+      { target: "objectScript" as const, wrapper: "objectScript" as const },
       { target: "notebook" as const },
     ]) {
       const { source } = generateMacroSource(actions, { ...opts, recordedAt: "T" });

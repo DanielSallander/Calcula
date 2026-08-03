@@ -19,6 +19,7 @@ import {
   onDesignModeChange,
   registerRowGutterWidget,
   registerGridLayer,
+  showToast,
   overlayGetColumnX,
   overlayGetRowY,
   overlayGetColumnsWidth,
@@ -119,7 +120,14 @@ async function attachBehavior(target: TargetRange): Promise<void> {
   try {
     await saveObjectScript(script);
   } catch (e) {
-    console.warn("[CellBehaviors] Failed to persist behavior script:", e);
+    // A behavior that was never stored will not survive a reload; the user is
+    // about to be handed an editor for it, so say it now.
+    showToast(
+      `The behavior script could not be saved into this workbook: ` +
+        `${e instanceof Error ? e.message : String(e)} It will be lost when the ` +
+        `workbook is closed.`,
+      { type: "error", duration: 0 },
+    );
   }
   await attachCellBehavior({
     id: bindingId,
@@ -130,8 +138,18 @@ async function attachBehavior(target: TargetRange): Promise<void> {
     endRow: target.endRow,
     endCol: target.endCol,
   });
-  // Mount so the scaffold works immediately (gated by Script Security).
-  await ObjectScriptManager.mountScript(script.id);
+  // Mount so the scaffold works immediately (gated by Script Security). A
+  // refusal here means the behavior is attached but inert — the cell will look
+  // bound and act ordinary, which is the exact confusion to head off.
+  try {
+    await ObjectScriptManager.mountScript(script.id);
+  } catch (e) {
+    showToast(
+      `The behavior is attached but not running: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+      { type: "error", duration: 0 },
+    );
+  }
 
   emitAppEvent("scriptable-objects:edit-script", {
     objectType: "range",
