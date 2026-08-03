@@ -82,6 +82,70 @@ async function compileSource(source: string, asyncWrapper = false): Promise<Setu
 let dbg: DebugController | null = null;
 
 /**
+ * Whether THIS mount is a debug mount.
+ *
+ * Deliberately separate from `dbg`: instrumentation can fail (the pass bails,
+ * the blob does not compile) and the realm then runs the ORIGINAL source with
+ * `dbg === null`. The session is still open, the editor is still watching, and
+ * "is anything running right now" is still the question it needs answered — so
+ * activity reporting is keyed on the SESSION, not on whether stepping works.
+ */
+let debugMount = false;
+
+/** Executions currently on the stack (setup, hook dispatches, method calls). */
+let activityDepth = 0;
+
+/**
+ * Report the start/end of one execution to the host.
+ *
+ * ONLY the OUTERMOST execution is reported. Nesting happens routinely — a hook
+ * handler calls an exposed method, a method dispatches an event — and a naive
+ * per-execution report would announce "finished" while the outer one was still
+ * running, which is the exact lie this whole mechanism exists to remove.
+ */
+function trackActivity<T>(label: string, run: () => T): T | Promise<Awaited<T>> {
+  if (!debugMount) return run();
+  const outermost = activityDepth === 0;
+  activityDepth++;
+  if (outermost) post({ t: "debugActivity", state: { running: true, label } });
+  const finish = (error?: unknown): void => {
+    activityDepth--;
+    if (!outermost) return;
+    post({
+      t: "debugActivity",
+      state: {
+        running: false,
+        label,
+        ...(error === undefined
+          ? {}
+          : { error: error instanceof Error ? error.message : String(error) }),
+      },
+    });
+  };
+  let result: T;
+  try {
+    result = run();
+  } catch (err) {
+    finish(err);
+    throw err;
+  }
+  if (result && typeof (result as { then?: unknown }).then === "function") {
+    return Promise.resolve(result).then(
+      (value) => {
+        finish();
+        return value as Awaited<T>;
+      },
+      (err: unknown) => {
+        finish(err);
+        throw err;
+      },
+    );
+  }
+  finish();
+  return result;
+}
+
+/**
  * Compile for a debug session: instrument, verify by compiling, and fall back
  * to the ORIGINAL source if anything at all went wrong. A transform bug can
  * cost stepping; it must never cost the user their script.
@@ -141,11 +205,13 @@ async function handleMount(spec: MountSpec): Promise<void> {
       post({ t: "mounted", ok: false, error: `Protocol version mismatch: host ${spec.protocolVersion}, worker 1` });
       return;
     }
+    debugMount = !!spec.debug;
+    activityDepth = 0;
     const setup = spec.debug ? await compileForDebug(spec) : await compileSource(spec.source);
     const { context, rt } = buildWorkerContext(spec, post);
     runtime = rt;
     intrinsicFreeze(context);
-    const teardown = await setup(context);
+    const teardown = await trackActivity("setup", () => setup(context));
     if (typeof teardown === "function") {
       teardownFn = teardown as () => void;
     }
@@ -273,7 +339,7 @@ async function handleMethodCall(callId: number, methodName: string, args: unknow
     return;
   }
   try {
-    const value = await handler(...args);
+    const value = await trackActivity(`${methodName}()`, () => handler(...args));
     post({ t: "methodResult", callId, ok: true, value: safeClone(value) });
   } catch (err) {
     post({
@@ -294,11 +360,20 @@ self.onmessage = (e: MessageEvent<H2W>) => {
     case "validate":
       void handleValidate(msg.source);
       break;
-    case "event":
-      if (runtime) {
-        dispatchHookEvent(runtime, msg.hook, msg.payload, post);
+    case "event": {
+      const rt = runtime;
+      if (rt) {
+        // The dispatch result is a promise only when a handler returned one;
+        // trackActivity keeps the session "running" until it settles, so a
+        // handler suspended at a breakpoint never looks finished. Handler
+        // failures are already reported by dispatchEvent itself, so the catch
+        // here drops nothing — it only stops a duplicate unhandled rejection.
+        void Promise.resolve(
+          trackActivity(msg.hook, () => dispatchHookEvent(rt, msg.hook, msg.payload, post)),
+        ).catch(() => undefined);
       }
       break;
+    }
     case "mirror":
       if (runtime) {
         applyMirror(runtime, msg.path, msg.value);
@@ -325,6 +400,11 @@ self.onmessage = (e: MessageEvent<H2W>) => {
       dbg?.control(msg.action);
       if (msg.action === "stop") {
         dbg = null;
+        // The session is over: no further activity reports. (The host remounts
+        // this script un-instrumented straight after, so the realm is on its
+        // way out — but a report arriving after the editor dropped the session
+        // would still be a message about a session that no longer exists.)
+        debugMount = false;
       }
       break;
     case "ping":

@@ -254,6 +254,44 @@ class MenuRegistry {
     // If menu doesn't exist yet, the item will be appended when registerMenu is called
   }
 
+  /**
+   * Patch an already-registered item in place (by menu id + item id).
+   *
+   * WHY THIS EXISTS. `registerMenuItem` is idempotent-by-merge: re-registering
+   * the same id only folds in new CHILDREN, so a second call with a new label
+   * or `hidden: true` was silently ignored. That is how the Macro Recorder ended
+   * up showing "Stop Recording" forever — a menu that describes a state it is
+   * not in. An item is a live surface, so the registry has to be able to say
+   * "this one now reads differently", not only "this one exists".
+   *
+   * The patch is applied to BOTH the dynamic record and the item currently in
+   * the menu, so it survives a later menu re-registration. `id` cannot be
+   * patched (that would be a different item). Unknown items are ignored.
+   */
+  updateMenuItem(
+    menuId: string,
+    itemId: string,
+    patch: Partial<Omit<MenuItemDefinition, "id">>,
+  ): void {
+    let changed = false;
+
+    const dynamic = this.dynamicItems.get(menuId);
+    const dynamicItem = dynamic?.find((it) => it.id === itemId);
+    if (dynamicItem) {
+      Object.assign(dynamicItem, patch, { id: itemId });
+      changed = true;
+    }
+
+    const menu = this.menus.get(menuId);
+    const menuItem = menu?.items.find((it) => it.id === itemId);
+    if (menuItem) {
+      Object.assign(menuItem, patch, { id: itemId });
+      changed = true;
+    }
+
+    if (changed) this.notify();
+  }
+
   /** Remove a dynamically-registered menu item (by menu id + item id). Used to
    *  tear down items registered by an extension on deactivation. */
   removeMenuItem(menuId: string, itemId: string): void {
@@ -319,6 +357,16 @@ export function registerMenuItem(menuId: string, item: MenuItemDefinition): void
 
 export function unregisterMenuItem(menuId: string, itemId: string): void {
   menuRegistry.removeMenuItem(menuId, itemId);
+}
+
+/** Patch a registered menu item in place (label, disabled, hidden, checked, …).
+ *  See MenuRegistry.updateMenuItem for why re-registering does not do this. */
+export function updateMenuItem(
+  menuId: string,
+  itemId: string,
+  patch: Partial<Omit<MenuItemDefinition, "id">>,
+): void {
+  menuRegistry.updateMenuItem(menuId, itemId, patch);
 }
 
 export function getMenus(): MenuDefinition[] {

@@ -331,6 +331,72 @@ describe("debug instrumentation — async promotion", () => {
     expect(r.pausableLines).not.toContain(3);
   });
 
+  it("follows the CONTEXT PARAMETER'S NAME, not the literal word 'context'", () => {
+    // The macro recorder emits exactly this shape. Keying promotion on the word
+    // "context" left every recorded macro's handler un-promotable, so every
+    // breakpoint inside it degraded to a hollow snapshot-only dot — in the one
+    // script shape the recorder produces, which is the one shape most users
+    // will ever debug.
+    const src = [
+      "function setup(button) {",
+      "  button.onClick(function () {",
+      "    const total = 1;",
+      "    return total;",
+      "  });",
+      "}",
+    ].join("\n");
+    const r = instrumentForDebug(src);
+    expect(r.code).toContain("button.onClick(async function");
+    expect(r.pausableLines).toEqual(expect.arrayContaining([3, 4]));
+    expect(r.snapshotLines).not.toContain(3);
+  });
+
+  it("promotes a callback on a NESTED context path (context.sheet.onDataChange)", () => {
+    const src = [
+      "function setup(context) {",
+      "  context.sheet.onDataChange(function (e) {",
+      "    const n = e.changes.length;",
+      "    return n;",
+      "  });",
+      "}",
+    ].join("\n");
+    const r = instrumentForDebug(src);
+    expect(r.code).toContain("context.sheet.onDataChange(async function");
+    expect(r.pausableLines).toEqual(expect.arrayContaining([3, 4]));
+  });
+
+  it("leaves a lookalike on someone ELSE'S object alone", () => {
+    // `emitter` is not the context binding, so its on* callback is a user
+    // contract we know nothing about — promoting it could change what the
+    // script's own code observes.
+    const src = [
+      "function setup(context) {",
+      "  const emitter = context.getThing();",
+      "  emitter.onTick(function () {",
+      "    const n = 1;",
+      "    return n;",
+      "  });",
+      "}",
+    ].join("\n");
+    const r = instrumentForDebug(src);
+    expect(r.code).not.toContain("emitter.onTick(async");
+    expect(r.snapshotLines).toEqual(expect.arrayContaining([4, 5]));
+  });
+
+  it("still never promotes onRender, whatever the context is called", () => {
+    const src = [
+      "function setup(cell) {",
+      "  cell.onRender(function (c) {",
+      "    const bold = c.value === 'x';",
+      "    return { bold };",
+      "  });",
+      "}",
+    ].join("\n");
+    const r = instrumentForDebug(src);
+    expect(r.code).not.toContain("onRender(async");
+    expect(r.snapshotLines).toEqual(expect.arrayContaining([3, 4]));
+  });
+
   it("does not promote an ordinary user helper (its callers are synchronous)", () => {
     const src = [
       "function helper(x) {",

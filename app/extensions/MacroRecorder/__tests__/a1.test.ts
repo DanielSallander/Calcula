@@ -1,13 +1,14 @@
 //! FILENAME: app/extensions/MacroRecorder/__tests__/a1.test.ts
-// PURPOSE: The A1 parsing behind the "place the button at" field, and the
-//          anchor-derived control id the button script is bound by.
-// CONTEXT: The id is the ONLY thing that makes the control the recorder creates
-//          and the object script it saves refer to the same button, so its
-//          shape is pinned here.
+// PURPOSE: The A1 parsing behind the "place the button at" field.
+// CONTEXT: The control id the button script binds to used to be derived HERE,
+//          from the anchor. It no longer is: the Controls extension owns the
+//          control and hands its instanceId back through the
+//          @api/buttonControlService seam, because a recorder that re-derives
+//          another extension's id format is one rename away from a button and a
+//          script that never meet. That contract lives in buttonScript.test.ts.
 
 import { describe, it, expect } from "vitest";
 import { formatA1, parseA1 } from "../lib/a1";
-import { controlInstanceId } from "../lib/buttonScript";
 
 describe("parseA1", () => {
   it("parses plain references", () => {
@@ -38,12 +39,5 @@ describe("parseA1", () => {
     ]) {
       expect(parseA1(formatA1(row, col))).toEqual({ row, col });
     }
-  });
-});
-
-describe("controlInstanceId", () => {
-  it("derives the anchor id the object-script host expects", () => {
-    expect(controlInstanceId(0, 5, 10)).toBe("control-0-5-10");
-    expect(controlInstanceId(2, 0, 0)).toBe("control-2-0-0");
   });
 });

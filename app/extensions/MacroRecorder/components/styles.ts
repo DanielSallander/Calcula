@@ -123,6 +123,83 @@ export const styles: Record<string, React.CSSProperties> = {
     padding: "8px 10px",
   },
 
+  /** "Your recording is safe, here is where it lives" — the reassurance the
+   *  review dialog leads with now that Close can no longer lose anything. */
+  saved: {
+    fontSize: 12,
+    color: v("--text-primary"),
+    lineHeight: 1.45,
+    border: `1px solid ${v("--border-default")}`,
+    borderLeft: "3px solid #3a9a5c",
+    borderRadius: 4,
+    padding: "8px 10px",
+    background: v("--grid-bg"),
+  },
+
+  /** Loud failure box — the auto-save fell over and the user must act. */
+  error: {
+    fontSize: 12,
+    color: "#d05353",
+    lineHeight: 1.45,
+    border: "1px solid rgba(208, 83, 83, 0.5)",
+    borderRadius: 4,
+    padding: "8px 10px",
+  },
+
+  list: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 0,
+    border: `1px solid ${v("--border-default")}`,
+    borderRadius: 4,
+    overflow: "auto",
+    minHeight: 120,
+    flex: 1,
+  },
+
+  listRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "7px 10px",
+    cursor: "pointer",
+    borderBottom: `1px solid ${v("--border-default")}`,
+  },
+
+  listRowSelected: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "7px 10px",
+    cursor: "pointer",
+    borderBottom: `1px solid ${v("--border-default")}`,
+    background: v("--accent-primary"),
+    color: "#ffffff",
+  },
+
+  badge: {
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+    borderRadius: 3,
+    padding: "1px 6px",
+    border: `1px solid ${v("--border-default")}`,
+    whiteSpace: "nowrap",
+  },
+
+  output: {
+    fontFamily: 'Consolas, "Cascadia Mono", monospace',
+    fontSize: 11,
+    lineHeight: 1.45,
+    whiteSpace: "pre-wrap",
+    maxHeight: 120,
+    overflow: "auto",
+    border: `1px solid ${v("--border-default")}`,
+    borderRadius: 4,
+    padding: "8px 10px",
+    background: v("--grid-bg"),
+  },
+
   footer: {
     display: "flex",
     justifyContent: "flex-end",

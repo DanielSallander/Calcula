@@ -19,6 +19,12 @@ import {
   IconDesignMode,
   registerControlStoreService,
 } from "@api";
+import { registerButtonControlProvider } from "@api/buttonControlService";
+import type {
+  ButtonControlAnchor,
+  ButtonControlHandle,
+  CreateButtonControlRequest,
+} from "@api/buttonControlService";
 import { getActiveSheet } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -394,6 +400,19 @@ function activate(context: ExtensionContext): void {
     },
   });
   cleanupFns.push(() => registerControlStoreService(null));
+
+  // Expose button CREATION (IoC). Placing a real, visible button is three
+  // coordinated writes plus a geometry calculation, all of which live here; the
+  // seam lets any extension ask for one without re-deriving that recipe (the
+  // Macro Recorder's "save as button" wrote control metadata by hand and drew
+  // nothing at all). Callers get the instanceId back — the id `button:clicked`
+  // carries and an object script must bind to — so nobody has to guess it.
+  cleanupFns.push(
+    registerButtonControlProvider({
+      createButton: createButtonControlAt,
+      removeButton: removeButtonControlAt,
+    }),
+  );
 
   // 1. Register button cell decoration for rendering (embedded buttons)
   const unregDecoration = context.grid.decorations.register("button", drawButton, 10);
@@ -1199,30 +1218,28 @@ function cellOriginPixels(row: number, col: number): { x: number; y: number } {
 }
 
 /**
- * Insert a button control on the current selection.
- * Creates a floating button positioned at the selected cell's location.
+ * Create a floating button control at an anchor cell — THE one place a button
+ * is made, for the ribbon's "Insert Button" and for every @api caller that comes
+ * through the ButtonControlProvider seam.
+ *
+ * It is one function on purpose. The recorded-macro "save as button" path used
+ * to write its own control metadata and produced nothing visible, because a
+ * button is three writes (backend metadata with the RIGHT property names,
+ * floating-store registration, overlay region sync) and it only did the first.
+ * Anything that duplicates this list drifts the next time a default changes.
  */
-async function insertButton(): Promise<void> {
-  const { restoreFocusToGrid } = await import("../../src/api/events");
-  const { getGridStateSnapshot } = await import("../../src/api/grid");
+async function createButtonControlAt(
+  request: CreateButtonControlRequest,
+): Promise<ButtonControlHandle> {
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
+  const { getGridStateSnapshot } = await import("../../src/api/grid");
 
-  // Get current selection
-  const sel = getCurrentSelectionFromInterceptor();
-  if (!sel) return;
-
-  const row = sel.endRow;
-  const col = sel.endCol;
-
-  // Get grid state for position calculation
+  const { sheetIndex, row, col } = request;
   const gridState = getGridStateSnapshot();
-  if (!gridState) return;
-
-  const sheetIndex = gridState.config?.activeSheet ?? 0;
-  const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
-  const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
-  const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
-  const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
+  const defaultCellWidth = gridState?.config?.defaultCellWidth ?? 100;
+  const defaultCellHeight = gridState?.config?.defaultCellHeight ?? 24;
+  const columnWidths = gridState?.dimensions?.columnWidths ?? new Map();
+  const rowHeights = gridState?.dimensions?.rowHeights ?? new Map();
 
   // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
   let cellX = 0;
@@ -1244,7 +1261,7 @@ async function insertButton(): Promise<void> {
   await setControlMetadata(sheetIndex, row, col, {
     controlType: "button",
     properties: {
-      text: { valueType: "static", value: "Button" },
+      text: { valueType: "static", value: request.label },
       fill: { valueType: "static", value: "#e0e0e0" },
       color: { valueType: "static", value: "#000000" },
       borderColor: { valueType: "static", value: "#999999" },
@@ -1260,8 +1277,8 @@ async function insertButton(): Promise<void> {
       y: { valueType: "static", value: String(cellY) },
       width: { valueType: "static", value: String(btnWidth) },
       height: { valueType: "static", value: String(btnHeight) },
-      onSelect: { valueType: "static", value: "" },
-      tooltip: { valueType: "static", value: "" },
+      onSelect: { valueType: "static", value: request.onSelect ?? "" },
+      tooltip: { valueType: "static", value: request.tooltip ?? "" },
     },
   });
 
@@ -1280,8 +1297,59 @@ async function insertButton(): Promise<void> {
   });
 
   // Sync overlay regions and refresh
+  invalidateFloatingButtonCache(controlId);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
+
+  return {
+    instanceId: controlId,
+    sheetIndex,
+    row,
+    col,
+    x: cellX,
+    y: cellY,
+    width: btnWidth,
+    height: btnHeight,
+  };
+}
+
+/** Delete the control at an anchor cell. Mirrors createButtonControlAt so a
+ *  caller whose second step failed can roll the button back cleanly. */
+async function removeButtonControlAt(anchor: ButtonControlAnchor): Promise<void> {
+  const { removeControlMetadata } = await import("./lib/controlApi");
+  const { sheetIndex, row, col } = anchor;
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+
+  await removeControlMetadata(sheetIndex, row, col);
+  removeFloatingControl(controlId);
+  invalidateFloatingButtonCache(controlId);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/**
+ * Insert a button control on the current selection.
+ * Creates a floating button positioned at the selected cell's location.
+ */
+async function insertButton(): Promise<void> {
+  const { restoreFocusToGrid } = await import("../../src/api/events");
+  const { getGridStateSnapshot } = await import("../../src/api/grid");
+
+  // Get current selection
+  const sel = getCurrentSelectionFromInterceptor();
+  if (!sel) return;
+
+  // Get grid state for the active sheet
+  const gridState = getGridStateSnapshot();
+  if (!gridState) return;
+
+  await createButtonControlAt({
+    sheetIndex: gridState.config?.activeSheet ?? 0,
+    row: sel.endRow,
+    col: sel.endCol,
+    label: "Button",
+  });
+
   restoreFocusToGrid();
 }
 

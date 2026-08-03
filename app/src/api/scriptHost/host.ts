@@ -14,6 +14,7 @@ import {
   callExposed,
   hostCallExposed,
   listExposed,
+  HOST_ONLY_EXPOSED_PREFIX,
   registerExposed,
   unregisterExposed,
   registerMountedHandle,
@@ -478,8 +479,21 @@ interface MountedWorker {
   pendingRenderDraws: Map<number, { key: string; timer: number; w: number; h: number }>;
   /** In-flight bitmap request keys (single-flight per key). */
   drawsInFlight: Set<string>;
-  /** Pending relayed methodCalls. */
-  pendingMethodCalls: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: number }>;
+  /**
+   * Pending relayed methodCalls. `timer` is null while the deadline is
+   * SUSPENDED, which happens for exactly one reason: the realm is paused in the
+   * debugger (see suspendMethodCallDeadlines).
+   */
+  pendingMethodCalls: Map<
+    number,
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: number | null;
+      /** (Re-)arm the deadline from now. */
+      arm: () => void;
+    }
+  >;
   nextReqId: number;
   /** Coalesced event queue, flushed per animation frame. */
   coalesced: Map<string, unknown>;
@@ -491,6 +505,15 @@ interface MountedWorker {
   shapeProps: Map<string, string>;
   /** Render hooks the worker declared (onRender/canvasRenderer/itemRenderer). */
   declaredRenderHooks: Set<string>;
+  /**
+   * EVERY hook the worker declared, in registration order.
+   *
+   * `forwarders` is not the same thing: `event:` subscriptions and the render
+   * hooks deliberately register no forwarder, so a set built from it would not
+   * be the honest answer to "what is this script waiting for" — which is
+   * precisely the question a debug session has to answer.
+   */
+  declaredHooks: string[];
   /**
    * Host-side copy of the seeded snapshot properties + subsequent mirror pushes,
    * used by event forwarders to filter by object bounds (table/namedRange range
@@ -568,6 +591,10 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     debugSession.paused = null;
     debugSession.ready = null;
     debugSession.lastSnapshot = null;
+    debugSession.activity = null;
+    debugSession.lastActivity = null;
+    debugSession.triggers = [];
+    debugSession.error = null;
     emitDebugState(debugSession, definition.id);
   }
 
@@ -590,6 +617,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     respawned: false,
     shapeProps: new Map(),
     declaredRenderHooks: new Set(),
+    declaredHooks: [],
     hostMirror: new Map(),
   };
   mounted.set(definition.id, mw);
@@ -707,7 +735,7 @@ export function hostUnmountScript(scriptId: string): void {
     pending.resolve(null);
   }
   for (const pending of mw.pendingMethodCalls.values()) {
-    clearTimeout(pending.timer);
+    if (pending.timer !== null) clearTimeout(pending.timer);
     pending.reject(new Error("Script unmounted"));
   }
   for (const pending of mw.pendingRenderDraws.values()) {
@@ -752,9 +780,14 @@ export function hostUnmountScript(scriptId: string): void {
   // The worker is gone, so any pause died with it. Say so rather than leaving a
   // "paused" indicator standing in front of a script that no longer exists.
   const session = debugSessions.get(scriptId);
-  if (session && session.status !== "detached") {
+  // "failed" already says the realm is gone AND why, so it is not downgraded to
+  // the less informative "detached" by the teardown that follows a failed mount.
+  if (session && session.status !== "detached" && session.status !== "failed") {
     session.status = "detached";
     session.paused = null;
+    // Nothing is executing and nothing can be triggered: the realm is gone.
+    session.activity = null;
+    session.triggers = [];
     emitDebugState(session, scriptId);
   }
 }
@@ -863,17 +896,73 @@ function post(mw: MountedWorker, msg: H2W): void {
 //   - JS UDF evaluation     -> the same relayed-call deadline; the cell reports
 //                              an error and recalculates later.
 
-/** State of one open debug session, as the editor renders it. */
+/**
+ * One thing that can make this script start executing.
+ *
+ * WHY THE DEBUGGER NEEDS THIS AT ALL. The dominant script shape — and the ONLY
+ * shape the macro recorder produces — is `setup` registering a handler and
+ * returning. Such a script has no entry point a debugger can "run": it is
+ * mounted and idle until something in the app happens to it. A session that
+ * cannot name that something, and cannot make it happen, leaves the user
+ * waiting in front of a script that will never move.
+ */
+export interface DebugTrigger {
+  /** Stable within a mount: "hook:onClick", "method:recalcAll". */
+  id: string;
+  kind: "hook" | "method";
+  /** The hook name or the exposed-method name. */
+  name: string;
+  /** What the user would do in the app to fire this for real. */
+  description: string;
+  /** Whether the debugger may fire it directly. */
+  fireable: boolean;
+  /** Why not, when `fireable` is false. */
+  reason?: string;
+}
+
+/** What the realm last told us it was executing. */
+export interface DebugActivityRecord {
+  label: string;
+  /** Set when that execution threw or rejected. */
+  error?: string;
+}
+
+/**
+ * State of one open debug session, as the editor renders it.
+ *
+ * THE STATUS IS A CLAIM ABOUT THE SCRIPT, NOT ABOUT THE SESSION. It used to
+ * become "running" when the realm reported it had instrumented the source and
+ * then never changed again, so an event-driven script — the common case —
+ * claimed to be running forever while nothing at all was happening. The realm
+ * now reports the start and end of every execution (`debugActivity`), and
+ * "waiting" / "finished" are the honest resting states.
+ */
 export interface DebugSessionState {
   scriptId: string;
   scriptName: string;
-  /** "starting" until the worker reports what it managed to instrument. */
-  status: "starting" | "running" | "paused" | "detached";
+  /**
+   * - starting  — remounting; the realm has not reported in yet.
+   * - running   — script code is on the stack right now (`activity` names it).
+   * - paused    — suspended at a yield point (`paused` describes where).
+   * - waiting   — mounted and idle, waiting for one of `triggers` to fire.
+   * - finished  — mounted and idle with NOTHING that can start it again.
+   * - failed    — `setup` threw; `error` says what it threw.
+   * - detached  — the script was unmounted; there is nothing to attach to.
+   */
+  status: "starting" | "running" | "paused" | "waiting" | "finished" | "failed" | "detached";
   breakpoints: number[];
   ready: DebugReadyState | null;
   paused: DebugPauseState | null;
   /** Most recent non-pausing (synchronous-context) breakpoint report. */
   lastSnapshot: DebugSnapshotState | null;
+  /** What is executing while `status` is "running" / "paused". */
+  activity: DebugActivityRecord | null;
+  /** The last execution that COMPLETED (its error, if it threw). */
+  lastActivity: DebugActivityRecord | null;
+  /** What can start this script again, as of the last idle transition. */
+  triggers: DebugTrigger[];
+  /** Set when `status` is "failed". */
+  error: string | null;
 }
 
 const debugSessions = new Map<string, DebugSessionState>();
@@ -903,6 +992,171 @@ export function isScriptDebugPaused(scriptId: string): boolean {
   return debugSessions.get(scriptId)?.status === "paused";
 }
 
+// ----------------------------------------------------------------------------
+// Triggers — what can make an idle script start executing
+// ----------------------------------------------------------------------------
+
+/**
+ * Hooks the debugger must NOT synthesize.
+ *
+ * Render hooks are pull-based: the host asks for styles/bitmaps on a 2s
+ * deadline and the realm refuses to suspend inside one at all (beginNoPause),
+ * so a "fire" button for them would either do nothing visible or invite the
+ * user to set a breakpoint that provably cannot stop. They are still LISTED —
+ * the user should see that the script renders — just not fireable.
+ */
+const UNFIREABLE_HOOKS: Record<string, string> = {
+  onRender: "cell renderers run on the paint deadline and cannot be suspended",
+  canvasRenderer: "shape painters run on the paint deadline and cannot be suspended",
+  itemRenderer: "slicer item painters run on the paint deadline and cannot be suspended",
+  markRenderer: "chart mark painters run on the paint deadline and cannot be suspended",
+};
+
+/** The gesture that fires a hook for real, in the user's words. */
+const HOOK_GESTURES: Record<string, string> = {
+  onClick: "a click on it",
+  onDoubleClick: "a double-click on it",
+  onChange: "its value changing",
+  onEdit: "an edit to it",
+  onEditStart: "an edit starting on it",
+  onEditEnd: "an edit finishing on it",
+  onSelect: "it being selected",
+  onSelectionChange: "the selection moving",
+  onDataChange: "its data changing",
+  onOpen: "the workbook being opened",
+  onBeforeSave: "the workbook being saved",
+  onAfterSave: "the workbook finishing a save",
+  onBeforeClose: "the workbook being closed",
+  onSheetChange: "the active sheet changing",
+  onThemeChange: "the theme changing",
+  onActivate: "it being activated",
+  onDeactivate: "it being deactivated",
+  onInsert: "a row/column being inserted",
+  onDelete: "a row/column being deleted",
+  onResize: "it being resized",
+  onRefresh: "it being refreshed",
+  onDrillThrough: "a drill-through on it",
+  onShow: "it being shown",
+  onHide: "it being hidden",
+  onPropertyChange: "one of its properties changing",
+  onPlacementChange: "it being moved",
+  onCellChange: "one of its cells changing",
+  onMessage: "a message being posted to it",
+};
+
+/**
+ * The synthetic payload a fired hook receives.
+ *
+ * DELIBERATELY THE PRODUCTION SHAPE, with neutral values — no "simulated: true"
+ * marker. A debugger that hands a handler a payload it could never receive in
+ * production teaches the author about a program that does not exist. Hooks
+ * absent from this table are dispatched with `undefined`, which is exactly what
+ * their real forwarders send.
+ */
+const SIMULATED_HOOK_PAYLOADS: Record<string, () => unknown> = {
+  onClick: () => ({ x: 0, y: 0 }),
+  onDoubleClick: () => ({ x: 0, y: 0 }),
+};
+
+function describeHookTrigger(objectType: string, hook: string): string {
+  if (hook.startsWith("event:")) {
+    return `the app event "${hook.slice("event:".length)}" being emitted`;
+  }
+  const gesture = HOOK_GESTURES[hook];
+  return gesture
+    ? `${gesture} (the ${objectType} this script is attached to)`
+    : `an ${hook} event on the ${objectType} this script is attached to`;
+}
+
+/**
+ * Everything that can start this script again: the hooks its `setup` registered
+ * and the methods it exposed. Recomputed on demand — a script may register a
+ * hook or expose a method long after `setup` returned.
+ */
+function collectDebugTriggers(mw: MountedWorker): DebugTrigger[] {
+  const { objectType, instanceId, id } = mw.definition;
+  const out: DebugTrigger[] = [];
+  for (const hook of mw.declaredHooks) {
+    const blocked = UNFIREABLE_HOOKS[hook];
+    out.push({
+      id: `hook:${hook}`,
+      kind: "hook",
+      name: hook,
+      description: describeHookTrigger(objectType, hook),
+      fireable: !blocked,
+      ...(blocked ? { reason: blocked } : {}),
+    });
+  }
+  for (const method of listExposed()) {
+    if (method.ownerScriptId !== id) continue;
+    if (method.objectType !== objectType) continue;
+    if ((method.instanceId ?? null) !== (instanceId ?? null)) continue;
+    if (method.methodName.startsWith(HOST_ONLY_EXPOSED_PREFIX)) continue;
+    out.push({
+      id: `method:${method.methodName}`,
+      kind: "method",
+      name: method.methodName,
+      description: `a call to ${method.methodName}() — a shortcut, a scheduled job, a formula or another script`,
+      fireable: true,
+    });
+  }
+  return out;
+}
+
+/** Idle statuses: the script is mounted, nothing is executing. */
+function idleStatusFor(triggers: DebugTrigger[]): "waiting" | "finished" {
+  return triggers.length > 0 ? "waiting" : "finished";
+}
+
+/**
+ * Move a session to its resting state: mounted, with nothing on the stack.
+ * "waiting" when something can still start it, "finished" when nothing can.
+ */
+function settleDebugIdle(mw: MountedWorker, session: DebugSessionState): void {
+  session.triggers = collectDebugTriggers(mw);
+  session.status = idleStatusFor(session.triggers);
+  session.paused = null;
+  session.activity = null;
+}
+
+/** Re-read the trigger list of a session that is already at rest. */
+function refreshIdleDebugTriggers(mw: MountedWorker): void {
+  const session = debugSessions.get(mw.definition.id);
+  if (!session) return;
+  if (session.status !== "waiting" && session.status !== "finished") return;
+  settleDebugIdle(mw, session);
+  emitDebugState(session, mw.definition.id);
+}
+
+/**
+ * The realm answered the mount.
+ *
+ * This is the backstop that makes the status honest even when instrumentation
+ * bailed out (no `debugActivity` reports at all in that case, because the
+ * fallback path runs the ORIGINAL source): `mounted` means `setup` returned, so
+ * whatever the session last believed, the script is now idle — or failed.
+ */
+function noteDebugMountSettled(mw: MountedWorker, ok: boolean, error?: string): void {
+  const scriptId = mw.definition.id;
+  const session = debugSessions.get(scriptId);
+  if (!session) return;
+  if (ok) {
+    if (session.status === "paused") return; // a later execution is suspended
+    session.error = null;
+    settleDebugIdle(mw, session);
+  } else {
+    // A `setup` that threw leaves nothing to step through — but the session is
+    // kept, showing WHAT it threw, instead of vanishing and taking the reason
+    // with it. Save & Apply remounts straight back into the session.
+    session.status = "failed";
+    session.paused = null;
+    session.activity = null;
+    session.triggers = [];
+    session.error = error || "setup() failed";
+  }
+  emitDebugState(session, scriptId);
+}
+
 /**
  * Open a debug session on a mounted script and remount it instrumented.
  *
@@ -928,6 +1182,10 @@ export async function hostStartDebugSession(
     ready: null,
     paused: null,
     lastSnapshot: null,
+    activity: null,
+    lastActivity: null,
+    triggers: [],
+    error: null,
   };
   debugSessions.set(scriptId, session);
   pauseOnEntryOnce.set(scriptId, options.pauseOnEntry === true);
@@ -938,18 +1196,78 @@ export async function hostStartDebugSession(
     // prompt mid-session for a script the user is already running.
     await mountWorker(definition);
   } catch (err) {
-    debugSessions.delete(scriptId);
-    pauseOnEntryOnce.delete(scriptId);
-    emitDebugState(null, scriptId);
+    // A `setup` that threw is a debugging RESULT, not a failure to start a
+    // session: noteDebugMountSettled has already recorded what it threw, and
+    // the panel shows it. Anything else (spawn failure, mount timeout) leaves
+    // no session behind.
+    const settled = debugSessions.get(scriptId);
+    if (settled?.status !== "failed") {
+      debugSessions.delete(scriptId);
+      pauseOnEntryOnce.delete(scriptId);
+      emitDebugState(null, scriptId);
+    }
     throw err;
   }
   return session;
 }
 
 /**
- * End a session: release any pause FIRST (a stop must always resume — a script
- * may never be left suspended by the act of closing the debugger), then remount
- * the script from its original source so no instrumentation survives.
+ * Fire one of a waiting script's triggers from the debugger.
+ *
+ * THE POINT: a script whose only entry point is an event is otherwise
+ * undebuggable — you can arm a breakpoint and then have no way to reach it.
+ * This is the same door the app itself uses (the hook forwarder's `event`
+ * message, or `hostCallExposed` for an exposed method), so a handler reached
+ * this way runs exactly as it would in production: same dispatcher, same
+ * payload shape, same instrumentation.
+ *
+ * It is trusted-UI-only, like every other function in this section: a session
+ * exists only because the user opened one, and a script has no way to reach
+ * this or to observe that it happened beyond the handler running.
+ */
+export async function hostDebugFireTrigger(scriptId: string, triggerId: string): Promise<void> {
+  const session = debugSessions.get(scriptId);
+  if (!session) {
+    throw new Error("No debug session is open for this script.");
+  }
+  const mw = mounted.get(scriptId);
+  if (!mw) {
+    throw new Error("The script is not mounted, so it has nothing to trigger.");
+  }
+  const trigger = collectDebugTriggers(mw).find((t) => t.id === triggerId);
+  if (!trigger) {
+    throw new Error(`"${triggerId}" is not a trigger this script has registered.`);
+  }
+  if (!trigger.fireable) {
+    throw new Error(`${trigger.name} cannot be fired from the debugger: ${trigger.reason}.`);
+  }
+  if (trigger.kind === "method") {
+    await Promise.resolve(
+      hostCallExposed(mw.definition.objectType, mw.definition.instanceId, trigger.name, []),
+    );
+    return;
+  }
+  post(mw, {
+    t: "event",
+    hook: trigger.name,
+    payload: SIMULATED_HOOK_PAYLOADS[trigger.name]?.(),
+  });
+}
+
+/**
+ * End a session: release any pause FIRST, then remount the script from its
+ * original source so no instrumentation survives.
+ *
+ * NO REALM IS EVER LEFT SUSPENDED BY A STOP, and that guarantee does not rest on
+ * the `stop` message being delivered. The remount below terminates the worker
+ * outright, which takes any pause with it; the message is posted first so that a
+ * realm which does read it in time unwinds its suspended executions normally
+ * instead of being cut off mid-frame. Either way the script comes back mounted,
+ * un-instrumented and un-paused.
+ *
+ * Works on a session with no mount behind it too (a `setup` that threw leaves a
+ * "failed" session the user dismisses with Stop) — there is simply nothing to
+ * remount.
  */
 export async function hostStopDebugSession(scriptId: string): Promise<void> {
   const session = debugSessions.get(scriptId);
@@ -978,8 +1296,11 @@ export function hostDebugControl(scriptId: string, action: DebugAction): void {
   if (!mw) return;
   post(mw, { t: "debugControl", action });
   if (session.status === "paused") {
-    session.status = "running";
+    // Optimistic: the realm's own `debugResumed` lands a tick later and is
+    // authoritative. Both agree that "resumed" means "running only if something
+    // is actually on the stack".
     session.paused = null;
+    session.status = session.activity ? "running" : idleStatusFor(session.triggers);
     emitDebugState(session, scriptId);
   }
 }
@@ -1015,8 +1336,9 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
   if (!session) return;
   switch (msg.t) {
     case "debugReady":
+      // NOT "running": instrumentation finishing says nothing about whether any
+      // script code is executing. `debugActivity` is the only thing that does.
       session.ready = msg.state;
-      session.status = "running";
       break;
     case "debugPaused":
       session.status = "paused";
@@ -1024,14 +1346,39 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
       // The script stopped before finishing `setup` — hold the mount deadline
       // open for as long as the user keeps it there.
       mw.suspendMountDeadline?.();
+      // ...and every relayed method call it is standing inside. A debugger-fired
+      // method, a scheduled job or a UDF that stops at a breakpoint would
+      // otherwise be abandoned by its 30s deadline while the user was reading
+      // the frame it stopped in.
+      suspendMethodCallDeadlines(mw);
       break;
     case "debugResumed":
-      session.status = "running";
+      // Only the pause is lifted. Whether anything is still executing is the
+      // activity tracker's answer: a resume that lets `setup` run to completion
+      // ends with the script IDLE, not "running".
       session.paused = null;
+      session.status = session.activity ? "running" : idleStatusFor(session.triggers);
       mw.resumeMountDeadline?.();
+      resumeMethodCallDeadlines(mw);
       break;
     case "debugSnapshot":
       session.lastSnapshot = msg.state;
+      break;
+    case "debugActivity":
+      if (msg.state.running) {
+        session.activity = { label: msg.state.label };
+        session.error = null;
+        if (session.status !== "paused") session.status = "running";
+      } else {
+        session.activity = null;
+        session.lastActivity = {
+          label: msg.state.label,
+          ...(msg.state.error ? { error: msg.state.error } : {}),
+        };
+        // A pause report can outlive the execution that raised it only if the
+        // realm died; while genuinely paused, no activity can have finished.
+        if (session.status !== "paused") settleDebugIdle(mw, session);
+      }
       break;
   }
   emitDebugState(session, scriptId);
@@ -1046,13 +1393,18 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
     const msg = e.data;
     switch (msg.t) {
       case "mounted":
+        noteDebugMountSettled(mw, msg.ok, msg.error);
         onMounted(msg.ok, msg.error);
         break;
       case "call":
         void handleCall(mw, msg.callId, msg.method, msg.args);
         break;
       case "hookRegistered":
+        if (!mw.declaredHooks.includes(msg.hook)) mw.declaredHooks.push(msg.hook);
         wireHookForwarder(mw, msg.hook);
+        // A hook registered after `setup` returned (from inside another handler)
+        // changes what the script is waiting for, so an idle session re-reads it.
+        refreshIdleDebugTriggers(mw);
         break;
       case "renderCellsResult": {
         const pending = mw.pendingRenderCells.get(msg.reqId);
@@ -1089,7 +1441,7 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
         const pending = mw.pendingMethodCalls.get(msg.callId);
         if (pending) {
           mw.pendingMethodCalls.delete(msg.callId);
-          clearTimeout(pending.timer);
+          if (pending.timer !== null) clearTimeout(pending.timer);
           if (msg.ok) {
             pending.resolve(msg.value);
           } else {
@@ -1118,6 +1470,7 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
       case "debugPaused":
       case "debugResumed":
       case "debugSnapshot":
+      case "debugActivity":
         handleDebugMessage(mw, msg);
         break;
       case "validated":
@@ -1623,6 +1976,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const relay = (...relayArgs: unknown[]) => relayMethodCall(mw, name, relayArgs);
       const cleanup = registerExposed(handle, name, relay, isPublic === true);
       mw.cleanupFns.push(cleanup);
+      // A newly exposed method is a new way to start this script — an open
+      // debug session sitting at rest must see it appear.
+      refreshIdleDebugTriggers(mw);
       return undefined;
     }
     case "base.unexpose": {
@@ -1634,6 +1990,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // remounted successor's registration.
       const [name] = args as [string];
       unregisterExposed(handle, name);
+      refreshIdleDebugTriggers(mw);
       return undefined;
     }
     case "base.callMethod": {
@@ -4790,17 +5147,58 @@ function wireLifecycleGuardForwarder(mw: MountedWorker, action: LifecycleAction)
   );
 }
 
-/** Relay a callMethod from another script INTO this worker (5s deadline). */
+/** Relay a callMethod from another script INTO this worker (METHOD_CALL_TIMEOUT_MS). */
 function relayMethodCall(mw: MountedWorker, methodName: string, args: unknown[]): Promise<unknown> {
   const callId = mw.nextReqId++;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      mw.pendingMethodCalls.delete(callId);
-      reject(new Error(`Method '${methodName}' timed out (${METHOD_CALL_TIMEOUT_MS}ms)`));
-    }, METHOD_CALL_TIMEOUT_MS) as unknown as number;
-    mw.pendingMethodCalls.set(callId, { resolve, reject, timer });
+    const entry = {
+      resolve,
+      reject,
+      timer: null as number | null,
+      arm: (): void => {
+        if (entry.timer !== null) return;
+        entry.timer = setTimeout(() => {
+          entry.timer = null;
+          mw.pendingMethodCalls.delete(callId);
+          reject(new Error(`Method '${methodName}' timed out (${METHOD_CALL_TIMEOUT_MS}ms)`));
+        }, METHOD_CALL_TIMEOUT_MS) as unknown as number;
+      },
+    };
+    entry.arm();
+    mw.pendingMethodCalls.set(callId, entry);
     post(mw, { t: "methodCall", callId, methodName, args });
+    // A call relayed INTO a realm that is already suspended must not start
+    // burning a deadline it cannot possibly meet: the realm will not read the
+    // message until it resumes.
+    if (isScriptDebugPaused(mw.definition.id)) suspendMethodCallDeadlines(mw);
   });
+}
+
+/**
+ * Stop the clock on every relayed method call into this realm.
+ *
+ * A DEBUGGED SCRIPT MUST NOT BE KILLED FOR BEING SLOW AT A BREAKPOINT. The mount
+ * deadline already worked this way; relayed method calls did not, so a method
+ * fired from the debugger (or a scheduled job, or a JS UDF) that stopped at a
+ * breakpoint was abandoned after 30s and surfaced to the author as a timeout
+ * that had nothing to do with their code.
+ *
+ * Render deadlines are deliberately NOT suspended: the grid is waiting on those,
+ * and the realm refuses to suspend inside a render at all (beginNoPause).
+ */
+function suspendMethodCallDeadlines(mw: MountedWorker): void {
+  for (const pending of mw.pendingMethodCalls.values()) {
+    if (pending.timer === null) continue;
+    clearTimeout(pending.timer);
+    pending.timer = null;
+  }
+}
+
+/** Re-arm those deadlines, in full, from the moment the script resumes. */
+function resumeMethodCallDeadlines(mw: MountedWorker): void {
+  for (const pending of mw.pendingMethodCalls.values()) {
+    pending.arm();
+  }
 }
 
 // ============================================================================

@@ -232,6 +232,8 @@ export {
 export {
   listWorkbookScripts,
   getWorkbookScript,
+  saveWorkbookScript,
+  deleteWorkbookScript,
   runWorkbookScript,
   dispatchScriptSideEffects,
   normalizeDeferredActions,
@@ -712,6 +714,8 @@ export {
   // Menu API
   registerMenu,
   registerMenuItem,
+  updateMenuItem,
+  unregisterMenuItem,
   getMenus,
   subscribeToMenus,
   notifyMenusChanged,
@@ -2204,6 +2208,24 @@ export type {
   IControlStoreService,
   ChartPlacement,
 } from "./componentStoreRegistry";
+
+// ============================================================================
+// Button Control Service (IoC seam — the Controls extension owns on-grid buttons)
+// ============================================================================
+
+export {
+  registerButtonControlProvider,
+  hasButtonControlProvider,
+  requireButtonControlProvider,
+  resetButtonControlProvider,
+} from "./buttonControlService";
+
+export type {
+  ButtonControlAnchor,
+  ButtonControlHandle,
+  ButtonControlProvider,
+  CreateButtonControlRequest,
+} from "./buttonControlService";
 
 // ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)

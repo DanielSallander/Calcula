@@ -3,40 +3,52 @@
 // CONTEXT: This is the step that makes a recording AUTOMATION rather than a
 //          transcript. Three things have to line up:
 //
-//            1. a button control exists at a cell,
+//            1. a real, VISIBLE button control exists at a cell,
 //            2. an object script is stored for objectType "button" with the
-//               instanceId that cell derives,
+//               instanceId that control carries,
 //            3. the script is mounted so the very next click runs it.
 //
-//          The instanceId is anchor-derived (`control-<sheet>-<row>-<col>`), so
-//          creating the control and saving the script are two independent
-//          writes that agree only because they compute the same id here.
+//          THE RECORDER DOES NOT BUILD THE BUTTON ITSELF. It used to: it called
+//          `set_control_metadata` with `{ label }` and nothing appeared on the
+//          grid, because the caption property is `text`, because a button also
+//          needs geometry/fill/border/pin defaults, and because nothing renders
+//          until the control is in the Controls extension's floating store. That
+//          is another extension's domain, and a copied property list drifts the
+//          first time it changes a default. So step 1 goes through the
+//          feature-neutral @api/buttonControlService seam that Controls
+//          registers into, and the instanceId comes BACK from it — the recorder
+//          never re-derives the id format, which is exactly how a button and a
+//          script end up bound to different keys.
+//
+//          WHY AN OBJECT SCRIPT AND NOT THE CONTROL'S OWN `onSelect`. A run-mode
+//          click on a floating button does two things: it runs the inline
+//          `onSelect` source in the isolated QuickJS module runtime, and it
+//          emits `button:clicked`, which the script host forwards to a mounted
+//          object script whose instanceId matches. The recorded macro targets
+//          the object-script API (`api.applyFormatting`, `api.insertRows`,
+//          `api.beginBatch`, …) — none of which exists in the QuickJS runtime —
+//          so the object script is the mechanism that can actually replay it.
+//          `onSelect` is therefore left EMPTY: setting both would run the click
+//          twice.
 
 import { ObjectScriptManager, saveObjectScript } from "@api";
-import type { ExtensionContext } from "@api/contract";
+import { requireButtonControlProvider } from "@api/buttonControlService";
+import { getDesignMode } from "@api/designMode";
 import type { ObjectScriptDefinition } from "@api";
 
-type BackendInvoke = ExtensionContext["invokeBackend"];
-
-let invokeBackend: BackendInvoke | null = null;
-
-/** Bound in activate() — the capability-scoped backend door for this extension. */
-export function bindBackend(fn: BackendInvoke): void {
-  invokeBackend = fn;
-}
-
-/** Test/teardown seam. */
-export function unbindBackend(): void {
-  invokeBackend = null;
-}
-
-/** The anchor-derived object-script instance id for a cell-anchored control. */
-export function controlInstanceId(
-  sheetIndex: number,
-  row: number,
-  col: number,
-): string {
-  return `control-${sheetIndex}-${row}-${col}`;
+/**
+ * The sentence to append to a "button created" message when Design Mode is on.
+ *
+ * In design mode a click SELECTS a control instead of running it, so a user who
+ * has been placing controls would click their new macro button and see nothing
+ * happen — the same "it doesn't work" the button bug already cost them once.
+ * Empty string when there is nothing to warn about, so callers can concatenate
+ * unconditionally.
+ */
+export function designModeHint(): string {
+  return getDesignMode()
+    ? " Design Mode is on, so clicking selects the button — turn it off (Developer ▸ Design Mode) to run the macro."
+    : "";
 }
 
 export interface SaveAsButtonOptions {
@@ -50,6 +62,7 @@ export interface SaveAsButtonOptions {
 }
 
 export interface SaveAsButtonResult {
+  /** The control's instance id, as the Controls extension assigned it. */
   instanceId: string;
   scriptId: string;
   /** False when the script was stored but could not be mounted right now
@@ -60,29 +73,27 @@ export interface SaveAsButtonResult {
 /**
  * Create the button and bind the recorded macro to its click.
  *
- * Throws if the backend door is unbound (the extension was not activated) or if
- * either write fails — a half-made button with no script is worse than an
- * error, so the control is removed again when the script cannot be stored.
+ * Throws if no button provider is registered (the Controls extension is not
+ * loaded) or if either write fails — a half-made button with no script is worse
+ * than an error, so the control is removed again when the script cannot be
+ * stored.
  */
 export async function saveAsButtonScript(
   options: SaveAsButtonOptions,
 ): Promise<SaveAsButtonResult> {
-  if (!invokeBackend) {
-    throw new Error("MacroRecorder is not activated (no backend door bound).");
-  }
+  const buttons = requireButtonControlProvider();
   const { name, source, sheetIndex, row, col } = options;
-  const instanceId = controlInstanceId(sheetIndex, row, col);
-  const scriptId = `macro-${instanceId}`;
 
-  await invokeBackend<void>("set_control_metadata", {
+  const handle = await buttons.createButton({
     sheetIndex,
     row,
     col,
-    metadata: {
-      controlType: "button",
-      properties: { label: { valueType: "static", value: name } },
-    },
+    label: name,
+    tooltip: `Runs the recorded macro "${name}"`,
+    // Intentionally no onSelect — see the header note on double-running.
   });
+  const instanceId = handle.instanceId;
+  const scriptId = `macro-${instanceId}`;
 
   const definition: ObjectScriptDefinition = {
     id: scriptId,
@@ -101,7 +112,7 @@ export async function saveAsButtonScript(
   } catch (e) {
     // Roll the control back so the user is not left with a dead button.
     try {
-      await invokeBackend<void>("remove_control_metadata", { sheetIndex, row, col });
+      await buttons.removeButton({ sheetIndex, row, col });
     } catch {
       /* best effort — the save error below is the one that matters */
     }
@@ -118,4 +129,41 @@ export async function saveAsButtonScript(
   }
 
   return { instanceId, scriptId, mounted };
+}
+
+export interface SaveAsInlineButtonOptions {
+  /** Button label. */
+  name: string;
+  /** QuickJS module source — `Calcula.*` statements, not object-script `api`. */
+  source: string;
+  sheetIndex: number;
+  row: number;
+  col: number;
+}
+
+/**
+ * Bind a QuickJS-runtime macro to a button via the control's OWN `onSelect`.
+ *
+ * The other half of the pair above. A notebook-target macro is `Calcula.*`
+ * source for the isolated Rust interpreter, which is exactly what a control's
+ * inline `onSelect` runs — so this needs no object script, no mount and no
+ * unlocked tier. Using the object-script route for it instead would produce a
+ * `setup()` that calls a function the source never declares: a button that
+ * looks bound and does nothing.
+ */
+export async function saveAsInlineButton(
+  options: SaveAsInlineButtonOptions,
+): Promise<{ instanceId: string }> {
+  const buttons = requireButtonControlProvider();
+  const { name, source, sheetIndex, row, col } = options;
+
+  const handle = await buttons.createButton({
+    sheetIndex,
+    row,
+    col,
+    label: name,
+    tooltip: `Runs "${name}"`,
+    onSelect: source,
+  });
+  return { instanceId: handle.instanceId };
 }

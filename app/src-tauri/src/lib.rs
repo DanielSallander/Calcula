@@ -4889,6 +4889,7 @@ pub fn run() {
             scripting::list_scripts,
             scripting::get_script,
             scripting::save_script,
+            scripting::delete_script,
             // Notebook commands
             scripting::notebook_create,
             scripting::notebook_save,

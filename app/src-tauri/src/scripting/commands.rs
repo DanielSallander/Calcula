@@ -1443,14 +1443,41 @@ pub fn save_script(
     Ok(())
 }
 
-// `delete_script` and `rename_script` used to live here. Both were registered in
-// `generate_handler!` and had ZERO callers anywhere in the app — no frontend
-// `invoke`, no gateway action, no MCP tool. They are deleted rather than kept
-// "in case": every `generate_handler!` entry costs main-thread stack in the
-// debug build's dispatch frame (the app already links with /STACK:33554432 for
-// exactly this reason), and an unreachable mutation command is surface a future
-// gateway can be pointed at without anyone re-deriving whether it should exist.
-// The Script Editor deletes and renames through the script-state save path.
+/// Delete a script module by ID.
+///
+/// Reserved internal records (`__calcula_`-prefixed data stores such as the
+/// Custom Functions library) are REFUSED: they reuse the module map for storage
+/// but are not user code, they are hidden from `list_scripts`, and deleting one
+/// would silently destroy the owning feature's state.
+#[tauri::command]
+pub fn delete_script(script_state: State<ScriptState>, id: String) -> Result<(), String> {
+    if is_reserved_script_id(&id) {
+        return Err(format!(
+            "Script '{}' is an internal record and cannot be deleted",
+            id
+        ));
+    }
+
+    let mut scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    if scripts.remove(&id).is_none() {
+        return Err(format!("Script '{}' not found", id));
+    }
+    Ok(())
+}
+
+// `rename_script` used to live here alongside a caller-less `delete_script`.
+// Both were registered in `generate_handler!` with ZERO callers anywhere in the
+// app, and every `generate_handler!` entry costs main-thread stack in the debug
+// build's dispatch frame (the app links with /STACK:33554432 for exactly this
+// reason), so they were removed. `delete_script` is back because the Macro
+// Recorder's macro library is a real caller: a recorded macro auto-saves into
+// the module store, so the user must be able to delete their own macro. Renaming
+// still needs no command of its own — a rename is `save_script` with the same id
+// and a new name, which is one round trip either way.
 
 #[cfg(test)]
 mod tests {

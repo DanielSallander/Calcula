@@ -19,10 +19,10 @@
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import { getExtensionData, setExtensionData } from "@api/extensionData";
-import type { DebugSessionState } from "@api/scriptHost/host";
+import type { DebugSessionState, DebugTrigger } from "@api/scriptHost/host";
 import type { DebugAction } from "@api/scriptHost/protocol";
 
-export type { DebugSessionState, DebugAction };
+export type { DebugSessionState, DebugTrigger, DebugAction };
 
 // ============================================================================
 // Types
@@ -50,7 +50,8 @@ type BridgeCommand =
   | { command: "start"; scriptId: string; lines: number[]; pauseOnEntry: boolean }
   | { command: "stop"; scriptId: string }
   | { command: "control"; scriptId: string; action: DebugAction }
-  | { command: "breakpoints"; scriptId: string; lines: number[] };
+  | { command: "breakpoints"; scriptId: string; lines: number[] }
+  | { command: "fire"; scriptId: string; triggerId: string };
 
 // ============================================================================
 // Breakpoint store — persisted per script IN THE WORKBOOK
@@ -371,6 +372,23 @@ export async function debugControl(scriptId: string, action: DebugAction): Promi
   applySessionState(scriptId, host.getDebugSession(scriptId));
 }
 
+/**
+ * Make one of a waiting script's triggers fire.
+ *
+ * An event-driven script — everything the macro recorder produces — has no
+ * entry point the debugger can "run", so without this a breakpoint inside its
+ * handler is unreachable from the editor.
+ */
+export async function fireDebugTrigger(scriptId: string, triggerId: string): Promise<void> {
+  if (transport === "remote") {
+    await sendCommand({ command: "fire", scriptId, triggerId });
+    return;
+  }
+  const host = await hostApi();
+  await host.hostDebugFireTrigger(scriptId, triggerId);
+  applySessionState(scriptId, host.getDebugSession(scriptId));
+}
+
 async function sendBreakpoints(scriptId: string, lines: number[]): Promise<void> {
   if (transport === "remote") {
     await sendCommand({ command: "breakpoints", scriptId, lines });
@@ -428,6 +446,9 @@ export function installObjectScriptDebugBridge(): () => void {
             break;
           case "breakpoints":
             host.hostSetDebugBreakpoints(cmd.scriptId, cmd.lines ?? []);
+            break;
+          case "fire":
+            await host.hostDebugFireTrigger(cmd.scriptId, cmd.triggerId);
             break;
         }
       } catch (err) {

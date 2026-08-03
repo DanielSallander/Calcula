@@ -27,6 +27,12 @@ The cost of that was not the missing feature — it was that nobody knew it was 
 is a claim someone will act on six months from now without re-reading the code. If you cannot cite
 the file that makes a status true, the status is PARTIAL.
 
+And citing a file is still not enough. On 2026-07-31 the rebuilt macro recorder was marked SHIPPED
+with 116 passing unit tests and every file citation correct; on 2026-08-03 the first human to use it
+found four bugs in five minutes, none of which any of those tests could have seen (§8, eighth
+correction). **A test count is a claim about a component, not about a feature** — if a status cites
+tests, it must say which component they cover, and name what was never exercised by a person.
+
 Statuses below were re-verified against the code on **2026-08-02** (Wave K), not carried over from
 wave reports. That pass found eleven false statuses in this file and is recorded as the seventh
 correction note in §8; the rule it added is short enough to state here:
@@ -260,10 +266,18 @@ Each now carries its closing status, re-checked against the code on 2026-08-01.
     **refused, never truncated**, because a half-read CSV is corrupt data that looks like good data.
     The capability is named `file.picker`, not `file.access`, because the id has to name the
     mechanism — the mechanism *is* the safety story.
-14. ~~**Macro recorder regressed to dead plumbing.**~~ **CLOSED 2026-07-31** — rebuilt as the
-    `MacroRecorder` extension with bridge-level capture, CommandRegistry capture and
-    "save as button script". The orphaned `setCellRecorderHook` is gone, replaced by
-    `setGridRecorderHook` with a real caller. See roadmap item 1 in §7 for the shipped scope.
+14. ~~**Macro recorder regressed to dead plumbing.**~~ **CLOSED 2026-08-03** (first claimed closed
+    2026-07-31; that claim was wrong — see below) — rebuilt as the `MacroRecorder` extension with
+    bridge-level capture, CommandRegistry capture, "save as button script", auto-save into a
+    workbook module and a Developer ▸ Macros… library. The orphaned `setCellRecorderHook` is gone,
+    replaced by `setGridRecorderHook` with a real caller.
+
+    **The 2026-07-31 closure was premature, and the way it failed is the whole lesson of this
+    document.** The rebuild shipped with 116 passing unit tests and was marked SHIPPED. The first
+    time a human ran it, four bugs appeared in the first five minutes — none of them reachable by
+    the tests that existed, because every one of those tests exercised `generateMacroSource`, a
+    PURE function, and all four bugs were in the wiring around it. See roadmap item 1 in §7 for the
+    corrected scope and §8's eighth correction for the testing-strategy conclusion.
 
 ### UDF-specific confirmed gaps (Custom Functions)
 
@@ -678,7 +692,7 @@ sorts and counts as nothing. Only three statuses are legal here: **SHIPPED**, **
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Macro recorder | SHIPPED |
+| 1 | Macro recorder | SHIPPED (re-verified against a human using it, 2026-08-03) |
 | 2 | Bulk typed range I/O + undo everywhere | SHIPPED |
 | 3 | Formatting + structural ops | SHIPPED |
 | 4 | Writeback automation capability | SHIPPED |
@@ -710,9 +724,64 @@ persistent scheduler"), which is closed; this row grades the *roadmap item*, whi
 residual named in its body. Where the two ever disagree about a fact rather than a scope, §2 and
 this table are both wrong until someone re-derives from code.
 
-1. ~~**Resurrect the macro recorder**~~ **SHIPPED (2026-07-31)** — as its own extension,
-   `app/extensions/MacroRecorder/`, registered in `extensions/manifest.ts` after ScriptNotebook
-   (whose Developer menu it contributes to).
+1. ~~**Resurrect the macro recorder**~~ **SHIPPED (codegen 2026-07-31; the feature around it
+   2026-08-03)** — as its own extension, `app/extensions/MacroRecorder/`, registered in
+   `extensions/manifest.ts` after ScriptNotebook (whose Developer menu it contributes to).
+
+   > **Read this before trusting the bullets below.** On 2026-07-31 this item was marked SHIPPED on
+   > the strength of 116 passing unit tests. On **2026-08-03 a human used it for the first time and
+   > it failed in four separate ways within one session** — and *not one* of the four was a codegen
+   > defect. The generated source was correct: correctly batched, undo-wrapped, with a working
+   > `setup(button)` wrapper. Every failure was in the wiring that surrounds the generator:
+   >
+   > 1. **"Save as Button Script" created no button.** It wrote `set_control_metadata` with
+   >    `properties.label`; the Controls extension renders a caption from `text`. It also skipped
+   >    the geometry, the `fill`/`color`/`borderColor`/`fontSize`/`embedded`/`pinToGrid`/`onSelect`/
+   >    `tooltip` defaults, the floating-control store registration and the overlay region sync. The
+   >    backend accepted the write and returned success. Nothing was drawn. **Fixed** by a
+   >    feature-neutral IoC seam, `@api/buttonControlService.ts`
+   >    (`ButtonControlProvider` = `createButton` / `removeButton`), which the **Controls** extension
+   >    registers into at activation and which the recorder calls — the same shape as
+   >    `autoFilterService.ts` and `printService.ts`. `Controls.insertButton()`'s body became one
+   >    `createButtonControlAt()` used by BOTH the ribbon and the seam, so there is one recipe and it
+   >    cannot drift. The caller takes `instanceId` **from the returned handle** rather than
+   >    re-deriving `control-<sheet>-<row>-<col>`, which is how a button and its script end up on
+   >    different keys.
+   > 2. **A debugged script said "Running" forever.** There was no hang. `DebugSessionState.status`
+   >    had no terminal state, and it was set to `"running"` on `debugReady` — a message that means
+   >    *instrumentation succeeded*, not *code is executing*. An event-driven script (everything the
+   >    recorder emits) finishes `setup` and then sits idle, so the badge never changed again. **The
+   >    UI was lying, and the fix was to make it tell the truth**: the realm now reports execution
+   >    start/end (`debugActivity`), and the statuses are `starting · running · paused · waiting ·
+   >    finished · failed · detached`. A second, real defect was found in the same area:
+   >    `isPromotableCallbackArg` required the literal receiver `context`, so in
+   >    `function setup(button) { button.onClick(...) }` — the exact shape the recorder emits — **no**
+   >    handler was promotable and every breakpoint inside a recorded macro silently degraded to a
+   >    snapshot-only dot. Promotion now follows `setup`'s actual first parameter. And because an
+   >    idle event-driven script has no entry point a debugger can "run", each trigger now has a
+   >    **Fire** button (`hostDebugFireTrigger`) that goes out through the same `{t:"event"}` door
+   >    the production forwarder uses.
+   > 3. **"Stop Recording" stayed in the menu after recording stopped.** `IMenuAPI` had no way to
+   >    change an item: `registerMenuItem` is idempotent-by-merge and only folds in children, so
+   >    re-registering with a new label was silently ignored. **Fixed** by adding the missing
+   >    capability rather than working around it — `MenuRegistry.updateMenuItem` (patches the dynamic
+   >    record *and* the live item, so it survives a menu re-registration), exposed as
+   >    `IMenuAPI.updateItem`/`unregisterItem`. The recorder now registers **one** item whose label
+   >    is derived from `subscribeToRecorder`, so every end path resets it; both items are
+   >    unregistered on deactivate (they leaked before), and a workbook swap ends the session.
+   > 4. **Choosing "Close" destroyed the recording.** The review dialog was a save prompt, so the
+   >    only way to keep a recording was to bind it to a button; anything else and the work was gone.
+   >    Excel never asks — a recorded macro always lands in a module. **Fixed:** `finishRecording()`
+   >    now reserves a name, generates the source with that final name, and writes it to a workbook
+   >    module script **before the dialog opens** (`lib/macroLibrary.ts`), marking the file modified
+   >    so it cannot vanish with a "clean" close. The dialog says where it went; Close is safe. The
+   >    listing surface did not exist, so it was built: **Developer ▸ Macros…**
+   >    (`components/MacroLibraryDialog.tsx`) lists every module with its runtime and offers
+   >    Run / Add Button / Save / Delete. Rust's `delete_script` was restored for it — it had been
+   >    deleted as caller-less, and now has a real caller.
+   >
+   > **The lesson is in §8's eighth correction, and it is the one worth carrying forward:** 116
+   > green tests on a pure function were evidence about the pure function and about nothing else.
    - **Capture moved to the IPC bridge, not the command layer.** The old `setCellRecorderHook`
      is replaced by `setGridRecorderHook` / `RecordedGridEvent` in `core/lib/tauri-api.ts`
      (re-exported from `@api/lib`): 20 structural event kinds — cell writes (with the batch
@@ -732,15 +801,31 @@ this table are both wrong until someone re-derives from code.
      (chunked) or one array + loop; anything a target cannot express is emitted as a
      `// NOT REPLAYABLE` comment AND reported in the result's `unsupported` list and the header.
      Invariant decimals are re-spelled with the recording locale's separator.
-   - **The loop is closed:** "Save as Button Script" creates a button control at a chosen cell,
-     saves an unlocked `objectType: "button"` script bound to the anchor-derived
-     `control-<sheet>-<row>-<col>` id, and mounts it — one click replays the macro. "Add as
-     Notebook Cell" appends a cell via an `@api/lib` event channel (siblings never import each
-     other). A status-bar indicator with Pause/Stop/Discard makes a running recording
-     unmissable; Ctrl+Shift+R toggles.
-   - Tests: 111 unit tests (`extensions/MacroRecorder/__tests__/`) — the generator is a pure
-     function and is pinned across batching, sheet switches, quoting/escaping, locale-sensitive
-     values, command capture, wrappers and JS-syntax validity.
+   - **Where a recording LIVES (2026-08-03).** Stopping a recording writes it to a workbook module
+     script immediately — `lib/macroLibrary.ts`, ids `macro-<slug>` (never the reserved
+     `__calcula_` prefix, which Rust hides from `list_scripts` and refuses to delete), with a
+     `runtime=objectScript|notebook` marker in the module `description` so the library knows which
+     interpreter the source was written for. `@api/workbookScripts` gained
+     `saveWorkbookScript`/`deleteWorkbookScript`, both of which call `markFileModified()`:
+     `save_script` does not dirty the document, so without it an auto-saved macro would disappear
+     with a "clean" workbook close. The review dialog is no longer a save prompt.
+   - **The loop is closed:** "Save as Button Script" creates a button control at a chosen cell
+     **through the `@api/buttonControlService` seam Controls owns**, saves an unlocked
+     `objectType: "button"` script bound to the `instanceId` the seam returns, and mounts it — one
+     click replays the macro. `onSelect` is deliberately left empty on that path: a run-mode click
+     fires BOTH the inline `onSelect` (QuickJS, `Calcula.*`) and `button:clicked` (forwarded to the
+     mounted object script), and a recorded object-script macro can only run in the second, so
+     setting both would run it twice. Notebook-target macros take the opposite route
+     (`saveAsInlineButton`, `onSelect` only). "Add as Notebook Cell" appends a cell via an
+     `@api/lib` event channel (siblings never import each other). A status-bar indicator with
+     Pause/Stop/Discard makes a running recording unmissable; Ctrl+Shift+R toggles.
+   - Tests: the codegen tests (`extensions/MacroRecorder/__tests__/`) pin the pure generator across
+     batching, sheet switches, quoting/escaping, locale-sensitive values, command capture, wrappers
+     and JS-syntax validity. **They are not evidence that the feature works** — see the box above.
+     The 2026-08-03 pass added the tests that could have caught the four field bugs: the seam's
+     register/require/reset contract, a `seamWiring` test asserting Controls actually registers a
+     provider and that `createButtonControlAt` is the single factory, the menu-label state machine,
+     the auto-save-before-dialog ordering, and the macro library dialog.
    - **Known gaps:** fills cannot be expressed on the objectScript target (no fill in
      UnlockedAPI) and formatting/structure cannot be expressed on the notebook target — both are
      reported rather than silently dropped. ~~`sortRange` lives in `api/backend.ts`, outside the
@@ -1643,6 +1728,60 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Eighth correction (2026-08-03, first human use of the macro recorder) — 116 passing unit tests
+> on a pure codegen function said nothing at all about whether the feature worked.**
+>
+> Every earlier correction in this sequence is about a *claim* that did not survive re-derivation
+> against source. This one is different, and it is worse, because the claim was checked: roadmap
+> item 1 was marked SHIPPED on 2026-07-31 backed by **116 green unit tests**, and the code those
+> tests covered was genuinely correct. Then a person opened the app, recorded a macro, and hit
+> **four bugs in one session**:
+>
+> 1. "Save as Button Script" produced no button at all (wrong property name, missing geometry and
+>    defaults, no floating-store registration — and the backend returned success anyway).
+> 2. A debugged script showed "Running" forever with nothing executing (the status was set on
+>    *instrumentation ready* and had no terminal state; the UI was lying, there was no hang).
+> 3. "Stop Recording" stayed in the menu after recording stopped (`IMenuAPI` had no way to change a
+>    registered item's label; re-registering was silently ignored).
+> 4. Choosing "Close" in the review dialog destroyed the recording (there was no module to save
+>    into, and no surface that would have listed one).
+>
+> **Not one of the four was a codegen defect, and not one was reachable by any test that existed.**
+> The 116 tests all exercised `generateMacroSource`, a pure function: actions in, string out. They
+> pinned batching, escaping, locale separators, wrapper shapes and JS syntax validity, and they were
+> right about every one of those things. What they could not observe is that the string was handed
+> to a control-metadata write with the wrong property name, that the dialog offering to save it had
+> no store behind it, that the menu describing the session could not be updated, and that the
+> debugger's status field was a different fact from the one it displayed.
+>
+> **The mechanism.** A pure function is the easiest thing in a feature to test and the least likely
+> thing in it to be wrong. Testing it heavily produces a large, green, entirely honest number that
+> is *evidence about the wrong component*, and the number is persuasive in exact proportion to how
+> irrelevant it is. Three of the four bugs were **seams between two owners** (recorder ↔ Controls,
+> recorder ↔ the menu registry, host ↔ realm) and the fourth was a **missing destination** — and a
+> unit test of one side of a seam cannot see the other side. This is the same failure §0 already
+> names as "dead plumbing", arriving through a new door: not code with no caller, but code whose
+> only caller is a test.
+>
+> **The rules this adds.**
+> - **A test count is a claim about a component, not about a feature.** Any status line citing test
+>   counts must name *which* component they cover. "116 unit tests" and "the feature works" are two
+>   different assertions and this document conflated them.
+> - **Every seam needs a test that asserts the OTHER side registers into it.** The fix here ships
+>   one (`seamWiring.test.ts` reads `Controls/index.ts` and asserts it registers a provider and that
+>   there is exactly one button factory). It is a crude test and it would have caught bug 1.
+> - **A status field that is displayed is part of the contract.** Bug 2 was not a hang, a race or a
+>   deadlock; it was a string that had never been given a value meaning "done". Any state machine
+>   rendered to a user needs its terminal states enumerated in the type, not implied.
+> - **"Where does the output go?" is a design question, not a UX polish item.** Bug 4 existed
+>   because a feature that produces an artifact shipped without a place to put it. If a feature
+>   creates something, the review before SHIPPED must name the store it lands in and the surface
+>   that lists it — or say out loud that it is ephemeral.
+> - **Something has to be exercised by a human before SHIPPED.** No amount of test discipline in
+>   this program found any of these four. Five minutes of use found all four. Where a GUI cannot be
+>   driven in the loop, the status line must say which parts were verified only by unit test and
+>   which are unverified — and the unverified list must be handed to whoever *can* click.
 
 > **Seventh correction (2026-08-02, Wave K closing pass) — the document was wrong about itself, in
 > the one direction that costs the most.**

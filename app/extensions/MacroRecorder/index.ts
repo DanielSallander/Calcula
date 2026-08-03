@@ -7,23 +7,32 @@
 //          ScriptEditor was retired and took the recorder with it, leaving the
 //          core-side hook with no caller. This is its home now — a normal
 //          extension using only @api, exactly like a third party would write.
+//
+// ONE MENU ITEM, NOT TWO. "Record Macro…" and "Stop Recording" used to both sit
+// in the Developer menu permanently, so the app offered to stop a recording that
+// was not running. A menu is a statement about the current state; the item's
+// LABEL now follows the session, which is also fewer things to read.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { ExtensionRegistry } from "@api";
+import { ExtensionRegistry, AppEvents } from "@api";
 import { showDialog } from "@api/ui";
+import { onAppEvent } from "@api/events";
 import { StartRecordingDialog } from "./components/StartRecordingDialog";
 import { RecordedMacroDialog } from "./components/RecordedMacroDialog";
+import { MacroLibraryDialog } from "./components/MacroLibraryDialog";
 import { RecordingIndicator } from "./components/RecordingIndicator";
 import {
   cancelRecording,
   getRecorderSnapshot,
   pauseRecording,
   resumeRecording,
+  subscribeToRecorder,
 } from "./lib/actionRecorder";
-import { finishRecording, setCurrentSelection } from "./lib/flow";
-import { bindBackend, unbindBackend } from "./lib/buttonScript";
+import { abandonRecording, finishRecording, setCurrentSelection } from "./lib/flow";
 import {
   COMMANDS,
+  LIBRARY_DIALOG_ID,
+  MENU_ITEMS,
   RESULT_DIALOG_ID,
   START_DIALOG_ID,
   STATUS_BAR_ITEM_ID,
@@ -31,6 +40,11 @@ import {
 
 const cleanupFns: (() => void)[] = [];
 let isActivated = false;
+
+/** The label the record/stop item shows for a given session status. */
+export function recordMenuLabel(status: string): string {
+  return status === "idle" ? "Record Macro…" : "Stop Recording";
+}
 
 // ============================================================================
 // Activation
@@ -42,11 +56,6 @@ function activate(context: ExtensionContext): void {
     return;
   }
   console.log("[MacroRecorder] Activating...");
-
-  // The capability-scoped backend door, needed to create the button control
-  // that "save as button script" binds to.
-  bindBackend(context.invokeBackend.bind(context));
-  cleanupFns.push(() => unbindBackend());
 
   // 1. Dialogs.
   context.ui.dialogs.register({
@@ -63,19 +72,32 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.dialogs.unregister(RESULT_DIALOG_ID));
 
+  context.ui.dialogs.register({
+    id: LIBRARY_DIALOG_ID,
+    component: MacroLibraryDialog,
+    priority: 100,
+  });
+  cleanupFns.push(() => context.ui.dialogs.unregister(LIBRARY_DIALOG_ID));
+
   // 2. Commands. Registered under the `macroRecorder.` prefix, which the
   //    session's ignore rule keys off — driving the recorder never records.
   context.commands.register(COMMANDS.START, () => {
     if (getRecorderSnapshot().status !== "idle") {
-      finishRecording();
-      return;
+      // Returned, not fire-and-forget: a failed auto-save must reach whoever
+      // pressed Ctrl+Shift+R or picked the menu item, not just the console.
+      return finishRecording();
     }
     showDialog(START_DIALOG_ID);
+    return undefined;
   });
   context.commands.register(COMMANDS.STOP, () => finishRecording());
   context.commands.register(COMMANDS.PAUSE, () => pauseRecording());
   context.commands.register(COMMANDS.RESUME, () => resumeRecording());
-  context.commands.register(COMMANDS.CANCEL, () => cancelRecording());
+  // `abandonRecording`, not the bare `cancelRecording`: discarding must ALSO
+  // drop the previous recording held for the review dialog, or a later "Discard"
+  // leaves a stale result behind that the dialog would happily re-open.
+  context.commands.register(COMMANDS.CANCEL, () => abandonRecording());
+  context.commands.register(COMMANDS.LIBRARY, () => showDialog(LIBRARY_DIALOG_ID));
   cleanupFns.push(() => {
     for (const id of Object.values(COMMANDS)) context.commands.unregister(id);
   });
@@ -84,17 +106,33 @@ function activate(context: ExtensionContext): void {
   //    it over from the retired ScriptEditor), so items are contributed to it
   //    rather than re-registering the menu.
   context.ui.menus.registerItem("developer", {
-    id: "developer:record-macro",
-    label: "Record Macro…",
+    id: MENU_ITEMS.RECORD,
+    label: recordMenuLabel(getRecorderSnapshot().status),
     commandId: COMMANDS.START,
+    shortcut: "Ctrl+Shift+R",
     order: 10,
   });
   context.ui.menus.registerItem("developer", {
-    id: "developer:stop-macro",
-    label: "Stop Recording",
-    commandId: COMMANDS.STOP,
+    id: MENU_ITEMS.LIBRARY,
+    label: "Macros…",
+    commandId: COMMANDS.LIBRARY,
     order: 11,
   });
+  cleanupFns.push(() => {
+    context.ui.menus.unregisterItem("developer", MENU_ITEMS.RECORD);
+    context.ui.menus.unregisterItem("developer", MENU_ITEMS.LIBRARY);
+  });
+
+  // 3b. Keep the item honest. Every end path — Stop, Discard, an activation
+  //     failure, a workbook swap — funnels through the recorder's snapshot, so
+  //     subscribing to it (rather than patching the label at each call site) is
+  //     what guarantees the menu and the status-bar indicator can never disagree.
+  const syncRecordMenuItem = () => {
+    context.ui.menus.updateItem("developer", MENU_ITEMS.RECORD, {
+      label: recordMenuLabel(getRecorderSnapshot().status),
+    });
+  };
+  cleanupFns.push(subscribeToRecorder(syncRecordMenuItem));
 
   // 4. The recording indicator. Always mounted; it renders nothing while idle.
   context.ui.statusBar.register({
@@ -108,12 +146,33 @@ function activate(context: ExtensionContext): void {
   // 5. Track the selection so a generated button gets a sensible anchor cell.
   cleanupFns.push(ExtensionRegistry.onSelectionChange(setCurrentSelection));
 
-  // 6. Ctrl+Shift+R toggles record/stop — the gesture people expect, and the
+  // 6. A recording cannot outlive the workbook it was taken in: its actions
+  //    address sheets and cells that are about to be replaced, and the module it
+  //    auto-saves into belongs to the OUTGOING workbook. So a swap ends the
+  //    session — which stores what was captured while the store still exists,
+  //    shows the source, and (because the indicator and the menu both derive
+  //    from the session) leaves neither of them claiming a recording is live.
+  for (const event of [
+    AppEvents.BEFORE_OPEN,
+    AppEvents.BEFORE_NEW,
+    AppEvents.BEFORE_CLOSE,
+  ]) {
+    cleanupFns.push(
+      onAppEvent(event, () => {
+        if (getRecorderSnapshot().status === "idle") return;
+        void finishRecording();
+      }),
+    );
+  }
+
+  // 7. Ctrl+Shift+R toggles record/stop — the gesture people expect, and the
   //    reason stopping never requires finding a menu.
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.shiftKey && (e.key === "R" || e.key === "r")) {
       e.preventDefault();
-      void context.commands.execute(COMMANDS.START);
+      void context.commands.execute(COMMANDS.START).catch((err) => {
+        console.error("[MacroRecorder] Ctrl+Shift+R failed:", err);
+      });
     }
   };
   window.addEventListener("keydown", onKeyDown, true);
@@ -157,7 +216,7 @@ const extension: ExtensionModule = {
     name: "Macro Recorder",
     version: "1.0.0",
     description:
-      "Record grid actions and generate runnable Calcula script source — object script or notebook cell — and bind it to a button.",
+      "Record grid actions into a saved workbook module script — read it, edit it, run it, and bind it to a button.",
   },
   activate,
   deactivate,

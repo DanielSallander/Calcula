@@ -11,6 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   debugControl,
+  fireDebugTrigger,
   getBreakpointLines,
   getDebugSession,
   loadPersistedBreakpoints,
@@ -21,6 +22,7 @@ import {
   DebugEvents,
   type DebugAction,
   type DebugSessionState,
+  type DebugTrigger,
 } from "../lib/debugger";
 import { onAppEvent } from "@api/events";
 
@@ -69,7 +71,27 @@ export function injectDebugStyles(): void {
     .osd-badge.paused { background: #4A3B00; color: #FFC400; }
     .osd-badge.running { background: #10331B; color: #6FD08C; }
     .osd-badge.starting { background: #26323D; color: #8CB4FF; }
+    .osd-badge.waiting { background: #2A2A38; color: #B9B4FF; }
+    .osd-badge.finished { background: #2B2B2B; color: #B0B0B0; }
+    .osd-badge.failed { background: #3A2323; color: #FF9B9B; }
     .osd-badge.detached { background: #3A2323; color: #FF9B9B; }
+    .osd-trigger-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 3px 6px; border-radius: 3px;
+    }
+    .osd-trigger-row:nth-child(odd) { background: rgba(255,255,255,0.03); }
+    .osd-trigger-name {
+      color: #9CDCFE; font-family: 'Cascadia Code', Consolas, monospace;
+      white-space: nowrap;
+    }
+    .osd-trigger-desc { color: #999; flex: 1; min-width: 0; }
+    .osd-trigger-fire {
+      background: #2D5A3D; color: #D7F5E1; border: 1px solid #3E7A54;
+      border-radius: 3px; padding: 1px 8px; font-size: 11px; cursor: pointer;
+      white-space: nowrap;
+    }
+    .osd-trigger-fire:hover { background: #3A6E4C; }
+    .osd-trigger-fire:disabled { background: #333; color: #777; border-color: #444; cursor: default; }
     .osd-dot {
       width: 7px; height: 7px; border-radius: 50%; background: currentColor;
     }
@@ -205,6 +227,8 @@ export interface UseDebugSession {
   start: (options?: { pauseOnEntry?: boolean }) => void;
   stop: () => void;
   send: (action: DebugAction) => void;
+  /** Make one of the script's registered triggers fire (event-driven scripts). */
+  fire: (triggerId: string) => void;
 }
 
 export function useDebugSession(scriptId: string | null): UseDebugSession {
@@ -293,6 +317,17 @@ export function useDebugSession(scriptId: string | null): UseDebugSession {
     [scriptId],
   );
 
+  const fire = useCallback(
+    (triggerId: string) => {
+      if (!scriptId) return;
+      setError(null);
+      void fireDebugTrigger(scriptId, triggerId).catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+      });
+    },
+    [scriptId],
+  );
+
   const decorations = useMemo(
     () => computeDebugDecorations(breakpointLines, session),
     [breakpointLines, session],
@@ -309,6 +344,7 @@ export function useDebugSession(scriptId: string | null): UseDebugSession {
     start,
     stop,
     send,
+    fire,
   };
 }
 
@@ -382,18 +418,18 @@ export function DebugToolbar({
     <>
       <span className={`osd-badge ${session.status}`} title={statusTitle(session)}>
         <span className={`osd-dot${session.status === "paused" ? " pulse" : ""}`} />
-        {session.status === "paused"
-          ? `Paused — line ${session.paused?.line ?? "?"}`
-          : session.status === "starting"
-            ? "Starting…"
-            : session.status === "detached"
-              ? "Script unmounted"
-              : "Running"}
+        {statusLabel(session)}
       </span>
       <button
         className={buttonClassName}
         onClick={() => send(isPaused ? "continue" : "pause")}
-        title={isPaused ? "Continue (F5)" : "Pause at the next statement"}
+        title={
+          isPaused
+            ? "Continue (F5)"
+            : session.status === "waiting" || session.status === "finished"
+              ? "Stop on the FIRST statement of the next execution (nothing is running right now)"
+              : "Pause at the next statement"
+        }
       >
         <Glyph d={isPaused ? ICONS.play : ICONS.pause} />
         {isPaused ? "Continue" : "Pause"}
@@ -435,17 +471,65 @@ export function DebugToolbar({
   );
 }
 
+/**
+ * The badge text. THIS IS THE HONESTY SURFACE.
+ *
+ * "Running" used to be shown for the entire life of a session, including the
+ * overwhelmingly common case where `setup` had registered a handler and
+ * returned — so the user watched a motionless "Running" badge and waited for
+ * work that was never going to start. Every resting state now names itself, and
+ * a running one names what is running.
+ */
+export function statusLabel(session: DebugSessionState): string {
+  switch (session.status) {
+    case "paused":
+      return `Paused — line ${session.paused?.line ?? "?"}`;
+    case "starting":
+      return "Starting…";
+    case "detached":
+      return "Script unmounted";
+    case "waiting":
+      return "Waiting for a trigger";
+    case "finished":
+      return "Finished";
+    case "failed":
+      return "setup() failed";
+    case "running":
+      return session.activity ? `Running ${session.activity.label}` : "Running";
+    default:
+      return "Running";
+  }
+}
+
 function statusTitle(session: DebugSessionState): string {
-  if (session.status === "paused") {
-    return (
-      `"${session.scriptName}" is suspended at line ${session.paused?.line}. ` +
-      `The app is NOT hung: renders, saving and closing all continue to work.`
-    );
+  switch (session.status) {
+    case "paused":
+      return (
+        `"${session.scriptName}" is suspended at line ${session.paused?.line}. ` +
+        `The app is NOT hung: renders, saving and closing all continue to work.`
+      );
+    case "detached":
+      return "The script was unmounted, so the session has nothing to attach to.";
+    case "waiting":
+      return (
+        `"${session.scriptName}" is MOUNTED AND IDLE. setup() finished; nothing is ` +
+        `executing. It runs again when one of its ${session.triggers.length} trigger(s) ` +
+        `fires — use Fire below to make one happen from here.`
+      );
+    case "finished":
+      return (
+        `"${session.scriptName}" ran setup() to completion and registered nothing ` +
+        `that can start it again. There is no more code to step through.`
+      );
+    case "failed":
+      return `"${session.scriptName}" failed during setup(): ${session.error ?? "unknown error"}`;
+    case "running":
+      return session.activity
+        ? `"${session.scriptName}" is executing ${session.activity.label}.`
+        : `Debugging "${session.scriptName}".`;
+    default:
+      return `Debugging "${session.scriptName}".`;
   }
-  if (session.status === "detached") {
-    return "The script was unmounted, so the session has nothing to attach to.";
-  }
-  return `Debugging "${session.scriptName}".`;
 }
 
 // ============================================================================
@@ -458,13 +542,60 @@ export interface DebugPanelProps {
   onRevealLine?: (line: number) => void;
 }
 
+/**
+ * The trigger list — the answer to "what will make this script run?".
+ *
+ * Every row says what the user would do in the app to fire it for real, and
+ * offers to do it from here. Without this, a script whose only entry point is
+ * an event (a recorded macro on a button, a cell-edit handler) can be
+ * breakpointed but never reached.
+ */
+function TriggerList({
+  triggers,
+  onFire,
+  disabled,
+}: {
+  triggers: DebugTrigger[];
+  onFire: (id: string) => void;
+  disabled: boolean;
+}): React.ReactElement {
+  return (
+    <div>
+      <div style={{ color: "#888", marginBottom: 3 }}>
+        Triggers ({triggers.length}) — what makes this script run
+      </div>
+      {triggers.map((t) => (
+        <div className="osd-trigger-row" key={t.id}>
+          <span className="osd-trigger-name">
+            {t.kind === "method" ? `${t.name}()` : t.name}
+          </span>
+          <span className="osd-trigger-desc">{t.description}</span>
+          <button
+            className="osd-trigger-fire"
+            onClick={() => onFire(t.id)}
+            disabled={disabled || !t.fireable}
+            title={
+              t.fireable
+                ? `Run the ${t.name} handler now, in this debug session, exactly as the app would.`
+                : `Cannot be fired from the debugger: ${t.reason}.`
+            }
+          >
+            Fire
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.ReactElement | null {
-  const { session, error } = state;
+  const { session, error, fire } = state;
   if (!session && !error) return null;
 
   const ready = session?.ready;
   const paused = session?.paused ?? null;
   const snapshot = session?.lastSnapshot ?? null;
+  const idle = session?.status === "waiting" || session?.status === "finished";
 
   return (
     <div
@@ -503,8 +634,49 @@ export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.Reac
 
       {session?.status === "running" && !paused && (
         <div style={{ color: "#888" }}>
-          Running. Execution stops at the next breakpoint on a pausable line.
+          Running {session.activity?.label ?? "script code"}. Execution stops at the next
+          breakpoint on a pausable line.
         </div>
+      )}
+
+      {session?.status === "failed" && (
+        <div style={{ color: "#FF9B9B" }}>
+          setup() threw before the script could be mounted: {session.error}. Fix it and use
+          Save &amp; Apply — the session stays open and the script remounts into it.
+        </div>
+      )}
+
+      {session?.status === "waiting" && (
+        <div style={{ color: "#B9B4FF" }}>
+          Mounted and idle. setup() finished and nothing is executing — this script runs again
+          only when one of the triggers below fires.
+          {session.lastActivity?.error
+            ? ` The last one (${session.lastActivity.label}) threw: ${session.lastActivity.error}`
+            : session.lastActivity
+              ? ` Last run: ${session.lastActivity.label}.`
+              : ""}
+        </div>
+      )}
+
+      {session?.status === "finished" && (
+        <div style={{ color: "#888" }}>
+          Finished. setup() ran to completion and registered no handlers and no exposed
+          methods, so there is nothing left that can start this script again.
+          {session.lastActivity?.error
+            ? ` It threw: ${session.lastActivity.error}`
+            : ""}
+        </div>
+      )}
+
+      {session && session.triggers.length > 0 && (
+        // Listed whenever the session knows them; only FIREABLE while the script
+        // is idle. Firing a second execution into a realm that is already
+        // suspended would queue behind the pause and look like a dead button.
+        <TriggerList
+          triggers={session.triggers}
+          onFire={fire}
+          disabled={!idle}
+        />
       )}
 
       {paused && (

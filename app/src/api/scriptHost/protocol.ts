@@ -191,6 +191,29 @@ export interface DebugSnapshotState {
   suppressed: number;
 }
 
+/**
+ * Whether SCRIPT CODE IS ACTUALLY ON THE STACK right now.
+ *
+ * WHY THIS EXISTS. A session used to flip to "running" the moment the realm
+ * reported it had instrumented the source, and nothing ever moved it off again.
+ * For the overwhelmingly common script shape — `setup` registers a handler and
+ * returns — that meant the editor said "Running" forever while precisely
+ * nothing ran, and the user sat waiting for an event a debug session gave them
+ * no way to fire. The realm is the ONLY place that can answer this honestly, so
+ * it says so: one message when an execution starts, one when it finishes.
+ *
+ * `label` names the execution ("setup", a hook name, an exposed method) so the
+ * editor can say WHAT is running rather than merely that something is.
+ */
+export interface DebugActivityState {
+  /** True when an execution began, false when the last one finished. */
+  running: boolean;
+  /** What started/finished: "setup", "onClick", "recalcAll()", ... */
+  label: string;
+  /** Set on a finishing report whose execution threw or rejected. */
+  error?: string;
+}
+
 /** What instrumentation actually achieved for this script. */
 export interface DebugReadyState {
   /** False when the pass bailed out — the ORIGINAL source is running. */
@@ -210,6 +233,7 @@ export type W2H =
   | { t: "debugPaused"; state: DebugPauseState }
   | { t: "debugResumed" }
   | { t: "debugSnapshot"; state: DebugSnapshotState }
+  | { t: "debugActivity"; state: DebugActivityState }
   | { t: "validated"; valid: boolean; error?: string }
   | { t: "call"; callId: number; method: string; args: unknown[] }
   | { t: "hookRegistered"; hook: string }

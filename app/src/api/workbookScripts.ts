@@ -26,8 +26,14 @@ export interface ScriptSummary {
 export interface WorkbookScript {
   id: string;
   name: string;
+  /** Free-text note shown beside the module in listings. Mirrors Rust's
+   *  `Option<String>`, which has NO serde default — the field must be present
+   *  (null is fine) on every save or deserialization rejects the payload. */
+  description: string | null;
   source: string;
   scope?: ScriptScope;
+  /** The .calp package this module arrived in; absent/null for local scripts. */
+  sourcePackage?: string | null;
 }
 
 // ============================================================================
@@ -342,6 +348,44 @@ export async function listWorkbookScripts(): Promise<ScriptSummary[]> {
 /** Get a single saved script module by id, including its source. */
 export async function getWorkbookScript(id: string): Promise<WorkbookScript> {
   return invokeBackend<WorkbookScript>("get_script", { id });
+}
+
+/**
+ * Create or replace a saved script module (keyed by `id`), and mark the
+ * workbook modified.
+ *
+ * Marking is not optional bookkeeping: module scripts are persisted INSIDE the
+ * .cala, and the backend's save path does not flag the document dirty for a
+ * script write. Without this a macro auto-saved after recording would look
+ * saved, and would be gone the next time the user closed a "clean" workbook —
+ * the exact silent-loss failure the auto-save exists to prevent.
+ */
+export async function saveWorkbookScript(script: WorkbookScript): Promise<void> {
+  await invokeBackend<void>("save_script", {
+    script: {
+      id: script.id,
+      name: script.name,
+      description: script.description ?? null,
+      source: script.source,
+      scope: script.scope ?? { type: "workbook" },
+      ...(script.sourcePackage ? { sourcePackage: script.sourcePackage } : {}),
+    },
+  });
+  const { markFileModified } = await import("./filesystem");
+  await markFileModified();
+}
+
+/**
+ * Delete a saved script module by id.
+ *
+ * The backend refuses reserved `__calcula_`-prefixed records (internal data
+ * stores such as the Custom Functions library, which reuse the script map for
+ * storage but are not user code).
+ */
+export async function deleteWorkbookScript(id: string): Promise<void> {
+  await invokeBackend<void>("delete_script", { id });
+  const { markFileModified } = await import("./filesystem");
+  await markFileModified();
 }
 
 /**

@@ -5,7 +5,7 @@
 //          a debugger UI can have.
 
 import { describe, it, expect } from "vitest";
-import { breakpointShift, computeDebugDecorations } from "../components/DebugPanel";
+import { breakpointShift, computeDebugDecorations, statusLabel } from "../components/DebugPanel";
 import type { DebugSessionState } from "../lib/debugger";
 
 function session(partial: Partial<DebugSessionState>): DebugSessionState {
@@ -17,6 +17,10 @@ function session(partial: Partial<DebugSessionState>): DebugSessionState {
     ready: null,
     paused: null,
     lastSnapshot: null,
+    activity: null,
+    lastActivity: null,
+    triggers: [],
+    error: null,
     ...partial,
   };
 }
@@ -66,6 +70,51 @@ describe("gutter decorations", () => {
     const pausedMarker = decos.find((d) => d.glyphClassName === "debug-paused-glyph");
     expect(pausedMarker?.line).toBe(4);
     expect(pausedMarker?.lineClassName).toBe("debug-paused-line");
+  });
+});
+
+describe("the status badge must never claim work is happening", () => {
+  it("says WAITING, not Running, for a script that is idle between triggers", () => {
+    const s = session({
+      status: "waiting",
+      triggers: [
+        {
+          id: "hook:onClick",
+          kind: "hook",
+          name: "onClick",
+          description: "a click on it (the button this script is attached to)",
+          fireable: true,
+        },
+      ],
+    });
+    expect(statusLabel(s)).toBe("Waiting for a trigger");
+    expect(statusLabel(s)).not.toMatch(/running/i);
+  });
+
+  it("says FINISHED for a script that ran to completion with nothing to restart it", () => {
+    expect(statusLabel(session({ status: "finished" }))).toBe("Finished");
+  });
+
+  it("NAMES what is running while something really is", () => {
+    const s = session({ status: "running", activity: { label: "onClick" } });
+    expect(statusLabel(s)).toBe("Running onClick");
+  });
+
+  it("falls back to a bare Running when the realm did not name the execution", () => {
+    expect(statusLabel(session({ status: "running" }))).toBe("Running");
+  });
+
+  it("says setup() failed rather than pretending the session is live", () => {
+    const s = session({ status: "failed", error: "button is not defined" });
+    expect(statusLabel(s)).toBe("setup() failed");
+  });
+
+  it("still reports the paused line", () => {
+    const s = session({
+      status: "paused",
+      paused: { line: 12, reason: "breakpoint", variables: [], callStack: [], waiting: 0 },
+    });
+    expect(statusLabel(s)).toBe("Paused — line 12");
   });
 });
 

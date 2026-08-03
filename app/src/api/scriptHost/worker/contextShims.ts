@@ -282,22 +282,57 @@ function registerReplyingHook(
   return cleanup;
 }
 
-/** Host event → registered handlers. Handler errors go to the host as script errors. */
-export function dispatchEvent(rt: WorkerRuntime, hook: string, payload: unknown, post: Post): void {
+/**
+ * Host event → registered handlers. Handler errors go to the host as script
+ * errors.
+ *
+ * Every handler is INVOKED SYNCHRONOUSLY, in registration order, exactly as
+ * before — the returned promise only settles afterwards, once every handler
+ * that returned a thenable has settled. Two things depend on that:
+ *
+ *  - the debugger can say when an execution genuinely ENDS (bootstrap.ts wraps
+ *    this call in an activity report), instead of guessing from the dispatch;
+ *  - an ASYNC handler that rejects is now reported like a synchronous throw.
+ *    It previously escaped the try/catch entirely and became an unhandled
+ *    rejection — silent on a production mount, which is the one direction an
+ *    error must never travel.
+ */
+export function dispatchEvent(
+  rt: WorkerRuntime,
+  hook: string,
+  payload: unknown,
+  post: Post,
+): Promise<void> | void {
   const handlers = rt.hooks.get(hook);
   if (!handlers) return;
+  const report = (err: unknown): void => {
+    post({
+      t: "error",
+      hook,
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  };
+  let pending: Array<Promise<void>> | null = null;
   for (const handler of [...handlers]) {
+    let result: unknown;
     try {
-      handler(payload);
+      result = handler(payload);
     } catch (err) {
-      post({
-        t: "error",
-        hook,
-        message: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      });
+      report(err);
+      continue;
+    }
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      (pending ??= []).push(
+        Promise.resolve(result).then(
+          () => undefined,
+          (err: unknown) => report(err),
+        ),
+      );
     }
   }
+  if (!pending) return;
+  return Promise.all(pending).then(() => undefined);
 }
 
 export function applyMirror(rt: WorkerRuntime, path: string, value: unknown): void {

@@ -5,15 +5,29 @@
 //          is therefore unmissable (a pulsing red dot), states the action count
 //          so the user can see capture happening, and carries Stop right next
 //          to it so stopping never requires hunting through a menu.
+//
+// EVERY BUTTON HERE GOES THROUGH THE REGISTERED COMMAND, not through the lib
+// function behind it. Two reasons, and the second is why it is worth the extra
+// hop. (1) There is then exactly ONE implementation of "stop" / "pause" /
+// "discard", so the button and the command cannot drift — they had already
+// drifted: Discard called `abandonRecording()` while `macroRecorder.cancel`
+// called the weaker `cancelRecording()`, which leaves a previous recording's
+// result sitting in the flow state. (2) It keeps the commands honest: a command
+// whose only callers are a script and a test is the same dead-plumbing shape
+// this whole feature was rebuilt to remove. The `macroRecorder.` prefix is in
+// the recorder's own ignore list, so driving the recorder is never recorded.
 
 import React, { useSyncExternalStore } from "react";
-import {
-  getRecorderSnapshot,
-  pauseRecording,
-  resumeRecording,
-  subscribeToRecorder,
-} from "../lib/actionRecorder";
-import { abandonRecording, finishRecording } from "../lib/flow";
+import { CommandRegistry } from "@api";
+import { getRecorderSnapshot, subscribeToRecorder } from "../lib/actionRecorder";
+import { COMMANDS } from "../lib/ids";
+
+/** Run a recorder command and surface a failure rather than swallowing it. */
+function run(commandId: string): void {
+  void CommandRegistry.execute(commandId).catch((err) => {
+    console.error(`[MacroRecorder] ${commandId} failed:`, err);
+  });
+}
 
 const PULSE_KEYFRAMES_ID = "macro-recorder-pulse";
 
@@ -80,21 +94,26 @@ export function RecordingIndicator(): React.ReactElement | null {
       <button
         type="button"
         style={link}
-        onClick={() => (recording ? pauseRecording() : resumeRecording())}
+        onClick={() => run(recording ? COMMANDS.PAUSE : COMMANDS.RESUME)}
       >
         {recording ? "Pause" : "Resume"}
       </button>
-      <button type="button" style={link} onClick={() => finishRecording()}>
+      <button type="button" style={link} onClick={() => run(COMMANDS.STOP)}>
         Stop
       </button>
       <button
         type="button"
         style={link}
         onClick={() => {
+          // The confirm stays HERE, not in the command: a script calling
+          // `macroRecorder.cancel` must not be able to raise a modal.
           if (
-            window.confirm("Discard this recording? The actions already taken stay in the workbook.")
+            window.confirm(
+              "Discard this recording? Nothing is saved — Stop instead if you want to keep it. " +
+                "The actions already taken stay in the workbook either way.",
+            )
           ) {
-            abandonRecording();
+            run(COMMANDS.CANCEL);
           }
         }}
       >

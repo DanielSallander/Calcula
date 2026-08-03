@@ -49,6 +49,18 @@ import type { InvokeArgs } from "./backend";
 export interface IMenuAPI {
   register(definition: MenuDefinition): void;
   registerItem(menuId: string, item: MenuItemDefinition): void;
+  /** Patch a registered item in place — label, disabled, hidden, checked.
+   *  Re-registering does NOT do this: registerItem only merges children, so a
+   *  menu item that must reflect state (e.g. "Record Macro…" / "Stop
+   *  Recording") has to be updated, not re-registered. */
+  updateItem(
+    menuId: string,
+    itemId: string,
+    patch: Partial<Omit<MenuItemDefinition, "id">>,
+  ): void;
+  /** Remove a registered item. Extensions must call this for their items on
+   *  deactivation, exactly as they unregister panes and dialogs. */
+  unregisterItem(menuId: string, itemId: string): void;
   getAll(): MenuDefinition[];
   subscribe(callback: () => void): () => void;
   notifyChanged(): void;

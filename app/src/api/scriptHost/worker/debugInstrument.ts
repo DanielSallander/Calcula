@@ -575,8 +575,38 @@ function describeFunction(toks: Tok[], braceIdx: number): PendingFn | null {
 }
 
 /**
+ * The identifier the script uses for its context object: `setup`'s FIRST
+ * PARAMETER, defaulting to `context` when there is no usable `setup(param)`.
+ *
+ * WHY IT IS NOT THE LITERAL "context". The parameter is a binding like any
+ * other, and real scripts name it after the object they are attached to — the
+ * macro recorder emits `function setup(button) { button.onClick(...) }`. Keying
+ * callback promotion on the word "context" therefore silently refused to
+ * promote handlers in exactly the script shape the recorder produces, and every
+ * breakpoint inside such a handler degraded to a hollow snapshot-only dot.
+ */
+function setupContextName(toks: Tok[]): string {
+  for (let i = 0; i + 3 < toks.length; i++) {
+    const kw = toks[i];
+    if (kw.kind !== "word" || kw.text !== "function") continue;
+    const name = toks[i + 1];
+    if (!name || name.kind !== "word" || name.text !== "setup") continue;
+    const open = toks[i + 2];
+    if (!open || open.kind !== "punc" || open.text !== "(") continue;
+    const first = toks[i + 3];
+    // A destructured (`{a, b}`) or absent parameter has no single name to key
+    // on; `context` is then the only sane guess and costs nothing if wrong.
+    if (!first || first.kind !== "word") return "context";
+    return first.text;
+  }
+  return "context";
+}
+
+/**
  * Whether the function starting at token `startIdx` is an inline callback
- * handed straight to `context.onXxx(...)` / `context.expose(...)`.
+ * handed straight to `<context>.onXxx(...)` / `<context>.expose(...)`, where
+ * `<context>` is the context binding itself or a member path rooted at it
+ * (`context.sheet.onDataChange`, `button.onClick`, ...).
  *
  * Those callbacks are reachable ONLY through the host dispatcher, which either
  * ignores the return value (dispatchEvent) or awaits it (exposed methods /
@@ -584,7 +614,7 @@ function describeFunction(toks: Tok[], braceIdx: number): PendingFn | null {
  * itself observes. `onRender` is excluded: its return value feeds the render
  * pipeline, which must never wait on a debugger.
  */
-function isPromotableCallbackArg(toks: Tok[], startIdx: number): boolean {
+function isPromotableCallbackArg(toks: Tok[], startIdx: number, contextName: string): boolean {
   let i = startIdx - 1;
   // Allow an `async` we are about to add / a leading modifier position.
   if (i < 0) return false;
@@ -604,14 +634,28 @@ function isPromotableCallbackArg(toks: Tok[], startIdx: number): boolean {
   }
   if (i < 0) return false;
   const method = toks[i - 1];
-  const dot = toks[i - 2];
-  const recv = toks[i - 3];
   if (!method || method.kind !== "word") return false;
-  if (!dot || dot.kind !== "punc" || dot.text !== ".") return false;
-  if (!recv || recv.kind !== "word" || recv.text !== "context") return false;
-  if (method.text === "expose") return true;
+  if (method.text !== "expose" && method.text !== "onRender" && !/^on[A-Z]/.test(method.text)) {
+    return false;
+  }
   if (method.text === "onRender") return false;
-  return /^on[A-Z]/.test(method.text);
+  // Walk the receiver back through `.name` links to its ROOT identifier, which
+  // must be the context binding. Anything else — a user's own emitter, a
+  // library object — is left alone: only the host dispatcher's own entry points
+  // are safe to make awaitable.
+  let r = i - 2;
+  for (;;) {
+    const dot = toks[r];
+    if (!dot || dot.kind !== "punc" || dot.text !== ".") return false;
+    const seg = toks[r - 1];
+    if (!seg || seg.kind !== "word") return false;
+    const before = toks[r - 2];
+    if (before && before.kind === "punc" && before.text === ".") {
+      r -= 2;
+      continue;
+    }
+    return seg.text === contextName;
+  }
 }
 
 /**
@@ -676,6 +720,7 @@ export function instrumentForDebug(source: string): InstrumentResult {
   const { toks, error } = tokenize(source);
   if (error) return fallback(error);
 
+  const contextName = setupContextName(toks);
   const insertions: Insertion[] = [];
   const pausable = new Set<number>();
   const snapshot = new Set<number>();
@@ -763,7 +808,7 @@ export function instrumentForDebug(source: string): InstrumentResult {
               const isTopLevelSetup =
                 stack.length === 0 && fn.name === "setup" &&
                 toks[fn.promoteIdx]?.text === "function";
-              if (isTopLevelSetup || isPromotableCallbackArg(toks, fn.promoteIdx)) {
+              if (isTopLevelSetup || isPromotableCallbackArg(toks, fn.promoteIdx, contextName)) {
                 insertions.push({ offset: toks[fn.promoteIdx].start, text: "async " });
                 promoted.push(isTopLevelSetup ? "setup" : `${fn.name} (callback)`);
                 canAwait = true;

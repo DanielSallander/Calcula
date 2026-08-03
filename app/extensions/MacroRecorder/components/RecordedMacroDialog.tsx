@@ -1,10 +1,17 @@
 //! FILENAME: app/extensions/MacroRecorder/components/RecordedMacroDialog.tsx
-// PURPOSE: Review the generated source and complete the loop — copy it, drop it
-//          into a notebook cell, or bind it to a new button.
+// PURPOSE: Review a recording that is ALREADY SAVED, and decide what else to do
+//          with it — copy it, drop it into a notebook cell, or bind it to a
+//          button.
 // CONTEXT: The "read" and "edit" halves of record -> read -> edit. The source is
 //          shown in an editable box on purpose: reading and then tweaking the
 //          generated code is the step that turns a recorder into a way to LEARN
 //          the scripting API, which is the whole reason this feature matters.
+//
+//          THIS IS NO LONGER A SAVE PROMPT. The recording is written to a
+//          workbook module script the moment recording stops (see flow.ts), so
+//          "Close" cannot lose anything and needs no warning wording. What the
+//          dialog owes the user instead is a plain statement of WHERE the macro
+//          went — and, if the auto-save failed, a loud one that it did not.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
@@ -13,8 +20,13 @@ import { showToast } from "@api/notifications";
 import { requestMacroToNotebook } from "@api/lib";
 import { getCachedLocale } from "@api/locale";
 import { generateMacroSource } from "../lib/actionCodegen";
-import { getAnchorCell, getFinishedRecording } from "../lib/flow";
-import { saveAsButtonScript } from "../lib/buttonScript";
+import {
+  getAnchorCell,
+  getFinishedRecording,
+  setFinishedSavedModule,
+} from "../lib/flow";
+import { designModeHint, saveAsButtonScript } from "../lib/buttonScript";
+import { saveMacroModule } from "../lib/macroLibrary";
 import { formatA1, parseA1 } from "../lib/a1";
 import type { MacroTarget, MacroWrapper } from "../lib/types";
 import { styles } from "./styles";
@@ -55,7 +67,10 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         wrapper,
         name: recording.name,
         decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
-        recordedAt: new Date().toISOString(),
+        // Pinned to the recording, not `now`: the source shown here has to be
+        // byte-identical to the module that was already stored, or the user is
+        // reading something subtly different from what they will find later.
+        recordedAt: recording.recordedAt,
       });
     } catch (e) {
       return {
@@ -107,7 +122,7 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
             wrapper: "buttonScript",
             name: recording.name,
             decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
-            recordedAt: new Date().toISOString(),
+            recordedAt: recording.recordedAt,
           }).source;
 
     setBusy(true);
@@ -121,9 +136,10 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         col: cell.col,
       });
       showToast(
-        result.mounted
+        (result.mounted
           ? `Button created at ${anchor} — click it to replay "${recording.name}".`
-          : `Button created at ${anchor}. It runs after the workbook is reloaded.`,
+          : `Button created at ${anchor}. It runs after the workbook is reloaded.`) +
+          designModeHint(),
         { type: "success" },
       );
       onClose();
@@ -133,6 +149,40 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
       setBusy(false);
     }
   }, [recording, anchor, wrapper, edited, source, onClose]);
+
+  /**
+   * Push the edited source back into the module that was auto-saved.
+   *
+   * Without this the dialog would show an editable box whose edits quietly
+   * disappear on Close — a smaller version of the very bug this dialog is being
+   * fixed for. Only offered while the text actually differs from what is stored.
+   */
+  const updateModule = useCallback(async () => {
+    if (!recording?.saved) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await saveMacroModule({
+        id: recording.saved.id,
+        name: recording.saved.name,
+        source,
+        // The runtime marker follows the SOURCE, not the original choice: the
+        // user may have switched targets in this dialog, and a module marked
+        // "objectScript" holding `Calcula.*` source would make the library
+        // refuse to run something that runs perfectly well.
+        runtime: target,
+        actionCount: recording.actions.length,
+        recordedAt: recording.recordedAt,
+      });
+      setFinishedSavedModule(saved);
+      setEdited(null);
+      showToast(`Updated module script "${saved.name}".`, { type: "success" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [recording, source, target]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -191,6 +241,21 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
         </div>
 
         <div style={styles.body}>
+          {recording.saved ? (
+            <div style={styles.saved} data-macro-saved-banner="">
+              Saved as the workbook module script{" "}
+              <strong>{recording.saved.name}</strong>. Find it again under{" "}
+              <strong>Developer ▸ Macros…</strong> — closing this window keeps it.
+            </div>
+          ) : (
+            <div style={styles.error} data-macro-save-error="">
+              <strong>This recording could not be saved.</strong> {recording.saveError}
+              <br />
+              It is still here, so copy the source below or send it to a notebook
+              cell before you close this window — otherwise it is lost.
+            </div>
+          )}
+
           <div style={styles.radioRow}>
             <label style={styles.radioLabel}>
               <input
@@ -284,6 +349,16 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
           <button type="button" style={styles.btn} onClick={() => void copy()}>
             Copy
           </button>
+          {recording.saved && edited !== null ? (
+            <button
+              type="button"
+              style={styles.btn}
+              disabled={busy}
+              onClick={() => void updateModule()}
+            >
+              {busy ? "Saving…" : "Update Module"}
+            </button>
+          ) : null}
           {target === "notebook" ? (
             <button type="button" style={styles.btnPrimary} onClick={toNotebook}>
               Add as Notebook Cell

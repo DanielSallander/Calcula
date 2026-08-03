@@ -15,6 +15,8 @@ import { createScopedInvokeBackend } from "../../api/backendCommands";
 import {
   registerMenu,
   registerMenuItem,
+  updateMenuItem,
+  unregisterMenuItem,
   getMenus,
   subscribeToMenus,
   notifyMenusChanged,
@@ -254,6 +256,8 @@ function buildContext(): ExtensionContext {
       menus: {
         register: registerMenu,
         registerItem: registerMenuItem,
+        updateItem: updateMenuItem,
+        unregisterItem: unregisterMenuItem,
         getAll: getMenus,
         subscribe: subscribeToMenus,
         notifyChanged: notifyMenusChanged,

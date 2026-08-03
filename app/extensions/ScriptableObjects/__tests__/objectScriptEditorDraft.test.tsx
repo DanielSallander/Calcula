@@ -89,6 +89,7 @@ vi.mock("../components/DebugPanel", () => ({
     decorations: [],
     breakpointLines: [],
     send: () => {},
+    fire: () => {},
     toggleLine: () => {},
   }),
 }));
