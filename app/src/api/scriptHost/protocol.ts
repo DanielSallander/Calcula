@@ -9,6 +9,18 @@ import type { CapabilityId } from "./allowlist";
 export const PROTOCOL_VERSION = 1;
 
 /**
+ * Current version of the object-script `context` API, stamped onto every mount
+ * definition.
+ *
+ * It lives HERE rather than in `scriptableObjects.ts` (which re-exports it as
+ * the public `SCRIPT_API_VERSION`) because the host has to build mount
+ * definitions of its own — the transient mount a module macro is debugged under
+ * — and `scriptableObjects.ts` imports the host. Reading the constant from
+ * there would close that import cycle; duplicating it would let the two drift.
+ */
+export const SCRIPT_API_VERSION = "1.0.0";
+
+/**
  * Name prefix for RUN-AT-CURSOR run-targets (VBA F5).
  *
  * On a DEBUG mount the worker auto-exposes every top-level function declaration

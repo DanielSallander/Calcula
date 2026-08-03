@@ -35,6 +35,40 @@ vi.mock("@api", () => ({
     if (!found) throw new Error(`Script '${id}' not found`);
     return found;
   },
+  // The generic module-script inventory the library now lists through (and the
+  // Object Script Editor lists through too). Mirrors the real one: reserved
+  // records hidden, a per-record read failure reported ON the record.
+  listWorkbookScriptRecords: async () =>
+    [...store.values()]
+      .filter((s) => !s.id.startsWith(RESERVED_PREFIX))
+      .map((summary) => {
+        // Through `get`, like the real one: a record that lists but cannot be
+        // READ must come back flagged rather than silently ordinary.
+        const found = store.get(summary.id);
+        return found
+          ? {
+              id: found.id,
+              name: found.name,
+              description: found.description ?? null,
+              source: found.source,
+              scope: found.scope,
+              sourcePackage: null,
+              loadError: null,
+            }
+          : {
+              id: summary.id,
+              name: summary.name,
+              description: null,
+              source: "",
+              sourcePackage: null,
+              loadError: `Script '${summary.id}' not found`,
+            };
+      }),
+  parseModuleScriptRuntime: (description: string | null | undefined) => {
+    if (typeof description !== "string") return null;
+    const match = /\bruntime=(objectScript|notebook)\b/.exec(description);
+    return match ? match[1] : null;
+  },
   saveWorkbookScript: async (script: StoredScript) => {
     store.set(script.id, { ...script });
   },

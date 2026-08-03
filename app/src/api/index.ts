@@ -231,9 +231,13 @@ export {
 // surface extensions use instead of importing the ScriptEditor extension internals.
 export {
   listWorkbookScripts,
+  listWorkbookScriptRecords,
   getWorkbookScript,
   saveWorkbookScript,
   deleteWorkbookScript,
+  parseModuleScriptRuntime,
+  onWorkbookScriptsChanged,
+  WORKBOOK_SCRIPTS_CHANGED_EVENT,
   runWorkbookScript,
   dispatchScriptSideEffects,
   normalizeDeferredActions,
@@ -246,6 +250,9 @@ export type {
   ScriptScope,
   ScriptSummary,
   WorkbookScript,
+  WorkbookScriptRecord,
+  WorkbookScriptsChangedDetail,
+  ModuleScriptRuntime,
   ScriptRunResult,
   ScriptRunSuccess,
   ScriptRunError,

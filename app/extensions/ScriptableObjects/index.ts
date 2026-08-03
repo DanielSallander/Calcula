@@ -39,6 +39,7 @@ import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateMa
 import { loadConsents, recordConsent, isConsentCurrent, getChangedScripts } from "./lib/consentStore";
 import type { CapabilityGrant } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
+import { hostStopTransientDebugSessions } from "@api/scriptHost/host";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
 import ObjectScriptManagerPane from "./components/ObjectScriptManagerPane";
@@ -825,6 +826,24 @@ async function activate(context: ExtensionContext): Promise<void> {
   // host resolves against its own mount table, and it can only ask for what the
   // host already exposes to trusted UI.
   cleanupFunctions.push(installObjectScriptDebugBridge());
+
+  // ---- Transient debug mounts do not outlive the window that opened them ----
+  // Debugging a recorded macro mounts it TRANSIENTLY (it is a module script and
+  // has no standing mount). Stop tears that down — but the user can also just
+  // close the editor window, and until now that left an unlocked realm running
+  // in this window with no UI left that knew it existed. The editor announces
+  // its own close; this is what makes that announcement mean something.
+  void onEditorClosed(() => {
+    void hostStopTransientDebugSessions().catch((e) => {
+      console.error("[ScriptableObjects] could not release debug mounts on editor close:", e);
+    });
+  }).then((unlisten) => {
+    cleanupFunctions.push(unlisten);
+  });
+  cleanupFunctions.push(() => {
+    // Extension teardown is also a reason for a debugger-owned mount to go.
+    void hostStopTransientDebugSessions().catch(() => undefined);
+  });
 
   // ---- Editor-open seam (@api/scriptEditorService) ----
   // The Macro Recorder sends the user here to edit a recorded macro ("double-

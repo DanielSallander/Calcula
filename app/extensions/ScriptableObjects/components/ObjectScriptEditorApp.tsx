@@ -22,7 +22,14 @@ import {
   loadAllObjectScripts,
   saveObjectScript,
 } from "@api/objectScriptBackend";
-import { getWorkbookScript, saveWorkbookScript } from "@api/workbookScripts";
+import {
+  getWorkbookScript,
+  listWorkbookScriptRecords,
+  onWorkbookScriptsChanged,
+  parseModuleScriptRuntime,
+  saveWorkbookScript,
+} from "@api/workbookScripts";
+import type { ModuleScriptRuntime, WorkbookScriptRecord } from "@api/workbookScripts";
 import {
   listTemplates,
   saveTemplate,
@@ -41,7 +48,6 @@ import {
   setRemoteDebugTransport,
   runAtCursor,
 } from "../lib/debugger";
-import type { MacroDebugMount } from "../lib/debugger";
 import {
   breakpointShift,
   DebugPanel,
@@ -260,6 +266,105 @@ function IconBook() {
 }
 
 // ============================================================================
+// Module scripts (recorded macros) as first-class documents
+// ============================================================================
+
+/**
+ * One MODULE script open in — or merely listed by — this editor.
+ *
+ * A recorded macro is a module script (`save_script`), not an object script, so
+ * `loadAllObjectScripts` cannot see it. The editor used to hold exactly ONE of
+ * these, handed to it over the open-with-macro channel, which meant a user with
+ * two macros could only ever see the one they navigated to: the second REPLACED
+ * the first. Macros are enumerated from the store now, like any other inventory,
+ * and this is the per-document state that enumeration produces.
+ */
+interface MacroDoc {
+  macroId: string;
+  /** Synthetic object-script shape for the editor chrome. `source` is the LIVE
+   *  buffer for this document (stashed on switch-away), not the stored text. */
+  script: ObjectScriptDefinition;
+  /** The stored description — where the runtime marker lives. Preserved verbatim
+   *  across a save so the macro keeps routing correctly. */
+  description: string | null;
+  /** The source as STORED, so a refresh can tell an external edit from a local one. */
+  savedSource: string;
+  /** Unsaved edits in this document's buffer. Per-document, so switching between
+   *  two macros cannot lose either one's work. */
+  dirty: boolean;
+  /** Why this module could not be read, or that it has since been deleted. */
+  loadError: string | null;
+  /** Recorder marker: a marked module is a MACRO, an unmarked one a plain module. */
+  runtime: ModuleScriptRuntime | null;
+}
+
+function macroDocFromRecord(record: WorkbookScriptRecord): MacroDoc {
+  return {
+    macroId: record.id,
+    script: {
+      id: record.id,
+      name: record.name,
+      objectType: "workbook",
+      instanceId: null,
+      source: record.source,
+      accessLevel: "unlocked",
+    },
+    description: record.description,
+    savedSource: record.source,
+    dirty: false,
+    loadError: record.loadError,
+    runtime: parseModuleScriptRuntime(record.description),
+  };
+}
+
+/** The dropdown prefix. A recorder-marked module is a MACRO; an unmarked one is
+ *  a hand-authored module — both live in the same store and both belong here. */
+function macroDocKindLabel(doc: MacroDoc): string {
+  return doc.runtime ? "MACRO" : "MODULE";
+}
+
+/** What a deleted-but-edited document says about itself. */
+const DELETED_WITH_EDITS_NOTE =
+  "This module was deleted from the workbook while you had unsaved edits. " +
+  "The edits are still here — Save writes it back.";
+
+/**
+ * Fold a fresh listing into the documents already open, PRESERVING per-document
+ * unsaved edits.
+ *
+ * The rules, in order:
+ *   - a listed module with local unsaved edits keeps its buffer (the record
+ *     supplies everything else);
+ *   - a listed module with no local edits takes the record wholesale;
+ *   - a module that has DISAPPEARED and has unsaved edits stays in the list,
+ *     flagged, rather than silently taking the author's work with it;
+ *   - a module that has disappeared and is clean simply goes.
+ */
+export function mergeMacroDocs(
+  previous: MacroDoc[],
+  records: WorkbookScriptRecord[],
+): MacroDoc[] {
+  const stale = new Map(previous.map((doc) => [doc.macroId, doc]));
+  const next: MacroDoc[] = records.map((record) => {
+    const existing = stale.get(record.id);
+    stale.delete(record.id);
+    const fresh = macroDocFromRecord(record);
+    if (!existing || !existing.dirty) return fresh;
+    return {
+      ...fresh,
+      script: { ...fresh.script, source: existing.script.source },
+      dirty: true,
+    };
+  });
+  for (const orphan of stale.values()) {
+    if (!orphan.dirty) continue;
+    next.push({ ...orphan, loadError: DELETED_WITH_EDITS_NOTE });
+  }
+  // Macros together, in a stable, human order — the list is a menu, not a log.
+  return next.sort((a, b) => a.script.name.localeCompare(b.script.name));
+}
+
+// ============================================================================
 // Component
 // ============================================================================
 
@@ -276,21 +381,32 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const [draftDoc, setDraftDoc] = useState<
     { draft: ScriptDraft; script: ObjectScriptDefinition } | null
   >(null);
-  // A recorded MACRO opened for editing. Unlike a draft it IS a real, saved
-  // record — but in the MODULE store (`save_script`), not the object-script
-  // store — so it needs its own doc-kind: Save routes to `saveWorkbookScript`,
-  // and debug/run mount it transiently under a synthetic unlocked `workbook`
-  // object-script definition. `description` carries the runtime marker verbatim,
-  // so the macro keeps routing correctly after a round-trip through the editor.
-  const [macroDoc, setMacroDoc] = useState<
-    { macroId: string; script: ObjectScriptDefinition; description: string | null } | null
-  >(null);
+  // EVERY recorded macro / module script in the workbook. Unlike a draft these
+  // are real, saved records — but in the MODULE store (`save_script`), not the
+  // object-script store — so they need their own doc-kind: Save routes to
+  // `saveWorkbookScript`, and debug/run mount them transiently under a synthetic
+  // unlocked `workbook` definition the HOST builds from the store.
+  const [macroDocs, setMacroDocs] = useState<MacroDoc[]>([]);
+  const macroDocsRef = useRef<MacroDoc[]>([]);
+  macroDocsRef.current = macroDocs;
   // Authoring language for the OPEN script. Stored scripts are always
   // JavaScript (that is the only thing the worker can import), so this always
   // starts at "javascript"; switching to TypeScript is an authoring decision
   // that lasts until the next save compiles the text back down.
   const [language, setLanguage] = useState<ScriptAuthoringLanguage>("javascript");
   const [isDirty, setIsDirty] = useState(false);
+  // Live mirrors of the buffer, so the async listeners (a macro arriving on the
+  // open channel, a background list refresh) can stash the author's current text
+  // into its document instead of reading a stale closure and overwriting it.
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+  const isDirtyRef = useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const activeDocIdRef = useRef<string | null>(activeScriptId);
+  activeDocIdRef.current = activeScriptId;
+  /** Which document the buffer currently holds. Guards the restore effect so a
+   *  background refresh of the macro list can never replace text being typed. */
+  const loadedDocIdRef = useRef<string | null>(null);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showConsole, setShowConsole] = useState(true);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
@@ -318,6 +434,25 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     window.addEventListener("mouseup", onUp);
   }, [consoleHeight]);
 
+  // Push one line into the editor console and reveal it. Declared before the
+  // loaders because they are the first thing that can need to speak.
+  const reportToConsole = useCallback(
+    (message: string, scriptId?: string, level: ConsoleEntry["level"] = "error") => {
+      setConsoleEntries((prev) => [
+        ...prev,
+        {
+          id: ++consoleIdRef.current,
+          level,
+          message,
+          scriptId,
+          timestamp: Date.now(),
+        },
+      ]);
+      setShowConsole(true);
+    },
+    [],
+  );
+
   // Load scripts from backend
   const loadScripts = useCallback(async () => {
     try {
@@ -330,10 +465,127 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
   }, []);
 
+  /**
+   * Enumerate the workbook's MODULE scripts — every recorded macro, not just the
+   * one this window was navigated to.
+   *
+   * This is the whole of bug A: the editor used to know about exactly the macro
+   * handed to it on the open channel, so a second macro replaced the first.
+   * `listWorkbookScriptRecords` is the same door the Macros library lists
+   * through, reached through @api rather than by importing the Macro Recorder.
+   */
+  const loadMacros = useCallback(async () => {
+    let records: WorkbookScriptRecord[];
+    try {
+      records = await listWorkbookScriptRecords();
+    } catch (e) {
+      // Never a silently empty dropdown: if the store cannot be read, say so.
+      reportToConsole(
+        `Could not list this workbook's script modules, so recorded macros are missing ` +
+          `from the list: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return;
+    }
+
+    // An external edit to the module the author is LOOKING at, with no local
+    // edits of their own, is shown rather than hidden — but it is announced,
+    // because text changing under the cursor with no explanation is worse than
+    // either outcome.
+    const activeId = activeDocIdRef.current;
+    if (activeId && !isDirtyRef.current) {
+      const record = records.find((r) => r.id === activeId);
+      if (record && !record.loadError && record.source !== sourceRef.current) {
+        setSource(record.source);
+        reportToConsole(
+          `"${record.name}" changed in the workbook and has been reloaded here.`,
+          record.id,
+          "info",
+        );
+      }
+    }
+
+    setMacroDocs((prev) => {
+      // Stash the live buffer into the ACTIVE document first. Its edits live in
+      // `source`/`isDirty` until a switch moves them, and the merge decides what
+      // to keep by looking at `dirty` — without this, a refresh that arrives
+      // while the author is typing would judge the document clean and throw the
+      // work away (deleted elsewhere) or overwrite it (edited elsewhere).
+      const activeId = activeDocIdRef.current;
+      const withLiveBuffer = activeId
+        ? prev.map((d) =>
+            d.macroId === activeId
+              ? {
+                  ...d,
+                  script: { ...d.script, source: sourceRef.current },
+                  dirty: isDirtyRef.current,
+                }
+              : d,
+          )
+        : prev;
+      return mergeMacroDocs(withLiveBuffer, records);
+    });
+    for (const record of records) {
+      if (record.loadError) {
+        reportToConsole(
+          `"${record.name}" (${record.id}) is listed but could not be read: ${record.loadError}`,
+          record.id,
+        );
+      }
+    }
+  }, [reportToConsole]);
+
   // Initial load
   useEffect(() => {
     loadScripts();
-  }, [loadScripts]);
+    void loadMacros();
+  }, [loadScripts, loadMacros]);
+
+  // The list must follow the workbook: a macro recorded, renamed or deleted in
+  // the main window while this editor is open changes what belongs here. The
+  // module store announces every write it makes (@api/workbookScripts), so this
+  // is a subscription, not a poll.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void onWorkbookScriptsChanged(() => {
+      void loadMacros();
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        /* no event bus in this environment; the list still loads on open */
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadMacros]);
+
+  /**
+   * Move the live buffer into the module document it belongs to.
+   *
+   * The single-macro editor already had the rule that "switching away must not
+   * silently write" — a module script must never be auto-saved through the
+   * object-script path. That rule is preserved for N documents by KEEPING the
+   * edits here instead: nothing is written, and coming back shows exactly what
+   * was being read.
+   */
+  const stashActiveMacroBuffer = useCallback(() => {
+    const id = activeDocIdRef.current;
+    if (!id) return;
+    if (!macroDocsRef.current.some((d) => d.macroId === id)) return;
+    const buffer = sourceRef.current;
+    const dirty = isDirtyRef.current;
+    setMacroDocs((prev) =>
+      prev.map((d) =>
+        d.macroId === id ? { ...d, script: { ...d.script, source: buffer }, dirty } : d,
+      ),
+    );
+  }, []);
+  const stashActiveBufferRef = useRef(stashActiveMacroBuffer);
+  stashActiveBufferRef.current = stashActiveMacroBuffer;
 
   // Listen for Tauri events from main window (registered once on mount)
   useEffect(() => {
@@ -382,34 +634,96 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     // authoritative record here so the editor always shows the live source, not
     // a copy that rode the wire; fall back to the preview if the record has
     // since been deleted, so the window still shows what the caller meant.
+    //
+    // OPENING IS SELECTING. A macro already in the list is SELECTED, never added
+    // a second time, and if the author has unsaved edits in it those edits are
+    // what they are shown — re-opening a document must not be a way to throw
+    // work away.
     const openWithMacroReady = onOpenWithModuleMacro((payload) => {
       if (cancelled) return;
       void (async () => {
-        let name = payload.name;
-        let source = payload.source;
-        let description = payload.description;
+        // Whatever is in the buffer belongs to the document being left. Read the
+        // live values here too: re-opening the document that is ALREADY in front
+        // of the author must see its unsaved edits, and the stash above is a
+        // state update that has not landed yet.
+        const leavingId = activeDocIdRef.current;
+        const liveBuffer = sourceRef.current;
+        const liveDirty = isDirtyRef.current;
+        stashActiveBufferRef.current();
+
+        let record: WorkbookScriptRecord | null = null;
+        let readError: string | null = null;
         try {
-          const record = await getWorkbookScript(payload.macroId);
-          name = record.name;
-          source = record.source;
-          description = record.description ?? null;
+          const live = await getWorkbookScript(payload.macroId);
+          record = {
+            id: live.id,
+            name: live.name,
+            description: live.description ?? null,
+            source: live.source,
+            scope: live.scope,
+            sourcePackage: live.sourcePackage ?? null,
+            loadError: null,
+          };
         } catch (e) {
-          console.warn("[ObjectScriptEditorApp] Could not re-read macro; using preview:", e);
+          readError = e instanceof Error ? e.message : String(e);
         }
         if (cancelled) return;
-        const script: ObjectScriptDefinition = {
-          id: payload.macroId,
-          name,
-          objectType: "workbook",
-          instanceId: null,
-          source,
-          accessLevel: "unlocked",
-        };
-        setMacroDoc({ macroId: payload.macroId, script, description });
-        setActiveScriptId(payload.macroId);
-        setSource(source);
+
+        const listed = macroDocsRef.current.find((d) => d.macroId === payload.macroId);
+        const isReopeningActive = listed !== undefined && listed.macroId === leavingId;
+        const existing = listed
+          ? {
+              dirty: isReopeningActive ? liveDirty : listed.dirty,
+              source: isReopeningActive ? liveBuffer : listed.script.source,
+            }
+          : undefined;
+        if (!record) {
+          // The record could not be read. Say so — a blank editor with no
+          // explanation is the failure mode this whole feature keeps hitting.
+          reportToConsole(
+            `"${payload.name}" could not be read from the workbook (${readError}). ` +
+              (existing
+                ? "Showing the copy already open here."
+                : "Showing the preview the caller sent; saving will write it back."),
+            payload.macroId,
+          );
+          record = {
+            id: payload.macroId,
+            name: payload.name,
+            description: payload.description,
+            source: existing ? existing.source : payload.source,
+            sourcePackage: null,
+            loadError: readError,
+          };
+        }
+
+        const fresh = macroDocFromRecord(record);
+        const keepBuffer = existing?.dirty === true;
+        const doc: MacroDoc = keepBuffer
+          ? {
+              ...fresh,
+              script: { ...fresh.script, source: existing!.source },
+              dirty: true,
+            }
+          : fresh;
+
+        setMacroDocs((prev) => {
+          const without = prev.filter((d) => d.macroId !== doc.macroId);
+          return [...without, doc].sort((a, b) => a.script.name.localeCompare(b.script.name));
+        });
+        setActiveScriptId(doc.macroId);
+        setSource(doc.script.source);
         setLanguage("javascript");
-        setIsDirty(false);
+        setIsDirty(doc.dirty);
+        loadedDocIdRef.current = doc.macroId;
+        if (keepBuffer) {
+          reportToConsole(
+            `"${doc.script.name}" was already open here with unsaved edits — those edits are shown, ` +
+              "not the stored version.",
+            doc.macroId,
+            "info",
+          );
+        }
       })();
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
     openChannelReady.push(openWithMacroReady);
@@ -465,7 +779,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setScripts(payload.scripts);
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
 
-    // Notify main window on close
+    // Announce a RELOAD/navigation of this webview. NOT the window closing:
+    // measured under Tauri + WebView2, `beforeunload` does not run when the
+    // window is closed, so the authoritative close announcement is made by the
+    // MAIN window from `tauri://destroyed` (openObjectScriptWindow.ts). This one
+    // covers the case the main window cannot see — the editor's own document
+    // going away while the window lives on.
     const handleBeforeUnload = () => {
       emitEditorClosed();
     };
@@ -478,20 +797,36 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     };
   }, []);
 
-  // When activeScriptId or scripts change, load source.
-  // If no script is selected but scripts exist, auto-select the first one.
+  // When the ACTIVE DOCUMENT changes, load its buffer. If nothing is selected
+  // but something exists, auto-select it (object scripts first, then modules —
+  // a workbook can hold macros and no object scripts at all).
+  //
+  // `loadedDocIdRef` guards the whole effect: it re-runs whenever the lists
+  // change, and without the guard a background refresh of the macro list would
+  // reset the buffer the author is typing in.
   useEffect(() => {
     if (!activeScriptId && scripts.length > 0) {
       setActiveScriptId(scripts[0].id);
       setSource(scripts[0].source);
       setIsDirty(false);
+      loadedDocIdRef.current = scripts[0].id;
+      return;
+    }
+    if (!activeScriptId && macroDocs.length > 0) {
+      const first = macroDocs[0];
+      setActiveScriptId(first.macroId);
+      setSource(first.script.source);
+      setIsDirty(first.dirty);
+      loadedDocIdRef.current = first.macroId;
       return;
     }
     if (!activeScriptId) return;
+    if (loadedDocIdRef.current === activeScriptId) return;
     const script = scripts.find((s) => s.id === activeScriptId);
     if (script) {
       setSource(script.source);
       setIsDirty(false);
+      loadedDocIdRef.current = activeScriptId;
       return;
     }
     // The draft is not in `scripts`, so it needs its own restore path — without
@@ -500,14 +835,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (draftDoc && draftDoc.script.id === activeScriptId) {
       setSource(draftDoc.script.source);
       setIsDirty(false);
+      loadedDocIdRef.current = activeScriptId;
       return;
     }
-    // Same for a recorded macro: it is not in the object-script list either.
-    if (macroDoc && macroDoc.macroId === activeScriptId) {
-      setSource(macroDoc.script.source);
-      setIsDirty(false);
+    // Same for a module script (a recorded macro): it is not in the
+    // object-script list either — and its buffer carries ITS unsaved edits.
+    const doc = macroDocs.find((d) => d.macroId === activeScriptId);
+    if (doc) {
+      setSource(doc.script.source);
+      setIsDirty(doc.dirty);
+      loadedDocIdRef.current = activeScriptId;
     }
-  }, [activeScriptId, scripts, draftDoc, macroDoc]);
+  }, [activeScriptId, scripts, draftDoc, macroDocs]);
 
   // Auto-scroll console
   useEffect(() => {
@@ -518,14 +857,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   /** True while the document in front of the author is an unsaved AI draft. */
   const isDraft =
     savedScript === null && draftDoc !== null && draftDoc.script.id === activeScriptId;
+  /** The module document in front of the author, if the active one is a module. */
+  const macroDoc =
+    savedScript === null && !isDraft
+      ? macroDocs.find((d) => d.macroId === activeScriptId) ?? null
+      : null;
   /** True while the document in front of the author is a recorded MACRO (module script). */
-  const isMacro =
-    savedScript === null &&
-    !isDraft &&
-    macroDoc !== null &&
-    macroDoc.macroId === activeScriptId;
+  const isMacro = macroDoc !== null;
   const activeScript =
-    savedScript ?? (isDraft ? draftDoc!.script : isMacro ? macroDoc!.script : null);
+    savedScript ?? (isDraft ? draftDoc!.script : macroDoc ? macroDoc.script : null);
   const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
@@ -538,24 +878,6 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     setActiveContextType(monacoTs, activeScript.objectType, objectContextsDts);
     registerTypescriptLane(monacoTs, activeScript.objectType, objectContextsDts);
   }, [activeScript]);
-
-  // Push one line into the editor console and reveal it.
-  const reportToConsole = useCallback(
-    (message: string, scriptId?: string, level: ConsoleEntry["level"] = "error") => {
-      setConsoleEntries((prev) => [
-        ...prev,
-        {
-          id: ++consoleIdRef.current,
-          level,
-          message,
-          scriptId,
-          timestamp: Date.now(),
-        },
-      ]);
-      setShowConsole(true);
-    },
-    [],
-  );
 
   // Switch active script
   const handleSelectScript = useCallback(async (scriptId: string) => {
@@ -571,10 +893,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     // A MACRO is a real record, but switching away must not silently write the
     // MODULE store from the object-script auto-save path below (it would create a
-    // spurious object script). Keep the edits in the macro doc — Save is the only
-    // thing that persists them, and coming back shows what was being read.
-    if (isMacro && macroDoc) {
-      setMacroDoc({ ...macroDoc, script: { ...macroDoc.script, source } });
+    // spurious object script). Keep the edits in ITS OWN document — Save is the
+    // only thing that persists them, and coming back to that macro (not merely
+    // the last one) shows what was being read.
+    if (isMacro) {
+      stashActiveMacroBuffer();
       setLanguage("javascript");
       setActiveScriptId(scriptId);
       return;
@@ -594,7 +917,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     setLanguage("javascript");
     setActiveScriptId(scriptId);
-  }, [isDirty, isDraft, draftDoc, isMacro, macroDoc, activeScript, source, reportToConsole]);
+  }, [
+    isDirty,
+    isDraft,
+    draftDoc,
+    isMacro,
+    stashActiveMacroBuffer,
+    activeScript,
+    source,
+    reportToConsole,
+  ]);
 
   // Save a recorded MACRO back to the MODULE store (`save_script`) — NOT the
   // object-script store. The macro is the single canonical thing every linking
@@ -619,10 +951,21 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         source: storedSource,
         scope: { type: "workbook" },
       });
-      setMacroDoc({
-        ...macroDoc,
-        script: { ...macroDoc.script, source: storedSource },
-      });
+      setMacroDocs((prev) =>
+        prev.map((d) =>
+          d.macroId === macroDoc.macroId
+            ? {
+                ...d,
+                script: { ...d.script, source: storedSource },
+                savedSource: storedSource,
+                dirty: false,
+                // A save is also the answer to "this was deleted while you had
+                // edits": it exists again, so the warning must go.
+                loadError: null,
+              }
+            : d,
+        ),
+      );
       setIsDirty(false);
       if (gate.transformed) {
         setSource(storedSource);
@@ -815,7 +1158,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     return subscribeRemoteDebugState();
   }, []);
 
-  const debug = useDebugSession(activeScriptId ?? null);
+  // A MODULE macro has no standing mount by design — buttons run it transiently
+  // per click — so Debug must be able to ask the host to mount it FROM THE
+  // MODULE STORE. Without this the Debug button threw "Cannot debug a script
+  // that is not mounted" on every cold open, and only worked after something
+  // else had happened to leave a mount behind.
+  const debug = useDebugSession(activeScriptId ?? null, { mountFromModuleStore: isMacro });
   const debugRef = useRef(debug);
   debugRef.current = debug;
   const activeScriptIdRef = useRef<string | null>(activeScriptId ?? null);
@@ -847,22 +1195,6 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (ed) applyDebugDecorations(ed, debug.decorations);
   }, [debug.decorations, applyDebugDecorations]);
 
-  // The synthetic transient mount a macro is debugged/run under — the unlocked
-  // `workbook` object-script shape, carrying the CURRENT (saved) buffer so Run
-  // reflects what the author sees. undefined for an ordinary object script,
-  // which is already mounted from its own saved source.
-  const macroMountFor = useCallback((): MacroDebugMount | undefined => {
-    if (!isMacro || !macroDoc) return undefined;
-    return {
-      scriptId: macroDoc.macroId,
-      name: macroDoc.script.name,
-      source,
-      objectType: "workbook",
-      instanceId: null,
-      accessLevel: "unlocked",
-    };
-  }, [isMacro, macroDoc, source]);
-
   // Run-at-cursor (VBA F5): run the top-level function the cursor is in, through
   // the same fire/exposed-method door the Fire buttons use. Never a wrong-arity
   // call and never a silent no-op — an unresolvable cursor speaks in the console.
@@ -877,13 +1209,30 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       return;
     }
     const line = ed.getPosition()?.lineNumber ?? 1;
-    const outcome = await runAtCursor(activeScript.id, source, line, macroMountFor());
-    if (outcome.status === "ran") {
-      reportToConsole(`Running ${outcome.functionName}()…`, activeScript.id, "info");
-    } else {
-      reportToConsole(outcome.message, activeScript.id);
+    // A module macro is mounted from the STORE, by id: Run is disabled while the
+    // buffer is dirty precisely so "what you see" and "what is stored" are the
+    // same text, and the host must never be handed a body by a caller.
+    // A throw here is the host refusing (no session, no such trigger, a mount
+    // that Script Security blocked). Unhandled it would be an unhandled promise
+    // rejection and, on screen, a Run button that did nothing at all — the exact
+    // silence this whole feature keeps regressing into. It goes in the console.
+    try {
+      const outcome = await runAtCursor(activeScript.id, source, line, {
+        mountFromModuleStore: isMacro,
+      });
+      if (outcome.status === "ran") {
+        reportToConsole(`Running ${outcome.functionName}()…`, activeScript.id, "info");
+      } else {
+        reportToConsole(outcome.message, activeScript.id, "error");
+      }
+    } catch (e) {
+      reportToConsole(
+        `Run failed: ${e instanceof Error ? e.message : String(e)}`,
+        activeScript.id,
+        "error",
+      );
     }
-  }, [activeScript, isDraft, isReadOnly, isDirty, source, macroMountFor, reportToConsole]);
+  }, [activeScript, isDraft, isReadOnly, isDirty, source, isMacro, reportToConsole]);
   const runFromCursorRef = useRef(runFromCursor);
   runFromCursorRef.current = runFromCursor;
 
@@ -1063,22 +1412,40 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           value={activeScriptId ?? ""}
           onChange={(e) => { void handleSelectScript(e.target.value); }}
         >
-          {scripts.length === 0 && !draftDoc && !macroDoc && <option value="">No scripts</option>}
+          {scripts.length === 0 && !draftDoc && macroDocs.length === 0 && (
+            <option value="">No scripts</option>
+          )}
           {draftDoc && (
             <option value={draftDoc.script.id}>
               AI DRAFT — {draftDoc.script.name} ({draftDoc.script.objectType})
             </option>
           )}
-          {macroDoc && (
-            <option value={macroDoc.macroId}>
-              MACRO — {macroDoc.script.name}
-            </option>
+          {/* Every module script in the workbook, grouped — not just the one this
+              window was navigated to. A recorder-marked module is a MACRO; an
+              unmarked one is a hand-authored module, and both live here. */}
+          {macroDocs.length > 0 && (
+            <optgroup label="Macros / modules">
+              {macroDocs.map((d) => {
+                const dirty = d.macroId === activeScriptId ? isDirty : d.dirty;
+                return (
+                  <option key={d.macroId} value={d.macroId}>
+                    {macroDocKindLabel(d)} — {d.script.name}
+                    {dirty ? " •" : ""}
+                    {d.loadError ? " (unreadable)" : ""}
+                  </option>
+                );
+              })}
+            </optgroup>
           )}
-          {scripts.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} ({s.objectType}{s.instanceId ? ` #${s.instanceId.slice(0, 8)}` : ""})
-            </option>
-          ))}
+          {scripts.length > 0 && (
+            <optgroup label="Object scripts">
+              {scripts.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.objectType}{s.instanceId ? ` #${s.instanceId.slice(0, 8)}` : ""})
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
 
         {/* Add script dropdown */}
@@ -1267,6 +1634,32 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           {draftDoc.draft.description && (
             <div style={{ marginTop: 2, opacity: 0.85 }}>{draftDoc.draft.description}</div>
           )}
+        </div>
+      )}
+
+      {/* A module the store could not give us. The editor still opens ON it —
+          hiding it would leave a blank window with no explanation — but it says
+          what is wrong and what saving will do. */}
+      {macroDoc && macroDoc.loadError && (
+        <div
+          data-testid="macro-load-error-banner"
+          style={{
+            padding: "8px 12px",
+            backgroundColor: "#3A2323",
+            borderBottom: "1px solid #6A3A3A",
+            color: "#FF9B9B",
+            fontSize: 11,
+            lineHeight: "1.5",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            "{macroDoc.script.name}" could not be read from this workbook
+          </div>
+          <div>{macroDoc.loadError}</div>
+          <div style={{ marginTop: 2, opacity: 0.85 }}>
+            Debugging and Run need the stored module, so they will fail until this is saved.
+          </div>
         </div>
       )}
 

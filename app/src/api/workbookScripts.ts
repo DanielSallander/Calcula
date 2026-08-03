@@ -7,7 +7,8 @@
 //   the standalone editor window). These go straight through the gated backend door,
 //   so they work in the main window regardless of which extensions are active.
 
-import { invokeBackend } from "./backend";
+import { invokeBackend, emitTauriEvent, listenTauriEvent } from "./backend";
+import type { UnlistenFn } from "./backend";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 
 /** Scope of a script: workbook-level or attached to a specific sheet. */
@@ -371,6 +372,7 @@ export async function saveWorkbookScript(script: WorkbookScript): Promise<void> 
       ...(script.sourcePackage ? { sourcePackage: script.sourcePackage } : {}),
     },
   });
+  announceWorkbookScriptsChanged({ id: script.id, change: "saved" });
   const { markFileModified } = await import("./filesystem");
   await markFileModified();
 }
@@ -384,8 +386,152 @@ export async function saveWorkbookScript(script: WorkbookScript): Promise<void> 
  */
 export async function deleteWorkbookScript(id: string): Promise<void> {
   await invokeBackend<void>("delete_script", { id });
+  announceWorkbookScriptsChanged({ id, change: "deleted" });
   const { markFileModified } = await import("./filesystem");
   await markFileModified();
+}
+
+// ============================================================================
+// Module-script inventory
+// ============================================================================
+//
+// WHY THIS LIVES IN @api AND NOT IN THE MACRO RECORDER. "What module scripts
+// does this workbook hold?" is a Bridge on the Decision Matrix, not a feature:
+// the Macro Recorder's library asks it, the Object Script Editor asks it (a
+// recorded macro is a MODULE script, so the object-script store cannot answer),
+// the code inventory asks it. Routing the editor's copy through the recorder
+// would put one extension inside another's internals, which the Facade Rule
+// forbids — and a macro-specific seam would be a second, narrower door onto the
+// same store. There is one store; this is the one door onto it.
+
+/**
+ * One module script as an INVENTORY sees it: the summary plus the fields that
+ * need the full record (`description`, `source`), and the read failure when the
+ * record could not be read at all.
+ *
+ * A record that fails to load is still listed. Hiding it would be the
+ * invisible-code failure this project exists to avoid — the user must be able to
+ * see that code is there even when the app cannot show it — so the failure
+ * travels WITH the entry instead of deleting it from the list.
+ */
+export interface WorkbookScriptRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  /** Empty string when `loadError` is set — never a lie about what it holds. */
+  source: string;
+  scope?: ScriptScope;
+  sourcePackage?: string | null;
+  /** Why the record could not be READ, when it could not. */
+  loadError: string | null;
+}
+
+/**
+ * Every module script in the workbook, with its full record resolved.
+ *
+ * `list_scripts` returns id+name only, so this fans out to `get_script`. A
+ * per-record failure is reported on that record rather than failing the whole
+ * listing: one unreadable module must not make the other nine invisible.
+ */
+export async function listWorkbookScriptRecords(): Promise<WorkbookScriptRecord[]> {
+  const summaries = await listWorkbookScripts();
+  const records: WorkbookScriptRecord[] = [];
+  for (const summary of summaries) {
+    try {
+      const record = await getWorkbookScript(summary.id);
+      records.push({
+        id: record.id,
+        name: record.name,
+        description: record.description ?? null,
+        source: record.source,
+        scope: record.scope,
+        sourcePackage: record.sourcePackage ?? null,
+        loadError: null,
+      });
+    } catch (e) {
+      records.push({
+        id: summary.id,
+        name: summary.name,
+        description: null,
+        source: "",
+        scope: summary.scope,
+        sourcePackage: null,
+        loadError: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return records;
+}
+
+/**
+ * Which interpreter a stored module's source was written for, as recorded in its
+ * `description`.
+ *
+ * THE MARKER IS A SHARED CONVENTION, not a private one: the Macro Recorder
+ * WRITES it and every editor/library that lists modules READS it, so it is
+ * defined once, here, on the record format itself. Two copies of this regex
+ * would be two answers to "what runtime is this?".
+ *
+ *   notebook     -> synchronous `Calcula.*` in the Rust QuickJS module runtime
+ *                   (what `run_script` executes).
+ *   objectScript -> the async object-script `api`, which exists only inside a
+ *                   mounted object-script realm.
+ *
+ * `null` means the module carries no marker at all — a hand-authored module,
+ * which is QuickJS source by definition. It is NOT "assume objectScript".
+ */
+export type ModuleScriptRuntime = "notebook" | "objectScript";
+
+const MODULE_SCRIPT_RUNTIME_MARKER = /\bruntime=(objectScript|notebook)\b/;
+
+export function parseModuleScriptRuntime(
+  description: string | null | undefined,
+): ModuleScriptRuntime | null {
+  if (typeof description !== "string") return null;
+  const match = MODULE_SCRIPT_RUNTIME_MARKER.exec(description);
+  return match ? (match[1] as ModuleScriptRuntime) : null;
+}
+
+// ============================================================================
+// Change notification
+// ============================================================================
+
+/**
+ * Cross-window event fired whenever a module script is created, replaced or
+ * deleted through this module.
+ *
+ * A TAURI event, not an app event, because the surfaces that must react do not
+ * all live in the main window: the standalone Object Script Editor is its own
+ * webview, and a macro recorded (or deleted) in the main window has to reach the
+ * list it is showing. It is emitted from the two write doors above, so no caller
+ * has to remember to announce anything — recording a macro, renaming it, and
+ * deleting it from the Macros dialog all notify by construction.
+ */
+export const WORKBOOK_SCRIPTS_CHANGED_EVENT = "workbook:module-scripts-changed";
+
+export interface WorkbookScriptsChangedDetail {
+  /** The module that changed. */
+  id: string;
+  change: "saved" | "deleted";
+}
+
+function announceWorkbookScriptsChanged(detail: WorkbookScriptsChangedDetail): void {
+  // Fire and forget: the write already succeeded, and an environment with no
+  // Tauri event bus (tests, the browser-only smoke harness) must not turn a
+  // successful save into a thrown error.
+  void emitTauriEvent(WORKBOOK_SCRIPTS_CHANGED_EVENT, detail).catch(() => {
+    /* no event bus here; listeners simply refresh on their next natural trigger */
+  });
+}
+
+/** Subscribe to module-script creations/replacements/deletions. */
+export function onWorkbookScriptsChanged(
+  callback: (detail: WorkbookScriptsChangedDetail) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<WorkbookScriptsChangedDetail>(
+    WORKBOOK_SCRIPTS_CHANGED_EVENT,
+    callback,
+  );
 }
 
 /**
@@ -400,7 +546,11 @@ async function withScriptSecurityPrompt<T>(run: () => Promise<T>): Promise<T> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("SCRIPT_PROMPT_REQUIRED")) {
-      const ok = window.confirm(
+      // AWAITED, deliberately: under Tauri `window.confirm` returns a PROMISE,
+      // and a bare `if (window.confirm(...))` tests an object — always truthy —
+      // so pressing Cancel granted the session approval anyway. This gate is the
+      // whole of Script Security's "prompt" mode; it must fail CLOSED.
+      const ok = await window.confirm(
         "This workbook wants to run a script.\n\n" +
         "Allow script execution for this session?\n" +
         "(Script Security is set to 'prompt'. Set it to 'enabled' or 'disabled' to stop asking.)",

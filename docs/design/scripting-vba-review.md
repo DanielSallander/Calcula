@@ -1774,6 +1774,107 @@ priced, not missed.
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
 
+> **Eleventh entry (2026-08-05, THIRD human use of the macro recorder) — a module macro was
+> first-class in the workbook and a second-class visitor in the editor. Two user-reported symptoms,
+> one root cause; fixing it uncovered a mount leak nobody had reported.**
+>
+> The tenth entry made the macro single-source and link-not-copy. The same human then kept using it
+> and reported two things: *"I have two recorded macros and I see them both in the Macros menu, but
+> when going to the Object Script Editor by clicking on any of them I only see one at a time in the
+> drop down menu"*, and *"Cannot debug a script that is not mounted — apply it first. If I just run it
+> first it works, and then I can debug it, but I cannot debug it from start."*
+>
+> **One root cause under both.** The editor treated a module macro as a transient visitor handed in
+> over the `OPEN_WITH_MODULE_MACRO` channel rather than as a member of the workbook's script
+> inventory. It held ONE `macroDoc` state slot and rendered exactly one option from it; the rest of
+> the dropdown came from `loadAllObjectScripts()` — the OBJECT-script store, which module macros are
+> not in. So opening a second macro REPLACED the first, and the editor never enumerated macros at all.
+> The debugger inherited the same assumption: a session was built from a caller-supplied mount, and a
+> macro has no standing mount by design (buttons run it transiently per click).
+>
+> **The inventory (bug A).** `@api/workbookScripts` gained `listWorkbookScriptRecords()` — the full
+> record per module, with a per-record `loadError` instead of one unreadable module making the other
+> nine invisible — plus `parseModuleScriptRuntime()` (the `runtime=` marker is a SHARED convention:
+> the recorder writes it, every listing reads it, so one regex) and a `WORKBOOK_SCRIPTS_CHANGED_EVENT`
+> emitted from inside `saveWorkbookScript`/`deleteWorkbookScript` so no caller can forget to announce.
+> The editor now holds `macroDocs[]` with a per-document buffer (switching keeps each one's unsaved
+> edits; a refresh arriving mid-typing stashes the live buffer before merging), renders them in a
+> `Macros / modules` optgroup, and follows the workbook live. **This did NOT become a macro seam:**
+> the door is the generic module store in `@api`, which the Macros library now delegates to as well —
+> `MacroRecorder/lib/macroLibrary.ts` keeps only the macro-specific routing. ScriptableObjects imports
+> zero MacroRecorder files, and the reverse holds too; both reach only `@api/*`.
+>
+> **Cold debug (bug B) — and the report was half wrong, which mattered.** `hostStartMacroDebugSession`
+> already existed and run-at-cursor passed it a mount; the *Debug button* did not — `useDebugSession`
+> called the bare `hostStartDebugSession`, which throws when the id is not mounted. It is now
+> `hostStartModuleScriptDebugSession(scriptId, …)`: **the caller supplies an id, never a body.** The
+> host loads the record through `get_script` and builds the synthetic unlocked `workbook` definition
+> itself, so what you step through is byte-for-byte what a button runs. The cross-window bridge command
+> lost its `mount` payload for a `fromModuleStore` boolean — the editor window can now *name* a module
+> but cannot *define* one, closing a source-injection door into an unlocked-tier mount (pinned by a
+> test asserting no source ever appears on the bridge).
+>
+> **"Run first, then debug works" was the symptom of a LEAK, and that is why it is recorded here.** It
+> was not the Macros ▸ Run path — that mounts under a unique `__calcula_macro_*` id and unmounts in a
+> `finally`, so it could never have satisfied the mount check. It was the editor's own Run: it opened
+> a session, and the session left a mount behind. `hostStartMacroDebugSession` added the id to
+> `transientDebugMounts`, then `hostStartDebugSession` remounted instrumented via `mountWorker` →
+> `hostUnmountScript`, **which deleted the transient marker mid-flight**. By the time the session was
+> open the mount was no longer marked debugger-owned, so Stop took the `else` branch and *remounted*
+> the macro instead of tearing it down. Every macro ever debugged or run-at-cursor left a permanently
+> mounted, unlocked `workbook` realm that nothing revoked — and pressing Debug afterwards "worked"
+> precisely because of that leak. Fixed at the root in `mountWorker`: a REMOUNT preserves transient
+> ownership, only a real unmount clears it. Cleanup now also runs on a failed session open, on editor
+> teardown, and on extension teardown.
+>
+> **A fourth bug, same area, the `window.confirm` pattern for the THIRD time.**
+> `@api/workbookScripts`'s Script Security "prompt" gate did `const ok = window.confirm(...)` — under
+> Tauri that returns a **Promise**, so the gate tested an object, was always truthy, and **Cancel
+> granted session approval anyway**. Awaited now; the gate fails closed. This is the same defect the
+> tenth entry fixed in the delete-warning and `RecordingIndicator`. It keeps shipping, and the project
+> rule against it exists because of exactly this recurrence.
+>
+> **Transparency follow-through.** A debugger-owned mount is a real unlocked whole-workbook realm that
+> the workbook itself does not keep. `hostTransientDebugMountIds()` now feeds a `debugger` tag in the
+> script transparency panel — previously that accessor had no production caller at all, which made an
+> unlocked mount indistinguishable in that list from a script the user installed.
+>
+> **What was proven by driving the live app.** `app/e2e/tests/macro-editor-inventory.spec.ts` (4
+> journeys) ran against a real `tauri dev` build over WebView2 CDP — real recorder, real Macros dialog,
+> real separate editor window, real worker realms, real backend module store — and passed 8/8 across
+> all three macro specs. Decisive assertions: both macros present in the `Macros / modules` optgroup
+> **simultaneously**, switching between them showing each one's own body (`51511` vs `62622`) and back
+> again; Debug from a genuinely cold macro (asserted unmounted, no session, not in the transient list
+> beforehand) opening with **no "not mounted" text anywhere**, then Stop returning the host to zero
+> transient mounts, twice; and run-at-cursor with **three** top-level functions — the case the tenth
+> entry explicitly left uncovered — writing only the cursor's function's cell, and refusing a
+> two-argument function by name with no wrong-arity call.
+>
+> **Two more real bugs surfaced only by execution.** (1) **Cold run-at-cursor fired into the remount
+> gap and silently did nothing.** `waitForDebugSettled` treated *anything but `starting`* as settled,
+> and an instrumented remount unmounts the plain realm first, broadcasting **`detached`**. Run fired
+> into that gap, the host's refusal came back as a state broadcast that the next broadcast wiped off
+> the panel, and the user saw `Running x()…` and nothing happened — while running the macro once by any
+> other route "fixed" it, because the second Run found an open session and skipped the wait. Now an
+> explicit `SETTLED_DEBUG_STATUSES` (`waiting`/`finished`/`paused`/`failed`), an early exit on an error
+> broadcast, and a **look-before-firing** check against the mirrored trigger list returning a new
+> `notReady` outcome instead of a lie. (2) **An unlocked realm survived closing the editor window:**
+> `beforeunload` **never runs in WebView2** when Tauri closes the window — measured with a probe, not
+> assumed — so the transient-mount release never fired. The close is now announced from
+> `tauri://destroyed` **in the window that survives**.
+>
+> **Verification (2026-08-05):** `npm run check-types` clean · `npm run lint:boundaries` clean ·
+> `npm run check:script-typings` `[OK] 39 interfaces verified, 545 members probed` (unchanged) ·
+> `npx vitest run` **104,570 passed / 0 failed across 661 files** (baseline 104,543 / 659: +27 tests,
+> +2 files — the editor-inventory suite, the debug-session and debugger contract tests, and the
+> transparency-tag test, each verified to FAIL without its fix) · `cargo check` clean in both
+> `app/src-tauri` and `core`. **No Rust was changed**, so the Rust suites were not re-run and their
+> baselines (app-lib 837, core 1,143) stand unmoved.
+>
+> **What still needs a human (most-likely-wrong first):** a REAL publish→subscribe of a workbook whose
+> button links a macro (still only the local orphan equivalent has run); undo after a run-at-cursor;
+> and the `debugger` tag in the transparency panel observed in the live app rather than in jsdom.
+
 > **Tenth entry (2026-08-04, the single-source model) — NOT a correction of a false claim; a
 > deliberate redesign the user chose after the ninth correction made both entry points execute.**
 >

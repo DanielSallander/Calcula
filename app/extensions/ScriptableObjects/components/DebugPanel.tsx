@@ -8,7 +8,7 @@
 //          through ../lib/debugger, which is the one place that knows whether
 //          this window talks to the host directly or over the window bridge.
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   debugControl,
   fireDebugTrigger,
@@ -231,7 +231,21 @@ export interface UseDebugSession {
   fire: (triggerId: string) => void;
 }
 
-export function useDebugSession(scriptId: string | null): UseDebugSession {
+/** How this document reaches a mount, for the surfaces that have no standing one. */
+export interface UseDebugSessionOptions {
+  /**
+   * The open document is a MODULE script (a recorded macro), which is never
+   * persistently mounted — buttons run it transiently per click. Debug must
+   * therefore be able to ask the host to mount it from the module store, or
+   * "Debug" is dead until the user runs the macro by some other route first.
+   */
+  mountFromModuleStore?: boolean;
+}
+
+export function useDebugSession(
+  scriptId: string | null,
+  options: UseDebugSessionOptions = {},
+): UseDebugSession {
   const [session, setSession] = useState<DebugSessionState | null>(null);
   const [breakpointLines, setBreakpointLines] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
@@ -282,12 +296,22 @@ export function useDebugSession(scriptId: string | null): UseDebugSession {
     [scriptId],
   );
 
+  // Read through a ref so `start` stays referentially stable while still using
+  // the CURRENT document's mount policy — the toolbar is re-rendered on every
+  // document switch and must not carry the previous document's answer.
+  const mountFromModuleStore = options.mountFromModuleStore === true;
+  const mountPolicyRef = useRef(mountFromModuleStore);
+  mountPolicyRef.current = mountFromModuleStore;
+
   const start = useCallback(
-    (options?: { pauseOnEntry?: boolean }) => {
+    (startOptions?: { pauseOnEntry?: boolean }) => {
       if (!scriptId) return;
       setBusy(true);
       setError(null);
-      void startDebugSession(scriptId, options ?? {})
+      void startDebugSession(scriptId, {
+        pauseOnEntry: startOptions?.pauseOnEntry,
+        mountFromModuleStore: mountPolicyRef.current,
+      })
         .catch((e: unknown) => {
           setError(e instanceof Error ? e.message : String(e));
         })

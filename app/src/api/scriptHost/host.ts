@@ -597,7 +597,16 @@ export async function hostMountScript(definition: HostMountDefinition): Promise<
 async function mountWorker(definition: HostMountDefinition): Promise<void> {
   wireActiveSheet();
   if (mounted.has(definition.id)) {
+    // OWNERSHIP SURVIVES A REMOUNT. `hostUnmountScript` clears the transient
+    // marker (an unmount really is the end of a debugger-owned mount), but a
+    // REMOUNT is not an unmount — and losing the marker here is what made the
+    // debugger leak: opening a session on a macro remounts it instrumented, the
+    // marker vanished mid-flight, and Stop then REMOUNTED the macro instead of
+    // tearing it down. The workbook was left with a permanently mounted,
+    // unlocked realm that nothing would ever revoke.
+    const wasTransient = transientDebugMounts.has(definition.id);
     hostUnmountScript(definition.id);
+    if (wasTransient) transientDebugMounts.add(definition.id);
   }
   faulted.delete(definition.id);
 
@@ -1265,26 +1274,117 @@ export async function hostStartDebugSession(
 }
 
 /**
- * Open a debug session on a script that has NO standing mount — a recorded macro
- * (a module script) the user opened in the Object Script Editor.
+ * Open a debug session on a MODULE script that has no standing mount — a
+ * recorded macro the user opened in the Object Script Editor.
  *
- * Mounts the supplied synthetic definition (the byte-for-byte unlocked
- * `workbook` object-script shape `runMacroModule` uses) if it is not already
- * mounted, remembers that the DEBUGGER owns the mount, then opens the session on
- * it. On Stop the transient mount is torn down, not remounted (there is nothing
- * to return it to). If the script is already mounted (a real object script, or a
- * session already open) this is exactly `hostStartDebugSession`.
+ * THE CALLER SUPPLIES AN ID, NEVER A BODY. `hostStartDebugSession` builds its
+ * session from the authoritative mount definition the host already holds; a
+ * module macro has no mount, so this resolves the equally authoritative record
+ * — the module store, through `get_script` — and builds the definition HERE.
+ * An earlier version took a caller-supplied `HostMountDefinition`, which meant
+ * arbitrary source arrived over the editor-window Tauri bridge and was mounted
+ * at the unlocked tier on the strength of an id. That is a source-injection door
+ * into the debugger, and it is now closed: nothing a caller sends can decide
+ * WHAT runs, only WHICH stored module does.
+ *
+ * The definition is the byte-for-byte unlocked `workbook` object-script shape
+ * `runMacroModule` uses for a button click, so what you step through is what a
+ * button runs. Script Security still gates the mount (`assertMountAllowed`).
+ *
+ * The mount is TRANSIENT: the debugger owns it, Stop tears it down rather than
+ * remounting it, and a session that fails to open takes the mount with it. If
+ * the id is already mounted (a real object script, or a session already open)
+ * this is exactly `hostStartDebugSession`.
  */
-export async function hostStartMacroDebugSession(
-  definition: HostMountDefinition,
+export async function hostStartModuleScriptDebugSession(
+  scriptId: string,
   breakpoints: number[] = [],
   options: { pauseOnEntry?: boolean } = {},
 ): Promise<DebugSessionState> {
-  if (!mounted.has(definition.id)) {
-    await hostMountScript(definition);
-    transientDebugMounts.add(definition.id);
+  if (mounted.has(scriptId)) {
+    return hostStartDebugSession(scriptId, breakpoints, options);
   }
-  return hostStartDebugSession(definition.id, breakpoints, options);
+
+  // Dynamically imported: `workbookScripts` reaches the backend door and
+  // `scriptableObjects` imports THIS module, so a static import would either
+  // drag the grid state into every host consumer or close an import cycle.
+  const [{ getWorkbookScript }, { SCRIPT_API_VERSION }] = await Promise.all([
+    import("../workbookScripts"),
+    import("./protocol"),
+  ]);
+
+  let record: Awaited<ReturnType<typeof getWorkbookScript>> | null = null;
+  try {
+    record = await getWorkbookScript(scriptId);
+  } catch (err) {
+    throw new Error(
+      `"${scriptId}" could not be read from this workbook's script modules, so there ` +
+        `is nothing to debug: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!record || typeof record.source !== "string" || record.source.trim() === "") {
+    throw new Error(
+      `"${scriptId}" is not a script module in this workbook (or holds no source). ` +
+        "It may have been deleted since the editor listed it.",
+    );
+  }
+
+  const definition: HostMountDefinition = {
+    id: scriptId,
+    name: record.name || scriptId,
+    objectType: "workbook",
+    instanceId: null,
+    source: record.source,
+    accessLevel: "unlocked",
+    provenance: "local",
+    apiVersion: SCRIPT_API_VERSION,
+  };
+
+  await hostMountScript(definition);
+  transientDebugMounts.add(scriptId);
+  try {
+    return await hostStartDebugSession(scriptId, breakpoints, options);
+  } catch (err) {
+    // The session did not open, so the mount the debugger made FOR it must not
+    // outlive the attempt: there is no production mount here to fall back to,
+    // and a leftover unlocked realm is exactly the thing nothing would ever
+    // revoke. (`hostUnmountScript` also clears the transient marker.)
+    if (mounted.has(scriptId)) hostUnmountScript(scriptId);
+    transientDebugMounts.delete(scriptId);
+    throw err;
+  }
+}
+
+/**
+ * Script ids whose mount the DEBUGGER owns (module macros mounted for a
+ * session). Transparency, and the input to the cleanup below.
+ */
+export function hostTransientDebugMountIds(): string[] {
+  return [...transientDebugMounts];
+}
+
+/**
+ * End every debugger-owned session and tear down its mount.
+ *
+ * The surface that opened these sessions is the standalone editor window, which
+ * the user can simply CLOSE. Without this, a transient macro mount — unlocked
+ * tier, real realm, live handlers — would survive in the main window with no UI
+ * left that knows it exists, which is precisely the ambient state a transient
+ * mount is supposed to avoid.
+ */
+export async function hostStopTransientDebugSessions(): Promise<void> {
+  for (const scriptId of [...transientDebugMounts]) {
+    try {
+      await hostStopDebugSession(scriptId);
+    } catch {
+      /* stop is best-effort; the unmount below is the guarantee */
+    }
+    // A transient mount with no session behind it (the session failed, or was
+    // already dismissed) is still ours to remove.
+    if (transientDebugMounts.delete(scriptId) && mounted.has(scriptId)) {
+      hostUnmountScript(scriptId);
+    }
+  }
 }
 
 /**

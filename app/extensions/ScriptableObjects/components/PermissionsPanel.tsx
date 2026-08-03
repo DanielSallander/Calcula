@@ -23,6 +23,8 @@ import {
 import type { AuditEntry, ScriptHandle, MethodPolicy, CapabilityId } from "@api";
 import type { PanelSectionProps } from "@api/uiTypes";
 import { emitAppEvent } from "@api/events";
+import { hostTransientDebugMountIds } from "@api/scriptHost/host";
+import { onDebugStateChange } from "../lib/debugger";
 import { ScriptableObjectEvents } from "../index";
 
 // ============================================================================
@@ -86,6 +88,22 @@ const packageTagStyle: React.CSSProperties = {
   ...tagStyle,
   backgroundColor: "#E5F1FB",
   color: "#0B5394",
+};
+
+/**
+ * Debugger-owned = a mount the DEBUGGER made, not the workbook.
+ *
+ * A module macro has no standing mount: buttons run it transiently per click.
+ * Opening a debug session on one mounts it at the unlocked tier for the length
+ * of the session, and without this tag that realm is indistinguishable in this
+ * list from a script the workbook actually runs — the user would see an unlocked
+ * whole-workbook mount appear and have no way to learn why it was there or that
+ * pressing Stop ends it. Naming it is the whole point of this panel.
+ */
+const debuggerTagStyle: React.CSSProperties = {
+  ...tagStyle,
+  backgroundColor: "#FDE7E9",
+  color: "#A4262C",
 };
 
 const capTagStyle: React.CSSProperties = {
@@ -196,15 +214,28 @@ interface ExposedMethodInfo {
 export function MountedScriptsSection({ placement }: PanelSectionProps): React.ReactElement {
   const [handles, setHandles] = useState<ScriptHandle[]>(() => listMountedHandles());
   const [exposed, setExposed] = useState<ExposedMethodInfo[]>(() => listExposed());
+  const [debuggerOwned, setDebuggerOwned] = useState<Set<string>>(
+    () => new Set(hostTransientDebugMountIds()),
+  );
 
   const refresh = useCallback(() => {
     setHandles(listMountedHandles());
     setExposed(listExposed());
+    setDebuggerOwned(new Set(hostTransientDebugMountIds()));
   }, []);
 
   useEffect(() => {
     refresh();
-    return ObjectScriptManager.onScriptChange(refresh);
+    const offScripts = ObjectScriptManager.onScriptChange(refresh);
+    // Opening or stopping a debug session mounts/unmounts a macro WITHOUT
+    // registering or removing an object script, so `onScriptChange` alone never
+    // fires for it — the panel would show a stale (or missing) "debugger" tag
+    // until something unrelated happened to refresh it.
+    const offDebug = onDebugStateChange(refresh);
+    return () => {
+      offScripts();
+      offDebug();
+    };
   }, [refresh]);
 
   const handleInspect = useCallback((scriptId: string) => {
@@ -247,6 +278,17 @@ export function MountedScriptsSection({ placement }: PanelSectionProps): React.R
                 >
                   {h.origin === "local" ? "local" : h.origin}
                 </span>
+                {debuggerOwned.has(h.scriptId) && (
+                  <span
+                    style={debuggerTagStyle}
+                    title={
+                      "The debugger mounted this module for a debug session — the workbook " +
+                      "does not keep it mounted. Stopping the session unmounts it."
+                    }
+                  >
+                    debugger
+                  </span>
+                )}
                 <button style={btnSmallStyle} onClick={() => handleInspect(h.scriptId)}>
                   Inspect
                 </button>

@@ -32,6 +32,34 @@ vi.mock("@api", () => ({
     if (!found) throw new Error(`Script '${id}' not found`);
     return found;
   },
+  // The generic module inventory the library lists through. Reads each record
+  // through `get`, so a record that lists but cannot be READ comes back flagged.
+  listWorkbookScriptRecords: async () =>
+    [...store.values()].map((summary) => {
+      const found = store.get(summary.id);
+      return found
+        ? {
+            id: found.id,
+            name: found.name,
+            description: found.description ?? null,
+            source: found.source,
+            sourcePackage: null,
+            loadError: null,
+          }
+        : {
+            id: summary.id,
+            name: summary.name,
+            description: null,
+            source: "",
+            sourcePackage: null,
+            loadError: `Script '${summary.id}' not found`,
+          };
+    }),
+  parseModuleScriptRuntime: (description: string | null | undefined) => {
+    if (typeof description !== "string") return null;
+    const match = /\bruntime=(objectScript|notebook)\b/.exec(description);
+    return match ? match[1] : null;
+  },
   saveWorkbookScript: async (s: StoredScript) => {
     store.set(s.id, { ...s });
   },

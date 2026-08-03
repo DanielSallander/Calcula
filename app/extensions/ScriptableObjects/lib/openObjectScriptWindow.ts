@@ -5,6 +5,7 @@
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
+  emitEditorClosed,
   emitOpenWithScript,
   emitOpenWithDraft,
   emitOpenWithModuleMacro,
@@ -93,13 +94,26 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
     }
   });
 
-  // Clean up reference when window is destroyed
+  // Clean up when the window is destroyed.
+  //
+  // THE ANNOUNCEMENT IS MADE HERE, BY THE WINDOW THAT SURVIVES. The editor also
+  // emits it from its own `beforeunload`, and in WebView2 under Tauri that
+  // handler DOES NOT RUN when the window is closed — measured, not assumed: an
+  // e2e probe listening for the announcement (and for a marker emitted from the
+  // handler itself) saw neither after a close. So a debug session left open in
+  // the editor kept its transient mount alive forever: an unlocked `workbook`
+  // realm, in the main window, with no UI left that knew it existed. The main
+  // window's own `tauri://destroyed` is the signal that cannot be lost with the
+  // webview, because it is delivered to a window that is still running.
   editorWindow.once("tauri://destroyed", () => {
     editorWindow = null;
     if (unlistenReady) {
       unlistenReady();
       unlistenReady = null;
     }
+    void emitEditorClosed().catch(() => {
+      /* nothing left to tell; the listeners release on teardown as a backstop */
+    });
   });
 }
 

@@ -48,6 +48,20 @@ vi.mock("@api", () => ({
     if (!found) throw new Error(`Script '${id}' not found`);
     return found;
   },
+  listWorkbookScriptRecords: async () =>
+    [...store.values()].map((s) => ({
+      id: s.id,
+      name: s.name,
+      description: s.description ?? null,
+      source: s.source,
+      sourcePackage: null,
+      loadError: null,
+    })),
+  parseModuleScriptRuntime: (description: string | null | undefined) => {
+    if (typeof description !== "string") return null;
+    const match = /\bruntime=(objectScript|notebook)\b/.exec(description);
+    return match ? match[1] : null;
+  },
   saveWorkbookScript: async (s: StoredScript) => {
     store.set(s.id, { ...s });
   },

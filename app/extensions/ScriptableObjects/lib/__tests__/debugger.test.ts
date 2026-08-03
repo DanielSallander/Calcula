@@ -19,7 +19,7 @@ vi.mock("@api/extensionData", () => ({
 
 // ---- The script host (this window IS the main window in these tests) -------
 const hostStartDebugSession = vi.fn(async () => undefined);
-const hostStartMacroDebugSession = vi.fn(async () => undefined);
+const hostStartModuleScriptDebugSession = vi.fn(async () => undefined);
 const hostStopDebugSession = vi.fn(async () => undefined);
 const hostDebugControl = vi.fn();
 const hostDebugFireTrigger = vi.fn(async () => undefined);
@@ -28,7 +28,8 @@ let hostMounted = false;
 let hostSession: unknown = null;
 vi.mock("@api/scriptHost/host", () => ({
   hostStartDebugSession: (...a: unknown[]) => hostStartDebugSession(...(a as [])),
-  hostStartMacroDebugSession: (...a: unknown[]) => hostStartMacroDebugSession(...(a as [])),
+  hostStartModuleScriptDebugSession: (...a: unknown[]) =>
+    hostStartModuleScriptDebugSession(...(a as [])),
   hostStopDebugSession: (...a: unknown[]) => hostStopDebugSession(...(a as [])),
   hostDebugControl: (...a: unknown[]) => hostDebugControl(...(a as [])),
   hostDebugFireTrigger: (...a: unknown[]) => hostDebugFireTrigger(...(a as [])),
@@ -235,10 +236,42 @@ describe("session control (remote transport — the standalone editor window)", 
     expect(hostStartDebugSession).not.toHaveBeenCalled();
     const commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]);
     expect(commands).toEqual([
-      { command: "start", scriptId: SCRIPT, lines: [2], pauseOnEntry: false, mount: null },
+      {
+        command: "start",
+        scriptId: SCRIPT,
+        lines: [2],
+        pauseOnEntry: false,
+        fromModuleStore: false,
+      },
       { command: "control", scriptId: SCRIPT, action: "continue" },
       { command: "stop", scriptId: SCRIPT },
     ]);
+  });
+
+  // THE SECURITY PROPERTY: the editor window can name a module, never define
+  // one. A `start` that carried source would be a door for mounting arbitrary
+  // code at the unlocked tier from another window.
+  it("NEVER puts script source on the bridge, even for a module macro", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    await fresh.startDebugSession(SCRIPT, { mountFromModuleStore: true });
+
+    const [command] = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(command).toEqual({
+      command: "start",
+      scriptId: SCRIPT,
+      lines: [],
+      pauseOnEntry: false,
+      fromModuleStore: true,
+    });
+    expect(JSON.stringify(command)).not.toContain("setCellValue");
+    expect(Object.keys(command)).not.toContain("mount");
+    expect(Object.keys(command)).not.toContain("source");
   });
 });
 
@@ -277,7 +310,7 @@ describe("run-at-cursor (local transport)", () => {
     // starts with no open session for SCRIPT.
     seedLocalSession(SCRIPT, null);
     hostStartDebugSession.mockClear();
-    hostStartMacroDebugSession.mockClear();
+    hostStartModuleScriptDebugSession.mockClear();
     hostDebugFireTrigger.mockClear();
     emitTauriEvent.mockClear();
   });
@@ -286,7 +319,7 @@ describe("run-at-cursor (local transport)", () => {
     const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     expect(outcome).toEqual({ status: "ran", functionName: "writeB1" });
     // A session had to be opened first (the script was not in one)...
-    expect(hostStartDebugSession).toHaveBeenCalledWith(SCRIPT, [], { mountIfAbsent: undefined });
+    expect(hostStartDebugSession).toHaveBeenCalledWith(SCRIPT, [], { pauseOnEntry: false });
     // ...and the SECOND function's run-target was fired, not the first.
     expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:writeB1");
   });
@@ -327,30 +360,141 @@ describe("run-at-cursor (local transport)", () => {
     const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 2);
     expect(outcome).toEqual({ status: "ran", functionName: "writeA1" });
     expect(hostStartDebugSession).not.toHaveBeenCalled();
-    expect(hostStartMacroDebugSession).not.toHaveBeenCalled();
+    expect(hostStartModuleScriptDebugSession).not.toHaveBeenCalled();
     expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:writeA1");
   });
 
-  it("mounts a macro that has no standing mount, then fires", async () => {
-    const mount = {
-      scriptId: SCRIPT,
-      name: "Macro1",
-      source: MACRO_SOURCE,
-      objectType: "workbook",
-      instanceId: null,
-      accessLevel: "unlocked",
-    };
-    const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 2, mount);
-    expect(outcome).toEqual({ status: "ran", functionName: "writeA1" });
-    // The macro path mounts the synthetic definition (id === macroId).
-    expect(hostStartMacroDebugSession).toHaveBeenCalledTimes(1);
-    const [def] = hostStartMacroDebugSession.mock.calls[0] as unknown[];
-    expect(def).toMatchObject({
-      id: SCRIPT,
-      objectType: "workbook",
-      instanceId: null,
-      accessLevel: "unlocked",
+  it("mounts a macro that has no standing mount BY ID, then fires", async () => {
+    const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 2, {
+      mountFromModuleStore: true,
     });
+    expect(outcome).toEqual({ status: "ran", functionName: "writeA1" });
+    // The module path hands the host an ID and nothing else — the host resolves
+    // the source from the module store itself.
+    expect(hostStartModuleScriptDebugSession).toHaveBeenCalledTimes(1);
+    expect(hostStartModuleScriptDebugSession).toHaveBeenCalledWith(SCRIPT, [], {
+      pauseOnEntry: false,
+    });
+    expect(hostStartDebugSession).not.toHaveBeenCalled();
     expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:writeA1");
+  });
+});
+
+// ============================================================================
+// Run-at-cursor over the WINDOW BRIDGE — the cold-start race
+// ============================================================================
+//
+// PROVEN LIVE, then pinned here. In the standalone editor window a fire is
+// ONE-WAY: `startDebugSession` returns as soon as the command is on the wire, so
+// run-at-cursor has to wait for the main window to finish remounting before it
+// fires. It waited for "any status that is not `starting`" — and an instrumented
+// remount UNMOUNTS the plain realm first, broadcasting `detached`. Run-at-cursor
+// saw `detached`, called the mount settled, and fired into the gap; the host
+// answered `"method:x" is not a trigger this script has registered`, the next
+// broadcast wiped that error off the panel, and the user got a Run that printed
+// "Running x()…" and changed nothing. Running the macro once by any other route
+// "fixed" it, because the second Run found an open session and skipped the wait.
+
+describe("run-at-cursor (remote transport — the standalone editor window)", () => {
+  /** Broadcast one host state into a module instance's mirror. */
+  function broadcast(scriptId: string, session: unknown, error?: string): void {
+    window.dispatchEvent(
+      new CustomEvent("objectscript:debug-state", {
+        detail: error === undefined ? { scriptId, session } : { scriptId, session, error },
+      }),
+    );
+  }
+
+  /** Yield to the event loop so `startDebugSession` has installed its listener. */
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  const SETTLED = {
+    scriptId: SCRIPT,
+    status: "waiting",
+    triggers: [{ id: "method:writeB1", kind: "method", name: "writeB1", fireable: true }],
+  };
+
+  it("does NOT fire while the remount is mid-flight, and fires once it settles", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    // Let `startDebugSession` put its command on the wire and start waiting.
+    await tick();
+    await tick();
+
+    // The exact sequence the live host emits while it remounts instrumented.
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "detached", triggers: [] });
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "running", triggers: [] });
+    await tick();
+
+    // NOTHING has been fired: only the `start` command is on the wire.
+    let commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(commands.map((c) => c.command)).toEqual(["start"]);
+
+    // The realm reports in: setup returned and the run-targets exist.
+    broadcast(SCRIPT, SETTLED);
+    const outcome = await pending;
+
+    expect(outcome).toEqual({ status: "ran", functionName: "writeB1" });
+    commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(commands.map((c) => c.command)).toEqual(["start", "fire"]);
+    expect(commands[1]).toMatchObject({ scriptId: SCRIPT, triggerId: "method:writeB1" });
+  });
+
+  it("says so instead of firing when the run target was never registered", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    // setup threw, so nothing was registered.
+    broadcast(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "failed",
+      triggers: [],
+      error: "boom",
+    });
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.functionName).toBe("writeB1");
+      expect(outcome.message).toMatch(/boom/);
+    }
+    const commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(commands.map((c) => c.command)).toEqual(["start"]);
+  });
+
+  it("stops waiting the moment the bridge reports the session did not open", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    broadcast(SCRIPT, null, "Script execution is disabled for this workbook");
+    const outcome = await pending;
+
+    // No session mirror at all, so the host stays authoritative and is asked.
+    expect(outcome).toEqual({ status: "ran", functionName: "writeB1" });
+    const commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >;
+    expect(commands.map((c) => c.command)).toEqual(["start", "fire"]);
   });
 });

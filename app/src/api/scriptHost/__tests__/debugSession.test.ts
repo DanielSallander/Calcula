@@ -36,6 +36,24 @@ vi.mock("../mountGate", () => ({
   assertMountAllowed: vi.fn().mockResolvedValue(undefined),
 }));
 
+// The workbook's MODULE store. A recorded macro lives here and nowhere else, so
+// this is the authoritative record the host resolves a cold debug session from.
+interface StoredModule {
+  id: string;
+  name: string;
+  description: string | null;
+  source: string;
+}
+const moduleStore = new Map<string, StoredModule>();
+const getWorkbookScript = vi.fn(async (id: string) => {
+  const found = moduleStore.get(id);
+  if (!found) throw new Error(`Script '${id}' not found`);
+  return found;
+});
+vi.mock("../../workbookScripts", () => ({
+  getWorkbookScript: (id: string) => getWorkbookScript(id),
+}));
+
 // ============================================================================
 // A fake worker realm that answers the debug protocol.
 // ============================================================================
@@ -198,6 +216,24 @@ const BUTTON_DEFINITION = {
   ].join("\n"),
   accessLevel: "restricted",
   apiVersion: "1.0.0",
+};
+
+/**
+ * A recorded macro as it is actually stored: a MODULE script, with the recorder's
+ * runtime marker in its description. It has no object-script record and no
+ * standing mount — which is exactly why debugging it used to be impossible until
+ * something else had run it.
+ */
+const MACRO_MODULE = {
+  id: "macro-monthly-close",
+  name: "Monthly close",
+  description: "Recorded macro · runtime=objectScript · 3 actions · recorded 2026-08-01",
+  source: [
+    "async function monthlyClose(api) {",
+    "  await api.setCellValue(0, 0, 'closed');",
+    "}",
+    "function setup(context) { return monthlyClose(context.api); }",
+  ].join("\n"),
 };
 
 async function mount(): Promise<void> {
@@ -802,6 +838,113 @@ describe("deadlines are suspended while a script is paused", () => {
 
     expect(rejection).not.toBeNull();
     expect((rejection as unknown as Error).message).toMatch(/timed out/i);
+  });
+});
+
+// ============================================================================
+// A MODULE macro is debuggable COLD.
+//
+// A recorded macro lives in the module store and is NEVER persistently mounted:
+// a button runs it transiently on each click. So "Debug" on a macro the user has
+// not run yet used to throw "Cannot debug a script that is not mounted — apply
+// it first", and only worked once something else had left a mount behind. The
+// host resolves the module itself now — from an ID, never from a caller-supplied
+// body — and owns the mount it makes.
+// ============================================================================
+
+describe("debugging a module macro that has never run", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    moduleStore.clear();
+    moduleStore.set(MACRO_MODULE.id, MACRO_MODULE);
+    getWorkbookScript.mockClear();
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(() => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  it("starts a session with NO prior mount, from the module store", async () => {
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+
+    const session = await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
+
+    expect(session.scriptId).toBe(MACRO_MODULE.id);
+    expect(host.getDebugSession(MACRO_MODULE.id)).not.toBeNull();
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+    expect(FakeWorker.last?.debugSpec).toEqual({ breakpoints: [2], pauseOnEntry: false });
+    // The source came from the STORE, not from the caller.
+    expect(getWorkbookScript).toHaveBeenCalledWith(MACRO_MODULE.id);
+    const mountMsg = FakeWorker.last!.received.find((m) => m.t === "mount") as unknown as {
+      spec: { source: string; tier: string; objectType: string };
+    };
+    expect(mountMsg.spec.source).toBe(MACRO_MODULE.source);
+    // The byte-for-byte shape a button click runs it under: unlocked tier (so
+    // `context.api` is non-null) on a `workbook` context.
+    expect(mountMsg.spec.tier).toBe("unlocked");
+    expect(mountMsg.spec.objectType).toBe("workbook");
+  });
+
+  it("the mount is TRANSIENT: stopping unmounts it rather than remounting", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
+    expect(host.hostTransientDebugMountIds()).toEqual([MACRO_MODULE.id]);
+
+    await host.hostStopDebugSession(MACRO_MODULE.id);
+
+    expect(host.getDebugSession(MACRO_MODULE.id)).toBeNull();
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+  });
+
+  it("closing the editor releases every debugger-owned mount", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+
+    await host.hostStopTransientDebugSessions();
+
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+    expect(host.getDebugSession(MACRO_MODULE.id)).toBeNull();
+  });
+
+  it("leaves NO mount behind when the session fails to open", async () => {
+    FakeWorker.setupError = "boom";
+    await expect(
+      host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []),
+    ).rejects.toThrow(/boom/);
+
+    // A failed session must not leave an unlocked realm nothing will ever revoke.
+    await host.hostStopTransientDebugSessions();
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+  });
+
+  it("says so plainly when the module is gone, and mounts nothing", async () => {
+    moduleStore.clear();
+    await expect(
+      host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []),
+    ).rejects.toThrow(/could not be read|not a script module/i);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    expect(host.getDebugSession(MACRO_MODULE.id)).toBeNull();
+  });
+
+  it("an id that IS mounted is the ordinary session path (no second mount)", async () => {
+    await host.hostMountScript({ ...DEFINITION });
+    getWorkbookScript.mockClear();
+
+    await host.hostStartModuleScriptDebugSession(DEFINITION.id, [3]);
+
+    // Resolved from the host's own mount table, so the store was never asked.
+    expect(getWorkbookScript).not.toHaveBeenCalled();
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+    // ...and a Stop returns it to a normal, uninstrumented mount.
+    await host.hostStopDebugSession(DEFINITION.id);
+    expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
   });
 });
 

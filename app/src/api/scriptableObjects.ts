@@ -729,8 +729,13 @@ export function listExposedMethods(): Array<{ objectType: string; instanceId: st
 /**
  * Current version of the object script context API.
  * Follows semantic versioning. Scripts can declare a minimum required version.
+ *
+ * Defined in `scriptHost/protocol.ts` and re-exported here: the host builds
+ * mount definitions of its own (the transient mount a module macro is debugged
+ * under) and cannot import this module without closing an import cycle.
  */
-export const SCRIPT_API_VERSION = "1.0.0";
+export { SCRIPT_API_VERSION } from "./scriptHost/protocol";
+import { SCRIPT_API_VERSION } from "./scriptHost/protocol";
 
 /** Parse a semver string into [major, minor, patch]. */
 function parseSemVer(v: string): [number, number, number] {

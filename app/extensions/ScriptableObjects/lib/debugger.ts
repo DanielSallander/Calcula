@@ -19,44 +19,33 @@
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import { getExtensionData, setExtensionData } from "@api/extensionData";
-import type { DebugSessionState, DebugTrigger, HostMountDefinition } from "@api/scriptHost/host";
+import type { DebugSessionState, DebugTrigger } from "@api/scriptHost/host";
 import type { DebugAction } from "@api/scriptHost/protocol";
 import {
   enclosingTopLevelFunction,
   topLevelFunctions,
 } from "@api/scriptHost/worker/debugInstrument";
-import { SCRIPT_API_VERSION } from "@api/scriptableObjects";
 
 export type { DebugSessionState, DebugTrigger, DebugAction };
 
 /**
- * The synthetic mount a script with NO standing mount is debugged under — a
- * recorded macro (a module script) the user opened in the editor. Defaults land
- * on the byte-for-byte unlocked `workbook` object-script shape `runMacroModule`
- * uses, so `context.api` is non-null and the body runs exactly as it does on a
- * button click.
+ * How a session is opened for a script with NO standing mount — a recorded macro
+ * (a MODULE script) the user opened in the editor.
+ *
+ * `mountFromModuleStore` is a request, not a payload: the host looks the id up
+ * in the module store and builds the synthetic unlocked `workbook` definition
+ * itself. Nothing here — and nothing on the cross-window bridge — carries
+ * SOURCE. It used to, and that made the bridge a door for mounting arbitrary
+ * code at the unlocked tier by naming an id.
  */
-export interface MacroDebugMount {
-  /** The macro's module id — the debug session and breakpoints key on this. */
-  scriptId: string;
-  name: string;
-  source: string;
-  objectType?: string;
-  instanceId?: string | null;
-  accessLevel?: string;
-}
-
-function toMountDefinition(m: MacroDebugMount): HostMountDefinition {
-  return {
-    id: m.scriptId,
-    name: m.name,
-    objectType: m.objectType ?? "workbook",
-    instanceId: m.instanceId ?? null,
-    source: m.source,
-    accessLevel: m.accessLevel ?? "unlocked",
-    provenance: "local",
-    apiVersion: SCRIPT_API_VERSION,
-  };
+export interface StartDebugOptions {
+  pauseOnEntry?: boolean;
+  /**
+   * When the script is not mounted, resolve it from the workbook's module store
+   * and mount it transiently for the session. False/absent keeps the strict
+   * "apply it first" behaviour object scripts need.
+   */
+  mountFromModuleStore?: boolean;
 }
 
 // ============================================================================
@@ -87,8 +76,12 @@ type BridgeCommand =
       scriptId: string;
       lines: number[];
       pauseOnEntry: boolean;
-      /** Present when the script has no standing mount (a recorded macro). */
-      mount?: MacroDebugMount | null;
+      /**
+       * Ask the host to resolve this id from the module store and mount it for
+       * the session (a recorded macro has no standing mount). A FLAG, never a
+       * body: the editor window cannot put source into a debug mount.
+       */
+      fromModuleStore?: boolean;
     }
   | { command: "stop"; scriptId: string }
   | { command: "control"; scriptId: string; action: DebugAction }
@@ -375,24 +368,27 @@ export function subscribeRemoteDebugState(): () => void {
  */
 export async function startDebugSession(
   scriptId: string,
-  options: { pauseOnEntry?: boolean; mountIfAbsent?: MacroDebugMount } = {},
+  options: StartDebugOptions = {},
 ): Promise<void> {
   const lines = getBreakpointLines(scriptId);
+  const pauseOnEntry = options.pauseOnEntry === true;
   if (transport === "remote") {
     await sendCommand({
       command: "start",
       scriptId,
       lines,
-      pauseOnEntry: options.pauseOnEntry === true,
-      mount: options.mountIfAbsent ?? null,
+      pauseOnEntry,
+      fromModuleStore: options.mountFromModuleStore === true,
     });
     return;
   }
   const host = await hostApi();
-  if (options.mountIfAbsent && !host.hostIsMounted(scriptId)) {
-    await host.hostStartMacroDebugSession(toMountDefinition(options.mountIfAbsent), lines, options);
+  if (options.mountFromModuleStore) {
+    // Resolves the source itself, and is a plain `hostStartDebugSession` when
+    // the id turns out to be mounted already.
+    await host.hostStartModuleScriptDebugSession(scriptId, lines, { pauseOnEntry });
   } else {
-    await host.hostStartDebugSession(scriptId, lines, options);
+    await host.hostStartDebugSession(scriptId, lines, { pauseOnEntry });
   }
   applySessionState(scriptId, host.getDebugSession(scriptId));
 }
@@ -444,7 +440,9 @@ export async function fireDebugTrigger(scriptId: string, triggerId: string): Pro
 export type RunAtCursorOutcome =
   | { status: "ran"; functionName: string }
   | { status: "noFunction"; message: string }
-  | { status: "badArity"; functionName: string; message: string };
+  | { status: "badArity"; functionName: string; message: string }
+  /** The session is open but the function has no run-target to fire (yet). */
+  | { status: "notReady"; functionName: string; message: string };
 
 /**
  * Resolve the function the cursor is in, per the VBA-F5 rule:
@@ -464,18 +462,55 @@ function resolveRunTarget(
 }
 
 /**
- * Wait until a debug session for `scriptId` has left "starting" (the remote
- * transport returns from `startDebugSession` before the main window has actually
- * remounted, so firing immediately could race the run-target registration).
- * Resolves early on any settled/absent state, and on a timeout backstop.
+ * The statuses that mean THE MOUNT HAS SETTLED: `setup` has returned or thrown,
+ * so everything the realm registers at mount time exists — including the
+ * run-targets the debugger exposes for each top-level function, which are what
+ * run-at-cursor fires.
+ *
+ * THE THREE THAT ARE NOT SETTLED, and why this list is explicit rather than
+ * "anything but starting":
+ *   - "starting"  the realm has not reported in at all.
+ *   - "running"   `setup` is still executing; it has not finished registering.
+ *   - "detached"  the gap INSIDE an instrumented remount. Opening a session
+ *                 unmounts the plain realm before spawning the instrumented one,
+ *                 and that unmount broadcasts a `detached` session.
+ *
+ * That last one is the bug this list exists to prevent, and it was live: a cold
+ * Run in the standalone editor window saw `detached` a few milliseconds after
+ * pressing Run, called the mount settled, and fired its trigger into the gap.
+ * The host answered `"method:x" is not a trigger this script has registered`,
+ * the very next state broadcast wiped that error off the panel, and the user got
+ * a Run that printed "Running x()…" and did absolutely nothing — while running
+ * the macro once by any other route "fixed" it, because the second Run found a
+ * session already open and skipped the wait entirely.
  */
-async function waitForDebugSettled(scriptId: string, timeoutMs = 8000): Promise<void> {
+const SETTLED_DEBUG_STATUSES: ReadonlySet<DebugSessionState["status"]> = new Set([
+  "waiting",
+  "finished",
+  "paused",
+  "failed",
+]);
+
+function isDebugMountSettled(session: DebugSessionState | null | undefined): boolean {
+  return !!session && SETTLED_DEBUG_STATUSES.has(session.status);
+}
+
+/**
+ * Wait until the debug session for `scriptId` is mounted and settled.
+ *
+ * The remote transport returns from `startDebugSession` as soon as the command
+ * is on the wire — long before the main window has finished remounting — so
+ * firing immediately would race the run-target registration. Resolves as soon as
+ * the mount settles, immediately on a broadcast that reports the session FAILED
+ * TO OPEN (there is nothing left to wait for), and on a timeout backstop so a
+ * lost broadcast can never wedge the editor.
+ */
+async function waitForDebugSettled(scriptId: string, timeoutMs = 20000): Promise<void> {
   // Local transport: startDebugSession already awaited the mount before it
   // returned, so the session (and its run-targets) are settled. Only the remote
   // bridge returns before the main window has finished remounting.
   if (transport === "local") return;
-  const existing = getDebugSession(scriptId);
-  if (existing && existing.status !== "starting") return;
+  if (isDebugMountSettled(getDebugSession(scriptId))) return;
   await new Promise<void>((resolve) => {
     let done = false;
     const finish = (): void => {
@@ -487,7 +522,13 @@ async function waitForDebugSettled(scriptId: string, timeoutMs = 8000): Promise<
     };
     const off = onDebugStateChange((detail) => {
       if (detail.scriptId !== scriptId) return;
-      if (!detail.session || detail.session.status !== "starting") finish();
+      // The bridge reports a session that could not be opened as an error
+      // broadcast; waiting out the backstop for it would only delay the message.
+      if (typeof (detail as { error?: string }).error === "string") {
+        finish();
+        return;
+      }
+      if (isDebugMountSettled(detail.session)) finish();
     });
     const timer = setTimeout(finish, timeoutMs);
   });
@@ -496,8 +537,9 @@ async function waitForDebugSettled(scriptId: string, timeoutMs = 8000): Promise<
 /**
  * Run the top-level function the cursor is in — the VBA F5 gesture.
  *
- * Ensures a debug mount exists (starting a session, mounting `mountIfAbsent`
- * first for a macro that has no standing mount), then fires the enclosing
+ * Ensures a debug mount exists (starting a session, and for a macro with no
+ * standing mount asking the host to mount it from the module store by id — the
+ * caller never supplies a body), then fires the enclosing
  * function through the SAME `hostCallExposed` door the Fire buttons use. It
  * NEVER guesses a wrong-arity call and never silently does nothing: an
  * unresolvable cursor and an un-runnable arity each return a message the caller
@@ -507,7 +549,7 @@ export async function runAtCursor(
   scriptId: string,
   source: string,
   line: number,
-  mountIfAbsent?: MacroDebugMount,
+  options: StartDebugOptions = {},
 ): Promise<RunAtCursorOutcome> {
   const target = resolveRunTarget(source, line);
   if (!target) {
@@ -529,10 +571,37 @@ export async function runAtCursor(
   }
 
   if (!getDebugSession(scriptId)) {
-    await startDebugSession(scriptId, { mountIfAbsent });
+    await startDebugSession(scriptId, options);
     await waitForDebugSettled(scriptId);
   }
-  await fireDebugTrigger(scriptId, `method:${target.name}`);
+
+  // LOOK BEFORE FIRING. Over the remote bridge a fire is one-way — the host's
+  // refusal comes back as a state broadcast that the next broadcast overwrites —
+  // so a trigger that does not exist would be a silent no-op reported to the
+  // author as "Running x()…". The session mirror already knows every trigger the
+  // realm registered, so the refusal is decided HERE, where it can be returned.
+  const triggerId = `method:${target.name}`;
+  const session = getDebugSession(scriptId);
+  // Refused only on EVIDENCE of absence. A mirror with no trigger list at all is
+  // not evidence — the host is authoritative and refuses for itself, and on the
+  // local transport that refusal is a throw the caller sees.
+  if (
+    session &&
+    Array.isArray(session.triggers) &&
+    !session.triggers.some((t) => t.id === triggerId)
+  ) {
+    return {
+      status: "notReady",
+      functionName: target.name,
+      message:
+        session.status === "failed"
+          ? `setup() failed, so "${target.name}" was never registered as a run target: ` +
+            `${session.error ?? "unknown error"}`
+          : `"${target.name}" is not registered as a run target yet (the script is ` +
+            `${session.status}). Try Run again in a moment.`,
+    };
+  }
+  await fireDebugTrigger(scriptId, triggerId);
   return { status: "ran", functionName: target.name };
 }
 
@@ -581,12 +650,12 @@ export function installObjectScriptDebugBridge(): () => void {
       try {
         switch (cmd.command) {
           case "start":
-            if (cmd.mount && !host.hostIsMounted(cmd.scriptId)) {
-              await host.hostStartMacroDebugSession(
-                toMountDefinition(cmd.mount),
-                cmd.lines ?? [],
-                { pauseOnEntry: cmd.pauseOnEntry === true },
-              );
+            if (cmd.fromModuleStore) {
+              // The host reads the module store itself. All the editor window
+              // can say is WHICH module; it cannot say what is in it.
+              await host.hostStartModuleScriptDebugSession(cmd.scriptId, cmd.lines ?? [], {
+                pauseOnEntry: cmd.pauseOnEntry === true,
+              });
             } else {
               await host.hostStartDebugSession(cmd.scriptId, cmd.lines ?? [], {
                 pauseOnEntry: cmd.pauseOnEntry === true,

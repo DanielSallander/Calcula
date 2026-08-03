@@ -46,7 +46,9 @@
 import {
   deleteWorkbookScript,
   getWorkbookScript,
+  listWorkbookScriptRecords,
   listWorkbookScripts,
+  parseModuleScriptRuntime,
   runObjectScriptOnce,
   runWorkbookScript,
   saveWorkbookScript,
@@ -74,8 +76,6 @@ export function describeMacroRuntime(runtime: MacroRuntime): string {
 // The description marker
 // ============================================================================
 
-const RUNTIME_MARKER = /\bruntime=(objectScript|notebook)\b/;
-
 /** The `description` written on a recorder-authored module. */
 export function buildMacroDescription(options: {
   runtime: MacroRuntime;
@@ -95,13 +95,15 @@ export function buildMacroDescription(options: {
  * source by definition — it is what `run_script` runs — so the library treats an
  * unmarked module as runnable, and only a module explicitly marked
  * `runtime=objectScript` is held back from the Run button.
+ *
+ * The marker itself is parsed by @api (`parseModuleScriptRuntime`), because the
+ * recorder WRITES it and other surfaces — the Object Script Editor's module list
+ * — READ it. One regex, one answer; two copies would eventually disagree.
  */
 export function parseMacroRuntime(
   description: string | null | undefined,
 ): MacroRuntime | null {
-  if (typeof description !== "string") return null;
-  const match = RUNTIME_MARKER.exec(description);
-  return match ? (match[1] as MacroRuntime) : null;
+  return parseModuleScriptRuntime(description);
 }
 
 /** Whether the QuickJS MODULE runtime (`run_script`) can execute this module. */
@@ -284,31 +286,26 @@ export async function autoSaveRecordedMacro(options: {
   });
 }
 
-/** Every module in the workbook, with its runtime marker resolved. */
+/**
+ * Every module in the workbook, with its runtime marker resolved.
+ *
+ * The listing itself is @api's (`listWorkbookScriptRecords`) — "what module
+ * scripts does this workbook hold" is not a macro-specific question, and the
+ * Object Script Editor asks it too. What is macro-specific, and stays here, is
+ * the runtime marker and what the library does with it.
+ */
 export async function listMacroModules(): Promise<MacroModuleEntry[]> {
-  const summaries = await listWorkbookScripts();
-  const entries: MacroModuleEntry[] = [];
-  for (const summary of summaries) {
-    let description: string | null = null;
-    let loadError: string | null = null;
-    try {
-      description = (await getWorkbookScript(summary.id)).description ?? null;
-    } catch (e) {
-      // A module whose record cannot be read is still listed — hiding it would
-      // be the invisible-code failure again, just with a different cause — but
-      // the failure travels with it. Swallowing it used to make an unreadable
-      // module look like an ordinary runnable one.
-      loadError = e instanceof Error ? e.message : String(e);
-    }
-    entries.push({
-      id: summary.id,
-      name: summary.name,
-      description,
-      runtime: parseMacroRuntime(description),
-      loadError,
-    });
-  }
-  return entries;
+  const records = await listWorkbookScriptRecords();
+  return records.map((record) => ({
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    runtime: parseMacroRuntime(record.description),
+    // A module whose record cannot be read is still listed — hiding it would be
+    // the invisible-code failure again, just with a different cause — but the
+    // failure travels with it.
+    loadError: record.loadError,
+  }));
 }
 
 /** Load one module's full record. */
