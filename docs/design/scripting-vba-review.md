@@ -747,8 +747,13 @@ residual named in its body. Where the two ever disagree about a fact rather than
 this table are both wrong until someone re-derives from code.
 
 1. ~~**Resurrect the macro recorder**~~ **SHIPPED (codegen 2026-07-31; the feature around it
-   2026-08-03)** — as its own extension, `app/extensions/MacroRecorder/`, registered in
-   `extensions/manifest.ts` after ScriptNotebook (whose Developer menu it contributes to).
+   2026-08-03; single-source LINK model + run-at-cursor + edit-in-editor 2026-08-04 — see the tenth
+   entry in §8)** — as its own extension, `app/extensions/MacroRecorder/`, registered in
+   `extensions/manifest.ts` after ScriptNotebook (whose Developer menu it contributes to). A recorded
+   macro now lives ONCE in the module store; a button carries a `macroRef` id and LINKS to it (runs the
+   current macro via `@api/macroRunService`), never a copied body — so editing the macro is reflected
+   on every linking button with no re-save. Deleting a linked macro warns by button anchor; an orphaned
+   click and a subscriber missing the macro both fail LOUD (`notFound` toast), never silent.
 
    > **Read this before trusting the bullets below.** On 2026-07-31 this item was marked SHIPPED on
    > the strength of 116 passing unit tests. On **2026-08-03 a human used it for the first time and
@@ -1768,6 +1773,81 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Tenth entry (2026-08-04, the single-source model) — NOT a correction of a false claim; a
+> deliberate redesign the user chose after the ninth correction made both entry points execute.**
+>
+> The ninth correction got Run and the button to both *execute*, but left the model DUPLICATIVE: the
+> recorded macro lived in the module store AND "Save as Button" wrote a SECOND object script holding a
+> **copy** of the body, keyed by the button's `instanceId`. Two artifacts that can drift — edit the
+> macro and the button keeps running yesterday's copy. Asked to choose, the user picked the VBA mental
+> model: **ONE canonical macro; a button LINKS to it, it does not copy it.** This entry records the
+> build of that decision, not a claim that failed re-derivation.
+>
+> **The link mechanism (settled, single path).** A macro lives ONCE as a module script (`macro-<slug>`).
+> A button that runs it carries a single 12-byte `macroRef` control property = that module id — no body
+> anywhere. On a click, `Controls.runFloatingButtonClick` reads `macroRef` **first** and runs the
+> CURRENT macro through a new feature-neutral seam `@api/macroRunService` (`MacroRunProvider.runMacroByRef`,
+> the same IoC shape as `buttonControlService`/`autoFilterService`); the Macro Recorder registers the
+> provider and resolves the id through the EXISTING `runMacroModule` run path. Because the module is
+> loaded at click time, editing the macro is reflected on every linking button with zero re-save — the
+> link-not-copy guarantee falls out for free. A button with no `macroRef` (a pre-existing copy-model
+> button) falls through to the old mounted-object-script path untouched, so nothing that worked breaks.
+>
+> **Run-at-cursor (VBA F5).** The Object Script Editor gained a **Run** button and F5: when paused F5
+> continues, otherwise it runs the top-level function the cursor is in — resolved by a pure
+> `enclosingTopLevelFunction(source, line)` helper, fired through the SAME `hostCallExposed`/Fire door
+> the trigger rows already used (no second execution channel). Top-level functions are auto-exposed as
+> host-only run-targets on **debug mounts only**, arity-bound (`0→fn()`, `1→fn(context.api)`, `>1→` a
+> clear refusal, never a wrong-arity call). Cursor in `setup`/whitespace falls back to the sole macro
+> function; zero-or-ambiguous speaks in the console rather than guessing.
+>
+> **Navigation.** Double-clicking a macro row, and an explicit "Edit in Object Script Editor" button,
+> both open the macro in the editor through a second seam `@api/scriptEditorService`
+> (`ScriptEditorProvider.openMacroInEditor`, provider registered by ScriptableObjects). The editor
+> opens it in a new `moduleMacro` doc-kind that loads via `getWorkbookScript`, edits under a synthetic
+> **unlocked `workbook`** object-script definition (so `context.api` is non-null, byte-for-byte the
+> shape `runMacroModule` uses), and — critically — routes Save to `saveWorkbookScript` (the MODULE
+> store), NOT `saveObjectScript`. So the thing edited and the thing every button runs are the one
+> record.
+>
+> **Deletion + orphans (the recurring silence, closed again at a new layer).** Deleting a macro ≥1
+> button links now warns, enumerating each linking button by sheet + A1 anchor
+> (`list_controls_referencing_macro`, a backend scan of the control store). Deletion still proceeds if
+> confirmed (the user may re-point), so orphans are expected and handled at click: `runMacroByRef`
+> returns a first-class `notFound`, and the click surfaces a loud toast naming the missing id — never a
+> silent no-op. A NEW `reason:"orphanMacro"` in `diagnoseButtonClick` keeps the wording in the one
+> tested place.
+>
+> **Distribution (loud-failure slice; deferral named).** `macroRef` is a plain control property, so it
+> and the linked module both already travel in a default `.calp` publish. The real work is the
+> publish-time guard `macro_reference_warnings`: if a publisher narrows the module set and drops a
+> linked macro, publish (and preview) emit a warning naming the button's anchor and the missing macro.
+> A subscriber missing the macro hits the identical local orphan path — the click toasts `notFound`, no
+> silent dead button. **Explicitly deferred:** auto-*pruning* the published module set to exactly the
+> macros a button needs. The non-negotiable — a missing macro is LOUD at both publish and click — is met.
+>
+> **What was proven by driving the live app (not a green number).** Following the ninth correction's
+> own rule, `app/e2e/tests/macro-link-model.spec.ts` ran against a real `cargo tauri dev` build over
+> WebView2 CDP and passed. The decisive assertion is in the user's own words: record a macro writing
+> `B16=17171`, add a linking button, **edit the macro to write `28282`** and Save, clear the cell,
+> **click the same button → the cell shows `28282`, asserted NOT `17171`.** That is link-not-copy,
+> proven, not argued. It also proved: double-click opens the editor on the macro; the editor's Run
+> executed the macro into the grid (not idling at "Waiting for a trigger"); deleting a linked macro
+> raised the anchor-named warning and Cancel actually cancelled; the orphaned click toasted instead of
+> no-op'ing. **Two real bugs surfaced only by execution and were fixed:** (1) the delete "warning" was
+> toothless because `window.confirm` under Tauri returns a `Promise` and the code tested `!Promise`
+> (always false) — it deleted regardless of Cancel; the same latent bug in `RecordingIndicator`'s
+> Discard was fixed too. (2) A cold editor lost its open payload to a fixed-timer race; an
+> `EDITOR_READY` handshake now gates delivery, hardening all three open channels (script/draft/macro).
+>
+> **What the E2E could NOT cover (confirm by hand — most-likely-wrong first):** distribution across a
+> REAL publish→subscribe (only the local orphan equivalent and the two Rust warning tests ran);
+> run-at-cursor with **two** top-level functions in a live worker realm hitting a breakpoint in the
+> cursor's function (jsdom can't run the worker); cross-sheet button→macro links; and undo after a
+> run-at-cursor. The double-run flagged by Track A stands as a known cosmetic: a recorded
+> single-function macro under the synthetic `workbook` mount runs once at `setup` and again on F5 (end
+> state identical for the idempotent writes a recorder emits); left on `workbook` per the settled design.
 
 > **Ninth correction (2026-08-03, SECOND human use of the macro recorder) — the fix for the eighth
 > correction was declared complete while two of the feature's three entry points still did nothing.**

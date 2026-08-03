@@ -15,6 +15,9 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionRegistry, AppEvents } from "@api";
+import { registerMacroRunProvider } from "@api/macroRunService";
+import { runMacroByRef } from "./lib/macroLibrary";
+import { macroRecorderBackend } from "./lib/macroRecorderBackend";
 import { showDialog } from "@api/ui";
 import { showToast } from "@api/notifications";
 import { onAppEvent } from "@api/events";
@@ -57,6 +60,10 @@ function activate(context: ExtensionContext): void {
     return;
   }
   console.log("[MacroRecorder] Activating...");
+
+  // 0. Bind the capability-scoped backend door for lib helpers (the delete
+  //    warning's `list_controls_referencing_macro` query goes through it).
+  macroRecorderBackend.set(context.invokeBackend);
 
   // 1. Dialogs.
   context.ui.dialogs.register({
@@ -146,6 +153,14 @@ function activate(context: ExtensionContext): void {
 
   // 5. Track the selection so a generated button gets a sensible anchor cell.
   cleanupFns.push(ExtensionRegistry.onSelectionChange(setCurrentSelection));
+
+  // 5b. The LINK mechanism. A button carrying a `macroRef` runs the CURRENT
+  //     macro of that id through this seam on each click — so this registration
+  //     is what makes a macro-linked button actually do anything. Registered
+  //     here (not in Controls) because running a macro means loading the module
+  //     and routing on its runtime marker, which is the recorder's knowledge,
+  //     not Controls'.
+  cleanupFns.push(registerMacroRunProvider({ runMacroByRef }));
 
   // 6. A recording cannot outlive the workbook it was taken in: its actions
   //    address sheets and cells that are about to be replaced, and the module it

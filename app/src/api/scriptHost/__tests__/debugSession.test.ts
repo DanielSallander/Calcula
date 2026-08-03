@@ -16,6 +16,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { H2W, W2H } from "../protocol";
+import { RUN_TARGET_EXPOSED_PREFIX } from "../protocol";
+import { HOST_ONLY_EXPOSED_PREFIX } from "../broker";
 
 // The mount path touches the backend for grants and snapshot seeds; none of
 // that is under test here, and all of it is defensive against failure.
@@ -578,6 +580,77 @@ describe("an event-driven script is MOUNTED AND WAITING, never 'running'", () =>
     expect(host.isScriptDebugPaused(BUTTON_DEFINITION.id)).toBe(false);
     expect(FakeWorker.last?.debugSpec).toBeNull();
     expect(host.hostIsMounted(BUTTON_DEFINITION.id)).toBe(true);
+  });
+});
+
+// ============================================================================
+// Run-at-cursor (VBA F5): top-level functions are surfaced as run-targets and
+// fired through the SAME hostCallExposed door as any other method trigger.
+// ============================================================================
+
+describe("run-at-cursor run-targets", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(() => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  it("the run-target prefix lives INSIDE the host-only namespace (no drift)", () => {
+    expect(RUN_TARGET_EXPOSED_PREFIX.startsWith(HOST_ONLY_EXPOSED_PREFIX)).toBe(true);
+  });
+
+  it("surfaces an auto-exposed run-target as a fireable method trigger with the PLAIN name", async () => {
+    await mountButtonAndDebug();
+    const worker = FakeWorker.last!;
+    // The real worker fires base.expose for each top-level fn on a debug mount;
+    // the fake realm stands in for that here.
+    worker.expose(`${RUN_TARGET_EXPOSED_PREFIX}doThing`);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const trigger = host
+      .getDebugSession(BUTTON_DEFINITION.id)
+      ?.triggers.find((t) => t.name === "doThing");
+    expect(trigger).toMatchObject({
+      id: "method:doThing",
+      kind: "method",
+      name: "doThing",
+      runTarget: true,
+      fireable: true,
+      invokeName: `${RUN_TARGET_EXPOSED_PREFIX}doThing`,
+    });
+  });
+
+  it("an ordinary host-only relay (NOT a run-target) stays hidden", async () => {
+    await mountButtonAndDebug();
+    const worker = FakeWorker.last!;
+    worker.expose(`${HOST_ONLY_EXPOSED_PREFIX}callImport`);
+    await new Promise((r) => setTimeout(r, 0));
+    const names = host.getDebugSession(BUTTON_DEFINITION.id)?.triggers.map((t) => t.name) ?? [];
+    expect(names).not.toContain("callImport");
+    expect(names).not.toContain(`${HOST_ONLY_EXPOSED_PREFIX}callImport`);
+  });
+
+  it("fires a run-target through its PREFIXED relay name (hostCallExposed)", async () => {
+    await mountButtonAndDebug();
+    const worker = FakeWorker.last!;
+    worker.expose(`${RUN_TARGET_EXPOSED_PREFIX}doThing`);
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Fire by the PLAIN-name trigger id; the host resolves it to the prefixed
+    // relay and relays a methodCall into the realm.
+    void host
+      .hostDebugFireTrigger(BUTTON_DEFINITION.id, "method:doThing")
+      .catch(() => undefined);
+    expect(worker.methodCalls().map((m) => m.methodName)).toEqual([
+      `${RUN_TARGET_EXPOSED_PREFIX}doThing`,
+    ]);
   });
 });
 

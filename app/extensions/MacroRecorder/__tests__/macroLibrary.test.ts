@@ -66,6 +66,7 @@ import {
   macroScriptId,
   parseMacroRuntime,
   reserveMacroModule,
+  runMacroByRef,
   saveMacroModule,
   uniqueMacroName,
   updateMacroModule,
@@ -337,5 +338,51 @@ describe("editing and deleting a saved macro", () => {
       /internal record/i,
     );
     expect(store.has("__calcula_custom_functions__")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runMacroByRef — the LINK mechanism a macro-linked button resolves on click.
+// ---------------------------------------------------------------------------
+
+describe("runMacroByRef (the button-link run path)", () => {
+  it("reports notFound for a macro that does not exist — never silent", async () => {
+    const outcome = await runMacroByRef("macro-gone");
+    expect(outcome).toEqual({ status: "notFound", macroId: "macro-gone" });
+  });
+
+  it("runs the CURRENT stored macro and reports it ran", async () => {
+    // A notebook-runtime macro routes to the module runtime (mocked to succeed).
+    await saveMacroModule({
+      id: "macro-live",
+      name: "Live Macro",
+      source: "Calcula.setCellValue(0,0,'v2')",
+      runtime: "notebook",
+      actionCount: 1,
+      recordedAt: "x",
+    });
+    const outcome = await runMacroByRef("macro-live");
+    expect(outcome).toEqual({ status: "ran", name: "Live Macro" });
+  });
+
+  it("resolves the macro at CALL time, so an edit changes what a click runs", async () => {
+    await saveMacroModule({
+      id: "macro-live",
+      name: "V1",
+      source: "one",
+      runtime: "notebook",
+      actionCount: 1,
+      recordedAt: "x",
+    });
+    // Edit the macro (rename + new source) WITHOUT touching any button.
+    await updateMacroModule({
+      id: "macro-live",
+      name: "V2",
+      source: "two",
+      description: store.get("macro-live")!.description,
+    });
+    // The link resolves the module fresh — it sees the edited record, no re-save.
+    const outcome = await runMacroByRef("macro-live");
+    expect(outcome).toEqual({ status: "ran", name: "V2" });
   });
 });

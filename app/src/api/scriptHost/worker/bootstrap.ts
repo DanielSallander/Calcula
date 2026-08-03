@@ -7,10 +7,10 @@
 //          an RPC the host's broker checks; the CSP pins its network reach.
 /// <reference lib="webworker" />
 
-import { MAX_SANDBOX_HIT_RECTS, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
-import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, type WorkerRuntime } from "./contextShims";
+import { MAX_SANDBOX_HIT_RECTS, RUN_TARGET_EXPOSED_PREFIX, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
+import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, registerRunTargetHandler, type WorkerRuntime } from "./contextShims";
 import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
-import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
+import { DEBUG_GLOBAL, instrumentForDebug, topLevelFunctions } from "./debugInstrument";
 import { createDebugRuntime, type DebugController } from "./debugRuntime";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -157,12 +157,30 @@ async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
     h: (line: number, locals: () => never) => dbg?.h(line, locals),
     s: (line: number, locals: () => never) => dbg?.s(line, locals),
     p: (pairs: Array<[string, () => unknown]>) => dbg?.p(pairs) ?? [],
+    // Run-at-cursor: the generated wrapper calls this once per top-level
+    // function, after the user body, so `fn` and `context` are both in scope.
+    rt: (name: string, fn: unknown, context: unknown) => {
+      if (typeof fn === "function" && runtime) {
+        registerRunTargetHandler(
+          runtime,
+          name,
+          fn as (...a: unknown[]) => unknown,
+          (context ?? {}) as { api?: unknown },
+        );
+      }
+    },
   };
+
+  // Registration statements appended AFTER the user body (on their own line, so
+  // no trailing user-line comment can swallow them, and no user line shifts).
+  const runTargetRegs = buildRunTargetRegistrations(spec.source);
+  const withRunTargets = (code: string): string =>
+    runTargetRegs ? `${code}\n${runTargetRegs}` : code;
 
   const result = instrumentForDebug(spec.source);
   if (result.ok) {
     try {
-      const fn = await compileSource(result.code, true);
+      const fn = await compileSource(withRunTargets(result.code), true);
       post({
         t: "debugReady",
         state: {
@@ -189,7 +207,29 @@ async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
   });
   dbg.dispose();
   dbg = null;
-  return compileSource(spec.source);
+  // Even un-instrumented, run-at-cursor can still RUN the function (it just will
+  // not pause), so the run-targets are registered on the fallback path too.
+  return compileSource(withRunTargets(spec.source));
+}
+
+/**
+ * The statements the debug wrapper runs after the user body to register each
+ * top-level function (except `setup`) as a run-target. `setup` is the entry
+ * point the mount already invokes, not something the user asks to run.
+ */
+function buildRunTargetRegistrations(source: string): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const fn of topLevelFunctions(source)) {
+    if (fn.name === "setup" || seen.has(fn.name)) continue;
+    seen.add(fn.name);
+    // `typeof <name> === "function"` guards a name the scan saw but the engine
+    // did not hoist (a syntax the fallback tolerated); never a ReferenceError.
+    parts.push(
+      `${DEBUG_GLOBAL}.rt(${JSON.stringify(fn.name)},typeof ${fn.name}==="function"?${fn.name}:null,context);`,
+    );
+  }
+  return parts.join("");
 }
 
 // ============================================================================
@@ -338,8 +378,13 @@ async function handleMethodCall(callId: number, methodName: string, args: unknow
     post({ t: "methodResult", callId, ok: false, error: { code: "UnknownMethod", message: `Method not found: ${methodName}` } });
     return;
   }
+  // A run-target's exposed name is prefixed; the debugger should show the plain
+  // function name it stands for, not the internal relay name.
+  const label = methodName.startsWith(RUN_TARGET_EXPOSED_PREFIX)
+    ? `${methodName.slice(RUN_TARGET_EXPOSED_PREFIX.length)}()`
+    : `${methodName}()`;
   try {
-    const value = await trackActivity(`${methodName}()`, () => handler(...args));
+    const value = await trackActivity(label, () => handler(...args));
     post({ t: "methodResult", callId, ok: true, value: safeClone(value) });
   } catch (err) {
     post({

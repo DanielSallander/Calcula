@@ -7,7 +7,12 @@
 //          labels, switch clauses, ASI).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { DEBUG_GLOBAL, instrumentForDebug } from "../debugInstrument";
+import {
+  DEBUG_GLOBAL,
+  instrumentForDebug,
+  topLevelFunctions,
+  enclosingTopLevelFunction,
+} from "../debugInstrument";
 
 interface Hit {
   line: number;
@@ -485,5 +490,76 @@ describe("debug instrumentation — locals capture", () => {
     expect(atThird?.names).not.toContain("second");
     const atFourth = frames.find((f) => f.line === 4);
     expect(atFourth?.names).toEqual(expect.arrayContaining(["first", "second"]));
+  });
+});
+
+// ============================================================================
+// Top-level function inventory (run-at-cursor / VBA F5)
+// ============================================================================
+
+const RECORDED_MACRO = [
+  "// Macro: Demo",                          // 1
+  "async function demo(api) {",             // 2
+  "  await api.setCellValue(0, 0, 'v');",   // 3
+  "}",                                        // 4
+  "",                                         // 5
+  "function setup(context) {",              // 6
+  "  if (typeof context.onClick === 'function') {", // 7
+  "    context.onClick(async () => {",      // 8
+  "      await demo(context.api);",          // 9
+  "    });",                                  // 10
+  "    return;",                              // 11
+  "  }",                                      // 12
+  "  return demo(context.api);",            // 13
+  "}",                                        // 14
+].join("\n");
+
+describe("topLevelFunctions", () => {
+  it("finds both top-level declarations in a recorded macro, with lines and arity", () => {
+    const fns = topLevelFunctions(RECORDED_MACRO);
+    expect(fns.map((f) => f.name)).toEqual(["demo", "setup"]);
+    const demo = fns.find((f) => f.name === "demo")!;
+    expect(demo).toMatchObject({ name: "demo", arity: 1, isAsync: true, startLine: 2, endLine: 4 });
+    const setup = fns.find((f) => f.name === "setup")!;
+    expect(setup).toMatchObject({ name: "setup", arity: 1, startLine: 6, endLine: 14 });
+  });
+
+  it("does NOT report function EXPRESSIONS or nested functions", () => {
+    const src = [
+      "const f = function inner() { return 1; };", // expression, not a declaration
+      "function real() {",
+      "  function nested() { return 2; }",         // nested — depth > 0
+      "  return nested();",
+      "}",
+    ].join("\n");
+    expect(topLevelFunctions(src).map((f) => f.name)).toEqual(["real"]);
+  });
+
+  it("counts arity: 0, 1 and many", () => {
+    const src = [
+      "function none() {}",
+      "function one(api) {}",
+      "function many(a, b, c) {}",
+    ].join("\n");
+    const byName = Object.fromEntries(topLevelFunctions(src).map((f) => [f.name, f.arity]));
+    expect(byName).toEqual({ none: 0, one: 1, many: 3 });
+  });
+
+  it("returns [] for unparseable source rather than throwing", () => {
+    expect(topLevelFunctions("function broken( {")).toEqual([]);
+  });
+});
+
+describe("enclosingTopLevelFunction", () => {
+  it("maps a cursor line to the function whose body contains it", () => {
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 3)?.name).toBe("demo");
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 9)?.name).toBe("setup");
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 2)?.name).toBe("demo"); // on the decl line
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 14)?.name).toBe("setup"); // on the close brace
+  });
+
+  it("returns null between declarations (blank line / header comment)", () => {
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 1)).toBeNull(); // header comment
+    expect(enclosingTopLevelFunction(RECORDED_MACRO, 5)).toBeNull(); // blank line
   });
 });

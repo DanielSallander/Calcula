@@ -31,6 +31,10 @@ import type { DialogProps } from "@api/uiTypes";
 import { showToast } from "@api/notifications";
 import { hasButtonControlProvider } from "@api/buttonControlService";
 import {
+  hasScriptEditorProvider,
+  requireScriptEditorProvider,
+} from "@api/scriptEditorService";
+import {
   refreshGridData,
 } from "@api/grid";
 import {
@@ -44,12 +48,11 @@ import {
   updateMacroModule,
   type MacroModuleEntry,
 } from "../lib/macroLibrary";
+import { designModeHint, linkMacroButton } from "../lib/buttonScript";
 import {
-  describeMountFailure,
-  designModeHint,
-  saveAsButtonScript,
-  saveAsInlineButton,
-} from "../lib/buttonScript";
+  describeMacroDeletion,
+  listControlsReferencingMacro,
+} from "../lib/linkedButtons";
 import { getAnchorCell, resolveAnchorSheetIndex } from "../lib/flow";
 import { formatA1, parseA1 } from "../lib/a1";
 import { disabledIf, styles } from "./styles";
@@ -204,7 +207,27 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
 
   const remove = useCallback(async () => {
     if (!loaded) return;
-    if (!window.confirm(`Delete "${loaded.name}"? This cannot be undone.`)) return;
+    // Warn about buttons that LINK this macro before deleting it. Deleting is
+    // still allowed (the user may re-point them), but silently orphaning a
+    // button is the recurring failure this feature has fought — so the confirm
+    // names each linking button by sheet + A1 anchor.
+    let confirmMessage = `Delete "${loaded.name}"? This cannot be undone.`;
+    try {
+      const linking = await listControlsReferencingMacro(loaded.id);
+      const warning = describeMacroDeletion(loaded.name, linking);
+      if (warning) confirmMessage = warning;
+    } catch {
+      // If the link scan fails, fall back to the plain confirm rather than
+      // blocking a delete on a diagnostic query.
+    }
+    // AWAIT the confirm. Under Tauri `window.confirm` is overridden to return a
+    // Promise<boolean> (it shows a NATIVE dialog); the synchronous form
+    // `if (!window.confirm(...))` tests `!Promise`, which is ALWAYS false, so the
+    // warning never gated the delete — Cancel was ignored and the macro was
+    // orphaned regardless. Awaiting works in both worlds: a real Promise resolves
+    // to the choice, and a plain boolean (jsdom/tests) is awaited to itself.
+    const confirmed = await window.confirm(confirmMessage);
+    if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {
@@ -231,55 +254,47 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
     setError(null);
     try {
       const sheetIndex = await resolveAnchorSheetIndex();
-      // Two runtimes, two binding mechanisms — see the note in buttonScript.ts.
-      // Object-script macros mount as an object script on the control's
-      // instanceId; QuickJS modules run inline from the control's own onSelect.
-      if (selectedEntry?.runtime === "objectScript") {
-        // The stored module IS the button script: its `setup(context)` wires
-        // `context.onClick` when the context is a button. Nothing is appended
-        // here, so there is no second source to drift from this one.
-        const result = await saveAsButtonScript({
-          name: loaded.name,
-          source: draftSource,
-          sheetIndex,
-          row: cell.row,
-          col: cell.col,
-        });
-        if (result.mounted) {
-          showToast(
-            `Button created at ${anchor} — click it to run "${loaded.name}".` +
-              designModeHint(),
-            { type: "success" },
-          );
-        } else {
-          const message = describeMountFailure(
-            anchor,
-            loaded.name,
-            result.mountError ?? "the script host gave no reason.",
-          );
-          setError(message);
-          showToast(message, { type: "error", duration: 0 });
-        }
-      } else {
-        await saveAsInlineButton({
-          name: loaded.name,
-          source: draftSource,
-          sheetIndex,
-          row: cell.row,
-          col: cell.col,
-        });
-        showToast(
-          `Button created at ${anchor} — click it to run "${loaded.name}".` +
-            designModeHint(),
-          { type: "success" },
-        );
-      }
+      // LINK, not copy. The button carries only this macro's id; a click runs
+      // the CURRENT macro through @api/macroRunService, in whichever runtime its
+      // marker names. Uniform for both runtimes — there is no second source to
+      // drift from the canonical macro, and editing the macro is reflected here
+      // with no re-save of the button.
+      await linkMacroButton({
+        macroId: loaded.id,
+        name: loaded.name,
+        sheetIndex,
+        row: cell.row,
+        col: cell.col,
+      });
+      showToast(
+        `Button created at ${anchor} — click it to run "${loaded.name}".` +
+          designModeHint(),
+        { type: "success" },
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [loaded, draftSource, anchor, selectedEntry]);
+  }, [loaded, anchor]);
+
+  /**
+   * Open a macro in the full Object Script Editor window (Track A's editor,
+   * reached through the @api/scriptEditorService seam — the Facade Rule forbids
+   * MacroRecorder importing ScriptableObjects internals). Used by both the
+   * double-click on a row and the explicit "Edit in Object Script Editor"
+   * button, so they cannot diverge.
+   */
+  const openInEditor = useCallback(async (macroId: string) => {
+    setError(null);
+    try {
+      await requireScriptEditorProvider().openMacroInEditor(macroId);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      showToast(message, { type: "error" });
+    }
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -300,10 +315,12 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
   const route = macroRunRoute(loaded?.description ?? selectedEntry?.description);
   const routeNote = describeRunRoute(loaded?.description ?? selectedEntry?.description);
   const buttonsAvailable = hasButtonControlProvider();
+  const editorAvailable = hasScriptEditorProvider();
 
   const runDisabled = busy || !loaded;
   const deleteDisabled = busy || !loaded;
   const addButtonDisabled = busy || !loaded || !buttonsAvailable;
+  const editDisabled = busy || !loaded || !editorAvailable;
   const saveDisabled = busy || !dirty;
 
   return (
@@ -349,6 +366,11 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
                       entry.id === selectedId ? styles.listRowSelected : styles.listRow
                     }
                     onClick={() => setSelectedId(entry.id)}
+                    onDoubleClick={() => {
+                      setSelectedId(entry.id);
+                      void openInEditor(entry.id);
+                    }}
+                    title="Double-click to edit in the Object Script Editor"
                   >
                     <span
                       style={{
@@ -479,6 +501,20 @@ export function MacroLibraryDialog(props: DialogProps): React.ReactElement | nul
             onClick={() => void addButton()}
           >
             Add Button
+          </button>
+          <button
+            type="button"
+            data-macro-edit-in-editor=""
+            style={disabledIf(styles.btn, editDisabled)}
+            disabled={editDisabled}
+            title={
+              editorAvailable
+                ? "Open this macro in the full Object Script Editor (debugger, run-at-cursor)"
+                : "The Object Script Editor is unavailable: the ScriptableObjects extension is not loaded."
+            }
+            onClick={() => loaded && void openInEditor(loaded.id)}
+          >
+            Edit in Object Script Editor
           </button>
           <button
             type="button"

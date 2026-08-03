@@ -57,7 +57,8 @@ import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import { installObjectScriptDebugBridge, reloadPersistedBreakpoints } from "./lib/debugger";
 import type { DialogProps } from "@api/uiTypes";
-import { openObjectScriptEditor } from "./lib/openObjectScriptWindow";
+import { openObjectScriptEditor, openMacroInEditor } from "./lib/openObjectScriptWindow";
+import { registerScriptEditorProvider } from "@api/scriptEditorService";
 import { installScriptDraftReview } from "./lib/scriptDrafts";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import {
@@ -824,6 +825,18 @@ async function activate(context: ExtensionContext): Promise<void> {
   // host resolves against its own mount table, and it can only ask for what the
   // host already exposes to trusted UI.
   cleanupFunctions.push(installObjectScriptDebugBridge());
+
+  // ---- Editor-open seam (@api/scriptEditorService) ----
+  // The Macro Recorder sends the user here to edit a recorded macro ("double-
+  // click a macro", "Edit in Object Script Editor") WITHOUT importing this
+  // extension's internals. We are the only place that can drive the editor
+  // window, so we register the provider; the seam throws for the Macro Recorder
+  // to surface if this extension is disabled, never a menu action that no-ops.
+  cleanupFunctions.push(
+    registerScriptEditorProvider({
+      openMacroInEditor: (macroId: string) => openMacroInEditor(macroId),
+    }),
+  );
 
   // ---- AI script-draft review queue (MCP `draft_object_script`) ----
   // The backend emits `mcp:script-draft` and tells the agent the draft "is

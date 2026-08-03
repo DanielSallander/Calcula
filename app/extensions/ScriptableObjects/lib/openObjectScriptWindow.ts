@@ -4,8 +4,14 @@
 //          reuses it if already open.
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { emitOpenWithScript, emitOpenWithDraft } from "./crossWindowEvents";
+import {
+  emitOpenWithScript,
+  emitOpenWithDraft,
+  emitOpenWithModuleMacro,
+  onEditorReady,
+} from "./crossWindowEvents";
 import type { ScriptDraft } from "./crossWindowEvents";
+import { getWorkbookScript } from "@api/workbookScripts";
 
 // ============================================================================
 // State
@@ -36,6 +42,31 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
     }
   }
 
+  // Deliver EXACTLY ONCE, whichever trigger fires first: the editor announcing
+  // its listeners are live (the deterministic path), or a timer fallback (so a
+  // window that never emits READY — an old build, a failed listen — still gets
+  // its payload rather than opening blank).
+  let delivered = false;
+  let unlistenReady: (() => void) | null = null;
+  const deliverOnce = (): void => {
+    if (delivered) return;
+    delivered = true;
+    if (unlistenReady) {
+      unlistenReady();
+      unlistenReady = null;
+    }
+    void deliver();
+  };
+
+  // Register the READY listener BEFORE creating the window, so the signal cannot
+  // race ahead of us. A cold editor whose React tree mounts well after any fixed
+  // timer used to LOSE the open event and show an empty editor; waiting for its
+  // own "ready" removes the guesswork.
+  void onEditorReady(() => deliverOnce()).then((fn) => {
+    if (delivered) fn();
+    else unlistenReady = fn;
+  });
+
   // Create new window
   editorWindow = new WebviewWindow(WINDOW_LABEL, {
     url: "/objectScript.html",
@@ -48,21 +79,27 @@ async function withEditorWindow(deliver: () => Promise<void>): Promise<void> {
     center: true,
   });
 
-  // Deliver once the window has created and React has mounted
+  // Fallback only: a generous window for the editor to boot and announce itself.
   editorWindow.once("tauri://created", () => {
-    setTimeout(() => {
-      void deliver();
-    }, 600);
+    setTimeout(() => deliverOnce(), 4000);
   });
 
   editorWindow.once("tauri://error", (e) => {
     console.error("[ObjectScriptEditor] Failed to create editor window:", e);
     editorWindow = null;
+    if (unlistenReady) {
+      unlistenReady();
+      unlistenReady = null;
+    }
   });
 
   // Clean up reference when window is destroyed
   editorWindow.once("tauri://destroyed", () => {
     editorWindow = null;
+    if (unlistenReady) {
+      unlistenReady();
+      unlistenReady = null;
+    }
   });
 }
 
@@ -85,6 +122,32 @@ export async function openObjectScriptEditor(scriptId?: string): Promise<void> {
  */
 export async function openObjectScriptEditorWithDraft(draft: ScriptDraft): Promise<void> {
   await withEditorWindow(() => emitOpenWithDraft(draft));
+}
+
+/**
+ * Open the Object Script Editor on a recorded MACRO (a module script).
+ *
+ * This is the implementation behind the `@api/scriptEditorService`
+ * `ScriptEditorProvider.openMacroInEditor` contract — the seam the Macro
+ * Recorder reaches through so it never imports this window's internals. The
+ * macro's authoritative record is read here (so a deleted macro fails loudly,
+ * before a window is even focused) and delivered on its own cross-window channel;
+ * the editor re-reads it too and edits it under the module `save_script` store,
+ * NOT the object-script store.
+ */
+export async function openMacroInEditor(macroId: string): Promise<void> {
+  // Read the authoritative record up front. A macro deleted out from under the
+  // caller must throw here — a caller (a menu action) turns that into a message,
+  // never a window that opens on nothing.
+  const macro = await getWorkbookScript(macroId);
+  await withEditorWindow(() =>
+    emitOpenWithModuleMacro({
+      macroId: macro.id,
+      name: macro.name,
+      source: macro.source,
+      description: macro.description ?? null,
+    }),
+  );
 }
 
 /**

@@ -6,7 +6,11 @@
 //          anything gets a message that names the cause and a place to go.
 
 import { describe, it, expect } from "vitest";
-import { diagnoseButtonClick } from "../lib/buttonClickDiagnosis";
+import {
+  diagnoseButtonClick,
+  macroRunnerUnavailableDiagnosis,
+  orphanMacroDiagnosis,
+} from "../lib/buttonClickDiagnosis";
 
 const script = { id: "macro-control-0-1-1", name: "Macro1426" };
 
@@ -70,6 +74,25 @@ describe("diagnoseButtonClick", () => {
     expect(d.reason).toBe("noClickHandler");
     expect(d.message).toContain("Macro1426");
     expect(d.message).toMatch(/onClick/);
+  });
+
+  it("names the missing macro when a linked button is orphaned", () => {
+    const d = orphanMacroDiagnosis("macro-do-thing");
+    expect(d.reason).toBe("orphanMacro");
+    expect(d.variant).toBe("error");
+    // The exact failure this feature fought: never a silent no-op.
+    expect(d.message).toContain("macro-do-thing");
+    expect(d.message).toMatch(/no longer exists/i);
+    expect(d.message).toMatch(/Macros/);
+  });
+
+  it("distinguishes 'nothing can run a macro' from an orphaned link", () => {
+    const d = macroRunnerUnavailableDiagnosis(
+      'This button links the recorded macro "macro-x", but the Macro Recorder extension is not loaded.',
+    );
+    expect(d.reason).toBe("orphanMacro");
+    expect(d.variant).toBe("error");
+    expect(d.message).toMatch(/Macro Recorder/);
   });
 
   it("never returns an empty message for a state it reports", () => {

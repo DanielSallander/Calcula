@@ -19,10 +19,45 @@
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import { getExtensionData, setExtensionData } from "@api/extensionData";
-import type { DebugSessionState, DebugTrigger } from "@api/scriptHost/host";
+import type { DebugSessionState, DebugTrigger, HostMountDefinition } from "@api/scriptHost/host";
 import type { DebugAction } from "@api/scriptHost/protocol";
+import {
+  enclosingTopLevelFunction,
+  topLevelFunctions,
+} from "@api/scriptHost/worker/debugInstrument";
+import { SCRIPT_API_VERSION } from "@api/scriptableObjects";
 
 export type { DebugSessionState, DebugTrigger, DebugAction };
+
+/**
+ * The synthetic mount a script with NO standing mount is debugged under — a
+ * recorded macro (a module script) the user opened in the editor. Defaults land
+ * on the byte-for-byte unlocked `workbook` object-script shape `runMacroModule`
+ * uses, so `context.api` is non-null and the body runs exactly as it does on a
+ * button click.
+ */
+export interface MacroDebugMount {
+  /** The macro's module id — the debug session and breakpoints key on this. */
+  scriptId: string;
+  name: string;
+  source: string;
+  objectType?: string;
+  instanceId?: string | null;
+  accessLevel?: string;
+}
+
+function toMountDefinition(m: MacroDebugMount): HostMountDefinition {
+  return {
+    id: m.scriptId,
+    name: m.name,
+    objectType: m.objectType ?? "workbook",
+    instanceId: m.instanceId ?? null,
+    source: m.source,
+    accessLevel: m.accessLevel ?? "unlocked",
+    provenance: "local",
+    apiVersion: SCRIPT_API_VERSION,
+  };
+}
 
 // ============================================================================
 // Types
@@ -47,7 +82,14 @@ const BRIDGE_COMMAND_EVENT = "objscript:debug-command";
 const BRIDGE_STATE_EVENT = "objscript:debug-state-broadcast";
 
 type BridgeCommand =
-  | { command: "start"; scriptId: string; lines: number[]; pauseOnEntry: boolean }
+  | {
+      command: "start";
+      scriptId: string;
+      lines: number[];
+      pauseOnEntry: boolean;
+      /** Present when the script has no standing mount (a recorded macro). */
+      mount?: MacroDebugMount | null;
+    }
   | { command: "stop"; scriptId: string }
   | { command: "control"; scriptId: string; action: DebugAction }
   | { command: "breakpoints"; scriptId: string; lines: number[] }
@@ -333,7 +375,7 @@ export function subscribeRemoteDebugState(): () => void {
  */
 export async function startDebugSession(
   scriptId: string,
-  options: { pauseOnEntry?: boolean } = {},
+  options: { pauseOnEntry?: boolean; mountIfAbsent?: MacroDebugMount } = {},
 ): Promise<void> {
   const lines = getBreakpointLines(scriptId);
   if (transport === "remote") {
@@ -342,11 +384,16 @@ export async function startDebugSession(
       scriptId,
       lines,
       pauseOnEntry: options.pauseOnEntry === true,
+      mount: options.mountIfAbsent ?? null,
     });
     return;
   }
   const host = await hostApi();
-  await host.hostStartDebugSession(scriptId, lines, options);
+  if (options.mountIfAbsent && !host.hostIsMounted(scriptId)) {
+    await host.hostStartMacroDebugSession(toMountDefinition(options.mountIfAbsent), lines, options);
+  } else {
+    await host.hostStartDebugSession(scriptId, lines, options);
+  }
   applySessionState(scriptId, host.getDebugSession(scriptId));
 }
 
@@ -387,6 +434,106 @@ export async function fireDebugTrigger(scriptId: string, triggerId: string): Pro
   const host = await hostApi();
   await host.hostDebugFireTrigger(scriptId, triggerId);
   applySessionState(scriptId, host.getDebugSession(scriptId));
+}
+
+// ============================================================================
+// Run-at-cursor (VBA F5)
+// ============================================================================
+
+/** The outcome of a run-at-cursor request — never a silent no-op. */
+export type RunAtCursorOutcome =
+  | { status: "ran"; functionName: string }
+  | { status: "noFunction"; message: string }
+  | { status: "badArity"; functionName: string; message: string };
+
+/**
+ * Resolve the function the cursor is in, per the VBA-F5 rule:
+ *   1. the top-level function whose body encloses `line` (if it is not `setup`);
+ *   2. otherwise — cursor in `setup`, in a header comment or on a blank line —
+ *      the SOLE non-`setup` top-level function, if there is exactly one (the
+ *      recorded-macro shape). Zero or several is ambiguous: no guess.
+ */
+function resolveRunTarget(
+  source: string,
+  line: number,
+): ReturnType<typeof enclosingTopLevelFunction> {
+  const enclosing = enclosingTopLevelFunction(source, line);
+  if (enclosing && enclosing.name !== "setup") return enclosing;
+  const nonSetup = topLevelFunctions(source).filter((f) => f.name !== "setup");
+  return nonSetup.length === 1 ? nonSetup[0] : null;
+}
+
+/**
+ * Wait until a debug session for `scriptId` has left "starting" (the remote
+ * transport returns from `startDebugSession` before the main window has actually
+ * remounted, so firing immediately could race the run-target registration).
+ * Resolves early on any settled/absent state, and on a timeout backstop.
+ */
+async function waitForDebugSettled(scriptId: string, timeoutMs = 8000): Promise<void> {
+  // Local transport: startDebugSession already awaited the mount before it
+  // returned, so the session (and its run-targets) are settled. Only the remote
+  // bridge returns before the main window has finished remounting.
+  if (transport === "local") return;
+  const existing = getDebugSession(scriptId);
+  if (existing && existing.status !== "starting") return;
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      off();
+      clearTimeout(timer);
+      resolve();
+    };
+    const off = onDebugStateChange((detail) => {
+      if (detail.scriptId !== scriptId) return;
+      if (!detail.session || detail.session.status !== "starting") finish();
+    });
+    const timer = setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * Run the top-level function the cursor is in — the VBA F5 gesture.
+ *
+ * Ensures a debug mount exists (starting a session, mounting `mountIfAbsent`
+ * first for a macro that has no standing mount), then fires the enclosing
+ * function through the SAME `hostCallExposed` door the Fire buttons use. It
+ * NEVER guesses a wrong-arity call and never silently does nothing: an
+ * unresolvable cursor and an un-runnable arity each return a message the caller
+ * shows the user.
+ */
+export async function runAtCursor(
+  scriptId: string,
+  source: string,
+  line: number,
+  mountIfAbsent?: MacroDebugMount,
+): Promise<RunAtCursorOutcome> {
+  const target = resolveRunTarget(source, line);
+  if (!target) {
+    return {
+      status: "noFunction",
+      message:
+        "Put the cursor inside a top-level function to run it. This script has no single " +
+        "function to fall back to (either none, or more than one besides setup).",
+    };
+  }
+  if (target.arity > 1) {
+    return {
+      status: "badArity",
+      functionName: target.name,
+      message:
+        `"${target.name}" takes ${target.arity} arguments. Run can only start a function that ` +
+        "takes no arguments or a single `api` argument — call it from setup() instead.",
+    };
+  }
+
+  if (!getDebugSession(scriptId)) {
+    await startDebugSession(scriptId, { mountIfAbsent });
+    await waitForDebugSettled(scriptId);
+  }
+  await fireDebugTrigger(scriptId, `method:${target.name}`);
+  return { status: "ran", functionName: target.name };
 }
 
 async function sendBreakpoints(scriptId: string, lines: number[]): Promise<void> {
@@ -434,9 +581,17 @@ export function installObjectScriptDebugBridge(): () => void {
       try {
         switch (cmd.command) {
           case "start":
-            await host.hostStartDebugSession(cmd.scriptId, cmd.lines ?? [], {
-              pauseOnEntry: cmd.pauseOnEntry === true,
-            });
+            if (cmd.mount && !host.hostIsMounted(cmd.scriptId)) {
+              await host.hostStartMacroDebugSession(
+                toMountDefinition(cmd.mount),
+                cmd.lines ?? [],
+                { pauseOnEntry: cmd.pauseOnEntry === true },
+              );
+            } else {
+              await host.hostStartDebugSession(cmd.scriptId, cmd.lines ?? [], {
+                pauseOnEntry: cmd.pauseOnEntry === true,
+              });
+            }
             break;
           case "stop":
             await host.hostStopDebugSession(cmd.scriptId);

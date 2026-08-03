@@ -938,3 +938,158 @@ function countLines(s: string): number {
   for (let i = 0; i < s.length; i++) if (s[i] === "\n") n++;
   return n;
 }
+
+// ============================================================================
+// Top-level function inventory (run-at-cursor / VBA F5)
+// ============================================================================
+
+/**
+ * One function DECLARED at the top level of a script's source — the unit
+ * run-at-cursor runs. `setup` is included here (it is a top-level function like
+ * any other); callers that want run-targets filter it out, because it is the
+ * entry point the mount already calls, not a thing the user asks to run.
+ */
+export interface TopLevelFunction {
+  /** Declared name (`function <name>`). */
+  name: string;
+  /**
+   * Best-effort parameter count from the source. Advisory only — the worker
+   * thunk binds arguments by the live `fn.length`, which is authoritative. The
+   * editor uses this to pre-warn on an un-runnable arity without a round-trip.
+   */
+  arity: number;
+  isAsync: boolean;
+  /** 1-based line of the `function` keyword. */
+  startLine: number;
+  /** 1-based line of the body's closing brace. */
+  endLine: number;
+}
+
+/** Whether a preceding token lets a `function` here begin a DECLARATION (not an expression). */
+function isDeclarationAnchor(tok: Tok | undefined): boolean {
+  if (!tok) return true; // start of source
+  return tok.kind === "punc" && (tok.text === ";" || tok.text === "{" || tok.text === "}");
+}
+
+/** Forward index of the `)` matching the `(` at `openIdx`, or -1. */
+function matchParenForward(toks: Tok[], openIdx: number): number {
+  let depth = 0;
+  for (let i = openIdx; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind !== "punc") continue;
+    if (t.text === "(") depth++;
+    else if (t.text === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Forward index of the `}` matching the `{` at `openIdx` (counts `${` as a brace open), or -1. */
+function matchBraceForward(toks: Tok[], openIdx: number): number {
+  let depth = 0;
+  for (let i = openIdx; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind !== "punc") continue;
+    if (t.text === "{" || t.text === "${") depth++;
+    else if (t.text === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Count parameters in the range `(openIdx .. closeIdx)` — top-level commas + 1. */
+function countParams(toks: Tok[], openIdx: number, closeIdx: number): number {
+  if (closeIdx <= openIdx + 1) return 0; // `()`
+  let commas = 0;
+  let depth = 0;
+  for (let i = openIdx + 1; i < closeIdx; i++) {
+    const t = toks[i];
+    if (t.kind !== "punc") continue;
+    if (t.text === "(" || t.text === "[" || t.text === "{") depth++;
+    else if (t.text === ")" || t.text === "]" || t.text === "}") depth--;
+    else if (t.text === "," && depth === 0) commas++;
+  }
+  return commas + 1;
+}
+
+/**
+ * Every function DECLARED at the top level of `source`.
+ *
+ * Only true declarations at brace depth 0 in statement position are returned —
+ * function *expressions* (`const f = function(){}`, callbacks) live at depth > 0
+ * or after a non-statement token and are deliberately excluded, because they are
+ * not things a user can "run" on their own. Conservative by design: when the
+ * scan is unsure it omits, so a returned entry is always a real run-target.
+ *
+ * Pure (no worker globals): safe to call from the editor to map a cursor line to
+ * the function that encloses it.
+ */
+export function topLevelFunctions(source: string): TopLevelFunction[] {
+  const { toks, error } = tokenize(source);
+  if (error) return [];
+  const out: TopLevelFunction[] = [];
+  let depth = 0; // `{` / `${` open, `}` close
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind === "punc") {
+      if (t.text === "{" || t.text === "${") depth++;
+      else if (t.text === "}") depth--;
+      continue;
+    }
+    if (depth !== 0) continue;
+    if (t.kind !== "word" || t.text !== "function") continue;
+
+    // `function` or `async function`, in statement position.
+    const prev = toks[i - 1];
+    let anchor = prev;
+    let isAsync = false;
+    if (prev && prev.kind === "word" && prev.text === "async") {
+      isAsync = true;
+      anchor = toks[i - 2];
+    }
+    if (!isDeclarationAnchor(anchor)) continue;
+
+    // Optional generator star, then the name.
+    let j = i + 1;
+    if (toks[j] && toks[j].kind === "punc" && toks[j].text === "*") j++;
+    const nameTok = toks[j];
+    if (!nameTok || nameTok.kind !== "word") continue; // anonymous — not a run-target
+    const open = toks[j + 1];
+    if (!open || open.kind !== "punc" || open.text !== "(") continue;
+    const close = matchParenForward(toks, j + 1);
+    if (close < 0) continue;
+    const brace = toks[close + 1];
+    if (!brace || brace.kind !== "punc" || brace.text !== "{") continue;
+    const closeBrace = matchBraceForward(toks, close + 1);
+    const endLine = closeBrace >= 0 ? toks[closeBrace].line : toks[toks.length - 1].line;
+
+    out.push({
+      name: nameTok.text,
+      arity: countParams(toks, j + 1, close),
+      isAsync,
+      startLine: t.line,
+      endLine,
+    });
+    // No manual skip: the loop keeps walking, and the `{`/`}` counting takes the
+    // scan to depth > 0 through this body, so nested functions are excluded.
+  }
+  return out;
+}
+
+/**
+ * The top-level function whose body encloses `line` (1-based), or null.
+ *
+ * Top-level declarations do not nest, so at most one contains the line; if the
+ * cursor sits between declarations (blank line, header comment) the answer is
+ * null and the caller falls back per its own rule.
+ */
+export function enclosingTopLevelFunction(source: string, line: number): TopLevelFunction | null {
+  for (const fn of topLevelFunctions(source)) {
+    if (line >= fn.startLine && line <= fn.endLine) return fn;
+  }
+  return null;
+}

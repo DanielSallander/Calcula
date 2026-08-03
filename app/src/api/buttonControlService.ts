@@ -37,6 +37,17 @@
 // take it from the handle rather than re-deriving the format, because a caller
 // that guesses wrong produces a button and a script that never meet.
 
+/**
+ * The control property that LINKS a button to a recorded macro by its module id.
+ *
+ * A button carrying `macroRef` runs the CURRENT macro of that id on each click,
+ * resolved through @api/macroRunService — no copied body lives on the button.
+ * The name is a shared constant rather than a string literal at each site so the
+ * writer (the Macro Recorder), the reader (Controls' click path) and the backend
+ * queries (deletion warning, publish guard) can never disagree on the key.
+ */
+export const MACRO_REF_PROPERTY = "macroRef";
+
 /** Where a control sits: the anchor cell it is attached to. */
 export interface ButtonControlAnchor {
   sheetIndex: number;
@@ -61,6 +72,17 @@ export interface CreateButtonControlRequest extends ButtonControlAnchor {
    * click, so setting both runs the work twice.
    */
   onSelect?: string;
+  /**
+   * LINK this button to a recorded macro by its module id (`macro-<slug>`).
+   *
+   * When set, the provider writes it as the `macroRef` control property and the
+   * click path resolves+runs the CURRENT macro through @api/macroRunService — no
+   * body is copied onto the button. This is the "link, not copy" model: editing
+   * the macro changes what every linking button runs, with no re-save. Mutually
+   * exclusive with `onSelect` in practice — a macro-linked button has no inline
+   * source of its own.
+   */
+  macroRef?: string;
 }
 
 /** A created button, as the provider actually placed it. */

@@ -2239,6 +2239,32 @@ export type {
 } from "./buttonControlService";
 
 // ============================================================================
+// Macro Run Service (IoC: a button LINKS a macro; this runs it by id)
+// ============================================================================
+
+export {
+  registerMacroRunProvider,
+  hasMacroRunProvider,
+  requireMacroRunProvider,
+  resetMacroRunProvider,
+} from "./macroRunService";
+
+export type { MacroRunOutcome, MacroRunProvider } from "./macroRunService";
+
+// ============================================================================
+// Script Editor Service (IoC: open a macro in the Object Script Editor)
+// ============================================================================
+
+export {
+  registerScriptEditorProvider,
+  hasScriptEditorProvider,
+  requireScriptEditorProvider,
+  resetScriptEditorProvider,
+} from "./scriptEditorService";
+
+export type { ScriptEditorProvider } from "./scriptEditorService";
+
+// ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)
 // ============================================================================
 

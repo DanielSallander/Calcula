@@ -4939,6 +4939,7 @@ pub fn run() {
             controls::set_control_metadata,
             controls::remove_control_metadata,
             controls::get_all_controls,
+            controls::list_controls_referencing_macro,
             controls::resolve_control_properties,
             // Cell-type assignment commands (granular bricks)
             cell_types::set_cell_type,

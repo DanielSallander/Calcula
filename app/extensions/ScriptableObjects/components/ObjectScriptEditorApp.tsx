@@ -22,6 +22,7 @@ import {
   loadAllObjectScripts,
   saveObjectScript,
 } from "@api/objectScriptBackend";
+import { getWorkbookScript, saveWorkbookScript } from "@api/workbookScripts";
 import {
   listTemplates,
   saveTemplate,
@@ -38,7 +39,9 @@ import {
   shiftBreakpoints,
   subscribeRemoteDebugState,
   setRemoteDebugTransport,
+  runAtCursor,
 } from "../lib/debugger";
+import type { MacroDebugMount } from "../lib/debugger";
 import {
   breakpointShift,
   DebugPanel,
@@ -65,8 +68,10 @@ import {
   emitRegisterScript,
   emitToggleAccess,
   emitEditorClosed,
+  emitEditorReady,
   onOpenWithScript,
   onOpenWithDraft,
+  onOpenWithModuleMacro,
   onConsoleOutput,
   onScriptError,
   onScriptsChanged,
@@ -271,6 +276,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const [draftDoc, setDraftDoc] = useState<
     { draft: ScriptDraft; script: ObjectScriptDefinition } | null
   >(null);
+  // A recorded MACRO opened for editing. Unlike a draft it IS a real, saved
+  // record — but in the MODULE store (`save_script`), not the object-script
+  // store — so it needs its own doc-kind: Save routes to `saveWorkbookScript`,
+  // and debug/run mount it transiently under a synthetic unlocked `workbook`
+  // object-script definition. `description` carries the runtime marker verbatim,
+  // so the macro keeps routing correctly after a round-trip through the editor.
+  const [macroDoc, setMacroDoc] = useState<
+    { macroId: string; script: ObjectScriptDefinition; description: string | null } | null
+  >(null);
   // Authoring language for the OPEN script. Stored scripts are always
   // JavaScript (that is the only thing the worker can import), so this always
   // starts at "javascript"; switching to TypeScript is an authoring decision
@@ -325,10 +339,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
+    // The OPEN-channel registrations. The main window holds delivery of the
+    // initial macro/script/draft until this editor says it is ready, and "ready"
+    // means exactly these three listeners are live — so READY is emitted only
+    // after all three `listen()` round-trips have resolved.
+    const openChannelReady: Array<Promise<unknown>> = [];
 
     // Open with specific script — set activeScriptId and reload scripts
     // from backend to ensure we have the latest (including newly created scripts).
-    onOpenWithScript(async (payload) => {
+    const openWithScriptReady = onOpenWithScript(async (payload) => {
       if (cancelled) return;
       if (payload.scriptId) {
         setActiveScriptId(payload.scriptId);
@@ -343,11 +362,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         }
       }
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+    openChannelReady.push(openWithScriptReady);
 
     // An AI-authored draft handed over for review. Nothing here saves, registers
     // or mounts it — it is loaded into the editor as text, under a banner that
     // says so, and only the Save button can make it real.
-    onOpenWithDraft((payload) => {
+    const openWithDraftReady = onOpenWithDraft((payload) => {
       if (cancelled) return;
       const script = draftToScriptDefinition(payload.draft);
       setDraftDoc({ draft: payload.draft, script });
@@ -356,6 +376,55 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setLanguage("javascript");
       setIsDirty(false);
     }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+    openChannelReady.push(openWithDraftReady);
+
+    // A recorded macro (a MODULE script) opened for editing. Re-read the
+    // authoritative record here so the editor always shows the live source, not
+    // a copy that rode the wire; fall back to the preview if the record has
+    // since been deleted, so the window still shows what the caller meant.
+    const openWithMacroReady = onOpenWithModuleMacro((payload) => {
+      if (cancelled) return;
+      void (async () => {
+        let name = payload.name;
+        let source = payload.source;
+        let description = payload.description;
+        try {
+          const record = await getWorkbookScript(payload.macroId);
+          name = record.name;
+          source = record.source;
+          description = record.description ?? null;
+        } catch (e) {
+          console.warn("[ObjectScriptEditorApp] Could not re-read macro; using preview:", e);
+        }
+        if (cancelled) return;
+        const script: ObjectScriptDefinition = {
+          id: payload.macroId,
+          name,
+          objectType: "workbook",
+          instanceId: null,
+          source,
+          accessLevel: "unlocked",
+        };
+        setMacroDoc({ macroId: payload.macroId, script, description });
+        setActiveScriptId(payload.macroId);
+        setSource(source);
+        setLanguage("javascript");
+        setIsDirty(false);
+      })();
+    }).then((fn) => { if (!cancelled) unlisteners.push(fn); else fn(); });
+    openChannelReady.push(openWithMacroReady);
+
+    // The main window waits for this before delivering the initial open payload.
+    // Emitted only once every OPEN listener is registered, so a payload sent in
+    // response cannot arrive before this editor can receive it.
+    void Promise.all(openChannelReady)
+      .then(() => {
+        if (!cancelled) void emitEditorReady();
+      })
+      .catch(() => {
+        /* a failed listen registration surfaces elsewhere; the timer fallback
+           in the main window still delivers so the window is never left blank */
+      });
 
     // Console output forwarded from main window
     onConsoleOutput((payload) => {
@@ -431,8 +500,14 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (draftDoc && draftDoc.script.id === activeScriptId) {
       setSource(draftDoc.script.source);
       setIsDirty(false);
+      return;
     }
-  }, [activeScriptId, scripts, draftDoc]);
+    // Same for a recorded macro: it is not in the object-script list either.
+    if (macroDoc && macroDoc.macroId === activeScriptId) {
+      setSource(macroDoc.script.source);
+      setIsDirty(false);
+    }
+  }, [activeScriptId, scripts, draftDoc, macroDoc]);
 
   // Auto-scroll console
   useEffect(() => {
@@ -443,7 +518,14 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   /** True while the document in front of the author is an unsaved AI draft. */
   const isDraft =
     savedScript === null && draftDoc !== null && draftDoc.script.id === activeScriptId;
-  const activeScript = savedScript ?? (isDraft ? draftDoc!.script : null);
+  /** True while the document in front of the author is a recorded MACRO (module script). */
+  const isMacro =
+    savedScript === null &&
+    !isDraft &&
+    macroDoc !== null &&
+    macroDoc.macroId === activeScriptId;
+  const activeScript =
+    savedScript ?? (isDraft ? draftDoc!.script : isMacro ? macroDoc!.script : null);
   const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
@@ -487,6 +569,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setActiveScriptId(scriptId);
       return;
     }
+    // A MACRO is a real record, but switching away must not silently write the
+    // MODULE store from the object-script auto-save path below (it would create a
+    // spurious object script). Keep the edits in the macro doc — Save is the only
+    // thing that persists them, and coming back shows what was being read.
+    if (isMacro && macroDoc) {
+      setMacroDoc({ ...macroDoc, script: { ...macroDoc.script, source } });
+      setLanguage("javascript");
+      setActiveScriptId(scriptId);
+      return;
+    }
     // Auto-save current. The same gate as the Save button: an auto-save is
     // still a save, and un-runnable text must never reach the store just
     // because the author picked another script from the list.
@@ -502,11 +594,63 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     setLanguage("javascript");
     setActiveScriptId(scriptId);
-  }, [isDirty, isDraft, draftDoc, activeScript, source, reportToConsole]);
+  }, [isDirty, isDraft, draftDoc, isMacro, macroDoc, activeScript, source, reportToConsole]);
+
+  // Save a recorded MACRO back to the MODULE store (`save_script`) — NOT the
+  // object-script store. The macro is the single canonical thing every linking
+  // button runs, so editing it here is reflected on every button with no re-save
+  // of the button. The description marker (runtime=objectScript) is preserved
+  // verbatim so the macro keeps routing correctly. No persistent object script
+  // is mounted: buttons run the macro transiently per click, and debug/run mount
+  // it transiently under the synthetic definition.
+  const handleSaveMacro = useCallback(async () => {
+    if (!activeScript || !macroDoc) return;
+    const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
+    if (!gate.ok) {
+      reportToConsole(gate.detail, activeScript.id);
+      return;
+    }
+    const storedSource = gate.javascript;
+    try {
+      await saveWorkbookScript({
+        id: macroDoc.macroId,
+        name: activeScript.name,
+        description: macroDoc.description,
+        source: storedSource,
+        scope: { type: "workbook" },
+      });
+      setMacroDoc({
+        ...macroDoc,
+        script: { ...macroDoc.script, source: storedSource },
+      });
+      setIsDirty(false);
+      if (gate.transformed) {
+        setSource(storedSource);
+        setLanguage("javascript");
+        reportToConsole(
+          "TypeScript compiled to JavaScript. The stored macro is the JavaScript now shown.",
+          macroDoc.macroId,
+          "info",
+        );
+      }
+      reportToConsole(
+        `Macro "${activeScript.name}" saved. Every button that links it runs this version now.`,
+        macroDoc.macroId,
+        "info",
+      );
+    } catch (e) {
+      reportToConsole(`Failed to save macro: ${e}`, macroDoc.macroId, "error");
+    }
+  }, [activeScript, macroDoc, source, reportToConsole]);
 
   // Save & Apply
   const handleSave = useCallback(async () => {
     if (!activeScript) return;
+    // A macro routes to the MODULE store, never the object-script store.
+    if (isMacro) {
+      await handleSaveMacro();
+      return;
+    }
 
     // THE GATE. Compile (TypeScript in, JavaScript out; JavaScript passes
     // through byte for byte) and parse the result in a scratch worker —
@@ -572,7 +716,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       ]);
       setShowConsole(true);
     }
-  }, [activeScript, isDraft, source, reportToConsole]);
+  }, [activeScript, isDraft, isMacro, handleSaveMacro, source, reportToConsole]);
 
   // Toggle access level. The backend is authoritative: distributed scripts
   // cannot be escalated, so the local state and the cross-window event are
@@ -580,6 +724,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // would still mount with the unlocked API for the session.
   const handleToggleAccess = useCallback(async () => {
     if (!activeScript) return;
+    // A macro is always run at the unlocked tier (that is the only tier where
+    // `context.api` is non-null). There is no per-tier flag in the module store,
+    // and routing this through the object-script save path would fabricate an
+    // object script. The access control is simply hidden for a macro.
+    if (isMacro) return;
     // A draft has no backend record, so there is nothing to persist yet —
     // and persisting it HERE would write AI-authored code into the workbook
     // behind a button the author pressed to read a tier label. Keep the choice
@@ -624,7 +773,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
     emitToggleAccess(updated).catch(console.error);
     setScripts((prev) => prev.map((s) => s.id === updated.id ? updated : s));
-  }, [activeScript, isDraft, draftDoc]);
+  }, [activeScript, isDraft, isMacro, draftDoc]);
 
   // Add new primitive script
   const handleAddScript = useCallback(async (objectType: ScriptableObjectType) => {
@@ -698,6 +847,46 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (ed) applyDebugDecorations(ed, debug.decorations);
   }, [debug.decorations, applyDebugDecorations]);
 
+  // The synthetic transient mount a macro is debugged/run under — the unlocked
+  // `workbook` object-script shape, carrying the CURRENT (saved) buffer so Run
+  // reflects what the author sees. undefined for an ordinary object script,
+  // which is already mounted from its own saved source.
+  const macroMountFor = useCallback((): MacroDebugMount | undefined => {
+    if (!isMacro || !macroDoc) return undefined;
+    return {
+      scriptId: macroDoc.macroId,
+      name: macroDoc.script.name,
+      source,
+      objectType: "workbook",
+      instanceId: null,
+      accessLevel: "unlocked",
+    };
+  }, [isMacro, macroDoc, source]);
+
+  // Run-at-cursor (VBA F5): run the top-level function the cursor is in, through
+  // the same fire/exposed-method door the Fire buttons use. Never a wrong-arity
+  // call and never a silent no-op — an unresolvable cursor speaks in the console.
+  const runFromCursor = useCallback(async () => {
+    const ed = editorRef.current;
+    if (!ed || !activeScript || isDraft || isReadOnly) return;
+    if (isDirty) {
+      reportToConsole(
+        "Save first — Run uses the saved source so a breakpoint lands where you see it.",
+        activeScript.id,
+      );
+      return;
+    }
+    const line = ed.getPosition()?.lineNumber ?? 1;
+    const outcome = await runAtCursor(activeScript.id, source, line, macroMountFor());
+    if (outcome.status === "ran") {
+      reportToConsole(`Running ${outcome.functionName}()…`, activeScript.id, "info");
+    } else {
+      reportToConsole(outcome.message, activeScript.id);
+    }
+  }, [activeScript, isDraft, isReadOnly, isDirty, source, macroMountFor, reportToConsole]);
+  const runFromCursorRef = useRef(runFromCursor);
+  runFromCursorRef.current = runFromCursor;
+
   // A debugger that stops off-screen looks exactly like one that did not stop.
   const pausedLine = debug.session?.paused?.line;
   useEffect(() => {
@@ -725,10 +914,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       run: () => handleSave(),
     });
     ed.addAction({
-      id: "objectScript.debug.continue",
-      label: "Debug: Continue",
+      // VBA F5: when paused, F5 CONTINUES; otherwise it RUNS the function the
+      // cursor is in. One key, the mental model VBA users already have.
+      id: "objectScript.debug.runOrContinue",
+      label: "Run / Continue (F5)",
       keybindings: [monaco.KeyCode.F5],
-      run: () => debugRef.current.send("continue"),
+      run: () => {
+        if (debugRef.current.isPaused) debugRef.current.send("continue");
+        else void runFromCursorRef.current();
+      },
     });
     ed.addAction({
       id: "objectScript.debug.stepOver",
@@ -869,10 +1063,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           value={activeScriptId ?? ""}
           onChange={(e) => { void handleSelectScript(e.target.value); }}
         >
-          {scripts.length === 0 && !draftDoc && <option value="">No scripts</option>}
+          {scripts.length === 0 && !draftDoc && !macroDoc && <option value="">No scripts</option>}
           {draftDoc && (
             <option value={draftDoc.script.id}>
               AI DRAFT — {draftDoc.script.name} ({draftDoc.script.objectType})
+            </option>
+          )}
+          {macroDoc && (
+            <option value={macroDoc.macroId}>
+              MACRO — {macroDoc.script.name}
             </option>
           )}
           {scripts.map((s) => (
@@ -928,7 +1127,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         {/* Templates are auto-applied to newly created components, so an
             AI draft must become a script the user approved BEFORE it can be
             stamped into one. Save it first. */}
-        {activeScript && !isDraft && (
+        {activeScript && !isDraft && !isMacro && (
           <button className="ose-btn" onClick={handleSaveAsTemplate} title="Save as reusable template">
             <IconTemplate /> Template
           </button>
@@ -951,11 +1150,17 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           </button>
         )}
 
-        {activeScript && (
+        {activeScript && !isMacro && (
           <button className="ose-btn" onClick={handleToggleAccess}
             title={`Access level: ${activeScript.accessLevel}. Click to toggle.`}>
             {activeScript.accessLevel === "restricted" ? <><IconLock /> Restricted</> : <><IconUnlock /> Unlocked</>}
           </button>
+        )}
+        {activeScript && isMacro && (
+          <span className="ose-btn" style={{ cursor: "default", opacity: 0.85 }}
+            title="A recorded macro always runs at the unlocked tier (where context.api is available).">
+            <IconUnlock /> Macro
+          </span>
         )}
 
         <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
@@ -980,7 +1185,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             and offering "run it" next to unreviewed AI code would be the one
             control this window must not have. */}
         {activeScript && !isDraft && (
-          <DebugToolbar state={debug} disabled={isDirty} buttonClassName="ose-btn" />
+          <DebugToolbar
+            state={debug}
+            disabled={isDirty}
+            buttonClassName="ose-btn"
+            onRun={() => void runFromCursor()}
+            runDisabled={isDirty || isReadOnly}
+            runDisabledTitle={
+              isReadOnly
+                ? "Distributed scripts are read-only and cannot be run from here."
+                : "Save first — Run uses the saved source so a breakpoint lands where you see it."
+            }
+          />
         )}
 
         {activeScript && !isDraft && breakpointLines.length > 0 && !debug.session && (
@@ -1005,10 +1221,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               ? "Distributed scripts are read-only"
               : isDraft
                 ? "Save this AI draft as a real object script and mount it (Ctrl+S)"
-                : "Save and apply (Ctrl+S)"
+                : isMacro
+                  ? "Save the macro back to the workbook (Ctrl+S). Every button that links it runs this version."
+                  : "Save and apply (Ctrl+S)"
           }>
           <IconSave />
-          {isReadOnly ? "Read Only" : isDraft ? "Save as Script" : "Save & Apply"}
+          {isReadOnly ? "Read Only" : isDraft ? "Save as Script" : isMacro ? "Save Macro" : "Save & Apply"}
         </button>
       </div>
 

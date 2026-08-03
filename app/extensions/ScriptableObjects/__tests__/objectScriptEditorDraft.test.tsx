@@ -31,6 +31,7 @@ vi.mock("../lib/crossWindowEvents", () => ({
     draftHandler = cb;
     return () => { draftHandler = null; };
   },
+  onOpenWithModuleMacro: async () => () => {},
   onConsoleOutput: async () => () => {},
   onScriptError: async () => () => {},
   onScriptsChanged: async () => () => {},
@@ -78,6 +79,7 @@ vi.mock("../lib/debugger", () => ({
   shiftBreakpoints: () => {},
   subscribeRemoteDebugState: () => () => {},
   setRemoteDebugTransport: () => {},
+  runAtCursor: async () => ({ status: "noFunction", message: "" }),
 }));
 vi.mock("../components/DebugPanel", () => ({
   breakpointShift: () => null,

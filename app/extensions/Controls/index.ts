@@ -19,12 +19,19 @@ import {
   IconDesignMode,
   registerControlStoreService,
 } from "@api";
-import { registerButtonControlProvider } from "@api/buttonControlService";
+import {
+  registerButtonControlProvider,
+  MACRO_REF_PROPERTY,
+} from "@api/buttonControlService";
 import type {
   ButtonControlAnchor,
   ButtonControlHandle,
   CreateButtonControlRequest,
 } from "@api/buttonControlService";
+import {
+  requireMacroRunProvider,
+  hasMacroRunProvider,
+} from "@api/macroRunService";
 import { getActiveSheet } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -119,7 +126,11 @@ import {
   toggleDesignMode,
   onDesignModeChange,
 } from "./lib/designMode";
-import { diagnoseButtonClick } from "./lib/buttonClickDiagnosis";
+import {
+  diagnoseButtonClick,
+  orphanMacroDiagnosis,
+  macroRunnerUnavailableDiagnosis,
+} from "./lib/buttonClickDiagnosis";
 import { setControlMetadata, getControlMetadata, getAllControls, setControlProperty } from "./lib/controlApi";
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
@@ -1287,6 +1298,13 @@ async function createButtonControlAt(
       height: { valueType: "static", value: String(btnHeight) },
       onSelect: { valueType: "static", value: request.onSelect ?? "" },
       tooltip: { valueType: "static", value: request.tooltip ?? "" },
+      // LINK to a recorded macro by id, when asked. A macro-linked button holds
+      // only this 12-byte reference — no copied body — and the run-mode click
+      // path resolves+runs the CURRENT macro through @api/macroRunService. Only
+      // written when present, so ordinary buttons stay free of the property.
+      ...(request.macroRef
+        ? { [MACRO_REF_PROPERTY]: { valueType: "static", value: request.macroRef } }
+        : {}),
     },
   });
 
@@ -2166,6 +2184,23 @@ function announceDesignModeClick(): void {
  * distinction the no-op diagnosis below is built on. Throws on failure rather
  * than logging: the caller turns it into a message the user can read.
  */
+/**
+ * Read the `macroRef` link off a control, or null when it carries none.
+ *
+ * A non-empty value is the module id of the recorded macro this button LINKS —
+ * the sole thing a macro-linked button stores. An empty string is treated as no
+ * link (it is how an ordinary button's absent property would read if ever set).
+ */
+async function readMacroRef(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<string | null> {
+  const metadata = await getControlMetadata(sheetIndex, row, col);
+  const ref = metadata?.properties[MACRO_REF_PROPERTY]?.value;
+  return ref && ref.length > 0 ? ref : null;
+}
+
 async function executeFloatingButtonAction(
   sheetIndex: number,
   row: number,
@@ -2208,6 +2243,38 @@ async function runFloatingButtonClick(
   col: number,
   instanceId: string,
 ): Promise<void> {
+  // THE LINK MODEL, CHECKED FIRST. A button that carries `macroRef` runs the
+  // CURRENT recorded macro of that id through @api/macroRunService — there is no
+  // copied body on the button, and no object script to mount. This branch RETURNS
+  // (it never falls through to the inline/object-script paths below), so a
+  // macro-linked button runs exactly once, and every outcome — including "the
+  // macro is gone" — is voiced, never silent.
+  const macroRef = await readMacroRef(sheetIndex, row, col);
+  if (macroRef) {
+    if (!hasMacroRunProvider()) {
+      // The macro exists (or not) but nothing can run one: the Macro Recorder is
+      // not loaded. Say so with the specific remedy rather than a generic error.
+      const diag = macroRunnerUnavailableDiagnosis(
+        `This button links the recorded macro "${macroRef}", but the Macro Recorder ` +
+          "extension is not loaded, so nothing can run it. Enable it and try again.",
+      );
+      showToast(diag.message, { type: diag.variant });
+      return;
+    }
+    const outcome = await requireMacroRunProvider().runMacroByRef(macroRef);
+    if (outcome.status === "notFound") {
+      const diag = orphanMacroDiagnosis(outcome.macroId);
+      showToast(diag.message, { type: diag.variant });
+    } else if (outcome.status === "failed") {
+      showToast(`"${outcome.name}" failed: ${outcome.message}`, { type: "error" });
+    } else {
+      // The macro ran. It drives the grid through paths Controls does not tally,
+      // so refetch unconditionally — the same reason the inline path refreshes.
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    }
+    return;
+  }
+
   const ranInline = await executeFloatingButtonAction(sheetIndex, row, col);
 
   // Dynamic, like the other ObjectScriptManager use in this file: the script

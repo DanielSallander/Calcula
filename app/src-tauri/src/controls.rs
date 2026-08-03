@@ -274,6 +274,59 @@ pub fn remove_control_metadata(
     controls.remove(&(sheet_index, row, col)).is_some()
 }
 
+/// The `macroRef` control property: the module id of the recorded macro a button
+/// LINKS. A button carrying this runs the CURRENT macro of that id (resolved
+/// front-end through @api/macroRunService) — no copied body lives on the button.
+/// Mirror of MACRO_REF_PROPERTY in app/src/api/buttonControlService.ts.
+pub const MACRO_REF_PROPERTY: &str = "macroRef";
+
+/// A button that links a macro, located for a human-readable deletion warning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroLinkingControl {
+    pub sheet_index: usize,
+    /// The sheet's display name, resolved here so the frontend need not.
+    pub sheet_name: String,
+    pub row: u32,
+    pub col: u32,
+}
+
+/// Every control whose `macroRef` equals `macro_id`, across all sheets.
+///
+/// Backs the delete-a-macro warning: deleting a macro that ≥1 button links must
+/// name those buttons rather than silently orphaning them. The scan lives here
+/// because the backend already holds control metadata for every sheet; the
+/// frontend would otherwise reassemble it from per-sheet lists.
+#[tauri::command]
+pub fn list_controls_referencing_macro(
+    state: State<AppState>,
+    macro_id: String,
+) -> Vec<MacroLinkingControl> {
+    let controls = state.controls.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let mut out: Vec<MacroLinkingControl> = controls
+        .iter()
+        .filter(|(_, meta)| {
+            meta.properties
+                .get(MACRO_REF_PROPERTY)
+                .map(|p| p.value == macro_id)
+                .unwrap_or(false)
+        })
+        .map(|((si, r, c), _)| MacroLinkingControl {
+            sheet_index: *si,
+            sheet_name: sheet_names
+                .get(*si)
+                .cloned()
+                .unwrap_or_else(|| format!("Sheet{}", si + 1)),
+            row: *r,
+            col: *c,
+        })
+        .collect();
+    // Deterministic order (sheet, row, col) so the warning reads consistently.
+    out.sort_by_key(|c| (c.sheet_index, c.row, c.col));
+    out
+}
+
 /// Get all controls for a specific sheet.
 #[tauri::command]
 pub fn get_all_controls(

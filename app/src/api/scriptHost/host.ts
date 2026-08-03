@@ -27,6 +27,7 @@ import {
   PROTOCOL_VERSION,
   RENDER_TIMEOUT_MS,
   METHOD_CALL_TIMEOUT_MS,
+  RUN_TARGET_EXPOSED_PREFIX,
   COALESCE_HOOKS,
   type DebugAction,
   type DebugPauseState,
@@ -746,6 +747,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
 export function hostUnmountScript(scriptId: string): void {
   const mw = mounted.get(scriptId);
   if (!mw) return;
+  transientDebugMounts.delete(scriptId);
   mw.worker.terminate();
   for (const pending of mw.pendingRenderCells.values()) {
     clearTimeout(pending.timer);
@@ -825,6 +827,7 @@ export function hostResetAll(): void {
     pauseOnEntryOnce.delete(scriptId);
     emitDebugState(null, scriptId);
   }
+  transientDebugMounts.clear();
   // Workbook reset = fresh session: forget all capability grants.
   resetAllGrants();
   // ...and every dialog mute / dismissal streak, so the next workbook's scripts
@@ -924,10 +927,10 @@ function post(mw: MountedWorker, msg: H2W): void {
  * waiting in front of a script that will never move.
  */
 export interface DebugTrigger {
-  /** Stable within a mount: "hook:onClick", "method:recalcAll". */
+  /** Stable within a mount: "hook:onClick", "method:recalcAll", "method:doThing". */
   id: string;
   kind: "hook" | "method";
-  /** The hook name or the exposed-method name. */
+  /** The hook name or the (display) exposed-method / run-target name. */
   name: string;
   /** What the user would do in the app to fire this for real. */
   description: string;
@@ -935,6 +938,18 @@ export interface DebugTrigger {
   fireable: boolean;
   /** Why not, when `fireable` is false. */
   reason?: string;
+  /**
+   * True for a RUN-AT-CURSOR run-target — a top-level function auto-exposed on
+   * this debug mount (VBA F5). Distinct from an ordinary exposed method so the
+   * UI can present it as "run this function" rather than an event hook.
+   */
+  runTarget?: boolean;
+  /**
+   * The actual exposed-method name to invoke through `hostCallExposed`. Equal to
+   * `name` for an ordinary method; for a run-target it is the prefixed relay name
+   * (`RUN_TARGET_EXPOSED_PREFIX + name`) while `name` stays the plain function.
+   */
+  invokeName?: string;
 }
 
 /** What the realm last told us it was executing. */
@@ -983,6 +998,14 @@ export interface DebugSessionState {
 }
 
 const debugSessions = new Map<string, DebugSessionState>();
+
+/**
+ * Scripts the DEBUGGER itself mounted (a recorded macro opened in the editor has
+ * no standing mount of its own — it is a module script). Tracked so Stop UNMOUNTS
+ * such a script rather than remounting it clean: there is no production mount to
+ * return it to.
+ */
+const transientDebugMounts = new Set<string>();
 
 /** Broadcast the session so every editor surface can re-render it. */
 function emitDebugState(session: DebugSessionState | null, scriptId: string): void {
@@ -1104,16 +1127,29 @@ function collectDebugTriggers(mw: MountedWorker): DebugTrigger[] {
       ...(blocked ? { reason: blocked } : {}),
     });
   }
+  const seenMethod = new Set<string>();
   for (const method of listExposed()) {
     if (method.ownerScriptId !== id) continue;
     if (method.objectType !== objectType) continue;
     if ((method.instanceId ?? null) !== (instanceId ?? null)) continue;
-    if (method.methodName.startsWith(HOST_ONLY_EXPOSED_PREFIX)) continue;
+    const isRunTarget = method.methodName.startsWith(RUN_TARGET_EXPOSED_PREFIX);
+    // Ordinary host-only relays (shared-library entry points) stay hidden; only
+    // run-targets — the debugger's own VBA-F5 entry points — are surfaced.
+    if (method.methodName.startsWith(HOST_ONLY_EXPOSED_PREFIX) && !isRunTarget) continue;
+    const displayName = isRunTarget
+      ? method.methodName.slice(RUN_TARGET_EXPOSED_PREFIX.length)
+      : method.methodName;
+    if (seenMethod.has(displayName)) continue; // a plain method shadows a same-named run-target
+    seenMethod.add(displayName);
     out.push({
-      id: `method:${method.methodName}`,
+      id: `method:${displayName}`,
       kind: "method",
-      name: method.methodName,
-      description: `a call to ${method.methodName}() — a shortcut, a scheduled job, a formula or another script`,
+      name: displayName,
+      invokeName: method.methodName,
+      ...(isRunTarget ? { runTarget: true } : {}),
+      description: isRunTarget
+        ? `run ${displayName}() from the top — the VBA-F5 "run the function the cursor is in" entry point`
+        : `a call to ${displayName}() — a shortcut, a scheduled job, a formula or another script`,
       fireable: true,
     });
   }
@@ -1229,6 +1265,29 @@ export async function hostStartDebugSession(
 }
 
 /**
+ * Open a debug session on a script that has NO standing mount — a recorded macro
+ * (a module script) the user opened in the Object Script Editor.
+ *
+ * Mounts the supplied synthetic definition (the byte-for-byte unlocked
+ * `workbook` object-script shape `runMacroModule` uses) if it is not already
+ * mounted, remembers that the DEBUGGER owns the mount, then opens the session on
+ * it. On Stop the transient mount is torn down, not remounted (there is nothing
+ * to return it to). If the script is already mounted (a real object script, or a
+ * session already open) this is exactly `hostStartDebugSession`.
+ */
+export async function hostStartMacroDebugSession(
+  definition: HostMountDefinition,
+  breakpoints: number[] = [],
+  options: { pauseOnEntry?: boolean } = {},
+): Promise<DebugSessionState> {
+  if (!mounted.has(definition.id)) {
+    await hostMountScript(definition);
+    transientDebugMounts.add(definition.id);
+  }
+  return hostStartDebugSession(definition.id, breakpoints, options);
+}
+
+/**
  * Fire one of a waiting script's triggers from the debugger.
  *
  * THE POINT: a script whose only entry point is an event is otherwise
@@ -1259,8 +1318,15 @@ export async function hostDebugFireTrigger(scriptId: string, triggerId: string):
     throw new Error(`${trigger.name} cannot be fired from the debugger: ${trigger.reason}.`);
   }
   if (trigger.kind === "method") {
+    // A run-target is invoked under its prefixed relay name (invokeName); an
+    // ordinary method under its own name. invokeName defaults to name.
     await Promise.resolve(
-      hostCallExposed(mw.definition.objectType, mw.definition.instanceId, trigger.name, []),
+      hostCallExposed(
+        mw.definition.objectType,
+        mw.definition.instanceId,
+        trigger.invokeName ?? trigger.name,
+        [],
+      ),
     );
     return;
   }
@@ -1297,7 +1363,16 @@ export async function hostStopDebugSession(scriptId: string): Promise<void> {
   pauseOnEntryOnce.delete(scriptId);
   emitDebugState(null, scriptId);
   if (mw) {
-    await mountWorker(mw.definition);
+    if (transientDebugMounts.has(scriptId)) {
+      // A macro the debugger mounted itself: there is no production mount to
+      // remount, so tear it down entirely instead of relaunching it.
+      transientDebugMounts.delete(scriptId);
+      hostUnmountScript(scriptId);
+    } else {
+      await mountWorker(mw.definition);
+    }
+  } else {
+    transientDebugMounts.delete(scriptId);
   }
 }
 

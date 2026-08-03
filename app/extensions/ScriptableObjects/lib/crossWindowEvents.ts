@@ -23,6 +23,15 @@ export const ObjectScriptEditorEvents = {
    * the backend's process-local draft store.
    */
   OPEN_WITH_DRAFT: "objscript:open-with-draft",
+  /**
+   * Main -> Editor: open a MODULE MACRO (`macro-<slug>`) for editing. Separate
+   * from OPEN_WITH_SCRIPT for the same reason OPEN_WITH_DRAFT is: that channel
+   * resolves an id through `loadAllObjectScripts` (the OBJECT-script store), and
+   * a recorded macro is a MODULE script that store knows nothing about. The
+   * editor fetches the authoritative record itself via `getWorkbookScript(id)`;
+   * the payload carries a light preview so the tab can name it before the fetch.
+   */
+  OPEN_WITH_MODULE_MACRO: "objscript:open-with-module-macro",
   /** Editor -> Main: request to save, register, and mount a script */
   SAVE_AND_APPLY: "objscript:save-and-apply",
   /** Editor -> Main: request to register a new script */
@@ -37,6 +46,18 @@ export const ObjectScriptEditorEvents = {
   SCRIPTS_CHANGED: "objscript:scripts-changed",
   /** Editor -> Main: editor window was closed */
   EDITOR_CLOSED: "objscript:editor-closed",
+  /**
+   * Editor -> Main: the editor window has mounted and REGISTERED its open-event
+   * listeners, so an open payload sent now will be received.
+   *
+   * Without this the main window could only guess when the editor was ready — it
+   * emitted the open event on a fixed timer after `tauri://created`, and a cold
+   * window whose React tree mounted later than the timer simply LOST the event
+   * and showed an empty editor. The main window now waits for this signal (with
+   * the timer only as a fallback) before delivering, so opening a macro/script in
+   * a freshly-created window is deterministic rather than timing-dependent.
+   */
+  EDITOR_READY: "objscript:editor-ready",
 } as const;
 
 // ============================================================================
@@ -72,6 +93,21 @@ export interface ScriptDraft {
 
 export interface OpenWithDraftPayload {
   draft: ScriptDraft;
+}
+
+/**
+ * One recorded macro (a MODULE script) handed to the editor to open. Only the id
+ * is authoritative — the editor re-reads the record with `getWorkbookScript(id)`
+ * so it always edits the live source, never a stale copy on the wire. `name`,
+ * `source` and `description` are a best-effort preview for the tab while the
+ * fetch is in flight (and a fallback if the record has since been deleted).
+ */
+export interface ModuleMacroPayload {
+  /** The macro's module id (`macro-<slug>`). */
+  macroId: string;
+  name: string;
+  source: string;
+  description: string | null;
 }
 
 export interface SaveAndApplyPayload {
@@ -115,6 +151,10 @@ export async function emitOpenWithDraft(draft: ScriptDraft): Promise<void> {
   await emitTauriEvent(ObjectScriptEditorEvents.OPEN_WITH_DRAFT, { draft } satisfies OpenWithDraftPayload);
 }
 
+export async function emitOpenWithModuleMacro(payload: ModuleMacroPayload): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.OPEN_WITH_MODULE_MACRO, payload);
+}
+
 export async function emitSaveAndApply(script: ObjectScriptDefinition): Promise<void> {
   await emitTauriEvent(ObjectScriptEditorEvents.SAVE_AND_APPLY, { script } satisfies SaveAndApplyPayload);
 }
@@ -143,6 +183,11 @@ export async function emitEditorClosed(): Promise<void> {
   await emitTauriEvent(ObjectScriptEditorEvents.EDITOR_CLOSED);
 }
 
+/** Editor -> Main: announce that open-event listeners are registered. */
+export async function emitEditorReady(): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.EDITOR_READY);
+}
+
 // ============================================================================
 // Listen Functions
 // ============================================================================
@@ -157,6 +202,15 @@ export function onOpenWithDraft(
   callback: (payload: OpenWithDraftPayload) => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent<OpenWithDraftPayload>(ObjectScriptEditorEvents.OPEN_WITH_DRAFT, callback);
+}
+
+export function onOpenWithModuleMacro(
+  callback: (payload: ModuleMacroPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<ModuleMacroPayload>(
+    ObjectScriptEditorEvents.OPEN_WITH_MODULE_MACRO,
+    callback,
+  );
 }
 
 export function onSaveAndApply(
@@ -199,4 +253,9 @@ export function onEditorClosed(
   callback: () => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent(ObjectScriptEditorEvents.EDITOR_CLOSED, callback);
+}
+
+/** Main: listen for the editor announcing its listeners are registered. */
+export function onEditorReady(callback: () => void): Promise<UnlistenFn> {
+  return listenTauriEvent(ObjectScriptEditorEvents.EDITOR_READY, callback);
 }

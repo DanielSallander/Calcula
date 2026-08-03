@@ -21,9 +21,43 @@
 
 /** What the click found. `null` = something ran; nothing to say. */
 export interface ButtonClickDiagnosis {
-  reason: "unbound" | "notMounted" | "noClickHandler";
+  reason: "unbound" | "notMounted" | "noClickHandler" | "orphanMacro";
   message: string;
   variant: "warning" | "error";
+}
+
+/**
+ * A click on a button that LINKS a recorded macro whose module is gone.
+ *
+ * The link model (a button carries a `macroRef` id, not a copied body) means the
+ * macro can be deleted out from under the button — locally, or on a subscriber
+ * that received a .calp without it. That is EXPECTED and must be VOICED: a click
+ * on such a button is exactly the silent-dead-button failure this whole feature
+ * has fought, so the wording lives here, in the one tested place, next to the
+ * other click diagnoses.
+ */
+export function orphanMacroDiagnosis(macroId: string): ButtonClickDiagnosis {
+  return {
+    reason: "orphanMacro",
+    variant: "error",
+    message:
+      `This button links the recorded macro "${macroId}", which no longer ` +
+      "exists in this workbook. Re-create it (Developer ▸ Macros…) or " +
+      "delete the button.",
+  };
+}
+
+/**
+ * A click on a macro-linked button when nothing can RUN a macro — the Macro
+ * Recorder extension is not loaded. Distinct from an orphaned link (the macro is
+ * gone) because the remedy is different: enable the extension, don't re-record.
+ */
+export function macroRunnerUnavailableDiagnosis(message: string): ButtonClickDiagnosis {
+  return {
+    reason: "orphanMacro",
+    variant: "error",
+    message,
+  };
 }
 
 /** The facts the diagnosis is derived from, supplied by the caller. */

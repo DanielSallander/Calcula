@@ -376,7 +376,19 @@ export interface DebugToolbarProps {
   disabled?: boolean;
   /** Rendered as the button class (each editor styles its own toolbar). */
   buttonClassName?: string;
+  /**
+   * Run-at-cursor (VBA F5): run the top-level function the cursor is in. When
+   * provided, a primary "Run" button is shown to the LEFT of Debug — the VBA
+   * mental model. Omitted surfaces (the in-window dialog) simply don't show it.
+   */
+  onRun?: () => void;
+  /** Disable the Run button (e.g. unsaved edits) with an explaining title. */
+  runDisabled?: boolean;
+  /** Title for the Run button when disabled. */
+  runDisabledTitle?: string;
 }
+
+const RUN_ICON = "M4 2.5v11l9-5.5-9-5.5z";
 
 /**
  * The step controls. The "paused" badge is deliberately loud and animated: the
@@ -386,9 +398,32 @@ export function DebugToolbar({
   state,
   disabled,
   buttonClassName = "ose-btn",
+  onRun,
+  runDisabled,
+  runDisabledTitle,
 }: DebugToolbarProps): React.ReactElement {
   const { session, isPaused, busy, start, stop, send, breakpointLines } = state;
   const active = !!session && session.status !== "detached";
+
+  // Run-at-cursor. Left of Debug, always available (its own gating aside): F5 in
+  // VBA runs the current Sub, and CONTINUES when paused — the button here is the
+  // "run" half; the F5 key does the paused→continue half in the editor.
+  const runButton = onRun ? (
+    <button
+      className={`${buttonClassName} primary`}
+      onClick={onRun}
+      disabled={disabled || runDisabled}
+      title={
+        runDisabled && runDisabledTitle
+          ? runDisabledTitle
+          : "Run (F5): run the top-level function the cursor is in, exactly as the app would.\n" +
+            "When paused at a breakpoint, F5 continues instead."
+      }
+    >
+      <Glyph d={RUN_ICON} />
+      Run
+    </button>
+  ) : null;
 
   if (!active) {
     // With no breakpoint set there would be nothing to stop at, and `setup`
@@ -396,26 +431,30 @@ export function DebugToolbar({
     // empty gutter means "stop on the first statement".
     const onEntry = breakpointLines.length === 0;
     return (
-      <button
-        className={buttonClassName}
-        onClick={() => start({ pauseOnEntry: onEntry })}
-        disabled={disabled || busy}
-        title={
-          "Start debugging this script.\n" +
-          "The script RESTARTS: it is remounted with step instrumentation, so setup() runs again.\n" +
-          (onEntry
-            ? "No breakpoints are set, so it will stop on the first statement."
-            : `It will stop at your ${breakpointLines.length} breakpoint(s).`)
-        }
-      >
-        <Glyph d={ICONS.bug} />
-        Debug
-      </button>
+      <>
+        {runButton}
+        <button
+          className={buttonClassName}
+          onClick={() => start({ pauseOnEntry: onEntry })}
+          disabled={disabled || busy}
+          title={
+            "Start debugging this script.\n" +
+            "The script RESTARTS: it is remounted with step instrumentation, so setup() runs again.\n" +
+            (onEntry
+              ? "No breakpoints are set, so it will stop on the first statement."
+              : `It will stop at your ${breakpointLines.length} breakpoint(s).`)
+          }
+        >
+          <Glyph d={ICONS.bug} />
+          Debug
+        </button>
+      </>
     );
   }
 
   return (
     <>
+      {runButton}
       <span className={`osd-badge ${session.status}`} title={statusTitle(session)}>
         <span className={`osd-dot${session.status === "paused" ? " pulse" : ""}`} />
         {statusLabel(session)}
@@ -562,7 +601,9 @@ function TriggerList({
   return (
     <div>
       <div style={{ color: "#888", marginBottom: 3 }}>
-        Triggers ({triggers.length}) — what makes this script run
+        Triggers ({triggers.length}) — what makes this script run. A{" "}
+        <span style={{ color: "#6FD08C" }}>Run</span> row is a top-level function (F5 runs the one
+        the cursor is in); a <span style={{ color: "#9CDCFE" }}>Fire</span> row is an event hook.
       </div>
       {triggers.map((t) => (
         <div className="osd-trigger-row" key={t.id}>
@@ -576,11 +617,13 @@ function TriggerList({
             disabled={disabled || !t.fireable}
             title={
               t.fireable
-                ? `Run the ${t.name} handler now, in this debug session, exactly as the app would.`
+                ? t.runTarget
+                  ? `Run ${t.name}() now, in this debug session (the VBA-F5 gesture).`
+                  : `Run the ${t.name} handler now, in this debug session, exactly as the app would.`
                 : `Cannot be fired from the debugger: ${t.reason}.`
             }
           >
-            Fire
+            {t.runTarget ? "Run" : "Fire"}
           </button>
         </div>
       ))}

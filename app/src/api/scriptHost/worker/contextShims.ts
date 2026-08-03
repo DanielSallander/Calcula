@@ -9,7 +9,7 @@
 //          capability shaping here is COSMETIC — enforcement is host-side.
 
 import type { MountSpec, W2H, RpcErrorShape } from "../protocol";
-import { callDeadlineMs, MAX_INFLIGHT_CALLS } from "../protocol";
+import { callDeadlineMs, MAX_INFLIGHT_CALLS, RUN_TARGET_EXPOSED_PREFIX } from "../protocol";
 import type {
   ScriptDialogFormSpec,
   ScriptDialogPromptOptions,
@@ -345,6 +345,42 @@ export function getRenderer(rt: WorkerRuntime, name: string): unknown {
 
 export function getExposedHandler(rt: WorkerRuntime, name: string): ((...args: unknown[]) => unknown) | undefined {
   return rt.exposed.get(name);
+}
+
+/**
+ * Register a RUN-AT-CURSOR run-target (VBA F5), used ONLY on a debug mount.
+ *
+ * A top-level function like `function doThing(api) { ... }` lives in the wrapper
+ * closure and is unreachable from any host message once the module resolves —
+ * exactly the wall `setup` sits behind. This exposes it through the SAME door
+ * `context.expose` uses (`rt.exposed` + a `base.expose` relay), under the
+ * host-only run-target prefix so no script can reach it (`callExposed` refuses
+ * the whole `HOST_ONLY_EXPOSED_PREFIX` namespace; only `hostCallExposed` gets
+ * in). The thunk is ARITY-BOUND against the live `fn.length`, closing over the
+ * live `context`:
+ *   - `fn.length === 0` -> `fn()`
+ *   - `fn.length === 1` -> `fn(context.api)`   (the conventional `fn(api)` macro)
+ *   - `fn.length  >  1` -> a clear throw, never a wrong-arity call.
+ */
+export function registerRunTargetHandler(
+  rt: WorkerRuntime,
+  displayName: string,
+  fn: (...args: unknown[]) => unknown,
+  context: { api?: unknown },
+): void {
+  const exposedName = `${RUN_TARGET_EXPOSED_PREFIX}${displayName}`;
+  const thunk = async (): Promise<unknown> => {
+    if (fn.length === 0) return await fn();
+    if (fn.length === 1) return await fn(context.api);
+    throw new Error(
+      `Run can only start a function that takes no arguments or a single \`api\` argument; ` +
+        `\`${displayName}\` takes ${fn.length} — call it from setup() instead.`,
+    );
+  };
+  rt.exposed.set(exposedName, thunk);
+  // Mirrors context.expose: register the relay host-side so the debugger can
+  // list and invoke it, WITHOUT making it script-callable (host-only prefix).
+  callFire(rt, "base.expose", [exposedName, false]);
 }
 
 function mirror<T>(rt: WorkerRuntime, path: string, fallback: T): T {

@@ -926,10 +926,25 @@ pub fn calp_publish_preview(
     )?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments);
-    // Same check core publish runs, over the same carrier — so the author
-    // sees dangling dropdown references at PREVIEW time, not only after the
-    // artifact is already written.
-    let warnings = calp::publish::dropdown_reference_warnings(&assembly.workbook, &sheet_indices);
+    // Same checks core publish runs, over the same carrier — so the author sees
+    // dangling dropdown references AND macro-linked buttons whose macro is not in
+    // the module set at PREVIEW time, not only after the artifact is written.
+    let mut warnings =
+        calp::publish::dropdown_reference_warnings(&assembly.workbook, &sheet_indices);
+    // Preview carries the default module set (all workbook module scripts), which
+    // is exactly what a default publish ships — so a linked macro is "missing"
+    // only if it genuinely is not among the workbook's modules.
+    let published_module_ids: std::collections::HashSet<String> = assembly
+        .workbook
+        .scripts
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    warnings.extend(calp::publish::macro_reference_warnings(
+        &assembly.workbook,
+        &sheet_indices,
+        &published_module_ids,
+    ));
     let sheet_names = sheet_indices
         .iter()
         .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))

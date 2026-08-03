@@ -107,14 +107,17 @@ export function RecordingIndicator(): React.ReactElement | null {
         onClick={() => {
           // The confirm stays HERE, not in the command: a script calling
           // `macroRecorder.cancel` must not be able to raise a modal.
-          if (
-            window.confirm(
+          //
+          // AWAIT it: under Tauri `window.confirm` returns a Promise<boolean>
+          // (native dialog), so the synchronous `if (window.confirm(...))` tests
+          // a truthy Promise and discards even when the user clicks Cancel.
+          void (async () => {
+            const confirmed = await window.confirm(
               "Discard this recording? Nothing is saved — Stop instead if you want to keep it. " +
                 "The actions already taken stay in the workbook either way.",
-            )
-          ) {
-            run(COMMANDS.CANCEL);
-          }
+            );
+            if (confirmed) run(COMMANDS.CANCEL);
+          })();
         }}
       >
         Discard

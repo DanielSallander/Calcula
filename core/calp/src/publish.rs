@@ -259,6 +259,92 @@ pub fn dropdown_reference_warnings(workbook: &Workbook, sheet_indices: &[usize])
     warnings
 }
 
+/// Bijective base-26 A1 column+row label from 0-based `col`/`row`
+/// (`(0,0) -> "A1"`, `(26,0) -> "AA1"`).
+fn a1_ref(col: u64, row: u64) -> String {
+    let mut n = col + 1;
+    let mut letters = String::new();
+    while n > 0 {
+        let rem = ((n - 1) % 26) as u8;
+        letters.insert(0, (b'A' + rem) as char);
+        n = (n - 1) / 26;
+    }
+    format!("{}{}", letters, row + 1)
+}
+
+/// Publish-time reference guard for macro-LINKED buttons (loud-failure slice).
+///
+/// A button that links a recorded macro carries a `macroRef` control property =
+/// the macro's MODULE-script id. That macro travels by default (all workbook
+/// module scripts publish unless the request narrows the set). But a publisher
+/// who NARROWED `module_scripts` could drop a macro a button still links —
+/// shipping a dead button whose click, on the subscriber, reports the macro
+/// missing. The subscriber is warned loudly at click; this warns the PUBLISHER
+/// loudly at publish, so the gap is caught before it ships: for every published
+/// control carrying a `macroRef` whose id is not in the published module set,
+/// emit a warning naming the button (sheet + A1) and the missing macro.
+///
+/// `published_module_ids` is the id set the publish actually carries. Factored
+/// out (like `dropdown_reference_warnings`) so the app's publish PREVIEW derives
+/// the same warnings without writing an artifact. Controls on unpublished sheets
+/// are ignored; warnings are emitted in (sheet-selection, row, col) order for a
+/// stable read.
+pub fn macro_reference_warnings(
+    workbook: &Workbook,
+    sheet_indices: &[usize],
+    published_module_ids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    // Published sheet id -> display name. Built in the selection's order so the
+    // warning stream reads predictably.
+    let mut published: Vec<(SheetId, &str)> = Vec::new();
+    for &idx in sheet_indices {
+        if let Some(s) = workbook.sheets.get(idx) {
+            published.push((s.id, s.name.as_str()));
+        }
+    }
+
+    let mut warnings: Vec<String> = Vec::new();
+    for (sheet_id, sheet_name) in &published {
+        let Some(sheet_controls) = workbook
+            .controls
+            .iter()
+            .find(|c| &c.sheet_id == sheet_id)
+        else {
+            continue;
+        };
+        let Some(entries) = sheet_controls.controls.as_array() else {
+            continue;
+        };
+        // Gather then sort so the per-sheet order is (row, col), independent of
+        // the artifact's own entry ordering.
+        let mut refs: Vec<(u64, u64, String)> = Vec::new();
+        for entry in entries {
+            let macro_id = entry
+                .get("properties")
+                .and_then(|p| p.get("macroRef"))
+                .and_then(|m| m.get("value"))
+                .and_then(|v| v.as_str());
+            let Some(macro_id) = macro_id else { continue };
+            if macro_id.is_empty() || published_module_ids.contains(macro_id) {
+                continue;
+            }
+            let row = entry.get("row").and_then(|r| r.as_u64()).unwrap_or(0);
+            let col = entry.get("col").and_then(|c| c.as_u64()).unwrap_or(0);
+            refs.push((row, col, macro_id.to_string()));
+        }
+        refs.sort();
+        for (row, col, macro_id) in refs {
+            warnings.push(format!(
+                "Button at {}!{} links the recorded macro \"{}\", but that macro is not in the published module set — subscribers will get a dead button (clicking it reports the macro is missing). Include the macro's module script, or remove the button before publishing.",
+                sheet_name,
+                a1_ref(col, row),
+                macro_id
+            ));
+        }
+    }
+    warnings
+}
+
 /// Whether the request carries any Wave A/B artifact the publish would
 /// actually write: slicers / opted-in comments / scenarios / outlines on the
 /// published sheets, ribbon filters / saved pivot layouts / extension data
@@ -860,7 +946,19 @@ pub fn publish(
     // publish preview via `dropdown_reference_warnings` (which re-derives the
     // artifact's (order, id) ordering, so the warnings match the
     // published_pane_controls written above).
-    let warnings = dropdown_reference_warnings(request.workbook, &request.sheet_indices);
+    let mut warnings = dropdown_reference_warnings(request.workbook, &request.sheet_indices);
+
+    // Loud-failure guard for macro-linked buttons: warn the publisher when a
+    // button links a recorded macro that this publish's (possibly narrowed)
+    // module set does not carry. The published module ids are exactly the ones
+    // written above (override set, or all workbook modules by default).
+    let published_module_ids: std::collections::HashSet<String> =
+        modules_to_publish.iter().map(|s| s.id.clone()).collect();
+    warnings.extend(macro_reference_warnings(
+        request.workbook,
+        &request.sheet_indices,
+        &published_module_ids,
+    ));
 
     // Write object scripts
     if !scripts_to_publish.is_empty() {
@@ -1256,6 +1354,62 @@ mod tests {
         // Out-of-range indices are tolerated (the preview path never
         // validates them; publish does separately).
         assert_eq!(dropdown_reference_warnings(&wb, &[0, 99]).len(), 2);
+    }
+
+    /// One on-grid control payload entry carrying a `macroRef` link.
+    fn macro_button(row: u32, col: u32, macro_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "row": row,
+            "col": col,
+            "controlType": "button",
+            "properties": {
+                "text": { "valueType": "static", "value": "Run" },
+                "macroRef": { "valueType": "static", "value": macro_id },
+            },
+        })
+    }
+
+    #[test]
+    fn macro_reference_warnings_flag_a_button_whose_macro_is_excluded() {
+        let mut wb = make_test_workbook(); // sheets: "Dashboard"(0), "Data"(1)
+        let dashboard_id = wb.sheets[0].id;
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: dashboard_id,
+            controls: serde_json::json!([
+                macro_button(0, 0, "macro-present"),
+                macro_button(2, 27, "macro-missing"), // AB3
+            ]),
+        }];
+
+        // Only "macro-present" ships. The button linking "macro-missing" must
+        // be flagged — loudly, by anchor and macro id.
+        let mut published: std::collections::HashSet<String> = std::collections::HashSet::new();
+        published.insert("macro-present".to_string());
+
+        let warnings = macro_reference_warnings(&wb, &[0], &published);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", warnings);
+        assert!(warnings[0].contains("macro-missing"), "{}", warnings[0]);
+        assert!(warnings[0].contains("Dashboard!AB3"), "{}", warnings[0]);
+        // The present one is never warned about.
+        assert!(!warnings[0].contains("macro-present"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn macro_reference_warnings_are_silent_when_all_linked_macros_ship() {
+        let mut wb = make_test_workbook();
+        let dashboard_id = wb.sheets[0].id;
+        wb.controls = vec![persistence::SavedSheetControls {
+            sheet_id: dashboard_id,
+            controls: serde_json::json!([macro_button(0, 0, "macro-a")]),
+        }];
+        let published: std::collections::HashSet<String> =
+            ["macro-a".to_string()].into_iter().collect();
+        assert!(macro_reference_warnings(&wb, &[0], &published).is_empty());
+
+        // A control on a sheet OUTSIDE the published selection is ignored, even
+        // when its macro is absent (that button isn't shipping either).
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert!(macro_reference_warnings(&wb, &[1], &empty).is_empty());
     }
 
     #[test]

@@ -27,11 +27,7 @@ import {
   resolveAnchorSheetIndex,
   setFinishedSavedModule,
 } from "../lib/flow";
-import {
-  describeMountFailure,
-  designModeHint,
-  saveAsButtonScript,
-} from "../lib/buttonScript";
+import { designModeHint, linkMacroButton } from "../lib/buttonScript";
 import { describeMacroRuntime, saveMacroModule } from "../lib/macroLibrary";
 import { formatA1, parseA1 } from "../lib/a1";
 import type { MacroTarget } from "../lib/types";
@@ -122,61 +118,57 @@ export function RecordedMacroDialog(props: DialogProps): React.ReactElement | nu
 
   const toButton = useCallback(async () => {
     if (!recording) return;
+    // LINK, not copy. A button carries only the canonical macro's id; a click
+    // runs the CURRENT macro through @api/macroRunService. There is no body on
+    // the button to drift from the macro. That means the macro has to EXIST to
+    // be linked — if the auto-save failed there is nothing to point at, so say
+    // so rather than create a button that links a macro that was never stored.
+    if (!recording.saved) {
+      setError(
+        "This recording could not be saved, so there is no macro to link a " +
+          "button to. Copy the source or send it to a notebook cell first.",
+      );
+      return;
+    }
     const cell = parseA1(anchor);
     if (!cell) {
       setError(`"${anchor}" is not a cell reference.`);
       return;
     }
-    // ONE artifact: the object-script wrapper's `setup(context)` already wires
-    // `context.onClick` when the context is a button, so whatever is in the box
-    // — generated or hand-edited — is what gets bound. There is no second,
-    // separately generated "button flavour" to drift from this one.
-    const wrapped =
-      target === "objectScript"
-        ? source
-        : generateMacroSource(recording.actions, {
-            target: "objectScript",
-            wrapper: "objectScript",
-            name: recording.name,
-            decimalSeparator: getCachedLocale()?.decimalSeparator ?? ".",
-            recordedAt: recording.recordedAt,
-          }).source;
+    // Unsaved edits in the box are NOT what the button runs — the button links
+    // the STORED macro. Nudge the user to write them back first so the button
+    // and the code they are reading agree.
+    if (edited !== null) {
+      setError(
+        "You have unsaved edits above. Press \"Update Module\" first — the button " +
+          "links the STORED macro, so it would run the last saved version, not " +
+          "the text shown here.",
+      );
+      return;
+    }
 
     setBusy(true);
     setError(null);
     try {
-      const result = await saveAsButtonScript({
+      await linkMacroButton({
+        macroId: recording.saved.id,
         name: recording.name,
-        source: wrapped,
         sheetIndex: await resolveAnchorSheetIndex(),
         row: cell.row,
         col: cell.col,
       });
-      if (result.mounted) {
-        showToast(
-          `Button created at ${anchor} — click it to replay "${recording.name}".` +
-            designModeHint(),
-          { type: "success" },
-        );
-        onClose();
-        return;
-      }
-      // NOT "it runs after a reload". Nothing checked that, and it is false
-      // whenever the cause was a declined Script Security prompt — a reload
-      // would decline it again. The dialog stays OPEN so the message is read.
-      const message = describeMountFailure(
-        anchor,
-        recording.name,
-        result.mountError ?? "the script host gave no reason.",
+      showToast(
+        `Button created at ${anchor} — click it to replay "${recording.name}".` +
+          designModeHint(),
+        { type: "success" },
       );
-      setError(message);
-      showToast(message, { type: "error", duration: 0 });
+      onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [recording, anchor, target, source, onClose]);
+  }, [recording, anchor, edited, onClose]);
 
   /**
    * Push the edited source back into the module that was auto-saved.

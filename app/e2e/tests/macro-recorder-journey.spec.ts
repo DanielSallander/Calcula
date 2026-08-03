@@ -401,34 +401,51 @@ test.describe("Macro Recorder — record, Run, and click the button", () => {
       });
 
       // ---------------------------------------------------------------
-      await test.step("6. Add Button creates a bound, mounted button", async () => {
+      await test.step("6. Add Button creates a button that LINKS the macro (no copy)", async () => {
         await library.locator("[data-macro-anchor-input]").fill(BUTTON.ref);
         await library.locator("[data-macro-add-button]").click();
 
-        // A mount failure is reported in-dialog; there must not be one.
+        // A failure is reported in-dialog; there must not be one.
         const toast = page
           .locator("[data-toast]")
           .filter({ hasText: new RegExp(`Button created at ${BUTTON.ref}`) });
         await expect(toast).toBeVisible({ timeout: 20_000 });
         await expect(toast).not.toContainText("is NOT running");
 
-        // The script really is registered against the control's instance id.
-        const bound = await page.evaluate(async (id) => {
-          const api: any = await (window as any).__calcImport(
-            new URL("/src/api/index.ts", document.baseURI).href,
-          );
-          const script = api.ObjectScriptManager.getScript("button", id);
-          return {
-            found: !!script,
-            mounted: script ? api.ObjectScriptManager.isScriptMounted(script.id) : false,
-            hasClick: script
-              ? api.mountedScriptHasHook(script.id, "button.onClick")
-              : false,
-          };
-        }, BUTTON_INSTANCE_ID);
-        expect(bound.found).toBe(true);
-        expect(bound.mounted).toBe(true);
-        expect(bound.hasClick).toBe(true);
+        // THE LINK MODEL (the user's decision): the button carries only a
+        // `macroRef` control property = the macro's module id. There is NO
+        // per-button object script and NO copied body — the click path resolves
+        // and runs the CURRENT macro by id. So assert the control holds a
+        // macroRef pointing at a real macro, and that NO object script was bound
+        // to the control's instance id (the old copy-model artifact is gone).
+        const link = await page.evaluate(
+          async (a) => {
+            const tauri = (window as any).__TAURI__;
+            const meta = await tauri.core.invoke("get_control_metadata", {
+              sheetIndex: a.sheet,
+              row: a.row,
+              col: a.col,
+            });
+            const macroRef: string | undefined = meta?.properties?.macroRef?.value;
+            const scripts: Array<{ id: string; name: string }> =
+              await tauri.core.invoke("list_scripts");
+            const target = macroRef ? scripts.find((s) => s.id === macroRef) : undefined;
+
+            const api: any = await (window as any).__calcImport(
+              new URL("/src/api/index.ts", document.baseURI).href,
+            );
+            const copyScript = api.ObjectScriptManager.getScript("button", a.instanceId);
+            return {
+              macroRef: macroRef ?? null,
+              targetName: target?.name ?? null,
+              hasObjectScriptCopy: !!copyScript,
+            };
+          },
+          { sheet: SHEET, row: BUTTON.row, col: BUTTON.col, instanceId: BUTTON_INSTANCE_ID },
+        );
+        expect(link.macroRef).not.toBeNull();
+        expect(link.targetName).toBe(macroName); // links the macro we recorded
+        expect(link.hasObjectScriptCopy).toBe(false); // link, not copy
 
         // Close the library so its backdrop stops covering the grid.
         await library.locator("button").filter({ hasText: /^Close$/ }).first().click();

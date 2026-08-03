@@ -51,7 +51,7 @@ import {
   runWorkbookScript,
   saveWorkbookScript,
 } from "@api";
-import type { ScriptRunResult } from "@api";
+import type { MacroRunOutcome, ScriptRunResult } from "@api";
 import type { MacroTarget } from "./types";
 
 /** Which interpreter a stored module's source was written for. */
@@ -383,4 +383,62 @@ export async function runMacroModule(entry: {
     durationMs: Date.now() - started,
     screenUpdating: true,
   };
+}
+
+/**
+ * Run a macro by its module id — the implementation behind the
+ * @api/macroRunService seam that a macro-LINKED button resolves on each click.
+ *
+ * This is the whole point of "link, not copy": the macro is loaded HERE, at
+ * click time, so a button always runs the macro's CURRENT source with no re-save
+ * of the button. It reuses the identical `runMacroModule` path Developer ▸
+ * Macros… ▸ Run uses — one execution path, one set of guarantees.
+ *
+ * Three outcomes, all explicit, none silent:
+ *   - `notFound`  the id is not in the workbook script store. The button links a
+ *                 macro that was deleted, or a .calp arrived without it. This is
+ *                 the orphan case the whole feature has fought to make loud.
+ *   - `failed`    the macro exists but could not be read or its code threw.
+ *   - `ran`       it completed.
+ */
+export async function runMacroByRef(macroId: string): Promise<MacroRunOutcome> {
+  // Existence check first, so a MISSING macro (orphan link) is distinguished
+  // from a macro that exists but fails to load — get_script cannot tell those
+  // apart (both surface as an error), and the caller voices them differently.
+  const summaries = await listWorkbookScripts();
+  const summary = summaries.find((s) => s.id === macroId);
+  if (!summary) return { status: "notFound", macroId };
+
+  let record: Awaited<ReturnType<typeof getWorkbookScript>>;
+  try {
+    record = await getWorkbookScript(macroId);
+  } catch (e) {
+    // Listed but unreadable: not "gone", so a failure rather than notFound.
+    return {
+      status: "failed",
+      name: summary.name,
+      message: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  let result: ScriptRunResult;
+  try {
+    result = await runMacroModule({
+      id: record.id,
+      name: record.name,
+      source: record.source,
+      description: record.description ?? null,
+    });
+  } catch (e) {
+    return {
+      status: "failed",
+      name: record.name,
+      message: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  if (result.type === "error") {
+    return { status: "failed", name: record.name, message: result.message };
+  }
+  return { status: "ran", name: record.name };
 }

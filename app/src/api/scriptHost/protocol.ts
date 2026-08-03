@@ -8,6 +8,23 @@ import type { CapabilityId } from "./allowlist";
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Name prefix for RUN-AT-CURSOR run-targets (VBA F5).
+ *
+ * On a DEBUG mount the worker auto-exposes every top-level function declaration
+ * under this prefix, so the debugger can invoke the function the cursor is in
+ * through the ordinary exposed-method door (`hostCallExposed`). It is a
+ * SUB-namespace of the broker's `HOST_ONLY_EXPOSED_PREFIX` ("__calcula_host__"):
+ * the script-facing `callExposed` door refuses the whole host-only namespace, so
+ * no script can reach a run-target — only trusted host code (the debugger) can.
+ *
+ * Defined here rather than in `broker.ts` because the WORKER realm (bootstrap.ts
+ * / contextShims.ts) must build the exposed name too, and the worker bundle may
+ * not import host/broker code. A test pins it against `HOST_ONLY_EXPOSED_PREFIX`
+ * so the two can never drift.
+ */
+export const RUN_TARGET_EXPOSED_PREFIX = "__calcula_host__runTarget:";
+
 // ============================================================================
 // Mount
 // ============================================================================
