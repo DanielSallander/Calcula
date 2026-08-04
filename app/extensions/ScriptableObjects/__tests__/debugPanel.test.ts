@@ -13,6 +13,9 @@ function session(partial: Partial<DebugSessionState>): DebugSessionState {
     scriptId: "s1",
     scriptName: "Test",
     status: "running",
+    // The object-script default: the mount called setup. A module macro's
+    // session is the false case, and the tests below name it explicitly.
+    autoInvokeSetup: true,
     breakpoints: [],
     ready: null,
     paused: null,
@@ -115,6 +118,58 @@ describe("the status badge must never claim work is happening", () => {
       paused: { line: 12, reason: "breakpoint", variables: [], callStack: [], waiting: 0 },
     });
     expect(statusLabel(s)).toBe("Paused — line 12");
+  });
+});
+
+// ============================================================================
+// An INERT mount (a module macro) executed NOTHING when the session opened, so
+// the badge must not say "Paused — line N" (which is what the mount-time
+// execution used to produce), must not say "Running", and must not claim
+// "setup() finished" either. It says the script is ready and nothing has run.
+// ============================================================================
+
+describe("the badge after an inert mount", () => {
+  const macroTrigger = {
+    id: "method:monthlyClose",
+    kind: "method" as const,
+    name: "monthlyClose",
+    description: "run monthlyClose() from the top",
+    fireable: true,
+    runTarget: true,
+  };
+
+  it("says nothing has run yet — not Paused, not Running, not Waiting-for-a-trigger", () => {
+    const s = session({
+      status: "waiting",
+      autoInvokeSetup: false,
+      triggers: [macroTrigger],
+    });
+    expect(statusLabel(s)).toBe("Ready — nothing has run yet");
+    expect(statusLabel(s)).not.toMatch(/paused|running/i);
+  });
+
+  it("reverts to the ordinary idle wording once the user HAS run something", () => {
+    const s = session({
+      status: "waiting",
+      autoInvokeSetup: false,
+      triggers: [macroTrigger],
+      lastActivity: { label: "monthlyClose()" },
+    });
+    expect(statusLabel(s)).toBe("Waiting for a trigger");
+  });
+
+  it("says NOTHING TO RUN — not 'setup() failed' — when an inert mount has no run target", () => {
+    const s = session({
+      status: "failed",
+      autoInvokeSetup: false,
+      error: "no top-level function declaration was found",
+    });
+    expect(statusLabel(s)).toBe("Nothing to run");
+  });
+
+  it("leaves the object-script wording alone (the scope guard)", () => {
+    const s = session({ status: "waiting", autoInvokeSetup: true, triggers: [macroTrigger] });
+    expect(statusLabel(s)).toBe("Waiting for a trigger");
   });
 });
 

@@ -67,6 +67,29 @@ describe("registerRunTargetHandler (VBA F5 arity binding)", () => {
     expect(received).toBe(api);
   });
 
+  it("the ENTRY POINT gets the whole context, not context.api", async () => {
+    // `setup` is registered as a run-target only on an INERT debug mount (one
+    // that did not call it). Handing it `context.api` would run the macro's
+    // entry point with a context that has no `api` at all, and the generated
+    // first line — `if (!context.api)` — would report the script as restricted
+    // instead of running it.
+    const api = { marker: "API" };
+    const { context, rt } = ctx(api);
+    let received: unknown = null;
+    registerRunTargetHandler(
+      rt,
+      "setup",
+      (c: unknown) => {
+        received = c;
+      },
+      context,
+      { entryPoint: true },
+    );
+    await getExposedHandler(rt, `${RUN_TARGET_EXPOSED_PREFIX}setup`)!();
+    expect(received).toBe(context);
+    expect((received as { api: unknown }).api).toBe(api);
+  });
+
   it("a >1-arg function throws a clear message and is never wrong-arity-called", async () => {
     const { context, rt } = ctx({});
     let called = false;

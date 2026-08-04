@@ -361,17 +361,25 @@ export function getExposedHandler(rt: WorkerRuntime, name: string): ((...args: u
  *   - `fn.length === 0` -> `fn()`
  *   - `fn.length === 1` -> `fn(context.api)`   (the conventional `fn(api)` macro)
  *   - `fn.length  >  1` -> a clear throw, never a wrong-arity call.
+ *
+ * `options.entryPoint` marks the script's own `setup`, which is registered as a
+ * run-target ONLY on an inert debug mount (one that did not call it). Its single
+ * parameter is the WHOLE `context`, not `context.api` — handing it `context.api`
+ * would run the entry point with a `context` that has no `api`, `notify` or
+ * `onClick`, and a recorded macro's first line (`if (!context.api)`) would then
+ * report the script as restricted instead of running it.
  */
 export function registerRunTargetHandler(
   rt: WorkerRuntime,
   displayName: string,
   fn: (...args: unknown[]) => unknown,
   context: { api?: unknown },
+  options: { entryPoint?: boolean } = {},
 ): void {
   const exposedName = `${RUN_TARGET_EXPOSED_PREFIX}${displayName}`;
   const thunk = async (): Promise<unknown> => {
     if (fn.length === 0) return await fn();
-    if (fn.length === 1) return await fn(context.api);
+    if (fn.length === 1) return await fn(options.entryPoint === true ? context : context.api);
     throw new Error(
       `Run can only start a function that takes no arguments or a single \`api\` argument; ` +
         `\`${displayName}\` takes ${fn.length} — call it from setup() instead.`,

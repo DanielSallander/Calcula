@@ -449,7 +449,16 @@ export type RunAtCursorOutcome =
  *   1. the top-level function whose body encloses `line` (if it is not `setup`);
  *   2. otherwise — cursor in `setup`, in a header comment or on a blank line —
  *      the SOLE non-`setup` top-level function, if there is exactly one (the
- *      recorded-macro shape). Zero or several is ambiguous: no guess.
+ *      recorded-macro shape);
+ *   3. otherwise `setup` itself, when the source declares one.
+ *
+ * Step 3 exists because a debug mount can be INERT (a module macro: entering the
+ * debugger executes nothing), and on an inert mount `setup` is a registered
+ * run-target — indeed the ONLY one for a macro whose whole body lives in it.
+ * Refusing to resolve it would leave Run with nothing to do on exactly the
+ * script the user most wants to run. On a NON-inert mount `setup` was already
+ * invoked by the mount and is not a run-target; `runAtCursor` sees that in the
+ * session's trigger list and says so rather than firing into nothing.
  */
 function resolveRunTarget(
   source: string,
@@ -457,8 +466,10 @@ function resolveRunTarget(
 ): ReturnType<typeof enclosingTopLevelFunction> {
   const enclosing = enclosingTopLevelFunction(source, line);
   if (enclosing && enclosing.name !== "setup") return enclosing;
-  const nonSetup = topLevelFunctions(source).filter((f) => f.name !== "setup");
-  return nonSetup.length === 1 ? nonSetup[0] : null;
+  const all = topLevelFunctions(source);
+  const nonSetup = all.filter((f) => f.name !== "setup");
+  if (nonSetup.length === 1) return nonSetup[0];
+  return all.find((f) => f.name === "setup") ?? null;
 }
 
 /**
@@ -593,16 +604,38 @@ export async function runAtCursor(
     return {
       status: "notReady",
       functionName: target.name,
-      message:
-        session.status === "failed"
-          ? `setup() failed, so "${target.name}" was never registered as a run target: ` +
-            `${session.error ?? "unknown error"}`
-          : `"${target.name}" is not registered as a run target yet (the script is ` +
-            `${session.status}). Try Run again in a moment.`,
+      message: notReadyMessage(session, target.name),
     };
   }
   await fireDebugTrigger(scriptId, triggerId);
   return { status: "ran", functionName: target.name };
+}
+
+/**
+ * Why Run cannot start `functionName` — always a reason, never a dead button.
+ *
+ * The `setup` case is its own sentence: on a mount that INVOKES setup (every
+ * object script) it is not a run-target at all, and "try again in a moment"
+ * would be false advice for a wait that never ends.
+ */
+function notReadyMessage(session: DebugSessionState, functionName: string): string {
+  if (session.status === "failed") {
+    return session.autoInvokeSetup === false
+      ? `"${functionName}" cannot be started: ${session.error ?? "unknown error"}`
+      : `setup() failed, so "${functionName}" was never registered as a run target: ` +
+          `${session.error ?? "unknown error"}`;
+  }
+  if (functionName === "setup" && session.autoInvokeSetup !== false) {
+    return (
+      "setup() is the entry point this mount already ran, so it is not a run target. " +
+      "Put the cursor inside another top-level function to run that, or fire one of the " +
+      "triggers in the debug panel."
+    );
+  }
+  return (
+    `"${functionName}" is not registered as a run target yet (the script is ` +
+    `${session.status}). Try Run again in a moment.`
+  );
 }
 
 async function sendBreakpoints(scriptId: string, lines: number[]): Promise<void> {

@@ -221,6 +221,13 @@ export interface UseDebugSession {
   breakpointLines: number[];
   decorations: DebugDecoration[];
   isPaused: boolean;
+  /**
+   * The open document is debugged under an INERT mount: entering the session
+   * prepares the realm and executes nothing, and the user starts it with Run /
+   * F5 / a Run row. True for module macros (see UseDebugSessionOptions), and it
+   * is what the toolbar promises the user before they press Debug.
+   */
+  inertMount: boolean;
   busy: boolean;
   error: string | null;
   toggleLine: (line: number) => void;
@@ -362,6 +369,9 @@ export function useDebugSession(
     breakpointLines,
     decorations,
     isPaused: session?.status === "paused",
+    // Before a session exists the document's own mount policy is the answer;
+    // once one is open the HOST's answer is authoritative (it built the mount).
+    inertMount: session ? session.autoInvokeSetup === false : mountFromModuleStore,
     busy,
     error,
     toggleLine,
@@ -426,7 +436,7 @@ export function DebugToolbar({
   runDisabled,
   runDisabledTitle,
 }: DebugToolbarProps): React.ReactElement {
-  const { session, isPaused, busy, start, stop, send, breakpointLines } = state;
+  const { session, isPaused, busy, start, stop, send, breakpointLines, inertMount } = state;
   const active = !!session && session.status !== "detached";
 
   // Run-at-cursor. Left of Debug, always available (its own gating aside): F5 in
@@ -450,9 +460,10 @@ export function DebugToolbar({
   ) : null;
 
   if (!active) {
-    // With no breakpoint set there would be nothing to stop at, and `setup`
-    // would have run to completion before the user could place one — so an
-    // empty gutter means "stop on the first statement".
+    // With no breakpoint set there would be nothing to stop at, so an empty
+    // gutter means "stop on the first statement" — of whatever runs first. On an
+    // inert mount that is the first statement the USER starts, which is the only
+    // reading that makes stepping show effects landing.
     const onEntry = breakpointLines.length === 0;
     return (
       <>
@@ -463,9 +474,12 @@ export function DebugToolbar({
           disabled={disabled || busy}
           title={
             "Start debugging this script.\n" +
-            "The script RESTARTS: it is remounted with step instrumentation, so setup() runs again.\n" +
+            (inertMount
+              ? "NOTHING RUNS: the script is prepared and instrumented, then waits. " +
+                "Start it with Run (F5) or a Run/Fire row in the panel below.\n"
+              : "The script RESTARTS: it is remounted with step instrumentation, so setup() runs again.\n") +
             (onEntry
-              ? "No breakpoints are set, so it will stop on the first statement."
+              ? "No breakpoints are set, so it will stop on the first statement it executes."
               : `It will stop at your ${breakpointLines.length} breakpoint(s).`)
           }
         >
@@ -544,6 +558,10 @@ export function DebugToolbar({
  * a running one names what is running.
  */
 export function statusLabel(session: DebugSessionState): string {
+  // An INERT mount (a module macro) executed nothing when the session opened, so
+  // every phrase below that says or implies "setup() ran" would be false until
+  // the user starts something. `lastActivity` is the proof that they have.
+  const inertUnrun = session.autoInvokeSetup === false && !session.lastActivity;
   switch (session.status) {
     case "paused":
       return `Paused — line ${session.paused?.line ?? "?"}`;
@@ -552,11 +570,11 @@ export function statusLabel(session: DebugSessionState): string {
     case "detached":
       return "Script unmounted";
     case "waiting":
-      return "Waiting for a trigger";
+      return inertUnrun ? "Ready — nothing has run yet" : "Waiting for a trigger";
     case "finished":
       return "Finished";
     case "failed":
-      return "setup() failed";
+      return session.autoInvokeSetup === false ? "Nothing to run" : "setup() failed";
     case "running":
       return session.activity ? `Running ${session.activity.label}` : "Running";
     default:
@@ -565,6 +583,8 @@ export function statusLabel(session: DebugSessionState): string {
 }
 
 function statusTitle(session: DebugSessionState): string {
+  const inert = session.autoInvokeSetup === false;
+  const inertUnrun = inert && !session.lastActivity;
   switch (session.status) {
     case "paused":
       return (
@@ -574,18 +594,23 @@ function statusTitle(session: DebugSessionState): string {
     case "detached":
       return "The script was unmounted, so the session has nothing to attach to.";
     case "waiting":
-      return (
-        `"${session.scriptName}" is MOUNTED AND IDLE. setup() finished; nothing is ` +
-        `executing. It runs again when one of its ${session.triggers.length} trigger(s) ` +
-        `fires — use Fire below to make one happen from here.`
-      );
+      return inertUnrun
+        ? `"${session.scriptName}" is PREPARED AND IDLE. Entering the debugger deliberately ` +
+            `ran nothing, so the sheet is untouched. Start it with Run (F5) or one of its ` +
+            `${session.triggers.length} trigger(s) below, and stepping will show each effect ` +
+            `land as you step.`
+        : `"${session.scriptName}" is MOUNTED AND IDLE. setup() finished; nothing is ` +
+            `executing. It runs again when one of its ${session.triggers.length} trigger(s) ` +
+            `fires — use Fire below to make one happen from here.`;
     case "finished":
       return (
         `"${session.scriptName}" ran setup() to completion and registered nothing ` +
         `that can start it again. There is no more code to step through.`
       );
     case "failed":
-      return `"${session.scriptName}" failed during setup(): ${session.error ?? "unknown error"}`;
+      return inert
+        ? `"${session.scriptName}" cannot be started from the debugger: ${session.error ?? "unknown error"}`
+        : `"${session.scriptName}" failed during setup(): ${session.error ?? "unknown error"}`;
     case "running":
       return session.activity
         ? `"${session.scriptName}" is executing ${session.activity.label}.`
@@ -663,6 +688,10 @@ export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.Reac
   const paused = session?.paused ?? null;
   const snapshot = session?.lastSnapshot ?? null;
   const idle = session?.status === "waiting" || session?.status === "finished";
+  // See statusLabel: an inert mount ran nothing, so "setup() finished" is a lie
+  // until the user has started something themselves.
+  const inert = session?.autoInvokeSetup === false;
+  const inertUnrun = inert && !session?.lastActivity;
 
   return (
     <div
@@ -708,20 +737,38 @@ export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.Reac
 
       {session?.status === "failed" && (
         <div style={{ color: "#FF9B9B" }}>
-          setup() threw before the script could be mounted: {session.error}. Fix it and use
-          Save &amp; Apply — the session stays open and the script remounts into it.
+          {inert ? (
+            <>{session.error}</>
+          ) : (
+            <>
+              setup() threw before the script could be mounted: {session.error}. Fix it and use
+              Save &amp; Apply — the session stays open and the script remounts into it.
+            </>
+          )}
         </div>
       )}
 
       {session?.status === "waiting" && (
         <div style={{ color: "#B9B4FF" }}>
-          Mounted and idle. setup() finished and nothing is executing — this script runs again
-          only when one of the triggers below fires.
-          {session.lastActivity?.error
-            ? ` The last one (${session.lastActivity.label}) threw: ${session.lastActivity.error}`
-            : session.lastActivity
-              ? ` Last run: ${session.lastActivity.label}.`
-              : ""}
+          {inertUnrun ? (
+            <>
+              Prepared — <strong>nothing has run yet</strong>. Entering the debugger mounted and
+              instrumented this script without executing it, so the sheet is untouched. Press Run
+              (F5) to run the function the cursor is in, or use a Run/Fire row below; execution
+              stops at your breakpoints and stepping applies each effect as you step.
+            </>
+          ) : (
+            <>
+              {inert
+                ? "Mounted and idle. Nothing is executing — this script runs again only when one of the triggers below fires."
+                : "Mounted and idle. setup() finished and nothing is executing — this script runs again only when one of the triggers below fires."}
+              {session.lastActivity?.error
+                ? ` The last one (${session.lastActivity.label}) threw: ${session.lastActivity.error}`
+                : session.lastActivity
+                  ? ` Last run: ${session.lastActivity.label}.`
+                  : ""}
+            </>
+          )}
         </div>
       )}
 

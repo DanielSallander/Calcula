@@ -85,6 +85,71 @@ describe("the debug channel is not a script-reachable surface", () => {
     expect(assignments.length).toBe(1);
     expect(host).toContain("debug: debugSession");
   });
+
+  it("the definition-taking session starter is module-private", () => {
+    const host = read("host.ts");
+    // `startDebugSessionOn` takes a HostMountDefinition, so exporting it would
+    // reopen the source-injection door `hostStartModuleScriptDebugSession`'s
+    // id-only contract closed: a caller could mount arbitrary code at the
+    // unlocked tier by handing the debugger a definition.
+    expect(host).toContain("async function startDebugSessionOn(");
+    expect(host).not.toMatch(/export\s+async\s+function\s+startDebugSessionOn\b/);
+  });
+
+  it("the MODULE session path still gates on Script Security", () => {
+    const host = read("host.ts");
+    const fn = host.slice(host.indexOf("export async function hostStartModuleScriptDebugSession"));
+    const body = fn.slice(0, fn.indexOf("\n}\n"));
+    // It builds the mount itself now (one inert mount instead of a plain mount
+    // followed by an instrumented remount), so the gate `hostMountScript` used
+    // to apply has to be applied here, explicitly.
+    expect(body).toContain("assertMountAllowed(definition.name)");
+    expect(body).toContain("startDebugSessionOn(definition");
+  });
+});
+
+// ============================================================================
+// A DEBUG MOUNT OF A MODULE MACRO EXECUTES NOTHING — pinned at the source, so a
+// future edit cannot quietly restore "mounting the macro runs it".
+// ============================================================================
+
+describe("inertness is decided by the host, for the module path only", () => {
+  it("exactly one call site asks for an inert session, and it is the module one", () => {
+    const host = read("host.ts");
+    const inertCalls = [...host.matchAll(/startDebugSessionOn\([^)]*?,\s*false\)/gs)];
+    expect(inertCalls.length).toBe(1);
+    const moduleFn = host.slice(
+      host.indexOf("export async function hostStartModuleScriptDebugSession"),
+    );
+    expect(moduleFn.slice(0, moduleFn.indexOf("\n}\n"))).toMatch(
+      /startDebugSessionOn\(definition,[\s\S]*?false\)/,
+    );
+  });
+
+  it("the worker only skips the entry point when the spec says so", () => {
+    const bootstrap = read("worker/bootstrap.ts");
+    const mount = bootstrap.slice(bootstrap.indexOf("async function handleMount("));
+    const body = mount.slice(0, mount.indexOf("\n}\n"));
+    // The decision is read from the MOUNT SPEC — never from the source, never
+    // from a heuristic about what the script looks like.
+    expect(body).toContain("!spec.debug.autoInvokeSetup");
+    // ...and a non-debug mount is untouched: production always invokes setup.
+    expect(body).toContain("spec.debug ? !spec.debug.autoInvokeSetup : false");
+  });
+
+  it("the inert module body cannot pause — pauseOnEntry belongs to the user's run", () => {
+    const bootstrap = read("worker/bootstrap.ts");
+    const fn = bootstrap.slice(bootstrap.indexOf("async function runInertModuleBody("));
+    const body = fn.slice(0, fn.indexOf("\n}\n"));
+    // The instrumenter yields before every top-level statement, declarations
+    // included, so the body evaluation is bracketed by the inert region or a
+    // pauseOnEntry session would stop on line 1 of a mount that ran nothing.
+    expect(body).toContain("dbg?.beginInert()");
+    expect(body).toContain("dbg?.endInert()");
+    // In a finally: a throwing module body must not leave the realm deaf to
+    // every subsequent breakpoint.
+    expect(body).toMatch(/finally\s*\{\s*dbg\?\.endInert\(\);/);
+  });
 });
 
 describe("the pause itself cannot be weaponized", () => {

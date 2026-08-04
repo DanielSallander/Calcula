@@ -1268,6 +1268,13 @@ this table are both wrong until someone re-derives from code.
     strings cross. Residual, stated: inside an active session the realm holds a `__calculaDbg`
     global its own code could call, which lets it pause *itself* — forfeiting its own veto rather
     than gaining one, and endable with Stop. It does not exist on a normal mount.
+    **Amended 2026-08-06 (twelfth entry, §8):** a debug mount may now be **inert** —
+    `MountSpec.debug.autoInvokeSetup: false` makes the wrapper tail skip `setup(context)`, so
+    entering the debugger executes nothing and the user starts the script with Run / run-at-cursor /
+    Fire. That flag is `false` in exactly one place — the synthetic module-macro mount the host
+    builds for a recorded macro, whose `setup` *is* the macro rather than a registration step. Every
+    object script keeps `autoInvokeSetup: true`, because its `setup` is what registers `onClick` and
+    a mount that skipped it would have nothing to debug.
 
 21. **TypeScript authoring (§7.12 half 2)** — **SHIPPED 2026-08-01 (Wave H).**
     `api/scriptTranspile.ts` compiles at save; **the emitted JavaScript becomes `script.source`**, so
@@ -1774,6 +1781,109 @@ priced, not missed.
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
 
+> **Twelfth entry (2026-08-06, FOURTH human use of the macro recorder) — a debug mount now executes
+> NOTHING, and the reason this took a fourth report is that the tenth correction had already found
+> the bug and written it down as "a known cosmetic".**
+>
+> The user opened a recorded macro in the Object Script Editor and pressed Debug. It paused at
+> line 6 — *and the grid already held every value the macro writes.* They had stepped nothing.
+>
+> **Root cause.** A module macro is opened and debugged under the synthetic **unlocked `workbook`**
+> definition the tenth entry introduced, so that what you step through is byte-for-byte what a
+> button runs. Under that definition `context.onClick` does not exist, so the recorder's generated
+> `setup` falls through its click branch to its last line, `return macroNNNN(context.api)`.
+> **Mounting the macro therefore RUNS the macro** — and `bootstrap.ts` invoked `setup(context)` on
+> every mount, debug mounts included (the wrapper tail was an unconditional
+> `return typeof setup === "function" ? setup(context) : undefined;`).
+>
+> **It was worse than reported: two executions before the user touched anything, three if they
+> pressed Run.** `hostStartModuleScriptDebugSession` did a plain `hostMountScript` first (macro runs
+> once) and *then* opened the session, which remounts instrumented (macro runs again). The plain
+> pre-mount is gone; there is exactly ONE mount now.
+>
+> **The fix — `DebugSpec.autoInvokeSetup`.** A mount carries a flag saying whether its wrapper tail
+> calls the entry point. False produces an **inert** module: the body still runs — that is what
+> declares the functions and executes the run-target registrations appended after it — but `setup`
+> is not invoked. Entering the debugger prepares the realm, installs the run-targets, and stops.
+> Run / run-at-cursor / Fire is what starts it. **That is VBA's contract**, and it is the only
+> arrangement in which stepping can show effects *land*.
+>
+> **The scope of `false` is the whole safety argument, so it is stated exactly.** It is set in ONE
+> place: the branch of `hostStartModuleScriptDebugSession` where the HOST ITSELF built the synthetic
+> module-macro definition. It is never inferred from the source, and never from "is this a debug
+> mount". `hostStartDebugSession` — every real object script, i.e. every button — reads
+> `!transientDebugMounts.has(scriptId)`, the debugger's own mount-ownership marker, so it stays
+> `true`: an object script's `setup` IS its registration step, and a debug mount that skipped it
+> would come up with no `onClick`, an empty Fire list and nothing to debug at all. Pinned by a test
+> named for the property: *a button script's onClick is STILL registered under the debugger*. The
+> flag also lives on the SESSION, not the mount, so Save & Apply and a re-pressed Debug cannot
+> quietly un-inert a session mid-flight.
+>
+> **`setup` becomes a run-target — but only on an inert mount.** It was previously excluded because
+> "the mount already invokes it"; that reason disappears when the mount does not, and for a recorded
+> macro whose entire body is reached through `setup` it is the only runnable thing there is. It is
+> registered with `entryPoint: true` so it receives the whole `context`, not `context.api` —
+> otherwise the generated `if (!context.api)` guard would report the script as restricted.
+>
+> **Two further bugs found while proving the first.** (1) The instrumenter emits a yield point before
+> every top-level statement **including `function foo(…)` declarations** (`pausableLines: [1,2,5,6]`
+> for a macro module), so `pauseOnEntry` — which the toolbar arms whenever the gutter is empty —
+> would still have stopped the *inert* mount at line 1 and announced "Paused — line 1" for a mount
+> that executed nothing. A new `DebugController.beginInert()/endInert()` region silences reporting
+> outright; it is deliberately NOT `beginNoPause`, which merely *degrades* a pause to a snapshot.
+> `pauseOnEntry` survives the region, so the first stop lands on the first statement the **user**
+> starts. (2) `hostStartDebugSession` on an already-mounted transient macro rebuilt the session with
+> `autoInvokeSetup: true`, silently un-inerting it — fixed by making the transient marker the
+> authority.
+>
+> **No silent success and no silent failure.** An inert mount with zero run-targets is reported
+> `status: "failed"` with the reason ("no top-level function declaration was found…"), NOT
+> `"finished"` — which would claim the script completed something. The badge reads
+> `"Nothing to run"`; the panel prints the reason; `runAtCursor` returns it to the editor console.
+> While an inert session has run nothing, the badge reads **"Ready — nothing has run yet"** and the
+> panel says *"Prepared — nothing has run yet … press Run (F5)"*, reverting to the ordinary wording
+> once `lastActivity` exists. A session that says "Waiting for a trigger" after running the whole
+> macro was the previous lie; both halves are now named.
+>
+> **Why this belongs in §8 and not just in a changelog.** The tenth correction FOUND this. It wrote,
+> in this document, that the double-run "stands as a known cosmetic … end state identical for the
+> idempotent writes a recorder emits". That sentence is now struck through where it appears. The
+> reasoning error is worth more than the bug: it judged a debugger by the END STATE of the program
+> instead of by whether the user can watch the program reach it. A debugger that runs the code before
+> you step it is not cosmetically wrong, it is *not a debugger* — and the idempotence that made the
+> end state identical is a property of RECORDED macros only, so any hand-authored non-idempotent
+> macro double-applied. **The rule this adds: "the end state is the same" is never a reason to
+> downgrade a finding about a tool whose entire purpose is the path to that end state.**
+>
+> **Proven by driving the live app.** `app/e2e/tests/macro-debug-inert.spec.ts` records a real macro
+> through the recorder UI and presses Debug, then samples the target cell repeatedly (a single
+> `toBe("")` would pass on its first read and miss an async mount-time `setup`). The macro's body is
+> a **counter**, not a constant write — one execution reads `"1"`, a mount-time run plus a user run
+> reads `"2"`. A constant-writing macro cannot tell those apart, **which is exactly how the original
+> double-run got dismissed as cosmetic in the first place.** The spec was negative-controlled by
+> restoring the bug (`startDebugSessionOn(…, true)`): tests 1, 2 and 5 fail, test 5 reading `"2"`,
+> and the object-script test correctly stays green — the detector is real and it is scoped.
+>
+> **Verification (2026-08-06):** `npm run check-types` clean · `npm run lint:boundaries` clean ·
+> `npm run check:script-typings` `[OK] 39 interfaces verified, 545 members probed` (unchanged) ·
+> `npx vitest run` **104,605 passed / 0 failed across 662 files** (baseline 104,564 / 660: +41 tests,
+> +2 files — `worker/__tests__/debugWrapper.test.ts` and `worker/__tests__/runTargetHandler.test.ts`,
+> plus additions to the debug-session, debug-runtime, debug-reach, debug-panel and debugger contract
+> suites) · `cargo check` clean in both `app/src-tauri` and `core`. **No Rust was changed** — the
+> debug session lives entirely in the TS script host — so the Rust suites were not re-run and their
+> baselines (app-lib 837, core 1,143) stand unmoved. E2E against a live `cargo tauri dev` over
+> WebView2 CDP: **12/12** — the 4 new `macro-debug-inert` tests plus the 8 existing macro tests
+> (`macro-editor-inventory` 4, `macro-link-model` 3, `macro-recorder-journey` 1), no regression.
+>
+> **What still needs a human (most-likely-wrong first):** an object script's FIRST F5 with an empty
+> gutter stops on a `function setup(button) {` *declaration* line rather than on the first executable
+> statement — the instrumenter puts a yield point in front of declarations too (the same property
+> `beginInert()` had to suppress on the macro path). It is honest (that mount really is executing)
+> but it is a poor first stop, and it is untouched here. Also: the macro trigger list now shows an
+> extra `setup()` **Run** row, which is correct on an inert mount but is new UI nobody has lived
+> with; and no visual baseline covers the editor window, so the new "Ready — nothing has run yet"
+> badge is unphotographed.
+
 > **Eleventh entry (2026-08-05, THIRD human use of the macro recorder) — a module macro was
 > first-class in the workbook and a second-class visitor in the editor. Two user-reported symptoms,
 > one root cause; fixing it uncovered a mount leak nobody had reported.**
@@ -1946,9 +2056,15 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
 > REAL publish→subscribe (only the local orphan equivalent and the two Rust warning tests ran);
 > run-at-cursor with **two** top-level functions in a live worker realm hitting a breakpoint in the
 > cursor's function (jsdom can't run the worker); cross-sheet button→macro links; and undo after a
-> run-at-cursor. The double-run flagged by Track A stands as a known cosmetic: a recorded
+> run-at-cursor. ~~The double-run flagged by Track A stands as a known cosmetic: a recorded
 > single-function macro under the synthetic `workbook` mount runs once at `setup` and again on F5 (end
-> state identical for the idempotent writes a recorder emits); left on `workbook` per the settled design.
+> state identical for the idempotent writes a recorder emits); left on `workbook` per the settled
+> design.~~ **WRONG — see the twelfth entry at the top of this section.** The double-run was a
+> real defect downgraded to "cosmetic" by reasoning about the END STATE of an idempotent write
+> instead of about what a debugger is for. It was also undercounted: entering the debugger ran the
+> macro TWICE before the user touched anything (a plain mount plus the instrumented remount), and
+> pressing Run made it three. The user's next report was the exact consequence: *paused at line 6
+> with every value the macro writes already in the grid.*
 
 > **Ninth correction (2026-08-03, SECOND human use of the macro recorder) — the fix for the eighth
 > correction was declared complete while two of the feature's three entry points still did nothing.**

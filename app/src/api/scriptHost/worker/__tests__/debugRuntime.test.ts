@@ -10,7 +10,13 @@ import { DEBUG_SNAPSHOT_MIN_INTERVAL_MS, type W2H } from "../../protocol";
 
 function make(breakpoints: number[] = [], pauseOnEntry = false) {
   const posted: W2H[] = [];
-  const rt = createDebugRuntime({ breakpoints, pauseOnEntry }, (m) => posted.push(m));
+  const rt = createDebugRuntime(
+    // autoInvokeSetup is the HOST's instruction to the mount, not to the pause
+    // machine; the runtime's own inert region (beginInert) is what this file
+    // exercises.
+    { breakpoints, pauseOnEntry, autoInvokeSetup: true },
+    (m) => posted.push(m),
+  );
   const noLocals = () => [];
   return { rt, posted, noLocals };
 }
@@ -158,6 +164,81 @@ describe("debug runtime — safety", () => {
   });
 });
 
+// ============================================================================
+// THE INERT REGION — the module-body evaluation of a debug mount that is not
+// supposed to execute anything of the user's.
+//
+// The instrumenter puts a yield point in front of EVERY top-level statement,
+// including the `function foo(...)` declarations a recorded macro is made of. So
+// without this region, opening a session on a macro with pauseOnEntry (what an
+// empty gutter means) would stop on line 1 during the mount and report
+// "Paused — line 1" for a mount that executed nothing.
+// ============================================================================
+
+describe("debug runtime — the inert region", () => {
+  it("does not pause on entry inside it, and does not report anything", async () => {
+    const { rt, posted, noLocals } = make([], true);
+    rt.beginInert();
+    let resumed = false;
+    await Promise.resolve(rt.h(1, noLocals)).then(() => {
+      resumed = true;
+    });
+    rt.endInert();
+
+    expect(resumed).toBe(true);
+    expect(rt.isPaused()).toBe(false);
+    // Unlike a no-pause region, nothing at all is reported: nothing the user
+    // asked for was running, so there is nothing to say.
+    expect(posted).toEqual([]);
+  });
+
+  it("swallows a breakpoint parked on a declaration line, silently", async () => {
+    const { rt, posted, noLocals } = make([5]);
+    rt.beginInert();
+    await rt.h(5, noLocals);
+    rt.s(5, noLocals);
+    rt.endInert();
+
+    expect(rt.isPaused()).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
+  it("KEEPS pauseOnEntry armed for the first thing the user runs after it", async () => {
+    const { rt, posted, noLocals } = make([], true);
+    rt.beginInert();
+    await rt.h(1, noLocals); // the module body: declarations
+    await rt.h(5, noLocals);
+    rt.endInert();
+    expect(posted).toEqual([]);
+
+    // The user presses Run: the FIRST statement of that execution is where the
+    // entry pause lands — which is what makes stepping show effects landing.
+    const pending = Promise.resolve(rt.h(2, noLocals));
+    await Promise.resolve();
+    const paused = posted.find((m) => m.t === "debugPaused");
+    expect(paused && paused.t === "debugPaused" && paused.state.line).toBe(2);
+    expect(paused && paused.t === "debugPaused" && paused.state.reason).toBe("entry");
+    rt.control("continue");
+    await pending;
+  });
+
+  it("nests, so an inner region cannot re-arm the outer one early", async () => {
+    const { rt, posted, noLocals } = make([3]);
+    rt.beginInert();
+    rt.beginInert();
+    rt.endInert();
+    await rt.h(3, noLocals);
+    expect(posted).toEqual([]);
+    rt.endInert();
+
+    const pending = Promise.resolve(rt.h(3, noLocals));
+    await Promise.resolve();
+    expect(rt.isPaused()).toBe(true);
+    rt.control("stop");
+    await pending;
+  });
+});
+
 describe("debug runtime — synchronous-context hits", () => {
   it("reports a snapshot and keeps running", async () => {
     const { rt, posted } = make([6]);
@@ -280,7 +361,7 @@ describe("instrumented source really pauses", () => {
 
   it("STOPS at the breakpoint (the statement after it has not run) and resumes", async () => {
     const posted: W2H[] = [];
-    const rt = createDebugRuntime({ breakpoints: [4], pauseOnEntry: false }, (m) => posted.push(m));
+    const rt = createDebugRuntime({ breakpoints: [4], pauseOnEntry: false, autoInvokeSetup: true }, (m) => posted.push(m));
     (globalThis as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = rt;
 
     const result = instrumentForDebug(SRC);
@@ -306,7 +387,7 @@ describe("instrumented source really pauses", () => {
 
   it("steps from one statement to the next", async () => {
     const posted: W2H[] = [];
-    const rt = createDebugRuntime({ breakpoints: [2], pauseOnEntry: false }, (m) => posted.push(m));
+    const rt = createDebugRuntime({ breakpoints: [2], pauseOnEntry: false, autoInvokeSetup: true }, (m) => posted.push(m));
     (globalThis as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = rt;
 
     const result = instrumentForDebug(SRC);
@@ -329,7 +410,7 @@ describe("instrumented source really pauses", () => {
   });
 
   it("a STOP mid-flight lets the script run to completion", async () => {
-    const rt = createDebugRuntime({ breakpoints: [2] }, () => undefined);
+    const rt = createDebugRuntime({ breakpoints: [2], pauseOnEntry: false, autoInvokeSetup: true }, () => undefined);
     (globalThis as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = rt;
     const result = instrumentForDebug(SRC);
     const context: { reached?: number } = {};
@@ -345,7 +426,7 @@ describe("instrumented source really pauses", () => {
 
   it("a breakpoint in a SYNCHRONOUS function reports but does not stop", async () => {
     const posted: W2H[] = [];
-    const rt = createDebugRuntime({ breakpoints: [2] }, (m) => posted.push(m));
+    const rt = createDebugRuntime({ breakpoints: [2], pauseOnEntry: false, autoInvokeSetup: true }, (m) => posted.push(m));
     (globalThis as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = rt;
     const src = [
       "function helper(x) {", // 1
@@ -385,7 +466,7 @@ describe("step over / into / out across a nested call", () => {
 
   async function drive(actions: Array<"stepOver" | "stepInto" | "stepOut">): Promise<number[]> {
     const posted: W2H[] = [];
-    const rt = createDebugRuntime({ breakpoints: [7], pauseOnEntry: false }, (m) => posted.push(m));
+    const rt = createDebugRuntime({ breakpoints: [7], pauseOnEntry: false, autoInvokeSetup: true }, (m) => posted.push(m));
     (globalThis as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = rt;
     const result = instrumentForDebug(NESTED);
     expect(result.ok).toBe(true);

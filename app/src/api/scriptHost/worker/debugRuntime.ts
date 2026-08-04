@@ -55,6 +55,23 @@ export interface DebugController extends DebugRuntimeApi {
   /** Enter a region where suspension is forbidden (host is waiting on us). */
   beginNoPause(): void;
   endNoPause(): void;
+  /**
+   * Enter a region where yield points do NOTHING AT ALL — no pause, no snapshot.
+   *
+   * Used for the module-body evaluation of an INERT debug mount. The instrumenter
+   * puts a yield point in front of every top-level statement, including the
+   * `function foo(...)` declarations a recorded macro is made of, so without this
+   * a session opened with `pauseOnEntry` (which is what an empty gutter means)
+   * would stop on line 1 DURING THE MOUNT — reporting "Paused — line 1" for a
+   * mount that deliberately executed nothing, which is the same lie in a new
+   * place. A breakpoint parked on a declaration line would do the same.
+   *
+   * Distinct from beginNoPause: that one DEGRADES a pause to a snapshot report,
+   * which is right for a render on a deadline and wrong here — nothing the user
+   * asked for is running, so there is nothing to report.
+   */
+  beginInert(): void;
+  endInert(): void;
   /** True while at least one execution is suspended at a yield point. */
   isPaused(): boolean;
   /** Release everything and disarm — the session is over. */
@@ -221,6 +238,8 @@ export function createDebugRuntime(spec: DebugSpec, post: Post): DebugController
   let armed = breakpoints.size > 0 || mode !== "run";
   let disposed = false;
   let noPauseDepth = 0;
+  /** >0 while an inert region is open — see DebugController.beginInert. */
+  let inertDepth = 0;
   /** Position captured at the current pause — the base for step-over/step-out. */
   let basePosition: FramePosition = { fn: "", depth: 0 };
   let sawFirstPause = false;
@@ -291,7 +310,7 @@ export function createDebugRuntime(spec: DebugSpec, post: Post): DebugController
 
   const api: DebugController = {
     h(line, locals) {
-      if (!armed || disposed) return;
+      if (!armed || disposed || inertDepth > 0) return;
       if (paused) {
         // Another execution is already stopped. Join it rather than announcing
         // a second pause: concurrent hook dispatches must not race the editor
@@ -331,7 +350,7 @@ export function createDebugRuntime(spec: DebugSpec, post: Post): DebugController
     },
 
     s(line, locals) {
-      if (!armed || disposed) return;
+      if (!armed || disposed || inertDepth > 0) return;
       if (mode === "run" && !breakpoints.has(line)) return;
       const now = Date.now();
       if (now - lastSnapshotAt < DEBUG_SNAPSHOT_MIN_INTERVAL_MS) {
@@ -410,6 +429,13 @@ export function createDebugRuntime(spec: DebugSpec, post: Post): DebugController
     },
     endNoPause() {
       if (noPauseDepth > 0) noPauseDepth--;
+    },
+
+    beginInert() {
+      inertDepth++;
+    },
+    endInert() {
+      if (inertDepth > 0) inertDepth--;
     },
 
     isPaused() {

@@ -71,8 +71,30 @@ export interface MountPackageInfo {
 export interface DebugSpec {
   /** Lines the user marked. Live data — updatable mid-session, no remount. */
   breakpoints: number[];
-  /** Pause at the first yield point of `setup` (default false). */
+  /** Pause at the first yield point the session reaches (default false). */
   pauseOnEntry: boolean;
+  /**
+   * Whether this mount CALLS the script's `setup(context)` entry point.
+   *
+   * True for every ordinary mount, debug or not: `setup` is what registers
+   * `onClick` and friends, so an object script whose setup was never called has
+   * no hooks, no triggers and nothing to debug.
+   *
+   * FALSE ONLY FOR THE SYNTHETIC MODULE-MACRO MOUNT the host builds in
+   * `hostStartModuleScriptDebugSession`. A recorded macro's `setup` is not a
+   * registration step — under the synthetic unlocked `workbook` definition
+   * `context.onClick` does not exist, so setup falls through to
+   * `return macroNNNN(context.api)` and MOUNTING THE MACRO RUNS IT. Entering the
+   * debugger therefore executed the whole macro, then invited the user to step
+   * through effects that had already landed (and ran it a second time when they
+   * did). VBA's contract is the opposite: entering debug prepares the script and
+   * executes NOTHING; Run / run-at-cursor / firing a trigger is what starts it.
+   *
+   * When false the realm still evaluates the module body and installs every
+   * run-target (including `setup` itself — see bootstrap.ts), so the session has
+   * something to run; it just does not invoke the entry point itself.
+   */
+  autoInvokeSetup: boolean;
 }
 
 export interface MountSpec {

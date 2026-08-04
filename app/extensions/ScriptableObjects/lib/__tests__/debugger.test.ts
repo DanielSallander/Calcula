@@ -378,6 +378,86 @@ describe("run-at-cursor (local transport)", () => {
     expect(hostStartDebugSession).not.toHaveBeenCalled();
     expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:writeA1");
   });
+
+  // THE DOUBLE-RUN. Run on a macro with no session opens one and fires a
+  // run-target. The mount used to EXECUTE the macro on its way in, so the editor
+  // Run button ran a recorded macro twice per press — once un-stepped at mount,
+  // once through the fire. The mount is inert now; the fire is the only
+  // execution, and there is exactly one of it.
+  it("Run on a cold macro starts ONE session and fires ONE run-target", async () => {
+    await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 2, { mountFromModuleStore: true });
+
+    expect(hostStartModuleScriptDebugSession).toHaveBeenCalledTimes(1);
+    expect(hostDebugFireTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  // An inert mount registers `setup` as a run-target, so a macro whose whole
+  // body lives in setup is runnable rather than a Run button that does nothing.
+  it("resolves setup() when there is no other top-level function", async () => {
+    const allInSetup = [
+      "function setup(context) {",
+      "  return context.api.setCellValue(0, 0, 1);",
+      "}",
+    ].join("\n");
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "waiting",
+      autoInvokeSetup: false,
+      triggers: [{ id: "method:setup", kind: "method", name: "setup", fireable: true }],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, allInSetup, 2, {
+      mountFromModuleStore: true,
+    });
+
+    expect(outcome).toEqual({ status: "ran", functionName: "setup" });
+    expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:setup");
+  });
+
+  // ...but on a mount that INVOKED setup (every object script) it is not a run
+  // target, and "try again in a moment" would be false advice for a wait that
+  // never ends.
+  it("explains, rather than firing, when setup() is not a run target", async () => {
+    const allInSetup = ["function setup(context) {", "  return 1;", "}"].join("\n");
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "waiting",
+      autoInvokeSetup: true,
+      triggers: [{ id: "hook:onClick", kind: "hook", name: "onClick", fireable: true }],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, allInSetup, 2);
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toMatch(/entry point this mount already ran/i);
+      expect(outcome.message).not.toMatch(/try run again/i);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  it("passes on the host's reason when an inert mount had nothing runnable", async () => {
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "failed",
+      autoInvokeSetup: false,
+      error: "Nothing in this script can be started from the debugger: no top-level function …",
+      triggers: [],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 2, {
+      mountFromModuleStore: true,
+    });
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toMatch(/cannot be started/i);
+      expect(outcome.message).toMatch(/no top-level function/i);
+      // Not the "setup() failed" wording — nothing ran, so nothing failed.
+      expect(outcome.message).not.toMatch(/setup\(\) failed/i);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================================

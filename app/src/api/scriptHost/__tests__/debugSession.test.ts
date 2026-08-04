@@ -76,7 +76,23 @@ class FakeWorker {
   received: H2W[] = [];
   terminated = false;
   /** Set from the mount spec so tests can assert instrumentation was asked for. */
-  debugSpec: { breakpoints: number[]; pauseOnEntry: boolean } | null = null;
+  debugSpec: { breakpoints: number[]; pauseOnEntry: boolean; autoInvokeSetup: boolean } | null =
+    null;
+  /**
+   * Run-targets the next DEBUG realm registers from the user body — i.e. what
+   * `buildRunTargetRegistrations` emits. They are relayed as `base.expose` calls
+   * BEFORE `mounted`, exactly as the real realm does.
+   */
+  static runTargetsOnMount: string[] = [];
+  /**
+   * Whether the realm reports `mounted` on a later task instead of synchronously.
+   *
+   * The real worker's messages each arrive as their OWN task, so the host's
+   * async `base.expose` handling has always drained before `mounted` is
+   * processed. A fake that emits everything synchronously would settle the mount
+   * before its own exposes landed — an artifact of the fake, not of the host.
+   */
+  static deferMounted = false;
 
   constructor() {
     FakeWorker.instances.push(this);
@@ -98,18 +114,33 @@ class FakeWorker {
           },
         });
       }
-      const debugging = !!msg.spec.debug && FakeWorker.reportActivity;
-      if (debugging) this.activity(true, "setup");
-      for (const hook of FakeWorker.hooksOnMount) {
-        this.emit({ t: "hookRegistered", hook });
+      // An INERT debug mount executes nothing of the user's entry point, so it
+      // reports NO activity — only the run-target registrations its wrapper made.
+      const inert = !!msg.spec.debug && msg.spec.debug.autoInvokeSetup === false;
+      for (const name of FakeWorker.runTargetsOnMount) {
+        this.expose(`${RUN_TARGET_EXPOSED_PREFIX}${name}`);
       }
+      const debugging = !!msg.spec.debug && FakeWorker.reportActivity && !inert;
+      if (debugging) this.activity(true, "setup");
+      if (!inert) {
+        for (const hook of FakeWorker.hooksOnMount) {
+          this.emit({ t: "hookRegistered", hook });
+        }
+      }
+      // On an inert mount this stands for the MODULE BODY throwing (a syntax
+      // error, top-level code) — the only way an inert mount can fail, since
+      // nothing else of the user's runs.
       if (FakeWorker.setupError) {
         if (debugging) this.activity(false, "setup", FakeWorker.setupError);
         this.emit({ t: "mounted", ok: false, error: FakeWorker.setupError });
         return;
       }
       if (debugging) this.activity(false, "setup");
-      this.emit({ t: "mounted", ok: true });
+      if (FakeWorker.deferMounted) {
+        setTimeout(() => this.emit({ t: "mounted", ok: true }), 0);
+      } else {
+        this.emit({ t: "mounted", ok: true });
+      }
     }
     if (msg.t === "debugControl") {
       // A real realm resumes on any control that leaves the pause.
@@ -251,7 +282,9 @@ function resetFakeWorker(): void {
   FakeWorker.instances = [];
   FakeWorker.last = null;
   FakeWorker.hooksOnMount = [];
+  FakeWorker.runTargetsOnMount = [];
   FakeWorker.reportActivity = true;
+  FakeWorker.deferMounted = false;
   FakeWorker.setupError = null;
 }
 
@@ -286,7 +319,13 @@ describe("debug sessions (host)", () => {
     // A second worker: entering a session restarts the script.
     expect(FakeWorker.instances.length).toBe(2);
     expect(FakeWorker.instances[0].terminated).toBe(true);
-    expect(FakeWorker.last?.debugSpec).toEqual({ breakpoints: [2, 4], pauseOnEntry: false });
+    expect(FakeWorker.last?.debugSpec).toEqual({
+      breakpoints: [2, 4],
+      pauseOnEntry: false,
+      // A real object script: its setup IS the registration step, so the debug
+      // mount still calls it.
+      autoInvokeSetup: true,
+    });
 
     const session = host.getDebugSession(DEFINITION.id);
     // This script's setup computes a value and returns; it registers nothing.
@@ -877,7 +916,15 @@ describe("debugging a module macro that has never run", () => {
     expect(session.scriptId).toBe(MACRO_MODULE.id);
     expect(host.getDebugSession(MACRO_MODULE.id)).not.toBeNull();
     expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
-    expect(FakeWorker.last?.debugSpec).toEqual({ breakpoints: [2], pauseOnEntry: false });
+    expect(FakeWorker.last?.debugSpec).toEqual({
+      breakpoints: [2],
+      pauseOnEntry: false,
+      // THE POINT: the macro's entry point is not invoked by the mount.
+      autoInvokeSetup: false,
+    });
+    // ...and there is exactly ONE mount. There used to be two — a plain one that
+    // ran the macro, then the instrumented remount that ran it again.
+    expect(FakeWorker.instances.length).toBe(1);
     // The source came from the STORE, not from the caller.
     expect(getWorkbookScript).toHaveBeenCalledWith(MACRO_MODULE.id);
     const mountMsg = FakeWorker.last!.received.find((m) => m.t === "mount") as unknown as {
@@ -945,6 +992,156 @@ describe("debugging a module macro that has never run", () => {
     // ...and a Stop returns it to a normal, uninstrumented mount.
     await host.hostStopDebugSession(DEFINITION.id);
     expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
+  });
+});
+
+// ============================================================================
+// A DEBUG MOUNT OF A MODULE MACRO EXECUTES NOTHING.
+//
+// THE BUG: opening a recorded macro in the editor and pressing Debug paused at
+// line 6 with every value the macro writes ALREADY in the grid. Under the
+// synthetic unlocked `workbook` definition `context.onClick` does not exist, so
+// the generated `setup` falls through to `return macroNNNN(context.api)` —
+// mounting the macro RAN it. Twice, in fact (a plain mount, then the
+// instrumented remount), and a third time when the user pressed Run.
+//
+// VBA's contract, and now ours: entering debug PREPARES and executes nothing;
+// the user starts it with Run / run-at-cursor / Fire, and stepping is what makes
+// effects land.
+// ============================================================================
+
+describe("an inert debug mount (module macro)", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    moduleStore.clear();
+    moduleStore.set(MACRO_MODULE.id, MACRO_MODULE);
+    getWorkbookScript.mockClear();
+    // The realm the macro mounts into: it registers `monthlyClose` and `setup`
+    // as run-targets from the module body, and reports NO activity.
+    FakeWorker.runTargetsOnMount = ["monthlyClose", "setup"];
+    FakeWorker.deferMounted = true;
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(() => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  it("executes NOTHING at mount: no activity is ever reported", async () => {
+    const states: Array<string | undefined> = [];
+    const off = onDebugState((detail) => states.push(detail.session?.status));
+
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
+    off();
+
+    const session = host.getDebugSession(MACRO_MODULE.id)!;
+    // The realm reported no `debugActivity` at all, so nothing ever ran.
+    expect(session.activity).toBeNull();
+    expect(session.lastActivity).toBeNull();
+    // ...and the session never passed through "running" on the way here.
+    expect(states).not.toContain("running");
+    expect(session.autoInvokeSetup).toBe(false);
+  });
+
+  it("reports the IDLE status, not paused and not running", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
+    const session = host.getDebugSession(MACRO_MODULE.id)!;
+    expect(session.status).toBe("waiting");
+    expect(session.paused).toBeNull();
+  });
+
+  it("registers the run-targets anyway — including setup, the macro's entry point", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+    const triggers = host.getDebugSession(MACRO_MODULE.id)!.triggers;
+
+    const byName = new Map(triggers.map((t) => [t.name, t]));
+    expect(byName.get("monthlyClose")).toMatchObject({
+      id: "method:monthlyClose",
+      kind: "method",
+      runTarget: true,
+      fireable: true,
+      invokeName: `${RUN_TARGET_EXPOSED_PREFIX}monthlyClose`,
+    });
+    // `setup` is a run-target ONLY here: nothing invoked it, and for a macro
+    // whose whole body lives in setup it is the only runnable thing there is.
+    expect(byName.get("setup")).toMatchObject({
+      id: "method:setup",
+      runTarget: true,
+      fireable: true,
+    });
+  });
+
+  it("firing a run-target after an inert mount executes it EXACTLY ONCE", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+    const worker = FakeWorker.last!;
+    expect(worker.methodCalls()).toEqual([]); // nothing ran at mount
+
+    void host
+      .hostDebugFireTrigger(MACRO_MODULE.id, "method:monthlyClose")
+      .catch(() => undefined);
+
+    expect(worker.methodCalls().map((m) => m.methodName)).toEqual([
+      `${RUN_TARGET_EXPOSED_PREFIX}monthlyClose`,
+    ]);
+  });
+
+  it("says WHY when an inert mount leaves nothing runnable — never a silent dead end", async () => {
+    // A module whose body the scan finds no top-level function declaration in.
+    FakeWorker.runTargetsOnMount = [];
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+
+    const session = host.getDebugSession(MACRO_MODULE.id)!;
+    expect(session.triggers).toEqual([]);
+    // NOT "finished" — nothing ran, so nothing finished.
+    expect(session.status).toBe("failed");
+    expect(session.error).toMatch(/no top-level function declaration was found/i);
+  });
+
+  it("stays inert across a remount (Save & Apply keeps you in the session)", async () => {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+    // The editor's Save & Apply remounts the script into the open session.
+    await host.hostStartDebugSession(MACRO_MODULE.id, [3]);
+
+    expect(FakeWorker.last?.debugSpec).toMatchObject({ autoInvokeSetup: false });
+    expect(host.getDebugSession(MACRO_MODULE.id)?.lastActivity).toBeNull();
+  });
+});
+
+// ============================================================================
+// ...and the scope of that decision: a REAL object script must keep running its
+// setup on a debug mount, or the Fire list would be empty and there would be
+// nothing to debug at all.
+// ============================================================================
+
+describe("an object script's debug mount still runs setup", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(() => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  it("a button script's onClick is STILL registered under the debugger", async () => {
+    await mountButtonAndDebug();
+
+    expect(FakeWorker.last?.debugSpec).toMatchObject({ autoInvokeSetup: true });
+    const session = host.getDebugSession(BUTTON_DEFINITION.id)!;
+    expect(session.autoInvokeSetup).toBe(true);
+    // The hook setup registered is there, fireable, and named in the trigger list.
+    expect(session.triggers.map((t) => t.id)).toContain("hook:onClick");
+    expect(session.status).toBe("waiting");
+    // ...and the realm DID report running setup, because it really did run it.
+    expect(session.lastActivity).toEqual({ label: "setup" });
   });
 });
 

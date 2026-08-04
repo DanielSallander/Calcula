@@ -10,8 +10,9 @@
 import { MAX_SANDBOX_HIT_RECTS, RUN_TARGET_EXPOSED_PREFIX, type H2W, type W2H, type MountSpec, type RenderCellRequest, type RenderDrawTarget, type SandboxHitGeometry } from "../protocol";
 import { buildWorkerContext, dispatchEvent as dispatchHookEvent, applyMirror, getRenderer, getExposedHandler, registerRunTargetHandler, type WorkerRuntime } from "./contextShims";
 import { hardenAmbientGlobals, forwardConsole, safeClone } from "./workerHardening";
-import { DEBUG_GLOBAL, instrumentForDebug, topLevelFunctions } from "./debugInstrument";
+import { DEBUG_GLOBAL, instrumentForDebug } from "./debugInstrument";
 import { createDebugRuntime, type DebugController } from "./debugRuntime";
+import { buildRunTargetRegistrations, withRunTargets, wrapModuleSource } from "./debugWrapper";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -43,31 +44,32 @@ forwardConsole((level, args) => post({ t: "console", level, args }));
 //    user-authored; all user code lives inside the exported function body.
 // ============================================================================
 
-type SetupFn = (context: unknown) => unknown;
+/**
+ * The compiled module body: evaluating the user's top level and — unless the
+ * mount is INERT — invoking `setup(context)` and returning whatever it returns.
+ */
+type ModuleEntryFn = (context: unknown) => unknown;
 
 /**
  * Wrap + import one source. `asyncWrapper` is set for a DEBUG mount so the
  * instrumented top level may `await` its yield points; the wrapper's result is
  * awaited by handleMount either way, so nothing else changes.
  *
- * The wrapper deliberately adds NO newline before the user source: line numbers
- * inside the blob are the user's line numbers, which is what breakpoints, error
- * stacks and the debugger's call-stack view all address.
+ * `invokeSetup: false` produces an INERT module: the body still runs (that is
+ * what declares the functions and installs the run-targets appended after it),
+ * but the entry point is not called. See DebugSpec.autoInvokeSetup. The wrapper
+ * text itself is built in debugWrapper.ts, where it can be tested.
  */
-async function compileSource(source: string, asyncWrapper = false): Promise<SetupFn> {
-  // Cosmetic cleanup only (imports/exports won't resolve in a blob module).
-  const cleaned = source
-    .replace(/^\s*import\s+.*$/gm, "// [import removed]")
-    .replace(/^\s*export\s+default\s+/gm, "");
-
-  const wrapped =
-    `export default ${asyncWrapper ? "async " : ""}function(context) { ${cleaned}\n` +
-    `; return typeof setup === "function" ? setup(context) : undefined; }`;
-
+async function compileSource(
+  source: string,
+  asyncWrapper = false,
+  invokeSetup = true,
+): Promise<ModuleEntryFn> {
+  const wrapped = wrapModuleSource(source, { asyncWrapper, invokeSetup });
   const blob = new Blob([wrapped], { type: "text/javascript" });
   const url = URL.createObjectURL(blob);
   try {
-    const mod = (await import(/* @vite-ignore */ url)) as { default: SetupFn };
+    const mod = (await import(/* @vite-ignore */ url)) as { default: ModuleEntryFn };
     return mod.default;
   } finally {
     URL.revokeObjectURL(url);
@@ -150,8 +152,9 @@ function trackActivity<T>(label: string, run: () => T): T | Promise<Awaited<T>> 
  * to the ORIGINAL source if anything at all went wrong. A transform bug can
  * cost stepping; it must never cost the user their script.
  */
-async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
+async function compileForDebug(spec: MountSpec): Promise<ModuleEntryFn> {
   const debugSpec = spec.debug!;
+  const invokeSetup = debugSpec.autoInvokeSetup;
   dbg = createDebugRuntime(debugSpec, post);
   (self as unknown as Record<string, unknown>)[DEBUG_GLOBAL] = {
     h: (line: number, locals: () => never) => dbg?.h(line, locals),
@@ -159,28 +162,30 @@ async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
     p: (pairs: Array<[string, () => unknown]>) => dbg?.p(pairs) ?? [],
     // Run-at-cursor: the generated wrapper calls this once per top-level
     // function, after the user body, so `fn` and `context` are both in scope.
-    rt: (name: string, fn: unknown, context: unknown) => {
+    // `entryPoint` is set only for `setup` on an inert mount — it takes the
+    // whole `context`, not `context.api`.
+    rt: (name: string, fn: unknown, context: unknown, entryPoint?: boolean) => {
       if (typeof fn === "function" && runtime) {
         registerRunTargetHandler(
           runtime,
           name,
           fn as (...a: unknown[]) => unknown,
           (context ?? {}) as { api?: unknown },
+          { entryPoint: entryPoint === true },
         );
       }
     },
   };
 
-  // Registration statements appended AFTER the user body (on their own line, so
-  // no trailing user-line comment can swallow them, and no user line shifts).
-  const runTargetRegs = buildRunTargetRegistrations(spec.source);
-  const withRunTargets = (code: string): string =>
-    runTargetRegs ? `${code}\n${runTargetRegs}` : code;
+  // Registration statements appended AFTER the user body. They run BEFORE the
+  // wrapper's tail, so the run-targets exist whether or not that tail calls
+  // `setup` — which is what makes an inert mount runnable.
+  const runTargetRegs = buildRunTargetRegistrations(spec.source, !invokeSetup);
 
   const result = instrumentForDebug(spec.source);
   if (result.ok) {
     try {
-      const fn = await compileSource(withRunTargets(result.code), true);
+      const fn = await compileSource(withRunTargets(result.code, runTargetRegs), true, invokeSetup);
       post({
         t: "debugReady",
         state: {
@@ -208,28 +213,10 @@ async function compileForDebug(spec: MountSpec): Promise<SetupFn> {
   dbg.dispose();
   dbg = null;
   // Even un-instrumented, run-at-cursor can still RUN the function (it just will
-  // not pause), so the run-targets are registered on the fallback path too.
-  return compileSource(withRunTargets(spec.source));
-}
-
-/**
- * The statements the debug wrapper runs after the user body to register each
- * top-level function (except `setup`) as a run-target. `setup` is the entry
- * point the mount already invokes, not something the user asks to run.
- */
-function buildRunTargetRegistrations(source: string): string {
-  const seen = new Set<string>();
-  const parts: string[] = [];
-  for (const fn of topLevelFunctions(source)) {
-    if (fn.name === "setup" || seen.has(fn.name)) continue;
-    seen.add(fn.name);
-    // `typeof <name> === "function"` guards a name the scan saw but the engine
-    // did not hoist (a syntax the fallback tolerated); never a ReferenceError.
-    parts.push(
-      `${DEBUG_GLOBAL}.rt(${JSON.stringify(fn.name)},typeof ${fn.name}==="function"?${fn.name}:null,context);`,
-    );
-  }
-  return parts.join("");
+  // not pause), so the run-targets are registered on the fallback path too — and
+  // an inert mount stays inert, because losing STEPPING must never cost the user
+  // the guarantee that entering the debugger executed nothing.
+  return compileSource(withRunTargets(spec.source, runTargetRegs), false, invokeSetup);
 }
 
 // ============================================================================
@@ -239,6 +226,31 @@ function buildRunTargetRegistrations(source: string): string {
 let runtime: WorkerRuntime | null = null;
 let teardownFn: (() => void) | null = null;
 
+/**
+ * Evaluate the module body of an INERT mount: declarations + the appended
+ * run-target registrations, and nothing else.
+ *
+ * Every yield point is silenced for the duration. The instrumenter puts one in
+ * front of every top-level statement — including the `function foo(...)`
+ * declarations a recorded macro is made of — so a session opened with
+ * `pauseOnEntry` (what an empty gutter means) would otherwise stop on line 1 of
+ * a mount that was supposed to execute nothing, and a breakpoint parked on a
+ * declaration line would do the same. `pauseOnEntry` survives the region: the
+ * runtime is still in its pause-next mode afterwards, so the FIRST statement the
+ * user starts is where it stops — which is the whole point.
+ */
+async function runInertModuleBody(
+  moduleEntry: ModuleEntryFn,
+  context: unknown,
+): Promise<unknown> {
+  dbg?.beginInert();
+  try {
+    return await moduleEntry(context);
+  } finally {
+    dbg?.endInert();
+  }
+}
+
 async function handleMount(spec: MountSpec): Promise<void> {
   try {
     if (spec.protocolVersion !== 1) {
@@ -247,11 +259,21 @@ async function handleMount(spec: MountSpec): Promise<void> {
     }
     debugMount = !!spec.debug;
     activityDepth = 0;
-    const setup = spec.debug ? await compileForDebug(spec) : await compileSource(spec.source);
+    // An INERT debug mount (a module macro opened in the editor) prepares the
+    // realm and executes NOTHING of the user's entry point. `moduleEntry` is
+    // still called — it IS the module body, so the declarations and the
+    // run-target registrations appended after them have to run — but its tail
+    // does not call `setup`, and no activity is reported for it, because
+    // reporting "setup" for a mount that never ran setup is the same lie in a
+    // different place.
+    const inert = spec.debug ? !spec.debug.autoInvokeSetup : false;
+    const moduleEntry = spec.debug ? await compileForDebug(spec) : await compileSource(spec.source);
     const { context, rt } = buildWorkerContext(spec, post);
     runtime = rt;
     intrinsicFreeze(context);
-    const teardown = await trackActivity("setup", () => setup(context));
+    const teardown = inert
+      ? await runInertModuleBody(moduleEntry, context)
+      : await trackActivity("setup", () => moduleEntry(context));
     if (typeof teardown === "function") {
       teardownFn = teardown as () => void;
     }

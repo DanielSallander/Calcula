@@ -702,6 +702,11 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
       ? {
           breakpoints: debugSession.breakpoints,
           pauseOnEntry: pauseOnEntryOnce.get(definition.id) === true,
+          // Survives every remount of the session (Save & Apply keeps you in the
+          // debugger, and an inert session must STAY inert): it lives on the
+          // session, not on the mount, and the reset above deliberately leaves
+          // it alone.
+          autoInvokeSetup: debugSession.autoInvokeSetup,
         }
       : undefined,
     snapshot,
@@ -991,6 +996,19 @@ export interface DebugSessionState {
    * - detached  — the script was unmounted; there is nothing to attach to.
    */
   status: "starting" | "running" | "paused" | "waiting" | "finished" | "failed" | "detached";
+  /**
+   * Whether the debug mount CALLED the script's `setup(context)` entry point.
+   *
+   * True for an object script — calling `setup` is what registers `onClick`, and
+   * a session that skipped it would have no triggers and nothing to debug.
+   *
+   * False for the synthetic module-macro mount (`hostStartModuleScriptDebugSession`),
+   * where `setup` is not a registration step but the macro body itself: calling
+   * it would execute the whole macro before the user had stepped a single line.
+   * The UI reads this to say "prepared, nothing has run yet" instead of
+   * "setup() finished".
+   */
+  autoInvokeSetup: boolean;
   breakpoints: number[];
   ready: DebugReadyState | null;
   paused: DebugPauseState | null;
@@ -1157,7 +1175,12 @@ function collectDebugTriggers(mw: MountedWorker): DebugTrigger[] {
       invokeName: method.methodName,
       ...(isRunTarget ? { runTarget: true } : {}),
       description: isRunTarget
-        ? `run ${displayName}() from the top — the VBA-F5 "run the function the cursor is in" entry point`
+        ? displayName === "setup"
+          ? // Only ever registered on an INERT mount (nothing called it), so this
+            // never contradicts an object script whose setup already ran.
+            "run setup() from the top — the entry point Calcula calls when this script is " +
+            "mounted, and what a button linked to this macro runs"
+          : `run ${displayName}() from the top — the VBA-F5 "run the function the cursor is in" entry point`
         : `a call to ${displayName}() — a shortcut, a scheduled job, a formula or another script`,
       fireable: true,
     });
@@ -1171,14 +1194,44 @@ function idleStatusFor(triggers: DebugTrigger[]): "waiting" | "finished" {
 }
 
 /**
+ * What the user is told when an INERT mount has nothing that can be started.
+ *
+ * The whole point of an inert mount is that the user drives execution, so a
+ * session with no run-target is a dead end — a Run button that does nothing.
+ * It is reported as a failure WITH THE REASON rather than as a serene "Waiting
+ * for a trigger" that will wait forever.
+ */
+const NOTHING_RUNNABLE_ERROR =
+  "Nothing in this script can be started from the debugger: no top-level function " +
+  "declaration was found. Put the macro body in a top-level `function name(api) { … }` " +
+  "(or `function setup(context) { … }`) — a function assigned to a const or an arrow " +
+  "function cannot be run from here.";
+
+/**
  * Move a session to its resting state: mounted, with nothing on the stack.
  * "waiting" when something can still start it, "finished" when nothing can.
  */
 function settleDebugIdle(mw: MountedWorker, session: DebugSessionState): void {
   session.triggers = collectDebugTriggers(mw);
-  session.status = idleStatusFor(session.triggers);
   session.paused = null;
   session.activity = null;
+  applyIdleStatus(session);
+}
+
+/**
+ * The resting status for a session whose triggers are already current — the one
+ * place that knows an INERT mount with no run-target is a dead end rather than a
+ * script that "finished".
+ */
+function applyIdleStatus(session: DebugSessionState): void {
+  if (!session.autoInvokeSetup && session.triggers.length === 0) {
+    // Terminal for an inert mount: nothing ran, so nothing can register a
+    // trigger later. Saying "finished" here would claim the script completed.
+    session.status = "failed";
+    session.error = NOTHING_RUNNABLE_ERROR;
+    return;
+  }
+  session.status = idleStatusFor(session.triggers);
 }
 
 /** Re-read the trigger list of a session that is already at rest. */
@@ -1235,11 +1288,39 @@ export async function hostStartDebugSession(
   if (!mw) {
     throw new Error("Cannot debug a script that is not mounted — apply it first.");
   }
-  const definition = mw.definition;
+  // A standing mount is normally a REAL object script: `setup` is its
+  // registration step, so the debug mount must keep calling it or the script
+  // would come up with no hooks, an empty Fire list and nothing to debug at all.
+  //
+  // THE EXCEPTION is a mount the DEBUGGER itself owns — the synthetic module
+  // macro. Its standing mount is one this file made, inert by construction, and
+  // re-entering a session on it (Save & Apply, pressing Debug again, Run finding
+  // the mount already there) must not quietly flip it back to "run the macro at
+  // mount". That marker is the only authority on the question, so it is read
+  // here rather than inferred from whatever session happens to be open.
+  const autoInvokeSetup = !transientDebugMounts.has(scriptId);
+  return startDebugSessionOn(mw.definition, breakpoints, options, autoInvokeSetup);
+}
+
+/**
+ * Open a session on a definition and (re)mount it instrumented.
+ *
+ * `autoInvokeSetup` is the one thing the two entry points disagree about, and it
+ * is decided by the CALLER because only the caller knows what kind of script
+ * this is — see DebugSessionState.autoInvokeSetup.
+ */
+async function startDebugSessionOn(
+  definition: HostMountDefinition,
+  breakpoints: number[],
+  options: { pauseOnEntry?: boolean },
+  autoInvokeSetup: boolean,
+): Promise<DebugSessionState> {
+  const scriptId = definition.id;
   const session: DebugSessionState = {
     scriptId,
     scriptName: definition.name,
     status: "starting",
+    autoInvokeSetup,
     breakpoints: normalizeBreakpointLines(breakpoints),
     ready: null,
     paused: null,
@@ -1255,7 +1336,8 @@ export async function hostStartDebugSession(
   try {
     // Ungated remount on purpose: this is already-consented code being
     // relaunched, exactly like the crash-respawn path. Re-gating here would
-    // prompt mid-session for a script the user is already running.
+    // prompt mid-session for a script the user is already running. (The MODULE
+    // path below gates before it ever gets here — that mount is brand new.)
     await mountWorker(definition);
   } catch (err) {
     // A `setup` that threw is a debugging RESULT, not a failure to start a
@@ -1291,10 +1373,24 @@ export async function hostStartDebugSession(
  * `runMacroModule` uses for a button click, so what you step through is what a
  * button runs. Script Security still gates the mount (`assertMountAllowed`).
  *
+ * THE MOUNT EXECUTES NOTHING. Under that synthetic definition `context.onClick`
+ * does not exist, so the macro's generated `setup` falls through to
+ * `return macroNNNN(context.api)` — meaning MOUNTING IT RUNS IT. This used to
+ * happen TWICE per session: once on a plain mount here, then again on the
+ * instrumented remount — so the debugger paused at line 6 with every value the
+ * macro writes already in the grid, and stepping applied them a third time. The
+ * plain pre-mount is gone (there is exactly ONE mount now) and it carries
+ * `autoInvokeSetup: false`, so entering the debugger prepares the realm,
+ * installs the run-targets, and stops. Run / run-at-cursor / Fire is what
+ * starts it, which is VBA's contract and the only way stepping can show effects
+ * landing.
+ *
  * The mount is TRANSIENT: the debugger owns it, Stop tears it down rather than
  * remounting it, and a session that fails to open takes the mount with it. If
  * the id is already mounted (a real object script, or a session already open)
- * this is exactly `hostStartDebugSession`.
+ * this is exactly `hostStartDebugSession` — including its `setup` invocation,
+ * because a standing mount means a real object script whose setup registers its
+ * hooks.
  */
 export async function hostStartModuleScriptDebugSession(
   scriptId: string,
@@ -1340,10 +1436,13 @@ export async function hostStartModuleScriptDebugSession(
     apiVersion: SCRIPT_API_VERSION,
   };
 
-  await hostMountScript(definition);
+  // Script Security gates this mount exactly as `hostMountScript` would; the
+  // mount itself then goes through the session path, so there is only ever ONE
+  // mount and it is the instrumented, inert one.
+  await assertMountAllowed(definition.name);
   transientDebugMounts.add(scriptId);
   try {
-    return await hostStartDebugSession(scriptId, breakpoints, options);
+    return await startDebugSessionOn(definition, breakpoints, options, false);
   } catch (err) {
     // The session did not open, so the mount the debugger made FOR it must not
     // outlive the attempt: there is no production mount here to fall back to,
@@ -1492,7 +1591,8 @@ export function hostDebugControl(scriptId: string, action: DebugAction): void {
     // authoritative. Both agree that "resumed" means "running only if something
     // is actually on the stack".
     session.paused = null;
-    session.status = session.activity ? "running" : idleStatusFor(session.triggers);
+    if (session.activity) session.status = "running";
+    else applyIdleStatus(session);
     emitDebugState(session, scriptId);
   }
 }
@@ -1549,7 +1649,8 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
       // activity tracker's answer: a resume that lets `setup` run to completion
       // ends with the script IDLE, not "running".
       session.paused = null;
-      session.status = session.activity ? "running" : idleStatusFor(session.triggers);
+      if (session.activity) session.status = "running";
+      else applyIdleStatus(session);
       mw.resumeMountDeadline?.();
       resumeMethodCallDeadlines(mw);
       break;
