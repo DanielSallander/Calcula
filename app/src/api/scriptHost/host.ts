@@ -614,6 +614,9 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
   // debugger), but every remount restarts from a clean, un-paused state.
   const debugSession = debugSessions.get(definition.id) ?? null;
   if (debugSession) {
+    // A remount restarts the session; nothing the PREVIOUS realm did may end it.
+    cancelDebugAutoEnd(definition.id);
+    activityStartedAt.delete(definition.id);
     debugSession.status = "starting";
     debugSession.paused = null;
     debugSession.ready = null;
@@ -762,6 +765,9 @@ export function hostUnmountScript(scriptId: string): void {
   const mw = mounted.get(scriptId);
   if (!mw) return;
   transientDebugMounts.delete(scriptId);
+  // There is no realm left to end a session against.
+  cancelDebugAutoEnd(scriptId);
+  activityStartedAt.delete(scriptId);
   mw.worker.terminate();
   for (const pending of mw.pendingRenderCells.values()) {
     clearTimeout(pending.timer);
@@ -839,8 +845,11 @@ export function hostResetAll(): void {
   for (const scriptId of [...debugSessions.keys()]) {
     debugSessions.delete(scriptId);
     pauseOnEntryOnce.delete(scriptId);
+    cancelDebugAutoEnd(scriptId);
     emitDebugState(null, scriptId);
   }
+  for (const scriptId of [...autoEndTimers.keys()]) cancelDebugAutoEnd(scriptId);
+  activityStartedAt.clear();
   transientDebugMounts.clear();
   // Workbook reset = fresh session: forget all capability grants.
   resetAllGrants();
@@ -971,6 +980,14 @@ export interface DebugActivityRecord {
   label: string;
   /** Set when that execution threw or rejected. */
   error?: string;
+  /**
+   * Wall-clock duration of a COMPLETED execution, in milliseconds.
+   *
+   * Only ever set on `lastActivity` (a running execution has no duration yet),
+   * and only when the host saw both ends of it — an execution that was already
+   * in flight when the session opened has no start to measure from.
+   */
+  durationMs?: number;
 }
 
 /**
@@ -990,8 +1007,12 @@ export interface DebugSessionState {
    * - starting  — remounting; the realm has not reported in yet.
    * - running   — script code is on the stack right now (`activity` names it).
    * - paused    — suspended at a yield point (`paused` describes where).
-   * - waiting   — mounted and idle, waiting for one of `triggers` to fire.
-   * - finished  — mounted and idle with NOTHING that can start it again.
+   * - waiting   — mounted and idle, with a real EVENT HOOK that something in the
+   *               app will fire (a click, an edit, a save). Only a `hook`
+   *               trigger justifies this word — see `idleStatusFor`.
+   * - finished  — mounted and idle with nothing that will fire on its own. Its
+   *               `method` run-targets are still there for the USER to run
+   *               again; nothing is going to arrive.
    * - failed    — `setup` threw; `error` says what it threw.
    * - detached  — the script was unmounted; there is nothing to attach to.
    */
@@ -1025,6 +1046,13 @@ export interface DebugSessionState {
 }
 
 const debugSessions = new Map<string, DebugSessionState>();
+
+/**
+ * When the realm said the CURRENT execution started, so a completed one can be
+ * reported with a duration. Host-side by design: the realm's clock is not ours,
+ * and an execution the host never saw start simply has no duration.
+ */
+const activityStartedAt = new Map<string, number>();
 
 /**
  * Scripts the DEBUGGER itself mounted (a recorded macro opened in the editor has
@@ -1188,9 +1216,25 @@ function collectDebugTriggers(mw: MountedWorker): DebugTrigger[] {
   return out;
 }
 
-/** Idle statuses: the script is mounted, nothing is executing. */
+/**
+ * Idle statuses: the script is mounted, nothing is executing.
+ *
+ * ONLY A `hook` TRIGGER MEANS "WAITING". The two kinds of trigger answer two
+ * different questions:
+ *   - hook   — something in the app WILL fire this (a click, an edit, a save).
+ *              The script really is waiting for it.
+ *   - method — YOU may run this again. A run-target is exposed on the debug
+ *              mount purely so the user can start it; nothing in the app is
+ *              going to call it, and nothing ever will.
+ *
+ * Counting methods as "waiting" is what made every recorded macro report
+ * "Waiting for a trigger" forever after the user had stepped through the whole
+ * thing: a macro always carries its own run-targets (`setup` plus each top-level
+ * function), so the list was never empty and the badge never changed. A macro
+ * that has run is FINISHED — there is nothing left to wait for.
+ */
 function idleStatusFor(triggers: DebugTrigger[]): "waiting" | "finished" {
-  return triggers.length > 0 ? "waiting" : "finished";
+  return triggers.some((t) => t.kind === "hook") ? "waiting" : "finished";
 }
 
 /**
@@ -1209,7 +1253,8 @@ const NOTHING_RUNNABLE_ERROR =
 
 /**
  * Move a session to its resting state: mounted, with nothing on the stack.
- * "waiting" when something can still start it, "finished" when nothing can.
+ * "waiting" when an event hook can still fire it, "finished" when the only way
+ * it runs again is the user starting it.
  */
 function settleDebugIdle(mw: MountedWorker, session: DebugSessionState): void {
   session.triggers = collectDebugTriggers(mw);
@@ -1241,6 +1286,145 @@ function refreshIdleDebugTriggers(mw: MountedWorker): void {
   if (session.status !== "waiting" && session.status !== "finished") return;
   settleDebugIdle(mw, session);
   emitDebugState(session, mw.definition.id);
+}
+
+// ----------------------------------------------------------------------------
+// Leaving debug mode by itself — stepping past the end of a macro
+// ----------------------------------------------------------------------------
+//
+// VBA's contract: step past the end of a Sub and you are out of break mode.
+// Ours was not — the user stepped through every line of a recorded macro and
+// the toolbar still showed a live session, because the debugger owns the mount
+// and nothing ever released it. A macro that has run to completion, with no
+// event hook that can start it again, has nothing left to debug: the session
+// ends itself and the toolbar returns to its normal state.
+//
+// THE THREE THINGS THIS MUST NOT DO:
+//   1. swallow a failure — a run that threw KEEPS its session (that is exactly
+//      when the user needs it), so only a clean completion ends;
+//   2. unregister a handler being debugged — a script with a real `hook`
+//      trigger stays mounted and waiting, forever if that is what the user
+//      wants;
+//   3. vanish without a trace — the completion is printed to the script console
+//      first, so there is a record after the badge disappears.
+//
+// It is also idempotent and identity-checked: everything it does is re-validated
+// against the SAME session object at the moment it acts, so a Stop, a Run or a
+// window close landing in the meantime wins and the auto-end simply drops.
+
+/** How often the pending-work check re-runs while a call is still in flight. */
+const AUTO_END_POLL_MS = 25;
+
+/**
+ * How long the auto-end waits for the run's own method call to come back before
+ * giving up entirely. Ending while the call is in flight would tear the realm
+ * down under it and reject the caller with "Script unmounted" — the run that
+ * just SUCCEEDED would be reported as failed. Giving up leaves the session open
+ * and honest ("Finished"); the user can still press Stop.
+ */
+const AUTO_END_MAX_WAIT_MS = 3_000;
+
+/** Pending auto-ends, keyed by script id, so a Stop/Run can cancel them. */
+const autoEndTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelDebugAutoEnd(scriptId: string): void {
+  const timer = autoEndTimers.get(scriptId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    autoEndTimers.delete(scriptId);
+  }
+}
+
+/**
+ * Whether this session is one that should let go of the debugger on its own.
+ *
+ * Re-evaluated on every tick, never cached: the user may have run something
+ * else, hit a breakpoint, or had a hook appear since the completion landed.
+ */
+function qualifiesForDebugAutoEnd(session: DebugSessionState): boolean {
+  // Only the DEBUGGER'S OWN inert mount (a recorded macro). A real object
+  // script's mount belongs to the workbook, not to this session.
+  if (session.autoInvokeSetup !== false) return false;
+  if (!transientDebugMounts.has(session.scriptId)) return false;
+  // Settled and idle. "paused"/"running" mean the user is still in it;
+  // "failed"/"detached" mean the session is carrying a message worth reading.
+  if (session.status !== "finished" && session.status !== "waiting") return false;
+  // A real event hook is a promise that something will fire: ending would
+  // unregister the very handler being debugged.
+  if (session.triggers.some((t) => t.kind === "hook")) return false;
+  // Something must actually have RUN, and it must have run cleanly.
+  const last = session.lastActivity;
+  if (!last || last.error) return false;
+  return true;
+}
+
+/** Human duration for the completion line. */
+function formatRunDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+/**
+ * The record that outlives the badge: one line in the script console saying
+ * what ran, how it ended, and that the session is over. Printed through the
+ * same channel `context.log` uses, so it lands in both editors' consoles.
+ */
+function announceDebugAutoEnd(session: DebugSessionState): void {
+  const last = session.lastActivity;
+  const label = last?.label ?? "the script";
+  const took = typeof last?.durationMs === "number" ? ` in ${formatRunDuration(last.durationMs)}` : "";
+  emitAppEvent("objectscript:console", {
+    scriptId: session.scriptId,
+    level: "log",
+    args: [
+      `[debug] ${session.scriptName}: ${label} finished${took}. ` +
+        "Nothing else can start this script, so the debug session ended. " +
+        "Press Run (F5) or Debug to run it again.",
+    ],
+  });
+}
+
+/**
+ * Try to end `session` now; re-arm if the run's own method call is still open.
+ *
+ * `session` is the identity guard: if the map no longer holds THIS object the
+ * user has stopped or restarted the session, and this auto-end is stale.
+ */
+function runDebugAutoEnd(scriptId: string, session: DebugSessionState, deadline: number): void {
+  if (debugSessions.get(scriptId) !== session) return;
+  if (!qualifiesForDebugAutoEnd(session)) return;
+  const mw = mounted.get(scriptId);
+  if (!mw) return;
+  if (mw.pendingMethodCalls.size > 0) {
+    // The realm reports the END OF THE EXECUTION before the relayed method call
+    // resolves. Tearing the worker down between those two would reject the call
+    // the user is awaiting.
+    if (Date.now() >= deadline) return;
+    scheduleDebugAutoEnd(scriptId, session, deadline);
+    return;
+  }
+  announceDebugAutoEnd(session);
+  // THE SAME TEARDOWN AS PRESSING STOP — there is no second path, so the
+  // transient mount is released exactly as it always was.
+  void hostStopDebugSession(scriptId).catch(() => undefined);
+}
+
+function scheduleDebugAutoEnd(scriptId: string, session: DebugSessionState, deadline: number): void {
+  cancelDebugAutoEnd(scriptId);
+  const timer = setTimeout(() => {
+    autoEndTimers.delete(scriptId);
+    runDebugAutoEnd(scriptId, session, deadline);
+  }, AUTO_END_POLL_MS);
+  autoEndTimers.set(scriptId, timer);
+}
+
+/** Arm an auto-end for a session that just completed an execution cleanly. */
+function maybeAutoEndDebugSession(scriptId: string, session: DebugSessionState): void {
+  if (!qualifiesForDebugAutoEnd(session)) {
+    cancelDebugAutoEnd(scriptId);
+    return;
+  }
+  scheduleDebugAutoEnd(scriptId, session, Date.now() + AUTO_END_MAX_WAIT_MS);
 }
 
 /**
@@ -1316,6 +1500,9 @@ async function startDebugSessionOn(
   autoInvokeSetup: boolean,
 ): Promise<DebugSessionState> {
   const scriptId = definition.id;
+  // A fresh session replaces whatever the previous one was about to do.
+  cancelDebugAutoEnd(scriptId);
+  activityStartedAt.delete(scriptId);
   const session: DebugSessionState = {
     scriptId,
     scriptName: definition.name,
@@ -1552,6 +1739,10 @@ export async function hostDebugFireTrigger(scriptId: string, triggerId: string):
  * remount.
  */
 export async function hostStopDebugSession(scriptId: string): Promise<void> {
+  // Whatever ends this session, it ends only once: a pending auto-end must not
+  // fire at a session the user (or a restart) has already taken away.
+  cancelDebugAutoEnd(scriptId);
+  activityStartedAt.delete(scriptId);
   const session = debugSessions.get(scriptId);
   if (!session) return;
   const mw = mounted.get(scriptId);
@@ -1635,6 +1826,9 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
     case "debugPaused":
       session.status = "paused";
       session.paused = msg.state;
+      // The user is standing inside the script: nothing may end the session
+      // under them.
+      cancelDebugAutoEnd(scriptId);
       // The script stopped before finishing `setup` — hold the mount deadline
       // open for as long as the user keeps it there.
       mw.suspendMountDeadline?.();
@@ -1661,16 +1855,29 @@ function handleDebugMessage(mw: MountedWorker, msg: Extract<W2H, { t: `debug${st
       if (msg.state.running) {
         session.activity = { label: msg.state.label };
         session.error = null;
+        activityStartedAt.set(scriptId, Date.now());
+        // Something is executing again — a pending auto-end from the PREVIOUS
+        // execution must not fire into it.
+        cancelDebugAutoEnd(scriptId);
         if (session.status !== "paused") session.status = "running";
       } else {
+        const startedAt = activityStartedAt.get(scriptId);
+        activityStartedAt.delete(scriptId);
         session.activity = null;
         session.lastActivity = {
           label: msg.state.label,
           ...(msg.state.error ? { error: msg.state.error } : {}),
+          ...(startedAt !== undefined ? { durationMs: Date.now() - startedAt } : {}),
         };
         // A pause report can outlive the execution that raised it only if the
         // realm died; while genuinely paused, no activity can have finished.
-        if (session.status !== "paused") settleDebugIdle(mw, session);
+        if (session.status !== "paused") {
+          settleDebugIdle(mw, session);
+          // Stepping past the end of a macro leaves debug mode, exactly as it
+          // does in VBA — but only for a clean run of a script nothing else can
+          // start. maybeAutoEndDebugSession decides; this is just the moment.
+          maybeAutoEndDebugSession(scriptId, session);
+        }
       }
       break;
   }

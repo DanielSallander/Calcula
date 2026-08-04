@@ -5,8 +5,33 @@
 //          a debugger UI can have.
 
 import { describe, it, expect } from "vitest";
-import { breakpointShift, computeDebugDecorations, statusLabel } from "../components/DebugPanel";
-import type { DebugSessionState } from "../lib/debugger";
+import {
+  badgeClassFor,
+  breakpointShift,
+  computeDebugDecorations,
+  idleMessage,
+  statusLabel,
+} from "../components/DebugPanel";
+import type { DebugSessionState, DebugTrigger } from "../lib/debugger";
+
+/** A real event hook: something in the app fires it. */
+const HOOK_TRIGGER: DebugTrigger = {
+  id: "hook:onClick",
+  kind: "hook",
+  name: "onClick",
+  description: "a click on it (the button this script is attached to)",
+  fireable: true,
+};
+
+/** A run-target: only the USER can start it. Never a reason to say "waiting". */
+const RUN_TARGET: DebugTrigger = {
+  id: "method:monthlyClose",
+  kind: "method",
+  name: "monthlyClose",
+  description: "run monthlyClose() from the top",
+  fireable: true,
+  runTarget: true,
+};
 
 function session(partial: Partial<DebugSessionState>): DebugSessionState {
   return {
@@ -77,25 +102,35 @@ describe("gutter decorations", () => {
 });
 
 describe("the status badge must never claim work is happening", () => {
-  it("says WAITING, not Running, for a script that is idle between triggers", () => {
-    const s = session({
-      status: "waiting",
-      triggers: [
-        {
-          id: "hook:onClick",
-          kind: "hook",
-          name: "onClick",
-          description: "a click on it (the button this script is attached to)",
-          fireable: true,
-        },
-      ],
-    });
-    expect(statusLabel(s)).toBe("Waiting for a trigger");
+  it("says WAITING and NAMES THE HOOK for a script that is idle between triggers", () => {
+    const s = session({ status: "waiting", triggers: [HOOK_TRIGGER] });
+    expect(statusLabel(s)).toBe("Waiting for onClick");
     expect(statusLabel(s)).not.toMatch(/running/i);
   });
 
+  it("names both hooks when there are two, and counts them beyond that", () => {
+    const onEdit: DebugTrigger = { ...HOOK_TRIGGER, id: "hook:onEdit", name: "onEdit" };
+    const onSave: DebugTrigger = { ...HOOK_TRIGGER, id: "hook:onBeforeSave", name: "onBeforeSave" };
+    expect(statusLabel(session({ status: "waiting", triggers: [HOOK_TRIGGER, onEdit] }))).toBe(
+      "Waiting for onClick or onEdit",
+    );
+    expect(
+      statusLabel(session({ status: "waiting", triggers: [HOOK_TRIGGER, onEdit, onSave] })),
+    ).toBe("Waiting for one of its 3 event hooks");
+  });
+
   it("says FINISHED for a script that ran to completion with nothing to restart it", () => {
-    expect(statusLabel(session({ status: "finished" }))).toBe("Finished");
+    expect(statusLabel(session({ status: "finished", lastActivity: { label: "setup" } }))).toBe(
+      "Finished",
+    );
+  });
+
+  it("says so when the last run THREW, instead of a serene Finished", () => {
+    const s = session({
+      status: "finished",
+      lastActivity: { label: "monthlyClose()", error: "TypeError: x is not a function" },
+    });
+    expect(statusLabel(s)).toBe("Finished with an error");
   });
 
   it("NAMES what is running while something really is", () => {
@@ -129,33 +164,32 @@ describe("the status badge must never claim work is happening", () => {
 // ============================================================================
 
 describe("the badge after an inert mount", () => {
-  const macroTrigger = {
-    id: "method:monthlyClose",
-    kind: "method" as const,
-    name: "monthlyClose",
-    description: "run monthlyClose() from the top",
-    fireable: true,
-    runTarget: true,
-  };
-
   it("says nothing has run yet — not Paused, not Running, not Waiting-for-a-trigger", () => {
+    // The host's status for a prepared macro is "finished" (its run-targets are
+    // not things that WILL fire), but nothing has run, so the word is Ready.
     const s = session({
-      status: "waiting",
+      status: "finished",
       autoInvokeSetup: false,
-      triggers: [macroTrigger],
+      triggers: [RUN_TARGET],
     });
     expect(statusLabel(s)).toBe("Ready — nothing has run yet");
-    expect(statusLabel(s)).not.toMatch(/paused|running/i);
+    expect(statusLabel(s)).not.toMatch(/paused|running|waiting/i);
+    // ...and it is not greyed out like a spent session: pressing Run is the
+    // next thing to do.
+    expect(badgeClassFor(s)).toBe("waiting");
   });
 
-  it("reverts to the ordinary idle wording once the user HAS run something", () => {
+  it("says FINISHED — never 'waiting' — once the macro HAS run", () => {
     const s = session({
-      status: "waiting",
+      status: "finished",
       autoInvokeSetup: false,
-      triggers: [macroTrigger],
-      lastActivity: { label: "monthlyClose()" },
+      triggers: [RUN_TARGET],
+      lastActivity: { label: "monthlyClose()", durationMs: 420 },
     });
-    expect(statusLabel(s)).toBe("Waiting for a trigger");
+    // THE REPORTED BUG: this used to be "Waiting for a trigger", forever,
+    // because the macro's own run-target counted as something to wait for.
+    expect(statusLabel(s)).toBe("Finished");
+    expect(badgeClassFor(s)).toBe("finished");
   });
 
   it("says NOTHING TO RUN — not 'setup() failed' — when an inert mount has no run target", () => {
@@ -168,8 +202,61 @@ describe("the badge after an inert mount", () => {
   });
 
   it("leaves the object-script wording alone (the scope guard)", () => {
-    const s = session({ status: "waiting", autoInvokeSetup: true, triggers: [macroTrigger] });
-    expect(statusLabel(s)).toBe("Waiting for a trigger");
+    const s = session({ status: "waiting", autoInvokeSetup: true, triggers: [HOOK_TRIGGER] });
+    expect(statusLabel(s)).toBe("Waiting for onClick");
+  });
+});
+
+// ============================================================================
+// The panel's sentence under the badge. Same rule, more words: it may only
+// promise an arrival when a real event HOOK exists.
+// ============================================================================
+
+describe("the idle explanation", () => {
+  it("promises an arrival only when a hook can arrive", () => {
+    const withHook = session({
+      status: "waiting",
+      triggers: [HOOK_TRIGGER],
+      lastActivity: { label: "onClick" },
+    });
+    expect(idleMessage(withHook)).toMatch(/runs again when onClick fires/);
+
+    const runTargetOnly = session({
+      status: "finished",
+      autoInvokeSetup: false,
+      triggers: [RUN_TARGET],
+      lastActivity: { label: "monthlyClose()", durationMs: 1500 },
+    });
+    const text = idleMessage(runTargetOnly);
+    expect(text).toMatch(/^Finished\./);
+    expect(text).toMatch(/No event hook can start this script again/);
+    expect(text).toMatch(/in 1\.5 s/);
+    expect(text).not.toMatch(/waiting|fires/i);
+  });
+
+  it("keeps the prepared-but-unrun wording for a macro that has not started", () => {
+    const s = session({ status: "finished", autoInvokeSetup: false, triggers: [RUN_TARGET] });
+    expect(idleMessage(s)).toMatch(/nothing has run yet/i);
+    expect(idleMessage(s)).not.toMatch(/Finished/);
+  });
+
+  it("leads with the error when the last run threw, and says why the session is still here", () => {
+    const s = session({
+      status: "finished",
+      autoInvokeSetup: false,
+      triggers: [RUN_TARGET],
+      lastActivity: { label: "monthlyClose()", error: "TypeError: x is not a function" },
+    });
+    const text = idleMessage(s);
+    expect(text).toMatch(/monthlyClose\(\) stopped with an error: TypeError/);
+    expect(text).toMatch(/kept open/);
+  });
+
+  it("does not claim an object script registered nothing when it exposed methods", () => {
+    const exposed: DebugTrigger = { ...RUN_TARGET, runTarget: undefined, name: "recalcAll" };
+    const s = session({ status: "finished", triggers: [exposed] });
+    expect(idleMessage(s)).toMatch(/registered no event hook/);
+    expect(idleMessage(s)).toMatch(/exposed method/);
   });
 });
 

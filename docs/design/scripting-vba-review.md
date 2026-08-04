@@ -1275,6 +1275,23 @@ this table are both wrong until someone re-derives from code.
     builds for a recorded macro, whose `setup` *is* the macro rather than a registration step. Every
     object script keeps `autoInvokeSetup: true`, because its `setup` is what registers `onClick` and
     a mount that skipped it would have nothing to debug.
+    **Amended 2026-08-06 (thirteenth entry, §8) — the two kinds of trigger, and leaving on your own.**
+    `collectDebugTriggers` returns `kind: "hook"` (a real event — *something in the app will fire
+    this*) and `kind: "method"` (a **run-target** the inert mount exposes — *you may run this again*).
+    They are not interchangeable, and only the first is a reason to wait: `idleStatusFor` counts
+    `kind === "hook"` alone. Consequently a session's resting status is `"waiting"` only when it can
+    name the event it is waiting for, and a macro — whose triggers are all its own run-targets —
+    rests at `"finished"`.
+    **Auto-exit rule (VBA: step past the end of a Sub and you are out of break mode).** When an
+    execution completes, `maybeAutoEndDebugSession` ends the session *iff all five hold*: the mount is
+    the debugger's own inert one (`autoInvokeSetup === false` **and** `transientDebugMounts.has(id)`),
+    the status is settled-idle (never `paused`/`running`/`failed`), there is **no** `hook` trigger,
+    `lastActivity` exists **with no error**, and no relayed method call is still in flight. It ends
+    through `hostStopDebugSession` — the Stop button's own teardown, so the transient mount is
+    released by the single path that knows how — after printing the run and its duration to the
+    script console. It is armed only from `debugActivity{running:false}` and cancelled on
+    start/stop/unmount/reset/remount/pause/new-activity, and re-validates the **same session object**
+    on the tick it fires, so a concurrent Stop or re-Run wins.
 
 21. **TypeScript authoring (§7.12 half 2)** — **SHIPPED 2026-08-01 (Wave H).**
     `api/scriptTranspile.ts` compiles at save; **the emitted JavaScript becomes `script.source`**, so
@@ -1780,6 +1797,91 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Thirteenth entry (2026-08-06, the same session as the twelfth — the very next thing the user
+> hit) — "It should exit debug mode when stepping through all the lines, correct?" A macro that had
+> finished said it was WAITING FOR A TRIGGER, and no trigger was ever coming.**
+>
+> With the inert mount working, the user stepped a recorded macro line by line to the end. Values
+> landed at the right line. Then the toolbar sat there showing a live session badged
+> **"Waiting for a trigger"**.
+>
+> **Root cause — one word covering two opposite meanings.** `idleStatusFor(triggers)` returned
+> `"waiting"` for `triggers.length > 0`, and `collectDebugTriggers` returns two KINDS:
+> `kind: "hook"` (a real event — something in the app fires it) and `kind: "method"` (a **run-target**
+> — an entry point the debugger exposes on the inert mount *so the user can run it*, i.e. the twelfth
+> entry's own mechanism). Every macro therefore carries at least `setup()` plus its body function,
+> the list is never empty, and the badge said "waiting" forever. **A hook means *something will fire
+> this*; a method means *you may run this again*. Only the former is waiting.** `idleStatusFor` now
+> counts hooks only.
+>
+> **...and a finished macro leaves debug mode.** VBA: step past the end of a Sub and you are out of
+> break mode. When an INERT session's execution completes **successfully** and the script has no
+> `hook` trigger, the host ends the session itself — through **`hostStopDebugSession`, the same
+> teardown the Stop button uses**, so the transient mount is released by the one path that already
+> knows how (`hostTransientDebugMountIds()` stays empty). Four guards, each with a test: a run that
+> **threw** keeps its session (that is when it is needed); a **paused** session is never ended under
+> the user; a script with a **real hook** stays mounted and waiting (ending would unregister the
+> handler being debugged); and a **non-inert object script's** mount belongs to the workbook, not to
+> the debugger. It is identity-checked against the session object and re-validated on the tick it
+> fires, so a Stop, a re-Run or a window close landing in the same beat simply wins. It also waits
+> for the run's own relayed method call to come back before tearing the realm down — ending between
+> the realm's "execution finished" report and the `methodResult` would reject the caller with
+> "Script unmounted" and report a run that SUCCEEDED as a failure.
+>
+> **Legible, not silent.** Before ending, the host prints one line to the script console — the same
+> channel `context.log` uses, so it reaches both editors: *"[debug] Monthly close: monthlyClose()
+> finished in 0.4 s. Nothing else can start this script, so the debug session ended. Press Run (F5)
+> or Debug to run it again."* The badge disappearing is then a completion the user can read, not a
+> vanishing.
+>
+> **Wording swept everywhere the status is rendered.** "Waiting for …" now NAMES the hook
+> (`Waiting for onClick`, `Waiting for onClick or onEdit`, `Waiting for one of its 3 event hooks`) —
+> if it cannot name what it is waiting for, it is not waiting. A prepared-but-unrun inert mount is
+> `"finished"` to the host (its run-targets are not things that *will* fire) and still reads
+> **"Ready — nothing has run yet"**, keeping the `waiting` badge colour so it does not look spent.
+> A run that threw badges **"Finished with an error"** with the error in red under it. The panel's
+> old "registered no handlers and no exposed methods" sentence was false for a macro and is replaced
+> by `idleMessage()`, which promises an arrival only when a hook exists.
+>
+> **Verification (2026-08-06):** `npm run check-types` clean · `npm run lint:boundaries` clean ·
+> `npm run check:script-typings` `[OK] 39 interfaces verified, 545 members probed` (unchanged) ·
+> `npx vitest run` **104,621 passed / 0 failed across 662 files** (baseline 104,605: +16 — eight host
+> tests for the auto-end and its four guards, six for the badge/panel wording, and two for the
+> cross-window bridge regression found by the live run below). **No Rust changed**, and both
+> `cargo check`s (app crate, core workspace) were re-run clean to prove it.
+> `macro-debug-inert.spec.ts` journeys 2 and 5 were rewritten to the new contract (the session ends
+> itself; there is no Stop to press).
+>
+> **Proven live (2026-08-06), and the live run found a seventh bug.** `macro-debug-autoend.spec.ts`
+> (new, 3/3, run twice green) drives the real recorder → real editor window → Debug → Run → **Step
+> Over until nothing is left to step**, against a live `tauri dev` over CDP. Asserted: the session
+> ends *itself* (`getDebugSession` null, `hostIsMounted` false, `hostTransientDebugMountIds() === []`,
+> no badge, **no Stop button**, Debug offered again); the badge is sampled at *every* pause and
+> **"Waiting for a trigger" appears zero times**; the macro's writes still stand after teardown (no
+> rollback, no second execution); a **button script with `onClick` badges `Waiting for onClick` and
+> survives 6 s of sampling un-ended, twice — including after a completed handler run**, which is the
+> exact state that arms the auto-end; and a **failing** macro keeps its session and its mount through
+> 8 s, with the error visible and Stop still working. The four macro specs re-ran **12/12**.
+>
+> **The seventh bug, caught only because the window was real.** `installObjectScriptDebugBridge`'s
+> catch block answered *every* failed cross-window command with a hard-coded `session: null`, and
+> `case "fire"` rejects with **whatever the script threw** — so a run that threw told the editor the
+> session was gone and `subscribeRemoteDebugState` deleted the mirror. The standalone editor went
+> blank: no badge, no trigger list, no Run row to retry with, **and no Stop**, while a live
+> instrumented debugger-owned mount stayed behind it with nothing in the UI able to release it. The
+> in-window dialog never had this (it calls the host directly), which is why it shipped. **Fix:** the
+> session comes from the host, never from the catch — `session: host.getDebugSession(cmd.scriptId)`;
+> a start that genuinely failed still reports null because the host deleted it. Two regression tests
+> added to a bridge that had **no** coverage at all (the mock discarded event handlers, so no test
+> could reach it); verified non-vacuous by reverting the one field and watching exactly the fire test
+> fail.
+>
+> **What still needs a human:** a run that THREW
+> deliberately does NOT move to `status: "failed"`, contrary to the letter of the request: the panel
+> disables every Run/Fire row unless the session is idle, so "failed" would take away the button the
+> user needs to retry after a fix. The error is kept visible in the badge, in red in the panel, and
+> in `lastActivity.error` instead.
 
 > **Twelfth entry (2026-08-06, FOURTH human use of the macro recorder) — a debug mount now executes
 > NOTHING, and the reason this took a fourth report is that the tenth correction had already found

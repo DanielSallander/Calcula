@@ -493,7 +493,7 @@ export function DebugToolbar({
   return (
     <>
       {runButton}
-      <span className={`osd-badge ${session.status}`} title={statusTitle(session)}>
+      <span className={`osd-badge ${badgeClassFor(session)}`} title={statusTitle(session)}>
         <span className={`osd-dot${session.status === "paused" ? " pulse" : ""}`} />
         {statusLabel(session)}
       </span>
@@ -548,20 +548,47 @@ export function DebugToolbar({
   );
 }
 
+// ============================================================================
+// Wording — hooks vs run-targets
+// ============================================================================
+//
+// A session's triggers come in two kinds and they mean opposite things:
+//   - hook   — something in the app WILL fire this (a click, an edit, a save).
+//              "Waiting" is true, and naming the hook makes it useful.
+//   - method — a run-target: YOU may run it again. Nothing is going to arrive.
+//
+// Saying "Waiting for a trigger" over a script whose only triggers are its own
+// run-targets is the bug this whole feature keeps relapsing into: a recorded
+// macro always carries run-targets, so the badge said "waiting" forever while
+// the user sat in front of a macro that had already finished.
+
+function hookTriggers(session: DebugSessionState): DebugTrigger[] {
+  return session.triggers.filter((t) => t.kind === "hook");
+}
+
+/** "onClick", "onClick or onEdit", "one of 3 event hooks". */
+function describeHooks(hooks: DebugTrigger[]): string {
+  if (hooks.length === 1) return hooks[0].name;
+  if (hooks.length === 2) return `${hooks[0].name} or ${hooks[1].name}`;
+  return `one of its ${hooks.length} event hooks`;
+}
+
 /**
  * The badge text. THIS IS THE HONESTY SURFACE.
  *
  * "Running" used to be shown for the entire life of a session, including the
  * overwhelmingly common case where `setup` had registered a handler and
  * returned — so the user watched a motionless "Running" badge and waited for
- * work that was never going to start. Every resting state now names itself, and
- * a running one names what is running.
+ * work that was never going to start. Every resting state now names itself, a
+ * running one names what is running, and a waiting one names WHAT IT IS WAITING
+ * FOR — because if it cannot name that, it is not waiting.
  */
 export function statusLabel(session: DebugSessionState): string {
   // An INERT mount (a module macro) executed nothing when the session opened, so
   // every phrase below that says or implies "setup() ran" would be false until
   // the user starts something. `lastActivity` is the proof that they have.
   const inertUnrun = session.autoInvokeSetup === false && !session.lastActivity;
+  const hooks = hookTriggers(session);
   switch (session.status) {
     case "paused":
       return `Paused — line ${session.paused?.line ?? "?"}`;
@@ -570,9 +597,16 @@ export function statusLabel(session: DebugSessionState): string {
     case "detached":
       return "Script unmounted";
     case "waiting":
-      return inertUnrun ? "Ready — nothing has run yet" : "Waiting for a trigger";
+      if (inertUnrun) return "Ready — nothing has run yet";
+      // The host only ever says "waiting" when a hook exists; the fallback is
+      // for a state this component did not build.
+      return hooks.length > 0 ? `Waiting for ${describeHooks(hooks)}` : "Waiting for a trigger";
     case "finished":
-      return "Finished";
+      // A script that has NOT run yet is ready, not finished — an inert mount
+      // reaches this status the moment it is prepared, because its run-targets
+      // are not something that "will fire".
+      if (inertUnrun) return "Ready — nothing has run yet";
+      return session.lastActivity?.error ? "Finished with an error" : "Finished";
     case "failed":
       return session.autoInvokeSetup === false ? "Nothing to run" : "setup() failed";
     case "running":
@@ -582,9 +616,23 @@ export function statusLabel(session: DebugSessionState): string {
   }
 }
 
+/**
+ * The badge's colour class. Presentation only — it follows the STATUS except for
+ * the one state whose word and whose mood disagree: an inert mount that has not
+ * run yet is "finished" to the host (nothing will fire it) but reads as ready,
+ * and greying it out would say the opposite of "press Run".
+ */
+export function badgeClassFor(session: DebugSessionState): string {
+  const inertUnrun = session.autoInvokeSetup === false && !session.lastActivity;
+  if (session.status === "finished" && inertUnrun) return "waiting";
+  return session.status;
+}
+
 function statusTitle(session: DebugSessionState): string {
   const inert = session.autoInvokeSetup === false;
   const inertUnrun = inert && !session.lastActivity;
+  const hooks = hookTriggers(session);
+  const runTargets = session.triggers.length - hooks.length;
   switch (session.status) {
     case "paused":
       return (
@@ -599,13 +647,30 @@ function statusTitle(session: DebugSessionState): string {
             `ran nothing, so the sheet is untouched. Start it with Run (F5) or one of its ` +
             `${session.triggers.length} trigger(s) below, and stepping will show each effect ` +
             `land as you step.`
-        : `"${session.scriptName}" is MOUNTED AND IDLE. setup() finished; nothing is ` +
-            `executing. It runs again when one of its ${session.triggers.length} trigger(s) ` +
-            `fires — use Fire below to make one happen from here.`;
+        : `"${session.scriptName}" is MOUNTED AND IDLE. ${inert ? "" : "setup() finished; "}` +
+            `nothing is executing. It runs again when ${describeHooks(hooks)} fires — use Fire ` +
+            `below to make that happen from here.`;
     case "finished":
+      if (inertUnrun) {
+        return (
+          `"${session.scriptName}" is PREPARED AND IDLE. Entering the debugger deliberately ` +
+          `ran nothing, so the sheet is untouched. Start it with Run (F5) or one of its ` +
+          `${runTargets} run target(s) below, and stepping will show each effect land.`
+        );
+      }
+      if (session.lastActivity?.error) {
+        return (
+          `"${session.scriptName}" finished: ${session.lastActivity.label} threw ` +
+          `${session.lastActivity.error}. The session is kept open so you can fix it, set a ` +
+          `breakpoint and run it again.`
+        );
+      }
       return (
-        `"${session.scriptName}" ran setup() to completion and registered nothing ` +
-        `that can start it again. There is no more code to step through.`
+        `"${session.scriptName}" is idle and NOTHING WILL START IT: it registered no event ` +
+        `hook, so nothing in the app can fire it.` +
+        (runTargets > 0
+          ? ` You can run it again yourself with Run (F5) or a Run row below.`
+          : ` There is no more code to step through.`)
       );
     case "failed":
       return inert
@@ -618,6 +683,75 @@ function statusTitle(session: DebugSessionState): string {
     default:
       return `Debugging "${session.scriptName}".`;
   }
+}
+
+/**
+ * The panel's one-line explanation of an idle session ("waiting" / "finished").
+ *
+ * Exported for the same reason `statusLabel` is: this sentence is the thing that
+ * lies when the hook/method distinction is dropped, so it is tested directly.
+ */
+export function idleMessage(session: DebugSessionState): string {
+  const inert = session.autoInvokeSetup === false;
+  const hooks = hookTriggers(session);
+  const runTargets = session.triggers.length - hooks.length;
+  const last = session.lastActivity;
+
+  if (inert && !last) {
+    return (
+      "Prepared — nothing has run yet. Entering the debugger mounted and instrumented this " +
+      "script without executing it, so the sheet is untouched. Press Run (F5) to run the " +
+      "function the cursor is in, or use a Run/Fire row below; execution stops at your " +
+      "breakpoints and stepping applies each effect as you step."
+    );
+  }
+  if (last?.error) {
+    // The error leads, and the session is deliberately still here: a run that
+    // threw is exactly when the debugger is worth having open.
+    return (
+      `${last.label} stopped with an error: ${last.error} — the session is kept open on ` +
+      `purpose so you can set a breakpoint and run it again.` +
+      (hooks.length > 0 ? ` It also runs again when ${describeHooks(hooks)} fires.` : "")
+    );
+  }
+  if (hooks.length > 0) {
+    return (
+      `Mounted and idle. ${inert ? "" : "setup() finished and "}nothing is executing — this ` +
+      `script runs again when ${describeHooks(hooks)} fires.` +
+      (last ? ` Last run: ${last.label}${formatDuration(last.durationMs)}.` : "")
+    );
+  }
+  if (last) {
+    return (
+      `Finished. ${last.label} ran to completion${formatDuration(last.durationMs)} and nothing ` +
+      `is executing. No event hook can start this script again` +
+      (runTargets > 0 ? " — press Run (F5) or a Run row below to run it again." : ".")
+    );
+  }
+  return (
+    "Finished. setup() ran to completion and registered no event hook, so nothing in the app " +
+    "can start this script again." +
+    (runTargets > 0
+      ? ` Its ${runTargets} exposed method(s) are still there for you to call from below.`
+      : "")
+  );
+}
+
+/**
+ * The blurb's colour: red for a run that threw (the session is being kept open
+ * FOR that error), lilac while a hook can still fire, grey once nothing can.
+ */
+function idleTone(session: DebugSessionState): string {
+  if (session.lastActivity?.error) return "#FF9B9B";
+  if (session.triggers.some((t) => t.kind === "hook")) return "#B9B4FF";
+  if (session.autoInvokeSetup === false && !session.lastActivity) return "#B9B4FF";
+  return "#888";
+}
+
+/** " in 0.4 s", or nothing when the host did not time the run. */
+function formatDuration(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "";
+  return ms < 1000 ? ` in ${Math.round(ms)} ms` : ` in ${(ms / 1000).toFixed(1)} s`;
 }
 
 // ============================================================================
@@ -691,7 +825,6 @@ export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.Reac
   // See statusLabel: an inert mount ran nothing, so "setup() finished" is a lie
   // until the user has started something themselves.
   const inert = session?.autoInvokeSetup === false;
-  const inertUnrun = inert && !session?.lastActivity;
 
   return (
     <div
@@ -748,38 +881,11 @@ export function DebugPanel({ state, onRevealLine }: DebugPanelProps): React.Reac
         </div>
       )}
 
-      {session?.status === "waiting" && (
-        <div style={{ color: "#B9B4FF" }}>
-          {inertUnrun ? (
-            <>
-              Prepared — <strong>nothing has run yet</strong>. Entering the debugger mounted and
-              instrumented this script without executing it, so the sheet is untouched. Press Run
-              (F5) to run the function the cursor is in, or use a Run/Fire row below; execution
-              stops at your breakpoints and stepping applies each effect as you step.
-            </>
-          ) : (
-            <>
-              {inert
-                ? "Mounted and idle. Nothing is executing — this script runs again only when one of the triggers below fires."
-                : "Mounted and idle. setup() finished and nothing is executing — this script runs again only when one of the triggers below fires."}
-              {session.lastActivity?.error
-                ? ` The last one (${session.lastActivity.label}) threw: ${session.lastActivity.error}`
-                : session.lastActivity
-                  ? ` Last run: ${session.lastActivity.label}.`
-                  : ""}
-            </>
-          )}
-        </div>
-      )}
-
-      {session?.status === "finished" && (
-        <div style={{ color: "#888" }}>
-          Finished. setup() ran to completion and registered no handlers and no exposed
-          methods, so there is nothing left that can start this script again.
-          {session.lastActivity?.error
-            ? ` It threw: ${session.lastActivity.error}`
-            : ""}
-        </div>
+      {idle && session && (
+        // ONE blurb for both idle statuses. Which words are true depends on
+        // whether a real event HOOK exists — not on how many triggers there are
+        // — so the sentence is built by idleMessage rather than by the status.
+        <div style={{ color: idleTone(session) }}>{idleMessage(session)}</div>
       )}
 
       {session && session.triggers.length > 0 && (

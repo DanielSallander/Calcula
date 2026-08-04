@@ -164,6 +164,33 @@ class FakeWorker {
     });
   }
 
+  /**
+   * Answer the relayed method call the host pushed in — what a real realm does
+   * when a fired run-target returns. Until this lands the host has a pending
+   * call in flight, and nothing may tear the realm down under it.
+   */
+  completeMethodCall(value: unknown = undefined): void {
+    this.emit({ t: "methodResult", callId: this.lastMethodCallId(), ok: true, value });
+  }
+
+  /** The same, for a run that threw. */
+  failMethodCall(message: string): void {
+    this.emit({
+      t: "methodResult",
+      callId: this.lastMethodCallId(),
+      ok: false,
+      error: { code: "HostError", message },
+    });
+  }
+
+  private lastMethodCallId(): number {
+    const call = this.received.filter((m) => m.t === "methodCall").pop() as
+      | { callId: number }
+      | undefined;
+    if (!call) throw new Error("no methodCall was relayed to this realm");
+    return call.callId;
+  }
+
   /** Simulate the realm reaching a breakpoint. */
   pauseAt(line: number, reason: "breakpoint" | "step" | "pause" | "entry" = "breakpoint"): void {
     this.emit({
@@ -378,9 +405,12 @@ describe("debug sessions (host)", () => {
 
     worker.activity(false, "onClick");
     const done = host.getDebugSession(BUTTON_DEFINITION.id);
+    // A button script HAS a real hook, so a completed execution leaves it
+    // waiting for the next click — and the session stays open.
     expect(done?.status).toBe("waiting");
     expect(done?.activity).toBeNull();
-    expect(done?.lastActivity).toEqual({ label: "onClick" });
+    expect(done?.lastActivity).toMatchObject({ label: "onClick" });
+    expect(typeof done?.lastActivity?.durationMs).toBe("number");
   });
 
   it("records that the last execution THREW, without claiming it is still running", async () => {
@@ -1050,7 +1080,12 @@ describe("an inert debug mount (module macro)", () => {
   it("reports the IDLE status, not paused and not running", async () => {
     await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
     const session = host.getDebugSession(MACRO_MODULE.id)!;
-    expect(session.status).toBe("waiting");
+    // NOT "waiting": a macro's triggers are its own RUN-TARGETS, and nothing in
+    // the app is ever going to fire one. There is nothing to wait for — the UI
+    // renders this as "Ready — nothing has run yet" (it has no lastActivity).
+    expect(session.status).toBe("finished");
+    expect(session.triggers.every((t) => t.kind === "method")).toBe(true);
+    expect(session.lastActivity).toBeNull();
     expect(session.paused).toBeNull();
   });
 
@@ -1112,6 +1147,203 @@ describe("an inert debug mount (module macro)", () => {
 });
 
 // ============================================================================
+// THE REPORTED BUG (2026-08-04): the user stepped through EVERY LINE of a
+// recorded macro and the toolbar still said "Waiting for a trigger", with the
+// session live. Nothing was ever going to arrive: a macro's triggers are its own
+// RUN-TARGETS — entry points exposed so the USER can run them — and the status
+// counted those as things to wait for.
+//
+// VBA's contract: step past the end of a Sub and you are out of break mode.
+// ============================================================================
+
+describe("a macro that ran to completion LEAVES DEBUG MODE", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    moduleStore.clear();
+    moduleStore.set(MACRO_MODULE.id, MACRO_MODULE);
+    getWorkbookScript.mockClear();
+    FakeWorker.runTargetsOnMount = ["monthlyClose", "setup"];
+    FakeWorker.deferMounted = true;
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(async () => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  /**
+   * Open the session and fire the macro's run-target, as Run (F5) does. `run`
+   * settles to "ok" or to the rejection text, so a teardown that rejected the
+   * caller cannot pass unnoticed.
+   */
+  async function startAndRun(): Promise<{ worker: FakeWorker; run: Promise<string> }> {
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, []);
+    const worker = FakeWorker.last!;
+    const run = fireAndReport(MACRO_MODULE.id, "method:monthlyClose");
+    worker.activity(true, "monthlyClose()");
+    return { worker, run };
+  }
+
+  function fireAndReport(scriptId: string, triggerId: string): Promise<string> {
+    return host.hostDebugFireTrigger(scriptId, triggerId).then(
+      () => "ok",
+      (e: unknown) => `rejected: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  it("ends the session, releases the transient mount, and says so in the console", async () => {
+    const lines: string[] = [];
+    const offConsole = onScriptConsole((detail) => lines.push(detail.args.join(" ")));
+    const { worker, run } = await startAndRun();
+
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await run;
+    await waitForSessionEnd(MACRO_MODULE.id);
+    offConsole();
+
+    // The toolbar is back to its normal, non-debug state...
+    expect(host.getDebugSession(MACRO_MODULE.id)).toBeNull();
+    // ...and nothing leaked: the debugger-owned mount went with it.
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    expect(worker.terminated).toBe(true);
+    // The badge disappeared, so the console is the record that it FINISHED
+    // rather than vanished.
+    const printed = lines.join("\n");
+    expect(printed).toMatch(/monthlyClose\(\) finished/);
+    expect(printed).toMatch(/debug session ended/i);
+    expect(printed).toMatch(/Monthly close/);
+  });
+
+  it("NEVER tears the realm down under the call that is still in flight", async () => {
+    const { worker, run } = await startAndRun();
+
+    // The realm reports the end of the execution BEFORE the relayed method call
+    // resolves. Ending here would reject the caller with "Script unmounted" —
+    // reporting the run that just succeeded as a failure.
+    worker.activity(false, "monthlyClose()");
+    await sleep(90);
+    expect(host.getDebugSession(MACRO_MODULE.id)).not.toBeNull();
+    expect(worker.terminated).toBe(false);
+
+    worker.completeMethodCall("done");
+    // The run that just SUCCEEDED must be reported as a success.
+    await expect(run).resolves.toBe("ok");
+    await waitForSessionEnd(MACRO_MODULE.id);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+  });
+
+  it("does NOT end a run that THREW — that is when the session is needed", async () => {
+    const { worker, run } = await startAndRun();
+
+    worker.activity(false, "monthlyClose()", "TypeError: total is not a function");
+    worker.failMethodCall("TypeError: total is not a function");
+    await expect(run).resolves.toMatch(/^rejected: TypeError/);
+    await sleep(120);
+
+    const session = host.getDebugSession(MACRO_MODULE.id);
+    expect(session).not.toBeNull();
+    expect(session?.lastActivity?.error).toMatch(/TypeError/);
+    // ...and the mount is still there to run it again after a fix.
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+    expect(host.hostTransientDebugMountIds()).toEqual([MACRO_MODULE.id]);
+  });
+
+  it("does NOT end a script that registered a real hook — that handler is live", async () => {
+    const { worker, run } = await startAndRun();
+
+    // The run registered a click handler: something in the app WILL fire it, so
+    // ending the session would unregister the very thing being debugged.
+    worker.emit({ t: "hookRegistered", hook: "onClick" });
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await run;
+    await sleep(120);
+
+    const session = host.getDebugSession(MACRO_MODULE.id);
+    expect(session?.status).toBe("waiting");
+    expect(session?.triggers.some((t) => t.kind === "hook")).toBe(true);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+  });
+
+  it("does NOT end a session that is PAUSED when the report lands", async () => {
+    const { worker, run } = await startAndRun();
+    worker.pauseAt(2);
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await run;
+    await sleep(120);
+
+    expect(host.getDebugSession(MACRO_MODULE.id)?.status).toBe("paused");
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+  });
+
+  it("is idempotent against a Stop that got there first", async () => {
+    const lines: string[] = [];
+    const offConsole = onScriptConsole((detail) => lines.push(detail.args.join(" ")));
+    const { worker, run } = await startAndRun();
+
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await run;
+    // The user presses Stop in the same beat the completion lands.
+    await host.hostStopDebugSession(MACRO_MODULE.id);
+    await sleep(120);
+    offConsole();
+
+    expect(host.getDebugSession(MACRO_MODULE.id)).toBeNull();
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(false);
+    // The session the user ended is not announced as an auto-end afterwards.
+    expect(lines.join("\n")).not.toMatch(/debug session ended/i);
+  });
+
+  it("never fights a session the user has already RESTARTED", async () => {
+    const { worker, run } = await startAndRun();
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await run;
+
+    // Run again, before the auto-end tick: the new execution wins.
+    const second = fireAndReport(MACRO_MODULE.id, "method:monthlyClose");
+    worker.activity(true, "monthlyClose()");
+    await sleep(120);
+
+    expect(host.getDebugSession(MACRO_MODULE.id)?.status).toBe("running");
+    expect(host.hostIsMounted(MACRO_MODULE.id)).toBe(true);
+
+    // ...and when THAT one completes, the session ends exactly once.
+    worker.activity(false, "monthlyClose()");
+    worker.completeMethodCall();
+    await second;
+    await waitForSessionEnd(MACRO_MODULE.id);
+    expect(host.hostTransientDebugMountIds()).toEqual([]);
+  });
+
+  it("leaves an OBJECT SCRIPT's mount alone — the workbook owns that one", async () => {
+    // A real (non-inert) mount is not the debugger's to release: Stop remounts
+    // it, and auto-ending would silently restart the user's script.
+    FakeWorker.runTargetsOnMount = [];
+    FakeWorker.deferMounted = false;
+    await host.hostMountScript({ ...DEFINITION });
+    await host.hostStartDebugSession(DEFINITION.id, []);
+    const worker = FakeWorker.last!;
+
+    worker.activity(true, "setup");
+    worker.activity(false, "setup");
+    await sleep(90);
+
+    expect(host.getDebugSession(DEFINITION.id)?.status).toBe("finished");
+    expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
+  });
+});
+
+// ============================================================================
 // ...and the scope of that decision: a REAL object script must keep running its
 // setup on a debug mount, or the Fire list would be empty and there would be
 // nothing to debug at all.
@@ -1141,9 +1373,32 @@ describe("an object script's debug mount still runs setup", () => {
     expect(session.triggers.map((t) => t.id)).toContain("hook:onClick");
     expect(session.status).toBe("waiting");
     // ...and the realm DID report running setup, because it really did run it.
-    expect(session.lastActivity).toEqual({ label: "setup" });
+    expect(session.lastActivity).toMatchObject({ label: "setup" });
   });
 });
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wait for a session to end itself (the auto-end runs on a short timer). */
+async function waitForSessionEnd(scriptId: string, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (host.getDebugSession(scriptId) !== null) {
+    if (Date.now() > deadline) throw new Error(`session for ${scriptId} never ended`);
+    await sleep(10);
+  }
+}
+
+/** Subscribe to the script console — where the completion line lands. */
+function onScriptConsole(cb: (detail: { scriptId: string; args: string[] }) => void): () => void {
+  const handler = (e: Event): void => {
+    const detail = (e as CustomEvent).detail as { scriptId: string; args: unknown[] };
+    cb({ scriptId: detail.scriptId, args: detail.args.map((a) => String(a)) });
+  };
+  window.addEventListener("objectscript:console", handler);
+  return () => window.removeEventListener("objectscript:console", handler);
+}
 
 /** Subscribe to the host's debug-state app event. */
 function onDebugState(

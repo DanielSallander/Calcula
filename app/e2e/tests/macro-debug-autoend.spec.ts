@@ -1,52 +1,63 @@
 /**
- * ENTERING THE DEBUGGER MUST EXECUTE NOTHING — proved against the real app.
+ * A FINISHED MACRO MUST LEAVE DEBUG MODE — proved against the real app.
  *
  * WHAT THE USER REPORTED. They opened a recorded macro in the Object Script
- * Editor and pressed Debug. The debugger paused at line 6 — but the grid ALREADY
- * held every value the macro writes, before they had stepped a single line that
- * writes them. Stepping then applied the same effects a second time.
+ * Editor, pressed Debug, and stepped through EVERY line. The values landed at
+ * the right lines (the inert-mount fix works) — but when the last line was
+ * behind them the toolbar still showed a live session badged
+ * "Waiting for a trigger". Waiting for what? Nothing in the app can start a
+ * recorded macro; only the user can. They asked, reasonably: "It should exit
+ * debug mode when stepping through all the lines, correct?"
  *
- * THE CAUSE. A module macro is opened under a synthetic unlocked `workbook`
- * definition, where `context.onClick` does not exist. The recorder's generated
- * `setup` therefore falls through its click branch to its last line,
- * `return macroNNNN(context.api)` — so INVOKING `setup` IS RUNNING THE MACRO,
- * and the debug mount invoked it. VBA's contract is the opposite: entering
- * debug prepares the script and executes NOTHING; Run / run-at-cursor / firing a
- * trigger is what starts it, and stepping is what makes effects land.
+ * THE CAUSE. `idleStatusFor` counted every trigger, and a macro's trigger list
+ * is never empty: alongside real event hooks the debugger exposes the macro's
+ * own top-level functions as RUN-TARGETS, purely so the user can start them. The
+ * two kinds answer opposite questions —
+ *   hook   -- something in the app WILL fire this. "Waiting" is true.
+ *   method -- YOU may run this again. Nothing is going to arrive.
+ * — so a macro reported "waiting" forever, and nothing ever released the
+ * debugger-owned mount.
  *
- * WHY THIS FILE EXISTS. Unit tests called this feature working before, and every
- * live run of it so far has caught something the unit tests could not see. So
- * nothing here is stubbed: the real macro recorder, the real Macros library, the
- * real separate editor window, the real worker realms, the real backend module
- * store and the real grid.
+ * WHY THIS FILE EXISTS. Every live run of this feature has caught a bug the unit
+ * tests could not see. Nothing here is stubbed: the real macro recorder, the
+ * real Macros library, the real separate editor window, the real worker realms,
+ * the real backend module store and the real grid. `macro-debug-inert.spec.ts`
+ * proves entering the debugger executes NOTHING; this file proves the other end
+ * of the same session — that finishing it gets you OUT.
  *
  * THE FOUR CLAIMS (one test each, self-contained, cleaned up in a finally):
- *   1. NOTHING RUNS ON DEBUG START. Record a macro that writes a known value,
- *      clear the cell, press Debug — the cell must STILL BE EMPTY, and the panel
- *      must say so ("Ready — nothing has run yet"), not "Paused — line N" and
- *      not "Running".
- *   2. RUNNING IS WHAT EXECUTES, AND EXACTLY ONCE. From that inert session, Run
- *      (F5) — and because the gutter is empty the session is armed to stop on
- *      the first statement THE USER starts, the cell is still empty AT THE
- *      PAUSE; Continue then lands the write. The macro is a COUNTER (it reads
- *      the cell and writes n+1), so one execution reads "1" and a double
- *      execution would read "2" — the two are distinguishable, which a macro
- *      writing a constant would not be.
- *   3. BUTTON SCRIPTS ARE NOT INERT. A real button object script, mounted the
- *      production way, still runs `setup` under the debugger — so `onClick` is
- *      registered and its Fire row is in the trigger list. The fix must not have
- *      made object-script debugging inert.
- *   4. NO LEAK. Ending a session leaves nothing mounted and no debugger-owned
- *      mount behind.
- *   5. A FINISHED MACRO LEAVES DEBUG MODE. Stepping past the end of a macro that
- *      nothing can start again ends the session by itself — the same teardown
- *      Stop performs — and prints the completion to the console so the user can
- *      see it finished rather than wonder where the badge went. (Reported: the
- *      user stepped through every line and the toolbar still said "Waiting for
- *      a trigger", waiting for something that could never arrive.)
+ *   1. STEPPING PAST THE LAST LINE LEAVES DEBUG MODE. Record a real macro, press
+ *      Debug, press Run, then press Step Over until there is nothing left to
+ *      step. The session must be GONE — no badge, no Stop button, Debug offered
+ *      again, `getDebugSession` null, nothing mounted, no debugger-owned mount —
+ *      and the console must carry a completion line, because a badge that simply
+ *      vanishes is indistinguishable from a crash. The badge is sampled at EVERY
+ *      pause and must never once have read "Waiting for a trigger".
+ *   2. THE WRITES STILL LANDED. The macro's value is in the cell after the
+ *      session tore itself down, and stays there. Auto-teardown must not roll
+ *      anything back nor race the final write.
+ *   3. A BUTTON SCRIPT IS NOT SWEPT UP (what an over-broad fix breaks). A real
+ *      button object script, mounted the production way, reports `waiting` after
+ *      `setup` — named as "Waiting for onClick" — keeps a FIREABLE onClick row,
+ *      and its session survives: held under observation, and again after a fired
+ *      handler has run to completion. A hook is a promise that something will
+ *      fire; ending there would unregister the handler being debugged.
+ *   4. A FAILING MACRO KEEPS ITS SESSION. A macro whose body throws is exactly
+ *      when the debugger is worth having open. The session stays, the error text
+ *      is on screen, the mount is kept, and no auto-end fires.
+ *
+ * DEVIATION FROM THE LITERAL REQUEST, ASSERTED AS BUILT (claim 4). A run-target
+ * that throws does NOT move the session to `status: "failed"`. `failed` is
+ * reserved for "this session can never run anything" (a `setup` that threw; an
+ * inert mount with no run-target), and `DebugPanel` disables every Run/Fire row
+ * unless the session is idle — so `failed` would delete the button the user
+ * needs to retry after fixing the error. The session settles idle with the error
+ * carried in `lastActivity.error`, badged "Finished with an error". This spec
+ * asserts the SUBSTANCE the request is about: session kept, error visible, no
+ * auto-end.
  *
  * SHARED APP. One app instance drives every functional spec, so this one owns a
- * private patch of the grid (column K, rows 61-64) and cleans up before AND
+ * private patch of the grid (column L, rows 71-75) and cleans up before AND
  * after each test.
  *
  * LOCALE. Every value written is a bare integer or a bare word — no list
@@ -58,17 +69,16 @@ import { test, expect } from "../fixtures";
 const SHEET = 0;
 
 /** Every macro/script this spec creates carries this, so cleanup sweeps strays. */
-const NAME_PREFIX = "E2EDebugInert";
+const NAME_PREFIX = "E2EAutoEnd";
 
 /** The Object Script Editor's fixed Tauri window label. */
 const EDITOR_LABEL = "object-script-editor";
 
 /** This spec's private patch of the grid. */
-const REC_CELL = { ref: "K61", row: 60, col: 10 }; // journey 1 — recorded write
-const COUNT_CELL = { ref: "K62", row: 61, col: 10 }; // journey 2 — execution counter
-const BTN_OUT_CELL = { ref: "K63", row: 62, col: 10 }; // journey 3 — onClick write
-const BTN_CTRL = { row: 63, col: 10 }; // journey 3 — the button control itself
-const COLD_CELL = { ref: "K65", row: 64, col: 10 }; // journey 5 — cold-Run counter
+const REC_CELL = { ref: "L71", row: 70, col: 11 }; // claims 1+2 — recorded write
+const BTN_OUT_CELL = { ref: "L73", row: 72, col: 11 }; // claim 3 — onClick write
+const BTN_CTRL = { row: 73, col: 11 }; // claim 3 — the button control itself
+const THROW_CELL = { ref: "L75", row: 74, col: 11 }; // claim 4 — written before the throw
 
 // ---------------------------------------------------------------------------
 // Backend readers/writers — setup + assertions, never the thing under test.
@@ -138,7 +148,7 @@ async function seedMacro(
  * module reached through `__calcImport` is the very one the app is running
  * (function identity against the @api barrel). Without it a Vite
  * module-duplication accident would report "nothing mounted" for a live mount
- * and the leak assertions would pass by being blind.
+ * and every teardown assertion here would pass by being blind.
  */
 async function hostDebugState(
   page: Page,
@@ -151,7 +161,11 @@ async function hostDebugState(
   status: string | null;
   autoInvokeSetup: boolean | null;
   triggerIds: string[];
+  hookTriggerIds: string[];
+  methodTriggerIds: string[];
   lastActivity: string | null;
+  lastActivityError: string | null;
+  lastActivityDurationMs: number | null;
   error: string | null;
 }> {
   return page.evaluate(async (id) => {
@@ -162,6 +176,7 @@ async function hostDebugState(
       new URL("/src/api/index.ts", document.baseURI).href,
     );
     const session: any = host.getDebugSession(id);
+    const triggers: any[] = session ? (session.triggers ?? []) : [];
     return {
       sameModuleInstance: host.hostIsMounted === api.hostIsMounted,
       mounted: host.hostIsMounted(id) === true,
@@ -169,8 +184,17 @@ async function hostDebugState(
       hasSession: !!session,
       status: session ? String(session.status) : null,
       autoInvokeSetup: session ? session.autoInvokeSetup === true : null,
-      triggerIds: session ? (session.triggers ?? []).map((t: any) => String(t.id)) : [],
+      triggerIds: triggers.map((t: any) => String(t.id)),
+      hookTriggerIds: triggers.filter((t: any) => t.kind === "hook").map((t: any) => String(t.id)),
+      methodTriggerIds: triggers
+        .filter((t: any) => t.kind === "method")
+        .map((t: any) => String(t.id)),
       lastActivity: session?.lastActivity ? String(session.lastActivity.label) : null,
+      lastActivityError: session?.lastActivity?.error ? String(session.lastActivity.error) : null,
+      lastActivityDurationMs:
+        typeof session?.lastActivity?.durationMs === "number"
+          ? Number(session.lastActivity.durationMs)
+          : null,
       error: session?.error ? String(session.error) : null,
     };
   }, scriptId);
@@ -196,7 +220,7 @@ async function cleanup(page: Page): Promise<void> {
     try {
       const modules: Array<{ id: string; name: string }> = await tauri.core.invoke("list_scripts");
       for (const m of modules) {
-        if ((m.name && m.name.startsWith(prefix)) || (m.id && m.id.startsWith("macro-e2edbginert"))) {
+        if ((m.name && m.name.startsWith(prefix)) || (m.id && m.id.startsWith("macro-e2eautoend"))) {
           await tauri.core.invoke("delete_script", { id: m.id }).catch(() => {});
         }
       }
@@ -283,38 +307,79 @@ function badge(editorPage: Page) {
   return editorPage.locator(".osd-badge");
 }
 
+/** Badge text right now, or null when there is no session on screen. */
+async function badgeText(editorPage: Page): Promise<string | null> {
+  const b = badge(editorPage);
+  if ((await b.count()) === 0) return null;
+  return (await b.first().innerText()).trim();
+}
+
+/** The debug toolbar's step-over button (icon only — identified by its tooltip). */
+function stepOverButton(editorPage: Page) {
+  return editorPage.locator('button[title^="Step over"]').first();
+}
+
 /**
- * Sample a cell repeatedly and fail the moment it is not empty.
+ * Wait until the session is suspended again or has ended.
  *
- * A `poll(...).toBe("")` would pass on its FIRST read and never notice a write
- * that lands 300ms later — which is exactly the shape of the bug (an async
- * `setup` invoked at mount). Nothing-happened can only be proved by watching.
+ * Between two steps the session passes through "running" and back; polling for
+ * exactly those two resting outcomes is what makes the step loop deterministic
+ * instead of timing-based.
  */
-async function assertStaysEmpty(
+async function waitPausedOrGone(
   page: Page,
-  cell: { row: number; col: number },
+  scriptId: string,
+  timeoutMs: number,
+): Promise<{ outcome: "paused" | "gone" | "stuck"; status: string | null }> {
+  const deadline = Date.now() + timeoutMs;
+  let status: string | null = null;
+  while (Date.now() < deadline) {
+    const state = await hostDebugState(page, scriptId);
+    if (!state.hasSession) return { outcome: "gone", status: null };
+    status = state.status;
+    if (status === "paused") return { outcome: "paused", status };
+    await page.waitForTimeout(200);
+  }
+  return { outcome: "stuck", status };
+}
+
+/**
+ * Sample a predicate repeatedly for `ms` and fail the moment it stops holding.
+ *
+ * A single `expect` after a wait passes on ONE reading; "the session did not end
+ * behind the user's back" is a claim about an interval, and an auto-end that
+ * fires 800ms late would slip straight through a single reading.
+ */
+async function assertHoldsFor(
+  page: Page,
   ms: number,
   because: string,
+  probe: () => Promise<boolean>,
 ): Promise<void> {
   const deadline = Date.now() + ms;
   let samples = 0;
   while (Date.now() < deadline) {
-    const value = await readCell(page, cell.row, cell.col);
+    const ok = await probe();
     samples++;
-    expect(value, `${because} (sample ${samples})`).toBe("");
+    expect(ok, `${because} (sample ${samples})`).toBe(true);
     await page.waitForTimeout(250);
   }
-  expect(samples, "the cell was actually sampled").toBeGreaterThan(3);
+  expect(samples, "the condition was actually sampled").toBeGreaterThan(3);
 }
 
 // ===========================================================================
 
-test.describe("Entering the debugger executes nothing", () => {
+test.describe("A finished macro leaves debug mode", () => {
   // =========================================================================
-  // JOURNEY 1 — THE REPORTED BUG, with a REAL recorded macro
+  // CLAIMS 1 + 2 — THE REPORTED BUG, with a REAL recorded macro, stepped
   // =========================================================================
+  //
+  // The user's exact gesture: Debug, then step, step, step until the macro is
+  // over. Continue would prove the auto-end too, but the report is about
+  // STEPPING, and the step path is the one that walks off the end of the
+  // function — where a session that never releases is most visible.
 
-  test("1. starting a debug session on a RECORDED macro runs none of it", async ({
+  test("1. stepping past the last line of a RECORDED macro ends the session (and the write stands)", async ({
     appPage: page,
     grid,
   }) => {
@@ -322,7 +387,7 @@ test.describe("Entering the debugger executes nothing", () => {
 
     const stamp = Date.now().toString(36);
     const macroName = `${NAME_PREFIX} rec ${stamp}`;
-    const VALUE = "70707";
+    const VALUE = "80808";
 
     await allowScripts(page);
     await cleanup(page);
@@ -330,10 +395,10 @@ test.describe("Entering the debugger executes nothing", () => {
     await clearCells(page, [REC_CELL]);
 
     let macroId: string | null = null;
+    /** The badge as it read at every single pause, in order. */
+    const badgeHistory: string[] = [];
+
     try {
-      // -- Record for real. The generated `setup` this produces is the source of
-      //    the bug: its click branch cannot match under the synthetic workbook
-      //    definition, so its last line calls the macro body.
       await test.step("record a macro that writes a known value", async () => {
         await grid.openMenu("Developer");
         const rec = page.locator("button").filter({ hasText: /^Record Macro/ }).first();
@@ -366,74 +431,132 @@ test.describe("Entering the debugger executes nothing", () => {
       macroId = await macroIdByName(page, macroName);
       expect(macroId, "the macro was stored as a module").not.toBeNull();
 
-      // The macro's effect is wiped, so ANY value here afterwards was written by
-      // an execution of the macro and nothing else.
+      // Wiped, so ANY value here afterwards was written by an execution of the
+      // macro and nothing else.
       await test.step("clear the cell the macro writes", async () => {
         await clearCells(page, [REC_CELL]);
         expect(await readCell(page, REC_CELL.row, REC_CELL.col)).toBe("");
         const before = await hostDebugState(page, macroId!);
         expect(before.sameModuleInstance, "harness reaches the app's own script host").toBe(true);
-        expect(before.mounted, "the macro has never been run in this session").toBe(false);
         expect(before.hasSession).toBe(false);
+        expect(before.mounted).toBe(false);
       });
 
       const editorPage = await openMacroInEditor(page, grid, macroName);
       await expect(documentSelect(editorPage)).toHaveValue(macroId!, { timeout: 20_000 });
 
-      // -- THE DECISIVE ASSERTION ---------------------------------------------
-      await test.step("Debug prepares the macro and executes NOTHING", async () => {
+      await test.step("Debug prepares the macro — a session exists, nothing has run", async () => {
         await editorPage.locator("button").filter({ hasText: /^Debug$/ }).first().click();
         await expect(badge(editorPage)).toBeVisible({ timeout: 60_000 });
-
-        // The session is really open (not merely pending).
         await expect
-          .poll(async () => (await hostDebugState(page, macroId!)).status, { timeout: 30_000 })
+          .poll(async () => (await hostDebugState(page, macroId!)).status, { timeout: 60_000 })
           .not.toBe("starting");
-
-        // THE USER'S REPORT, INVERTED, AND FIRST: the grid must be untouched.
-        // Asserted before any host internals so a regression fails in the
-        // user's own terms — "the macro ran when I pressed Debug".
-        await assertStaysEmpty(
-          page,
-          REC_CELL,
-          6_000,
-          "the macro must NOT have run when the debug session started",
-        );
 
         const during = await hostDebugState(page, macroId!);
         expect(during.autoInvokeSetup, "the module-macro mount does not invoke setup").toBe(false);
         expect(during.mounted, "a realm exists — it just ran nothing").toBe(true);
+        expect(during.transientIds, "the mount belongs to the debugger").toContain(macroId!);
         expect(during.lastActivity, "nothing has executed in this session").toBeNull();
+        // THE TRIGGER SHAPE THAT CAUSED THE BUG: run-targets only, no hook.
+        expect(during.hookTriggerIds, "nothing in the app can fire a recorded macro").toEqual([]);
+        expect(
+          during.methodTriggerIds.length,
+          "but the user is offered run-targets to start it with",
+        ).toBeGreaterThan(0);
+        // A prepared-but-un-run session must NOT already claim to be waiting on
+        // something. This is the exact sentence the user was shown forever.
+        const label = await badgeText(editorPage);
+        expect(label, "a prepared macro is not waiting for anything").not.toMatch(
+          /Waiting for a trigger/i,
+        );
+        badgeHistory.push(String(label));
       });
 
-      await test.step("the panel says idle/ready — not paused, not running", async () => {
-        // Class, not prose: "waiting" is the machine-readable claim, and it is
-        // neither "paused" nor "running".
-        await expect(badge(editorPage)).toHaveClass(/waiting/, { timeout: 30_000 });
-        const label = (await badge(editorPage).innerText()).trim();
-        expect(label, "the badge must not claim a pause").not.toMatch(/Paused/i);
-        expect(label, "the badge must not claim execution").not.toMatch(/Running/i);
-        expect(label).toMatch(/nothing has run yet/i);
-        // ...and the panel body explains it in the same words.
-        await expect(editorPage.getByText(/nothing has run yet/i).first()).toBeVisible({
-          timeout: 10_000,
-        });
-        // The status the bug produced is nowhere on screen.
-        await expect(editorPage.getByText(/^Paused — line/)).toHaveCount(0);
+      await test.step("Run suspends on the first statement", async () => {
+        await editorPage.locator("button").filter({ hasText: /^Run$/ }).first().click();
+        await expect(badge(editorPage)).toHaveClass(/paused/, { timeout: 90_000 });
+        expect(await readCell(page, REC_CELL.row, REC_CELL.col)).toBe("");
       });
 
-      // -- JOURNEY 4 (no leak) on this session --------------------------------
-      await test.step("Stop leaves nothing mounted and no debugger-owned mount", async () => {
-        await editorPage.locator("button").filter({ hasText: /^Stop$/ }).first().click();
-        await expect(badge(editorPage)).toHaveCount(0, { timeout: 30_000 });
+      // -- THE USER'S GESTURE: step until there is nothing left to step -------
+      let steps = 0;
+      let finalOutcome: "paused" | "gone" | "stuck" = "paused";
+      await test.step("step through every line", async () => {
+        for (let i = 0; i < 40; i++) {
+          const settled = await waitPausedOrGone(page, macroId!, 60_000);
+          finalOutcome = settled.outcome;
+          if (settled.outcome !== "paused") break;
+
+          const label = await badgeText(editorPage);
+          if (label !== null) badgeHistory.push(label);
+
+          const step = stepOverButton(editorPage);
+          await expect(step).toBeEnabled({ timeout: 15_000 });
+          await step.click();
+          steps++;
+          await editorPage.waitForTimeout(150);
+        }
+        expect(steps, "the macro really was stepped through").toBeGreaterThan(0);
+      });
+
+      // -- CLAIM 1 ------------------------------------------------------------
+      await test.step("the session ended itself — no Stop was ever pressed", async () => {
+        expect(
+          finalOutcome,
+          "stepping past the last line must leave debug mode, not park in an idle session",
+        ).toBe("gone");
+
+        // The host's truth.
         await expect
-          .poll(async () => (await hostDebugState(page, macroId!)).mounted, { timeout: 30_000 })
+          .poll(async () => (await hostDebugState(page, macroId!)).hasSession, { timeout: 30_000 })
           .toBe(false);
         const after = await hostDebugState(page, macroId!);
-        expect(after.hasSession).toBe(false);
-        expect(after.transientIds).toEqual([]);
-        // Stopping is not a back door either: still nothing was executed.
-        expect(await readCell(page, REC_CELL.row, REC_CELL.col)).toBe("");
+        expect(after.mounted, "the debugger-owned realm went with the session").toBe(false);
+        expect(after.transientIds, "no debugger-owned mount survives").toEqual([]);
+
+        // The user's truth: badge gone, Stop gone, Debug offered again.
+        await expect(badge(editorPage)).toHaveCount(0, { timeout: 30_000 });
+        await expect(
+          editorPage.locator("button").filter({ hasText: /^Stop$/ }),
+        ).toHaveCount(0);
+        await expect(
+          editorPage.locator("button").filter({ hasText: /^Debug$/ }).first(),
+        ).toBeVisible({ timeout: 10_000 });
+      });
+
+      await test.step("the badge NEVER read 'Waiting for a trigger'", async () => {
+        expect(badgeHistory.length, "badge states were actually sampled").toBeGreaterThan(1);
+        const offending = badgeHistory.filter((l) => /Waiting for a trigger/i.test(l));
+        expect(
+          offending,
+          `the reported symptom, seen in the badge history: ${JSON.stringify(badgeHistory)}`,
+        ).toEqual([]);
+      });
+
+      await test.step("the console says it finished, so the badge did not just vanish", async () => {
+        await expect
+          .poll(async () => consoleText(editorPage), { timeout: 30_000 })
+          .toMatch(/debug session ended/i);
+        const text = await consoleText(editorPage);
+        expect(text, "the completion names the script").toContain(macroName);
+        expect(text).toMatch(/finished/i);
+        // ...and tells the user how to get back in.
+        expect(text).toMatch(/Run \(F5\)|press Run/i);
+      });
+
+      // -- CLAIM 2 ------------------------------------------------------------
+      await test.step("the write landed and stands after the teardown", async () => {
+        expect(
+          await readCell(page, REC_CELL.row, REC_CELL.col),
+          "stepping to the end applied the macro's write",
+        ).toBe(VALUE);
+        // Ending the session is not a rollback and not a second execution.
+        await page.waitForTimeout(4_000);
+        expect(
+          await readCell(page, REC_CELL.row, REC_CELL.col),
+          "the auto-teardown neither rolled the write back nor re-ran the macro",
+        ).toBe(VALUE);
+        expect((await hostDebugState(page, macroId!)).hasSession).toBe(false);
       });
     } finally {
       await destroyEditorWindow(page).catch(() => {});
@@ -443,160 +566,24 @@ test.describe("Entering the debugger executes nothing", () => {
   });
 
   // =========================================================================
-  // JOURNEY 2 — running is what executes, and it executes ONCE
+  // CLAIM 3 — the regression guard: a hook really is something to wait for
   // =========================================================================
   //
-  // The macro is byte-for-byte the recorder's shape (a body function plus a
-  // `setup` whose click branch cannot match here, so its last line calls the
-  // body) — but its body is a COUNTER: it reads the cell and writes n+1. That is
-  // what makes one execution distinguishable from two. A recorded macro writing
-  // a constant cannot tell those apart, which is precisely how the original
-  // double-run was dismissed as cosmetic.
+  // The fix hinges on one distinction. Widen it by a hair — end on any clean
+  // completion, or treat "no method left" as "nothing left" — and debugging a
+  // button becomes impossible: the session that owns the onClick handler would
+  // tear itself down the moment `setup` returned, or the moment a click had been
+  // handled. This mounts a REAL button script the production way and holds the
+  // session under observation at both of those moments.
 
-  test("2. Run is what executes the macro — once, and not before", async ({
+  test("3. a BUTTON script waits for onClick — its session is never auto-ended", async ({
     appPage: page,
     grid,
   }) => {
     test.setTimeout(420_000);
 
     const stamp = Date.now().toString(36);
-    const macroName = `${NAME_PREFIX} count ${stamp}`;
-    const macroId = `macro-e2edbginert-count-${stamp}`;
-    const source =
-      `// Macro: ${macroName}\n` +
-      `// Target runtime: object script (unlocked)\n` +
-      `async function e2eCountRuns(api) {\n` +
-      `  // ANCHOR_COUNTER_BODY\n` +
-      `  const prev = await api.getCellValue(${COUNT_CELL.row}, ${COUNT_CELL.col});\n` +
-      `  const n = Number(prev) || 0;\n` +
-      `  await api.setCellValue(${COUNT_CELL.row}, ${COUNT_CELL.col}, String(n + 1));\n` +
-      `}\n` +
-      `\n` +
-      `// Entry point. Calcula calls setup() when this script is mounted.\n` +
-      `function setup(context) {\n` +
-      `  if (!context.api) {\n` +
-      `    context.notify("needs an UNLOCKED script", "error");\n` +
-      `    return;\n` +
-      `  }\n` +
-      `  if (typeof context.onClick === "function") {\n` +
-      `    context.onClick(async () => {\n` +
-      `      await e2eCountRuns(context.api);\n` +
-      `    });\n` +
-      `    return;\n` +
-      `  }\n` +
-      `  return e2eCountRuns(context.api);\n` +
-      `}\n`;
-
-    await allowScripts(page);
-    await cleanup(page);
-    await destroyEditorWindow(page);
-    await clearCells(page, [COUNT_CELL]);
-
-    try {
-      await seedMacro(page, { id: macroId, name: macroName, source });
-      const editorPage = await openMacroInEditor(page, grid, macroName);
-      await expect(documentSelect(editorPage)).toHaveValue(macroId, { timeout: 20_000 });
-
-      await test.step("Debug: the counter has not been incremented", async () => {
-        await editorPage.locator("button").filter({ hasText: /^Debug$/ }).first().click();
-        await expect(badge(editorPage)).toBeVisible({ timeout: 60_000 });
-        await expect(badge(editorPage)).toHaveClass(/waiting/, { timeout: 30_000 });
-        await assertStaysEmpty(
-          page,
-          COUNT_CELL,
-          5_000,
-          "the counter must read empty — zero executions",
-        );
-      });
-
-      await test.step("the inert mount still registered something to run", async () => {
-        // Preparing without executing is only useful if the session can then be
-        // STARTED. Both the body and `setup` are offered as Run rows.
-        const state = await hostDebugState(page, macroId);
-        expect(state.triggerIds).toContain("method:e2eCountRuns");
-        expect(state.triggerIds, "setup is runnable on an inert mount").toContain("method:setup");
-        expect(state.status, "not a dead end").not.toBe("failed");
-        await expect(editorPage.locator(".osd-trigger-row")).not.toHaveCount(0);
-      });
-
-      // -- Run (F5). The gutter is empty, so the session is armed to stop on the
-      //    first statement the USER starts — that pause is itself proof that the
-      //    execution began now and not at mount.
-      await test.step("Run pauses on the first statement, with the cell still empty", async () => {
-        await editorPage.locator("button").filter({ hasText: /^Run$/ }).first().click();
-        await expect(badge(editorPage)).toHaveClass(/paused/, { timeout: 60_000 });
-        const label = (await badge(editorPage).innerText()).trim();
-        expect(label).toMatch(/Paused/i);
-        // Suspended BEFORE the write: this is what the user asked for all along.
-        expect(await readCell(page, COUNT_CELL.row, COUNT_CELL.col)).toBe("");
-        expect(await consoleText(editorPage)).toMatch(/Running e2eCountRuns\(\)/);
-      });
-
-      await test.step("Continue lands the write — exactly one execution", async () => {
-        await editorPage.locator("button").filter({ hasText: /^Continue$/ }).first().click();
-        await expect
-          .poll(async () => readCell(page, COUNT_CELL.row, COUNT_CELL.col), { timeout: 60_000 })
-          .toBe("1");
-
-        // Settle, then re-read: a second execution would have made this "2".
-        await page.waitForTimeout(4_000);
-        expect(
-          await readCell(page, COUNT_CELL.row, COUNT_CELL.col),
-          "the macro ran ONCE — a mount-time run plus this one would read 2",
-        ).toBe("1");
-      });
-
-      // -- JOURNEY 6: stepping past the end LEAVES DEBUG MODE ------------------
-      await test.step("the finished macro leaves debug mode by itself — no Stop to press", async () => {
-        // VBA's contract, and the user's report: they stepped through every line
-        // and the toolbar still showed a live session "waiting for a trigger"
-        // that nothing could ever send. A macro that ran cleanly, with no event
-        // hook to wait for, ends its own session.
-        await expect(badge(editorPage)).toHaveCount(0, { timeout: 60_000 });
-        await expect
-          .poll(async () => (await hostDebugState(page, macroId)).hasSession, { timeout: 30_000 })
-          .toBe(false);
-        const after = await hostDebugState(page, macroId);
-        expect(after.mounted, "the debugger-owned mount went with the session").toBe(false);
-        expect(after.transientIds).toEqual([]);
-        // The badge is gone, so the CONSOLE is the record that it finished
-        // rather than vanished.
-        await expect
-          .poll(async () => consoleText(editorPage), { timeout: 30_000 })
-          .toMatch(/e2eCountRuns\(\) finished/);
-        expect(await consoleText(editorPage)).toMatch(/debug session ended/i);
-        // Leaving debug mode is not a second execution.
-        expect(await readCell(page, COUNT_CELL.row, COUNT_CELL.col)).toBe("1");
-        // ...and the toolbar is back to its normal state.
-        await expect(
-          editorPage.locator("button").filter({ hasText: /^Debug$/ }).first(),
-        ).toBeVisible({ timeout: 10_000 });
-      });
-    } finally {
-      await destroyEditorWindow(page).catch(() => {});
-      await cleanup(page).catch(() => {});
-      await clearCells(page, [COUNT_CELL]).catch(() => {});
-    }
-  });
-
-  // =========================================================================
-  // JOURNEY 3 — the regression guard: object scripts are NOT inert
-  // =========================================================================
-  //
-  // `setup` is a macro's whole body, but an object script's REGISTRATION step:
-  // it is what calls `button.onClick(...)`. If the fix had made every debug
-  // mount inert, debugging a button would come up with an empty Fire list and
-  // nothing to breakpoint. This mounts a real button script the production way
-  // and debugs it from the same editor window the user uses.
-
-  test("3. debugging a BUTTON script still runs setup, so onClick is registered", async ({
-    appPage: page,
-    grid,
-  }) => {
-    test.setTimeout(420_000);
-
-    const stamp = Date.now().toString(36);
-    const scriptId = `btn-e2edbginert-${stamp}`;
+    const scriptId = `btn-e2eautoend-${stamp}`;
     const scriptName = `${NAME_PREFIX} button ${stamp}`;
     const instanceId = `control-${SHEET}-${BTN_CTRL.row}-${BTN_CTRL.col}`;
     const buttonSource =
@@ -609,10 +596,10 @@ test.describe("Entering the debugger executes nothing", () => {
     // A macro only so the Macros library has a row to open the editor window
     // from; the subject of this test is the button script.
     const seedName = `${NAME_PREFIX} opener ${stamp}`;
-    const seedId = `macro-e2edbginert-opener-${stamp}`;
+    const seedId = `macro-e2eautoend-opener-${stamp}`;
     const seedSource =
       `// Macro: ${seedName}\n` +
-      `async function e2eOpenerNoop(api) {\n` +
+      `async function e2eAutoEndOpenerNoop(api) {\n` +
       `  await api.getCellValue(0, 0);\n` +
       `}\n\n` +
       `function setup(context) {\n` +
@@ -640,7 +627,6 @@ test.describe("Entering the debugger executes nothing", () => {
                 properties: { label: { valueType: "static", value: "E2E" } },
               },
             });
-            // Persisted, so the editor lists it in "Object scripts"...
             await tauri.core.invoke("save_object_script", {
               script: {
                 id: a.scriptId,
@@ -667,8 +653,6 @@ test.describe("Entering the debugger executes nothing", () => {
           },
         );
 
-        // ...and mounted through the production manager, exactly as the app does
-        // when the workbook loads.
         await page.evaluate(
           async (a) => {
             const api: any = await (window as any).__calcImport(
@@ -700,43 +684,47 @@ test.describe("Entering the debugger executes nothing", () => {
         await expect(documentSelect(editorPage)).toHaveValue(scriptId, { timeout: 20_000 });
       });
 
-      // -- THE REGRESSION ASSERTION -------------------------------------------
-      //
-      // THE CONTRAST WITH JOURNEY 1 IS THE WHOLE POINT. An empty gutter means
-      // "stop on the first statement" on BOTH kinds of script. The macro session
-      // reported no pause at all, because its mount deliberately executed
-      // nothing. This one stops at line 1 — the debug mount of an object script
-      // really is executing its module and about to call `setup`. Same gesture,
-      // opposite (and correct) outcome.
-      await test.step("Debug EXECUTES this script — it suspends at line 1", async () => {
+      await test.step("Debug executes this script — it suspends at line 1", async () => {
         await editorPage.locator("button").filter({ hasText: /^Debug$/ }).first().click();
         await expect(badge(editorPage)).toBeVisible({ timeout: 60_000 });
-
         await expect
           .poll(async () => (await hostDebugState(page, scriptId)).status, { timeout: 60_000 })
           .toBe("paused");
-        const state = await hostDebugState(page, scriptId);
-        expect(state.autoInvokeSetup, "an object script's debug mount DOES call setup").toBe(true);
-        expect(state.transientIds, "a standing object script is not a debugger-owned mount").toEqual(
-          [],
-        );
-        await expect(badge(editorPage)).toHaveClass(/paused/);
-        expect((await badge(editorPage).innerText()).trim()).toMatch(/^Paused/);
+        expect((await hostDebugState(page, scriptId)).autoInvokeSetup).toBe(true);
       });
 
-      await test.step("Continue: setup completes and registers onClick in the Fire list", async () => {
+      await test.step("Continue: setup registers onClick and the session reports WAITING", async () => {
         await editorPage.locator("button").filter({ hasText: /^Continue$/ }).first().click();
 
         await expect
-          .poll(async () => (await hostDebugState(page, scriptId)).triggerIds, { timeout: 60_000 })
-          .toContain("hook:onClick");
+          .poll(async () => (await hostDebugState(page, scriptId)).status, { timeout: 60_000 })
+          .toBe("waiting");
 
         const state = await hostDebugState(page, scriptId);
-        expect(state.autoInvokeSetup).toBe(true);
-        expect(state.status, "not the inert dead end").not.toBe("failed");
+        expect(state.hookTriggerIds, "a real event hook exists").toContain("hook:onClick");
 
-        // The user-visible Fire list — non-empty, with an onClick row that can
-        // be fired from here.
+        // The badge NAMES what it is waiting for — the whole point of the
+        // hook/method distinction. "Waiting for a trigger" (unnamed) is the
+        // symptom sentence and must not appear here either.
+        const label = await badgeText(editorPage);
+        expect(label).toMatch(/^Waiting for onClick/);
+        expect(label).not.toMatch(/Waiting for a trigger/i);
+      });
+
+      await test.step("the session is NOT auto-ended — held under observation", async () => {
+        await assertHoldsFor(
+          page,
+          6_000,
+          "a script with a live event hook keeps its session and its mount",
+          async () => {
+            const s = await hostDebugState(page, scriptId);
+            return s.hasSession && s.mounted && s.status === "waiting";
+          },
+        );
+        await expect(badge(editorPage)).toHaveCount(1);
+      });
+
+      await test.step("its onClick row is still there and still fireable", async () => {
         const onClickRow = editorPage
           .locator(".osd-trigger-row")
           .filter({ hasText: "onClick" })
@@ -745,17 +733,9 @@ test.describe("Entering the debugger executes nothing", () => {
         const fireButton = onClickRow.locator(".osd-trigger-fire");
         await expect(fireButton).toHaveText("Fire");
         await expect(fireButton).toBeEnabled();
-
-        const label = (await badge(editorPage).innerText()).trim();
-        expect(label, "an object script is not reported as having nothing to run").not.toMatch(
-          /Nothing to run/i,
-        );
-        expect(label, "an object script is not reported as the un-run inert kind").not.toMatch(
-          /nothing has run yet/i,
-        );
       });
 
-      await test.step("firing onClick from the debugger runs the handler", async () => {
+      await test.step("firing onClick runs the handler", async () => {
         await editorPage
           .locator(".osd-trigger-row")
           .filter({ hasText: "onClick" })
@@ -767,11 +747,27 @@ test.describe("Entering the debugger executes nothing", () => {
           .toBe("clicked");
       });
 
+      await test.step("a COMPLETED hook run still does not end the session", async () => {
+        // The auto-end is armed by exactly this event — a clean completion. The
+        // hook is what must veto it, at the one moment the veto matters.
+        await expect
+          .poll(async () => (await hostDebugState(page, scriptId)).lastActivity, { timeout: 30_000 })
+          .not.toBeNull();
+        await assertHoldsFor(
+          page,
+          6_000,
+          "the session survives a handler that ran to completion",
+          async () => {
+            const s = await hostDebugState(page, scriptId);
+            return s.hasSession && s.mounted && s.status === "waiting";
+          },
+        );
+        expect(await badgeText(editorPage)).toMatch(/^Waiting for onClick/);
+      });
+
       await test.step("Stop leaves no debugger-owned mount behind", async () => {
         await editorPage.locator("button").filter({ hasText: /^Stop$/ }).first().click();
         await expect(badge(editorPage)).toHaveCount(0, { timeout: 30_000 });
-        // The script itself is a production mount and may legitimately survive;
-        // what must NOT survive is a mount the DEBUGGER owns.
         expect((await hostDebugState(page, scriptId)).transientIds).toEqual([]);
       });
     } finally {
@@ -806,32 +802,25 @@ test.describe("Entering the debugger executes nothing", () => {
   });
 
   // =========================================================================
-  // JOURNEY 5 — pressing Run WITHOUT pressing Debug first runs it once
+  // CLAIM 4 — a run that threw is exactly when the debugger must stay open
   // =========================================================================
-  //
-  // This is the path that was worst hit and is easiest to miss: Run on a macro
-  // with no session open has to CREATE one. It used to plain-mount the macro
-  // (execution 1), remount it instrumented (execution 2) and then fire the
-  // run-target (execution 3) — three runs for one press of one button, all
-  // invisible because a recorded macro writes the same constant every time. The
-  // counter makes all three visible; the answer must be 1.
 
-  test("5. Run with no session open runs the macro exactly once", async ({
+  test("4. a macro whose body THROWS keeps its session, its mount and its error", async ({
     appPage: page,
     grid,
   }) => {
     test.setTimeout(420_000);
 
     const stamp = Date.now().toString(36);
-    const macroName = `${NAME_PREFIX} cold ${stamp}`;
-    const macroId = `macro-e2edbginert-cold-${stamp}`;
+    const macroName = `${NAME_PREFIX} throws ${stamp}`;
+    const macroId = `macro-e2eautoend-throws-${stamp}`;
+    const BOOM = "E2EBOOM deliberate failure";
     const source =
       `// Macro: ${macroName}\n` +
       `// Target runtime: object script (unlocked)\n` +
-      `async function e2eColdRunCount(api) {\n` +
-      `  const prev = await api.getCellValue(${COLD_CELL.row}, ${COLD_CELL.col});\n` +
-      `  const n = Number(prev) || 0;\n` +
-      `  await api.setCellValue(${COLD_CELL.row}, ${COLD_CELL.col}, String(n + 1));\n` +
+      `async function e2eAutoEndThrows(api) {\n` +
+      `  await api.setCellValue(${THROW_CELL.row}, ${THROW_CELL.col}, "reached");\n` +
+      `  throw new Error("${BOOM}");\n` +
       `}\n` +
       `\n` +
       `function setup(context) {\n` +
@@ -839,69 +828,97 @@ test.describe("Entering the debugger executes nothing", () => {
       `    context.notify("needs an UNLOCKED script", "error");\n` +
       `    return;\n` +
       `  }\n` +
-      `  if (typeof context.onClick === "function") {\n` +
-      `    context.onClick(async () => {\n` +
-      `      await e2eColdRunCount(context.api);\n` +
-      `    });\n` +
-      `    return;\n` +
-      `  }\n` +
-      `  return e2eColdRunCount(context.api);\n` +
+      `  return e2eAutoEndThrows(context.api);\n` +
       `}\n`;
 
     await allowScripts(page);
     await cleanup(page);
     await destroyEditorWindow(page);
-    await clearCells(page, [COLD_CELL]);
+    await clearCells(page, [THROW_CELL]);
 
     try {
       await seedMacro(page, { id: macroId, name: macroName, source });
       const editorPage = await openMacroInEditor(page, grid, macroName);
       await expect(documentSelect(editorPage)).toHaveValue(macroId, { timeout: 20_000 });
 
-      await test.step("precondition: no session, nothing mounted, cell empty", async () => {
-        const before = await hostDebugState(page, macroId);
-        expect(before.sameModuleInstance).toBe(true);
-        expect(before.hasSession).toBe(false);
-        expect(before.mounted).toBe(false);
-        expect(await readCell(page, COLD_CELL.row, COLD_CELL.col)).toBe("");
-      });
+      await test.step("Debug, then Run — it suspends before the failing line", async () => {
+        await editorPage.locator("button").filter({ hasText: /^Debug$/ }).first().click();
+        await expect(badge(editorPage)).toBeVisible({ timeout: 60_000 });
+        await expect
+          .poll(async () => (await hostDebugState(page, macroId)).status, { timeout: 60_000 })
+          .not.toBe("starting");
 
-      await test.step("one press of Run = one execution", async () => {
         await editorPage.locator("button").filter({ hasText: /^Run$/ }).first().click();
-        await expect
-          .poll(async () => readCell(page, COLD_CELL.row, COLD_CELL.col), { timeout: 90_000 })
-          .toBe("1");
-
-        // Settle, then re-read. Mount + instrumented remount + fire would be "3".
-        await page.waitForTimeout(5_000);
-        expect(
-          await readCell(page, COLD_CELL.row, COLD_CELL.col),
-          "one press of Run must be one execution, not three",
-        ).toBe("1");
-        expect(await consoleText(editorPage)).toMatch(/Running e2eColdRunCount\(\)/);
+        await expect(badge(editorPage)).toHaveClass(/paused/, { timeout: 90_000 });
       });
 
-      await test.step("...and the session Run opened ends itself when the macro finishes", async () => {
-        // Run on a cold macro opens a session to execute it. Once it is done
-        // there is nothing left to debug and nothing that can start it again, so
-        // the session and its debugger-owned mount are released — the user is
-        // not left in break mode in front of a macro that has finished.
+      await test.step("Continue: the body throws", async () => {
+        await editorPage.locator("button").filter({ hasText: /^Continue$/ }).first().click();
         await expect
-          .poll(async () => (await hostDebugState(page, macroId)).hasSession, { timeout: 60_000 })
+          .poll(async () => (await hostDebugState(page, macroId)).lastActivityError, {
+            timeout: 90_000,
+          })
+          .toContain("E2EBOOM");
+      });
+
+      // -- THE CLAIM ----------------------------------------------------------
+      await test.step("the session is KEPT — no auto-end after a failure", async () => {
+        await assertHoldsFor(
+          page,
+          8_000,
+          "a run that threw keeps its session and its debugger-owned mount",
+          async () => {
+            const s = await hostDebugState(page, macroId);
+            return s.hasSession && s.mounted && s.transientIds.includes(macroId);
+          },
+        );
+        const s = await hostDebugState(page, macroId);
+        expect(s.autoInvokeSetup, "still the debugger's own inert mount").toBe(false);
+        expect(s.hookTriggerIds, "nothing can fire it — the error is the only reason it stays").toEqual(
+          [],
+        );
+        expect(
+          s.methodTriggerIds.length,
+          "and the run-targets survive so the user can retry",
+        ).toBeGreaterThan(0);
+      });
+
+      await test.step("the error is on screen, in the badge and in the panel", async () => {
+        const label = await badgeText(editorPage);
+        expect(label, "the badge does not hide the failure").toMatch(/error/i);
+        expect(label, "and it is not the symptom sentence").not.toMatch(/Waiting for a trigger/i);
+        // The error TEXT itself, where the user reads it.
+        await expect(editorPage.getByText(/E2EBOOM/).first()).toBeVisible({ timeout: 30_000 });
+        await expect(
+          editorPage.getByText(/session is kept open on purpose/i).first(),
+        ).toBeVisible({ timeout: 30_000 });
+      });
+
+      await test.step("the retry path is live: the Run row is still enabled", async () => {
+        const runRow = editorPage
+          .locator(".osd-trigger-row")
+          .filter({ hasText: "e2eAutoEndThrows" })
+          .first();
+        await expect(runRow).toBeVisible({ timeout: 30_000 });
+        await expect(runRow.locator(".osd-trigger-fire")).toBeEnabled();
+      });
+
+      await test.step("what ran before the throw stands", async () => {
+        expect(await readCell(page, THROW_CELL.row, THROW_CELL.col)).toBe("reached");
+      });
+
+      await test.step("Stop is still the way out, and it leaves nothing behind", async () => {
+        await editorPage.locator("button").filter({ hasText: /^Stop$/ }).first().click();
+        await expect(badge(editorPage)).toHaveCount(0, { timeout: 30_000 });
+        await expect
+          .poll(async () => (await hostDebugState(page, macroId)).mounted, { timeout: 30_000 })
           .toBe(false);
-        const after = await hostDebugState(page, macroId);
-        expect(after.mounted, "no unlocked realm outlives the run it was made for").toBe(false);
-        expect(after.transientIds).toEqual([]);
-        await expect
-          .poll(async () => consoleText(editorPage), { timeout: 30_000 })
-          .toMatch(/e2eColdRunCount\(\) finished/);
-        // Ending the session is not another execution.
-        expect(await readCell(page, COLD_CELL.row, COLD_CELL.col)).toBe("1");
+        expect((await hostDebugState(page, macroId)).transientIds).toEqual([]);
       });
     } finally {
       await destroyEditorWindow(page).catch(() => {});
       await cleanup(page).catch(() => {});
-      await clearCells(page, [COLD_CELL]).catch(() => {});
+      await clearCells(page, [THROW_CELL]).catch(() => {});
     }
   });
 });

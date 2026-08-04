@@ -4,7 +4,7 @@
 //          pointing at the wrong statement, a live session is updated without a
 //          restart, and stopping always goes through the host's stop path.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // ---- The workbook's extension-data store, faked as a single value ----------
 let stored: unknown = null;
@@ -39,9 +39,18 @@ vi.mock("@api/scriptHost/host", () => ({
 }));
 
 const emitTauriEvent = vi.fn(async () => undefined);
+/** Cross-window listeners the module registered, so a test can deliver to them. */
+const tauriListeners = new Map<string, (payload: unknown) => void>();
+const listenTauriEvent = vi.fn(async (event: string, handler: (payload: unknown) => void) => {
+  tauriListeners.set(event, handler);
+  return () => {
+    if (tauriListeners.get(event) === handler) tauriListeners.delete(event);
+  };
+});
 vi.mock("@api/backend", () => ({
   emitTauriEvent: (...a: unknown[]) => emitTauriEvent(...(a as [])),
-  listenTauriEvent: vi.fn(async () => () => undefined),
+  listenTauriEvent: (...a: unknown[]) =>
+    listenTauriEvent(...(a as [string, (payload: unknown) => void])),
 }));
 
 import * as dbg from "../debugger";
@@ -576,5 +585,94 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
       Record<string, unknown>
     >;
     expect(commands.map((c) => c.command)).toEqual(["start", "fire"]);
+  });
+});
+
+// ============================================================================
+// The main-window bridge — relaying an error is not reporting a dead session
+// ============================================================================
+//
+// FOUND LIVE, NOT HERE. Debugging a recorded macro whose body threw: the host
+// kept the session open on purpose (that is exactly when the debugger is worth
+// having), but the STANDALONE EDITOR WINDOW went blank — no badge, no trigger
+// list, no Run row to retry with, and no Stop button — while a live,
+// instrumented, debugger-owned mount stayed behind it with nothing left in the
+// UI able to release it.
+//
+// The cause was one hard-coded field. The bridge's catch answered every failed
+// command with `session: null`, and `subscribeRemoteDebugState` deletes the
+// mirror on a null. But most of these commands say nothing about whether the
+// session exists: `fire` rejects with whatever the SCRIPT threw. Only the host
+// knows, so only the host may answer.
+describe("the main-window debug bridge", () => {
+  const BRIDGE_COMMAND_EVENT = "objscript:debug-command";
+  const BRIDGE_STATE_EVENT = "objscript:debug-state-broadcast";
+
+  /** Broadcasts the bridge sent to the editor window, oldest first. */
+  function stateBroadcasts(): Array<Record<string, unknown>> {
+    return (emitTauriEvent.mock.calls as unknown as unknown[][])
+      .filter((c) => c[0] === BRIDGE_STATE_EVENT)
+      .map((c) => c[1] as Record<string, unknown>);
+  }
+
+  /** Deliver a command from the editor window and let the relay settle. */
+  async function sendFromEditor(cmd: Record<string, unknown>): Promise<void> {
+    const handler = tauriListeners.get(BRIDGE_COMMAND_EVENT);
+    expect(handler, "the bridge registered a command listener").toBeTypeOf("function");
+    handler!(cmd);
+    // hostApi() is dynamically imported and the relay is async throughout.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  let uninstall: (() => void) | null = null;
+
+  beforeEach(() => {
+    tauriListeners.clear();
+    emitTauriEvent.mockClear();
+    hostDebugFireTrigger.mockClear();
+    hostStartDebugSession.mockClear();
+    hostSession = null;
+    uninstall = dbg.installObjectScriptDebugBridge();
+  });
+
+  afterEach(() => {
+    uninstall?.();
+    uninstall = null;
+  });
+
+  it("keeps the session when a FIRED trigger throws — the error is the script's, not the session's", async () => {
+    const live = {
+      scriptId: SCRIPT,
+      status: "finished",
+      autoInvokeSetup: false,
+      triggers: [{ id: "method:boom", kind: "method", name: "boom", fireable: true }],
+      lastActivity: { label: "boom()", error: "Error: E2EBOOM" },
+    };
+    hostSession = live;
+    hostDebugFireTrigger.mockRejectedValueOnce(new Error("Error: E2EBOOM"));
+
+    await sendFromEditor({ command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
+
+    const broadcasts = stateBroadcasts();
+    expect(broadcasts.length, "the editor window was told something").toBeGreaterThan(0);
+    const last = broadcasts[broadcasts.length - 1];
+    expect(last.error).toContain("E2EBOOM");
+    // THE REGRESSION: this used to be null, which deleted the editor's mirror.
+    expect(last.session, "the live session survives a run that threw").toBe(live);
+  });
+
+  it("still reports null when the host really has no session (a start that failed)", async () => {
+    hostSession = null;
+    hostStartDebugSession.mockRejectedValueOnce(
+      new Error("Cannot debug a script that is not mounted — apply it first."),
+    );
+
+    await sendFromEditor({ command: "start", scriptId: SCRIPT, lines: [] });
+
+    const last = stateBroadcasts().pop();
+    expect(last?.error).toMatch(/not mounted/);
+    // Not invented by the catch — the host deleted the session and says so.
+    expect(last?.session).toBeNull();
   });
 });

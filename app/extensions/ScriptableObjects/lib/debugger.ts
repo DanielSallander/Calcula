@@ -607,7 +607,23 @@ export async function runAtCursor(
       message: notReadyMessage(session, target.name),
     };
   }
-  await fireDebugTrigger(scriptId, triggerId);
+  try {
+    await fireDebugTrigger(scriptId, triggerId);
+  } catch (err) {
+    // A COMPLETED MACRO RELEASES ITS SESSION (the host ends a debug session that
+    // ran cleanly and has no event hook to wait for), and the user's next Run
+    // can land in the microseconds between the look above and this fire. That is
+    // not an error to show — it is a Run that needs a mount. Reopen and fire
+    // once; anything else is the caller's to see.
+    //
+    // Local transport only: over the bridge a fire is one-way, so a fire into a
+    // session that has just ended comes back as an error broadcast instead, and
+    // pressing Run again works (by then the mirror has caught up).
+    if (getDebugSession(scriptId)) throw err;
+    await startDebugSession(scriptId, options);
+    await waitForDebugSettled(scriptId);
+    await fireDebugTrigger(scriptId, triggerId);
+  }
   return { status: "ran", functionName: target.name };
 }
 
@@ -710,10 +726,25 @@ export function installObjectScriptDebugBridge(): () => void {
         }
       } catch (err) {
         // The editor window is waiting on a state broadcast; give it one that
-        // says the session did not open, rather than leaving it spinning.
+        // carries the error, rather than leaving it spinning.
+        //
+        // THE SESSION COMES FROM THE HOST, NEVER FROM THIS CATCH. A rejected
+        // command does not mean the session is gone, and most of these are not
+        // even about the session's existence: `fire` rejects with whatever the
+        // SCRIPT threw, which is the one moment the debugger is most worth
+        // having open. Hard-coding `session: null` here deleted the editor
+        // window's mirror on exactly that path — the badge, the trigger list and
+        // the Run row all disappeared while the host still held a live,
+        // instrumented, debugger-owned mount, leaving the user with a running
+        // realm, no Stop button to release it, and no way to retry the function
+        // they had just fixed. (The in-window dialog never had this: it calls
+        // the host directly, so only the host's own broadcasts move its state.)
+        //
+        // A start that genuinely failed still reports null — because the host
+        // says so, having deleted the session itself.
         void emitTauriEvent(BRIDGE_STATE_EVENT, {
           scriptId: cmd.scriptId,
-          session: null,
+          session: host.getDebugSession(cmd.scriptId),
           error: err instanceof Error ? err.message : String(err),
         });
       }
