@@ -420,6 +420,15 @@ export interface DebugToolbarProps {
   runDisabled?: boolean;
   /** Title for the Run button when disabled. */
   runDisabledTitle?: string;
+  /**
+   * Open the session instead of calling `state.start` directly.
+   *
+   * The surfaces that edit live text use this to FLUSH THE BUFFER FIRST: a
+   * session instruments the source at mount, so debugging without flushing would
+   * instrument the stored copy and step the author through code that is not the
+   * code in front of them. Omitted surfaces keep the plain start.
+   */
+  onStart?: (options: { pauseOnEntry: boolean }) => void;
 }
 
 const RUN_ICON = "M4 2.5v11l9-5.5-9-5.5z";
@@ -435,8 +444,10 @@ export function DebugToolbar({
   onRun,
   runDisabled,
   runDisabledTitle,
+  onStart,
 }: DebugToolbarProps): React.ReactElement {
   const { session, isPaused, busy, start, stop, send, breakpointLines, inertMount } = state;
+  const beginSession = onStart ?? start;
   const active = !!session && session.status !== "detached";
 
   // Run-at-cursor. Left of Debug, always available (its own gating aside): F5 in
@@ -470,7 +481,7 @@ export function DebugToolbar({
         {runButton}
         <button
           className={buttonClassName}
-          onClick={() => start({ pauseOnEntry: onEntry })}
+          onClick={() => beginSession({ pauseOnEntry: onEntry })}
           disabled={disabled || busy}
           title={
             "Start debugging this script.\n" +

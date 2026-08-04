@@ -590,8 +590,8 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   }, [isDirty, activeScript, source, scripts, reportToConsole]);
 
   // Save
-  const handleSave = useCallback(async () => {
-    if (!activeScript) return;
+  const handleSave = useCallback(async (): Promise<boolean> => {
+    if (!activeScript) return false;
 
     // THE GATE. Compile (TypeScript in, JavaScript out; JavaScript passes
     // through byte for byte) and parse the result in a scratch worker —
@@ -603,7 +603,7 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     if (!gate.ok) {
       reportToConsole(gate.detail, activeScript.id);
       showToast(gate.message, { type: "error" });
-      return;
+      return false;
     }
 
     // From here on, ONE artifact: the JavaScript that will run.
@@ -648,8 +648,10 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
       } else {
         showToast("Script saved and applied.", { type: "success" });
       }
+      return true;
     } catch (e) {
       showToast(`Failed to save: ${e}`, { type: "error" });
+      return false;
     }
   }, [activeScript, source, reportToConsole]);
 
@@ -693,6 +695,13 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     setIsDirty(false);
   }, []);
 
+  // Read through refs so the debug starter stays referentially stable while
+  // still seeing the CURRENT buffer state and save implementation.
+  const isDirtyRef = useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const handleSaveRef = useRef(handleSave);
+  handleSaveRef.current = handleSave;
+
   // ---- Debugging (task H1) -------------------------------------------------
   // The session lives in the host; this is a view of it plus the gutter.
   const debug = useDebugSession(activeScriptId ?? null);
@@ -702,6 +711,26 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
   activeScriptIdRef.current = activeScriptId ?? null;
   const debugDecorationsRef = useRef<string[]>([]);
   const breakpointLines = debug.breakpointLines;
+
+  /**
+   * Open a session on the text in front of the author.
+   *
+   * DEBUG IS NOT DISABLED BY AN UNSAVED BUFFER. A session instruments the source
+   * at MOUNT, so the old "disabled while dirty" rule kept the two in step by
+   * refusing to work at all; applying the edit first keeps them in step by
+   * making the mount use the text on screen — which is what the author meant by
+   * pressing Debug. A save that cannot compile stops here (handleSave has
+   * already reported why) rather than instrumenting the stored copy.
+   */
+  const startDebugFlushed = useCallback(
+    (options: { pauseOnEntry: boolean }) => {
+      void (async () => {
+        if (isDirtyRef.current && !(await handleSaveRef.current())) return;
+        debugRef.current.start(options);
+      })();
+    },
+    [],
+  );
 
   useEffect(() => {
     injectDebugStyles();
@@ -757,7 +786,9 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
       id: "objectScript.save",
       label: "Save Script",
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-      run: () => handleSave(),
+      run: () => {
+        void handleSave();
+      },
     });
     ed.addAction({
       id: "objectScript.debug.continue",
@@ -1108,8 +1139,9 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
           {activeScript && (
             <DebugToolbar
               state={debug}
-              disabled={!activeScript || isDirty}
+              disabled={!activeScript}
               buttonClassName="ose-toolbar-btn"
+              onStart={startDebugFlushed}
             />
           )}
 

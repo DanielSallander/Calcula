@@ -428,11 +428,15 @@ test.describe("Macro link model", () => {
       editorPage = await findEditorPage(30_000);
 
       await test.step("3. the editor window opened on THIS macro", async () => {
-        // Macro mode is unmistakable: the Save button reads "Save Macro" and the
-        // document dropdown shows the macro under its name.
+        // Macro mode is unmistakable: a module has NO Save button (its edits are
+        // live, exactly as in the VBE) — it carries the live-state indicator
+        // instead — and the document dropdown shows the macro under its name.
+        await expect(
+          editorPage!.locator("[data-testid='module-live-indicator']"),
+        ).toBeVisible({ timeout: 30_000 });
         await expect(
           editorPage!.locator("button").filter({ hasText: /^Save Macro$/ }),
-        ).toBeVisible({ timeout: 30_000 });
+        ).toHaveCount(0);
         // The macro is the loaded document: it appears as the "MACRO — <name>"
         // option, keyed by its module id. (An <option> is not "visible" to
         // Playwright when the select is collapsed, so assert presence + value.)

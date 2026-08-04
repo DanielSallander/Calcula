@@ -881,6 +881,35 @@ this table are both wrong until someone re-derives from code.
      the Sorting dialog's reused criteria object cannot retroactively rewrite a recorded action.
      `removeDuplicates` has no script API on either runtime, so it is REPORTED as unsupported
      rather than emitted.
+   - **Amended 2026-08-04 — a module edit is LIVE; there is no per-module save step.** Run and Debug
+     used to be `disabled={isDirty}`, so a typed character disarmed the two buttons the author had
+     just reached for and "Save Macro" was a step VBA has never had. **The VBE model replaces it:**
+     the module *is* the code, and the separate step is saving the *workbook* — which Calcula already
+     matched, because writing to the module store (`save_script`) is a plain map insert while `.cala`
+     is what reaches disk. The buffer is now written through on a **400 ms idle debounce**
+     (`ScriptableObjects/lib/liveModuleBuffer.ts`, a class rather than a hook precisely so the rules
+     below are testable), and **every explicit gesture flushes first** — Run, Debug, run-at-cursor,
+     Ctrl+S, switching document, unmount, `beforeunload` and window **blur** (the editor is its own
+     Tauri window, so leaving it is the only route to anything that runs a macro). Four rules carry
+     the safety: writes never overlap (a second is never queued behind one in flight; the caller
+     awaits and re-decides, bounded to 3 chase passes), unchanged bytes are never rewritten,
+     **un-compilable text stores nothing and destroys nothing** — the last version that compiled
+     stays intact and is what a linked button still runs — and the idle pass never rewrites the
+     author's text, so a TypeScript buffer *defers* rather than swapping JavaScript in under a moving
+     cursor. Only genuinely unparseable source fails, because `ts.transpileModule` has no type
+     checker; that is what makes an idle auto-persist safe at all. **Run on source that does not
+     compile REFUSES, loudly, naming the compiler error — it never falls back to the older stored
+     copy**, which would run code the author is not looking at while their real error sat silently in
+     the editor. Scope is a policy *table*, `lib/liveEditPolicy.ts`, so a new document kind cannot be
+     added without answering both questions: modules auto-persist on idle; **object scripts** persist
+     on gesture only (their save is an *apply* — `emitSaveAndApply` remounts the realm and re-runs
+     `setup()`, so an idle timer would restart running code every typing pause); **AI drafts persist
+     on nothing at all** — not a timer, not a gesture, not closing the window — because only a human
+     pressing Save may turn a draft into real code. The "Save Macro" button is gone, replaced by a
+     `module-live-indicator` chip (Live / Saving… / Compile to store / Not stored); Ctrl+S still
+     flushes and says honestly that module edits were already live. The workbook dirty marker is
+     unaffected: every write goes through `saveWorkbookScript`, which calls `markFileModified()`.
+     Verified live end to end in `app/e2e/tests/macro-live-edit.spec.ts`.
 2. **Bulk typed range I/O + undo everywhere** — **SHIPPED.** `sheet.getRangeValues` /
    `sheet.setRangeValues` and `api.getRangeValues` move a whole rectangle in one RPC under a
    `maxCells` clamp, carrying values, types AND formulas; `api.getCellData` reads one cell with its
@@ -1292,6 +1321,19 @@ this table are both wrong until someone re-derives from code.
     script console. It is armed only from `debugActivity{running:false}` and cancelled on
     start/stop/unmount/reset/remount/pause/new-activity, and re-validates the **same session object**
     on the tick it fires, so a concurrent Stop or re-Run wins.
+    **Amended 2026-08-04 (live module editing, item 1) — a session is never hot-swapped.** Now that a
+    module edit reaches the store on an idle debounce, the store can move underneath an open session,
+    and a session OWNS the snapshot it instrumented at mount. Rather than restart it silently, a write
+    while a session is open marks that session **stale** (state, not a comment) and raises a
+    `stale-session-banner` saying the session is running the earlier version. Run then splits on the
+    one thing that matters: **paused → refuse**, naming the line the author is stopped on and telling
+    them to press Stop, because remounting under a paused author would make their locals, call stack
+    and position vanish mid-inspection; **not paused → stop and wait**, via `stopDebugSessionAndWait`,
+    which exists because the remote debug bridge returns before the main window has torn the session
+    down — without the wait the fresh session could race the old one's teardown. Debug itself flushes
+    before starting (`startDebugFlushed`), since a session instruments at mount and debugging an
+    unflushed buffer would step through the stored copy with breakpoints landing on the wrong lines.
+    Ending a session always clears the stale flag, so "stale" can never be a state the user is stuck in.
 
 21. **TypeScript authoring (§7.12 half 2)** — **SHIPPED 2026-08-01 (Wave H).**
     `api/scriptTranspile.ts` compiles at save; **the emitted JavaScript becomes `script.source`**, so

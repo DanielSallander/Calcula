@@ -47,7 +47,16 @@ import {
   subscribeRemoteDebugState,
   setRemoteDebugTransport,
   runAtCursor,
+  getDebugSession,
+  stopDebugSessionAndWait,
 } from "../lib/debugger";
+import {
+  LiveModulePersister,
+  outcomeLeavesBufferUnsaved,
+  outcomeWroteNewBytes,
+  type LivePersistOutcome,
+} from "../lib/liveModuleBuffer";
+import { editorDocumentKind, liveEditPolicyFor } from "../lib/liveEditPolicy";
 import {
   breakpointShift,
   DebugPanel,
@@ -323,6 +332,52 @@ function macroDocKindLabel(doc: MacroDoc): string {
   return doc.runtime ? "MACRO" : "MODULE";
 }
 
+/**
+ * How live a module document's text is, as the author should be told.
+ *
+ * "Live" is the resting state and the whole point of the feature: the buffer and
+ * the module store hold the same bytes, so every button that links this macro,
+ * Run, and Debug all get exactly what is on screen. The other three states are
+ * the honest exceptions, and each one names what the author must do.
+ */
+export type LiveDocState =
+  | { state: "live" }
+  /** Typed within the last few hundred ms, or a write is on its way. */
+  | { state: "saving" }
+  /** TypeScript: storing it means compiling it, which rewrites the buffer, and
+   *  only an explicit gesture may do that. */
+  | { state: "deferred"; message: string }
+  /** The text does not compile (or the store refused it). The last good stored
+   *  version is intact and is what a button would still run. */
+  | { state: "error"; message: string };
+
+/** The short label the toolbar/status bar shows for a live state. */
+export function liveStateLabel(live: LiveDocState | undefined): string {
+  switch (live?.state) {
+    case "saving":
+      return "Saving…";
+    case "deferred":
+      return "Compile to store";
+    case "error":
+      return "Not stored";
+    default:
+      return "Live";
+  }
+}
+
+/** Turn a persist outcome into what the author is shown. */
+export function liveStateFromOutcome(outcome: LivePersistOutcome): LiveDocState {
+  switch (outcome.status) {
+    case "deferred":
+      return { state: "deferred", message: outcome.message };
+    case "invalid":
+    case "failed":
+      return { state: "error", message: outcome.message };
+    default:
+      return { state: "live" };
+  }
+}
+
 /** What a deleted-but-edited document says about itself. */
 const DELETED_WITH_EDITS_NOTE =
   "This module was deleted from the workbook while you had unsaved edits. " +
@@ -407,6 +462,20 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   /** Which document the buffer currently holds. Guards the restore effect so a
    *  background refresh of the macro list can never replace text being typed. */
   const loadedDocIdRef = useRef<string | null>(null);
+  /** Per-module-document live state, keyed by module id. */
+  const [liveStates, setLiveStates] = useState<Record<string, LiveDocState>>({});
+  /**
+   * Module documents whose OPEN DEBUG SESSION is running older code than the
+   * store now holds.
+   *
+   * A session instruments the source at mount and owns that snapshot for its
+   * whole life. Persisting an edit must NOT hot-swap it — that would discard a
+   * paused author's inspection mid-thought — so the session keeps running what
+   * it was built from and this set is how the UI says so out loud.
+   */
+  const [staleSessionDocs, setStaleSessionDocs] = useState<string[]>([]);
+  const staleSessionDocsRef = useRef<string[]>([]);
+  staleSessionDocsRef.current = staleSessionDocs;
   const [showSidebar, setShowSidebar] = useState(true);
   const [showConsole, setShowConsole] = useState(true);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
@@ -451,6 +520,131 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setShowConsole(true);
     },
     [],
+  );
+
+  // ==========================================================================
+  // LIVE MODULE EDITING (the VBE model)
+  // ==========================================================================
+  //
+  // A module script is the live code. There is no per-module save step: the
+  // buffer is written through on an idle debounce and flushed by every explicit
+  // gesture, so Run and Debug always execute what is on screen. `.cala` remains
+  // the separate step that persists to disk — `saveWorkbookScript` marks the
+  // workbook modified, so the title bar still says the file needs saving.
+  //
+  // WHAT DOES NOT AUTO-PERSIST, and why, is a policy table (lib/liveEditPolicy.ts)
+  // rather than a comment: an object script's save is also an APPLY (it remounts
+  // the realm and re-runs setup()), and an AI draft must never become real code
+  // without a human pressing Save.
+
+  /** Marks a document's open debug session as running older code than the store. */
+  const markSessionStale = useCallback((docId: string) => {
+    setStaleSessionDocs((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
+  }, []);
+  const clearSessionStale = useCallback((docId: string) => {
+    setStaleSessionDocs((prev) => (prev.includes(docId) ? prev.filter((id) => id !== docId) : prev));
+  }, []);
+
+  /** The last compile/write failure reported per document, so a debounce that
+   *  keeps failing on the same broken line does not fill the console with it. */
+  const lastLiveErrorRef = useRef<Map<string, string>>(new Map());
+
+  const applyLiveOutcome = useCallback(
+    (docId: string, outcome: LivePersistOutcome) => {
+      setLiveStates((prev) => ({ ...prev, [docId]: liveStateFromOutcome(outcome) }));
+
+      if (outcome.status === "invalid" || outcome.status === "failed") {
+        const detail = outcome.status === "invalid" ? outcome.detail : outcome.message;
+        if (lastLiveErrorRef.current.get(docId) !== detail) {
+          lastLiveErrorRef.current.set(docId, detail);
+          reportToConsole(
+            outcome.status === "invalid"
+              ? `${detail}\nThe stored version is unchanged, so anything that runs this macro still runs the last version that compiled.`
+              : `The module store refused the write: ${outcome.message}`,
+            docId,
+          );
+        }
+        return;
+      }
+      lastLiveErrorRef.current.delete(docId);
+      if (!outcomeWroteNewBytes(outcome)) return;
+
+      const stored = outcome.stored;
+      const isActive = activeDocIdRef.current === docId;
+      setMacroDocs((prev) =>
+        prev.map((d) =>
+          d.macroId === docId
+            ? {
+                ...d,
+                // The ACTIVE document's buffer lives in `source`; every other
+                // document's lives in its own `script.source`, and we just wrote
+                // it, so that is now the stored text.
+                script: { ...d.script, source: isActive ? d.script.source : stored },
+                savedSource: stored,
+                dirty: isActive ? sourceRef.current !== stored : false,
+                // A successful write is also the answer to "this was deleted
+                // while you had edits": it exists again.
+                loadError: null,
+              }
+            : d,
+        ),
+      );
+      if (isActive) setIsDirty(sourceRef.current !== stored);
+
+      if (outcome.status === "compiled" && isActive) {
+        // The stored bytes are not the buffer bytes, so show what was stored:
+        // the author must never be looking at text other than the text that
+        // runs, is hashed for consent and is read by a reviewer.
+        setSource(stored);
+        setLanguage("javascript");
+        reportToConsole(
+          "TypeScript compiled to JavaScript. The stored module is the JavaScript now shown.",
+          docId,
+          "info",
+        );
+      }
+
+      // AN OPEN SESSION IS NOT HOT-SWAPPED. It keeps its instrumented snapshot;
+      // the next Run/Debug is what picks the new source up.
+      if (getDebugSession(docId)) markSessionStale(docId);
+    },
+    [reportToConsole, markSessionStale],
+  );
+  const applyLiveOutcomeRef = useRef(applyLiveOutcome);
+  applyLiveOutcomeRef.current = applyLiveOutcome;
+
+  const persisterRef = useRef<LiveModulePersister | null>(null);
+  if (!persisterRef.current) {
+    persisterRef.current = new LiveModulePersister({
+      // The SAME gate the Save button always used. An auto-persist is still a
+      // save: un-runnable text must never reach the store just because the
+      // author paused typing.
+      gate: (src, name) => gateObjectScriptSave(src, name, hostValidateScript),
+      write: async (docId, javascript) => {
+        const doc = macroDocsRef.current.find((d) => d.macroId === docId);
+        await saveWorkbookScript({
+          id: docId,
+          name: doc?.script.name ?? docId,
+          // The runtime marker lives in the description and decides how the
+          // macro is executed — preserved verbatim on every write.
+          description: doc?.description ?? null,
+          source: javascript,
+          scope: { type: "workbook" },
+        });
+      },
+      onOutcome: (docId, outcome) => applyLiveOutcomeRef.current(docId, outcome),
+    });
+  }
+  const persister = persisterRef.current;
+
+  // Going away is the last chance to write: flush FIRST, then drop the timers.
+  // Disposing without flushing would throw away up to one debounce window of
+  // typing — the one loss this feature exists to prevent.
+  useEffect(
+    () => () => {
+      void persister.flushAll().finally(() => persister.dispose());
+    },
+    [persister],
   );
 
   // Load scripts from backend
@@ -539,6 +733,28 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     loadScripts();
     void loadMacros();
   }, [loadScripts, loadMacros]);
+
+  // Keep the persister's idea of "what the store holds" in step with the listing,
+  // and let go of documents that are gone. `track` never touches a buffer, so a
+  // refresh landing mid-edit cannot take the author's text — and it never lowers
+  // the stored baseline underneath a write that is already in flight.
+  useEffect(() => {
+    const live = new Set<string>();
+    for (const doc of macroDocs) {
+      live.add(doc.macroId);
+      persister.track(doc.macroId, doc.script.name, doc.savedSource);
+    }
+    persister.retain(live);
+    setLiveStates((prev) => {
+      const next: Record<string, LiveDocState> = {};
+      let changed = false;
+      for (const [id, state] of Object.entries(prev)) {
+        if (live.has(id)) next[id] = state;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [macroDocs, persister]);
 
   // The list must follow the workbook: a macro recorded, renamed or deleted in
   // the main window while this editor is open changes what belongs here. The
@@ -786,14 +1002,31 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     // covers the case the main window cannot see — the editor's own document
     // going away while the window lives on.
     const handleBeforeUnload = () => {
+      // FLUSH ON THE WAY OUT. Best effort by nature: an unload handler cannot
+      // await a backend round trip, so the write is posted and the page may go
+      // before it lands. That is why the blur flush below exists — it is the one
+      // that can be relied on.
+      void persisterRef.current?.flushAll();
       emitEditorClosed();
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
+
+    // THE RELIABLE FLUSH. This editor is its own Tauri window, and the only way
+    // to reach anything that runs a macro (a button on the grid, the Macros
+    // dialog) is to leave it. Leaving is a blur, and a blur handler runs with
+    // the window still alive, so the store is up to date before the main window
+    // can execute anything. Without it the guarantee would rest on the 400 ms
+    // debounce having happened to fire.
+    const handleWindowBlur = () => {
+      void persisterRef.current?.flushAll();
+    };
+    window.addEventListener("blur", handleWindowBlur);
 
     return () => {
       cancelled = true;
       unlisteners.forEach((fn) => fn());
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("blur", handleWindowBlur);
     };
   }, []);
 
@@ -869,6 +1102,20 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const isReadOnly = activeScript?.provenance === "distributed";
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
+  /** What kind of document is open, and therefore what live editing may do to it. */
+  const docKind = editorDocumentKind({ isDraft, isModule: isMacro });
+  const livePolicy = liveEditPolicyFor(docKind);
+  const livePolicyRef = useRef(livePolicy);
+  livePolicyRef.current = livePolicy;
+  const activeNameRef = useRef<string>(activeScript?.name ?? "");
+  activeNameRef.current = activeScript?.name ?? "";
+  /** The live state of the module in front of the author (modules only). */
+  const activeLive: LiveDocState | undefined = isMacro && activeScriptId
+    ? liveStates[activeScriptId] ?? (isDirty ? { state: "saving" } : { state: "live" })
+    : undefined;
+  /** True when the open document's debug session is running pre-edit code. */
+  const activeSessionStale = !!activeScriptId && staleSessionDocs.includes(activeScriptId);
+
   // Point `ObjectScriptContext` at THIS script's context interface, so
   // `@param {ObjectScriptContext} context` resolves to (say) SlicerContext —
   // on BOTH lanes, because JSDoc types only apply to a .js model and real
@@ -891,15 +1138,20 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setActiveScriptId(scriptId);
       return;
     }
-    // A MACRO is a real record, but switching away must not silently write the
-    // MODULE store from the object-script auto-save path below (it would create a
-    // spurious object script). Keep the edits in ITS OWN document — Save is the
-    // only thing that persists them, and coming back to that macro (not merely
-    // the last one) shows what was being read.
+    // A MODULE is live code, so switching away FLUSHES it: the module store must
+    // hold what the author was looking at before anything in the main window
+    // (a button that links this macro) can run it. The buffer is still stashed
+    // into its own document first, because a flush that cannot compile stores
+    // nothing — and the author's text must survive that.
     if (isMacro) {
       stashActiveMacroBuffer();
+      const leavingId = activeDocIdRef.current;
       setLanguage("javascript");
       setActiveScriptId(scriptId);
+      // Deliberately NOT awaited before the switch: the outcome is applied to the
+      // document it belongs to (by id), so a slow write cannot delay opening the
+      // next document — and cannot land in the wrong buffer either.
+      if (leavingId) void persister.flush(leavingId, true);
       return;
     }
     // Auto-save current. The same gate as the Save button: an auto-save is
@@ -926,74 +1178,49 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     activeScript,
     source,
     reportToConsole,
+    persister,
   ]);
 
-  // Save a recorded MACRO back to the MODULE store (`save_script`) — NOT the
-  // object-script store. The macro is the single canonical thing every linking
-  // button runs, so editing it here is reflected on every button with no re-save
-  // of the button. The description marker (runtime=objectScript) is preserved
-  // verbatim so the macro keeps routing correctly. No persistent object script
-  // is mounted: buttons run the macro transiently per click, and debug/run mount
-  // it transiently under the synthetic definition.
-  const handleSaveMacro = useCallback(async () => {
-    if (!activeScript || !macroDoc) return;
-    const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
-    if (!gate.ok) {
-      reportToConsole(gate.detail, activeScript.id);
-      return;
-    }
-    const storedSource = gate.javascript;
-    try {
-      await saveWorkbookScript({
-        id: macroDoc.macroId,
-        name: activeScript.name,
-        description: macroDoc.description,
-        source: storedSource,
-        scope: { type: "workbook" },
-      });
-      setMacroDocs((prev) =>
-        prev.map((d) =>
-          d.macroId === macroDoc.macroId
-            ? {
-                ...d,
-                script: { ...d.script, source: storedSource },
-                savedSource: storedSource,
-                dirty: false,
-                // A save is also the answer to "this was deleted while you had
-                // edits": it exists again, so the warning must go.
-                loadError: null,
-              }
-            : d,
-        ),
-      );
-      setIsDirty(false);
-      if (gate.transformed) {
-        setSource(storedSource);
-        setLanguage("javascript");
-        reportToConsole(
-          "TypeScript compiled to JavaScript. The stored macro is the JavaScript now shown.",
-          macroDoc.macroId,
-          "info",
-        );
-      }
-      reportToConsole(
-        `Macro "${activeScript.name}" saved. Every button that links it runs this version now.`,
-        macroDoc.macroId,
-        "info",
-      );
-    } catch (e) {
-      reportToConsole(`Failed to save macro: ${e}`, macroDoc.macroId, "error");
-    }
-  }, [activeScript, macroDoc, source, reportToConsole]);
+  /**
+   * Push a MODULE document's buffer into the module store NOW, and report
+   * whether the store ended up holding it.
+   *
+   * There is only one write path for a module (the persister), so an idle
+   * debounce, Ctrl+S, switching document, closing the window and the flush in
+   * front of Run all obey the same gate, the same coalescing and the same
+   * "un-compilable text stores nothing" rule. The description marker
+   * (runtime=objectScript) rides along in the persister's `write`, so the macro
+   * keeps routing correctly however it was flushed.
+   */
+  const flushMacro = useCallback(
+    async (docId: string): Promise<{ ok: boolean; source: string }> => {
+      const outcome = await persister.flush(docId, true);
+      const stored = persister.storedSource(docId) ?? sourceRef.current;
+      // "ok" means one thing only: the store now holds the text on screen. Ask
+      // the outcome type itself rather than re-listing the failing statuses here
+      // — a new status added to LivePersistOutcome must not default to success
+      // and let Run mount the older stored copy.
+      return { ok: !outcomeLeavesBufferUnsaved(outcome), source: stored };
+    },
+    [persister],
+  );
 
-  // Save & Apply
-  const handleSave = useCallback(async () => {
-    if (!activeScript) return;
+  /**
+   * Store the open document, wherever it belongs, and say whether the store now
+   * holds the text on screen. QUIET: the outcome handler reports failures, and
+   * this is called on every Run/Debug, where a "saved!" line per press would be
+   * noise. `handleSave` is the chatty wrapper for the deliberate gesture.
+   */
+  const flushActiveDocument = useCallback(async (): Promise<{ ok: boolean; source: string }> => {
+    if (!activeScript) return { ok: false, source: sourceRef.current };
     // A macro routes to the MODULE store, never the object-script store.
     if (isMacro) {
-      await handleSaveMacro();
-      return;
+      return flushMacro(activeScript.id);
     }
+    // A DRAFT is never written by anything but the Save button itself, and an
+    // object script that has not changed must not be re-applied: re-saving it
+    // would remount the realm and re-run setup() for nothing.
+    if (!isDirty && !isDraft) return { ok: true, source };
 
     // THE GATE. Compile (TypeScript in, JavaScript out; JavaScript passes
     // through byte for byte) and parse the result in a scratch worker —
@@ -1004,7 +1231,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     const gate = await gateObjectScriptSave(source, activeScript.name, hostValidateScript);
     if (!gate.ok) {
       reportToConsole(gate.detail, activeScript.id);
-      return;
+      return { ok: false, source };
     }
 
     // From here on, ONE artifact: the JavaScript that will run.
@@ -1046,6 +1273,10 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       }
       // Update local state
       setScripts((prev) => prev.map((s) => s.id === updated.id ? updated : s));
+      // A save IS a remount, so the session (if any) is now instrumented from
+      // this very text: whatever was stale about it no longer is.
+      clearSessionStale(updated.id);
+      return { ok: true, source: storedSource };
     } catch (e) {
       setConsoleEntries((prev) => [
         ...prev,
@@ -1058,8 +1289,44 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         },
       ]);
       setShowConsole(true);
+      return { ok: false, source };
     }
-  }, [activeScript, isDraft, isMacro, handleSaveMacro, source, reportToConsole]);
+  }, [
+    activeScript,
+    isDirty,
+    isDraft,
+    isMacro,
+    flushMacro,
+    source,
+    reportToConsole,
+    clearSessionStale,
+  ]);
+
+  /**
+   * Ctrl+S / the Save button.
+   *
+   * For an object script or a draft this is the real save-and-apply. For a
+   * MODULE it is only a flush — the edits were already live — so it says that
+   * out loud rather than letting the gesture imply that unsaved work existed.
+   */
+  const handleSave = useCallback(async (): Promise<{ ok: boolean; source: string }> => {
+    if (!activeScript) return { ok: false, source: sourceRef.current };
+    const before = isMacro ? persister.storedSource(activeScript.id) : null;
+    const flushed = await flushActiveDocument();
+    if (isMacro && flushed.ok) {
+      reportToConsole(
+        before === flushed.source
+          ? `"${activeScript.name}" is already the stored version — module edits are live as you type.`
+          : `Macro "${activeScript.name}" stored. Every button that links it runs this version now. ` +
+              "Save the workbook to keep it on disk.",
+        activeScript.id,
+        "info",
+      );
+    }
+    return flushed;
+  }, [activeScript, isMacro, persister, flushActiveDocument, reportToConsole]);
+  const flushActiveDocumentRef = useRef(flushActiveDocument);
+  flushActiveDocumentRef.current = flushActiveDocument;
 
   // Toggle access level. The backend is authoritative: distributed scripts
   // cannot be escalated, so the local state and the cross-window event are
@@ -1195,29 +1462,88 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     if (ed) applyDebugDecorations(ed, debug.decorations);
   }, [debug.decorations, applyDebugDecorations]);
 
+  /**
+   * FLUSH, then answer whether Run/Debug may proceed.
+   *
+   * Run is never disabled merely because the buffer is unsaved — it stores the
+   * buffer first and then runs it. The one thing it must never do is fall back
+   * to the older stored copy when the buffer does not compile: that would run
+   * code the author is not looking at while their real error sits silently in the
+   * editor. So a failed flush REFUSES the gesture, loudly, with the compiler
+   * message.
+   */
+  const flushBeforeRunning = useCallback(
+    async (gesture: "Run" | "Debug"): Promise<{ ok: boolean; source: string }> => {
+      if (!activeScript) return { ok: false, source: sourceRef.current };
+      if (!livePolicyRef.current.persistOnGesture) {
+        // An AI draft. Nothing may write it, and Run/Debug are not offered for
+        // one — this is the belt to that suspenders.
+        return { ok: false, source: sourceRef.current };
+      }
+      const flushed = await flushActiveDocumentRef.current();
+      if (!flushed.ok) {
+        reportToConsole(
+          `${gesture} did not start: the code in the editor could not be stored (see the error above), ` +
+            `and ${gesture} must never quietly fall back to the older stored version. ` +
+            `That version is untouched — fix the problem and press ${gesture} again.`,
+          activeScript.id,
+        );
+      }
+      return flushed;
+    },
+    [activeScript, reportToConsole],
+  );
+
   // Run-at-cursor (VBA F5): run the top-level function the cursor is in, through
   // the same fire/exposed-method door the Fire buttons use. Never a wrong-arity
   // call and never a silent no-op — an unresolvable cursor speaks in the console.
   const runFromCursor = useCallback(async () => {
     const ed = editorRef.current;
     if (!ed || !activeScript || isDraft || isReadOnly) return;
-    if (isDirty) {
-      reportToConsole(
-        "Save first — Run uses the saved source so a breakpoint lands where you see it.",
-        activeScript.id,
-      );
-      return;
-    }
     const line = ed.getPosition()?.lineNumber ?? 1;
-    // A module macro is mounted from the STORE, by id: Run is disabled while the
-    // buffer is dirty precisely so "what you see" and "what is stored" are the
-    // same text, and the host must never be handed a body by a caller.
+
+    // 1. WHAT YOU SEE IS WHAT RUNS. The buffer goes to the store before anything
+    //    is mounted; a compile failure stops here rather than running the older
+    //    stored copy behind the author's back.
+    const flushed = await flushBeforeRunning("Run");
+    if (!flushed.ok) return;
+
+    // 2. An open session was instrumented from the source as it was when the
+    //    session opened, and it OWNS that snapshot. If edits have been stored
+    //    since, this Run would fire into the old code.
+    if (staleSessionDocsRef.current.includes(activeScript.id)) {
+      if (debugRef.current.isPaused) {
+        // NEVER remount underneath a paused author: their locals, call stack and
+        // position would vanish mid-inspection. Say what is true and let them
+        // choose.
+        reportToConsole(
+          `The debug session is paused at line ${debugRef.current.session?.paused?.line ?? "?"} in the code as it was ` +
+            "when the session started, so Run cannot use your newer edits. Your edits ARE stored — " +
+            "press Stop (or continue to the end) and Run again to step through them.",
+          activeScript.id,
+        );
+        return;
+      }
+      reportToConsole(
+        "Restarting the debug session so it runs the code you are looking at…",
+        activeScript.id,
+        "info",
+      );
+      await stopDebugSessionAndWait(activeScript.id);
+      clearSessionStale(activeScript.id);
+    }
+
+    // 3. A module macro is mounted from the STORE, by id — the host must never be
+    //    handed a body by a caller — which is exactly why step 1 exists.
+    //    The cursor is resolved against the text that was stored (identical to
+    //    the buffer unless a TypeScript compile rewrote it, in which case the
+    //    editor is already showing the stored JavaScript).
     // A throw here is the host refusing (no session, no such trigger, a mount
     // that Script Security blocked). Unhandled it would be an unhandled promise
     // rejection and, on screen, a Run button that did nothing at all — the exact
     // silence this whole feature keeps regressing into. It goes in the console.
     try {
-      const outcome = await runAtCursor(activeScript.id, source, line, {
+      const outcome = await runAtCursor(activeScript.id, flushed.source, line, {
         mountFromModuleStore: isMacro,
       });
       if (outcome.status === "ran") {
@@ -1232,9 +1558,43 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         "error",
       );
     }
-  }, [activeScript, isDraft, isReadOnly, isDirty, source, isMacro, reportToConsole]);
+  }, [
+    activeScript,
+    isDraft,
+    isReadOnly,
+    isMacro,
+    reportToConsole,
+    flushBeforeRunning,
+    clearSessionStale,
+  ]);
   const runFromCursorRef = useRef(runFromCursor);
   runFromCursorRef.current = runFromCursor;
+
+  /**
+   * Open a debug session on the text in front of the author.
+   *
+   * A session instruments the source AT MOUNT, so debugging without flushing
+   * first would step through the stored copy while the editor showed something
+   * else — the same lie Run avoids, with breakpoints landing on the wrong lines.
+   */
+  const startDebugFlushed = useCallback(
+    (options: { pauseOnEntry: boolean }) => {
+      void (async () => {
+        if (!activeScript) return;
+        const flushed = await flushBeforeRunning("Debug");
+        if (!flushed.ok) return;
+        clearSessionStale(activeScript.id);
+        debugRef.current.start(options);
+      })();
+    },
+    [activeScript, flushBeforeRunning, clearSessionStale],
+  );
+
+  // A session that has ended cannot be running older code than the store: the
+  // warning goes with it, so "stale" can never be a state the user is stuck in.
+  useEffect(() => {
+    if (activeScriptId && !debug.session) clearSessionStale(activeScriptId);
+  }, [debug.session, activeScriptId, clearSessionStale]);
 
   // A debugger that stops off-screen looks exactly like one that did not stop.
   const pausedLine = debug.session?.paused?.line;
@@ -1260,7 +1620,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       id: "objectScript.save",
       label: "Save Script",
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-      run: () => handleSave(),
+      run: () => {
+        void handleSave();
+      },
     });
     ed.addAction({
       // VBA F5: when paused, F5 CONTINUES; otherwise it RUNS the function the
@@ -1316,12 +1678,37 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     ed.focus();
   }, [handleSave, applyDebugDecorations]);
 
-  const handleChange = useCallback((val: string | undefined) => {
-    if (val !== undefined) {
+  const handleChange = useCallback(
+    (val: string | undefined) => {
+      if (val === undefined) return;
       setSource(val);
       setIsDirty(true);
-    }
-  }, []);
+      const docId = activeDocIdRef.current;
+      if (!docId) return;
+      // THE LIVE PATH. Only kinds whose policy allows an idle write get here —
+      // an AI draft never does, and an object script's save is an apply, so it
+      // waits for the gesture that asks for one.
+      if (!livePolicyRef.current.autoPersistOnIdle) return;
+      if (!persister.tracks(docId)) return;
+      persister.note(docId, activeNameRef.current, val);
+      // THE CHIP MUST NEVER CLAIM WORK THAT DOES NOT EXIST. An edit can land the
+      // buffer back on the bytes the store already holds — an undo, a character
+      // typed and deleted, a rejected edit reverted by hand — and `note` then
+      // correctly arms nothing at all. Announcing "Saving…" for a write that is
+      // never going to happen would strand the indicator there permanently,
+      // because only a COMPLETED write clears it: the flush behind Ctrl+S and
+      // Run also short-circuits on "unchanged" without reporting an outcome. So
+      // the state is taken from the persister's own comparison, not from the
+      // fact that a keystroke happened.
+      const pending = persister.hasUnsavedEdits(docId);
+      setIsDirty(pending);
+      setLiveStates((prev) => {
+        const next: LiveDocState = pending ? { state: "saving" } : { state: "live" };
+        return prev[docId]?.state === next.state ? prev : { ...prev, [docId]: next };
+      });
+    },
+    [persister],
+  );
 
   const handleInsertMethod = useCallback((methodName: string) => {
     if (editorRef.current) {
@@ -1425,12 +1812,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               unmarked one is a hand-authored module, and both live here. */}
           {macroDocs.length > 0 && (
             <optgroup label="Macros / modules">
+              {/* NO "unsaved" DOT FOR ORDINARY EDITING. A module's edits are
+                  live, so a dot on every keystroke would claim work is at risk
+                  when none is. The dot now means the one thing that IS true: this
+                  module's buffer could NOT be stored (it does not compile, or the
+                  store refused it), so what runs is still the older version. */}
               {macroDocs.map((d) => {
-                const dirty = d.macroId === activeScriptId ? isDirty : d.dirty;
+                const live = liveStates[d.macroId];
+                const notStored = live?.state === "error" || live?.state === "deferred";
                 return (
                   <option key={d.macroId} value={d.macroId}>
                     {macroDocKindLabel(d)} — {d.script.name}
-                    {dirty ? " •" : ""}
+                    {notStored ? " •" : ""}
                     {d.loadError ? " (unreadable)" : ""}
                   </option>
                 );
@@ -1554,15 +1947,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         {activeScript && !isDraft && (
           <DebugToolbar
             state={debug}
-            disabled={isDirty}
             buttonClassName="ose-btn"
             onRun={() => void runFromCursor()}
-            runDisabled={isDirty || isReadOnly}
-            runDisabledTitle={
-              isReadOnly
-                ? "Distributed scripts are read-only and cannot be run from here."
-                : "Save first — Run uses the saved source so a breakpoint lands where you see it."
-            }
+            onStart={startDebugFlushed}
+            // NEITHER RUN NOR DEBUG IS EVER DISABLED BY AN UNSAVED BUFFER. Both
+            // flush first and then run what the author is looking at, which is
+            // the whole point of the change: in the VBE you never press Save
+            // before you press F5. The only thing that still disables Run is a
+            // distributed script, which cannot be run from here at all.
+            runDisabled={isReadOnly}
+            runDisabledTitle="Distributed scripts are read-only and cannot be run from here."
           />
         )}
 
@@ -1578,24 +1972,97 @@ export function ObjectScriptEditorApp(): React.ReactElement {
 
         <div style={{ width: 1, height: 18, backgroundColor: "#444", margin: "0 2px" }} />
 
-        <button className="ose-btn primary" onClick={handleSave}
-          // A draft has never been saved, so it is savable the moment it
-          // arrives — requiring an edit first would leave the only way to
-          // accept AI code being to change it.
-          disabled={(!isDirty && !isDraft) || isReadOnly}
-          title={
-            isReadOnly
-              ? "Distributed scripts are read-only"
-              : isDraft
-                ? "Save this AI draft as a real object script and mount it (Ctrl+S)"
-                : isMacro
-                  ? "Save the macro back to the workbook (Ctrl+S). Every button that links it runs this version."
+        {/* THE SAVE AFFORDANCE.
+            A module has no Save button, exactly as a VBE module has none: its
+            edits are already live, and a button offering to "save" them would
+            state the opposite of what is true. What replaces it is a quiet
+            indicator of the ONE thing the author cannot otherwise know — whether
+            the store currently holds what they are looking at. Ctrl+S still
+            flushes (and says so), for the hand that will press it anyway.
+            An OBJECT SCRIPT keeps its button, because pressing it does something
+            an edit does not: it remounts the script and re-runs setup().
+            An AI DRAFT keeps its button, because only a human pressing it may
+            turn AI-authored code into a real script. */}
+        {activeScript && isMacro ? (
+          <span
+            className="ose-btn"
+            data-testid="module-live-indicator"
+            data-live-state={activeLive?.state ?? "live"}
+            style={{
+              cursor: "default",
+              color:
+                activeLive?.state === "error"
+                  ? "#F48771"
+                  : activeLive?.state === "deferred"
+                    ? "#CCA700"
+                    : activeLive?.state === "saving"
+                      ? "#CCC"
+                      : "#89D185",
+            }}
+            title={
+              activeLive?.state === "error"
+                ? `${activeLive.message}\nThe stored module is unchanged — anything that runs this macro still runs the last version that compiled.`
+                : activeLive?.state === "deferred"
+                  ? activeLive.message
+                  : `${livePolicy.rationale}\nCtrl+S stores it immediately; Run and Debug store it before they run.`
+            }
+          >
+            <IconSave />
+            {liveStateLabel(activeLive)}
+          </span>
+        ) : (
+          <button className="ose-btn primary" onClick={() => void handleSave()}
+            // A draft has never been saved, so it is savable the moment it
+            // arrives — requiring an edit first would leave the only way to
+            // accept AI code being to change it.
+            disabled={(!isDirty && !isDraft) || isReadOnly}
+            title={
+              isReadOnly
+                ? "Distributed scripts are read-only"
+                : isDraft
+                  ? "Save this AI draft as a real object script and mount it (Ctrl+S)"
                   : "Save and apply (Ctrl+S)"
-          }>
-          <IconSave />
-          {isReadOnly ? "Read Only" : isDraft ? "Save as Script" : isMacro ? "Save Macro" : "Save & Apply"}
-        </button>
+            }>
+            <IconSave />
+            {isReadOnly ? "Read Only" : isDraft ? "Save as Script" : "Save & Apply"}
+          </button>
+        )}
       </div>
+
+      {/* AN OPEN DEBUG SESSION IS NOT HOT-SWAPPED BY AN EDIT.
+          The realm was instrumented from the source as it stood when the session
+          opened and it keeps that snapshot for its whole life — remounting it
+          underneath a paused author would throw away the locals, the call stack
+          and the position they are reading. So the edit is stored, the session
+          keeps running the older code, and the difference is said out loud
+          rather than left for the user to discover by stepping through a line
+          that is no longer there. */}
+      {activeSessionStale && debug.session && (
+        <div
+          data-testid="stale-session-banner"
+          style={{
+            padding: "8px 12px",
+            backgroundColor: "#3A3320",
+            borderBottom: "1px solid #6A5A2A",
+            color: "#FFD666",
+            fontSize: 11,
+            lineHeight: "1.5",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            This debug session is running the earlier version of the code
+          </div>
+          <div>
+            Your edits are stored — every button that links this macro already runs them. The open
+            session cannot take them: it was instrumented when it started, and replacing it now
+            would discard {debug.isPaused ? "the pause you are inspecting" : "the session"}.{" "}
+            {debug.isPaused
+              ? "Press Stop when you are done here; the next Run or Debug picks up your edits."
+              : "Run restarts the session for you, or press Stop and Debug again."}
+          </div>
+        </div>
+      )}
 
       {/* AI draft review banner. The MCP tool tells the agent its draft is
           "queued for the user to review"; this is what the user is shown, and
@@ -1846,7 +2313,24 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               {errorCount} error{errorCount !== 1 && "s"}
             </span>
           )}
-          <span>{isDraft ? "Never saved" : isDirty ? "Modified" : "Saved"}</span>
+          {/* The status bar must never imply that unsaved edits exist when they
+              are already live. For a module it reports the LIVE state; for the
+              kinds that really do hold unsaved work, it still says so. */}
+          <span data-testid="editor-save-state">
+            {isDraft
+              ? "Never saved"
+              : isMacro
+                ? activeLive?.state === "error"
+                  ? "Not stored — does not compile"
+                  : activeLive?.state === "deferred"
+                    ? "Not stored — Ctrl+S to compile"
+                    : activeLive?.state === "saving"
+                      ? "Saving…"
+                      : "Live"
+                : isDirty
+                  ? "Modified"
+                  : "Saved"}
+          </span>
         </span>
       </div>
     </div>

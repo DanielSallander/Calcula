@@ -404,6 +404,49 @@ export async function stopDebugSession(scriptId: string): Promise<void> {
   applySessionState(scriptId, null);
 }
 
+/**
+ * Stop a session AND wait until this window can see that it is gone.
+ *
+ * `stopDebugSession` over the remote bridge returns as soon as the command is on
+ * the wire, so the session MIRROR still holds the old session for a few
+ * milliseconds. That matters for exactly one caller: the editor tearing down a
+ * session whose instrumented mount was built from older source, so that the Run
+ * which follows opens a FRESH mount instead of finding the stale one still
+ * listed and firing into it. Without the wait, "Run picks up your edits" would
+ * be a race that usually lost.
+ *
+ * Resolves immediately when there is no session, and on a timeout backstop so a
+ * lost broadcast can never wedge Run.
+ */
+export async function stopDebugSessionAndWait(
+  scriptId: string,
+  timeoutMs = 10000,
+): Promise<void> {
+  if (!getDebugSession(scriptId)) return;
+  if (transport === "local") {
+    await stopDebugSession(scriptId);
+    return;
+  }
+  const gone = new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      off();
+      clearTimeout(timer);
+      resolve();
+    };
+    // Registered BEFORE the command is sent: the broadcast that clears the
+    // session can arrive while `sendCommand` is still awaiting its round trip.
+    const off = onDebugStateChange((detail) => {
+      if (detail.scriptId === scriptId && !detail.session) finish();
+    });
+    const timer = setTimeout(finish, timeoutMs);
+  });
+  await stopDebugSession(scriptId);
+  await gone;
+}
+
 /** Continue / step / pause. */
 export async function debugControl(scriptId: string, action: DebugAction): Promise<void> {
   if (transport === "remote") {

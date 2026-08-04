@@ -147,6 +147,8 @@ vi.mock("../lib/debugger", () => ({
   subscribeRemoteDebugState: () => () => {},
   setRemoteDebugTransport: () => {},
   runAtCursor: async () => ({ status: "noFunction", message: "" }),
+  getDebugSession: () => null,
+  stopDebugSessionAndWait: async () => {},
 }));
 
 /** What the editor told `useDebugSession` about the ACTIVE document. */
@@ -162,6 +164,12 @@ vi.mock("../components/DebugPanel", () => ({
       session: null,
       decorations: [],
       breakpointLines: [],
+      isPaused: false,
+      busy: false,
+      error: null,
+      inertMount: true,
+      start: () => {},
+      stop: () => {},
       send: () => {},
       fire: () => {},
       toggleLine: () => {},
@@ -312,9 +320,9 @@ describe("Object Script Editor — macros are first-class documents", () => {
     expect(labels).toContain("MODULE — Zed helper");
   });
 
-  // Per-document unsaved edits. Switching away must not lose them, and must not
-  // write them either.
-  it("keeps each macro's unsaved edits when switching between them", async () => {
+  // Per-document buffers. Switching away FLUSHES the document being left (a
+  // module is live code), and must still never lose the text of either one.
+  it("keeps each macro's own text when switching, and flushes the one being left", async () => {
     await mountApp();
     await deliverMacro(MACRO_A);
 
@@ -330,20 +338,23 @@ describe("Object Script Editor — macros are first-class documents", () => {
     await choose(MACRO_B.id);
     expect(buffer().value).toBe("// edited BETA");
 
-    // ...and nothing was written on the way: switching is not a save, and a
-    // module must never leak into the OBJECT-script store.
-    expect(saveWorkbookScript).not.toHaveBeenCalled();
+    // Each switch stored the document it left — to the MODULE store, by id.
+    // A module must never leak into the OBJECT-script store.
+    expect(store.get(MACRO_A.id)!.source).toBe("// edited ALPHA");
+    expect(store.get(MACRO_B.id)!.source).toBe("// edited BETA");
     expect(saveObjectScript).not.toHaveBeenCalled();
   });
 
-  it("marks the macros that hold unsaved edits", async () => {
+  it("marks only the macros whose text could NOT be stored", async () => {
     await mountApp();
     await deliverMacro(MACRO_A);
-    await type("// dirty");
+    await type("// stored fine");
     await choose(MACRO_B.id);
 
+    // Alpha stored cleanly on the way out, so it carries no warning dot: with
+    // live editing a dot on ordinary typing would claim work is at risk.
     const alpha = [...select().options].find((o) => o.value === MACRO_A.id)!;
-    expect(alpha.textContent).toContain("•");
+    expect(alpha.textContent).not.toContain("•");
     const beta = [...select().options].find((o) => o.value === MACRO_B.id)!;
     expect(beta.textContent).not.toContain("•");
   });
@@ -417,18 +428,31 @@ describe("Object Script Editor — macros are first-class documents", () => {
     expect(debugSessionOptions).toEqual({ mountFromModuleStore: true });
   });
 
-  it("saves a macro back to the MODULE store, marker intact", async () => {
+  // The VBE has no per-module Save button, and neither does this: a control
+  // offering to save edits that are already live states the opposite of what is
+  // true. What replaces it is the live indicator.
+  it("offers no Save button for a module — it shows the live state instead", async () => {
+    await mountApp();
+    await deliverMacro(MACRO_A);
+
+    const save = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("Save Macro"),
+    );
+    expect(save, "a module must not carry a Save button").toBeFalsy();
+
+    const indicator = container.querySelector("[data-testid='module-live-indicator']");
+    expect(indicator, "no live indicator for a module document").toBeTruthy();
+    expect(indicator!.textContent).toContain("Live");
+  });
+
+  it("stores a macro back to the MODULE store, marker intact", async () => {
     await mountApp();
     await deliverMacro(MACRO_A);
     await type("// saved body");
 
-    const save = [...container.querySelectorAll("button")].find((b) =>
-      (b.textContent ?? "").includes("Save Macro"),
-    ) as HTMLButtonElement;
-    expect(save, "no Save Macro button for a module document").toBeTruthy();
-    await act(async () => {
-      save.click();
-    });
+    // Any explicit gesture flushes; switching away is the one this test can
+    // drive without timers (the debounce path has its own test).
+    await choose(MACRO_B.id);
 
     expect(saveWorkbookScript).toHaveBeenCalledTimes(1);
     expect(saveWorkbookScript.mock.calls[0][0]).toMatchObject({
