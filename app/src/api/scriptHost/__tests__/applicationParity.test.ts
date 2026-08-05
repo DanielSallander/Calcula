@@ -272,7 +272,11 @@ describe("the restricted sheet clamp is described accurately", () => {
       hostSrc.indexOf("async function clampSheetIndex"),
       hostSrc.indexOf("async function withScriptUndoBatch"),
     );
-    expect(clamp).toContain("lib.getActiveSheet()");
+    // Wave 1: the ref (index or name) resolves against the LIVE sheet list and
+    // is compared to the list's own activeIndex — still the active sheet, and
+    // still nothing else.
+    expect(clamp).toContain("lib.getSheets()");
+    expect(clamp).toContain("activeIndex");
     // Nothing about the mount definition is consulted — there is no binding.
     expect(clamp).not.toContain("definition.instanceId");
     expect(clamp).not.toContain("boundSheet");

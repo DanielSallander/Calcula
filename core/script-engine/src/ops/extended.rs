@@ -3,11 +3,12 @@
 //! CONTEXT: Registers navigation, view, formatting, calculation, data, and
 //! display control methods on the Calcula global object.
 
-use rquickjs::{Function, Object};
+use rquickjs::{Ctx, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::types::{cell_value_to_string, DeferredAction, ScriptContext};
+use crate::ops::{resolve_opt_sheet_key, resolve_sheet_key};
+use crate::types::{DeferredAction, ScriptContext};
 
 /// Register extended operations on the Calcula object.
 pub fn register_extended_ops<'js>(
@@ -19,7 +20,7 @@ pub fn register_extended_ops<'js>(
     // Navigation & View
     // ========================================================================
 
-    // getViewMode() -> "normal" | "pageBreakPreview"
+    // getViewMode() -> "normal" | "pageLayout" | "pageBreakPreview"
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> String {
@@ -31,23 +32,39 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set getViewMode: {}", e))?;
     }
 
-    // setViewMode(mode)
+    // setViewMode(mode) — STRICTLY validated: "normal" | "pageLayout" |
+    // "pageBreakPreview". Anything else THROWS instead of travelling to the
+    // frontend as a silent no-op.
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |mode: String| {
-            let mut ctx = sc.borrow_mut();
-            ctx.host.view_mode = mode.clone();
-            ctx.deferred_actions
-                .borrow_mut()
-                .push(DeferredAction::SetViewMode { mode });
-        })
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, mode: String| -> rquickjs::Result<()> {
+                if !crate::types::VALID_VIEW_MODES.contains(&mode.as_str()) {
+                    return Err(rquickjs::Exception::throw_message(
+                        &ctx,
+                        &format!(
+                            "Invalid view mode \"{}\": expected \"normal\", \"pageLayout\", or \"pageBreakPreview\"",
+                            mode
+                        ),
+                    ));
+                }
+                let mut ctx_ref = sc.borrow_mut();
+                ctx_ref.host.view_mode = mode.clone();
+                ctx_ref
+                    .deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::SetViewMode { mode });
+                Ok(())
+            },
+        )
         .map_err(|e| format!("Failed to create setViewMode: {}", e))?;
         calcula
             .set("setViewMode", func)
             .map_err(|e| format!("Failed to set setViewMode: {}", e))?;
     }
 
-    // getZoom() -> number (percentage as decimal, e.g. 1.0 = 100%)
+    // getZoom() -> number (REAL percent, 100 = 100%)
     {
         let sc = shared_ctx.clone();
         let func = Function::new(ctx.clone(), move || -> f64 {
@@ -59,16 +76,37 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set getZoom: {}", e))?;
     }
 
-    // setZoom(percent)
+    // setZoom(percent) — REAL percent, validated to [10, 400]; out-of-range or
+    // non-finite THROWS. (The parameter was always DOCUMENTED as a percent but
+    // used to carry a factor — healed end-to-end, see types.rs HostState.zoom.)
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |percent: f64| {
-            let mut ctx = sc.borrow_mut();
-            ctx.host.zoom = percent;
-            ctx.deferred_actions
-                .borrow_mut()
-                .push(DeferredAction::SetZoom { percent });
-        })
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, percent: f64| -> rquickjs::Result<()> {
+                if !percent.is_finite()
+                    || percent < crate::types::ZOOM_MIN_PERCENT
+                    || percent > crate::types::ZOOM_MAX_PERCENT
+                {
+                    return Err(rquickjs::Exception::throw_message(
+                        &ctx,
+                        &format!(
+                            "Invalid zoom {}: expected a percent between {} and {}",
+                            percent,
+                            crate::types::ZOOM_MIN_PERCENT,
+                            crate::types::ZOOM_MAX_PERCENT
+                        ),
+                    ));
+                }
+                let mut ctx_ref = sc.borrow_mut();
+                ctx_ref.host.zoom = percent;
+                ctx_ref
+                    .deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::SetZoom { percent });
+                Ok(())
+            },
+        )
         .map_err(|e| format!("Failed to create setZoom: {}", e))?;
         calcula
             .set("setZoom", func)
@@ -153,43 +191,55 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set previousSheet: {}", e))?;
     }
 
-    // getSheetVisibility(index) -> "visible" | "hidden" | "veryHidden"
+    // getSheetVisibility(indexOrName) -> "visible" | "hidden" | "veryHidden"
+    // Accepts a 0-based index or a sheet name; a miss THROWS (ops/mod.rs).
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |index: i32| -> String {
-            let ctx = sc.borrow();
-            ctx.host
-                .sheet_visibility
-                .get(index as usize)
-                .cloned()
-                .unwrap_or_else(|| "visible".to_string())
-        })
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, key: Value<'js>| -> rquickjs::Result<String> {
+                let ctx_ref = sc.borrow();
+                let idx = resolve_sheet_key(&ctx, &ctx_ref, &key)?;
+                Ok(ctx_ref
+                    .host
+                    .sheet_visibility
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| "visible".to_string()))
+            },
+        )
         .map_err(|e| format!("Failed to create getSheetVisibility: {}", e))?;
         calcula
             .set("getSheetVisibility", func)
             .map_err(|e| format!("Failed to set getSheetVisibility: {}", e))?;
     }
 
-    // hideSheet(index, level?) - set sheet visibility to "hidden" or "veryHidden"
+    // hideSheet(indexOrName, level?) - set sheet visibility to "hidden" or
+    // "veryHidden". Accepts a 0-based index or a sheet name; a miss THROWS.
     {
         let sc = shared_ctx.clone();
         let func = Function::new(
             ctx.clone(),
-            move |index: i32, level: rquickjs::function::Opt<String>| {
+            move |ctx: Ctx<'js>,
+                  key: Value<'js>,
+                  level: rquickjs::function::Opt<String>|
+                  -> rquickjs::Result<()> {
+                let idx = resolve_sheet_key(&ctx, &sc.borrow(), &key)?;
                 let visibility = level.0.unwrap_or_else(|| "hidden".to_string());
-                let mut ctx = sc.borrow_mut();
-                let idx = index as usize;
+                let mut ctx_ref = sc.borrow_mut();
                 // Extend visibility vec if needed
-                while ctx.host.sheet_visibility.len() <= idx {
-                    ctx.host.sheet_visibility.push("visible".to_string());
+                while ctx_ref.host.sheet_visibility.len() <= idx {
+                    ctx_ref.host.sheet_visibility.push("visible".to_string());
                 }
-                ctx.host.sheet_visibility[idx] = visibility.clone();
-                ctx.deferred_actions
+                ctx_ref.host.sheet_visibility[idx] = visibility.clone();
+                ctx_ref
+                    .deferred_actions
                     .borrow_mut()
                     .push(DeferredAction::SetSheetVisibility {
                         sheet_index: idx,
                         visibility,
                     });
+                Ok(())
             },
         )
         .map_err(|e| format!("Failed to create hideSheet: {}", e))?;
@@ -198,23 +248,29 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set hideSheet: {}", e))?;
     }
 
-    // unhideSheet(index) - set sheet visibility to "visible"
+    // unhideSheet(indexOrName) - set sheet visibility to "visible".
+    // Accepts a 0-based index or a sheet name; a miss THROWS (ops/mod.rs).
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |index: i32| {
-            let mut ctx = sc.borrow_mut();
-            let idx = index as usize;
-            while ctx.host.sheet_visibility.len() <= idx {
-                ctx.host.sheet_visibility.push("visible".to_string());
-            }
-            ctx.host.sheet_visibility[idx] = "visible".to_string();
-            ctx.deferred_actions
-                .borrow_mut()
-                .push(DeferredAction::SetSheetVisibility {
-                    sheet_index: idx,
-                    visibility: "visible".to_string(),
-                });
-        })
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, key: Value<'js>| -> rquickjs::Result<()> {
+                let idx = resolve_sheet_key(&ctx, &sc.borrow(), &key)?;
+                let mut ctx_ref = sc.borrow_mut();
+                while ctx_ref.host.sheet_visibility.len() <= idx {
+                    ctx_ref.host.sheet_visibility.push("visible".to_string());
+                }
+                ctx_ref.host.sheet_visibility[idx] = "visible".to_string();
+                ctx_ref
+                    .deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::SetSheetVisibility {
+                        sheet_index: idx,
+                        visibility: "visible".to_string(),
+                    });
+                Ok(())
+            },
+        )
         .map_err(|e| format!("Failed to create unhideSheet: {}", e))?;
         calcula
             .set("unhideSheet", func)
@@ -280,19 +336,44 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set getNamedStyles: {}", e))?;
     }
 
-    // applyNamedStyle(styleName, row, col)
+    // applyNamedStyle(styleName, row, col, endRow?, endCol?)
+    // Single cell when endRow/endCol are omitted; an INCLUSIVE rect when both
+    // are given (Wave 4). Passing exactly one of the two THROWS — a half-rect
+    // has no meaning and silently ignoring the stray corner would misformat.
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |name: String, row: i32, col: i32| {
-            sc.borrow()
-                .deferred_actions
-                .borrow_mut()
-                .push(DeferredAction::ApplyNamedStyle {
-                    name,
-                    row: row.max(0) as u32,
-                    col: col.max(0) as u32,
-                });
-        })
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  name: String,
+                  row: i32,
+                  col: i32,
+                  end_row: rquickjs::function::Opt<i32>,
+                  end_col: rquickjs::function::Opt<i32>|
+                  -> rquickjs::Result<()> {
+                let (end_row, end_col) = match (end_row.0, end_col.0) {
+                    (Some(er), Some(ec)) => (Some(er.max(0) as u32), Some(ec.max(0) as u32)),
+                    (None, None) => (None, None),
+                    _ => {
+                        return Err(rquickjs::Exception::throw_message(
+                            &ctx,
+                            "applyNamedStyle: endRow and endCol must be given together",
+                        ));
+                    }
+                };
+                sc.borrow()
+                    .deferred_actions
+                    .borrow_mut()
+                    .push(DeferredAction::ApplyNamedStyle {
+                        name,
+                        row: row.max(0) as u32,
+                        col: col.max(0) as u32,
+                        end_row,
+                        end_col,
+                    });
+                Ok(())
+            },
+        )
         .map_err(|e| format!("Failed to create applyNamedStyle: {}", e))?;
         calcula
             .set("applyNamedStyle", func)
@@ -407,77 +488,95 @@ pub fn register_extended_ops<'js>(
             .map_err(|e| format!("Failed to set fillRight: {}", e))?;
     }
 
-    // getCurrentRegion(row, col) -> JSON { startRow, startCol, endRow, endCol }
-    // Scans the active grid for a contiguous block of non-empty cells containing (row, col)
+    // getCurrentRegion(row, col, sheet?) -> JSON { startRow, startCol, endRow, endCol, empty }
+    // Contiguous data block containing (row, col) — Excel's CurrentRegion.
+    // The algorithm is engine::navigation::current_region, the SAME function
+    // behind the get_current_region Tauri command (zero drift). `empty: true`
+    // means the cell is isolated and empty; the box then collapses to the
+    // starting cell. `sheet` is a 0-based index or name (ops/mod.rs resolver).
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move |row: i32, col: i32| -> String {
-            let ctx = sc.borrow();
-            let grid = &ctx.grids[ctx.active_sheet];
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  row: i32,
+                  col: i32,
+                  sheet: rquickjs::function::Opt<Value<'js>>|
+                  -> rquickjs::Result<String> {
+                let ctx_ref = sc.borrow();
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
+                let grid = &ctx_ref.grids[si];
 
-            let row = row.max(0) as u32;
-            let col = col.max(0) as u32;
+                let row = row.max(0) as u32;
+                let col = col.max(0) as u32;
 
-            // Expand outward from (row, col) to find contiguous data region
-            let has_data = |r: u32, c: u32| -> bool {
-                grid.get_cell(r, c)
-                    .map(|cell| !cell_value_to_string(&cell.value).is_empty())
-                    .unwrap_or(false)
-            };
-
-            // Check if any cell in a row within the column range has data
-            let row_has_data = |r: u32, min_c: u32, max_c: u32| -> bool {
-                (min_c..=max_c).any(|c| has_data(r, c))
-            };
-
-            // Check if any cell in a column within the row range has data
-            let col_has_data = |c: u32, min_r: u32, max_r: u32| -> bool {
-                (min_r..=max_r).any(|r| has_data(r, c))
-            };
-
-            let mut min_row = row;
-            let mut max_row = row;
-            let mut min_col = col;
-            let mut max_col = col;
-
-            // Iteratively expand until stable
-            let mut changed = true;
-            while changed {
-                changed = false;
-                // Expand up
-                if min_row > 0 && row_has_data(min_row - 1, min_col, max_col) {
-                    min_row -= 1;
-                    changed = true;
-                }
-                // Expand down
-                if row_has_data(max_row + 1, min_col, max_col) {
-                    max_row += 1;
-                    changed = true;
-                }
-                // Expand left
-                if min_col > 0 && col_has_data(min_col - 1, min_row, max_row) {
-                    min_col -= 1;
-                    changed = true;
-                }
-                // Expand right
-                if col_has_data(max_col + 1, min_row, max_row) {
-                    max_col += 1;
-                    changed = true;
-                }
-            }
-
-            serde_json::json!({
-                "startRow": min_row,
-                "startCol": min_col,
-                "endRow": max_row,
-                "endCol": max_col
-            })
-            .to_string()
-        })
+                let json = match engine::navigation::current_region(grid, row, col) {
+                    Some((start_row, start_col, end_row, end_col)) => serde_json::json!({
+                        "startRow": start_row,
+                        "startCol": start_col,
+                        "endRow": end_row,
+                        "endCol": end_col,
+                        "empty": false
+                    }),
+                    None => serde_json::json!({
+                        "startRow": row,
+                        "startCol": col,
+                        "endRow": row,
+                        "endCol": col,
+                        "empty": true
+                    }),
+                };
+                Ok(json.to_string())
+            },
+        )
         .map_err(|e| format!("Failed to create getCurrentRegion: {}", e))?;
         calcula
             .set("getCurrentRegion", func)
             .map_err(|e| format!("Failed to set getCurrentRegion: {}", e))?;
+    }
+
+    // getRangeEdge(row, col, direction, sheet?) -> JSON { row, col }
+    // Excel Ctrl+Arrow / Range.End edge navigation over the FULL Excel grid
+    // bounds. Same engine::navigation::range_edge as the keyboard handler and
+    // the get_range_edge Tauri command. `direction` is "up" | "down" | "left"
+    // | "right"; anything else THROWS.
+    {
+        let sc = shared_ctx.clone();
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  row: i32,
+                  col: i32,
+                  direction: String,
+                  sheet: rquickjs::function::Opt<Value<'js>>|
+                  -> rquickjs::Result<String> {
+                let ctx_ref = sc.borrow();
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
+                let dir = engine::navigation::EdgeDirection::parse(&direction).ok_or_else(|| {
+                    rquickjs::Exception::throw_message(
+                        &ctx,
+                        &format!(
+                            "Invalid direction \"{}\": expected \"up\", \"down\", \"left\", or \"right\"",
+                            direction
+                        ),
+                    )
+                })?;
+                let grid = &ctx_ref.grids[si];
+                let (target_row, target_col) = engine::navigation::range_edge(
+                    grid,
+                    row.max(0) as u32,
+                    col.max(0) as u32,
+                    dir,
+                    engine::navigation::EXCEL_MAX_ROW_INDEX,
+                    engine::navigation::EXCEL_MAX_COL_INDEX,
+                );
+                Ok(serde_json::json!({ "row": target_row, "col": target_col }).to_string())
+            },
+        )
+        .map_err(|e| format!("Failed to create getRangeEdge: {}", e))?;
+        calcula
+            .set("getRangeEdge", func)
+            .map_err(|e| format!("Failed to set getRangeEdge: {}", e))?;
     }
 
     // getScrollArea() -> string | ""
@@ -599,6 +698,35 @@ pub fn register_extended_ops<'js>(
         calcula
             .set("getDisplayHeadings", func)
             .map_err(|e| format!("Failed to set getDisplayHeadings: {}", e))?;
+    }
+
+    // getDisplayFormulas() -> bool — whether the grid shows formula text
+    // instead of computed values (the app's Ctrl+` formula-view toggle).
+    {
+        let sc = shared_ctx.clone();
+        let func = Function::new(ctx.clone(), move || -> bool {
+            sc.borrow().host.display_formulas
+        })
+        .map_err(|e| format!("Failed to create getDisplayFormulas: {}", e))?;
+        calcula
+            .set("getDisplayFormulas", func)
+            .map_err(|e| format!("Failed to set getDisplayFormulas: {}", e))?;
+    }
+
+    // setDisplayFormulas(value)
+    {
+        let sc = shared_ctx.clone();
+        let func = Function::new(ctx.clone(), move |value: bool| {
+            let mut ctx = sc.borrow_mut();
+            ctx.host.display_formulas = value;
+            ctx.deferred_actions
+                .borrow_mut()
+                .push(DeferredAction::SetDisplayFormulas { value });
+        })
+        .map_err(|e| format!("Failed to create setDisplayFormulas: {}", e))?;
+        calcula
+            .set("setDisplayFormulas", func)
+            .map_err(|e| format!("Failed to set setDisplayFormulas: {}", e))?;
     }
 
     Ok(())

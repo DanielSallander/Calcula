@@ -181,6 +181,10 @@ function activate(context: ExtensionContext): void {
     AppEvents.ROWS_DELETED,
     AppEvents.COLUMNS_DELETED,
     AppEvents.STRUCTURAL_UNDO,
+    // CF definitions changed OUTSIDE this extension's own dialogs (the script
+    // rows api.*ConditionalFormat) — same staleness as a structural shift:
+    // `state.rules` must be re-read, not merely re-evaluated.
+    AppEvents.CONDITIONAL_FORMATS_CHANGED,
   ]) {
     cleanupFns.push(context.events.on(evt, onRulesStale));
   }

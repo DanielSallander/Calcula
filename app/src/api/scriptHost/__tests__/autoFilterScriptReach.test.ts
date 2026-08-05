@@ -105,7 +105,8 @@ describe("G4 broker methods: the 5-file pattern", () => {
       "api.autoFilterApply": [10, 0, 0, 4],
       "api.autoFilterSetColumn": [0, { kind: "nonsense" }],
       "api.autoFilterClear": [-2],
-      "api.moveSheet": ["a", 1],
+      // "a" is now a valid sheet NAME (Wave 1) — an object is still refused.
+      "api.moveSheet": [{ sheet: 0 }, 1],
       "api.copySheet": [0, "Bad/Name"],
       "api.splitPanes": [-1, null],
     };
@@ -136,8 +137,12 @@ describe("G4 broker methods: the 5-file pattern", () => {
     // from the template, so a missing entry here means the template was not
     // updated and no script author can discover the feature.
     expect(typingsSrc).toContain("splitPanes(splitRow: number | null");
-    expect(typingsSrc).toContain("moveSheet(fromIndex: number, toIndex: number)");
-    expect(typingsSrc).toContain("copySheet(sourceIndex: number, newName?: string)");
+    expect(typingsSrc).toContain("moveSheet(fromSheet: SheetRef, toIndex: number)");
+    // Wave 4 grew an optional trailing position — the pin tracks the full
+    // signature so a silent arity change is still caught.
+    expect(typingsSrc).toContain(
+      "copySheet(sourceSheet: SheetRef, newName?: string, position?: ScriptSheetPosition)",
+    );
     expect(typingsSrc).toContain("filter: {");
     for (const member of ["listValues(", "setColumn(", "apply(", "remove()"]) {
       expect(typingsSrc).toContain(member);
@@ -248,9 +253,12 @@ describe("AutoFilter validators", () => {
 });
 
 describe("sheet move/copy and split validators", () => {
-  it("moveSheet takes two non-negative integers", () => {
+  it("moveSheet takes a sheet ref (index or name) and a numeric position", () => {
     expect(vMoveSheet([0, 2])).toBe(true);
-    expect(vMoveSheet([-1, 2])).toMatch(/fromIndex/);
+    // Wave 1: the source may be a sheet NAME (resolved host-side)...
+    expect(vMoveSheet(["Sheet1", 2])).toBe(true);
+    expect(vMoveSheet([-1, 2])).toMatch(/fromSheet/);
+    // ...but the destination is a POSITION, so a string there is still refused.
     expect(vMoveSheet([0, "2"])).toMatch(/toIndex/);
   });
 
@@ -463,9 +471,11 @@ describe("AutoFilter: what the script path must NOT do", () => {
 
 describe("sheet move/copy host guards", () => {
   it("moveSheet refuses an unknown source and an out-of-range destination", () => {
-    // move_sheet clamps out-of-range indexes silently; the executor checks the
-    // live list first so a script is never told a sheet moved where it did not.
-    expect(hostSrc).toContain("No sheet with index ${fromIndex}");
+    // move_sheet clamps out-of-range indexes silently; the executor resolves
+    // the source against the live list first (Wave 1: index or name, via
+    // resolveSheetRefIn) so a script is never told a sheet moved where it did
+    // not — and the unknown-sheet refusal lists the actual sheet names.
+    expect(hostSrc).toMatch(/case "api\.moveSheet"[\s\S]*?resolveSheetRefIn\(before\.sheets, fromRef, "moveSheet"\)/);
     expect(hostSrc).toContain("is past the last position");
   });
 

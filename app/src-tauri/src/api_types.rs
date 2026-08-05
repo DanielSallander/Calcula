@@ -679,6 +679,9 @@ pub struct ClearRangeParams {
     pub end_col: u32,
     #[serde(default)]
     pub apply_to: ClearApplyTo,
+    /// Target sheet (0-based). None = the active sheet (Wave 3 cross-sheet ops).
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
 }
 
 /// Result of clear_range_with_options command.
@@ -803,6 +806,9 @@ pub struct SortRangeParams {
     /// Sort orientation (rows or columns)
     #[serde(default)]
     pub orientation: SortOrientation,
+    /// Target sheet (0-based). None = the active sheet (Wave 3 cross-sheet ops).
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
 }
 
 /// Result of sort_range command.
@@ -2217,6 +2223,32 @@ pub struct UsedRangeResult {
     pub end_row: u32,
     pub end_col: u32,
     pub empty: bool,
+}
+
+/// Target cell of a Ctrl+Arrow / Range.End edge navigation (get_range_edge).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeEdgeResult {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// One cell coordinate in a get_special_cells answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecialCellRef {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// Result of get_special_cells (Excel's Range.SpecialCells / Go To Special).
+/// `cells` is row-major sorted and capped at 100,000 entries; `truncated`
+/// says whether the cap dropped anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecialCellsResult {
+    pub cells: Vec<SpecialCellRef>,
+    pub truncated: bool,
 }
 
 // ============================================================================

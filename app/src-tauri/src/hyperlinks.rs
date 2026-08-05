@@ -240,6 +240,10 @@ impl From<&Hyperlink> for HyperlinkIndicator {
 pub struct AddHyperlinkParams {
     pub row: u32,
     pub col: u32,
+    /// Target sheet (0-based). None = the active sheet. Lets scripts attach
+    /// hyperlinks to a background sheet without activate-mutate-activate-back.
+    #[serde(default)]
+    pub sheet_index: Option<usize>,
     pub link_type: HyperlinkType,
     pub target: String,
     #[serde(default)]
@@ -275,16 +279,43 @@ pub struct UpdateHyperlinkParams {
 // COMMANDS
 // ============================================================================
 
-/// Add a hyperlink to a cell
+/// Resolve an optional 0-based sheet index against the workbook: None = the
+/// active sheet, Some(i) must be in range. Every hyperlink command funnels
+/// through this so an out-of-range index is a NAMED error instead of a silent
+/// write into a sheet slot that does not exist (the storage is a HashMap, so
+/// nothing else would ever complain).
+fn resolve_hyperlink_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
+    let active = *state.active_sheet.lock().unwrap();
+    match sheet_index {
+        None => Ok(active),
+        Some(idx) => {
+            let count = state.sheet_names.lock().unwrap().len();
+            if idx < count {
+                Ok(idx)
+            } else {
+                Err(format!(
+                    "Sheet index {} out of range: workbook has {} sheet(s)",
+                    idx, count
+                ))
+            }
+        }
+    }
+}
+
+/// Add a hyperlink to a cell (on the active sheet, or `params.sheet_index`)
 #[tauri::command]
 pub fn add_hyperlink(
     state: State<AppState>,
     params: AddHyperlinkParams,
 ) -> HyperlinkResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // allowInsertHyperlinks option gate.
+    let target_sheet = match resolve_hyperlink_sheet(&state, params.sheet_index) {
+        Ok(idx) => idx,
+        Err(e) => return HyperlinkResult::err(e),
+    };
+    // allowInsertHyperlinks option gate — checked on the TARGET sheet, not the
+    // active one: protection must answer for the sheet actually being written.
     if let Err(e) = crate::protection::check_sheet_action(
-        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+        &state, target_sheet, "insertHyperlinks", "insert hyperlinks",
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
@@ -293,17 +324,17 @@ pub fn add_hyperlink(
     // Create the hyperlink based on type
     let mut hyperlink = match params.link_type {
         HyperlinkType::Url => {
-            Hyperlink::new_url(params.row, params.col, active_sheet, params.target)
+            Hyperlink::new_url(params.row, params.col, target_sheet, params.target)
         }
         HyperlinkType::File => {
-            Hyperlink::new_file(params.row, params.col, active_sheet, params.target)
+            Hyperlink::new_file(params.row, params.col, target_sheet, params.target)
         }
         HyperlinkType::InternalReference => {
             let cell_ref = params.cell_reference.unwrap_or(params.target);
             Hyperlink::new_internal(
                 params.row,
                 params.col,
-                active_sheet,
+                target_sheet,
                 params.sheet_name,
                 cell_ref,
             )
@@ -318,7 +349,7 @@ pub fn add_hyperlink(
             Hyperlink::new_email(
                 params.row,
                 params.col,
-                active_sheet,
+                target_sheet,
                 email,
                 params.email_subject,
             )
@@ -330,13 +361,15 @@ pub fn add_hyperlink(
     hyperlink.tooltip = params.tooltip;
 
     // Store the hyperlink
-    let sheet_hyperlinks = hyperlinks.entry(active_sheet).or_insert_with(HashMap::new);
+    let sheet_hyperlinks = hyperlinks.entry(target_sheet).or_insert_with(HashMap::new);
     let row = params.row;
     let col = params.col;
-    sheet_hyperlinks.insert((row, col), hyperlink.clone());
+    let previous = sheet_hyperlinks.insert((row, col), hyperlink.clone());
     drop(hyperlinks);
 
-    record_hyperlink_undo(&state, active_sheet, row, col, None, "Add hyperlink");
+    // `previous` matters: overwriting an existing link must restore IT on undo,
+    // not delete the slot.
+    record_hyperlink_undo(&state, target_sheet, row, col, previous, "Add hyperlink");
 
     HyperlinkResult::ok(hyperlink)
 }
@@ -387,23 +420,27 @@ pub fn update_hyperlink(
     HyperlinkResult::ok(result)
 }
 
-/// Remove a hyperlink from a cell
+/// Remove a hyperlink from a cell (on the active sheet, or `sheet_index`)
 #[tauri::command]
 pub fn remove_hyperlink(
     state: State<AppState>,
     row: u32,
     col: u32,
+    sheet_index: Option<usize>,
 ) -> HyperlinkResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    // allowInsertHyperlinks option gate.
+    let target_sheet = match resolve_hyperlink_sheet(&state, sheet_index) {
+        Ok(idx) => idx,
+        Err(e) => return HyperlinkResult::err(e),
+    };
+    // allowInsertHyperlinks option gate, on the TARGET sheet.
     if let Err(e) = crate::protection::check_sheet_action(
-        &state, active_sheet, "insertHyperlinks", "insert hyperlinks",
+        &state, target_sheet, "insertHyperlinks", "insert hyperlinks",
     ) {
         return HyperlinkResult { success: false, hyperlink: None, error: Some(e) };
     }
     let mut hyperlinks = state.hyperlinks.lock().unwrap();
 
-    let sheet_hyperlinks = match hyperlinks.get_mut(&active_sheet) {
+    let sheet_hyperlinks = match hyperlinks.get_mut(&target_sheet) {
         Some(h) => h,
         None => return HyperlinkResult::err("No hyperlinks on this sheet"),
     };
@@ -412,38 +449,39 @@ pub fn remove_hyperlink(
         Some(removed) => {
             let previous = Some(removed.clone());
             drop(hyperlinks);
-            record_hyperlink_undo(&state, active_sheet, row, col, previous, "Remove hyperlink");
+            record_hyperlink_undo(&state, target_sheet, row, col, previous, "Remove hyperlink");
             HyperlinkResult::ok(removed)
         }
         None => HyperlinkResult::err("No hyperlink at this cell"),
     }
 }
 
-/// Get hyperlink at a specific cell
+/// Get hyperlink at a specific cell (on the active sheet, or `sheet_index`)
 #[tauri::command]
 pub fn get_hyperlink(
     state: State<AppState>,
     row: u32,
     col: u32,
+    sheet_index: Option<usize>,
 ) -> Option<Hyperlink> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = resolve_hyperlink_sheet(&state, sheet_index).ok()?;
     let hyperlinks = state.hyperlinks.lock().unwrap();
 
     hyperlinks
-        .get(&active_sheet)
+        .get(&target_sheet)
         .and_then(|sheet_hyperlinks| sheet_hyperlinks.get(&(row, col)).cloned())
 }
 
-/// Get all hyperlinks in the current sheet
+/// Get all hyperlinks on a sheet (the active sheet, or `sheet_index`)
 #[tauri::command]
-pub fn get_all_hyperlinks(state: State<AppState>) -> Vec<Hyperlink> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+pub fn get_all_hyperlinks(state: State<AppState>, sheet_index: Option<usize>) -> Result<Vec<Hyperlink>, String> {
+    let target_sheet = resolve_hyperlink_sheet(&state, sheet_index)?;
     let hyperlinks = state.hyperlinks.lock().unwrap();
 
-    hyperlinks
-        .get(&active_sheet)
+    Ok(hyperlinks
+        .get(&target_sheet)
         .map(|sheet_hyperlinks| sheet_hyperlinks.values().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Get hyperlink indicators for rendering (shows which cells have hyperlinks)

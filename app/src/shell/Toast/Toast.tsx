@@ -33,6 +33,9 @@ function ToastItem({ toast }: { toast: ToastItem }): React.ReactElement {
         border: `1px solid ${style.border}`,
         borderRadius: 6,
         boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
+        // The toast ITSELF is interactive (its OK button) even though the
+        // container around it is click-through — see ToastContainer.
+        pointerEvents: "auto",
         fontSize: 13,
         fontFamily: "system-ui, -apple-system, sans-serif",
         // Text stays literal-dark: the variant backgrounds above are fixed light
@@ -93,7 +96,14 @@ export function ToastContainer(): React.ReactElement | null {
           display: "flex",
           flexDirection: "column",
           gap: 8,
-          pointerEvents: "auto",
+          // CLICK-THROUGH. This div is a LAYOUT BOX, not a surface: with
+          // `auto` it spanned the union of every stacked toast (380px wide,
+          // 200px+ tall with three of them) at z-index 9999 over the grid, so
+          // a click in the 8px gaps — or anywhere the box was wider than the
+          // toast in it — hit this div and was swallowed. The cell under the
+          // pointer never got it. Each toast re-enables pointer events for
+          // itself, so its OK button still works.
+          pointerEvents: "none",
         }}
       >
         {toasts.map((toast) => (

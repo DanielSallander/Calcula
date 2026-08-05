@@ -133,11 +133,35 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
   if (aspect === "chart.updateSpec" || aspect === "chart.replaceSpec") {
     return checkChartSpec(aspectArgs);
   }
+  // Chart geometry (Wave 4): move/resize/rename/re-sheet an existing chart.
+  // The bounds are EXACTLY vCreateChart's placement bounds — moving a chart
+  // must not be a laxer door than creating one there.
+  if (aspect === "chart.setGeometry") {
+    return checkChartGeometryAspect(aspectArgs);
+  }
+  // Table STRUCTURE mutation (Wave 4): the ListObject management family —
+  // rename/resize/columns/totals/style/convert/insert/delete row. Enumerated
+  // shapes, so a typo'd totals function fails with the accepted list instead
+  // of reaching the backend.
+  if (TABLE_STRUCTURE_ASPECTS.has(aspect as string)) {
+    return checkTableStructureAspect(aspect as string, aspectArgs);
+  }
+  // Named-range definition edit (Wave 4): one patch object, gated here so both
+  // setState doors reject an unknown key / illegal name before the tier check.
+  if (aspect === "namedRange.update") {
+    return checkNamedRangeUpdate(aspectArgs);
+  }
   // Pivot layout mutation (B3): the field/area/aggregation vocabulary is the
   // Pivot Layout DSL's, checked here so a typo ("Rows", "avg") fails with the
   // accepted list instead of reaching the backend as a silent no-op.
   if (PIVOT_LAYOUT_ASPECTS.has(aspect as string)) {
     return checkPivotLayoutAspect(aspect as string, aspectArgs);
+  }
+  // Pivot DATA mutation (Wave 3): filters / item visibility / sort / number
+  // format — gated exactly like the layout family above, so both the
+  // own-object door and api.objectSetState land on the same shape check.
+  if (PIVOT_DATA_ASPECTS.has(aspect as string)) {
+    return checkPivotDataAspect(aspect as string, aspectArgs);
   }
   return true;
 };
@@ -147,23 +171,71 @@ export const vDecl: Validator = ([decls]) =>
 export const vHtml: Validator = ([html]) =>
   isBoundedString(html, 5_000_000) ? true : "html must be a string (max 5 MB)";
 
+// ============================================================================
+// Sheet references (Wave 1): index OR name, everywhere a sheet can be named
+// ============================================================================
+// A sheet is addressed the way VBA always allowed: by 0-based index or by NAME.
+// The validator only checks SHAPE (an index-shaped number, or a string that
+// could be a sheet name under the same character rules renameSheet enforces);
+// RESOLUTION — exact name first, then unique case-insensitive, with an error
+// that lists the actual sheets — happens host-side at execution time against
+// live state (host.ts resolveSheetRef). Never worker-side: a name must mean
+// what the workbook means by it at the moment the call lands.
+
+function checkSheetRef(v: unknown, label: string): true | string {
+  if (typeof v === "number") {
+    return isCellCoord(v)
+      ? true
+      : `${label} must be a non-negative 0-based sheet index or a sheet name`;
+  }
+  if (typeof v === "string") {
+    // Same character rules as renameSheet: 1-255 chars, none of : \ / ? * [ ]
+    const named = checkSheetName(v);
+    return named === true ? true : `${label}: ${named}`;
+  }
+  return `${label} must be a 0-based sheet index (number) or a sheet name (string)`;
+}
+
+/** Optional sheet slot: undefined/null = "the active sheet". */
+function checkOptionalSheetRef(v: unknown, label = "sheetIndex"): true | string {
+  if (v === undefined || v === null) return true;
+  return checkSheetRef(v, label);
+}
+
+/** Single required sheet-ref argument (api.setActiveSheet / api.deleteSheet). */
+export const vSheetRef: Validator = ([ref]) => checkSheetRef(ref, "sheet");
+
+// ============================================================================
+// Typed cell writes (Wave 1): string | number | boolean | null per cell
+// ============================================================================
+// A script that writes 42 means the NUMBER 42 — the host converts it through
+// the same invariant input-parse path a paste of a numeric cell takes, so it
+// lands typed rather than as text. `null` CLEARS the cell (the honest spelling
+// of Range.Value = Empty). Strings keep the 1 MB ceiling.
+
+export function checkCellWriteValue(v: unknown, label: string): true | string {
+  if (v === null || typeof v === "boolean") return true;
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? true : `${label} must be a finite number`;
+  }
+  if (typeof v === "string") {
+    return v.length <= MAX_STRING ? true : `${label} is over 1 MB of text`;
+  }
+  return `${label} must be a string, number, boolean or null (null clears the cell)`;
+}
+
 export const vCellRef: Validator = ([row, col, sheetIndex]) => {
   if (!isCellCoord(row)) return "row must be a non-negative integer";
   if (!isCellCoord(col)) return "col must be a non-negative integer";
-  if (sheetIndex !== undefined && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
-  }
-  return true;
+  return checkOptionalSheetRef(sheetIndex);
 };
 
 export const vCellSet: Validator = ([row, col, value, sheetIndex]) => {
   if (!isCellCoord(row)) return "row must be a non-negative integer";
   if (!isCellCoord(col)) return "col must be a non-negative integer";
-  if (!isBoundedString(value)) return "value must be a string (max 1 MB)";
-  if (sheetIndex !== undefined && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
-  }
-  return true;
+  const val = checkCellWriteValue(value, "value");
+  if (val !== true) return val;
+  return checkOptionalSheetRef(sheetIndex);
 };
 
 export const vBatch: Validator = ([updates]) => {
@@ -173,7 +245,8 @@ export const vBatch: Validator = ([updates]) => {
     const { row, col, value } = u as { row?: unknown; col?: unknown; value?: unknown };
     if (!isCellCoord(row)) return "each update.row must be a non-negative integer";
     if (!isCellCoord(col)) return "each update.col must be a non-negative integer";
-    if (!isBoundedString(value)) return "each update.value must be a string (max 1 MB)";
+    const val = checkCellWriteValue(value, "each update.value");
+    if (val !== true) return val;
   }
   return true;
 };
@@ -197,15 +270,13 @@ export const vRangeRef: Validator = ([startRow, startCol, endRow, endCol, sheetI
     ((endRow as number) - (startRow as number) + 1) *
     ((endCol as number) - (startCol as number) + 1);
   if (cells > MAX_RANGE_CELLS) return `range too large: ${cells} cells (max ${MAX_RANGE_CELLS})`;
-  if (sheetIndex !== undefined && sheetIndex !== null && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
-  }
-  return true;
+  return checkOptionalSheetRef(sheetIndex);
 };
 
 /** Bulk range WRITE args: [startRow, startCol, values, sheetIndex?]. `values` is
- *  a rows x cols grid of strings anchored at (startRow, startCol); a hole
- *  (undefined / null entry) leaves that cell untouched. */
+ *  a rows x cols grid of cell values (string | number | boolean | null)
+ *  anchored at (startRow, startCol); a hole (undefined entry) leaves that cell
+ *  untouched, an explicit null CLEARS it. */
 export const vRangeWrite: Validator = ([startRow, startCol, values, sheetIndex]) => {
   if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
   if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
@@ -216,12 +287,137 @@ export const vRangeWrite: Validator = ([startRow, startCol, values, sheetIndex])
     cells += row.length;
     if (cells > MAX_RANGE_CELLS) return `range too large: over ${MAX_RANGE_CELLS} cells`;
     for (const v of row) {
-      if (v === undefined || v === null) continue;
-      if (!isBoundedString(v)) return "each value must be a string (max 1 MB)";
+      if (v === undefined) continue; // hole: leave the cell untouched
+      const val = checkCellWriteValue(v, "each value");
+      if (val !== true) return val;
     }
   }
-  if (sheetIndex !== undefined && sheetIndex !== null && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+// ============================================================================
+// Selection + navigation (Wave 2): api.select / api.scrollTo / api.clearRange
+// ============================================================================
+// The A1-STRING form of api.select is resolved WORKER-SIDE (contextShims) to
+// numeric coordinates before the broker call, so these validators only ever
+// see numbers — plus an optional sheet ref, which resolves host-side at
+// execution time exactly like every other Wave-1 sheet slot.
+
+/** Ceiling for one api.select call's areas (a multi-area selection). Excel's
+ *  own Ctrl+Click selections are human-sized; a script that wants thousands of
+ *  disjoint rectangles selected is not selecting, it is painting. */
+export const MAX_SELECT_AREAS = 128;
+
+/** One rectangular area: { startRow, startCol, endRow, endCol }. */
+function checkSelectArea(v: unknown, label: string): true | string {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `${label} must be an object { startRow, startCol, endRow, endCol }`;
+  }
+  const a = v as Record<string, unknown>;
+  for (const key of ["startRow", "startCol", "endRow", "endCol"]) {
+    if (!isCellCoord(a[key])) return `${label}.${key} must be a non-negative integer`;
+  }
+  return true;
+}
+
+/** api.select args: [startRow, startCol, endRow?, endCol?, options?]. */
+export const vSelect: Validator = ([startRow, startCol, endRow, endCol, options]) => {
+  if (!isCellCoord(startRow)) return "startRow must be a non-negative integer";
+  if (!isCellCoord(startCol)) return "startCol must be a non-negative integer";
+  if (endRow !== undefined && endRow !== null && !isCellCoord(endRow)) {
+    return "endRow must be a non-negative integer";
+  }
+  if (endCol !== undefined && endCol !== null && !isCellCoord(endCol)) {
+    return "endCol must be a non-negative integer";
+  }
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { sheetIndex?, scroll?, ranges? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (key !== "sheetIndex" && key !== "scroll" && key !== "ranges") {
+      return `unknown select option "${key}" (allowed: sheetIndex, scroll, ranges)`;
+    }
+  }
+  if (o.scroll !== undefined && typeof o.scroll !== "boolean") {
+    return "options.scroll must be a boolean";
+  }
+  if (o.ranges !== undefined) {
+    if (!Array.isArray(o.ranges)) return "options.ranges must be an array of areas";
+    if (o.ranges.length > MAX_SELECT_AREAS) {
+      return `too many areas: ${o.ranges.length} (max ${MAX_SELECT_AREAS})`;
+    }
+    for (let i = 0; i < o.ranges.length; i++) {
+      const verdict = checkSelectArea(o.ranges[i], `options.ranges[${i}]`);
+      if (verdict !== true) return verdict;
+    }
+  }
+  return checkOptionalSheetRef(o.sheetIndex, "options.sheetIndex");
+};
+
+/** api.scrollTo args: [row, col, sheet?] — a viewport move, never a write. */
+export const vScrollTo: Validator = ([row, col, sheetIndex]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** The four edge directions api.getRangeEdge understands — the same strings
+ *  Rust's EdgeDirection::parse accepts (core/engine/src/navigation.rs), so a
+ *  typo fails HERE with the accepted list instead of crossing to the backend. */
+export const SCRIPT_EDGE_DIRECTIONS: ReadonlySet<string> = new Set([
+  "up", "down", "left", "right",
+]);
+
+/** api.getRangeEdge args: [row, col, direction, sheet?] — a pure read (where
+ *  WOULD Ctrl+Arrow land), never a navigation. */
+export const vRangeEdge: Validator = ([row, col, direction, sheetIndex]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  if (!SCRIPT_EDGE_DIRECTIONS.has(direction as string)) {
+    return `direction must be one of: ${[...SCRIPT_EDGE_DIRECTIONS].join(", ")}`;
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.getUsedRange args: [sheet?] — just the optional Wave-1 sheet ref. */
+export const vUsedRange: Validator = ([sheetIndex]) =>
+  checkOptionalSheetRef(sheetIndex);
+
+/** api.setTabColor args: [sheet, color] — `color` is a hex color, or null to
+ *  remove the tab colour entirely. */
+export const vTabColor: Validator = ([sheet, color]) => {
+  const ref = checkSheetRef(sheet, "sheet");
+  if (ref !== true) return ref;
+  if (color === null) return true;
+  return isHexColor(color)
+    ? true
+    : 'color must be a hex color like "#RRGGBB" (or null to remove the tab colour)';
+};
+
+/** What api.clearRange may be told to clear. Deliberately NOT the backend's
+ *  whole ClearApplyTo union: "hyperlinks"/"removeHyperlinks"/"resetContents"
+ *  are interactive-menu refinements with no script story yet, and an
+ *  enumerated set here means a typo fails with the accepted list. */
+export const SCRIPT_CLEAR_APPLY_TO: ReadonlySet<string> = new Set([
+  "all", "contents", "formats",
+]);
+
+/** api.clearRange args: [startRow, startCol, endRow, endCol, options?, sheet?]. */
+export const vClearRange: Validator = ([startRow, startCol, endRow, endCol, options, sheetIndex]) => {
+  const range = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  if (range !== true) return range;
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { applyTo? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (key !== "applyTo") return `unknown clear option "${key}" (allowed: applyTo)`;
+  }
+  if (o.applyTo !== undefined && !SCRIPT_CLEAR_APPLY_TO.has(o.applyTo as string)) {
+    return `applyTo must be one of: ${[...SCRIPT_CLEAR_APPLY_TO].join(", ")}`;
   }
   return true;
 };
@@ -235,10 +431,13 @@ export const vRangeWrite: Validator = ([startRow, startCol, values, sheetIndex])
 // no error to search for — and a permissive object is also the classic way a
 // privileged field (locked / formulaHidden) sneaks into a formatting call.
 //
-// PROTECTION ATTRIBUTES ARE DELIBERATELY ABSENT. The backend FormattingParams
-// also carries `locked` / `formulaHidden` (and the checkbox/button cell-control
-// flags). Those are protection + cell-behavior surfaces with their own
-// governance; formatting is not the door to them.
+// PROTECTION ATTRIBUTES ARE TIER-GATED, NOT ABSENT (Wave 3, item 8). The
+// backend FormattingParams also carries `locked` / `formulaHidden` (and the
+// checkbox/button cell-control flags). The cell-control flags stay out
+// entirely; `locked`/`formulaHidden` are accepted ONLY by the UNLOCKED
+// api.setRangeFormat row (vRangeFormatUnlocked below) — a DISTRIBUTED script
+// is forced to the restricted tier at pull, so packaged code can never unlock
+// cells out from under the sheet protection that guards them.
 
 /** Excel's underline styles (mirrors core UnderlineStyle). */
 const UNDERLINE_STYLES = new Set([
@@ -256,6 +455,21 @@ const BORDER_KEYS = [
 ] as const;
 
 /**
+ * RANGE-EDGE border keys (Wave 3, item 2). The six per-side keys above apply
+ * their border to EVERY cell of the rectangle — outlining a table with
+ * borderTop draws interior lines. These three describe the RECTANGLE instead:
+ * the host decomposes them into the per-cell truth (outline = only the edge
+ * cells get the respective side; insideHorizontal/insideVertical = only the
+ * interior edges, on both adjoining cells, exactly as Excel stores them).
+ * They are WRITE-ONLY vocabulary: a format read-back reports the decomposed
+ * per-cell sides, never these keys.
+ */
+const RANGE_BORDER_KEYS = [
+  "borderOutline", "borderInsideHorizontal", "borderInsideVertical",
+] as const;
+export const SCRIPT_RANGE_BORDER_KEYS: ReadonlySet<string> = new Set(RANGE_BORDER_KEYS);
+
+/**
  * Every key `setRangeFormat` accepts, with its shape. Exported so the tests and
  * the scaffold/docs surface enumerate the SAME set the broker enforces.
  */
@@ -264,12 +478,55 @@ export const SCRIPT_FORMAT_KEYS: ReadonlySet<string> = new Set([
   "fontSize", "fontFamily", "textColor", "backgroundColor",
   "textAlign", "verticalAlign", "numberFormat",
   "wrapText", "textRotation", "indent", "shrinkToFit",
+  "fill",
   ...BORDER_KEYS,
+  ...RANGE_BORDER_KEYS,
 ]);
 
 /** `#RRGGBB` or `#RRGGBBAA` (the `#` is optional — Rust's Color::from_hex trims it). */
 function isHexColor(v: unknown): boolean {
   return typeof v === "string" && /^#?[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(v);
+}
+
+// ============================================================================
+// Theme colors (Wave 4, formatting breadth)
+// ============================================================================
+// Wherever a format key takes a color, it takes a HEX STRING or a THEME
+// REFERENCE `{ theme, tint? }`. The slot names are the engine's 12 OOXML slots
+// (theme.rs ThemeColorSlot::from_key, key for key); `tint` is a FRACTION in
+// -1..1 (positive = lighter, negative = darker — the host converts to the
+// backend's permille form). textColor/backgroundColor theme refs ride the
+// FormattingParams *_theme/*_tint fields and READ BACK as the theme object;
+// border-side theme refs are resolved to their current hex at write time (the
+// border pipeline stores absolute colors only) and read back as that hex.
+
+/** The 12 theme color slots (mirrors engine ThemeColorSlot keys). */
+export const SCRIPT_THEME_SLOTS: ReadonlySet<string> = new Set([
+  "dark1", "light1", "dark2", "light2",
+  "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+  "hyperlink", "followedHyperlink",
+]);
+
+/** One color value: hex string OR `{ theme, tint? }`. Exported for tests. */
+export function checkColorValue(key: string, v: unknown): true | string {
+  if (isHexColor(v)) return true;
+  if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+    const c = v as Record<string, unknown>;
+    for (const k of Object.keys(c)) {
+      if (c[k] === undefined) continue;
+      if (k !== "theme" && k !== "tint") {
+        return `${key}.${k} is not a theme-color property (use theme, tint)`;
+      }
+    }
+    if (!SCRIPT_THEME_SLOTS.has(c.theme as string)) {
+      return `${key}.theme must be one of: ${[...SCRIPT_THEME_SLOTS].join(", ")}`;
+    }
+    if (c.tint !== undefined && (!isFiniteNumber(c.tint) || c.tint < -1 || c.tint > 1)) {
+      return `${key}.tint must be a number between -1 (darkest) and 1 (lightest)`;
+    }
+    return true;
+  }
+  return `${key} must be a hex color like "#RRGGBB" or a theme reference { theme, tint? }`;
 }
 
 function checkBorderSide(key: string, v: unknown): true | string {
@@ -283,16 +540,95 @@ function checkBorderSide(key: string, v: unknown): true | string {
   if (!BORDER_STYLES.has(side.style as string)) {
     return `${key}.style must be one of: ${[...BORDER_STYLES].join(", ")}`;
   }
-  if (!isHexColor(side.color)) return `${key}.color must be a hex color like "#000000"`;
-  return true;
+  return checkColorValue(`${key}.color`, side.color);
+}
+
+// ============================================================================
+// Pattern / gradient fills (Wave 4, formatting breadth)
+// ============================================================================
+// The `fill` format key mirrors the engine's Fill enum (style.rs) through the
+// FillParam the backend already parses (styles.rs parse_fill_param /
+// parse_pattern_type / parse_gradient_direction) — enumerated HERE so a typo'd
+// pattern name fails with the accepted list instead of silently becoming
+// PatternType::None. `{ type: "none" }` removes the fill (back to the default
+// background); `backgroundColor` remains the shorthand for a solid fill.
+
+/** Excel's pattern vocabulary (mirrors parse_pattern_type, word for word). */
+export const SCRIPT_FILL_PATTERN_TYPES: ReadonlySet<string> = new Set([
+  "solid", "darkGray", "mediumGray", "lightGray", "gray125", "gray0625",
+  "darkHorizontal", "darkVertical", "darkDown", "darkUp", "darkGrid", "darkTrellis",
+  "lightHorizontal", "lightVertical", "lightDown", "lightUp", "lightGrid", "lightTrellis",
+]);
+
+/** Gradient directions (mirrors parse_gradient_direction, word for word). */
+export const SCRIPT_GRADIENT_DIRECTIONS: ReadonlySet<string> = new Set([
+  "horizontal", "vertical", "diagonalDown", "diagonalUp", "fromCenter",
+]);
+
+/** Keys legal per fill type ("type" itself included). */
+const FILL_TYPE_KEYS: Record<string, string[]> = {
+  none: ["type"],
+  solid: ["type", "color"],
+  pattern: ["type", "patternType", "fgColor", "bgColor"],
+  gradient: ["type", "color1", "color2", "direction"],
+};
+
+/** One fill spec. Exported for tests and the setState aspect gate. */
+export function checkFillParam(v: unknown): true | string {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return 'fill must be an object { type: "none" | "solid" | "pattern" | "gradient", ... }';
+  }
+  const f = v as Record<string, unknown>;
+  const type = f.type;
+  if (typeof type !== "string" || !(type in FILL_TYPE_KEYS)) {
+    return `fill.type must be one of: ${Object.keys(FILL_TYPE_KEYS).join(", ")}`;
+  }
+  const allowed = FILL_TYPE_KEYS[type];
+  for (const key of Object.keys(f)) {
+    if (f[key] === undefined) continue;
+    if (!allowed.includes(key)) {
+      return `unknown fill key "${key}" for type "${type}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  switch (type) {
+    case "none":
+      return true;
+    case "solid":
+      return checkColorValue("fill.color", f.color);
+    case "pattern": {
+      if (!SCRIPT_FILL_PATTERN_TYPES.has(f.patternType as string)) {
+        return `fill.patternType must be one of: ${[...SCRIPT_FILL_PATTERN_TYPES].join(", ")}`;
+      }
+      const fg = checkColorValue("fill.fgColor", f.fgColor);
+      if (fg !== true) return fg;
+      return checkColorValue("fill.bgColor", f.bgColor);
+    }
+    default: {
+      // gradient
+      if (!SCRIPT_GRADIENT_DIRECTIONS.has(f.direction as string)) {
+        return `fill.direction must be one of: ${[...SCRIPT_GRADIENT_DIRECTIONS].join(", ")}`;
+      }
+      const c1 = checkColorValue("fill.color1", f.color1);
+      if (c1 !== true) return c1;
+      return checkColorValue("fill.color2", f.color2);
+    }
+  }
 }
 
 /**
  * Validate a partial format object. Only the properties present are changed —
  * an absent key leaves that attribute alone, so a script can bold a range
  * without resetting its font or number format.
+ *
+ * `allowProtection` admits the `locked` / `formulaHidden` booleans — passed
+ * ONLY by vRangeFormatUnlocked (the api.setRangeFormat row); every other
+ * caller keeps the refusal, with a message that says WHY rather than
+ * pretending the key is unknown.
  */
-export function checkFormatObject(format: unknown): true | string {
+export function checkFormatObject(
+  format: unknown,
+  opts?: { allowProtection?: boolean },
+): true | string {
   if (typeof format !== "object" || format === null || Array.isArray(format)) {
     return "format must be an object";
   }
@@ -303,6 +639,17 @@ export function checkFormatObject(format: unknown): true | string {
   }
   for (const key of keys) {
     const value = f[key];
+    if (key === "locked" || key === "formulaHidden") {
+      if (!opts?.allowProtection) {
+        return (
+          `"${key}" is a sheet-protection attribute, not formatting — ` +
+          "only the unlocked api.setRangeFormat may change it"
+        );
+      }
+      if (value === undefined) continue; // explicit undefined = "leave alone"
+      if (typeof value !== "boolean") return `${key} must be a boolean`;
+      continue;
+    }
     if (!SCRIPT_FORMAT_KEYS.has(key)) {
       return `unknown format property "${key}" (allowed: ${[...SCRIPT_FORMAT_KEYS].join(", ")})`;
     }
@@ -355,9 +702,16 @@ export function checkFormatObject(format: unknown): true | string {
         if (!isBoundedString(value, 512)) return "numberFormat must be a string (max 512 chars)";
         break;
       case "textColor":
-      case "backgroundColor":
-        if (!isHexColor(value)) return `${key} must be a hex color like "#RRGGBB"`;
+      case "backgroundColor": {
+        const verdict = checkColorValue(key, value);
+        if (verdict !== true) return verdict;
         break;
+      }
+      case "fill": {
+        const verdict = checkFillParam(value);
+        if (verdict !== true) return verdict;
+        break;
+      }
       default: {
         // The only keys left are the six border sides.
         const verdict = checkBorderSide(key, value);
@@ -374,6 +728,177 @@ export const vRangeFormat: Validator = ([startRow, startCol, endRow, endCol, for
   if (rect !== true) return rect;
   return checkFormatObject(format);
 };
+
+/**
+ * api.setRangeFormat args (the UNLOCKED row only): same shape as vRangeFormat,
+ * but the protection attributes `locked` / `formulaHidden` are accepted. The
+ * restricted-tier rows keep vRangeFormat — a distributed script must not be
+ * able to unlock cells (see the tier note at the top of this section).
+ */
+export const vRangeFormatUnlocked: Validator = ([startRow, startCol, endRow, endCol, format, sheetIndex]) => {
+  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  if (rect !== true) return rect;
+  return checkFormatObject(format, { allowProtection: true });
+};
+
+// ============================================================================
+// Named cell styles (Wave 4, formatting breadth)
+// ============================================================================
+// VBA's Styles collection / Range.Style, over the SAME named_styles commands
+// the Cell Styles gallery uses. A style NAME is just a display string (the
+// backend map is name-keyed); the length cap mirrors sheet names.
+
+const MAX_NAMED_STYLE_NAME = 255;
+
+function checkNamedStyleName(name: unknown): true | string {
+  if (!isBoundedString(name, MAX_NAMED_STYLE_NAME) || name.trim().length === 0) {
+    return `style name must be a non-empty string (max ${MAX_NAMED_STYLE_NAME} chars)`;
+  }
+  return true;
+}
+
+/** api.deleteNamedStyle args: [name]. */
+export const vNamedStyleName: Validator = ([name]) => checkNamedStyleName(name);
+
+/** api.applyNamedStyle args: [name, startRow, startCol, endRow, endCol, sheet?]. */
+export const vNamedStyleApply: Validator = ([name, startRow, startCol, endRow, endCol, sheetIndex]) => {
+  const named = checkNamedStyleName(name);
+  if (named !== true) return named;
+  return vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+};
+
+/**
+ * api.createNamedStyle args: [name, format]. The format is the SAME enumerated
+ * gate setRangeFormat uses, minus what makes no sense in a per-cell style: the
+ * three RANGE-EDGE border keys (a named style has no rectangle to decompose
+ * against) and the protection attributes (a distributed script must not mint
+ * an unlocking style; use the unlocked api.setRangeFormat on the cells).
+ */
+export const vNamedStyleCreate: Validator = ([name, format]) => {
+  const named = checkNamedStyleName(name);
+  if (named !== true) return named;
+  if (typeof format === "object" && format !== null && !Array.isArray(format)) {
+    for (const key of Object.keys(format as Record<string, unknown>)) {
+      if (SCRIPT_RANGE_BORDER_KEYS.has(key)) {
+        return (
+          `"${key}" describes a rectangle, but a named style is PER-CELL — ` +
+          "use borderTop / borderRight / borderBottom / borderLeft instead"
+        );
+      }
+    }
+  }
+  return checkFormatObject(format);
+};
+
+// ============================================================================
+// Format READ-BACK + calculation control + sheet protection (Wave 3)
+// ============================================================================
+// The read rows (api.getRangeFormat / api.getCellFormat and their sheet.*
+// twins) reuse vRangeRef / vCellRef — a format read is addressed exactly like
+// a value read. Below are the validators the new WRITE/CONTROL rows need.
+
+/** The two calculation modes the backend stores (calculation.rs). The Rust
+ *  setter is STRICT since the Wave-3 hardening: anything else — including the
+ *  formerly-coerced "auto" — rejects with the accepted pair, so this gate and
+ *  the backend agree spelling for spelling and getCalculationMode() === the
+ *  value you set. */
+export const SCRIPT_CALCULATION_MODES: ReadonlySet<string> = new Set([
+  "automatic", "manual",
+]);
+
+/** api.setCalculationMode args: [mode]. */
+export const vCalculationMode: Validator = ([mode]) => {
+  if (!SCRIPT_CALCULATION_MODES.has(mode as string)) {
+    return `mode must be one of: ${[...SCRIPT_CALCULATION_MODES].join(", ")}`;
+  }
+  return true;
+};
+
+/** api.recalculate args: [options?] — { full?: boolean }. Default (and
+ *  full: false) recalculates the active sheet; full: true the whole workbook. */
+export const vRecalculate: Validator = ([options]) => {
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { full? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (key !== "full") return `unknown recalculate option "${key}" (allowed: full)`;
+  }
+  if (o.full !== undefined && typeof o.full !== "boolean") {
+    return "options.full must be a boolean";
+  }
+  return true;
+};
+
+/** The boolean permission flags of SheetProtectionOptions (mirrors the Rust
+ *  struct in protection.rs / the backend.ts interface, key for key). */
+export const SHEET_PROTECTION_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "allowSelectLockedCells", "allowSelectUnlockedCells",
+  "allowFormatCells", "allowFormatColumns", "allowFormatRows",
+  "allowInsertColumns", "allowInsertRows", "allowInsertHyperlinks",
+  "allowDeleteColumns", "allowDeleteRows",
+  "allowSort", "allowAutoFilter", "allowPivotTables",
+  "allowEditObjects", "allowEditScenarios",
+]);
+
+const MAX_PROTECTION_PASSWORD = 255;
+
+/**
+ * api.protectSheet args: [options?, sheet?]. `options` is the full
+ * SheetProtectionOptions flag set (all optional; omitted flags take the same
+ * defaults the Protect Sheet dialog uses) plus `password`.
+ *
+ * `scriptsCanEdit` (VBA's UserInterfaceOnly) is recognized and REFUSED with
+ * the reason: the backend write gates check sheet protection for script
+ * writes exactly as for keystrokes, and plumbing a scripts-exempt flag
+ * through every write path is a Rust-side change this wave did not make.
+ * Refusing loudly beats accepting a flag that silently does nothing.
+ */
+export const vProtectSheet: Validator = ([options, sheetIndex]) => {
+  if (options !== undefined && options !== null) {
+    if (typeof options !== "object" || Array.isArray(options)) {
+      return "options must be an object (protection flags + password?)";
+    }
+    const o = options as Record<string, unknown>;
+    for (const key of Object.keys(o)) {
+      const value = o[key];
+      if (value === undefined) continue;
+      if (key === "password") {
+        if (!isBoundedString(value, MAX_PROTECTION_PASSWORD)) {
+          return `password must be a string (max ${MAX_PROTECTION_PASSWORD} chars)`;
+        }
+        continue;
+      }
+      if (key === "scriptsCanEdit") {
+        return (
+          "scriptsCanEdit (UserInterfaceOnly) is not supported yet: sheet " +
+          "protection currently binds scripts exactly as it binds the user, " +
+          "so protecting a sheet also blocks this script's own writes to its " +
+          "locked cells"
+        );
+      }
+      if (!SHEET_PROTECTION_OPTION_KEYS.has(key)) {
+        return `unknown protection option "${key}" (allowed: password, ${[...SHEET_PROTECTION_OPTION_KEYS].join(", ")})`;
+      }
+      if (typeof value !== "boolean") return `${key} must be a boolean`;
+    }
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.unprotectSheet args: [password?, sheet?]. A wrong password answers
+ *  false host-side — it is never a validation error. */
+export const vUnprotectSheet: Validator = ([password, sheetIndex]) => {
+  if (password !== undefined && password !== null && !isBoundedString(password, MAX_PROTECTION_PASSWORD)) {
+    return `password must be a string (max ${MAX_PROTECTION_PASSWORD} chars)`;
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.getProtectionStatus args: [sheet?] — just the optional sheet ref. */
+export const vProtectionStatus: Validator = ([sheetIndex]) =>
+  checkOptionalSheetRef(sheetIndex);
 
 // ============================================================================
 // Structural operations (B2)
@@ -392,10 +917,7 @@ export const vRowColOp: Validator = ([start, count, sheetIndex]) => {
   if (count > MAX_STRUCTURAL_COUNT) {
     return `count too large: ${count} (max ${MAX_STRUCTURAL_COUNT})`;
   }
-  if (sheetIndex !== undefined && sheetIndex !== null && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
-  }
-  return true;
+  return checkOptionalSheetRef(sheetIndex);
 };
 
 /** setRowHeight / setColumnWidth args: [index, size, sheetIndex?]. `size` is in
@@ -405,8 +927,69 @@ export const vDimension: Validator = ([index, size, sheetIndex]) => {
   if (!isFiniteNumber(size) || size < 0 || size > 4096) {
     return "size must be a number between 0 and 4096 pixels (0 restores the default)";
   }
-  if (sheetIndex !== undefined && sheetIndex !== null && !isCellCoord(sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** The most columns (or rows) one auto-fit call may measure. Measurement is
+ *  canvas text metrics per non-empty cell, so it is priced like a big read,
+ *  not like a resize. */
+export const MAX_AUTOFIT_SPAN = 10_000;
+
+/** autoFitColumns / autoFitRows args: [start, end, sheetIndex?] — an INCLUSIVE
+ *  index span, mirroring the double-click best-fit's multi-select behavior. */
+export const vAutoFitSpan: Validator = ([start, end, sheetIndex]) => {
+  if (!isCellCoord(start)) return "start must be a non-negative integer";
+  if (!isCellCoord(end)) return "end must be a non-negative integer";
+  if ((end as number) < (start as number)) return "end must be >= start";
+  const span = (end as number) - (start as number) + 1;
+  if (span > MAX_AUTOFIT_SPAN) {
+    return `span too large: ${span} (max ${MAX_AUTOFIT_SPAN})`;
+  }
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** What api.fillRange accepts for options.direction / options.type. */
+const FILL_DIRECTIONS = new Set(["down", "up", "right", "left"]);
+const FILL_TYPES = new Set(["copy", "series"]);
+
+/** fillRange args: [startRow, startCol, endRow, endCol, options?, sheetIndex?].
+ *  The rectangle is SOURCE + TARGET together (Excel's FillDown shape): the
+ *  band of `sourceSize` rows/columns at the edge filling starts from seeds the
+ *  rest. `sourceSize` past the range's extent along the fill axis is refused
+ *  (there would be nothing left to fill and no honest way to guess a band). */
+export const vFillRange: Validator = ([startRow, startCol, endRow, endCol, options, sheetIndex]) => {
+  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  if (rect !== true) return rect;
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { direction?, type?, sourceSize? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (!["direction", "type", "sourceSize"].includes(key)) {
+      return `unknown fill option "${key}" (allowed: direction, type, sourceSize)`;
+    }
+  }
+  const direction = o.direction === undefined ? "down" : o.direction;
+  if (!FILL_DIRECTIONS.has(direction as string)) {
+    return `direction must be one of: ${[...FILL_DIRECTIONS].join(", ")}`;
+  }
+  if (o.type !== undefined && !FILL_TYPES.has(o.type as string)) {
+    return `type must be one of: ${[...FILL_TYPES].join(", ")}`;
+  }
+  if (o.sourceSize !== undefined) {
+    if (!isFiniteNumber(o.sourceSize) || !Number.isInteger(o.sourceSize) || o.sourceSize < 1) {
+      return "sourceSize must be an integer >= 1";
+    }
+    const axisSpan =
+      direction === "down" || direction === "up"
+        ? (endRow as number) - (startRow as number) + 1
+        : (endCol as number) - (startCol as number) + 1;
+    if (o.sourceSize > axisSpan) {
+      return `sourceSize (${o.sourceSize}) exceeds the range's ${
+        direction === "down" || direction === "up" ? "row" : "column"
+      } count (${axisSpan})`;
+    }
   }
   return true;
 };
@@ -418,6 +1001,267 @@ export const vFreeze: Validator = ([freezeRow, freezeCol]) => {
     if (!isCellCoord(v)) return `${name} must be a non-negative integer or null`;
   }
   return true;
+};
+
+// ============================================================================
+// Data validation (Wave 3, item 5)
+// ============================================================================
+// The script-facing rule is FLAT (type + operator + formulas + messages +
+// dropdown flag); the host maps it onto the backend's nested DataValidation
+// union. The type strings mirror the serde tags in data_validation.rs /
+// core/types DataValidationRule EXACTLY (minus "none": clearing is
+// clearDataValidation, never a rule). Per-type key enumeration, so an unknown
+// or out-of-place key fails HERE with the accepted list.
+
+/** The rule types a script may set — the serde union tags, minus "none". */
+export const SCRIPT_VALIDATION_TYPES: ReadonlySet<string> = new Set([
+  "wholeNumber", "decimal", "list", "date", "time", "textLength", "custom",
+]);
+
+/** Comparison operators (mirrors DataValidationOperator, key for key). */
+export const SCRIPT_VALIDATION_OPERATORS: ReadonlySet<string> = new Set([
+  "between", "notBetween", "equal", "notEqual",
+  "greaterThan", "lessThan", "greaterThanOrEqual", "lessThanOrEqual",
+]);
+
+/** Error-alert styles (mirrors DataValidationAlertStyle). */
+export const SCRIPT_VALIDATION_ALERT_STYLES: ReadonlySet<string> = new Set([
+  "stop", "warning", "information",
+]);
+
+/** Most literal entries one list rule may carry. */
+export const MAX_VALIDATION_LIST_VALUES = 1024;
+const MAX_VALIDATION_TEXT = 2048;
+const MAX_VALIDATION_FORMULA = 8192;
+
+/** Keys legal for EVERY rule type (the message/behavior envelope). */
+const VALIDATION_COMMON_KEYS = [
+  "type", "ignoreBlanks",
+  "inputTitle", "inputMessage", "showInput",
+  "errorTitle", "errorMessage", "errorStyle", "showError",
+];
+
+/** Extra keys per rule type. */
+const VALIDATION_TYPE_KEYS: Record<string, string[]> = {
+  wholeNumber: ["operator", "formula1", "formula2"],
+  decimal: ["operator", "formula1", "formula2"],
+  date: ["operator", "formula1", "formula2"],
+  time: ["operator", "formula1", "formula2"],
+  textLength: ["operator", "formula1", "formula2"],
+  custom: ["formula"],
+  list: ["values", "sourceRange", "inCellDropdown"],
+};
+
+/**
+ * One flat validation rule. Exported so the aspect/tests can gate the same
+ * shape; returns `true` or the reason.
+ */
+export function checkValidationRule(rule: unknown): true | string {
+  if (typeof rule !== "object" || rule === null || Array.isArray(rule)) {
+    return "rule must be an object { type, ... }";
+  }
+  const r = rule as Record<string, unknown>;
+  const type = r.type;
+  if (!isBoundedString(type, 64) || !SCRIPT_VALIDATION_TYPES.has(type)) {
+    return `rule.type must be one of: ${[...SCRIPT_VALIDATION_TYPES].join(", ")}`;
+  }
+  const allowed = [...VALIDATION_COMMON_KEYS, ...VALIDATION_TYPE_KEYS[type]];
+  for (const key of Object.keys(r)) {
+    if (r[key] === undefined) continue;
+    if (!allowed.includes(key)) {
+      return `unknown rule key "${key}" for type "${type}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  // The envelope, one gate for every type.
+  if (r.ignoreBlanks !== undefined && typeof r.ignoreBlanks !== "boolean") {
+    return "rule.ignoreBlanks must be a boolean";
+  }
+  for (const key of ["inputTitle", "inputMessage", "errorTitle", "errorMessage"]) {
+    if (r[key] !== undefined && !isBoundedString(r[key], MAX_VALIDATION_TEXT)) {
+      return `rule.${key} must be a string (max ${MAX_VALIDATION_TEXT} chars)`;
+    }
+  }
+  for (const key of ["showInput", "showError"]) {
+    if (r[key] !== undefined && typeof r[key] !== "boolean") {
+      return `rule.${key} must be a boolean`;
+    }
+  }
+  if (r.errorStyle !== undefined && !SCRIPT_VALIDATION_ALERT_STYLES.has(r.errorStyle as string)) {
+    return `rule.errorStyle must be one of: ${[...SCRIPT_VALIDATION_ALERT_STYLES].join(", ")}`;
+  }
+  // The per-type payload.
+  if (VALIDATION_TYPE_KEYS[type][0] === "operator") {
+    // The five compare kinds: operator + formula1 (+ formula2 for the
+    // two-bound operators).
+    if (!SCRIPT_VALIDATION_OPERATORS.has(r.operator as string)) {
+      return `rule.operator must be one of: ${[...SCRIPT_VALIDATION_OPERATORS].join(", ")}`;
+    }
+    if (!isFiniteNumber(r.formula1)) {
+      return "rule.formula1 must be a number (dates and times use their serial-number form)";
+    }
+    const twoBound = r.operator === "between" || r.operator === "notBetween";
+    if (twoBound && !isFiniteNumber(r.formula2)) {
+      return `rule.formula2 is required for the "${r.operator}" operator`;
+    }
+    if (!twoBound && r.formula2 !== undefined) {
+      return `rule.formula2 is only used with "between" / "notBetween"`;
+    }
+  } else if (type === "custom") {
+    if (!isBoundedString(r.formula, MAX_VALIDATION_FORMULA) || r.formula.trim().length === 0) {
+      return `rule.formula must be a non-empty formula string (max ${MAX_VALIDATION_FORMULA} chars)`;
+    }
+  } else {
+    // list: exactly ONE source — literal values or a sheet range.
+    const hasValues = r.values !== undefined;
+    const hasRange = r.sourceRange !== undefined;
+    if (hasValues === hasRange) {
+      return "a list rule needs exactly one source: values (an array) OR sourceRange (a rectangle)";
+    }
+    if (hasValues) {
+      if (!Array.isArray(r.values) || r.values.length === 0) {
+        return "rule.values must be a non-empty array of strings";
+      }
+      if (r.values.length > MAX_VALIDATION_LIST_VALUES) {
+        return `too many list values: ${r.values.length} (max ${MAX_VALIDATION_LIST_VALUES})`;
+      }
+      for (const v of r.values) {
+        if (!isBoundedString(v, MAX_VALIDATION_TEXT)) {
+          return `each list value must be a string (max ${MAX_VALIDATION_TEXT} chars)`;
+        }
+      }
+    } else {
+      const box = checkValidationBox(r.sourceRange, "rule.sourceRange");
+      if (box !== true) return box;
+      const sr = (r.sourceRange as Record<string, unknown>).sheetIndex;
+      if (sr !== undefined && sr !== null && !isCellCoord(sr)) {
+        return "rule.sourceRange.sheetIndex must be a non-negative 0-based sheet index";
+      }
+    }
+    if (r.inCellDropdown !== undefined && typeof r.inCellDropdown !== "boolean") {
+      return "rule.inCellDropdown must be a boolean";
+    }
+  }
+  return true;
+}
+
+/** A plain rectangle object ({ startRow, startCol, endRow, endCol }). */
+function checkValidationBox(v: unknown, label: string): true | string {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `${label} must be an object { startRow, startCol, endRow, endCol }`;
+  }
+  const box = v as Record<string, unknown>;
+  for (const key of ["startRow", "startCol", "endRow", "endCol"]) {
+    if (!isCellCoord(box[key])) return `${label}.${key} must be a non-negative integer`;
+  }
+  if ((box.endRow as number) < (box.startRow as number)) return `${label}.endRow must be >= startRow`;
+  if ((box.endCol as number) < (box.startCol as number)) return `${label}.endCol must be >= startCol`;
+  return true;
+}
+
+/** api.setDataValidation args: [startRow, startCol, endRow, endCol, rule,
+ *  sheet?]. NO cell-count ceiling on purpose: a validation range is ONE stored
+ *  rule, not per-cell work, and whole-column validation is the normal case. */
+export const vDataValidationSet: Validator = ([startRow, startCol, endRow, endCol, rule, sheetIndex]) => {
+  const box = checkValidationBox({ startRow, startCol, endRow, endCol }, "range");
+  if (box !== true) return box;
+  const verdict = checkValidationRule(rule);
+  if (verdict !== true) return verdict;
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.clearDataValidation args: [range, sheet?] — `range` is a rectangle. */
+export const vDataValidationClear: Validator = ([range, sheetIndex]) => {
+  const box = checkValidationBox(range, "range");
+  if (box !== true) return box;
+  return checkOptionalSheetRef(sheetIndex);
+};
+
+/** api.listDataValidations / api.listHyperlinks args: [sheet?]. */
+export const vSheetScopedList: Validator = ([sheetIndex]) =>
+  checkOptionalSheetRef(sheetIndex);
+
+// ============================================================================
+// Hyperlinks (Wave 3, item 6)
+// ============================================================================
+// api.addHyperlink args: [row, col, link, options?, sheet?]. `link` is a typed
+// union on `type` (the serde HyperlinkType tags); per-type key enumeration so
+// an out-of-place key fails with the accepted list. There is deliberately NO
+// "follow" method anywhere: navigation to internal targets is api.select /
+// scrollTo; opening external targets from a script is not a grid op.
+
+/** The link types (mirrors HyperlinkType, tag for tag). */
+export const SCRIPT_HYPERLINK_TYPES: ReadonlySet<string> = new Set([
+  "url", "email", "internalReference", "file",
+]);
+
+const MAX_HYPERLINK_TARGET = 2048;
+const MAX_HYPERLINK_TEXT = 1024;
+
+const HYPERLINK_TYPE_KEYS: Record<string, string[]> = {
+  url: ["type", "target"],
+  file: ["type", "target"],
+  email: ["type", "target", "subject"],
+  internalReference: ["type", "cellReference", "sheetName"],
+};
+
+/** One link spec. Exported for tests. */
+export function checkHyperlinkSpec(link: unknown): true | string {
+  if (typeof link !== "object" || link === null || Array.isArray(link)) {
+    return "link must be an object { type, ... }";
+  }
+  const l = link as Record<string, unknown>;
+  const type = l.type;
+  if (!isBoundedString(type, 64) || !SCRIPT_HYPERLINK_TYPES.has(type)) {
+    return `link.type must be one of: ${[...SCRIPT_HYPERLINK_TYPES].join(", ")}`;
+  }
+  const allowed = HYPERLINK_TYPE_KEYS[type];
+  for (const key of Object.keys(l)) {
+    if (l[key] === undefined) continue;
+    if (!allowed.includes(key)) {
+      return `unknown link key "${key}" for type "${type}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  if (type === "internalReference") {
+    if (!isBoundedString(l.cellReference, 64) || l.cellReference.trim().length === 0) {
+      return 'link.cellReference must be an A1 cell reference like "B4"';
+    }
+    if (l.sheetName !== undefined && l.sheetName !== null) {
+      const named = checkSheetName(l.sheetName);
+      if (named !== true) return `link.sheetName: ${named}`;
+    }
+  } else {
+    if (!isBoundedString(l.target, MAX_HYPERLINK_TARGET) || l.target.trim().length === 0) {
+      return `link.target must be a non-empty string (max ${MAX_HYPERLINK_TARGET} chars)`;
+    }
+    if (type === "email" && l.subject !== undefined && !isBoundedString(l.subject, MAX_HYPERLINK_TEXT)) {
+      return `link.subject must be a string (max ${MAX_HYPERLINK_TEXT} chars)`;
+    }
+  }
+  return true;
+}
+
+/** api.addHyperlink args: [row, col, link, options?, sheet?]. */
+export const vAddHyperlink: Validator = ([row, col, link, options, sheetIndex]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  const spec = checkHyperlinkSpec(link);
+  if (spec !== true) return spec;
+  if (options !== undefined && options !== null) {
+    if (typeof options !== "object" || Array.isArray(options)) {
+      return "options must be an object { displayText?, tooltip? }";
+    }
+    const o = options as Record<string, unknown>;
+    for (const key of Object.keys(o)) {
+      if (o[key] === undefined) continue;
+      if (key !== "displayText" && key !== "tooltip") {
+        return `unknown hyperlink option "${key}" (allowed: displayText, tooltip)`;
+      }
+      if (!isBoundedString(o[key], MAX_HYPERLINK_TEXT)) {
+        return `${key} must be a string (max ${MAX_HYPERLINK_TEXT} chars)`;
+      }
+    }
+  }
+  return checkOptionalSheetRef(sheetIndex);
 };
 
 // ============================================================================
@@ -444,15 +1288,17 @@ export const vSheetName: Validator = ([name]) => {
   return checkSheetName(name);
 };
 
-/** renameSheet args: [index, newName]. */
-export const vSheetRename: Validator = ([index, newName]) => {
-  if (!isCellCoord(index)) return "index must be a non-negative integer";
+/** renameSheet args: [sheet, newName] — `sheet` is a 0-based index or a name. */
+export const vSheetRename: Validator = ([sheet, newName]) => {
+  const ref = checkSheetRef(sheet, "sheet");
+  if (ref !== true) return ref;
   return checkSheetName(newName);
 };
 
-/** setSheetVisibility args: [index, visibility]. */
-export const vSheetVisibility: Validator = ([index, visibility]) => {
-  if (!isCellCoord(index)) return "index must be a non-negative integer";
+/** setSheetVisibility args: [sheet, visibility] — `sheet` is an index or a name. */
+export const vSheetVisibility: Validator = ([sheet, visibility]) => {
+  const ref = checkSheetRef(sheet, "sheet");
+  if (ref !== true) return ref;
   if (!["visible", "hidden", "veryHidden"].includes(visibility as string)) {
     return "visibility must be visible|hidden|veryHidden";
   }
@@ -525,13 +1371,61 @@ export const vSortRange: Validator = ([startRow, startCol, endRow, endCol, field
 };
 
 const MAX_SEARCH_TEXT = 8192;
+/** Longest A1 spelling accepted where a range option may be a string. */
+const MAX_A1_RANGE_TEXT = 64;
 
+/**
+ * A range OPTION (Wave 4): a plain rectangle { startRow, startCol, endRow,
+ * endCol } or an A1 spelling ("B2:D10", resolved host-side). Shared by the
+ * find/replace `range` option; the box must be normalized (end >= start) —
+ * the executors clamp results, they do not repair geometry.
+ */
+function checkRangeOption(v: unknown, label: string): true | string {
+  if (typeof v === "string") {
+    if (!isBoundedString(v, MAX_A1_RANGE_TEXT) || v.trim().length === 0) {
+      return `${label} must be an A1 range like "B2:D10" (max ${MAX_A1_RANGE_TEXT} chars)`;
+    }
+    return true;
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    return `${label} must be an A1 string or an object { startRow, startCol, endRow, endCol }`;
+  }
+  const o = v as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (o[k] === undefined) continue;
+    if (!["startRow", "startCol", "endRow", "endCol"].includes(k)) {
+      return `unknown ${label} key "${k}" (allowed: startRow, startCol, endRow, endCol)`;
+    }
+  }
+  if (!isCellCoord(o.startRow)) return `${label}.startRow must be a non-negative integer`;
+  if (!isCellCoord(o.startCol)) return `${label}.startCol must be a non-negative integer`;
+  if (!isCellCoord(o.endRow)) return `${label}.endRow must be a non-negative integer`;
+  if (!isCellCoord(o.endCol)) return `${label}.endCol must be a non-negative integer`;
+  if ((o.endRow as number) < (o.startRow as number)) return `${label}.endRow must be >= startRow`;
+  if ((o.endCol as number) < (o.startCol as number)) return `${label}.endCol must be >= startCol`;
+  return true;
+}
+
+/** Boolean search flags, plus the Wave-3 `sheetIndex` slot (index or NAME —
+ *  resolved host-side under the Wave-1 rules, like every other sheet ref) and
+ *  the Wave-4 `range` clamp (a Box or an A1 spelling). */
 function checkFindOptions(options: unknown, allowed: string[]): true | string {
   if (options === undefined || options === null) return true;
   if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
   const o = options as Record<string, unknown>;
   for (const k of Object.keys(o)) {
     if (!allowed.includes(k)) return `unknown search option "${k}" (allowed: ${allowed.join(", ")})`;
+    if (k === "sheetIndex") {
+      const ref = checkOptionalSheetRef(o[k], "options.sheetIndex");
+      if (ref !== true) return ref;
+      continue;
+    }
+    if (k === "range") {
+      if (o[k] === undefined || o[k] === null) continue;
+      const rect = checkRangeOption(o[k], "options.range");
+      if (rect !== true) return rect;
+      continue;
+    }
     if (o[k] !== undefined && typeof o[k] !== "boolean") return `${k} must be a boolean`;
   }
   return true;
@@ -542,7 +1436,10 @@ export const vFind: Validator = ([query, options]) => {
   if (!isBoundedString(query, MAX_SEARCH_TEXT) || query.length === 0) {
     return `query must be a non-empty string (max ${MAX_SEARCH_TEXT} chars)`;
   }
-  return checkFindOptions(options, ["caseSensitive", "matchEntireCell", "searchFormulas"]);
+  return checkFindOptions(
+    options,
+    ["caseSensitive", "matchEntireCell", "searchFormulas", "sheetIndex", "range"],
+  );
 };
 
 /** replaceAll args: [search, replacement, options?]. */
@@ -553,7 +1450,166 @@ export const vReplace: Validator = ([search, replacement, options]) => {
   if (!isBoundedString(replacement, MAX_SEARCH_TEXT)) {
     return `replacement must be a string (max ${MAX_SEARCH_TEXT} chars)`;
   }
-  return checkFindOptions(options, ["caseSensitive", "matchEntireCell"]);
+  return checkFindOptions(options, ["caseSensitive", "matchEntireCell", "sheetIndex", "range"]);
+};
+
+// ============================================================================
+// Range ops (Wave 4, RANGE-OPS cluster): removeDuplicates / textToColumns /
+// getSpecialCells / goalSeek
+// ============================================================================
+
+/** Most key columns one removeDuplicates call may name (one per column of the
+ *  widest legal range is far below this). */
+const MAX_KEY_COLUMNS = 1_024;
+/** Most delimiters one textToColumns call may name. */
+const MAX_DELIMITERS = 16;
+
+/** removeDuplicates args: [startRow, startCol, endRow, endCol, options?, sheet?].
+ *  `options.columns` are 0-based offsets FROM THE RANGE START (sortRange
+ *  style) — bounded by the range's own width. */
+export const vRemoveDuplicates: Validator = (
+  [startRow, startCol, endRow, endCol, options, sheetIndex],
+) => {
+  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  if (rect !== true) return rect;
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { columns?, hasHeaders? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (o[k] === undefined) continue;
+    if (!["columns", "hasHeaders"].includes(k)) {
+      return `unknown removeDuplicates option "${k}" (allowed: columns, hasHeaders)`;
+    }
+  }
+  if (o.hasHeaders !== undefined && typeof o.hasHeaders !== "boolean") {
+    return "hasHeaders must be a boolean";
+  }
+  if (o.columns !== undefined) {
+    if (!Array.isArray(o.columns) || o.columns.length === 0 || o.columns.length > MAX_KEY_COLUMNS) {
+      return `columns must be a non-empty array of column offsets (max ${MAX_KEY_COLUMNS})`;
+    }
+    const width = (endCol as number) - (startCol as number) + 1;
+    for (const c of o.columns) {
+      if (!isFiniteNumber(c) || !Number.isInteger(c) || c < 0) {
+        return "each columns entry must be a non-negative integer offset from the range start";
+      }
+      if (c >= width) {
+        return `columns offset ${c} is outside the range (width ${width})`;
+      }
+    }
+  }
+  return true;
+};
+
+/** textToColumns args: [startRow, startCol, endRow, endCol, options?]. The
+ *  source must be ONE column; the sheet slot rides in options.sheetIndex. */
+export const vTextToColumns: Validator = ([startRow, startCol, endRow, endCol, options]) => {
+  const rect = vRangeRef([startRow, startCol, endRow, endCol, undefined]);
+  if (rect !== true) return rect;
+  if (startCol !== endCol) return "textToColumns source must be a single column";
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) {
+    return "options must be an object { delimiters?, consecutiveAsOne?, destination?, sheetIndex? }";
+  }
+  const o = options as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (o[k] === undefined) continue;
+    if (!["delimiters", "consecutiveAsOne", "destination", "sheetIndex"].includes(k)) {
+      return `unknown textToColumns option "${k}" (allowed: delimiters, consecutiveAsOne, destination, sheetIndex)`;
+    }
+  }
+  if (o.delimiters !== undefined) {
+    if (!Array.isArray(o.delimiters) || o.delimiters.length === 0 ||
+        o.delimiters.length > MAX_DELIMITERS) {
+      return `delimiters must be a non-empty array of single characters (max ${MAX_DELIMITERS})`;
+    }
+    for (const d of o.delimiters) {
+      if (typeof d !== "string" || d.length !== 1) {
+        return "each delimiter must be exactly one character";
+      }
+    }
+  }
+  if (o.consecutiveAsOne !== undefined && typeof o.consecutiveAsOne !== "boolean") {
+    return "consecutiveAsOne must be a boolean";
+  }
+  if (o.destination !== undefined && o.destination !== null) {
+    if (typeof o.destination !== "object" || Array.isArray(o.destination)) {
+      return "destination must be an object { row, col }";
+    }
+    const dest = o.destination as Record<string, unknown>;
+    for (const k of Object.keys(dest)) {
+      if (dest[k] === undefined) continue;
+      if (k !== "row" && k !== "col") {
+        return `unknown destination key "${k}" (allowed: row, col)`;
+      }
+    }
+    if (!isCellCoord(dest.row)) return "destination.row must be a non-negative integer";
+    if (!isCellCoord(dest.col)) return "destination.col must be a non-negative integer";
+  }
+  return checkOptionalSheetRef(o.sheetIndex, "options.sheetIndex");
+};
+
+/** The cell classes api.getSpecialCells accepts (mirrors the backend's
+ *  get_special_cells kinds). */
+export const SPECIAL_CELLS_KINDS: ReadonlySet<string> = new Set([
+  "constants", "formulas", "blanks", "visible",
+]);
+
+/** getSpecialCells args: [startRow, startCol, endRow, endCol, kind, sheet?]. */
+export const vSpecialCells: Validator = (
+  [startRow, startCol, endRow, endCol, kind, sheetIndex],
+) => {
+  const rect = vRangeRef([startRow, startCol, endRow, endCol, sheetIndex]);
+  if (rect !== true) return rect;
+  if (!isBoundedString(kind, 32) || !SPECIAL_CELLS_KINDS.has(kind)) {
+    return `kind must be one of: ${[...SPECIAL_CELLS_KINDS].join(", ")}`;
+  }
+  return true;
+};
+
+/** Iteration ceiling a script may ask goal seek for. */
+const MAX_GOAL_SEEK_ITERATIONS = 10_000;
+
+/** goalSeek args: [params] — one object, mirroring the backend's
+ *  GoalSeekParams plus the sheetIndex slot (which must resolve to the ACTIVE
+ *  sheet; the executor refuses others). */
+export const vGoalSeek: Validator = ([params]) => {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    return "goalSeek takes one object { targetRow, targetCol, targetValue, variableRow, variableCol, maxIterations?, tolerance?, sheetIndex? }";
+  }
+  const p = params as Record<string, unknown>;
+  const allowed = [
+    "targetRow", "targetCol", "targetValue", "variableRow", "variableCol",
+    "maxIterations", "tolerance", "sheetIndex",
+  ];
+  for (const k of Object.keys(p)) {
+    if (p[k] === undefined) continue;
+    if (!allowed.includes(k)) {
+      return `unknown goalSeek key "${k}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  if (!isCellCoord(p.targetRow)) return "targetRow must be a non-negative integer";
+  if (!isCellCoord(p.targetCol)) return "targetCol must be a non-negative integer";
+  if (!isCellCoord(p.variableRow)) return "variableRow must be a non-negative integer";
+  if (!isCellCoord(p.variableCol)) return "variableCol must be a non-negative integer";
+  if (!isFiniteNumber(p.targetValue)) return "targetValue must be a finite number";
+  if (p.targetRow === p.variableRow && p.targetCol === p.variableCol) {
+    return "the target cell and the variable cell must be different cells";
+  }
+  if (p.maxIterations !== undefined) {
+    if (!isFiniteNumber(p.maxIterations) || !Number.isInteger(p.maxIterations) ||
+        p.maxIterations < 1 || p.maxIterations > MAX_GOAL_SEEK_ITERATIONS) {
+      return `maxIterations must be an integer between 1 and ${MAX_GOAL_SEEK_ITERATIONS}`;
+    }
+  }
+  if (p.tolerance !== undefined) {
+    if (!isFiniteNumber(p.tolerance) || p.tolerance <= 0) {
+      return "tolerance must be a positive number";
+    }
+  }
+  return checkOptionalSheetRef(p.sheetIndex, "sheetIndex");
 };
 
 // ============================================================================
@@ -604,6 +1660,393 @@ export const vObjectAspect: Validator = ([objectType, targetId, aspect, aspectAr
   return vSetState([aspect, aspectArgs ?? []]);
 };
 
+// ============================================================================
+// Conditional formatting CRUD (Wave 3, item 3)
+// ============================================================================
+// The rule union mirrors the Rust serde shapes in conditional_formatting.rs
+// EXACTLY: `type` is the serde variant tag (camelCase), and the per-kind keys
+// are the struct's fields. Validation is by ENUMERATION, SCRIPT_FORMAT_KEYS
+// style — an unknown key or kind is REJECTED with the accepted list, because a
+// silently dropped `bgColor` typo leaves the script author staring at an
+// unstyled grid with nothing to search for.
+
+/** Every serde variant tag of ConditionalFormatRule (Rust `#[serde(tag = "type")]`). */
+export const CF_RULE_KINDS: ReadonlySet<string> = new Set([
+  "colorScale", "dataBar", "iconSet", "cellValue", "containsText",
+  "topBottom", "aboveAverage", "duplicateValues", "uniqueValues",
+  "expression", "blankCells", "noBlanks", "errorCells", "noErrors",
+  "timePeriod",
+]);
+
+/** Rust CFValueType. */
+const CF_VALUE_TYPES = new Set([
+  "number", "percent", "formula", "percentile", "min", "max", "autoMin", "autoMax",
+]);
+const CF_DATA_BAR_DIRECTIONS = new Set(["context", "leftToRight", "rightToLeft"]);
+const CF_DATA_BAR_AXIS_POSITIONS = new Set(["automatic", "cellMidpoint", "none"]);
+const CF_ICON_SET_TYPES = new Set([
+  "threeArrows", "threeArrowsGray", "threeFlags", "threeTrafficLights1",
+  "threeTrafficLights2", "threeSigns", "threeSymbols", "threeSymbols2",
+  "threeStars", "threeTriangles", "fourArrows", "fourArrowsGray", "fourRating",
+  "fourTrafficLights", "fourRedToBlack", "fiveArrows", "fiveArrowsGray",
+  "fiveRating", "fiveQuarters", "fiveBoxes",
+]);
+const CF_THRESHOLD_OPERATORS = new Set(["greaterThan", "greaterThanOrEqual"]);
+const CF_CELL_VALUE_OPERATORS = new Set([
+  "equal", "notEqual", "greaterThan", "greaterThanOrEqual",
+  "lessThan", "lessThanOrEqual", "between", "notBetween",
+]);
+const CF_TEXT_RULE_TYPES = new Set(["contains", "notContains", "beginsWith", "endsWith"]);
+const CF_TOP_BOTTOM_TYPES = new Set(["topItems", "topPercent", "bottomItems", "bottomPercent"]);
+const CF_AVERAGE_RULE_TYPES = new Set([
+  "aboveAverage", "belowAverage", "equalOrAboveAverage", "equalOrBelowAverage",
+  "oneStdDevAbove", "oneStdDevBelow", "twoStdDevAbove", "twoStdDevBelow",
+  "threeStdDevAbove", "threeStdDevBelow",
+]);
+const CF_TIME_PERIODS = new Set([
+  "today", "yesterday", "tomorrow", "last7Days", "thisWeek", "lastWeek",
+  "nextWeek", "thisMonth", "lastMonth", "nextMonth", "thisQuarter",
+  "lastQuarter", "nextQuarter", "thisYear", "lastYear", "nextYear",
+]);
+
+/**
+ * Every key the CF `format` object accepts (mirrors Rust ConditionalFormat).
+ * DISTINCT from SCRIPT_FORMAT_KEYS: CF's `underline` is a BOOLEAN (not a
+ * style word) and its borders are flat color/style string pairs.
+ */
+export const CF_FORMAT_KEYS: ReadonlySet<string> = new Set([
+  "backgroundColor", "textColor", "bold", "italic", "underline",
+  "strikethrough", "numberFormat",
+  "borderTopColor", "borderTopStyle", "borderBottomColor", "borderBottomStyle",
+  "borderLeftColor", "borderLeftStyle", "borderRightColor", "borderRightStyle",
+]);
+const CF_FORMAT_BOOLEAN_KEYS = new Set(["bold", "italic", "underline", "strikethrough"]);
+
+/** The most ranges one CF rule may target. */
+export const MAX_CF_RANGES = 64;
+const MAX_CF_TEXT = 8192;
+const MAX_CF_COLOR = 64;
+const MAX_CF_THRESHOLDS = 16;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function checkOnlyKeys(
+  o: Record<string, unknown>, label: string, allowed: readonly string[],
+): true | string {
+  for (const k of Object.keys(o)) {
+    if (!allowed.includes(k)) {
+      return `unknown ${label} property "${k}" (allowed: ${allowed.join(", ")})`;
+    }
+  }
+  return true;
+}
+
+function checkCFColor(v: unknown, label: string): true | string {
+  if (!isBoundedString(v, MAX_CF_COLOR) || v.length === 0) {
+    return `${label} must be a non-empty color string (e.g. "#FF0000")`;
+  }
+  return true;
+}
+
+function checkColorScalePoint(v: unknown, label: string): true | string {
+  if (!isPlainObject(v)) return `${label} must be an object { valueType, value?, formula?, color }`;
+  const keys = checkOnlyKeys(v, label, ["valueType", "value", "formula", "color"]);
+  if (keys !== true) return keys;
+  if (!CF_VALUE_TYPES.has(v.valueType as string)) {
+    return `${label}.valueType must be one of: ${[...CF_VALUE_TYPES].join(", ")}`;
+  }
+  if (v.value !== undefined && !isFiniteNumber(v.value)) return `${label}.value must be a finite number`;
+  if (v.formula !== undefined && !isBoundedString(v.formula, MAX_CF_TEXT)) {
+    return `${label}.formula must be a string (max ${MAX_CF_TEXT} chars)`;
+  }
+  return checkCFColor(v.color, `${label}.color`);
+}
+
+function checkIconSetThreshold(v: unknown, label: string): true | string {
+  if (!isPlainObject(v)) return `${label} must be an object { valueType, value, operator, formula? }`;
+  const keys = checkOnlyKeys(v, label, ["valueType", "value", "operator", "formula"]);
+  if (keys !== true) return keys;
+  if (!CF_VALUE_TYPES.has(v.valueType as string)) {
+    return `${label}.valueType must be one of: ${[...CF_VALUE_TYPES].join(", ")}`;
+  }
+  if (!isFiniteNumber(v.value)) return `${label}.value must be a finite number`;
+  if (!CF_THRESHOLD_OPERATORS.has(v.operator as string)) {
+    return `${label}.operator must be one of: ${[...CF_THRESHOLD_OPERATORS].join(", ")}`;
+  }
+  if (v.formula !== undefined && !isBoundedString(v.formula, MAX_CF_TEXT)) {
+    return `${label}.formula must be a string (max ${MAX_CF_TEXT} chars)`;
+  }
+  return true;
+}
+
+/** One CF RULE, per kind — the union's serde shape, enumerated. */
+export function checkCFRule(rule: unknown): true | string {
+  if (!isPlainObject(rule)) return "rule must be an object with a `type` key";
+  const kind = rule.type;
+  if (!isBoundedString(kind, 64) || !CF_RULE_KINDS.has(kind)) {
+    return `rule.type must be one of: ${[...CF_RULE_KINDS].join(", ")}`;
+  }
+  switch (kind) {
+    case "colorScale": {
+      const keys = checkOnlyKeys(rule, "colorScale", ["type", "minPoint", "midPoint", "maxPoint"]);
+      if (keys !== true) return keys;
+      const min = checkColorScalePoint(rule.minPoint, "minPoint");
+      if (min !== true) return min;
+      if (rule.midPoint !== undefined) {
+        const mid = checkColorScalePoint(rule.midPoint, "midPoint");
+        if (mid !== true) return mid;
+      }
+      return checkColorScalePoint(rule.maxPoint, "maxPoint");
+    }
+    case "dataBar": {
+      const keys = checkOnlyKeys(rule, "dataBar", [
+        "type", "minValueType", "minValue", "minFormula", "maxValueType",
+        "maxValue", "maxFormula", "fillColor", "borderColor",
+        "negativeFillColor", "negativeBorderColor", "axisColor",
+        "axisPosition", "direction", "showValue", "gradientFill",
+      ]);
+      if (keys !== true) return keys;
+      for (const k of ["minValueType", "maxValueType"] as const) {
+        if (!CF_VALUE_TYPES.has(rule[k] as string)) {
+          return `dataBar.${k} must be one of: ${[...CF_VALUE_TYPES].join(", ")}`;
+        }
+      }
+      for (const k of ["minValue", "maxValue"] as const) {
+        if (rule[k] !== undefined && !isFiniteNumber(rule[k])) return `dataBar.${k} must be a finite number`;
+      }
+      for (const k of ["minFormula", "maxFormula"] as const) {
+        if (rule[k] !== undefined && !isBoundedString(rule[k], MAX_CF_TEXT)) {
+          return `dataBar.${k} must be a string (max ${MAX_CF_TEXT} chars)`;
+        }
+      }
+      const fill = checkCFColor(rule.fillColor, "dataBar.fillColor");
+      if (fill !== true) return fill;
+      for (const k of ["borderColor", "negativeFillColor", "negativeBorderColor", "axisColor"] as const) {
+        if (rule[k] !== undefined) {
+          const c = checkCFColor(rule[k], `dataBar.${k}`);
+          if (c !== true) return c;
+        }
+      }
+      if (!CF_DATA_BAR_AXIS_POSITIONS.has(rule.axisPosition as string)) {
+        return `dataBar.axisPosition must be one of: ${[...CF_DATA_BAR_AXIS_POSITIONS].join(", ")}`;
+      }
+      if (!CF_DATA_BAR_DIRECTIONS.has(rule.direction as string)) {
+        return `dataBar.direction must be one of: ${[...CF_DATA_BAR_DIRECTIONS].join(", ")}`;
+      }
+      if (typeof rule.showValue !== "boolean") return "dataBar.showValue must be a boolean";
+      if (typeof rule.gradientFill !== "boolean") return "dataBar.gradientFill must be a boolean";
+      return true;
+    }
+    case "iconSet": {
+      const keys = checkOnlyKeys(rule, "iconSet", [
+        "type", "iconSet", "thresholds", "reverseIcons", "showIconOnly",
+      ]);
+      if (keys !== true) return keys;
+      if (!CF_ICON_SET_TYPES.has(rule.iconSet as string)) {
+        return `iconSet.iconSet must be one of: ${[...CF_ICON_SET_TYPES].join(", ")}`;
+      }
+      if (!Array.isArray(rule.thresholds) || rule.thresholds.length > MAX_CF_THRESHOLDS) {
+        return `iconSet.thresholds must be an array (max ${MAX_CF_THRESHOLDS})`;
+      }
+      for (let i = 0; i < rule.thresholds.length; i++) {
+        const t = checkIconSetThreshold(rule.thresholds[i], `thresholds[${i}]`);
+        if (t !== true) return t;
+      }
+      if (typeof rule.reverseIcons !== "boolean") return "iconSet.reverseIcons must be a boolean";
+      if (typeof rule.showIconOnly !== "boolean") return "iconSet.showIconOnly must be a boolean";
+      return true;
+    }
+    case "cellValue": {
+      const keys = checkOnlyKeys(rule, "cellValue", ["type", "operator", "value1", "value2"]);
+      if (keys !== true) return keys;
+      if (!CF_CELL_VALUE_OPERATORS.has(rule.operator as string)) {
+        return `cellValue.operator must be one of: ${[...CF_CELL_VALUE_OPERATORS].join(", ")}`;
+      }
+      if (!isBoundedString(rule.value1, MAX_CF_TEXT)) {
+        return `cellValue.value1 must be a string (max ${MAX_CF_TEXT} chars; a literal or a formula)`;
+      }
+      if (rule.value2 !== undefined && !isBoundedString(rule.value2, MAX_CF_TEXT)) {
+        return `cellValue.value2 must be a string (max ${MAX_CF_TEXT} chars)`;
+      }
+      return true;
+    }
+    case "containsText": {
+      const keys = checkOnlyKeys(rule, "containsText", ["type", "ruleType", "text"]);
+      if (keys !== true) return keys;
+      if (!CF_TEXT_RULE_TYPES.has(rule.ruleType as string)) {
+        return `containsText.ruleType must be one of: ${[...CF_TEXT_RULE_TYPES].join(", ")}`;
+      }
+      if (!isBoundedString(rule.text, MAX_CF_TEXT) || rule.text.length === 0) {
+        return `containsText.text must be a non-empty string (max ${MAX_CF_TEXT} chars)`;
+      }
+      return true;
+    }
+    case "topBottom": {
+      const keys = checkOnlyKeys(rule, "topBottom", ["type", "ruleType", "rank"]);
+      if (keys !== true) return keys;
+      if (!CF_TOP_BOTTOM_TYPES.has(rule.ruleType as string)) {
+        return `topBottom.ruleType must be one of: ${[...CF_TOP_BOTTOM_TYPES].join(", ")}`;
+      }
+      if (!isFiniteNumber(rule.rank) || !Number.isInteger(rule.rank) || rule.rank < 1 || rule.rank > 1_000_000) {
+        return "topBottom.rank must be an integer between 1 and 1000000";
+      }
+      return true;
+    }
+    case "aboveAverage": {
+      const keys = checkOnlyKeys(rule, "aboveAverage", ["type", "ruleType"]);
+      if (keys !== true) return keys;
+      if (!CF_AVERAGE_RULE_TYPES.has(rule.ruleType as string)) {
+        return `aboveAverage.ruleType must be one of: ${[...CF_AVERAGE_RULE_TYPES].join(", ")}`;
+      }
+      return true;
+    }
+    case "timePeriod": {
+      const keys = checkOnlyKeys(rule, "timePeriod", ["type", "period"]);
+      if (keys !== true) return keys;
+      if (!CF_TIME_PERIODS.has(rule.period as string)) {
+        return `timePeriod.period must be one of: ${[...CF_TIME_PERIODS].join(", ")}`;
+      }
+      return true;
+    }
+    case "expression": {
+      const keys = checkOnlyKeys(rule, "expression", ["type", "formula"]);
+      if (keys !== true) return keys;
+      if (!isBoundedString(rule.formula, MAX_CF_TEXT) || rule.formula.length === 0) {
+        return `expression.formula must be a non-empty string (max ${MAX_CF_TEXT} chars)`;
+      }
+      return true;
+    }
+    // Unit variants: `type` is the whole payload.
+    default:
+      return checkOnlyKeys(rule, kind, ["type"]);
+  }
+}
+
+/** The CF `format` object (what to apply on a match), enumerated. */
+export function checkCFFormat(format: unknown): true | string {
+  if (!isPlainObject(format)) return "format must be an object";
+  for (const key of Object.keys(format)) {
+    const value = format[key];
+    if (!CF_FORMAT_KEYS.has(key)) {
+      return `unknown format property "${key}" (allowed: ${[...CF_FORMAT_KEYS].join(", ")})`;
+    }
+    if (value === undefined) continue;
+    if (CF_FORMAT_BOOLEAN_KEYS.has(key)) {
+      if (typeof value !== "boolean") return `${key} must be a boolean`;
+    } else if (!isBoundedString(value, 255) || value.length === 0) {
+      return `${key} must be a non-empty string (max 255 chars)`;
+    }
+  }
+  return true;
+}
+
+/** One numeric CF range box. A1 spellings resolve WORKER-side (Wave-1 style),
+ *  so by the time the broker sees a range it is always this numeric shape. */
+function checkCFRangeBox(v: unknown, label: string): true | string {
+  if (!isPlainObject(v)) {
+    return `${label} must be an object { startRow, startCol, endRow, endCol }`;
+  }
+  const keys = checkOnlyKeys(v, label, ["startRow", "startCol", "endRow", "endCol"]);
+  if (keys !== true) return keys;
+  for (const k of ["startRow", "startCol", "endRow", "endCol"] as const) {
+    if (!isCellCoord(v[k])) return `${label}.${k} must be a non-negative integer`;
+  }
+  const b = v as { startRow: number; startCol: number; endRow: number; endCol: number };
+  if (b.startRow > b.endRow || b.startCol > b.endCol) {
+    return `${label} must be normalized (startRow <= endRow, startCol <= endCol)`;
+  }
+  return true;
+}
+
+function checkCFRanges(ranges: unknown): true | string {
+  if (!Array.isArray(ranges) || ranges.length === 0 || ranges.length > MAX_CF_RANGES) {
+    return `ranges must be a non-empty array of range objects (max ${MAX_CF_RANGES})`;
+  }
+  for (let i = 0; i < ranges.length; i++) {
+    const r = checkCFRangeBox(ranges[i], `ranges[${i}]`);
+    if (r !== true) return r;
+  }
+  return true;
+}
+
+function checkCFRuleId(v: unknown, label = "ruleId"): true | string {
+  if (!isFiniteNumber(v) || !Number.isInteger(v) || v < 0 || v > Number.MAX_SAFE_INTEGER) {
+    return `${label} must be a non-negative integer (the id addConditionalFormat / listConditionalFormats reported)`;
+  }
+  return true;
+}
+
+/** addConditionalFormat args: [spec] where spec = { rule, format, ranges, stopIfTrue? }. */
+export const vCFSpec: Validator = ([spec]) => {
+  if (!isPlainObject(spec)) return "expected a spec object { rule, format, ranges, stopIfTrue? }";
+  const keys = checkOnlyKeys(spec, "spec", ["rule", "format", "ranges", "stopIfTrue"]);
+  if (keys !== true) return keys;
+  const rule = checkCFRule(spec.rule);
+  if (rule !== true) return rule;
+  const format = checkCFFormat(spec.format);
+  if (format !== true) return format;
+  const ranges = checkCFRanges(spec.ranges);
+  if (ranges !== true) return ranges;
+  if (spec.stopIfTrue !== undefined && typeof spec.stopIfTrue !== "boolean") {
+    return "stopIfTrue must be a boolean";
+  }
+  return true;
+};
+
+/** updateConditionalFormat args: [ruleId, patch]. Only the keys present change. */
+export const vCFUpdate: Validator = ([ruleId, patch]) => {
+  const id = checkCFRuleId(ruleId);
+  if (id !== true) return id;
+  if (!isPlainObject(patch)) {
+    return "expected a patch object { rule?, format?, ranges?, stopIfTrue?, enabled? }";
+  }
+  const keys = checkOnlyKeys(patch, "patch", ["rule", "format", "ranges", "stopIfTrue", "enabled"]);
+  if (keys !== true) return keys;
+  if (Object.keys(patch).length === 0) {
+    return "patch must change at least one of: rule, format, ranges, stopIfTrue, enabled";
+  }
+  if (patch.rule !== undefined) {
+    const rule = checkCFRule(patch.rule);
+    if (rule !== true) return rule;
+  }
+  if (patch.format !== undefined) {
+    const format = checkCFFormat(patch.format);
+    if (format !== true) return format;
+  }
+  if (patch.ranges !== undefined) {
+    const ranges = checkCFRanges(patch.ranges);
+    if (ranges !== true) return ranges;
+  }
+  if (patch.stopIfTrue !== undefined && typeof patch.stopIfTrue !== "boolean") {
+    return "stopIfTrue must be a boolean";
+  }
+  if (patch.enabled !== undefined && typeof patch.enabled !== "boolean") {
+    return "enabled must be a boolean";
+  }
+  return true;
+};
+
+/** deleteConditionalFormat args: [ruleId]. */
+export const vCFRuleId: Validator = ([ruleId]) => checkCFRuleId(ruleId);
+
+/** listConditionalFormats args: [sheet?]. The sheet ref (index or name)
+ *  resolves host-side by the Wave-1 rules; the backend command is sheet-aware
+ *  (conditional_formatting.rs takes sheetIndex), so a non-active sheet is
+ *  honored, not refused. */
+export const vCFList: Validator = ([sheet]) => checkOptionalSheetRef(sheet, "sheet");
+
+/** clearConditionalFormats args: [range?, sheet?]. Omitted range = the whole
+ *  sheet. Same sheet-aware slot as vCFList. */
+export const vCFClear: Validator = ([range, sheet]) => {
+  if (range !== undefined && range !== null) {
+    const box = checkCFRangeBox(range, "range");
+    if (box !== true) return box;
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
 /** Shared chart-spec gate: shape + JSON-serializability + 2 MB ceiling. */
 function checkChartSpec(aspectArgs: unknown): true | string {
   if (!Array.isArray(aspectArgs) || aspectArgs.length < 1) return "expected a spec argument";
@@ -619,24 +2062,23 @@ function checkChartSpec(aspectArgs: unknown): true | string {
   return true;
 }
 
-/** createChart args: [spec, options?]. `options` places the new chart. */
-export const vCreateChart: Validator = ([spec, options]) => {
-  const shape = checkChartSpec([spec]);
-  if (shape !== true) return shape;
-  if (options === undefined || options === null) return true;
-  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
-  const o = options as Record<string, unknown>;
+/**
+ * The chart placement keys ONE gate proves, shared by vCreateChart (options)
+ * and the chart.setGeometry aspect (patch) — the bounds are one decision, not
+ * two: name <= 255, sheetIndex a Wave-1 sheet ref, x/y within +-1,000,000 px,
+ * width/height 10..20,000 px.
+ */
+function checkChartPlacementProps(o: Record<string, unknown>, label: string): true | string {
   for (const k of Object.keys(o)) {
     if (!["name", "sheetIndex", "x", "y", "width", "height"].includes(k)) {
-      return `unknown chart option "${k}" (allowed: name, sheetIndex, x, y, width, height)`;
+      return `unknown ${label} "${k}" (allowed: name, sheetIndex, x, y, width, height)`;
     }
   }
   if (o.name !== undefined && !isBoundedString(o.name, MAX_OBJECT_NAME)) {
     return `name must be a string (max ${MAX_OBJECT_NAME} chars)`;
   }
-  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
-    return "sheetIndex must be a non-negative integer";
-  }
+  const sheet = checkOptionalSheetRef(o.sheetIndex);
+  if (sheet !== true) return sheet;
   for (const k of ["x", "y"] as const) {
     if (o[k] !== undefined && (!isFiniteNumber(o[k]) || Math.abs(o[k] as number) > 1_000_000)) {
       return `${k} must be a number between -1000000 and 1000000 (pixels)`;
@@ -648,6 +2090,28 @@ export const vCreateChart: Validator = ([spec, options]) => {
     }
   }
   return true;
+}
+
+/** chart.setGeometry aspect args: [patch]. At least one placement key. */
+export function checkChartGeometryAspect(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  const patch = args[0];
+  if (!isPlainObject(patch)) {
+    return "expected a geometry patch object ({ x?, y?, width?, height?, name?, sheetIndex? })";
+  }
+  if (Object.keys(patch).length === 0) {
+    return "geometry patch must set at least one of: x, y, width, height, name, sheetIndex";
+  }
+  return checkChartPlacementProps(patch, "geometry property");
+}
+
+/** createChart args: [spec, options?]. `options` places the new chart. */
+export const vCreateChart: Validator = ([spec, options]) => {
+  const shape = checkChartSpec([spec]);
+  if (shape !== true) return shape;
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  return checkChartPlacementProps(options as Record<string, unknown>, "chart option");
 };
 
 /** createTable args: [startRow, startCol, endRow, endCol, options?]. */
@@ -674,18 +2138,71 @@ export const vCreateTable: Validator = ([startRow, startCol, endRow, endCol, opt
 /** Excel's forbidden characters in a defined name (plus whitespace). */
 const ILLEGAL_NAME_CHARS = /[\s:\\/?*[\]()+\-,;<>=&^%$#@!~`'"{}|]/;
 
-/** createNamedRange args: [name, refersTo, options?]. */
-export const vCreateNamedRange: Validator = ([name, refersTo, options]) => {
+/** ONE spelling rule for a defined name, shared by create and rename. */
+function checkDefinedNameSpelling(name: unknown, label = "name"): true | string {
   if (!isBoundedString(name, MAX_OBJECT_NAME) || (name as string).length === 0) {
-    return `name must be a non-empty string (max ${MAX_OBJECT_NAME} chars)`;
+    return `${label} must be a non-empty string (max ${MAX_OBJECT_NAME} chars)`;
   }
   if (ILLEGAL_NAME_CHARS.test(name as string)) {
-    return "name may not contain spaces or punctuation (letters, digits, _ and . only)";
+    return `${label} may not contain spaces or punctuation (letters, digits, _ and . only)`;
   }
-  if (/^[0-9.]/.test(name as string)) return "name must start with a letter or underscore";
+  if (/^[0-9.]/.test(name as string)) return `${label} must start with a letter or underscore`;
+  return true;
+}
+
+/** refersTo formula text, shared by create and update. */
+function checkRefersTo(refersTo: unknown): true | string {
   if (!isBoundedString(refersTo, 8192) || (refersTo as string).length === 0) {
     return "refersTo must be a non-empty string (e.g. \"=Sheet1!$A$1:$B$10\")";
   }
+  return true;
+}
+
+/**
+ * namedRange.update aspect args: [patch]. Mirrors the MCP update_named_range
+ * tri-state: an ABSENT key keeps the stored value; `sheetIndex: null` clears
+ * the scope to workbook. At least one key must be present — an empty patch is
+ * a question, not an edit.
+ */
+export function checkNamedRangeUpdate(aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  const patch = args[0];
+  if (!isPlainObject(patch)) {
+    return "expected an update object ({ refersTo?, newName?, comment?, sheetIndex? })";
+  }
+  const keys = Object.keys(patch);
+  if (keys.length === 0) {
+    return "update must set at least one of: refersTo, newName, comment, sheetIndex";
+  }
+  for (const k of keys) {
+    if (!["refersTo", "newName", "comment", "sheetIndex"].includes(k)) {
+      return `unknown named-range update key "${k}" (allowed: refersTo, newName, comment, sheetIndex)`;
+    }
+  }
+  if (patch.newName !== undefined) {
+    const spelled = checkDefinedNameSpelling(patch.newName, "newName");
+    if (spelled !== true) return spelled;
+  }
+  if (patch.refersTo !== undefined) {
+    const target = checkRefersTo(patch.refersTo);
+    if (target !== true) return target;
+  }
+  if (patch.comment !== undefined && !isBoundedString(patch.comment, 4096)) {
+    return "comment must be a string (max 4096 chars)";
+  }
+  if (patch.sheetIndex !== undefined && patch.sheetIndex !== null) {
+    const sheet = checkSheetRef(patch.sheetIndex, "sheetIndex");
+    if (sheet !== true) return `${sheet} (or null = workbook scope)`;
+  }
+  return true;
+}
+
+/** createNamedRange args: [name, refersTo, options?]. */
+export const vCreateNamedRange: Validator = ([name, refersTo, options]) => {
+  const spelled = checkDefinedNameSpelling(name);
+  if (spelled !== true) return spelled;
+  const target = checkRefersTo(refersTo);
+  if (target !== true) return target;
   if (options === undefined || options === null) return true;
   if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
   const o = options as Record<string, unknown>;
@@ -694,8 +2211,9 @@ export const vCreateNamedRange: Validator = ([name, refersTo, options]) => {
       return `unknown named-range option "${k}" (allowed: sheetIndex, comment)`;
     }
   }
-  if (o.sheetIndex !== undefined && o.sheetIndex !== null && !isCellCoord(o.sheetIndex)) {
-    return "sheetIndex must be a non-negative integer or null (null = workbook scope)";
+  if (o.sheetIndex !== undefined && o.sheetIndex !== null) {
+    const sheet = checkSheetRef(o.sheetIndex, "sheetIndex");
+    if (sheet !== true) return `${sheet} (or null = workbook scope)`;
   }
   if (o.comment !== undefined && !isBoundedString(o.comment, 4096)) {
     return "comment must be a string (max 4096 chars)";
@@ -765,7 +2283,8 @@ export const vCreatePivot: Validator = ([sourceRange, destinationCell, fields, o
     return `name must be a string (max ${MAX_OBJECT_NAME} chars)`;
   }
   for (const k of ["sourceSheet", "destinationSheet"] as const) {
-    if (o[k] !== undefined && !isCellCoord(o[k])) return `${k} must be a non-negative integer`;
+    const sheet = checkOptionalSheetRef(o[k], k);
+    if (sheet !== true) return sheet;
   }
   if (o.hasHeaders !== undefined && typeof o.hasHeaders !== "boolean") {
     return "hasHeaders must be a boolean";
@@ -884,8 +2403,294 @@ export function checkPivotLayoutAspect(aspect: string, aspectArgs: unknown): tru
   }
 }
 
-export const vIndex: Validator = ([index]) =>
-  isCellCoord(index) ? true : "index must be a non-negative integer";
+// ============================================================================
+// Pivot DATA aspects (Wave 3, item 4): report filters, item visibility, sort,
+// number format — the "set the page filter, refresh" macro's missing line.
+// ============================================================================
+// Reached through the SAME two doors as the layout aspects (object.setState on
+// an own pivot, api.objectSetState on any pivot at unlocked tier); no new
+// allowlist row. `field` is the SOURCE COLUMN name, resolved host-side against
+// the pivot's cache with the real names listed on a miss.
+
+export const PIVOT_DATA_ASPECTS: ReadonlySet<string> = new Set([
+  "pivot.setFilter",
+  "pivot.clearFilter",
+  "pivot.setItemVisibility",
+  "pivot.sortField",
+  "pivot.setNumberFormat",
+]);
+
+/** Directions pivot.sortField accepts. There is deliberately NO "none"/null:
+ *  the backend (sort_pivot_field) can only set ascending/descending — a
+ *  "clear sort" that silently did nothing would be worse than an absence. */
+export const PIVOT_SORT_DIRECTIONS: ReadonlySet<string> = new Set(["asc", "desc"]);
+
+/** The most items one pivot.setFilter call may keep. */
+export const MAX_PIVOT_FILTER_ITEMS = 10_000;
+const MAX_PIVOT_ITEM_NAME = 4096;
+const MAX_PIVOT_NUMBER_FORMAT = 255;
+
+/** Validate one pivot DATA aspect's arguments (shape only, no state reads). */
+export function checkPivotDataAspect(aspect: string, aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  switch (aspect) {
+    case "pivot.setFilter": {
+      const field = checkFieldName(args[0]);
+      if (field !== true) return field;
+      const values = args[1];
+      if (values === null) return true; // null = clear the field's filters
+      if (!Array.isArray(values) || values.length > MAX_PIVOT_FILTER_ITEMS) {
+        return `values must be an array of item names to KEEP (max ${MAX_PIVOT_FILTER_ITEMS}) or null to clear`;
+      }
+      for (const v of values) {
+        if (!isBoundedString(v, MAX_PIVOT_ITEM_NAME)) {
+          return `each filter value must be a string (max ${MAX_PIVOT_ITEM_NAME} chars)`;
+        }
+      }
+      return true;
+    }
+    case "pivot.clearFilter":
+      return checkFieldName(args[0]);
+    case "pivot.setItemVisibility": {
+      const field = checkFieldName(args[0]);
+      if (field !== true) return field;
+      // An ITEM may legitimately be the empty string (a blank cell in the
+      // source column), so unlike `field` it is not required non-empty.
+      if (!isBoundedString(args[1], MAX_PIVOT_ITEM_NAME)) {
+        return `item must be a string (max ${MAX_PIVOT_ITEM_NAME} chars)`;
+      }
+      if (typeof args[2] !== "boolean") return "visible must be a boolean";
+      return true;
+    }
+    case "pivot.sortField": {
+      const field = checkFieldName(args[0]);
+      if (field !== true) return field;
+      if (!PIVOT_SORT_DIRECTIONS.has(args[1] as string)) {
+        return `direction must be one of: ${[...PIVOT_SORT_DIRECTIONS].join(", ")}`;
+      }
+      return true;
+    }
+    case "pivot.setNumberFormat": {
+      const field = checkFieldName(args[0]);
+      if (field !== true) return field;
+      if (!isBoundedString(args[1], MAX_PIVOT_NUMBER_FORMAT) || (args[1] as string).length === 0) {
+        return `format must be a non-empty number format string (max ${MAX_PIVOT_NUMBER_FORMAT} chars), e.g. "#,##0.00"`;
+      }
+      return true;
+    }
+    default:
+      return true;
+  }
+}
+
+// ============================================================================
+// Table STRUCTURE aspects (Wave 4): the ListObject management family —
+// rename/resize/columns/totals row/style/convert-to-range/insert/delete row.
+// ============================================================================
+// Reached through the SAME two doors as the pivot aspect families
+// (object.setState on an own table, api.objectSetState on any table at
+// unlocked tier); no new allowlist rows. Every aspect maps 1:1 onto an
+// existing backend table command; the ACTIVE-SHEET rule those commands
+// enforce is asserted host-side with the fix spelled out.
+
+export const TABLE_STRUCTURE_ASPECTS: ReadonlySet<string> = new Set([
+  "table.rename",
+  "table.resize",
+  "table.addColumn",
+  "table.removeColumn",
+  "table.renameColumn",
+  "table.setTotalsRow",
+  "table.setTotalsFunction",
+  "table.setStyle",
+  "table.convertToRange",
+  "table.insertRow",
+  "table.deleteRow",
+]);
+
+/** The backend's TotalsRowFunction vocabulary (backend.ts), verbatim. */
+export const TABLE_TOTALS_FUNCTIONS: ReadonlySet<string> = new Set([
+  "none", "average", "count", "countNumbers", "max", "min", "sum",
+  "stdDev", "var", "custom",
+]);
+
+/** The 7 boolean TableStyleOptions keys (backend.ts), verbatim. */
+export const TABLE_STYLE_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "bandedRows", "bandedColumns", "headerRow", "totalRow",
+  "firstColumn", "lastColumn", "showFilterButton",
+]);
+
+const MAX_TABLE_FORMULA = 8192;
+
+function checkTableColumnName(v: unknown, label: string): true | string {
+  if (!isBoundedString(v, MAX_OBJECT_NAME) || (v as string).trim().length === 0) {
+    return `${label} must be a non-empty column name (max ${MAX_OBJECT_NAME} chars)`;
+  }
+  return true;
+}
+
+/** An optional 0-based data-row position (insert/add-column index). */
+function checkTableRowPosition(v: unknown, label: string, required: boolean): true | string {
+  if (v === undefined || v === null) {
+    return required ? `${label} must be a non-negative integer` : true;
+  }
+  if (!isFiniteNumber(v) || !Number.isInteger(v) || v < 0 || v > 10_000_000) {
+    return `${label} must be a non-negative integer`;
+  }
+  return true;
+}
+
+/** Validate one table STRUCTURE aspect's arguments (shape only, no state reads). */
+export function checkTableStructureAspect(aspect: string, aspectArgs: unknown): true | string {
+  const args = Array.isArray(aspectArgs) ? aspectArgs : [];
+  switch (aspect) {
+    case "table.rename": {
+      if (!isBoundedString(args[0], MAX_OBJECT_NAME) || (args[0] as string).trim().length === 0) {
+        return `newName must be a non-empty string (max ${MAX_OBJECT_NAME} chars)`;
+      }
+      return true;
+    }
+    case "table.resize":
+      // The same rectangle gate every range argument gets (grid coordinates).
+      return vRangeRef([args[0], args[1], args[2], args[3]]);
+    case "table.addColumn": {
+      const name = checkTableColumnName(args[0], "name");
+      if (name !== true) return name;
+      return checkTableRowPosition(args[1], "position", false);
+    }
+    case "table.removeColumn":
+      return checkTableColumnName(args[0], "name");
+    case "table.renameColumn": {
+      const oldName = checkTableColumnName(args[0], "oldName");
+      if (oldName !== true) return oldName;
+      return checkTableColumnName(args[1], "newName");
+    }
+    case "table.setTotalsRow":
+      return typeof args[0] === "boolean" ? true : "show must be a boolean";
+    case "table.setTotalsFunction": {
+      const column = checkTableColumnName(args[0], "column");
+      if (column !== true) return column;
+      if (!TABLE_TOTALS_FUNCTIONS.has(args[1] as string)) {
+        return `function must be one of: ${[...TABLE_TOTALS_FUNCTIONS].join(", ")}`;
+      }
+      if (args[1] === "custom") {
+        if (!isBoundedString(args[2], MAX_TABLE_FORMULA) || (args[2] as string).length === 0) {
+          return "a \"custom\" totals function needs a formula string as the third argument";
+        }
+      } else if (args[2] !== undefined && args[2] !== null) {
+        return "a formula is only accepted with the \"custom\" totals function";
+      }
+      return true;
+    }
+    case "table.setStyle": {
+      const style = args[0];
+      if (isBoundedString(style, MAX_OBJECT_NAME) && (style as string).length > 0) return true;
+      if (!isPlainObject(style)) {
+        return "style must be a style NAME or an object ({ styleName?, styleOptions? })";
+      }
+      for (const k of Object.keys(style)) {
+        if (!["styleName", "styleOptions"].includes(k)) {
+          return `unknown style key "${k}" (allowed: styleName, styleOptions)`;
+        }
+      }
+      if (Object.keys(style).length === 0) {
+        return "style must set styleName and/or styleOptions";
+      }
+      if (style.styleName !== undefined &&
+          (!isBoundedString(style.styleName, MAX_OBJECT_NAME) || (style.styleName as string).length === 0)) {
+        return `styleName must be a non-empty string (max ${MAX_OBJECT_NAME} chars)`;
+      }
+      if (style.styleOptions !== undefined) {
+        if (!isPlainObject(style.styleOptions)) return "styleOptions must be an object of booleans";
+        for (const [k, v] of Object.entries(style.styleOptions)) {
+          if (!TABLE_STYLE_OPTION_KEYS.has(k)) {
+            return `unknown styleOptions key "${k}" (allowed: ${[...TABLE_STYLE_OPTION_KEYS].join(", ")})`;
+          }
+          if (typeof v !== "boolean") return `styleOptions.${k} must be a boolean`;
+        }
+      }
+      return true;
+    }
+    case "table.convertToRange":
+      return args.length === 0 || "convertToRange takes no arguments";
+    case "table.insertRow":
+      return checkTableRowPosition(args[0], "position", false);
+    case "table.deleteRow":
+      return checkTableRowPosition(args[0], "position", true);
+    default:
+      return true;
+  }
+}
+
+// ============================================================================
+// Notes + comments (Wave 4): the cell-annotation CRUD rows.
+// ============================================================================
+// Notes are VBA's Range.NoteText 90% case (one text per cell); comments are
+// the threaded kind. Text is capped WELL below the 1 MB cell ceiling — 32k is
+// Excel's own note limit and nobody reads a longer tooltip.
+
+export const MAX_NOTE_TEXT = 32_768;
+
+function checkAnnotationText(v: unknown, label: string): true | string {
+  if (!isBoundedString(v, MAX_NOTE_TEXT) || (v as string).length === 0) {
+    return `${label} must be a non-empty string (max ${MAX_NOTE_TEXT} chars)`;
+  }
+  return true;
+}
+
+/** setNote args: [row, col, text | null, sheet?]. null REMOVES the note. */
+export const vSetNote: Validator = ([row, col, text, sheet]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  if (text !== null) {
+    const t = checkAnnotationText(text, "text");
+    if (t !== true) return `${t} (or null to remove the note)`;
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** addComment args: [row, col, text]. */
+export const vAddComment: Validator = ([row, col, text]) => {
+  if (!isCellCoord(row)) return "row must be a non-negative integer";
+  if (!isCellCoord(col)) return "col must be a non-negative integer";
+  return checkAnnotationText(text, "text");
+};
+
+/** replyToComment args: [commentId, text]. */
+export const vCommentReply: Validator = ([commentId, text]) => {
+  if (!isBoundedString(commentId, MAX_KEY) || (commentId as string).length === 0) {
+    return "commentId must be a non-empty string";
+  }
+  return checkAnnotationText(text, "text");
+};
+
+/** resolveComment args: [commentId, resolved?]. Omitted resolved = true. */
+export const vResolveComment: Validator = ([commentId, resolved]) => {
+  if (!isBoundedString(commentId, MAX_KEY) || (commentId as string).length === 0) {
+    return "commentId must be a non-empty string";
+  }
+  if (resolved !== undefined && typeof resolved !== "boolean") {
+    return "resolved must be a boolean (omit for true)";
+  }
+  return true;
+};
+
+/** listComments args: [range?, sheet?]. Omitted range = the whole sheet. The
+ *  rectangle is a FILTER over stored comments, not a cell payload, so it gets
+ *  coordinate/ordering checks but no MAX_RANGE_CELLS ceiling — "every comment
+ *  in column A" is a legitimate question. */
+export const vListComments: Validator = ([range, sheet]) => {
+  if (range !== undefined && range !== null) {
+    if (!isPlainObject(range)) {
+      return "range must be an object ({ startRow, startCol, endRow, endCol }) or null";
+    }
+    for (const k of ["startRow", "startCol", "endRow", "endCol"] as const) {
+      if (!isCellCoord(range[k])) return `range.${k} must be a non-negative integer`;
+    }
+    if ((range.endRow as number) < (range.startRow as number)) return "range.endRow must be >= range.startRow";
+    if ((range.endCol as number) < (range.startCol as number)) return "range.endCol must be >= range.startCol";
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
 
 export const vEvent: Validator = ([name]) =>
   isBoundedString(name, MAX_EVENT_NAME) && (name as string).length > 0
@@ -1967,8 +3772,108 @@ export const vEvaluate: Validator = ([expressions, options]) => {
   const o = options as Record<string, unknown>;
   const known = checkKnownKeys(o, ["sheetIndex"], "evaluate option");
   if (known !== true) return known;
-  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
-    return "options.sheetIndex must be a non-negative integer";
+  return checkOptionalSheetRef(o.sheetIndex, "options.sheetIndex");
+};
+
+// ============================================================================
+// The APPLICATION cluster (Wave 4): status bar, batches that pause repaints,
+// macros-by-name, and view/window state
+// ============================================================================
+
+/** Longest status-bar message accepted. The bar is one line of chrome; a
+ *  message longer than this was never going to be readable there. */
+export const MAX_STATUS_BAR_CHARS = 512;
+
+/** api.setStatusBar args: [text]. `null` restores the default "Ready". */
+export const vStatusBar: Validator = ([text]) => {
+  if (text === null) return true;
+  if (!isBoundedString(text, MAX_STATUS_BAR_CHARS)) {
+    return `text must be a string (max ${MAX_STATUS_BAR_CHARS} chars) or null to clear the message`;
+  }
+  return true;
+};
+
+/** Longest undo-entry description accepted for api.beginBatch. */
+export const MAX_BATCH_DESCRIPTION_CHARS = 200;
+
+/** api.beginBatch args: [description, options?]. The options bag is CLOSED:
+ *  an unknown key is refused rather than ignored, because a silently dropped
+ *  `deferRepaint` is a script that believes the screen is paused while every
+ *  write repaints. */
+export const vBeginBatch: Validator = ([description, options]) => {
+  if (!isBoundedString(description, MAX_BATCH_DESCRIPTION_CHARS)) {
+    return `description must be a string (max ${MAX_BATCH_DESCRIPTION_CHARS} chars) — it names the undo entry`;
+  }
+  if (options === undefined || options === null) return true;
+  if (typeof options !== "object" || Array.isArray(options)) return "options must be an object";
+  const o = options as Record<string, unknown>;
+  const known = checkKnownKeys(o, ["deferRepaint"], "beginBatch option");
+  if (known !== true) return known;
+  if (o.deferRepaint !== undefined && typeof o.deferRepaint !== "boolean") {
+    return "options.deferRepaint must be a boolean";
+  }
+  return true;
+};
+
+/** Longest macro reference (display name or module id) accepted. */
+export const MAX_MACRO_REF_CHARS = 256;
+
+/** api.runMacro args: [nameOrId]. */
+export const vRunMacro: Validator = ([ref]) => {
+  if (!isBoundedString(ref, MAX_MACRO_REF_CHARS) || (ref as string).trim().length === 0) {
+    return `name must be a non-empty string (max ${MAX_MACRO_REF_CHARS} chars) — a macro's display name or its module id`;
+  }
+  return true;
+};
+
+/** The View settings a script can read and write — each backed by the SAME
+ *  event the View menu emits, so a script toggle and a menu click are one
+ *  mechanism. */
+export const SCRIPT_VIEW_OPTIONS: ReadonlySet<string> = new Set([
+  "gridlines", "headings", "zeros", "formulas", "viewMode",
+]);
+
+/** The three view modes Core renders (mirrors core ViewMode). */
+export const SCRIPT_VIEW_MODES: ReadonlySet<string> = new Set([
+  "normal", "pageLayout", "pageBreakPreview",
+]);
+
+function checkViewOptionName(name: unknown): true | string {
+  if (typeof name !== "string" || !SCRIPT_VIEW_OPTIONS.has(name)) {
+    return `name must be one of: ${[...SCRIPT_VIEW_OPTIONS].join(", ")}`;
+  }
+  return true;
+}
+
+/** api.getViewOption args: [name]. */
+export const vViewOptionGet: Validator = ([name]) => checkViewOptionName(name);
+
+/** api.setViewOption args: [name, value]. The value's TYPE follows the name:
+ *  the four toggles take a boolean, "viewMode" takes one of the three mode
+ *  words — a mismatch is refused with the accepted list, never coerced. */
+export const vViewOptionSet: Validator = ([name, value]) => {
+  const named = checkViewOptionName(name);
+  if (named !== true) return named;
+  if (name === "viewMode") {
+    if (typeof value !== "string" || !SCRIPT_VIEW_MODES.has(value)) {
+      return `viewMode must be one of: ${[...SCRIPT_VIEW_MODES].join(", ")}`;
+    }
+    return true;
+  }
+  if (typeof value !== "boolean") return `${String(name)} takes a boolean value`;
+  return true;
+};
+
+/** Zoom bounds, in PERCENT — the unit the whole script surface speaks. Inside
+ *  Core's own factor clamp (0.1..5.0), so nothing here can be silently
+ *  re-clamped after validation. */
+export const ZOOM_PERCENT_MIN = 10;
+export const ZOOM_PERCENT_MAX = 400;
+
+/** api.setZoom args: [percent]. */
+export const vZoom: Validator = ([percent]) => {
+  if (!isFiniteNumber(percent) || percent < ZOOM_PERCENT_MIN || percent > ZOOM_PERCENT_MAX) {
+    return `percent must be a number between ${ZOOM_PERCENT_MIN} and ${ZOOM_PERCENT_MAX}`;
   }
   return true;
 };
@@ -2001,10 +3906,7 @@ function checkFormulaOptions(options: unknown): true | string {
   if (o.style !== undefined && (typeof o.style !== "string" || !FORMULA_REFERENCE_STYLES.has(o.style))) {
     return `options.style must be one of: ${[...FORMULA_REFERENCE_STYLES].join(", ")}`;
   }
-  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
-    return "options.sheetIndex must be a non-negative integer";
-  }
-  return true;
+  return checkOptionalSheetRef(o.sheetIndex, "options.sheetIndex");
 }
 
 /** api.getCellFormula / sheet.getCellFormula args: [row, col, options?]. */
@@ -2066,10 +3968,7 @@ export const vPasteRange: Validator = ([row, col, options]) => {
   if (o.skipBlanks !== undefined && typeof o.skipBlanks !== "boolean") {
     return "options.skipBlanks must be a boolean";
   }
-  if (o.sheetIndex !== undefined && !isCellCoord(o.sheetIndex)) {
-    return "options.sheetIndex must be a non-negative integer";
-  }
-  return true;
+  return checkOptionalSheetRef(o.sheetIndex, "options.sheetIndex");
 };
 
 // ============================================================================
@@ -2086,19 +3985,62 @@ export const vPasteRange: Validator = ([row, col, options]) => {
 // Sheet move / copy + split panes (G4)
 // ============================================================================
 
-/** api.moveSheet args: [fromIndex, toIndex]. */
-export const vMoveSheet: Validator = ([fromIndex, toIndex]) => {
-  if (!isCellCoord(fromIndex)) return "fromIndex must be a non-negative integer";
+/** api.moveSheet args: [fromSheet, toIndex]. `fromSheet` identifies a sheet
+ *  (index or name); `toIndex` is a POSITION in the tab bar, so it stays a
+ *  number — "move Sheet1 to 'Summary'" has no meaning. */
+export const vMoveSheet: Validator = ([fromSheet, toIndex]) => {
+  const ref = checkSheetRef(fromSheet, "fromSheet");
+  if (ref !== true) return ref;
   if (!isCellCoord(toIndex)) return "toIndex must be a non-negative integer";
   return true;
 };
 
-/** api.copySheet args: [sourceIndex, newName?]. Omitted name = the app's next
- *  default ("Sheet1 (2)"). */
-export const vCopySheet: Validator = ([sourceIndex, newName]) => {
-  if (!isCellCoord(sourceIndex)) return "sourceIndex must be a non-negative integer";
-  if (newName === undefined || newName === null) return true;
-  return checkSheetName(newName);
+/**
+ * The optional `{ before }` / `{ after }` position bag addSheet and copySheet
+ * accept (Wave 4 — VBA's Add Before:=/After:=). EXACTLY ONE anchor: naming
+ * both is rejected rather than one silently winning, and each anchor is an
+ * ordinary Wave-1 sheet ref (index or name), resolved host-side.
+ */
+function checkSheetPosition(position: unknown): true | string {
+  if (position === undefined || position === null) return true;
+  if (typeof position !== "object" || Array.isArray(position)) {
+    return "position must be an object like { before: \"Summary\" } or { after: 0 }";
+  }
+  const p = position as Record<string, unknown>;
+  const known = checkKnownKeys(p, ["before", "after"], "position option");
+  if (known !== true) return known;
+  const hasBefore = p.before !== undefined && p.before !== null;
+  const hasAfter = p.after !== undefined && p.after !== null;
+  if (hasBefore && hasAfter) {
+    return "position may name before OR after, not both";
+  }
+  if (hasBefore) return checkSheetRef(p.before, "position.before");
+  if (hasAfter) return checkSheetRef(p.after, "position.after");
+  return true;
+}
+
+/** api.addSheet args: [name?, position?]. Omitted name = the app's next
+ *  default ("Sheet3"); omitted position = appended at the end (the historical
+ *  contract). */
+export const vAddSheet: Validator = ([name, position]) => {
+  if (name !== undefined && name !== null) {
+    const named = checkSheetName(name);
+    if (named !== true) return named;
+  }
+  return checkSheetPosition(position);
+};
+
+/** api.copySheet args: [sourceSheet, newName?, position?]. `sourceSheet` is an
+ *  index or a name; omitted name = the app's next default ("Sheet1 (2)");
+ *  omitted position = immediately after the source (the historical contract). */
+export const vCopySheet: Validator = ([sourceSheet, newName, position]) => {
+  const ref = checkSheetRef(sourceSheet, "sourceSheet");
+  if (ref !== true) return ref;
+  if (newName !== undefined && newName !== null) {
+    const named = checkSheetName(newName);
+    if (named !== true) return named;
+  }
+  return checkSheetPosition(position);
 };
 
 /** api.splitPanes args: [splitRow, splitCol]. Same SHAPE as vFreeze, but a
@@ -2220,4 +4162,172 @@ export const vPrintPdf: Validator = ([suggestedName]) => {
   }
   if (!/\.pdf$/i.test(suggestedName)) return 'suggestedName must end in ".pdf"';
   return true;
+};
+
+// ============================================================================
+// Page setup + print layout (Wave 4, SHEETS cluster)
+// ============================================================================
+//
+// The whole family is ACTIVE-SHEET-ONLY like AutoFilter: every backend print
+// command acts on the active sheet, so the optional trailing sheet ref is a
+// flagged slot the host refuses unless it names the active sheet. The patch
+// vocabulary below mirrors the Rust `PageSetup` struct — minus printArea /
+// printTitles* / manual*Breaks, which have their OWN rows (setPrintArea,
+// addPageBreak, ...) and must not grow a second, competing spelling here.
+
+/** The PageSetup keys a script may patch, each with its accepted shape. */
+const PAGE_SETUP_PATCH_KEYS = [
+  "paperSize", "orientation",
+  "marginTop", "marginBottom", "marginLeft", "marginRight",
+  "marginHeader", "marginFooter",
+  "scale", "fitToWidth", "fitToHeight",
+  "printGridlines", "printHeadings",
+  "centerHorizontally", "centerVertically",
+  "header", "footer",
+] as const;
+
+const PAGE_SETUP_PAPER_SIZES: ReadonlySet<string> = new Set([
+  "letter", "a4", "a3", "legal", "tabloid",
+]);
+
+/** Header/footer template length cap ("&L&F&C&P of &N"-style strings). */
+const MAX_HEADER_FOOTER_CHARS = 512;
+
+/** One patch key's value check; null = OK. */
+function pageSetupValueError(key: string, v: unknown): string | null {
+  switch (key) {
+    case "paperSize":
+      return typeof v === "string" && PAGE_SETUP_PAPER_SIZES.has(v)
+        ? null
+        : `patch.paperSize must be one of: ${[...PAGE_SETUP_PAPER_SIZES].join(", ")}`;
+    case "orientation":
+      return v === "portrait" || v === "landscape"
+        ? null
+        : 'patch.orientation must be "portrait" or "landscape"';
+    case "marginTop": case "marginBottom": case "marginLeft": case "marginRight":
+    case "marginHeader": case "marginFooter":
+      return isFiniteNumber(v) && v >= 0 && v <= 10
+        ? null
+        : `patch.${key} must be a number of inches (0 to 10)`;
+    case "scale":
+      return isFiniteNumber(v) && Number.isInteger(v) && v >= 10 && v <= 400
+        ? null
+        : "patch.scale must be an integer percent (10 to 400)";
+    case "fitToWidth": case "fitToHeight":
+      return isFiniteNumber(v) && Number.isInteger(v) && v >= 0 && v <= 32_767
+        ? null
+        : `patch.${key} must be a non-negative integer page count (0 = off)`;
+    case "printGridlines": case "printHeadings":
+    case "centerHorizontally": case "centerVertically":
+      return typeof v === "boolean" ? null : `patch.${key} must be a boolean`;
+    case "header": case "footer":
+      return isBoundedString(v, MAX_HEADER_FOOTER_CHARS)
+        ? null
+        : `patch.${key} must be a string (max ${MAX_HEADER_FOOTER_CHARS} chars)`;
+    default:
+      return `unknown patch key "${key}"`;
+  }
+}
+
+/** api.setPageSetup args: [patch, sheet?]. PARTIAL on purpose — only the keys
+ *  present change, exactly like setRangeFormat. */
+export const vPageSetupPatch: Validator = ([patch, sheet]) => {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+    return "patch must be an object of page-setup properties";
+  }
+  const p = patch as Record<string, unknown>;
+  const known = checkKnownKeys(p, PAGE_SETUP_PATCH_KEYS, "page-setup property");
+  if (known !== true) return known;
+  const keys = Object.keys(p);
+  if (keys.length === 0) return "patch must name at least one page-setup property";
+  for (const key of keys) {
+    const err = pageSetupValueError(key, p[key]);
+    if (err !== null) return err;
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** api.setPrintArea args: [startRow, startCol, endRow, endCol, sheet?]. */
+export const vPrintArea: Validator = ([startRow, startCol, endRow, endCol, sheet]) => {
+  for (const [name, v] of [
+    ["startRow", startRow], ["startCol", startCol],
+    ["endRow", endRow], ["endCol", endCol],
+  ] as const) {
+    if (!isCellCoord(v)) return `${name} must be a non-negative integer`;
+  }
+  if ((endRow as number) < (startRow as number)) return "endRow must be >= startRow";
+  if ((endCol as number) < (startCol as number)) return "endCol must be >= startCol";
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** api.addPageBreak / api.removePageBreak args: [kind, index, sheet?]. A "row"
+ *  break sits ABOVE `index`; a "col" break sits LEFT of it — so index 0 has no
+ *  meaning for add (there is nothing above row 1), which the host refuses. */
+export const vPageBreak: Validator = ([kind, index, sheet]) => {
+  if (kind !== "row" && kind !== "col") return 'kind must be "row" or "col"';
+  if (!isCellCoord(index)) return "index must be a non-negative integer";
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+// ============================================================================
+// Outline grouping (Wave 4, SHEETS cluster) — over @api/groupingService
+// ============================================================================
+
+/** A group span may cover at most this many rows/columns. Not a security bound
+ *  — the backend stores one level per row — but a million-row group is a
+ *  mistake worth catching before the outline bar tries to draw it. */
+export const MAX_GROUP_SPAN = 1_048_576;
+
+/** api.groupRows / ungroupRows / groupColumns / ungroupColumns args:
+ *  [start, end, sheet?] (0-based, inclusive — the ribbon's own vocabulary). */
+export const vGroupSpan: Validator = ([start, end, sheet]) => {
+  if (!isCellCoord(start)) return "start must be a non-negative integer";
+  if (!isCellCoord(end)) return "end must be a non-negative integer";
+  if ((end as number) < (start as number)) return "end must be >= start";
+  if ((end as number) - (start as number) + 1 > MAX_GROUP_SPAN) {
+    return `group span too large (max ${MAX_GROUP_SPAN})`;
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** Excel's outline depth cap (8 levels, shown as buttons 1-8). */
+const MAX_OUTLINE_LEVEL = 8;
+
+/** api.showOutlineLevel args: [rowLevel | null, colLevel | null] — at least
+ *  one axis. Level 0 collapses everything; level N shows groups to depth N. */
+export const vOutlineLevel: Validator = ([rowLevel, colLevel, sheet]) => {
+  const rowGiven = rowLevel !== undefined && rowLevel !== null;
+  const colGiven = colLevel !== undefined && colLevel !== null;
+  if (!rowGiven && !colGiven) return "pass rowLevel, colLevel, or both";
+  for (const [name, given, v] of [
+    ["rowLevel", rowGiven, rowLevel],
+    ["colLevel", colGiven, colLevel],
+  ] as const) {
+    if (!given) continue;
+    if (!isFiniteNumber(v) || !Number.isInteger(v) || v < 0 || v > MAX_OUTLINE_LEVEL) {
+      return `${name} must be an integer between 0 and ${MAX_OUTLINE_LEVEL}, or null`;
+    }
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+// ============================================================================
+// cap.scheduleOnce (Wave 4) — the one-shot half of Application.OnTime
+// ============================================================================
+
+/** The one-shot delay floor, mirroring Rust MIN_ONCE_DELAY_SECS
+ *  (scripting/scheduler.rs) — pinned by a test, never imported across the
+ *  boundary. */
+export const MIN_ONCE_DELAY_SECS = 5;
+
+/** cap.scheduleOnce args: [atMs, handler, options?]. `atMs` is an absolute
+ *  epoch-millisecond time (the worker shim converts a Date). Whether it is
+ *  far enough in the FUTURE is the host's business (validators never read the
+ *  clock); the host floors the delay to MIN_ONCE_DELAY_SECS and refuses more
+ *  than a year out. */
+export const vScheduleOnce: Validator = ([atMs, handler, options]) => {
+  if (!isFiniteNumber(atMs) || atMs < 0) {
+    return "atMs must be an epoch-millisecond number (or pass a Date to schedule.once)";
+  }
+  return scheduleHandlerError(handler) ?? scheduleOptionsError(options) ?? true;
 };

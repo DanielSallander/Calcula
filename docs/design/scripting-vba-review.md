@@ -1,6 +1,7 @@
 # Scripting System Review — VBA Parity, Models & .calp Coverage
 
-**Date:** 2026-07-31 (review) · **Closing status: 2026-08-01, after Waves A–I (program closed)**
+**Date:** 2026-07-31 (review) · **Closing status: 2026-08-01, after Waves A–I (program closed)** ·
+**Idiom waves 1–4: 2026-08-04/05** (§7 items 26–29; wave 5 deferred, list under item 29)
 **Method:** 18-agent adversarial review. Eight readers enumerated every script surface from code
 (broker allowlist, QuickJS op registry, MCP tool list, capability vocabulary); five graders scored
 the combined surface against the Excel VBA object model; every claimed gap was then adversarially
@@ -90,6 +91,18 @@ siblings filtered correctly. Neither has a broker method. If you are auditing th
 question to ask is not "what can this code call" but **"what arrives in its inbox without it asking,
 and who decided to start it".**
 
+**2026-08-04/05 — the VBA-IDIOM waves (§7 items 26–29).** A 19-agent audit re-read the whole surface
+at SIGNATURE level — not "does a row exist" but "does it accept the argument forms a VBA user
+actually writes" — and found that the remaining gap was idioms, not features: **125 verified
+findings across 8 domains**, of which ~30 were already at or above parity, distilled into **46 work
+items across 5 waves; waves 1–4 (34 items) shipped 2026-08-04/05, wave 5 deferred** (list under
+item 29). The audit also found **four shipped-BEHAVIOR bugs** in code every status called green:
+`textRotation: 'rotate90'` was silently applied as None — the app's own FormatCells dialog was
+bitten; `onDataChange`'s rAF coalescing OVERWROTE pending batches, dropping edits under paste; the
+typings promised own-write echo suppression that only `range.onChange` actually had; and
+`workbook.onOpen` never fired for its own workbook's open, because scripts mount FROM `AFTER_OPEN`.
+The lesson is the fourteenth correction note in §8.
+
 ---
 
 ## 1. Verdict
@@ -141,10 +154,10 @@ The "now" column is the one to trust; each cell names the code that makes it tru
 | Security model | ✅ Beyond VBA | ✅ Beyond VBA | QuickJS wall-clock deadline + memory cap (`core/script-engine/src/limits.rs:118,173`). **16-capability** vocabulary (`capabilityIds.ts:192-209`, mirrored `core/persistence/src/lib.rs:1343` as a compile-time-sized `[&str; 16]` that is also `include_str!`-diffed against the TypeScript source). Wave G added `file.picker` and `ui.shortcut`; **Wave I added three**: `grid.read` (the host-PUSH capability — see the Add-in row), `distribution.publish` and `distribution.subscribe`. The engine also gained a real recursion ceiling: `MAX_LAMBDA_DEPTH = 256` at the single choke point every lambda call funnels through (`core/engine/src/evaluator.rs:474,6171`), measured against a 1 MiB thread rather than guessed, and the one nested-`Evaluator` site (`eval_3d_ref`) now inherits the depth instead of resetting the budget. **Wave K closed the last wedge:** the evaluator itself now carries a deterministic WORK budget plus a user-reachable cancellation (`core/engine/src/budget.rs`, `app/src-tauri/src/eval_budget.rs`), so a shallow exponential or a million-cell array formula becomes `#LIMIT!` in one cell instead of hanging the application — measured at under the noise floor of the benchmark machine (§8). **What did not hold, and had to be fixed:** a `.calp`'s custom-function library ran with no consent at all (§7.19-A) and a package's module script could be executed by a package-supplied button (§7.19-B). Both are closed and both are now the reason §0 carries a seventh audit instruction.
 | Transparency/audit | ✅ Beyond VBA | ✅ Beyond VBA | §6.2 drift closed: `scriptSurfaces.ts` now has a two-directional completeness guard against the allowlist (`scriptSurfaces.test.ts` "no surface understates"/"overstates"). Scheduled jobs are listed and cancellable per workbook. **The named residual is closed:** the interpreter's reach is now DERIVED — `core/script-engine/src/manifest.rs` boots a real QuickJS runtime, enumerates the registered surface, diffs it against `OP_MANIFEST` in both directions, and proves `model.*` throws without a provider; `api/codeInventory.ts` mirrors it and `api/__tests__/interpreterReachDrift.test.ts` reads the Rust source. It is also SHOWN: the "Code in This File" panel no longer prints "Grid-only" for a notebook that can be granted `bi.query`/`bi.sql` on request. **Wave H closed three more holes:** the three script-held states that had no reader (keybindings, private clipboards, the submission watch) are joined and *revocable* in the panel (`codeInventory.ts:1030` `getScriptHeldState`); add-in installs are audited machine-side (`extension_audit.rs`); and **imported libraries are now code units** (`codeInventory.ts`, surface `script-library`) — third-party code that no script's source contains, but whose bytes live in the workbook, was previously invisible to the one panel whose job is "what code is in this file". |
 | Event observation | ✅ Competitive+ | ✅ Competitive+ | Unchanged, plus sheet-collection and recalculation-completed events. |
-| Event interception | ❌ Missing | ✅ Competitive | `core/lib/lifecycleGuards.ts`: onBeforeSave/onBeforeClose reply with a verdict (3s deadline, default-ALLOW). Missing: onBeforeDoubleClick / onBeforeRightClick exist on no surface. |
+| Event interception | ❌ Missing | ✅ Competitive | `core/lib/lifecycleGuards.ts`: onBeforeSave/onBeforeClose reply with a verdict (3s deadline, default-ALLOW). The last missing pair — onBeforeDoubleClick / onBeforeRightClick — shipped in idiom Wave 4 (item 29), cancellable with a 1.5s default-ALLOW deadline. |
 | Range/sheet mutation | ❌ Weakest | ✅ Competitive | Formatting, bulk typed I/O, row/col insert+delete, sheet add/delete/rename/visibility, row height / column width, freeze panes, merge, `api.sortRange`, `api.findAll`/`replaceAll`. **Wave G closed the whole "missing" list:** `api.moveSheet`/`api.copySheet` (`allowlist.ts:158,160`), `api.splitPanes` (`:147`), six `api.autoFilter*` rows (`:186-198`) through the feature-neutral `@api/autoFilterService` seam, and `api.copyRange`/`api.pasteRange` (`:249,251`) over a **script-private** buffer. The OS clipboard is refused, not gated — see §6.6. **Nothing named here is still missing.** |
 | Application/environment | ❌ Weakest | ✅ Competitive | `ui.dialog` (alert/confirm/prompt/form); `schedule` replaces `Application.OnTime`. **Wave G closed the rest:** `api.workbookSave`/`SaveAs`/`IsDirty`/`FileName` (`allowlist.ts:274-280`) delegating to the SAME `core/lib/file-api` Ctrl+S calls, so the Before-Save veto, the `.xlsx` loss-report consent and the dirty/title broadcasts are the originals; `cap.shortcutBind/Unbind/List` for OnKey (`:529-544`); `cap.filePrintPdf` (`:492`); `cap.fileExportText`/`ImportText` (`:471,475`); and `api.evaluate`/`evaluateAll` as the WorksheetFunction bridge (`:216`, backed by the new `evaluate_formula_typed` command). **Deliberately absent, not deferred: workbook open/close/new** — Calcula holds one document, so each would replace or discard the workbook the user is looking at, and a picker click means "open this file", not "let this running script read it". Pinned by test. |
-| Object automation | ⚠️ Half | ✅ Competitive | `api.createChart/createTable/createPivot/createNamedRange`, matching `delete*`, `api.listObjects`. **Missing: pivot FIELD layout is still read-only from scripts** (`update_pivot_fields` exists backend-side; no broker row, no QuickJS op) — see §2.9. |
+| Object automation | ⚠️ Half | ✅ Competitive | `api.createChart/createTable/createPivot/createNamedRange`, matching `delete*`, `api.listObjects`. **Corrected 2026-08-05:** this cell said pivot FIELD layout was still read-only from scripts, contradicting §2.9's own closure — the five-list trap again (pivot layout is an `object.setState` ASPECT, so no allowlist row exists to grep). In truth pivot field layout (`pivot.addField`/`moveField`/`removeField`/`setAggregation`/`setLayout`, §2.9) AND data-level control (`setFilter`/`clearFilter`/`setItemVisibility`/`sortField`/`setNumberFormat`, idiom Wave 3, item 28) are script-reachable via `object.setState` aspects. |
 | Model automation | ✅ Category lead | ✅ Category lead | Plus `cap.biModelValidate`, `cap.biModelLineage`, `cap.biModelBatch` (one undo step), and the notebook `security_roles` leak closed (`bi/script_provider.rs:198-207` uses the same `sanitize_model_info` as the worker gateway). |
 | .calp/writeback automation | ❌ Zero | ✅ Competitive | `distribution.writeback` ships 7 methods (listRegions/getLayer/saveDraft/preview/submit/listSubmissions/review), Rust-enforced with an Ed25519 publisher gate, plus the poll-backed submission-received event. **Wave I closed the missing half: publish / pull / subscribe / refresh are now scriptable**, as TWO capabilities behind ONE Rust gateway (`scripting/distribution_gateway.rs`) — `distribution.publish` (outbound: your name on content other people run) and `distribution.subscribe` (inbound: other people's code in front of you), never one grant, because one consent sentence could then only describe the union. Four bounds make it grantable: **(1)** every `cap.pkg*` row is `tier: "unlocked"` while `calp::pull` forces every pulled object script to Restricted — so a package can never pull further packages or publish itself, structurally, and no prompt can grant it; **(2)** `require_configured_registry` (`:441`) refuses any location the user did not add, dev subscriptions excluded (`:409`); **(3)** `require_publish_identity` (`:486`) uses `load_existing`, never `load_or_create`, so a script can act as a publisher you already are but can never MINT the identity others TOFU-pin; **(4)** the gateway dispatches into the same `calp_*` commands the dialogs call, with a source-level guard that fails if it ever reimplements signature/TOFU/integrity/min_app_version. Eleven verbs are dispatchable and thirteen are refused as recorded decisions (detach, resetSubscription, the override family, devSubscribe/devRefresh, add/removeRegistry, the data-source family, exportPackageHtml).
 | Scheduling | ❌ Missing | ✅ Competitive | **The loop closes end to end as of 2026-08-01.** The `schedule` capability is Rust-authoritative (re-checked at registration and at every firing), jobs persist in the .cala against a source hash, local-script grants persist per workbook + script + source hash (§7.16) and are restored at mount BEFORE the mount spec is built (`host.ts:357`), and `grant_script_capability` now accepts `schedule` — it validates through `capability_store::is_grantable` instead of a private list that had drifted (§7.10). Pinned by a cross-language drift guard (`api/__tests__/crossLayerConstantDrift.test.ts` "capability grant mirror"). **Remaining: `has_scheduled_jobs()` warns only in the xlsx save-loss report; no headless runtime, which the consent string now says out loud.** |
@@ -225,7 +238,8 @@ Each now carries its closing status, re-checked against the code on 2026-08-01.
    fully reachable. Aspect-dispatched reach must be audited at `executeSetState`, not in ALLOWLIST.
 10. ~~**No cancellable Before\* lifecycle**~~ — **CLOSED.** `core/lib/lifecycleGuards.ts` is the choke
     point; save and close await a verdict (3s deadline, default-ALLOW, attributed cancellation
-    toast). Not extended to double-click/right-click, which exist as hooks on no surface.
+    toast). Extended to double-click/right-click in idiom Wave 4 (item 29): cancellable, 1.5s
+    default-ALLOW, so a hung script can never make the grid uneditable.
 11. ~~**No OnTime / persistent scheduler**~~ — **CLOSED (fully, 2026-08-01).** The `schedule`
     capability persists jobs in the workbook and re-checks the grant at every firing; a local
     script's "Always allow" grant persists per workbook + script + source hash and is restored at
@@ -1377,6 +1391,82 @@ this table are both wrong until someone re-derives from code.
 
 25. **Closing integration pass** — **SHIPPED 2026-08-01.** Findings and fixes in §7.18 below.
 
+26. **Idiom Wave 1 — the addressing foundation** — **SHIPPED 2026-08-04/05.** Sheet name-or-index is
+    accepted on EVERY sheet slot: one host resolver (`resolveSheetRefIn`: exact match, then unique
+    case-insensitive; a miss throws listing the real names) with a QuickJS twin
+    (`resolve_sheet_key`), and `setActiveSheet`'s silent no-op on an unknown name is now a throw.
+    `api.range('Sheet1!A1')` is a top-level entry that also resolves named ranges and table names.
+    `parseA1`'s sheet-prefix silent-drop was fixed in BOTH realms — it was writing to the wrong
+    sheet, not rejecting. Writes are typed (`string|number|boolean|null`, null clears) with
+    locale-safe invariant parsing — the audit found an sv-SE `'42.5'`→`425` corruption on the
+    off-sheet path and fixed it. The own-write echo guard was extended to `sheet.onDataChange` /
+    `cell.onEdit`; `workbook.onOpen` is replayed at mount (scripts mount FROM `AFTER_OPEN`, so it
+    otherwise never fires for its own open); coalescing now concatenates with a bound and a
+    `truncated` flag instead of overwriting batches; change payloads carry the A1 address. The live
+    E2E then caught what unit tests could not: a sheet name on `api.setCellValue` wrote the ACTIVE
+    sheet; off-sheet writes were silently dropped in a TOCTOU race with sheet switching (closed by
+    skip-retry through `writeOffSheetCellTyped`, which owns the writeback draft gate); and the toast
+    container swallowed grid clicks.
+
+27. **Idiom Wave 2 — grid eyes** — **SHIPPED 2026-08-04/05.** `api.getSelection` / `api.select` /
+    `api.scrollTo` are multi-area (the script emitters were DROPPING areas beyond the first), plus
+    `activeCell`. Ctrl+Arrow / used-range / current-region semantics live in ONE
+    `engine::navigation` implementation (`range_edge` / `current_region`) sitting behind the
+    keyboard, the Tauri commands, the QuickJS ops and the broker rows — keyboard and script can
+    never disagree. `api.getUsedRange` / `getCurrentRegion` / `getRangeEdge`; rich sheet handles
+    (rename/delete/move/copy/visibility/tabColor); `api.clearRange` with `contents|formats|all`; and
+    range algebra (`intersect` / `contains` / `boundingUnion`) implemented identically in TS and
+    Rust.
+
+28. **Idiom Wave 3 — the big walls** — **SHIPPED 2026-08-04/05.** `getRangeFormat` /
+    `getCellFormat` as the EXACT inverse of `setRangeFormat`, with a matrix test pinned to
+    `SCRIPT_FORMAT_KEYS` — the key list IS the contract. `borderOutline` / `borderInside*`
+    decompose to edges as a single undo step. Conditional formatting CRUD (`vCFSpec`); pivot DATA
+    aspects (`setFilter` / `clearFilter` / `setItemVisibility` / `sortField` / `setNumberFormat`)
+    via `object.setState`; data validation CRUD; hyperlinks CRUD (no Follow for external URLs —
+    deliberate); calc-mode control with restore-on-fault/unmount/swap (`manualCalcHolders`);
+    protection rows — `scriptsCanEdit` (UserInterfaceOnly) DEFERRED because it needs a
+    script-origin flag threaded through every Rust write gate, and the loud refusal names exactly
+    that; CSV parse/serialize (`@api/csvText` + QuickJS `ops/text.rs`, fixture-level parity);
+    `fillRange` with drag parity via the extracted `fillEngine.ts`; `autoFit` using real canvas
+    measurement + `autoFitContributors`; and cross-sheet STRUCTURAL ops — insert/delete/merge/
+    sort/find/replace/clear honour a sheet param through protection-on-the-TARGET-sheet, the
+    writeback claim guards, undo and recalc — killing the activate-mutate-activate-back idiom.
+
+29. **Idiom Wave 4 — breadth** — **SHIPPED 2026-08-04/05.** `setStatusBar` (live, restore-on-fault);
+    `beginBatch({deferRepaint})` — ScreenUpdating done right, never a stateful flag; `api.runMacro`
+    with a re-entrancy chain guard; `userName`; view options, zoom-percent (healing the QuickJS
+    factor-vs-percent split-brain) and panes read; named styles from scripts including rect apply;
+    theme colors + tint (`getThemePalette`); pattern/gradient fills; 11 table structure aspects + 3
+    reads (ListObject parity); `namedRange.update` as a one-undo rename; `chart.setGeometry` +
+    typed spec sugar routed through the Charts extension's single validator; notes + threaded
+    comments CRUD; page setup / print area / page breaks + an `onBeforePrint` lifecycle guard;
+    outline grouping via the `@api/groupingService` seam; `addSheet` / `copySheet` positioning;
+    `onSheetAdd` / `onSheetDelete` / `onSheetRename` hooks; cancellable `onBeforeDoubleClick` /
+    `onBeforeRightClick` (1.5s default-ALLOW — a hung script can never make the grid uneditable);
+    and `cap.scheduleOnce` (a persisted one-shot riding the existing `schedule` capability,
+    auto-removed after firing, server-audited) + `api.sleep`.
+    **Wave 5 stays DEFERRED**, and the list is written out so it cannot rot into an implied "done":
+    user-hidden row state, CenterAcrossSelection, shape creation, insert/delete CELLS with shift,
+    extended border styles, superscript/subscript, sparklines, scenarios rows, consolidate, and
+    long-tail sugar — plus `scriptsCanEdit` from item 28.
+
+**Sixteen sandbox exclusions were ADJUDICATED by the idiom audit, not skipped** — each is a
+recorded decision: `SendKeys` never (it is authority over the user's keyboard); `EnableEvents`
+as a flag stays deleted — echo suppression is structural, not a mutable global; `DisplayAlerts`
+moot; `CutCopyMode` moot; `Workbooks.Open/Close` excluded by the single-document policy;
+`PrintOut` → the PDF picker; `Environ` denied except the dedicated `userName` row; the OnKey
+combo-shape restriction stays; `Hyperlinks.Follow` for external URLs excluded; `WindowState` /
+`NewWindow` excluded; multi-sheet grouped select has no Calcula concept; QuickJS `sleep`
+excluded; `CheckSpelling` / Speech out of scope; the restricted-tier `locked` / `formulaHidden`
+refusal stays; and an extension's statusBar stays toast-only.
+
+**Evidence for items 26–29** (all run at wave close, 2026-08-05): `npx vitest run` **105,285
+passed across 690 files** · core `cargo test` **1,206** · `script-engine` **104** · app-lib
+**876** · script typings **39 interfaces / 712 members** (545 at wave start) · **11 E2E specs /
+51 tests all green against the live app**, including the per-wave idiom specs
+(`vba-idioms-wave1..4.spec.ts`) driven through real Monaco keystrokes.
+
 ### 7.17 Integration pass — what the wave reports got wrong
 
 Five stage reports were verified against the code rather than trusted. Four claims did not survive.
@@ -1839,6 +1929,34 @@ priced, not missed.
 ## 8. What is still open after nine waves
 
 The short, honest list. Everything here is verified absent as of 2026-08-02, not inferred.
+
+> **Fourteenth entry (2026-08-04/05, the VBA-idiom audit — recorded at the close of waves 1–4) —
+> the 2026-07-31 review verified FEATURES, and never once verified a SIGNATURE.**
+>
+> The 19-agent idiom audit (125 verified findings; §0, §7 items 26–29) established that a surface
+> can be "present" — row exists, tests green, scorecard cell ✅ — while rejecting the argument
+> forms a VBA user actually writes: `setActiveSheet(name)` was a silent no-op unless given an
+> index, `Range("Sheet1!A1")` had no top-level entry and `parseA1` silently DROPPED the sheet
+> prefix (writing the wrong sheet, which is worse than rejecting), and `rng.Value = 42` — a typed
+> write — did not exist, only strings. Every one of those surfaces was truthfully marked SHIPPED
+> by the standards of every prior wave. **Signature-level truth requires reading the validators,
+> not the row names** — a row name is a claim that an entry point exists; only its validator says
+> what a user may actually pass through it.
+>
+> The same audit found four shipped-BEHAVIOR bugs (§0: `textRotation` 'rotate90'→None,
+> coalescing overwrote batches, promised-but-absent echo suppression, `onOpen` never firing for
+> its own open), and none of them was findable by any of the five lists or by reading either side
+> alone. They were found only by COMPARING two artifacts that each looked correct: what the app
+> EMITS against what its own parsers ACCEPT (the FormatCells dialog emitted a rotation its own
+> format parser applied as None — the app was bitten by its own bug), and what the typings
+> PROMISE against what the forwarders DO (the `.d.ts` documented own-write echo suppression that
+> only `range.onChange` implemented).
+>
+> **The rule this adds.** A promise in the typings is a claim like any other, and it decays like
+> a claim of absence — nothing fails when it becomes false, because nothing executes a comment.
+> When auditing a surface, diff it against its own counterparties: emitter against parser,
+> typings against forwarder, validator against the sentence a VBA user would type. A status that
+> cites only one side of any of those pairs is not a status.
 
 > **Thirteenth entry (2026-08-06, the same session as the twelfth — the very next thing the user
 > hit) — "It should exit debug mode when stepping through all the lines, correct?" A macro that had
@@ -2759,8 +2877,10 @@ The short, honest list. Everything here is verified absent as of 2026-08-02, not
   wants a helper module behind a button. The sanctioned shape is an object script, which is why this
   is a documented limit rather than a defect; making modules consentable means adding them to the
   ScriptableObjects consent view, which is a change to a mature security flow.
-- **`onBeforeDoubleClick` / `onBeforeRightClick`** exist on no surface (§2.10) — re-verified absent
-  across all five lists (zero occurrences of either identifier anywhere in `app/` or `core/`).
+- ~~**`onBeforeDoubleClick` / `onBeforeRightClick`** exist on no surface (§2.10) — re-verified absent
+  across all five lists (zero occurrences of either identifier anywhere in `app/` or `core/`).~~ —
+  **CLOSED 2026-08-05 (idiom Wave 4, item 29).** Both ship cancellable with a 1.5s default-ALLOW
+  deadline, so a hung script can never make the grid uneditable.
 - **A UDF body still receives values, never a Range object.**
 - **Picker-mediated import caps size *after* the read.** There is no stat-before-read command, so a
   user who picks a 2 GB file causes a memory spike before the refusal. Only the user can trigger it
@@ -2867,7 +2987,8 @@ the code.
 3. **Cross-workbook work.** VBA's `Workbooks.Open` and a personal macro workbook make multi-file
    automation routine. Calcula holds one document and refuses `open`/`close`/`new` from a script;
    there is no personal macro library. §6.5.
-4. **Two event hooks.** `onBeforeDoubleClick` / `onBeforeRightClick` exist on no surface.
+4. ~~**Two event hooks.** `onBeforeDoubleClick` / `onBeforeRightClick` exist on no surface.~~
+   Closed by idiom Wave 4 (item 29): both ship cancellable, 1.5s default-ALLOW.
 5. **Range objects in UDFs.** A Calcula UDF receives values; a VBA UDF receives a `Range` and can ask
    it about addresses, formats and formulas.
 6. **Headless execution.** VBA can be driven by an external host with Excel invisible. Calcula's
@@ -2879,7 +3000,9 @@ filtering, modelling, scheduling, prompting, packaging, publishing and debugging
 better* on containment, transparency, audit, consent and distribution. It remains behind on
 everything that reaches **outside** the one open document: the machine, other workbooks, custom UI
 surfaces, and headless operation. Three of those four are refusals with reasons rather than gaps;
-custom UI surfaces are the one genuinely unfinished frontier.
+custom UI surfaces are the one genuinely unfinished frontier. The 2026-08-04/05 idiom waves (items
+26–29) then closed the SIGNATURE gap on top of the feature gap — what remains inside the document
+is the deferred wave-5 list under item 29 plus `scriptsCanEdit`, and nothing else.
 
 **And one closing note this program earned the hard way.** Nine waves in, the defect that mattered
 most was not a missing feature or a weak check — it was a payload kind nobody had listed. Every

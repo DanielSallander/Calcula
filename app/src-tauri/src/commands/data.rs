@@ -3375,6 +3375,179 @@ pub fn clear_range(
     Ok(count)
 }
 
+/// Clear-with-options on a NON-ACTIVE sheet (Wave 3 cross-sheet ops): the
+/// same guard chain as the active path — sheet protection, spill hosts,
+/// object-region protection and the writeback claim guard for content clears
+/// — re-anchored to the TARGET sheet, mutating `grids[target]`. Undo is one
+/// sheet-tagged "script_grid_cells" CustomRestore (exact cell restore, no
+/// recalc needed for the restored cells); subscriber overrides are recorded
+/// for the target sheet; dependents recalculate via
+/// `recalc_after_off_sheet_write`.
+pub(crate) fn clear_range_with_options_off_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: usize,
+    params: ClearRangeParams,
+) -> Result<ClearRangeResult, String> {
+    let min_row = params.start_row.min(params.end_row);
+    let max_row = params.start_row.max(params.end_row);
+    let min_col = params.start_col.min(params.end_col);
+    let max_col = params.start_col.max(params.end_col);
+    let apply_to = params.apply_to;
+
+    // Sheet protection applies to FORMAT clears too (see the active twin).
+    crate::protection::check_sheet_protection_range(
+        state, target, min_row, min_col, max_row, max_col,
+    )?;
+
+    if !matches!(apply_to, ClearApplyTo::Formats) {
+        {
+            let spill_hosts = state.spill_hosts.lock().unwrap();
+            check_spill_protection(&spill_hosts, target, min_row, min_col, max_row, max_col)?;
+        }
+        check_region_range_protection(state, target, min_row, min_col, max_row, max_col)?;
+        crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state, "clear this range", &[target], min_row, min_col, max_row, max_col,
+        )?;
+    }
+
+    let mut override_edits: Vec<(u32, u32, Option<engine::Cell>, Option<engine::Cell>)> = Vec::new();
+    let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
+
+    let count = {
+        let mut grids = state.grids.lock().unwrap();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        let grid = grids
+            .get_mut(target)
+            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+
+        let effective_end_row = max_row.min(grid.max_row);
+        let effective_end_col = max_col.min(grid.max_col);
+
+        let mut cells_in_range: Vec<(u32, u32)> = grid
+            .cells
+            .keys()
+            .filter(|(r, c)| {
+                *r >= min_row && *r <= effective_end_row && *c >= min_col && *c <= effective_end_col
+            })
+            .cloned()
+            .collect();
+
+        // Formats mode touches every position in the range, not just existing
+        // cells (count parity with the active twin; only existing cells are
+        // actually rewritten below).
+        if matches!(apply_to, ClearApplyTo::Formats) {
+            for r in min_row..=effective_end_row {
+                for c in min_col..=effective_end_col {
+                    if !cells_in_range.contains(&(r, c)) {
+                        cells_in_range.push((r, c));
+                    }
+                }
+            }
+        }
+
+        let count = cells_in_range.len() as u32;
+
+        for (row, col) in cells_in_range {
+            let previous_cell = grid.get_cell(row, col).cloned();
+            match apply_to {
+                ClearApplyTo::All | ClearApplyTo::ResetContents => {
+                    if previous_cell.is_some() {
+                        override_edits.push((row, col, previous_cell.clone(), None));
+                        previous_cells.push((row, col, previous_cell));
+                        grid.clear_cell(row, col);
+                    }
+                }
+                ClearApplyTo::Contents => {
+                    if let Some(ref cell) = previous_cell {
+                        let style_index = cell.style_index;
+                        let mut new_cell = engine::Cell::new();
+                        new_cell.style_index = style_index;
+                        override_edits.push((
+                            row,
+                            col,
+                            previous_cell.clone(),
+                            Some(new_cell.clone()),
+                        ));
+                        previous_cells.push((row, col, previous_cell.clone()));
+                        grid.set_cell(row, col, new_cell);
+                    }
+                }
+                ClearApplyTo::Formats => {
+                    if let Some(ref cell) = previous_cell {
+                        // Index 0 = INHERIT (falls back to row/column tier).
+                        let mut new_cell = cell.clone();
+                        new_cell.style_index = 0;
+                        previous_cells.push((row, col, previous_cell.clone()));
+                        grid.set_cell(row, col, new_cell);
+                    }
+                }
+                ClearApplyTo::Hyperlinks | ClearApplyTo::RemoveHyperlinks => {
+                    if let Some(ref cell) = previous_cell {
+                        if apply_to == ClearApplyTo::RemoveHyperlinks {
+                            let mut new_cell = cell.clone();
+                            new_cell.style_index = 0;
+                            previous_cells.push((row, col, previous_cell.clone()));
+                            grid.set_cell(row, col, new_cell);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !previous_cells.is_empty() {
+            let desc = match apply_to {
+                ClearApplyTo::All => "Clear all",
+                ClearApplyTo::Contents => "Clear contents",
+                ClearApplyTo::Formats => "Clear formats",
+                ClearApplyTo::Hyperlinks => "Clear hyperlinks",
+                ClearApplyTo::RemoveHyperlinks => "Remove hyperlinks",
+                ClearApplyTo::ResetContents => "Reset contents",
+            };
+            undo_stack.begin_transaction(format!(
+                "{} on sheet {} ({},{}) to ({},{})",
+                desc, target + 1, min_row, min_col, max_row, max_col
+            ));
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
+                desc,
+            );
+            undo_stack.commit_transaction();
+        }
+
+        count
+    };
+
+    // Subscriber overrides for the TARGET sheet (no-op when not subscribed).
+    crate::calp_commands::record_subscription_override_edits(state, target, &override_edits);
+
+    // Dependents (anywhere) of the cleared cells recalculate now.
+    if count > 0 && !matches!(apply_to, ClearApplyTo::Formats) {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &[target],
+        );
+    }
+
+    if count > 0 {
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    }
+
+    Ok(ClearRangeResult {
+        count,
+        updated_cells: Vec::new(),
+    })
+}
+
 /// Clear a range of cells with options for what to clear.
 /// Supports Excel-compatible ClearApplyTo options:
 /// - All: Clear both content and formatting (default)
@@ -3387,9 +3560,36 @@ pub fn clear_range(
 pub fn clear_range_with_options(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     params: ClearRangeParams,
 ) -> Result<ClearRangeResult, String> {
     let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Wave 3: an explicit non-active target takes the off-sheet path.
+    if let Some(target) = params.sheet_index {
+        if target != active_sheet {
+            let count = state.sheet_names.lock().unwrap().len();
+            if target >= count {
+                return Err(format!(
+                    "Sheet index {} out of range: workbook has {} sheet(s)",
+                    target, count
+                ));
+            }
+            return clear_range_with_options_off_sheet(
+                &state,
+                &file_state,
+                &user_files_state,
+                &pivot_state,
+                &pane_control_state,
+                &ribbon_filter_state,
+                target,
+                params,
+            );
+        }
+    }
 
     // Sheet protection applies to FORMAT clears too, unlike the region check
     // below — hence it sits outside that `if`. Excel defaults allowFormatCells
@@ -3447,6 +3647,7 @@ pub fn clear_range_with_options(
         end_row,
         end_col,
         apply_to,
+        sheet_index: _,
     } = params;
 
     // Normalize coordinates
@@ -3766,8 +3967,309 @@ pub fn clear_range_with_options(
 /// - Case sensitivity
 /// - Header row handling
 /// - Row or column orientation
+/// Sort a range on a NON-ACTIVE sheet (Wave 3 cross-sheet ops): the same
+/// guard chain as the active path (allowSort option + per-cell protection +
+/// spill + writeback claim + merged-cell refusal) re-anchored to the TARGET
+/// sheet, permuting `grids[target]`. Undo is one sheet-tagged
+/// "script_grid_cells" CustomRestore over the data range; relative formula
+/// references are shifted with the move exactly like the active path
+/// (BUG-0010 semantics), and dependents recalculate through
+/// `recalc_after_off_sheet_write`.
+pub(crate) fn sort_range_off_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: usize,
+    params: SortRangeParams,
+) -> Result<SortRangeResult, String> {
+    crate::protection::check_sheet_action(state, target, "sort", "sort")?;
+    crate::protection::check_sheet_protection_range(
+        state, target,
+        params.start_row.min(params.end_row), params.start_col.min(params.end_col),
+        params.start_row.max(params.end_row), params.start_col.max(params.end_col),
+    )?;
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        check_spill_protection(
+            &spill_hosts, target,
+            params.start_row, params.start_col,
+            params.end_row, params.end_col,
+        )?;
+    }
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        state, "sort this range", &[target],
+        params.start_row, params.start_col, params.end_row, params.end_col,
+    )?;
+
+    let SortRangeParams {
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+        fields,
+        match_case,
+        has_headers,
+        orientation,
+        sheet_index: _,
+    } = params;
+
+    if fields.is_empty() {
+        return Ok(SortRangeResult {
+            success: false,
+            sorted_count: 0,
+            updated_cells: vec![],
+            error: Some("At least one sort field is required".to_string()),
+        });
+    }
+
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    // Merged-cell refusal against the TARGET sheet's merge set.
+    let partial_merge = crate::report::with_sheet_merges(state, target, |merged| {
+        merged.iter().any(|region| {
+            let overlaps = region.start_row <= max_row
+                && region.end_row >= min_row
+                && region.start_col <= max_col
+                && region.end_col >= min_col;
+            let fully_inside = region.start_row >= min_row
+                && region.end_row <= max_row
+                && region.start_col >= min_col
+                && region.end_col <= max_col;
+            overlaps && !fully_inside
+        })
+    });
+    if partial_merge {
+        return Ok(SortRangeResult {
+            success: false,
+            sorted_count: 0,
+            updated_cells: vec![],
+            error: Some(
+                "Cannot sort a range that partially overlaps with merged cells".to_string(),
+            ),
+        });
+    }
+
+    let sorted_count = {
+        let mut grids = state.grids.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        let grid = grids
+            .get_mut(target)
+            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+
+        let color_sort = fields
+            .iter()
+            .any(|f| matches!(f.sort_on, SortOn::CellColor | SortOn::FontColor));
+
+        let sorted_count: u32;
+        let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
+
+        match orientation {
+            SortOrientation::Rows => {
+                let data_start_row = if has_headers { min_row + 1 } else { min_row };
+                if data_start_row > max_row {
+                    return Ok(SortRangeResult {
+                        success: true,
+                        sorted_count: 0,
+                        updated_cells: vec![],
+                        error: None,
+                    });
+                }
+
+                // Extract rows (with tier materialization for color sorts,
+                // same rule as the active path).
+                let mut rows: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+                for row in data_start_row..=max_row {
+                    let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
+                    for col in min_col..=max_col {
+                        let mut cell = grid.get_cell(row, col).cloned();
+                        if color_sort {
+                            if let Some(c) = cell.as_mut() {
+                                if c.style_index == 0 {
+                                    c.style_index = grid.effective_style_index(row, col);
+                                }
+                            }
+                        }
+                        row_data.push(cell);
+                    }
+                    rows.push((row, row_data));
+                }
+
+                rows.sort_by(|a, b| {
+                    compare_rows_by_fields(&a.1, &b.1, &fields, min_col, match_case, &styles)
+                });
+
+                // Capture the whole data range for undo BEFORE rewriting.
+                for row in data_start_row..=max_row {
+                    for col in min_col..=max_col {
+                        previous_cells.push((row, col, grid.get_cell(row, col).cloned()));
+                    }
+                }
+
+                sorted_count = rows.len() as u32;
+                for (new_row_idx, (original_row, row_data)) in rows.iter().enumerate() {
+                    let target_row = data_start_row + new_row_idx as u32;
+                    let row_delta = target_row as i32 - *original_row as i32;
+                    for (col_offset, cell_opt) in row_data.iter().enumerate() {
+                        let target_col = min_col + col_offset as u32;
+                        if let Some(cell) = cell_opt {
+                            let mut cell = cell.clone();
+                            if row_delta != 0 {
+                                if let Some(formula) = cell.formula_string() {
+                                    let shifted = crate::commands::structure::shift_formula_internal(
+                                        &formula, row_delta, 0,
+                                    );
+                                    cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                }
+                            }
+                            grid.set_cell(target_row, target_col, cell);
+                        } else {
+                            grid.clear_cell(target_row, target_col);
+                        }
+                    }
+                }
+            }
+            SortOrientation::Columns => {
+                let data_start_col = if has_headers { min_col + 1 } else { min_col };
+                if data_start_col > max_col {
+                    return Ok(SortRangeResult {
+                        success: true,
+                        sorted_count: 0,
+                        updated_cells: vec![],
+                        error: None,
+                    });
+                }
+
+                let mut cols: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+                for col in data_start_col..=max_col {
+                    let mut col_data: Vec<Option<engine::Cell>> = Vec::new();
+                    for row in min_row..=max_row {
+                        let mut cell = grid.get_cell(row, col).cloned();
+                        if color_sort {
+                            if let Some(c) = cell.as_mut() {
+                                if c.style_index == 0 {
+                                    c.style_index = grid.effective_style_index(row, col);
+                                }
+                            }
+                        }
+                        col_data.push(cell);
+                    }
+                    cols.push((col, col_data));
+                }
+
+                cols.sort_by(|a, b| {
+                    compare_cols_by_fields(&a.1, &b.1, &fields, min_row, match_case, &styles)
+                });
+
+                for row in min_row..=max_row {
+                    for col in data_start_col..=max_col {
+                        previous_cells.push((row, col, grid.get_cell(row, col).cloned()));
+                    }
+                }
+
+                sorted_count = cols.len() as u32;
+                for (new_col_idx, (original_col, col_data)) in cols.iter().enumerate() {
+                    let target_col = data_start_col + new_col_idx as u32;
+                    let col_delta = target_col as i32 - *original_col as i32;
+                    for (row_offset, cell_opt) in col_data.iter().enumerate() {
+                        let target_row = min_row + row_offset as u32;
+                        if let Some(cell) = cell_opt {
+                            let mut cell = cell.clone();
+                            if col_delta != 0 {
+                                if let Some(formula) = cell.formula_string() {
+                                    let shifted = crate::commands::structure::shift_formula_internal(
+                                        &formula, 0, col_delta,
+                                    );
+                                    cell.ast = parser::parse(&shifted).ok().map(Box::new);
+                                }
+                            }
+                            grid.set_cell(target_row, target_col, cell);
+                        } else {
+                            grid.clear_cell(target_row, target_col);
+                        }
+                    }
+                }
+            }
+        }
+
+        if sorted_count > 0 {
+            undo_stack.begin_transaction(format!(
+                "Sort range on sheet {} ({},{}) to ({},{})",
+                target + 1, min_row, min_col, max_row, max_col
+            ));
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
+                "Sort range",
+            );
+            undo_stack.commit_transaction();
+        }
+
+        sorted_count
+    };
+
+    // Moved formulas may feed (or be fed by) cells anywhere — recalculate.
+    if sorted_count > 0 {
+        crate::commands::data::recalc_after_off_sheet_write(
+            state,
+            user_files_state,
+            pivot_state,
+            pane_control_state,
+            ribbon_filter_state,
+            &[target],
+        );
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    }
+
+    Ok(SortRangeResult {
+        success: true,
+        sorted_count,
+        updated_cells: Vec::new(),
+        error: None,
+    })
+}
+
 #[tauri::command]
-pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> Result<SortRangeResult, String> {
+pub fn sort_range(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<'_, UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    params: SortRangeParams,
+) -> Result<SortRangeResult, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path.
+    {
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if let Some(target) = params.sheet_index {
+            if target != active_sheet {
+                let count = state.sheet_names.lock().unwrap().len();
+                if target >= count {
+                    return Err(format!(
+                        "Sheet index {} out of range: workbook has {} sheet(s)",
+                        target, count
+                    ));
+                }
+                return sort_range_off_sheet(
+                    &state,
+                    &file_state,
+                    &user_files_state,
+                    &pivot_state,
+                    &pane_control_state,
+                    &ribbon_filter_state,
+                    target,
+                    params,
+                );
+            }
+        }
+    }
     // Sheet protection, BOTH axes: the allowSort option must permit sorting at
     // all, and every cell in the range must be writable (a sort rewrites them).
     {
@@ -3824,6 +4326,7 @@ pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: 
         match_case,
         has_headers,
         orientation,
+        sheet_index: _,
     } = params;
 
     // Validate sort fields
@@ -4456,36 +4959,43 @@ pub fn get_cell_count(state: State<AppState>) -> usize {
     grid.cells.len()
 }
 
-/// Get the bounding box (used range) of all non-empty cells in the active sheet.
+/// Get the bounding box (used range) of all stored cells on a sheet.
+///
+/// `sheet_index` defaults to the active sheet (whose live grid is `state.grid`
+/// — `grids[active]` is stale). The algorithm is engine::navigation::used_range,
+/// shared with the QuickJS getUsedRange op.
 #[tauri::command]
-pub fn get_used_range(state: State<AppState>) -> UsedRangeResult {
-    let grid = state.grid.lock().unwrap();
-    if grid.cells.is_empty() {
-        return UsedRangeResult {
+pub fn get_used_range(
+    state: State<AppState>,
+    sheet_index: Option<usize>,
+) -> Result<UsedRangeResult, String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = sheet_index.unwrap_or(active_sheet);
+    let grids = state.grids.lock().unwrap();
+    let active_grid = state.grid.lock().unwrap();
+    let grid: &Grid = if target_sheet == active_sheet {
+        &active_grid
+    } else if target_sheet < grids.len() {
+        &grids[target_sheet]
+    } else {
+        return Err(format!("sheet index out of range: {}", target_sheet));
+    };
+    Ok(match engine::navigation::used_range(grid) {
+        Some((start_row, start_col, end_row, end_col)) => UsedRangeResult {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            empty: false,
+        },
+        None => UsedRangeResult {
             start_row: 0,
             start_col: 0,
             end_row: 0,
             end_col: 0,
             empty: true,
-        };
-    }
-    let mut min_row = u32::MAX;
-    let mut min_col = u32::MAX;
-    let mut max_row = 0u32;
-    let mut max_col = 0u32;
-    for &(row, col) in grid.cells.keys() {
-        if row < min_row { min_row = row; }
-        if col < min_col { min_col = col; }
-        if row > max_row { max_row = row; }
-        if col > max_col { max_col = col; }
-    }
-    UsedRangeResult {
-        start_row: min_row,
-        start_col: min_col,
-        end_row: max_row,
-        end_col: max_col,
-        empty: false,
-    }
+        },
+    })
 }
 
 /// Get all non-empty cells in a row range (sparse iteration).
@@ -4856,19 +5366,111 @@ pub fn remove_duplicates(
     }
 }
 
+/// Recalculate every sheet a cross-sheet write touched, plus the active sheet.
+///
+/// THE BUG THIS CLOSES (found live, vba-idioms-wave1.spec.ts): a script's
+/// off-sheet write went through `update_cell_on_sheets`, which stored the cell
+/// and returned — no dependency propagation at all. A formula NEXT TO the
+/// written cell (`=R61*2` beside a `range("Sheet1!R61").setValue(42)`) kept its
+/// stale value indefinitely, because that command was built for sheet-grouping
+/// replication and nothing downstream ever recalculated. The QuickJS script
+/// surface already solved this (scripting/commands.rs): evaluate each written
+/// sheet, then the active sheet, TWICE — the second pass propagates one more
+/// cross-sheet hop. Same pattern here, shared by the write command below and
+/// the `recalculate_sheets_after_script_write` command the bulk path calls once
+/// after its per-cell writes.
+///
+/// Callers must hold NO AppState locks — `recalculate_sheet_values` takes its
+/// own.
+pub(crate) fn recalc_after_off_sheet_write(
+    state: &AppState,
+    user_files_state: &UserFilesState,
+    pivot_state: &crate::pivot::PivotState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    sheet_indices: &[usize],
+) {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    for _pass in 0..2 {
+        for &idx in sheet_indices {
+            if idx == active_sheet {
+                continue;
+            }
+            crate::calculation::recalculate_sheet_values(
+                state,
+                user_files_state,
+                pivot_state,
+                idx,
+                Some((pane_control_state, ribbon_filter_state)),
+            );
+        }
+        crate::calculation::recalculate_sheet_values(
+            state,
+            user_files_state,
+            pivot_state,
+            active_sheet,
+            Some((pane_control_state, ribbon_filter_state)),
+        );
+    }
+}
+
+/// The recalc half of `update_cell_on_sheets`, callable on its own: the script
+/// host's BULK off-sheet write loops `update_cell_on_sheets` per cell with
+/// `recalc: false` (a full sheet evaluation per cell would be quadratic), then
+/// invokes this ONCE for the whole block.
+#[tauri::command]
+pub fn recalculate_sheets_after_script_write(
+    state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    sheet_indices: Vec<usize>,
+) -> Result<(), String> {
+    recalc_after_off_sheet_write(
+        &state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &sheet_indices,
+    );
+    Ok(())
+}
+
 /// Replicate a cell value update to multiple non-active sheets.
-/// Used for sheet grouping: when the user has multiple sheets selected,
-/// a value entered on the active sheet is replicated to grouped sheets.
+/// Used for sheet grouping (a value entered on the active sheet is replicated
+/// to grouped sheets) AND as the script host's off-sheet single-cell write.
 /// Handles literals directly and formulas by evaluating in each sheet's context.
+///
+/// After the write, dependent formulas are recalculated (written sheets + the
+/// active sheet — see `recalc_after_off_sheet_write`) unless `recalc` is
+/// `Some(false)`, which the bulk script path uses to batch one recalc per block.
+///
+/// RETURNS THE SHEETS IT ACTUALLY WROTE. The ACTIVE sheet is skipped: for the
+/// sheet-GROUPING caller that is correct (the active sheet was already written
+/// by `update_cell`), but a SCRIPT's off-sheet write has no such prior write —
+/// so a skip there silently DROPS the value. That is not hypothetical: the
+/// script host decides "this is off-sheet" from a `get_sheets` snapshot, and if
+/// the active sheet changes before this command runs (a macro writing sheet A
+/// while the user — or the macro itself — switches to sheet A) the write
+/// vanished with no error anywhere. Caught live by vba-idioms-wave1.spec.ts.
+/// Reporting the skip lets the host re-issue it through the active-sheet path
+/// instead of losing it.
 #[tauri::command]
 pub fn update_cell_on_sheets(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     sheet_indices: Vec<usize>,
     row: u32,
     col: u32,
     value: String,
-) -> Result<(), String> {
+    invariant: Option<bool>,
+    recalc: Option<bool>,
+) -> Result<Vec<usize>, String> {
     let _pass = crate::eval_budget::begin_pass(
         crate::eval_budget::EvalSurface::Interactive,
         &state.calc_cancel,
@@ -4897,80 +5499,117 @@ pub fn update_cell_on_sheets(
         col,
     )?;
 
-    let locale = state.locale.lock().unwrap();
-    let user_files = user_files_state.files.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
-    let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut undo_stack = state.undo_stack.lock().unwrap();
+    // Every AppState lock is scoped to this block: `recalc_after_off_sheet_write`
+    // below takes its own locks and would deadlock against these.
+    let wrote: Vec<usize> = {
+        let locale = state.locale.lock().unwrap();
+        let user_files = user_files_state.files.lock().unwrap();
+        let sheet_names = state.sheet_names.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        let mut wrote: Vec<usize> = Vec::new();
 
-    // Handle empty value - clear the cell on each target sheet
-    if value.trim().is_empty() {
-        for &sheet_idx in &sheet_indices {
-            if sheet_idx == active_sheet || sheet_idx >= grids.len() {
-                continue;
+        // Handle empty value - clear the cell on each target sheet. A clear
+        // changes dependents exactly like a write, so it falls through to the
+        // same recalc below instead of returning early.
+        if value.trim().is_empty() {
+            for &sheet_idx in &sheet_indices {
+                if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+                    continue;
+                }
+                let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
+                if previous_cell.is_some() {
+                    undo_stack.begin_transaction(format!("Clear cell on sheet {}", sheet_idx));
+                    undo_stack.record_cell_change(row, col, previous_cell);
+                    grids[sheet_idx].clear_cell(row, col);
+                    undo_stack.commit_transaction();
+                }
+                // A clear of an already-empty cell is still "handled": the
+                // caller asked for empty and empty is what the sheet holds, so
+                // it must NOT be reported as skipped (that would make the host
+                // re-issue it against the active sheet).
+                wrote.push(sheet_idx);
             }
-            let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
-            if previous_cell.is_some() {
-                undo_stack.begin_transaction(format!("Clear cell on sheet {}", sheet_idx));
+            wrote
+        } else {
+            // Parse the input (same logic as update_cell). When invariant=true the
+            // value is a script's TYPED write in canonical US form ("42.5", "TRUE");
+            // delocalizing it against the workbook locale would corrupt it (sv-SE
+            // reads "42.5" as 425), so it takes the invariant parse — the same split
+            // update_cells_batch makes.
+            let cell_template = if invariant.unwrap_or(false) {
+                parse_cell_input_invariant(&value, &locale)
+            } else {
+                parse_cell_input(&value, &locale)
+            };
+            let is_formula = cell_template.has_formula();
+
+            // If formula, parse and convert the AST once for reuse across sheets
+            let engine_ast = if let Some(formula) = cell_template.formula_string() {
+                match parser::parse(&formula) {
+                    Ok(parser_ast) => Some(crate::convert_expr(&parser_ast)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
+            for &sheet_idx in &sheet_indices {
+                if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+                    continue;
+                }
+
+                undo_stack.begin_transaction(format!("Update cell on sheet {}", sheet_idx));
+                let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
+
+                let mut cell = cell_template.clone();
+
+                // Preserve existing style from target sheet
+                if let Some(existing) = grids[sheet_idx].get_cell(row, col) {
+                    cell.style_index = existing.style_index;
+                }
+
+                // If formula, evaluate in the context of the target sheet
+                if is_formula {
+                    if let Some(ref ast) = engine_ast {
+                        let result_value = crate::evaluate_formula_multi_sheet_with_ast_and_files(
+                            &grids,
+                            &sheet_names,
+                            sheet_idx,
+                            ast,
+                            &user_files,
+                        );
+                        cell.value = result_value;
+                        cell.ast = Some(Box::new(ast.clone()));
+                    }
+                }
+
+                grids[sheet_idx].set_cell(row, col, cell);
                 undo_stack.record_cell_change(row, col, previous_cell);
-                grids[sheet_idx].clear_cell(row, col);
                 undo_stack.commit_transaction();
+                wrote.push(sheet_idx);
             }
+            wrote
         }
-        return Ok(());
-    }
-
-    // Parse the input (same logic as update_cell)
-    let cell_template = parse_cell_input(&value, &locale);
-    let is_formula = cell_template.has_formula();
-
-    // If formula, parse and convert the AST once for reuse across sheets
-    let engine_ast = if let Some(formula) = cell_template.formula_string() {
-        match parser::parse(&formula) {
-            Ok(parser_ast) => Some(crate::convert_expr(&parser_ast)),
-            Err(_) => None,
-        }
-    } else {
-        None
     };
 
-    for &sheet_idx in &sheet_indices {
-        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
-            continue;
-        }
-
-        undo_stack.begin_transaction(format!("Update cell on sheet {}", sheet_idx));
-        let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
-
-        let mut cell = cell_template.clone();
-
-        // Preserve existing style from target sheet
-        if let Some(existing) = grids[sheet_idx].get_cell(row, col) {
-            cell.style_index = existing.style_index;
-        }
-
-        // If formula, evaluate in the context of the target sheet
-        if is_formula {
-            if let Some(ref ast) = engine_ast {
-                let result_value = crate::evaluate_formula_multi_sheet_with_ast_and_files(
-                    &grids,
-                    &sheet_names,
-                    sheet_idx,
-                    ast,
-                    &user_files,
-                );
-                cell.value = result_value;
-                cell.ast = Some(Box::new(ast.clone()));
-            }
-        }
-
-        grids[sheet_idx].set_cell(row, col, cell);
-        undo_stack.record_cell_change(row, col, previous_cell);
-        undo_stack.commit_transaction();
+    // Dependent formulas — the neighbouring `=R61*2`, an active-sheet
+    // `=Sheet2!A1`, a chain across sheets — recalculate now, exactly as the
+    // QuickJS script surface does after ITS off-sheet writes. `recalc: false`
+    // is the bulk path's opt-out (it batches one recalc per block).
+    if !wrote.is_empty() && recalc.unwrap_or(true) {
+        recalc_after_off_sheet_write(
+            &state,
+            &user_files_state,
+            &pivot_state,
+            &pane_control_state,
+            &ribbon_filter_state,
+            &sheet_indices,
+        );
     }
 
-    Ok(())
+    Ok(wrote)
 }
 
 /// Clear a range of cells on multiple non-active sheets.

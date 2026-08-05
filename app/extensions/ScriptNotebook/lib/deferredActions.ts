@@ -36,8 +36,12 @@ export interface DeferredActionHost {
   getActiveSheetIndex(): number;
   /** Bring a sheet to the front (used before a cross-sheet goto). */
   activateSheet(sheetIndex: number): Promise<void>;
-  /** Scroll to a cell, optionally selecting it. */
-  gotoCell(row: number, col: number, select: boolean): void;
+  /**
+   * Scroll to a cell, optionally selecting it. `endRow`/`endCol` are the
+   * inclusive end of the selection (equal to `row`/`col` for a single cell);
+   * the viewport always scrolls to the range's top-left.
+   */
+  gotoCell(row: number, col: number, select: boolean, endRow: number, endCol: number): void;
   /** Full workbook recalculation (Excel: Application.Calculate). */
   recalculate(): Promise<void>;
   /** Status bar message; null resets it to the default text. */
@@ -49,9 +53,21 @@ export interface DeferredActionHost {
   setDisplayZeros(value: boolean): void;
   setDisplayGridlines(value: boolean): void;
   setDisplayHeadings(value: boolean): void;
+  /** Formula view (Ctrl+`): show formula text instead of computed values. */
+  setDisplayFormulas(value: boolean): void;
   fillDown(startRow: number, startCol: number, endRow: number, endCol: number): Promise<void>;
   fillRight(startRow: number, startCol: number, endRow: number, endCol: number): Promise<void>;
-  applyNamedStyle(name: string, row: number, col: number): Promise<void>;
+  /**
+   * Apply a named style to the single cell (row, col), or — when endRow/endCol
+   * are given — to the inclusive rect, as ONE undo step.
+   */
+  applyNamedStyle(
+    name: string,
+    row: number,
+    col: number,
+    endRow?: number,
+    endCol?: number,
+  ): Promise<void>;
   /** A1-style range restriction, or null to clear it. */
   setScrollArea(area: string | null): Promise<void>;
   setIterationSettings(
@@ -91,10 +107,14 @@ function asSheetVisibility(visibility: string): SheetVisibilityName | null {
     : null;
 }
 
-/** Scripts express zoom as a factor (1.0 = 100%); the host wants a percentage. */
-export function zoomFactorToPercent(factor: number): number {
-  return factor * 100;
-}
+/**
+ * The zoom bounds the script surface promises, in REAL percent. Wave 4 healed
+ * the old factor form (`SetZoom.percent` used to carry 1.0 for 100%): the wire
+ * now carries the percent itself, validated to this range engine-side; this is
+ * the host's belt-and-braces re-check.
+ */
+export const ZOOM_PERCENT_MIN = 10;
+export const ZOOM_PERCENT_MAX = 400;
 
 // ============================================================================
 // Dispatch
@@ -111,11 +131,29 @@ async function applyDeferredAction(
   switch (action.action) {
     case "goto": {
       if (!isCellCoord(action.row) || !isCellCoord(action.col)) return false;
+      // endRow/endCol extend the target to a range (A1-form goto). Null means
+      // a single cell; a half-set or inverted pair is a malformed payload.
+      let endRow = action.row;
+      let endCol = action.col;
+      if (action.endRow !== null || action.endCol !== null) {
+        if (
+          action.endRow === null ||
+          action.endCol === null ||
+          !isCellCoord(action.endRow) ||
+          !isCellCoord(action.endCol) ||
+          action.endRow < action.row ||
+          action.endCol < action.col
+        ) {
+          return false;
+        }
+        endRow = action.endRow;
+        endCol = action.endCol;
+      }
       // sheetIndex is NaN when the script did not name a sheet — stay put.
       if (isSheetIndex(action.sheetIndex) && action.sheetIndex !== host.getActiveSheetIndex()) {
         await host.activateSheet(action.sheetIndex);
       }
-      host.gotoCell(action.row, action.col, action.select);
+      host.gotoCell(action.row, action.col, action.select, endRow, endCol);
       return true;
     }
 
@@ -149,6 +187,10 @@ async function applyDeferredAction(
       host.setDisplayHeadings(action.value);
       return true;
 
+    case "setDisplayFormulas":
+      host.setDisplayFormulas(action.value);
+      return true;
+
     case "setViewMode": {
       const mode = asViewMode(action.mode);
       if (!mode) return false;
@@ -157,8 +199,12 @@ async function applyDeferredAction(
     }
 
     case "setZoom": {
-      if (!(action.percent > 0)) return false;
-      host.setZoomPercent(zoomFactorToPercent(action.percent));
+      // A REAL percent, passed through verbatim (the engine already validated
+      // the range; re-check here so a hand-crafted payload cannot sneak past).
+      if (!(action.percent >= ZOOM_PERCENT_MIN && action.percent <= ZOOM_PERCENT_MAX)) {
+        return false;
+      }
+      host.setZoomPercent(action.percent);
       return true;
     }
 
@@ -197,6 +243,20 @@ async function applyDeferredAction(
 
     case "applyNamedStyle": {
       if (!action.name || !isCellCoord(action.row) || !isCellCoord(action.col)) return false;
+      // endRow/endCol widen the target to an inclusive rect. Same half-set
+      // rule as goto: both or neither.
+      if (action.endRow !== null || action.endCol !== null) {
+        if (
+          action.endRow === null ||
+          action.endCol === null ||
+          !isCellCoord(action.endRow) ||
+          !isCellCoord(action.endCol)
+        ) {
+          return false;
+        }
+        await host.applyNamedStyle(action.name, action.row, action.col, action.endRow, action.endCol);
+        return true;
+      }
       await host.applyNamedStyle(action.name, action.row, action.col);
       return true;
     }

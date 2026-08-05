@@ -241,6 +241,11 @@ function activate(context: ExtensionContext): void {
   // structural UNDO carries no updated cells, so the cellEvents path above
   // never fires for it — hence STRUCTURAL_UNDO here.
   //
+  // DATA_CHANGED is the announce non-dialog writers make for NON-cell document
+  // state (script api.setDataValidation, paste-special of validation, the
+  // hyperlink dialog's convention): no cell value moved, so the cellEvents
+  // path stays silent, yet the rule set this extension caches just changed.
+  //
   // Any open dropdown or prompt is anchored to a pre-shift cell, so close it.
   const onValidationStale = () => {
     hideOverlay(DROPDOWN_OVERLAY_ID);
@@ -250,6 +255,7 @@ function activate(context: ExtensionContext): void {
     refreshValidationState();
   };
   for (const evt of [
+    AppEvents.DATA_CHANGED,
     AppEvents.ROWS_INSERTED,
     AppEvents.COLUMNS_INSERTED,
     AppEvents.ROWS_DELETED,

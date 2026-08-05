@@ -54,6 +54,9 @@ export type {
   // Sorting
   SortRangeResult,
 
+  // Used range (bounding box of stored cells)
+  UsedRangeResult,
+
   // Computed Properties
   ComputedPropertyTargetType,
   ComputedPropertyData,

@@ -4,10 +4,11 @@
 //! list, create, and manage both cell bookmarks and view bookmarks.
 //! Mutations are queued and applied on the frontend after execution.
 
-use rquickjs::{Function, Object};
+use rquickjs::{Ctx, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ops::resolve_opt_sheet_key;
 use crate::types::{BookmarkMutation, ScriptContext};
 
 /// Register bookmark operations on a `Calcula.bookmarks` sub-object.
@@ -32,29 +33,29 @@ pub fn register_bookmark_ops<'js>(
             .map_err(|e| format!("Failed to set listCellBookmarks: {}", e))?;
     }
 
-    // addCellBookmark(row, col, sheetIndex?, label?, color?) -> void
+    // addCellBookmark(row, col, sheet?, label?, color?) -> void
+    // `sheet` is a 0-based index or a sheet name; a miss THROWS (ops/mod.rs).
     {
         let sc = shared_ctx.clone();
         let func = Function::new(
             ctx.clone(),
-            move |row: u32,
+            move |ctx: Ctx<'js>,
+                  row: u32,
                   col: u32,
-                  sheet_index: rquickjs::function::Opt<i32>,
+                  sheet: rquickjs::function::Opt<Value<'js>>,
                   label: rquickjs::function::Opt<String>,
-                  color: rquickjs::function::Opt<String>| {
-                let ctx = sc.borrow();
-                let si = if let Some(idx) = sheet_index.0 {
-                    if idx < 0 { ctx.active_sheet } else { idx as usize }
-                } else {
-                    ctx.active_sheet
-                };
-                ctx.bookmark_mutations.borrow_mut().push(BookmarkMutation::AddCellBookmark {
+                  color: rquickjs::function::Opt<String>|
+                  -> rquickjs::Result<()> {
+                let ctx_ref = sc.borrow();
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
+                ctx_ref.bookmark_mutations.borrow_mut().push(BookmarkMutation::AddCellBookmark {
                     row,
                     col,
                     sheet_index: si,
                     label: label.0,
                     color: color.0,
                 });
+                Ok(())
             },
         )
         .map_err(|e| format!("Failed to create addCellBookmark: {}", e))?;
@@ -63,23 +64,25 @@ pub fn register_bookmark_ops<'js>(
             .map_err(|e| format!("Failed to set addCellBookmark: {}", e))?;
     }
 
-    // removeCellBookmark(row, col, sheetIndex?) -> void
+    // removeCellBookmark(row, col, sheet?) -> void
+    // `sheet` is a 0-based index or a sheet name; a miss THROWS (ops/mod.rs).
     {
         let sc = shared_ctx.clone();
         let func = Function::new(
             ctx.clone(),
-            move |row: u32, col: u32, sheet_index: rquickjs::function::Opt<i32>| {
-                let ctx = sc.borrow();
-                let si = if let Some(idx) = sheet_index.0 {
-                    if idx < 0 { ctx.active_sheet } else { idx as usize }
-                } else {
-                    ctx.active_sheet
-                };
-                ctx.bookmark_mutations.borrow_mut().push(BookmarkMutation::RemoveCellBookmark {
+            move |ctx: Ctx<'js>,
+                  row: u32,
+                  col: u32,
+                  sheet: rquickjs::function::Opt<Value<'js>>|
+                  -> rquickjs::Result<()> {
+                let ctx_ref = sc.borrow();
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
+                ctx_ref.bookmark_mutations.borrow_mut().push(BookmarkMutation::RemoveCellBookmark {
                     row,
                     col,
                     sheet_index: si,
                 });
+                Ok(())
             },
         )
         .map_err(|e| format!("Failed to create removeCellBookmark: {}", e))?;

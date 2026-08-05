@@ -236,16 +236,16 @@ const SERVER_AUDITED_METHODS: ReadonlyMap<string, string> = new Map([
   ["cap.pkgNextVersion", "script_distribution"],
   ["cap.pkgPublish", "script_distribution"],
   ["cap.pkgPublishModel", "script_distribution"],
-  // script_scheduler records the two REGISTRATION ops on both outcomes.
+  // script_scheduler records the three REGISTRATION ops on both outcomes.
   ["cap.scheduleEvery", "script_scheduler (every)"],
   ["cap.scheduleAt", "script_scheduler (at)"],
-  // KNOWN GAP, deliberately taken: script_scheduler's "cancel" arm records only
-  // when a job was actually removed. A cancel naming a job that does not exist
-  // (or one the caller does not own) therefore goes unrecorded now that the
-  // broker defers to it. That is a no-op with no reach behind it; the alternative
-  // — leaving this out — double-records every REAL cancellation, which corrupts
-  // the trail that matters. The Rust `else` arm is requested separately.
-  ["cap.scheduleCancel", "script_scheduler (cancel; records only on removed=true)"],
+  ["cap.scheduleOnce", "script_scheduler (once)"],
+  // The "cancel" arm records UNCONDITIONALLY (the former records-only-on-removed
+  // gap is closed in Rust): a cancel naming a missing job, or another script's
+  // job, is audited as a refusal — exactly the probing shape a trail exists to
+  // show — while the broker still skips its own write to avoid double-recording
+  // the real cancellations.
+  ["cap.scheduleCancel", "script_scheduler (cancel; both outcomes)"],
 ]);
 
 /**

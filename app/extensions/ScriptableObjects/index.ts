@@ -238,7 +238,7 @@ function computePackageCapabilities(
  * via a persisted consent in the workbook (keyed by script source hash, so
  * upstream script changes re-prompt).
  */
-async function loadAndMountScripts(): Promise<void> {
+async function loadAndMountScripts(cause?: "open"): Promise<void> {
   // Honor the global Script Security setting: object scripts (button/shape/
   // slicer behaviors) are user-authored code, so a "disabled" — or an
   // unconfirmed "prompt" — setting must keep them inert. This is the primary
@@ -266,7 +266,7 @@ async function loadAndMountScripts(): Promise<void> {
   const mountFailures: string[] = [];
   for (const script of localScripts) {
     try {
-      await ObjectScriptManager.mountScript(script.id);
+      await ObjectScriptManager.mountScript(script.id, { cause });
     } catch (e) {
       mountFailures.push(
         `${script.name}: ${e instanceof Error ? e.message : String(e)}`,
@@ -320,7 +320,7 @@ async function loadAndMountScripts(): Promise<void> {
           const declared = parseDeclaredCapabilities(script.source);
           await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
           try {
-            await ObjectScriptManager.mountScript(script.id);
+            await ObjectScriptManager.mountScript(script.id, { cause });
           } catch (e) {
             // Keep mounting the package's other scripts; the failure is already
             // travelling as `objectscript:error` -> toast.
@@ -585,8 +585,12 @@ async function activate(context: ExtensionContext): Promise<void> {
   );
 
   // ---- Load object scripts from backend on startup ----
+  // The startup load IS a workbook open (the app just loaded whatever workbook
+  // it starts with — including a .cala launched by double-click), so it carries
+  // the same "open" cause as the AFTER_OPEN reload below: a workbook.onOpen
+  // hook fires for the open that mounted it, however the workbook arrived.
   try {
-    await loadAndMountScripts();
+    await loadAndMountScripts("open");
   } catch (e) {
     console.warn("[ScriptableObjects] Failed to load object scripts:", e);
   }
@@ -602,7 +606,9 @@ async function activate(context: ExtensionContext): Promise<void> {
       consentQueue.length = 0; // queued prompts belong to the previous workbook
       capabilityQueue.length = 0; // pending JIT prompts belong to the previous workbook
       try {
-        await loadAndMountScripts();
+        // cause "open": these mounts happen FROM the AFTER_OPEN handler, after
+        // the broadcast — the host replays the one onOpen delivery they missed.
+        await loadAndMountScripts("open");
       } catch (e) {
         console.warn("[ScriptableObjects] Failed to reload object scripts:", e);
       }

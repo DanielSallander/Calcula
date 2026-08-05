@@ -345,6 +345,35 @@ export function resizeChart(
 }
 
 /**
+ * Patch a chart's placement — position, size, display name and/or sheet
+ * (Wave 4 script geometry). Only the keys PRESENT in the patch change; the
+ * same fields the drag handles mutate, persisted through the same debounced
+ * save. Returns the updated definition, or null when no chart has that id.
+ */
+export function updateChartPlacement(
+  chartId: string,
+  placement: {
+    name?: string;
+    sheetIndex?: number;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  },
+): ChartDefinition | null {
+  const chart = charts.find((c) => c.chartId === chartId);
+  if (!chart) return null;
+  if (placement.name !== undefined) chart.name = placement.name;
+  if (placement.sheetIndex !== undefined) chart.sheetIndex = placement.sheetIndex;
+  if (placement.x !== undefined) chart.x = placement.x;
+  if (placement.y !== undefined) chart.y = placement.y;
+  if (placement.width !== undefined) chart.width = placement.width;
+  if (placement.height !== undefined) chart.height = placement.height;
+  scheduleSave(chartId);
+  return chart;
+}
+
+/**
  * Set the active sheet index. Charts on other sheets will be hidden.
  */
 export function setActiveSheetIndex(sheetIndex: number): void {

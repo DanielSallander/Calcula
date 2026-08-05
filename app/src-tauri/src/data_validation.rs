@@ -550,7 +550,29 @@ pub fn resolve_list_source(
 // TAURI COMMANDS
 // ============================================================================
 
-/// Set data validation on a range.
+/// Resolve an optional 0-based sheet index: None = the active sheet, Some(i)
+/// must be in range. The validation storage is a HashMap keyed by sheet index,
+/// so without this an out-of-range index would silently create a phantom
+/// sheet's rule list instead of erroring.
+fn resolve_validation_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
+    let active = *state.active_sheet.lock().unwrap();
+    match sheet_index {
+        None => Ok(active),
+        Some(idx) => {
+            let count = state.sheet_names.lock().unwrap().len();
+            if idx < count {
+                Ok(idx)
+            } else {
+                Err(format!(
+                    "Sheet index {} out of range: workbook has {} sheet(s)",
+                    idx, count
+                ))
+            }
+        }
+    }
+}
+
+/// Set data validation on a range (on the active sheet, or `sheet_index`).
 #[tauri::command]
 pub fn set_data_validation(
     state: State<AppState>,
@@ -559,11 +581,17 @@ pub fn set_data_validation(
     end_row: u32,
     end_col: u32,
     validation: DataValidation,
+    sheet_index: Option<usize>,
 ) -> DataValidationResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = match resolve_validation_sheet(&state, sheet_index) {
+        Ok(idx) => idx,
+        Err(e) => {
+            return DataValidationResult { success: false, validation: None, error: Some(e) }
+        }
+    };
     let mut validations = state.data_validations.lock().unwrap();
 
-    let sheet_validations = validations.entry(active_sheet).or_insert_with(Vec::new);
+    let sheet_validations = validations.entry(target_sheet).or_insert_with(Vec::new);
 
     // Pre-mutation snapshot for undo (BUG-0008: validation changes bypassed
     // the undo system).
@@ -594,7 +622,7 @@ pub fn set_data_validation(
 
     crate::undo_commands::record_validation_undo(
         &state,
-        active_sheet,
+        target_sheet,
         previous,
         "Set data validation",
     );
@@ -606,7 +634,7 @@ pub fn set_data_validation(
     }
 }
 
-/// Clear data validation from a range.
+/// Clear data validation from a range (on the active sheet, or `sheet_index`).
 #[tauri::command]
 pub fn clear_data_validation(
     state: State<AppState>,
@@ -614,11 +642,17 @@ pub fn clear_data_validation(
     start_col: u32,
     end_row: u32,
     end_col: u32,
+    sheet_index: Option<usize>,
 ) -> DataValidationResult {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = match resolve_validation_sheet(&state, sheet_index) {
+        Ok(idx) => idx,
+        Err(e) => {
+            return DataValidationResult { success: false, validation: None, error: Some(e) }
+        }
+    };
     let mut validations = state.data_validations.lock().unwrap();
 
-    let previous = if let Some(sheet_validations) = validations.get_mut(&active_sheet) {
+    let previous = if let Some(sheet_validations) = validations.get_mut(&target_sheet) {
         let previous = sheet_validations.clone();
         let min_row = start_row.min(end_row);
         let max_row = start_row.max(end_row);
@@ -639,7 +673,7 @@ pub fn clear_data_validation(
     if let Some(previous) = previous {
         crate::undo_commands::record_validation_undo(
             &state,
-            active_sheet,
+            target_sheet,
             previous,
             "Clear data validation",
         );
@@ -652,17 +686,18 @@ pub fn clear_data_validation(
     }
 }
 
-/// Get data validation for a specific cell.
+/// Get data validation for a specific cell (on the active sheet, or `sheet_index`).
 #[tauri::command]
 pub fn get_data_validation(
     state: State<AppState>,
     row: u32,
     col: u32,
+    sheet_index: Option<usize>,
 ) -> Option<DataValidation> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    let target_sheet = resolve_validation_sheet(&state, sheet_index).ok()?;
     let validations = state.data_validations.lock().unwrap();
 
-    if let Some(sheet_validations) = validations.get(&active_sheet) {
+    if let Some(sheet_validations) = validations.get(&target_sheet) {
         if let Some(validation) = get_validation_for_cell(sheet_validations, row, col) {
             return Some(validation.clone());
         }
@@ -671,15 +706,16 @@ pub fn get_data_validation(
     None
 }
 
-/// Get all validation ranges for the current sheet.
+/// Get all validation ranges for a sheet (the active sheet, or `sheet_index`).
 #[tauri::command]
 pub fn get_all_data_validations(
     state: State<AppState>,
-) -> Vec<ValidationRange> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    sheet_index: Option<usize>,
+) -> Result<Vec<ValidationRange>, String> {
+    let target_sheet = resolve_validation_sheet(&state, sheet_index)?;
     let validations = state.data_validations.lock().unwrap();
 
-    validations.get(&active_sheet).cloned().unwrap_or_default()
+    Ok(validations.get(&target_sheet).cloned().unwrap_or_default())
 }
 
 /// Validate a cell value against its validation rule.

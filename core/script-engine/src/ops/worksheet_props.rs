@@ -3,10 +3,11 @@
 //! CONTEXT: Registers getUsedRange, getDisplayZeros, setDisplayZeros,
 //! isDirty, and product methods on the Calcula global object.
 
-use rquickjs::{Function, Object};
+use rquickjs::{Ctx, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ops::resolve_opt_sheet_key;
 use crate::types::{DeferredAction, ScriptContext};
 
 /// Register worksheet property operations on the Calcula object.
@@ -15,53 +16,40 @@ pub fn register_worksheet_props_ops<'js>(
     calcula: &Object<'js>,
     shared_ctx: Rc<RefCell<ScriptContext>>,
 ) -> Result<(), String> {
-    // getUsedRange() -> { startRow, startCol, endRow, endCol, empty }
+    // getUsedRange(sheet?) -> { startRow, startCol, endRow, endCol, empty }
+    // The algorithm is engine::navigation::used_range, the SAME function
+    // behind the get_used_range Tauri command. `sheet` is a 0-based index or
+    // a sheet name (ops/mod.rs resolver); absent = the active sheet.
     {
         let sc = shared_ctx.clone();
-        let func = Function::new(ctx.clone(), move || -> String {
-            let ctx = sc.borrow();
-            let grid = &ctx.grids[ctx.active_sheet];
+        let func = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>,
+                  sheet: rquickjs::function::Opt<Value<'js>>|
+                  -> rquickjs::Result<String> {
+                let ctx_ref = sc.borrow();
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
+                let grid = &ctx_ref.grids[si];
 
-            if grid.cells.is_empty() {
-                return serde_json::json!({
-                    "startRow": 0,
-                    "startCol": 0,
-                    "endRow": 0,
-                    "endCol": 0,
-                    "empty": true
-                })
-                .to_string();
-            }
-
-            let mut min_row = u32::MAX;
-            let mut min_col = u32::MAX;
-            let mut max_row = 0u32;
-            let mut max_col = 0u32;
-
-            for &(row, col) in grid.cells.keys() {
-                if row < min_row {
-                    min_row = row;
-                }
-                if row > max_row {
-                    max_row = row;
-                }
-                if col < min_col {
-                    min_col = col;
-                }
-                if col > max_col {
-                    max_col = col;
-                }
-            }
-
-            serde_json::json!({
-                "startRow": min_row,
-                "startCol": min_col,
-                "endRow": max_row,
-                "endCol": max_col,
-                "empty": false
-            })
-            .to_string()
-        })
+                let json = match engine::navigation::used_range(grid) {
+                    Some((start_row, start_col, end_row, end_col)) => serde_json::json!({
+                        "startRow": start_row,
+                        "startCol": start_col,
+                        "endRow": end_row,
+                        "endCol": end_col,
+                        "empty": false
+                    }),
+                    None => serde_json::json!({
+                        "startRow": 0,
+                        "startCol": 0,
+                        "endRow": 0,
+                        "endCol": 0,
+                        "empty": true
+                    }),
+                };
+                Ok(json.to_string())
+            },
+        )
         .map_err(|e| format!("Failed to create getUsedRange: {}", e))?;
         calcula
             .set("getUsedRange", func)
@@ -119,6 +107,8 @@ pub fn register_worksheet_props_ops<'js>(
                 .push(DeferredAction::Goto {
                     row: row.max(0) as u32,
                     col: col.max(0) as u32,
+                    end_row: None,
+                    end_col: None,
                     sheet_index: ctx_ref.active_sheet,
                     select: false,
                 });

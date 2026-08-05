@@ -19,12 +19,39 @@ import {
   makeRange,
   rangeFromAddress,
   makeWorkbook,
+  parseA1Body,
+  resolveSheetName,
+  sheetRangeTransport,
+  splitSheetPrefix,
+  type Box,
+  type CellPoint,
+  type EdgeDirection,
+  type FillCount,
+  type GoalSeekOutcome,
+  type RangeGroupResult,
   type RangeTransport,
+  type RegionResult,
+  type RemoveDuplicatesCount,
   type ScriptCell,
+  type ScriptCellFormat,
   type ScriptFormat,
   type ScriptRange,
+  type ScriptValidationRule,
+  type SheetFindResult,
+  type SpecialCellsAnswer,
+  type SpecialCellsKind,
+  type TextToColumnsCount,
   type WorkbookTransport,
 } from "./canonicalModel";
+// Pure CSV helpers (Wave 3, item 9): dependency-free @api module shared with
+// the CsvImportExport extension — runs INSIDE the worker, no broker involved.
+import {
+  scriptParseCsv,
+  scriptToCsv,
+  type ScriptParseCsvOptions,
+  type ScriptParseCsvResult,
+  type ScriptToCsvOptions,
+} from "../../csvText";
 
 /** Sort criterion accepted by api.sortRange (mirrors @api SortField). */
 interface ScriptSortField {
@@ -44,10 +71,206 @@ interface ScriptSortOptions {
   orientation?: "rows" | "columns";
 }
 
+/** How a sheet is addressed (Wave 1): a 0-based index or a sheet NAME. Names
+ *  resolve HOST-SIDE at execution time against the live sheet list — exact
+ *  match first, then case-insensitively if unique — never in this worker, so a
+ *  name always means what the workbook means by it when the call lands. */
+type SheetRef = number | string;
+
+/** What a cell write accepts (Wave 1): a typed value. Numbers and booleans
+ *  land TYPED (42 reads back as the number 42); null CLEARS the cell. */
+type ScriptCellValue = string | number | boolean | null;
+
+/** api.sleep's per-call ceiling (Wave 4): the same 30s bound every broker call
+ *  carries (protocol.ts CALL_TIMEOUT_MS), stated as a literal because this
+ *  module is bundled into the worker and must stay dependency-light. */
+const MAX_SLEEP_MS = 30_000;
+
+/** Where addSheet/copySheet place the new sheet (Wave 4): before OR after an
+ *  existing sheet (index or name) — naming both is refused. */
+interface ScriptSheetPositionShim {
+  before?: SheetRef;
+  after?: SheetRef;
+}
+
+/** The active sheet's page setup, as api.getPageSetup answers it and (any
+ *  subset of it) api.setPageSetup accepts. Mirrors the backend PageSetup;
+ *  print area / print titles / manual breaks are READ here but WRITTEN through
+ *  their own methods (setPrintArea, addPageBreak, ...). */
+interface ScriptPageSetupShim {
+  paperSize: "letter" | "a4" | "a3" | "legal" | "tabloid";
+  orientation: "portrait" | "landscape";
+  /** Margins in INCHES. */
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+  marginHeader: number;
+  marginFooter: number;
+  /** Print scale percent (10-400); ignored when fitToWidth/Height are on. */
+  scale: number;
+  /** Fit-to pages across / down (0 = off). */
+  fitToWidth: number;
+  fitToHeight: number;
+  printGridlines: boolean;
+  printHeadings: boolean;
+  /** Read-only here: "A1:F20", or "" for the whole sheet (use setPrintArea). */
+  printArea: string;
+  /** Read-only here: rows repeated at top, "1:2" ("" = none). */
+  printTitlesRows: string;
+  /** Read-only here: columns repeated at left, "A:B" ("" = none). */
+  printTitlesCols: string;
+  centerHorizontally: boolean;
+  centerVertically: boolean;
+  /** Header/footer template ("&L&F&C&P of &N&R&D"). */
+  header: string;
+  footer: string;
+  /** Read-only here: manual break positions (use addPageBreak/removePageBreak). */
+  manualRowBreaks: number[];
+  manualColBreaks: number[];
+}
+
 interface ScriptFindOptions {
   caseSensitive?: boolean;
   matchEntireCell?: boolean;
   searchFormulas?: boolean;
+  /** The sheet to search (0-based index or NAME, resolved host-side under the
+   *  Wave-1 rules). Omit for the active sheet. */
+  sheetIndex?: SheetRef;
+  /** Restrict the search to a rectangle: a Box or an A1 spelling ("B2:D10").
+   *  Omit to search the whole sheet (Wave 4). */
+  range?: Box | string;
+}
+
+interface ScriptReplaceOptions {
+  caseSensitive?: boolean;
+  matchEntireCell?: boolean;
+  /** The sheet to replace on (Wave-1 rules). Omit for the active sheet. */
+  sheetIndex?: SheetRef;
+  /** Restrict the replace to a rectangle: a Box or an A1 spelling. Omit to
+   *  replace across the whole sheet (Wave 4). */
+  range?: Box | string;
+}
+
+/** api.removeDuplicates options. `columns` are 0-based offsets FROM THE RANGE
+ *  START (sortRange-style); omitted = every column of the range. */
+interface ScriptRemoveDuplicatesOptions {
+  columns?: number[];
+  hasHeaders?: boolean;
+}
+
+/** api.textToColumns options. Each delimiter is ONE character; omitting
+ *  `delimiters` splits on commas. `destination` defaults to the source's own
+ *  top-left cell. ACTIVE SHEET only (the split writes through the visible
+ *  grid), refused otherwise. */
+interface ScriptTextToColumnsOptions {
+  delimiters?: string[];
+  consecutiveAsOne?: boolean;
+  destination?: CellPoint;
+  sheetIndex?: SheetRef;
+}
+
+/** api.goalSeek parameters (VBA Range.GoalSeek). The target cell must hold a
+ *  formula; the variable cell must hold a constant. ACTIVE SHEET only. */
+interface ScriptGoalSeekParams {
+  targetRow: number;
+  targetCol: number;
+  targetValue: number;
+  variableRow: number;
+  variableCol: number;
+  maxIterations?: number;
+  tolerance?: number;
+  sheetIndex?: SheetRef;
+}
+
+/** api.addHyperlink's link spec (a union on `type`; per-type keys enforced
+ *  broker-side with the accepted list). */
+interface ScriptHyperlinkSpecShim {
+  type: "url" | "email" | "internalReference" | "file";
+  target?: string;
+  subject?: string;
+  sheetName?: string;
+  cellReference?: string;
+}
+
+interface ScriptHyperlinkOptionsShim {
+  displayText?: string;
+  tooltip?: string;
+}
+
+/** A hyperlink as scripts read it back (mirrors the host's ScriptHyperlink). */
+interface ScriptHyperlinkShim {
+  row: number;
+  col: number;
+  sheetIndex: number;
+  type: "url" | "email" | "internalReference" | "file";
+  target: string;
+  displayText: string | null;
+  tooltip: string | null;
+  sheetName: string | null;
+  cellReference: string | null;
+}
+
+/** One api.listDataValidations entry: the rectangle + its flat rule. */
+interface ScriptValidationRangeInfoShim extends Box {
+  rule: ScriptValidationRule;
+}
+
+// ---- Selection + navigation (Wave 2) ----
+
+/** One rectangular area of a selection, normalized (start <= end per axis). */
+interface ScriptSelectionArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** What api.getSelection() returns (mirrors the host's ScriptSelectionSnapshot;
+ *  null when nothing is selected). */
+interface ScriptSelection extends ScriptSelectionArea {
+  /** The sheet the selection lives on (0-based). */
+  sheetIndex: number;
+  /** The active cell — the one a keystroke would land in. */
+  activeRow: number;
+  activeCol: number;
+  /** EVERY selected area: the primary rectangle first, then each Ctrl+Click
+   *  area. Always at least one entry. */
+  areas: ScriptSelectionArea[];
+}
+
+/** api.select options. `scroll` defaults to true (Application.Goto scrolls);
+ *  `ranges` adds Ctrl+Click-style extra areas. */
+interface ScriptSelectOptions {
+  /** 0-based sheet index or sheet name (resolved host-side, Wave-1 rules). */
+  sheetIndex?: SheetRef;
+  scroll?: boolean;
+  ranges?: ScriptSelectionArea[];
+}
+
+/** api.clearRange options. Default applyTo: "all". */
+interface ScriptClearOptions {
+  applyTo?: "all" | "contents" | "formats";
+}
+
+/** api.fillRange options (Wave 3, item 10). The rectangle is SOURCE + TARGET
+ *  together: the band of `sourceSize` (default 1) rows/columns at the edge
+ *  `direction` starts from seeds the rest. */
+interface ScriptFillOptions {
+  direction?: "down" | "up" | "right" | "left";
+  /** "copy" (default): tile the band, shifting formulas — Excel FillDown.
+   *  "series": the drag handle's series/date/custom-list inference. */
+  type?: "copy" | "series";
+  sourceSize?: number;
+}
+
+/** One sheet as api.getSheets() lists it (mirrors the host executor's shape —
+ *  the visibility/tabColor that getSheetNames discards). */
+interface ScriptSheetInfo {
+  index: number;
+  name: string;
+  visibility: "visible" | "hidden" | "veryHidden";
+  tabColor: string | null;
 }
 
 /** How one column of an AutoFilter is currently filtered (read back). */
@@ -91,7 +314,8 @@ interface ScriptAutoFilterValues {
 /** api.evaluate options. `sheetIndex` is the sheet UNQUALIFIED references
  *  resolve against (defaults to the active one); "Sheet2!A1" always works. */
 interface ScriptEvaluateOptions {
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name. */
+  sheetIndex?: SheetRef;
 }
 
 /** One evaluated expression — the same value/display/type triple a typed cell
@@ -107,7 +331,8 @@ interface ScriptEvaluatedValue {
  *  somebody ticked a checkbox. */
 interface ScriptFormulaOptions {
   style?: "A1" | "R1C1";
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name. */
+  sheetIndex?: SheetRef;
 }
 
 /** What copy/paste answer with, so a caller can size its own layout. */
@@ -123,7 +348,8 @@ interface ScriptPasteOptions {
   mode?: "all" | "values" | "formulas";
   transpose?: boolean;
   skipBlanks?: boolean;
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name (must resolve to the active sheet). */
+  sheetIndex?: SheetRef;
 }
 
 /** One object returned by api.charts() / api.tables() / ... (mirrors the host's
@@ -145,7 +371,8 @@ interface ScriptObjectRef {
 /** Placement options for api.createChart. */
 interface ScriptChartOptions {
   name?: string;
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name. */
+  sheetIndex?: SheetRef;
   x?: number;
   y?: number;
   width?: number;
@@ -727,6 +954,7 @@ function buildCapsShim(rt: WorkerRuntime): {
       options?: { label?: string },
     ): Promise<unknown>;
     at(timeOfDay: string, handlerName: string, options?: { label?: string }): Promise<unknown>;
+    once(at: number | Date, handlerName: string, options?: { label?: string }): Promise<unknown>;
     list(): Promise<unknown[]>;
     cancel(jobId: string): Promise<boolean>;
   };
@@ -937,6 +1165,15 @@ function buildCapsShim(rt: WorkerRuntime): {
       /** Run `handlerName` daily at a LOCAL "HH:MM" (e.g. "06:30"). */
       async at(timeOfDay: string, handlerName: string, options?: { label?: string }) {
         return call(rt, "cap.scheduleAt", [timeOfDay, handlerName, options]);
+      },
+      /** Run `handlerName` ONCE at `at` (a Date or epoch ms) — VBA's one-shot
+       *  Application.OnTime. At least 5 seconds from now; persisted like every
+       *  schedule (a reload before it is due does not lose it), fires only if
+       *  Calcula is open then, and removes itself after firing. For a plain
+       *  in-session pause, use api.sleep instead. */
+      async once(at: number | Date, handlerName: string, options?: { label?: string }) {
+        const atMs = at instanceof Date ? at.getTime() : at;
+        return call(rt, "cap.scheduleOnce", [atMs, handlerName, options]);
       },
       /** This script's own scheduled jobs. */
       async list() {
@@ -1162,6 +1399,17 @@ function objGet(
   return call(rt, "api.objectGetState", [objectType, id, aspect, args]);
 }
 
+/** The chart.setGeometry patch (mirrors the host's ChartPlacement + a named
+ *  sheet — resolved host-side by the Wave-1 rules). */
+interface ScriptChartGeometryShim {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  name?: string;
+  sheetIndex?: SheetRef;
+}
+
 function makeChartHandle(rt: WorkerRuntime, id: string): Record<string, unknown> {
   return {
     id,
@@ -1172,6 +1420,16 @@ function makeChartHandle(rt: WorkerRuntime, id: string): Record<string, unknown>
     replaceSpec: (fullSpec: Record<string, unknown>) => objSet(rt, "chart", id, "chart.replaceSpec", [fullSpec]),
     setStyleProperty: (name: string, value: unknown) =>
       objSet(rt, "chart", id, "chart.setStyleProperty", [name, value]),
+    // ---- Geometry + spec sugar (Wave 4) ----
+    // setGeometry is PLACEMENT (position/size/name/sheet — the chart store's
+    // path, not the spec's); the three sugars below are ordinary updateSpec
+    // patches, so the Charts extension's schema validator stays the single
+    // gate they pass through.
+    setGeometry: (patch: ScriptChartGeometryShim) =>
+      objSet(rt, "chart", id, "chart.setGeometry", [patch]),
+    setTitle: (title: string | null) => objSet(rt, "chart", id, "chart.updateSpec", [{ title }]),
+    setType: (mark: string) => objSet(rt, "chart", id, "chart.updateSpec", [{ mark }]),
+    setSourceRange: (range: string) => objSet(rt, "chart", id, "chart.updateSpec", [{ data: range }]),
     delete: () => call(rt, "api.deleteChart", [id]),
   };
 }
@@ -1204,6 +1462,30 @@ function makeTableHandle(rt: WorkerRuntime, id: string): Record<string, unknown>
     range: (address: string): ScriptRange => rangeFromAddress(transport, address),
     cell: (row: number, colIndex: number): ScriptRange =>
       makeRange(transport, { startRow: row, startCol: colIndex, endRow: row, endCol: colIndex }),
+    /** The table's DATA BODY as a grid-absolute, sheet-bound ScriptRange —
+     *  unlike range()/cell(), which are TABLE-RELATIVE and body-clamped. */
+    toRange: (): Promise<ScriptRange> => tableToRange(rt, id),
+    // ---- Structure (Wave 4): the ListObject management family ----
+    rename: (newName: string) => objSet(rt, "table", id, "table.rename", [newName]),
+    resize: (startRow: number, startCol: number, endRow: number, endCol: number) =>
+      objSet(rt, "table", id, "table.resize", [startRow, startCol, endRow, endCol]),
+    addColumn: (name: string, position?: number) =>
+      objSet(rt, "table", id, "table.addColumn", [name, position]),
+    removeColumn: (name: string) => objSet(rt, "table", id, "table.removeColumn", [name]),
+    renameColumn: (oldName: string, newName: string) =>
+      objSet(rt, "table", id, "table.renameColumn", [oldName, newName]),
+    setTotalsRow: (show: boolean) => objSet(rt, "table", id, "table.setTotalsRow", [show]),
+    setTotalsFunction: (column: string, fn: string, customFormula?: string) =>
+      objSet(rt, "table", id, "table.setTotalsFunction", [column, fn, customFormula]),
+    setStyle: (style: string | { styleName?: string; styleOptions?: Record<string, boolean> }) =>
+      objSet(rt, "table", id, "table.setStyle", [style]),
+    convertToRange: () => objSet(rt, "table", id, "table.convertToRange", []),
+    insertRow: (position?: number) => objSet(rt, "table", id, "table.insertRow", [position]),
+    deleteRow: (position: number) => objSet(rt, "table", id, "table.deleteRow", [position]),
+    // Structure READS: the twins of the management aspects.
+    getColumns: () => objGet(rt, "table", id, "table.getColumns", []),
+    getStyle: () => objGet(rt, "table", id, "table.getStyle", []),
+    getTotals: () => objGet(rt, "table", id, "table.getTotals", []),
     delete: () => call(rt, "api.deleteTable", [id]),
   };
 }
@@ -1222,6 +1504,17 @@ function makePivotHandle(rt: WorkerRuntime, id: string): Record<string, unknown>
     setAggregation: (field: string, aggregation: string) =>
       objSet(rt, "pivot", id, "pivot.setAggregation", [field, aggregation]),
     setLayout: (directives: string[]) => objSet(rt, "pivot", id, "pivot.setLayout", [directives]),
+    // ---- Data aspects (Wave 3 item 4): filters / visibility / sort / format ----
+    getFieldInfo: (field: string) => objGet(rt, "pivot", id, "pivot.getFieldInfo", [field]),
+    setFilter: (field: string, values: string[] | null) =>
+      objSet(rt, "pivot", id, "pivot.setFilter", [field, values]),
+    clearFilter: (field: string) => objSet(rt, "pivot", id, "pivot.clearFilter", [field]),
+    setItemVisibility: (field: string, item: string, visible: boolean) =>
+      objSet(rt, "pivot", id, "pivot.setItemVisibility", [field, item, visible]),
+    sortField: (field: string, direction: "asc" | "desc") =>
+      objSet(rt, "pivot", id, "pivot.sortField", [field, direction]),
+    setNumberFormat: (valueField: string, format: string) =>
+      objSet(rt, "pivot", id, "pivot.setNumberFormat", [valueField, format]),
     delete: () => call(rt, "api.deletePivot", [id]),
   };
 }
@@ -1249,23 +1542,60 @@ function makeShapeHandle(rt: WorkerRuntime, id: string): Record<string, unknown>
   };
 }
 
-function makeNamedRangeHandle(rt: WorkerRuntime, name: string): Record<string, unknown> {
-  return {
-    name,
-    getValues: () => objGet(rt, "namedRange", name, "namedRange.getValues", []),
-    setValues: (values: string[][]) => objSet(rt, "namedRange", name, "namedRange.setValues", [values]),
-    delete: () => call(rt, "api.deleteNamedRange", [name]),
-  };
+/** The namedRange.update patch (tri-state scope: absent = keep, null =
+ *  workbook, a sheet ref = that sheet). */
+interface ScriptNamedRangeUpdateShim {
+  refersTo?: string;
+  newName?: string;
+  comment?: string;
+  sheetIndex?: SheetRef | null;
 }
 
-// ---- Unlocked API shim ----
+function makeNamedRangeHandle(rt: WorkerRuntime, name: string): Record<string, unknown> {
+  // NAME-KEYED IDENTITY: every aspect addresses the range by its NAME, so a
+  // successful rename must re-key the handle or every later call would target
+  // a name that no longer exists. `currentName` is the one closure variable
+  // all methods read; update() re-points it from the host's answer (the same
+  // idiom ScriptSheet.rename uses).
+  let currentName = name;
+  const handle: Record<string, unknown> = {
+    get name() { return currentName; },
+    getValues: () => objGet(rt, "namedRange", currentName, "namedRange.getValues", []),
+    setValues: (values: string[][]) =>
+      objSet(rt, "namedRange", currentName, "namedRange.setValues", [values]),
+    /** The name's grid rectangle as a sheet-bound ScriptRange. */
+    toRange: (): Promise<ScriptRange> => namedRangeToRange(rt, currentName),
+    // ---- Definition edit (Wave 4) ----
+    update: async (patch: ScriptNamedRangeUpdateShim) => {
+      const result = (await objSet(rt, "namedRange", currentName, "namedRange.update", [patch])) as
+        { name: string };
+      currentName = result.name;
+      return result;
+    },
+    setRefersTo: (refersTo: string) =>
+      objSet(rt, "namedRange", currentName, "namedRange.update", [{ refersTo }]),
+    rename: async (newName: string) => {
+      const result = (await objSet(rt, "namedRange", currentName, "namedRange.update", [{ newName }])) as
+        { name: string };
+      currentName = result.name;
+      return result;
+    },
+    delete: () => call(rt, "api.deleteNamedRange", [currentName]),
+  };
+  return handle;
+}
 
-function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
-  // Cross-sheet transport for the canonical Workbook navigation. readCell/
-  // writeCell go through sheet.getCellValue/setCellValue WITH a sheetIndex — the
-  // host permits that cross-sheet reach only for the unlocked tier, which is
-  // exactly when this shim is built. No new aspect / no new privileged surface.
-  const workbookTransport: WorkbookTransport = {
+// ---- Top-level A1 / named-range / table range entry (Wave 1) ----
+
+/**
+ * Cross-sheet transport for the canonical Workbook navigation and for every
+ * sheet-bound range this module builds. readCell/writeCell go through
+ * sheet.getCellValue/setCellValue WITH a sheetIndex — the host permits that
+ * cross-sheet reach only for the unlocked tier, which is the only tier these
+ * builders run for. No new aspect / no new privileged surface.
+ */
+function makeWorkbookTransport(rt: WorkerRuntime): WorkbookTransport {
+  return {
     getSheetNames: () => call(rt, "api.getSheetNames", []) as Promise<string[]>,
     getActiveSheet: () => call(rt, "api.getActiveSheet", []) as Promise<number>,
     setActiveSheet: (index) => call(rt, "api.setActiveSheet", [index]) as Promise<void>,
@@ -1284,20 +1614,397 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       call(rt, "api.setRangeFormat", [sr, sc, er, ec, format, sheetIndex]) as Promise<void>,
     clearFormatRange: (sheetIndex, sr, sc, er, ec) =>
       call(rt, "api.clearRangeFormat", [sr, sc, er, ec, sheetIndex]) as Promise<void>,
+    // Format read-back (Wave 3): range.getFormats()/getFormat() on any sheet
+    // the navigation reached.
+    readFormats: (sheetIndex, sr, sc, er, ec) =>
+      call(rt, "api.getRangeFormat", [sr, sc, er, ec, sheetIndex]) as Promise<ScriptCellFormat[][]>,
+    // Named-style sugar (Wave 4): range.applyStyle("Good"). The host refuses a
+    // non-active sheet (the backend command is active-sheet-only).
+    applyNamedStyle: (sheetIndex, sr, sc, er, ec, name) =>
+      call(rt, "api.applyNamedStyle", [name, sr, sc, er, ec, sheetIndex]) as Promise<void>,
+    // Navigation reads + selection (Wave 2): the Range.End/CurrentRegion/
+    // UsedRange discovery rows, and the range.select() sugar over api.select.
+    rangeEdge: (sheetIndex, row, col, direction) =>
+      call(rt, "api.getRangeEdge", [row, col, direction, sheetIndex]) as Promise<CellPoint>,
+    currentRegion: (sheetIndex, row, col) =>
+      call(rt, "api.getCurrentRegion", [row, col, sheetIndex]) as Promise<RegionResult>,
+    usedRange: (sheet) => call(rt, "api.getUsedRange", [sheet]) as Promise<RegionResult>,
+    selectRange: (sheetIndex, sr, sc, er, ec, scroll) =>
+      call(rt, "api.select", [sr, sc, er, ec, { sheetIndex, scroll }]) as Promise<void>,
+    // The rich sheet facet (Wave 2): thin delegates over the flat rows. Sheet
+    // identity crosses as a REF (the facet passes its NAME), resolved
+    // host-side per call under the Wave-1 rules.
+    getSheetInfos: () => call(rt, "api.getSheets", []) as Promise<ScriptSheetInfo[]>,
+    renameSheet: (sheet, newName) =>
+      call(rt, "api.renameSheet", [sheet, newName]) as Promise<void>,
+    deleteSheet: (sheet) => call(rt, "api.deleteSheet", [sheet]) as Promise<void>,
+    setSheetVisibility: (sheet, visibility) =>
+      call(rt, "api.setSheetVisibility", [sheet, visibility]) as Promise<void>,
+    moveSheet: (sheet, toIndex) =>
+      call(rt, "api.moveSheet", [sheet, toIndex]) as Promise<void>,
+    copySheet: (sheet, newName) =>
+      call(rt, "api.copySheet", [sheet, newName]) as Promise<{ index: number; name: string }>,
+    setTabColor: (sheet, color) =>
+      call(rt, "api.setTabColor", [sheet, color]) as Promise<void>,
+    // Wave 3: sheet-addressable structural + data ops, so the rich sheet facet
+    // and the sheet-bound ranges drive their own sheet without activating it.
+    insertRows: (sheet, startRow, count) =>
+      call(rt, "api.insertRows", [startRow, count, sheet]) as Promise<void>,
+    deleteRows: (sheet, startRow, count) =>
+      call(rt, "api.deleteRows", [startRow, count, sheet]) as Promise<void>,
+    insertColumns: (sheet, startCol, count) =>
+      call(rt, "api.insertColumns", [startCol, count, sheet]) as Promise<void>,
+    deleteColumns: (sheet, startCol, count) =>
+      call(rt, "api.deleteColumns", [startCol, count, sheet]) as Promise<void>,
+    mergeCells: (sheet, sr, sc, er, ec) =>
+      call(rt, "api.mergeCells", [sr, sc, er, ec, sheet]) as Promise<void>,
+    unmergeCells: (sheet, row, col) =>
+      call(rt, "api.unmergeCells", [row, col, sheet]) as Promise<void>,
+    sortRange: (sheet, sr, sc, er, ec, fields, options) =>
+      call(rt, "api.sortRange", [sr, sc, er, ec, fields, options, sheet]) as Promise<number>,
+    clearRange: (sheet, sr, sc, er, ec, options) =>
+      call(rt, "api.clearRange", [sr, sc, er, ec, options, sheet]) as Promise<{ count: number }>,
+    findAll: (sheet, query, options) =>
+      call(rt, "api.findAll", [query, { ...(options ?? {}), sheetIndex: sheet }]) as
+        Promise<SheetFindResult>,
+    replaceAll: (sheet, search, replacement, options) =>
+      call(rt, "api.replaceAll", [search, replacement, { ...(options ?? {}), sheetIndex: sheet }]) as
+        Promise<{ replacementCount: number }>,
+    // Validation sugar (range.setValidation()/validation()): null = clear.
+    setValidation: (sheetIndex, sr, sc, er, ec, rule) =>
+      (rule === null
+        ? call(rt, "api.clearDataValidation", [
+            { startRow: sr, startCol: sc, endRow: er, endCol: ec }, sheetIndex,
+          ])
+        : call(rt, "api.setDataValidation", [sr, sc, er, ec, rule, sheetIndex])) as Promise<void>,
+    readValidation: (sheetIndex, row, col) =>
+      call(rt, "api.getDataValidation", [row, col, sheetIndex]) as
+        Promise<ScriptValidationRule | null>,
+    // Wave 3 (items 10/11): fill + auto-fit. The host resolves the sheet ref
+    // and REFUSES a non-active sheet (the machineries are active-sheet-only),
+    // so these delegates stay honest instead of silently retargeting.
+    fillRange: (sheetIndex, sr, sc, er, ec, options) =>
+      call(rt, "api.fillRange", [sr, sc, er, ec, options, sheetIndex]) as Promise<FillCount>,
+    autoFitColumns: (sheet, startCol, endCol) =>
+      call(rt, "api.autoFitColumns", [startCol, endCol, sheet]) as Promise<FillCount>,
+    autoFitRows: (sheet, startRow, endRow) =>
+      call(rt, "api.autoFitRows", [startRow, endRow, sheet]) as Promise<FillCount>,
+    // Wave 4 (RANGE-OPS): the range-scoped rows. The rectangle rides in the
+    // find/replace OPTIONS (the flat rows take it there); the rest are
+    // rectangle-first rows.
+    findInRange: (sheet, sr, sc, er, ec, query, options) =>
+      call(rt, "api.findAll", [query, {
+        ...(options ?? {}),
+        sheetIndex: sheet,
+        range: { startRow: sr, startCol: sc, endRow: er, endCol: ec },
+      }]) as Promise<SheetFindResult>,
+    replaceInRange: (sheet, sr, sc, er, ec, search, replacement, options) =>
+      call(rt, "api.replaceAll", [search, replacement, {
+        ...(options ?? {}),
+        sheetIndex: sheet,
+        range: { startRow: sr, startCol: sc, endRow: er, endCol: ec },
+      }]) as Promise<{ replacementCount: number }>,
+    removeDuplicates: (sheet, sr, sc, er, ec, options) =>
+      call(rt, "api.removeDuplicates", [sr, sc, er, ec, options, sheet]) as
+        Promise<RemoveDuplicatesCount>,
+    textToColumns: (sheet, sr, sc, er, ec, options) =>
+      call(rt, "api.textToColumns", [sr, sc, er, ec, { ...(options ?? {}), sheetIndex: sheet }]) as
+        Promise<TextToColumnsCount>,
+    specialCells: (sheet, sr, sc, er, ec, kind) =>
+      call(rt, "api.getSpecialCells", [sr, sc, er, ec, kind, sheet]) as
+        Promise<SpecialCellsAnswer>,
+    goalSeek: (sheet, targetRow, targetCol, targetValue, variableRow, variableCol) =>
+      call(rt, "api.goalSeek", [{
+        targetRow, targetCol, targetValue, variableRow, variableCol, sheetIndex: sheet,
+      }]) as Promise<GoalSeekOutcome>,
+    // Wave 4 (SHEETS): outline grouping sugar for range.group()/ungroup().
+    // The host asserts the ACTIVE sheet and refuses when the Grouping
+    // extension is disabled — the delegate stays honest either way.
+    groupRows: (sheet, startRow, endRow) =>
+      call(rt, "api.groupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
+    ungroupRows: (sheet, startRow, endRow) =>
+      call(rt, "api.ungroupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
   };
+}
+
+/**
+ * The own-sheet (`sheet.*`) transport with an explicit sheet NAME carried on
+ * every call. Nothing is resolved in the worker: the host resolves the name
+ * per call and clamps it by tier — a restricted script is refused for any
+ * sheet that is not the active one (RESTRICTED_SHEET_CLAMP_MESSAGE); an
+ * unlocked sheet script gets real cross-sheet reach. This is how
+ * `sheet.range("Data!A1")` stopped being a silent write to the wrong sheet.
+ */
+function namedSheetTransport(rt: WorkerRuntime, sheetName: string): RangeTransport {
+  return {
+    readCell: (row, col) =>
+      call(rt, "sheet.getCellValue", [row, col, sheetName]) as Promise<string>,
+    writeCell: (row, col, value) =>
+      call(rt, "sheet.setCellValue", [row, col, value, sheetName]) as Promise<void>,
+    readRange: (sr, sc, er, ec) =>
+      call(rt, "sheet.getRangeValues", [sr, sc, er, ec, sheetName]) as Promise<ScriptCell[][]>,
+    writeCells: (sr, sc, values) =>
+      call(rt, "sheet.setRangeValues", [sr, sc, values, sheetName]) as Promise<void>,
+    formatRange: (sr, sc, er, ec, format) =>
+      call(rt, "sheet.setRangeFormat", [sr, sc, er, ec, format, sheetName]) as Promise<void>,
+    clearFormatRange: (sr, sc, er, ec) =>
+      call(rt, "sheet.clearRangeFormat", [sr, sc, er, ec, sheetName]) as Promise<void>,
+    readFormats: (sr, sc, er, ec) =>
+      call(rt, "sheet.getRangeFormat", [sr, sc, er, ec, sheetName]) as Promise<ScriptCellFormat[][]>,
+    // Named-style sugar (Wave 4): unlocked-tier reach (api.* row); the host
+    // additionally refuses a non-active sheet.
+    applyNamedStyle: (sr, sc, er, ec, name) =>
+      call(rt, "api.applyNamedStyle", [name, sr, sc, er, ec, sheetName]) as Promise<void>,
+  };
+}
+
+/** Object names for an error message: `"Sales", "Costs"` (or "(none)"). */
+function objectNamesForError(refs: ScriptObjectRef[]): string {
+  if (refs.length === 0) return "(none)";
+  return refs.map((r) => `"${r.name}"`).join(", ");
+}
+
+/** Find an inventory object by name: exact match first, then a UNIQUE
+ *  case-insensitive match — the same rule sheet names resolve by. Null when
+ *  nothing (or more than one thing) matches. */
+function findObjectByName(refs: ScriptObjectRef[], name: string): ScriptObjectRef | null {
+  const exact = refs.find((r) => r.name === name);
+  if (exact) return exact;
+  const lower = name.toLowerCase();
+  const ci = refs.filter((r) => r.name.toLowerCase() === lower);
+  return ci.length === 1 ? ci[0] : null;
+}
+
+/**
+ * A named range's grid rectangle as a sheet-bound ScriptRange, parsed from its
+ * refersTo formula ("=Sheet1!$A$1:$B$10"). Sheet resolution mirrors the
+ * backend's resolve_named_range_coords: the formula's sheet prefix, else the
+ * name's scope sheet, else sheet 0.
+ */
+async function namedRangeRefToRange(
+  wbt: WorkbookTransport,
+  ref: ScriptObjectRef,
+): Promise<ScriptRange> {
+  const refersTo = (ref.refersTo ?? "").trim().replace(/^=/, "");
+  const { sheetName, rest } = splitSheetPrefix(refersTo);
+  let box: Box;
+  try {
+    box = parseA1Body(rest);
+  } catch {
+    throw new Error(
+      `Named range "${ref.name}" refers to "${ref.refersTo ?? ""}", which is not a ` +
+        `rectangular range this API can address.`,
+    );
+  }
+  const sheetIndex =
+    sheetName !== null
+      ? resolveSheetName(await wbt.getSheetNames(), sheetName)
+      : ref.sheetIndex ?? 0;
+  return makeRange(sheetRangeTransport(wbt, sheetIndex), box);
+}
+
+/**
+ * A table's DATA BODY as a grid-absolute, sheet-bound ScriptRange: the stored
+ * rectangle minus its header row (`rowCount` is the inventory's data-row
+ * count, so the header-row count is derivable without a second call). This is
+ * the Excel meaning of a bare table name — headers excluded.
+ */
+function tableRefToRange(wbt: WorkbookTransport, ref: ScriptObjectRef): ScriptRange {
+  if (!ref.range || ref.sheetIndex === null || ref.sheetIndex === undefined) {
+    throw new Error(`Table "${ref.name || ref.id}" has no resolvable range.`);
+  }
+  const full = parseA1Body(ref.range);
+  const span = full.endRow - full.startRow + 1;
+  const dataRows = ref.rowCount ?? span;
+  const headerRows = Math.min(Math.max(span - dataRows, 0), span - 1);
+  return makeRange(sheetRangeTransport(wbt, ref.sheetIndex), {
+    startRow: full.startRow + headerRows,
+    startCol: full.startCol,
+    endRow: full.endRow,
+    endCol: full.endCol,
+  });
+}
+
+/** namedRange(name).toRange(): resolve the name through the object inventory. */
+async function namedRangeToRange(rt: WorkerRuntime, name: string): Promise<ScriptRange> {
+  const refs = (await call(rt, "api.listObjects", ["namedRange"])) as ScriptObjectRef[];
+  const ref = findObjectByName(refs, name);
+  if (!ref) {
+    throw new Error(
+      `No named range called "${name}". Named ranges in this workbook: ${objectNamesForError(refs)}`,
+    );
+  }
+  return namedRangeRefToRange(makeWorkbookTransport(rt), ref);
+}
+
+/** table(id).toRange(): resolve the table id through the object inventory. */
+async function tableToRange(rt: WorkerRuntime, id: string): Promise<ScriptRange> {
+  const refs = (await call(rt, "api.listObjects", ["table"])) as ScriptObjectRef[];
+  const ref = refs.find((r) => r.id === id);
+  if (!ref) throw new Error(`No table with id "${id}".`);
+  return tableRefToRange(makeWorkbookTransport(rt), ref);
+}
+
+/**
+ * api.range(address) — the top-level range entry (VBA's Range("...")).
+ * Resolution order, decided worker-side but enforced host-side per call:
+ *  1. an address with a "Sheet!" prefix (bare or 'quoted') is ALWAYS an
+ *     address — the prefix resolves exact-then-unique-case-insensitive, and an
+ *     unknown name throws listing the workbook's sheets;
+ *  2. a plain A1 address binds to the ACTIVE sheet ("A1" is the cell A1,
+ *     never a named range — A1-parse wins);
+ *  3. a named range (exact name, then unique case-insensitive);
+ *  4. a table name — its DATA BODY, headers excluded.
+ */
+async function resolveTopLevelRange(rt: WorkerRuntime, address: string): Promise<ScriptRange> {
+  const wbt = makeWorkbookTransport(rt);
+  const { sheetName, rest } = splitSheetPrefix(address);
+  if (sheetName !== null) {
+    const idx = resolveSheetName(await wbt.getSheetNames(), sheetName);
+    return makeRange(sheetRangeTransport(wbt, idx), parseA1Body(rest));
+  }
+  let box: Box | null = null;
+  try {
+    box = parseA1Body(address);
+  } catch {
+    box = null;
+  }
+  if (box !== null) {
+    const [names, active] = await Promise.all([wbt.getSheetNames(), wbt.getActiveSheet()]);
+    const idx = active >= 0 && active < names.length ? active : 0;
+    return makeRange(sheetRangeTransport(wbt, idx), box);
+  }
+  // Not an address: named ranges first (Excel precedence), then tables.
+  const [namedRanges, tables] = await Promise.all([
+    call(rt, "api.listObjects", ["namedRange"]) as Promise<ScriptObjectRef[]>,
+    call(rt, "api.listObjects", ["table"]) as Promise<ScriptObjectRef[]>,
+  ]);
+  const named = findObjectByName(namedRanges, address);
+  if (named) return namedRangeRefToRange(wbt, named);
+  const table = findObjectByName(tables, address);
+  if (table) return tableRefToRange(wbt, table);
+  throw new Error(
+    `"${address}" is not an A1 address, a named range, or a table in this workbook. ` +
+      `Named ranges: ${objectNamesForError(namedRanges)}; tables: ${objectNamesForError(tables)}`,
+  );
+}
+
+// ---- Conditional formatting (Wave 3 item 3): A1-or-numbers range args ----
+
+/** One CF range, numeric and inclusive (the broker/backend shape). */
+interface ScriptCFRangeBox {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** What a script may pass wherever a CF range is expected: an A1 spelling
+ *  ("B2:D10") or the numeric box. A1 resolves WORKER-side (Wave-1 style), so
+ *  the broker only ever sees numbers. */
+type ScriptCFRangeInput = string | ScriptCFRangeBox;
+
+interface ScriptCFSpecInput {
+  rule: Record<string, unknown>;
+  format: Record<string, unknown>;
+  ranges: ScriptCFRangeInput[];
+  stopIfTrue?: boolean;
+}
+
+interface ScriptCFPatchInput {
+  rule?: Record<string, unknown>;
+  format?: Record<string, unknown>;
+  ranges?: ScriptCFRangeInput[];
+  stopIfTrue?: boolean;
+  enabled?: boolean;
+}
+
+/**
+ * Resolve one A1-or-numbers CF range worker-side. A "Sheet!" prefix is REFUSED
+ * rather than silently dropped: the CF backend is ACTIVE-SHEET scoped, so an
+ * address naming another sheet would otherwise land somewhere the author did
+ * not say. Non-string, non-conforming input passes through untouched so the
+ * BROKER's validator produces the canonical error message.
+ */
+function resolveCFRange(input: unknown): unknown {
+  if (typeof input !== "string") return input;
+  const { sheetName, rest } = splitSheetPrefix(input);
+  if (sheetName !== null) {
+    throw new Error(
+      `Conditional formats are active-sheet scoped: drop the "${sheetName}!" prefix ` +
+        `and call api.setActiveSheet(${JSON.stringify(sheetName)}) first`,
+    );
+  }
+  return parseA1Body(rest);
+}
+
+function resolveCFRanges(ranges: unknown): unknown {
+  return Array.isArray(ranges) ? ranges.map(resolveCFRange) : ranges;
+}
+
+function resolveCFSpec(spec: ScriptCFSpecInput): unknown {
+  if (typeof spec !== "object" || spec === null) return spec;
+  const out: Record<string, unknown> = { ...spec };
+  if ("ranges" in out) out.ranges = resolveCFRanges(out.ranges);
+  return out;
+}
+
+// ---- The APPLICATION cluster (Wave 4): view/window state shapes ----
+
+/** The View settings api.getViewOption / setViewOption address by name. */
+type ScriptViewOptionNameShim = "gridlines" | "headings" | "zeros" | "formulas" | "viewMode";
+
+/** The three view modes Core renders. */
+type ScriptViewModeShim = "normal" | "pageLayout" | "pageBreakPreview";
+
+/** What api.getPanes answers: both halves of View ▸ Window in one read. */
+interface ScriptPanesShim {
+  freezeRow: number | null;
+  freezeCol: number | null;
+  splitRow: number | null;
+  splitCol: number | null;
+}
+
+/** One named cell style as api.listNamedStyles / createNamedStyle report it. */
+interface ScriptNamedStyleShim {
+  name: string;
+  builtIn: boolean;
+  category: string;
+}
+
+/** What api.getThemePalette answers: the document theme's 12 slot colors
+ *  resolved to hex, plus its font pair. */
+interface ScriptThemePaletteShim {
+  name: string;
+  colors: Record<string, string>;
+  fonts: { heading: string; body: string };
+}
+
+// ---- Unlocked API shim ----
+
+function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
+  const workbookTransport = makeWorkbookTransport(rt);
   return {
     getCellValue: (row: number, col: number) => call(rt, "api.getCellValue", [row, col]),
-    setCellValue: (row: number, col: number, value: string) => call(rt, "api.setCellValue", [row, col, value]),
+    // The optional sheet ref (index or NAME) must be FORWARDED, not dropped:
+    // this arrow's arity used to be 3, so `api.setCellValue(r, c, v, "Sheet2")`
+    // silently wrote the ACTIVE sheet (caught live by vba-idioms-wave1.spec.ts).
+    setCellValue: (row: number, col: number, value: ScriptCellValue, sheet?: SheetRef) =>
+      call(rt, "api.setCellValue", [row, col, value, sheet]),
     updateCellsBatch: (updates: unknown[]) => call(rt, "api.updateCellsBatch", [updates]),
     // Typed reads: value + type + formula, so a read/modify/write round-trip
     // cannot silently replace a formula with its display text.
-    getCellData: (row: number, col: number, sheetIndex?: number) =>
-      call(rt, "api.getCellData", [row, col, sheetIndex]),
-    getRangeValues: (startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number) =>
-      call(rt, "api.getRangeValues", [startRow, startCol, endRow, endCol, sheetIndex]),
+    getCellData: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getCellData", [row, col, sheet]),
+    getRangeValues: (startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef) =>
+      call(rt, "api.getRangeValues", [startRow, startCol, endRow, endCol, sheet]),
     getSheetNames: () => call(rt, "api.getSheetNames", []),
     getActiveSheet: () => call(rt, "api.getActiveSheet", []),
-    setActiveSheet: (index: number) => call(rt, "api.setActiveSheet", [index]),
+    setActiveSheet: (sheet: SheetRef) => call(rt, "api.setActiveSheet", [sheet]),
+    // Top-level range entry (VBA Range("...")): "Data!A1:B5", "'My Sheet'!A1",
+    // plain A1 on the active sheet, a named range, or a table's data body.
+    // A1-parse wins over names; see resolveTopLevelRange for the order.
+    range: (address: string): Promise<ScriptRange> => resolveTopLevelRange(rt, address),
     // Canonical Workbook -> Sheet -> Range navigation (C3 step 3), plus the
     // FILE LIFECYCLE (G1) of the document this script lives in.
     //
@@ -1334,64 +2041,257 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       return cleanup;
     },
     executeCommand: (commandId: string, args?: unknown) => callFire(rt, "api.executeCommand", [commandId, args]),
-    beginBatch: (description: string) => call(rt, "api.beginBatch", [description]),
+    // { deferRepaint: true } pauses screen repaints for the LIFE OF THE BATCH
+    // (the honest ScreenUpdating): one refresh fires at commit/cancel, and the
+    // host unfreezes on fault/unmount too — a dead script cannot pin a frozen
+    // canvas.
+    beginBatch: (description: string, options?: { deferRepaint?: boolean }) =>
+      call(rt, "api.beginBatch", [description, options]),
     commitBatch: () => call(rt, "api.commitBatch", []),
     cancelBatch: () => call(rt, "api.cancelBatch", []),
+
+    // ---- the APPLICATION cluster (Wave 4) ----
+    /** Show a message in the status bar (VBA's Application.StatusBar); null
+     *  restores "Ready". Cleared automatically when this script stops. */
+    setStatusBar: (text: string | null) =>
+      call(rt, "api.setStatusBar", [text]) as Promise<void>,
+    /** Run a recorded macro by display name or module id (VBA's
+     *  Application.Run). Resolves with the macro's name; rejects when it does
+     *  not exist, fails, or is already running (re-entrancy is refused). */
+    runMacro: (name: string) => call(rt, "api.runMacro", [name]) as Promise<{ name: string }>,
+    /** The Windows user name (VBA's Application.UserName) — the same display
+     *  name Calcula attaches to writeback submissions. */
+    userName: () => call(rt, "api.userName", []) as Promise<string>,
+    /** Read one View setting: the four booleans, or the view mode word. */
+    getViewOption: (name: ScriptViewOptionNameShim) =>
+      call(rt, "api.getViewOption", [name]) as Promise<boolean | ScriptViewModeShim>,
+    /** Change one View setting — the same mechanism as the View menu. */
+    setViewOption: (name: ScriptViewOptionNameShim, value: boolean | ScriptViewModeShim) =>
+      call(rt, "api.setViewOption", [name, value]) as Promise<void>,
+    /** The zoom level, in PERCENT (100 = 100%). */
+    getZoom: () => call(rt, "api.getZoom", []) as Promise<number>,
+    /** Zoom the grid, in PERCENT (10-400). */
+    setZoom: (percent: number) => call(rt, "api.setZoom", [percent]) as Promise<void>,
+    /** The frozen rows/columns and window split currently in effect — the read
+     *  half of freezePanes/splitPanes. */
+    getPanes: () => call(rt, "api.getPanes", []) as Promise<ScriptPanesShim>,
+    /**
+     * Pause this script for `ms` milliseconds (VBA's Application.Wait, without
+     * the frozen UI — the app keeps running; only YOUR code waits).
+     *
+     * WORKER-LOCAL: no broker call, nothing to consent to, and the pause dies
+     * with the script — it is IN-SESSION ONLY. Anything that must survive a
+     * reload (or fire while this script is not running) is caps.schedule's
+     * business, which persists in the workbook. Bounded to 30s per call (the
+     * same ceiling every broker call has) so a stray sleep(1e9) cannot park a
+     * handler forever; the timer counts against the worker's shared timer cap.
+     */
+    sleep: (ms: number): Promise<void> => {
+      if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+        return Promise.reject(
+          new Error("sleep(ms): ms must be a non-negative finite number of milliseconds"),
+        );
+      }
+      const bounded = Math.min(ms, MAX_SLEEP_MS);
+      return new Promise((resolve) => setTimeout(resolve, bounded));
+    },
 
     // ---- Formatting (B2) ----
     setRangeFormat: (
       startRow: number, startCol: number, endRow: number, endCol: number,
-      format: ScriptFormat, sheetIndex?: number,
-    ) => call(rt, "api.setRangeFormat", [startRow, startCol, endRow, endCol, format, sheetIndex]),
+      format: ScriptFormat, sheet?: SheetRef,
+    ) => call(rt, "api.setRangeFormat", [startRow, startCol, endRow, endCol, format, sheet]),
     clearRangeFormat: (
-      startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number,
-    ) => call(rt, "api.clearRangeFormat", [startRow, startCol, endRow, endCol, sheetIndex]),
+      startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+    ) => call(rt, "api.clearRangeFormat", [startRow, startCol, endRow, endCol, sheet]),
+    // ---- Format read-back (Wave 3, item 1) ----
+    getRangeFormat: (
+      startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+    ) => call(rt, "api.getRangeFormat", [startRow, startCol, endRow, endCol, sheet]) as
+      Promise<ScriptCellFormat[][]>,
+    getCellFormat: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getCellFormat", [row, col, sheet]) as Promise<ScriptCellFormat>,
+
+    // ---- Named cell styles + theme palette (Wave 4) ----
+    /** The workbook's named cell styles — built-in ("Good", "Heading 1", ...)
+     *  and custom — with each one's category. */
+    listNamedStyles: () =>
+      call(rt, "api.listNamedStyles", []) as Promise<ScriptNamedStyleShim[]>,
+    /** Apply a named style to a block of cells (one undo step). ACTIVE sheet
+     *  only — the sheet ref is refused if it names another sheet. */
+    applyNamedStyle: (
+      name: string, startRow: number, startCol: number, endRow: number, endCol: number,
+      sheet?: SheetRef,
+    ) => call(rt, "api.applyNamedStyle", [name, startRow, startCol, endRow, endCol, sheet]) as
+      Promise<void>,
+    /** Create a custom named style from a format description (the same
+     *  vocabulary setRangeFormat takes, minus the range-edge border keys and
+     *  the protection attributes). */
+    createNamedStyle: (name: string, format: ScriptFormat) =>
+      call(rt, "api.createNamedStyle", [name, format]) as Promise<ScriptNamedStyleShim>,
+    /** Delete a CUSTOM named style (built-ins are refused; already-styled
+     *  cells keep their look). */
+    deleteNamedStyle: (name: string) =>
+      call(rt, "api.deleteNamedStyle", [name]) as Promise<void>,
+    /** The document theme: its 12 named colors resolved to hex, and the
+     *  heading/body font pair. */
+    getThemePalette: () =>
+      call(rt, "api.getThemePalette", []) as Promise<ScriptThemePaletteShim>,
+
+    // ---- Calculation control (Wave 3, item 7) ----
+    getCalculationMode: () =>
+      call(rt, "api.getCalculationMode", []) as Promise<"automatic" | "manual">,
+    /**
+     * If your script sets "manual" and then stops for any reason (unmount, a
+     * fault, being stopped mid-session, workbook swap), the host restores
+     * "automatic" — a dead script can never leave the workbook uncalculating.
+     */
+    setCalculationMode: (mode: "automatic" | "manual") =>
+      call(rt, "api.setCalculationMode", [mode]) as Promise<"automatic" | "manual">,
+    recalculate: (options?: { full?: boolean }) =>
+      call(rt, "api.recalculate", [options]) as Promise<{ cellsUpdated: number }>,
+
+    // ---- Sheet protection (Wave 3, item 8) ----
+    protectSheet: (
+      options?: Record<string, unknown>, sheet?: SheetRef,
+    ) => call(rt, "api.protectSheet", [options, sheet]) as
+      Promise<{ protected: true; hasPassword: boolean }>,
+    unprotectSheet: (password?: string, sheet?: SheetRef) =>
+      call(rt, "api.unprotectSheet", [password, sheet]) as Promise<boolean>,
+    getProtectionStatus: (sheet?: SheetRef) =>
+      call(rt, "api.getProtectionStatus", [sheet]) as Promise<{
+        protected: boolean;
+        hasPassword: boolean;
+        options: Record<string, boolean>;
+      }>,
 
     // ---- Structure (B2) ----
-    insertRows: (startRow: number, count: number, sheetIndex?: number) =>
-      call(rt, "api.insertRows", [startRow, count, sheetIndex]),
-    deleteRows: (startRow: number, count: number, sheetIndex?: number) =>
-      call(rt, "api.deleteRows", [startRow, count, sheetIndex]),
-    insertColumns: (startCol: number, count: number, sheetIndex?: number) =>
-      call(rt, "api.insertColumns", [startCol, count, sheetIndex]),
-    deleteColumns: (startCol: number, count: number, sheetIndex?: number) =>
-      call(rt, "api.deleteColumns", [startCol, count, sheetIndex]),
+    insertRows: (startRow: number, count: number, sheet?: SheetRef) =>
+      call(rt, "api.insertRows", [startRow, count, sheet]),
+    deleteRows: (startRow: number, count: number, sheet?: SheetRef) =>
+      call(rt, "api.deleteRows", [startRow, count, sheet]),
+    insertColumns: (startCol: number, count: number, sheet?: SheetRef) =>
+      call(rt, "api.insertColumns", [startCol, count, sheet]),
+    deleteColumns: (startCol: number, count: number, sheet?: SheetRef) =>
+      call(rt, "api.deleteColumns", [startCol, count, sheet]),
     mergeCells: (
-      startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number,
-    ) => call(rt, "api.mergeCells", [startRow, startCol, endRow, endCol, sheetIndex]),
-    unmergeCells: (row: number, col: number, sheetIndex?: number) =>
-      call(rt, "api.unmergeCells", [row, col, sheetIndex]),
-    setRowHeight: (row: number, height: number, sheetIndex?: number) =>
-      call(rt, "api.setRowHeight", [row, height, sheetIndex]),
-    setColumnWidth: (col: number, width: number, sheetIndex?: number) =>
-      call(rt, "api.setColumnWidth", [col, width, sheetIndex]),
+      startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+    ) => call(rt, "api.mergeCells", [startRow, startCol, endRow, endCol, sheet]),
+    unmergeCells: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.unmergeCells", [row, col, sheet]),
+    setRowHeight: (row: number, height: number, sheet?: SheetRef) =>
+      call(rt, "api.setRowHeight", [row, height, sheet]),
+    setColumnWidth: (col: number, width: number, sheet?: SheetRef) =>
+      call(rt, "api.setColumnWidth", [col, width, sheet]),
+    // ---- Auto-fit (Wave 3, item 11): the double-click best-fit, scripted.
+    //      ACTIVE SHEET only (measurement is canvas metrics over the rendered
+    //      sheet) — a sheet ref naming another sheet is refused host-side.
+    autoFitColumns: (startCol: number, endCol: number, sheet?: SheetRef) =>
+      call(rt, "api.autoFitColumns", [startCol, endCol, sheet]) as Promise<FillCount>,
+    autoFitRows: (startRow: number, endRow: number, sheet?: SheetRef) =>
+      call(rt, "api.autoFitRows", [startRow, endRow, sheet]) as Promise<FillCount>,
     freezePanes: (freezeRow: number | null, freezeCol: number | null) =>
       call(rt, "api.freezePanes", [freezeRow, freezeCol]),
     /** The other half of View ▸ Window (G4): scrollable panes, not frozen ones. */
     splitPanes: (splitRow: number | null, splitCol: number | null) =>
       call(rt, "api.splitPanes", [splitRow, splitCol]),
 
-    // ---- Sheet CRUD (B2) ----
-    addSheet: (name?: string) => call(rt, "api.addSheet", [name]),
-    deleteSheet: (index: number) => call(rt, "api.deleteSheet", [index]),
-    renameSheet: (index: number, newName: string) => call(rt, "api.renameSheet", [index, newName]),
-    setSheetVisibility: (index: number, visibility: "visible" | "hidden" | "veryHidden") =>
-      call(rt, "api.setSheetVisibility", [index, visibility]),
-    // ---- Sheet move / copy (G4) ----
+    // ---- Page setup + print layout (Wave 4) ----
+    // VBA's Worksheet.PageSetup, ACTIVE SHEET only (the backend it drives is);
+    // a sheet ref naming another sheet is refused host-side, never redirected.
+    // Printing itself stays where it was: caps.file.exportPdf and the user's
+    // own File menu.
+    /** The active sheet's full page setup, as the Page Setup dialog shows it. */
+    getPageSetup: (sheet?: SheetRef) =>
+      call(rt, "api.getPageSetup", [sheet]) as Promise<ScriptPageSetupShim>,
+    /** Patch the active sheet's page setup — only the properties named change
+     *  (setRangeFormat's partial-write contract, applied to the page). */
+    setPageSetup: (patch: Partial<ScriptPageSetupShim>, sheet?: SheetRef) =>
+      call(rt, "api.setPageSetup", [patch, sheet]) as Promise<void>,
+    /** Set which rectangle the active sheet prints; resolves to its A1 form. */
+    setPrintArea: (
+      startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+    ) => call(rt, "api.setPrintArea", [startRow, startCol, endRow, endCol, sheet]) as
+      Promise<{ area: string }>,
+    /** Remove the active sheet's print area (the whole sheet prints again). */
+    clearPrintArea: (sheet?: SheetRef) =>
+      call(rt, "api.clearPrintArea", [sheet]) as Promise<void>,
+    /** Insert a manual page break ABOVE a row / LEFT of a column (index >= 1). */
+    addPageBreak: (kind: "row" | "col", index: number, sheet?: SheetRef) =>
+      call(rt, "api.addPageBreak", [kind, index, sheet]) as Promise<void>,
+    /** Remove a manual page break. */
+    removePageBreak: (kind: "row" | "col", index: number, sheet?: SheetRef) =>
+      call(rt, "api.removePageBreak", [kind, index, sheet]) as Promise<void>,
+    /** Remove every manual page break on the active sheet. */
+    resetPageBreaks: (sheet?: SheetRef) =>
+      call(rt, "api.resetPageBreaks", [sheet]) as Promise<void>,
+
+    // ---- Outline grouping (Wave 4) ----
+    // Excel's Data ▸ Group/Ungroup, ACTIVE SHEET only, driven through the
+    // Grouping feature so the outline bar and hidden rows stay in step —
+    // with the feature disabled these REJECT rather than grouping invisibly.
+    // Spans are 0-based and INCLUSIVE.
+    groupRows: (startRow: number, endRow: number, sheet?: SheetRef) =>
+      call(rt, "api.groupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
+    ungroupRows: (startRow: number, endRow: number, sheet?: SheetRef) =>
+      call(rt, "api.ungroupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
+    groupColumns: (startCol: number, endCol: number, sheet?: SheetRef) =>
+      call(rt, "api.groupColumns", [startCol, endCol, sheet]) as Promise<RangeGroupResult>,
+    ungroupColumns: (startCol: number, endCol: number, sheet?: SheetRef) =>
+      call(rt, "api.ungroupColumns", [startCol, endCol, sheet]) as Promise<RangeGroupResult>,
+    /** Collapse/expand to an outline depth — the little 1/2/3 buttons. Pass
+     *  null to leave an axis alone. */
+    showOutlineLevel: (rowLevel: number | null, colLevel: number | null) =>
+      call(rt, "api.showOutlineLevel", [rowLevel, colLevel]) as Promise<RangeGroupResult>,
+
+    // ---- Sheet CRUD (B2; positioning Wave 4) ----
+    /** Add a sheet (and make it active). `position` places it before/after an
+     *  existing sheet (VBA's Add Before:=/After:=); omitted = at the end. */
+    addSheet: (name?: string, position?: ScriptSheetPositionShim) =>
+      call(rt, "api.addSheet", [name, position]),
+    deleteSheet: (sheet: SheetRef) => call(rt, "api.deleteSheet", [sheet]),
+    renameSheet: (sheet: SheetRef, newName: string) => call(rt, "api.renameSheet", [sheet, newName]),
+    setSheetVisibility: (sheet: SheetRef, visibility: "visible" | "hidden" | "veryHidden") =>
+      call(rt, "api.setSheetVisibility", [sheet, visibility]),
+    // ---- Sheet move / copy (G4; positioning Wave 4) ----
     // Both RENUMBER other sheets, so any index a script is holding is stale
     // afterwards. That is stated on the authoring surface rather than papered
     // over — there is no stable sheet handle to hand back instead.
-    moveSheet: (fromIndex: number, toIndex: number) =>
-      call(rt, "api.moveSheet", [fromIndex, toIndex]),
-    copySheet: (sourceIndex: number, newName?: string) =>
-      call(rt, "api.copySheet", [sourceIndex, newName]) as
+    moveSheet: (fromSheet: SheetRef, toIndex: number) =>
+      call(rt, "api.moveSheet", [fromSheet, toIndex]),
+    /** Duplicate a sheet. `position` places the copy before/after an existing
+     *  sheet; omitted = immediately after its source. */
+    copySheet: (sourceSheet: SheetRef, newName?: string, position?: ScriptSheetPositionShim) =>
+      call(rt, "api.copySheet", [sourceSheet, newName, position]) as
         Promise<{ index: number; name: string }>,
 
     // ---- Sort + find/replace (B2) ----
     sortRange: (
       startRow: number, startCol: number, endRow: number, endCol: number,
-      fields: ScriptSortField[], options?: ScriptSortOptions, sheetIndex?: number,
-    ) => call(rt, "api.sortRange", [startRow, startCol, endRow, endCol, fields, options, sheetIndex]),
+      fields: ScriptSortField[], options?: ScriptSortOptions, sheet?: SheetRef,
+    ) => call(rt, "api.sortRange", [startRow, startCol, endRow, endCol, fields, options, sheet]),
+    // ---- Range ops (Wave 4, RANGE-OPS cluster) ----
+    /** Remove duplicate rows from a rectangle (Data ▸ Remove Duplicates):
+     *  a row whose key columns repeat an earlier row is deleted and the
+     *  survivors close up — one undo step. `options.columns` are offsets from
+     *  the range start; omitted = every column. ACTIVE SHEET only. */
+    removeDuplicates: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      options?: ScriptRemoveDuplicatesOptions, sheet?: SheetRef,
+    ) => call(rt, "api.removeDuplicates", [startRow, startCol, endRow, endCol, options, sheet]) as
+      Promise<RemoveDuplicatesCount>,
+    /** Split ONE COLUMN of text into columns by delimiters (Data ▸ Text to
+     *  Columns), writing at `options.destination` (default: in place). ACTIVE
+     *  SHEET only, refused otherwise. */
+    textToColumns: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      options?: ScriptTextToColumnsOptions,
+    ) => call(rt, "api.textToColumns", [startRow, startCol, endRow, endCol, options]) as
+      Promise<TextToColumnsCount>,
+    /** Goal Seek (single-variable solver): drive the variable cell until the
+     *  target formula cell evaluates to `targetValue`. ACTIVE SHEET only. */
+    goalSeek: (params: ScriptGoalSeekParams) =>
+      call(rt, "api.goalSeek", [params]) as Promise<GoalSeekOutcome>,
     // ---- the WorksheetFunction bridge (G4) ----
     // `evaluate` answers ONE expression, `evaluateAll` a batch in one round
     // trip; both go through the same broker method, so there is one policy row
@@ -1419,14 +2319,42 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     // one your Ctrl+V reads — a script can neither see what you copied nor take
     // it away from you.
     copyRange: (
-      startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number,
-    ) => call(rt, "api.copyRange", [startRow, startCol, endRow, endCol, sheetIndex]) as
+      startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+    ) => call(rt, "api.copyRange", [startRow, startCol, endRow, endCol, sheet]) as
       Promise<ScriptClipboardSize>,
     paste: (row: number, col: number, options?: ScriptPasteOptions) =>
       call(rt, "api.pasteRange", [row, col, options]) as Promise<ScriptClipboardSize>,
     /** `paste` with an explicit mode — the PasteSpecial spelling. */
     pasteSpecial: (row: number, col: number, options: ScriptPasteOptions) =>
       call(rt, "api.pasteRange", [row, col, options]) as Promise<ScriptClipboardSize>,
+
+    // ---- fill / AutoFill (Wave 3, item 10) ----
+    // The fill-handle's own machinery (same series inference, same formula
+    // shifting, same merge replication). The rectangle is SOURCE + TARGET
+    // together: the band of `sourceSize` (default 1) rows/columns at the edge
+    // the fill starts from seeds the rest — Excel's FillDown shape. ACTIVE
+    // SHEET only, refused otherwise.
+    fillRange: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      options?: ScriptFillOptions, sheet?: SheetRef,
+    ) => call(rt, "api.fillRange", [startRow, startCol, endRow, endCol, options, sheet]) as
+      Promise<FillCount>,
+
+    // ---- pure text helpers (Wave 3, item 9) ----
+    // Worker-LOCAL compute: no broker row, no round trip, nothing to consent
+    // to — parsing a string a script already holds discloses nothing new.
+    // Semantics are pinned to the Rust QuickJS twin (Calcula.text in
+    // core/script-engine/src/ops/text.rs) by shared fixtures. Async only for
+    // surface uniformity (every api.* member answers with a Promise); the
+    // work itself never leaves the worker.
+    text: {
+      parseCsv: async (content: string, options?: ScriptParseCsvOptions): Promise<ScriptParseCsvResult> =>
+        scriptParseCsv(content, options),
+      toCsv: async (
+        rows: ReadonlyArray<ReadonlyArray<string | number | boolean | null>>,
+        options?: ScriptToCsvOptions,
+      ): Promise<string> => scriptToCsv(rows, options),
+    },
 
     // ---- column filtering / AutoFilter (G4) ----
     // Grouped under `api.filter.*` because six flat methods called
@@ -1448,12 +2376,194 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       remove: () => call(rt, "api.autoFilterRemove", []) as Promise<void>,
     },
 
+    // ---- Selection + navigation (Wave 2) ----
+    // VBA's Selection / ActiveCell / Range.Select / Application.Goto.
+    /** The raw selection snapshot: coordinates + every area; null when nothing
+     *  is selected. */
+    getSelection: () => call(rt, "api.getSelection", []) as Promise<ScriptSelection | null>,
+    /** The primary selected area as a live ScriptRange (offset/resize/
+     *  setValues/format all work), bound to the selection's own sheet. */
+    async selection(): Promise<ScriptRange | null> {
+      const sel = (await call(rt, "api.getSelection", [])) as ScriptSelection | null;
+      if (!sel) return null;
+      return makeRange(sheetRangeTransport(workbookTransport, sel.sheetIndex), {
+        startRow: sel.startRow,
+        startCol: sel.startCol,
+        endRow: sel.endRow,
+        endCol: sel.endCol,
+      });
+    },
+    /** The active cell as a single-cell ScriptRange (VBA's ActiveCell). */
+    async activeCell(): Promise<ScriptRange | null> {
+      const sel = (await call(rt, "api.getSelection", [])) as ScriptSelection | null;
+      if (!sel) return null;
+      return makeRange(sheetRangeTransport(workbookTransport, sel.sheetIndex), {
+        startRow: sel.activeRow,
+        startCol: sel.activeCol,
+        endRow: sel.activeRow,
+        endCol: sel.activeCol,
+      });
+    },
+    /**
+     * Select cells. Polymorphic:
+     *   select(startRow, startCol, endRow?, endCol?, options?)  — numbers
+     *   select("A1:B5", options?) / select("Data!A1", options?) — an address
+     * The STRING form resolves worker-side to numbers (+ a sheet ref carried in
+     * options), so the broker only ever sees the numeric shape; the sheet name
+     * itself still resolves host-side against the live list (Wave 1 rules).
+     */
+    select(
+      target: number | string,
+      startColOrOptions?: number | ScriptSelectOptions,
+      endRow?: number | ScriptSelectOptions,
+      endCol?: number,
+      options?: ScriptSelectOptions,
+    ): Promise<void> {
+      if (typeof target === "string") {
+        const opts = startColOrOptions as ScriptSelectOptions | undefined;
+        if (opts !== undefined && (typeof opts !== "object" || opts === null || Array.isArray(opts))) {
+          throw new Error("select(address, options?): options must be an object");
+        }
+        const { sheetName, rest } = splitSheetPrefix(target);
+        const box = parseA1Body(rest);
+        const merged: ScriptSelectOptions = { ...(opts ?? {}) };
+        // An explicit "Sheet!" prefix IS the sheet — it wins over options.
+        if (sheetName !== null) merged.sheetIndex = sheetName;
+        return call(rt, "api.select", [
+          box.startRow, box.startCol, box.endRow, box.endCol, merged,
+        ]) as Promise<void>;
+      }
+      // Numeric form. select(r, c, { ... }) is accepted as a convenience:
+      // an object in the endRow slot is the options bag.
+      if (typeof endRow === "object" && endRow !== null) {
+        return call(rt, "api.select", [
+          target, startColOrOptions, undefined, undefined, endRow,
+        ]) as Promise<void>;
+      }
+      return call(rt, "api.select", [
+        target, startColOrOptions, endRow, endCol, options,
+      ]) as Promise<void>;
+    },
+    /** Scroll a cell into view WITHOUT changing the selection. */
+    scrollTo: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.scrollTo", [row, col, sheet]) as Promise<void>,
+    /** Clear a rectangle: everything (default), contents only, or formats only
+     *  — one undo step, on any sheet (Wave-1 rules; Wave 3 closed the
+     *  active-sheet residual). */
+    clearRange: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      options?: ScriptClearOptions, sheet?: SheetRef,
+    ) => call(rt, "api.clearRange", [startRow, startCol, endRow, endCol, options, sheet]) as
+      Promise<{ count: number }>,
+    /** Every sheet with its visibility and tab colour (getSheetNames keeps
+     *  only the names). */
+    getSheets: () => call(rt, "api.getSheets", []) as Promise<ScriptSheetInfo[]>,
+    /** Change (or remove, with null) a sheet's tab colour. */
+    setTabColor: (sheet: SheetRef, color: string | null) =>
+      call(rt, "api.setTabColor", [sheet, color]) as Promise<void>,
+    // ---- Range discovery (Wave 2): Range.End / CurrentRegion / UsedRange ----
+    /** Where Ctrl+Arrow would land from (row, col) — a pure read, nothing moves. */
+    getRangeEdge: (row: number, col: number, direction: EdgeDirection, sheet?: SheetRef) =>
+      call(rt, "api.getRangeEdge", [row, col, direction, sheet]) as Promise<CellPoint>,
+    /** The contiguous data block around (row, col) — what Ctrl+A would select. */
+    getCurrentRegion: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getCurrentRegion", [row, col, sheet]) as Promise<RegionResult>,
+    /** The bounding box of everything stored on a sheet. */
+    getUsedRange: (sheet?: SheetRef) =>
+      call(rt, "api.getUsedRange", [sheet]) as Promise<RegionResult>,
+    /** The cells of one class inside a rectangle — Excel's Go To Special
+     *  (Range.SpecialCells). "visible" answers what survives AutoFilter /
+     *  advanced-filter / outline hiding, which is the "copy visible cells
+     *  after filtering" primitive (Wave 4). */
+    getSpecialCells: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      kind: SpecialCellsKind, sheet?: SheetRef,
+    ) => call(rt, "api.getSpecialCells", [startRow, startCol, endRow, endCol, kind, sheet]) as
+      Promise<SpecialCellsAnswer>,
+
     findAll: (query: string, options?: ScriptFindOptions) =>
       call(rt, "api.findAll", [query, options]),
     replaceAll: (
       search: string, replacement: string,
-      options?: { caseSensitive?: boolean; matchEntireCell?: boolean },
+      options?: ScriptReplaceOptions,
     ) => call(rt, "api.replaceAll", [search, replacement, options]),
+
+    // ---- Data validation (Wave 3, item 5) ----
+    /** Set a data-validation rule on a rectangle (any sheet — Wave-1 rules). */
+    setDataValidation: (
+      startRow: number, startCol: number, endRow: number, endCol: number,
+      rule: ScriptValidationRule, sheet?: SheetRef,
+    ) => call(rt, "api.setDataValidation", [startRow, startCol, endRow, endCol, rule, sheet]) as
+      Promise<void>,
+    /** Remove the data-validation rules from a rectangle. */
+    clearDataValidation: (range: Box, sheet?: SheetRef) =>
+      call(rt, "api.clearDataValidation", [range, sheet]) as Promise<void>,
+    /** The rule on one cell, in setDataValidation's shape; null when none. */
+    getDataValidation: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getDataValidation", [row, col, sheet]) as
+        Promise<ScriptValidationRule | null>,
+    /** Every rule on a sheet, with the rectangle each one covers. */
+    listDataValidations: (sheet?: SheetRef) =>
+      call(rt, "api.listDataValidations", [sheet]) as Promise<ScriptValidationRangeInfoShim[]>,
+
+    // ---- Hyperlinks (Wave 3, item 6) ----
+    // Attach / read / remove only — there is deliberately NO follow: internal
+    // navigation is api.select / api.scrollTo, and opening an external target
+    // is the user's click, never a script's.
+    /** Attach a hyperlink to a cell; resolves to the link as stored. */
+    addHyperlink: (
+      row: number, col: number, link: ScriptHyperlinkSpecShim,
+      options?: ScriptHyperlinkOptionsShim, sheet?: SheetRef,
+    ) => call(rt, "api.addHyperlink", [row, col, link, options, sheet]) as
+      Promise<ScriptHyperlinkShim>,
+    /** Remove the hyperlink from a cell. Resolves false when there was none
+     *  (the cell is in the state you asked for); real refusals reject. */
+    removeHyperlink: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.removeHyperlink", [row, col, sheet]) as Promise<boolean>,
+    /** The hyperlink on one cell; null when it has none. */
+    getHyperlink: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getHyperlink", [row, col, sheet]) as Promise<ScriptHyperlinkShim | null>,
+    /** Every hyperlink on a sheet. */
+    listHyperlinks: (sheet?: SheetRef) =>
+      call(rt, "api.listHyperlinks", [sheet]) as Promise<ScriptHyperlinkShim[]>,
+
+    // ---- Notes + comments (Wave 4) ----
+    // Notes are the one-text-per-cell kind (VBA Range.NoteText); comments are
+    // the threaded kind. The notes backend addresses THE ACTIVE SHEET — a
+    // named other sheet is refused with the fix spelled out. listComments
+    // alone is sheet-addressable.
+    /** Set, replace or (with null) remove the note on a cell. Resolves to the
+     *  note's id, or null after a removal. */
+    setNote: (row: number, col: number, text: string | null, sheet?: SheetRef) =>
+      call(rt, "api.setNote", [row, col, text, sheet]) as Promise<{ id: string } | null>,
+    /** The note text on one cell; null when it has none. */
+    getNote: (row: number, col: number, sheet?: SheetRef) =>
+      call(rt, "api.getNote", [row, col, sheet]) as Promise<string | null>,
+    /** Every note on the active sheet. */
+    listNotes: (sheet?: SheetRef) =>
+      call(rt, "api.listNotes", [sheet]) as
+        Promise<Array<{ row: number; col: number; text: string; author: string }>>,
+    /** Start a threaded comment on a cell; resolves to the thread's id. */
+    addComment: (row: number, col: number, text: string) =>
+      call(rt, "api.addComment", [row, col, text]) as Promise<{ id: string }>,
+    /** Reply to a comment thread; resolves to the reply's id. */
+    replyToComment: (commentId: string, text: string) =>
+      call(rt, "api.replyToComment", [commentId, text]) as Promise<{ id: string }>,
+    /** Mark a thread resolved (default) or reopen it with `false`. */
+    resolveComment: (commentId: string, resolved?: boolean) =>
+      call(rt, "api.resolveComment", [commentId, resolved]) as Promise<void>,
+    /** Delete a comment thread and all its replies. */
+    deleteComment: (commentId: string) =>
+      call(rt, "api.deleteComment", [commentId]) as Promise<void>,
+    /** The comment threads on a sheet, optionally only inside a rectangle. */
+    listComments: (
+      range?: { startRow: number; startCol: number; endRow: number; endCol: number } | null,
+      sheet?: SheetRef,
+    ) =>
+      call(rt, "api.listComments", [range, sheet]) as Promise<Array<{
+        id: string; row: number; col: number; text: string; author: string;
+        resolved: boolean; replies: Array<{ id: string; text: string; author: string }>;
+      }>>,
 
     // ---- Workbook objects: enumerate (B3) ----
     // One broker method (api.listObjects) behind six named readers, so the
@@ -1477,7 +2587,7 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
     deleteTable: (tableId: string) => call(rt, "api.deleteTable", [tableId]),
     createNamedRange: (
       name: string, refersTo: string,
-      options?: { sheetIndex?: number | null; comment?: string },
+      options?: { sheetIndex?: SheetRef | null; comment?: string },
     ) => call(rt, "api.createNamedRange", [name, refersTo, options]),
     deleteNamedRange: (name: string) => call(rt, "api.deleteNamedRange", [name]),
     createPivot: (
@@ -1486,6 +2596,25 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       options?: Record<string, unknown>,
     ) => call(rt, "api.createPivot", [sourceRange, destinationCell, fields, options]),
     deletePivot: (pivotId: string) => call(rt, "api.deletePivot", [pivotId]),
+
+    // ---- Conditional formatting CRUD (Wave 3 item 3) ----
+    // Ranges are A1-or-numbers: "B2:D10" resolves worker-side to the numeric
+    // box, so the broker (and its validator) sees one shape. ACTIVE SHEET only
+    // today — the optional sheet arg is a flagged slot the host refuses unless
+    // it names the active sheet.
+    listConditionalFormats: (sheet?: SheetRef) =>
+      call(rt, "api.listConditionalFormats", [sheet]),
+    addConditionalFormat: (spec: ScriptCFSpecInput) =>
+      call(rt, "api.addConditionalFormat", [resolveCFSpec(spec)]),
+    updateConditionalFormat: (ruleId: number, patch: ScriptCFPatchInput) =>
+      call(rt, "api.updateConditionalFormat", [ruleId, resolveCFSpec(patch as ScriptCFSpecInput)]),
+    deleteConditionalFormat: (ruleId: number) =>
+      call(rt, "api.deleteConditionalFormat", [ruleId]),
+    clearConditionalFormats: (range?: ScriptCFRangeInput | null, sheet?: SheetRef) =>
+      call(rt, "api.clearConditionalFormats", [
+        range === undefined || range === null ? null : resolveCFRange(range),
+        sheet,
+      ]) as Promise<{ count: number }>,
 
     // ---- Workbook objects: address ANOTHER instance (B3) ----
     chart: (chartId: string) => makeChartHandle(rt, chartId),
@@ -1531,7 +2660,17 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onAfterSave: (h: Handler) => registerHook(rt, "onAfterSave", h),
         onBeforeClose: (h: (payload: unknown) => unknown) =>
           registerReplyingHook(rt, "onBeforeClose", "__workbook_onBeforeClose", h),
+        // Cancellable like save/close (Wave 4): asked before Print AND before
+        // Export-to-PDF (a PDF is a print), including a script's own PDF.
+        onBeforePrint: (h: (payload: unknown) => unknown) =>
+          registerReplyingHook(rt, "onBeforePrint", "__workbook_onBeforePrint", h),
         onSheetChange: (h: Handler) => registerHook(rt, "onSheetChange", h),
+        // Sheet COLLECTION hooks (Wave 4): the workbook mirror is pushed
+        // before delivery, so properties.sheetCount/getSheetNames() read the
+        // post-change truth inside the handler.
+        onSheetAdd: (h: Handler) => registerHook(rt, "onSheetAdd", h),
+        onSheetDelete: (h: Handler) => registerHook(rt, "onSheetDelete", h),
+        onSheetRename: (h: Handler) => registerHook(rt, "onSheetRename", h),
         onThemeChange: (h: Handler) => registerHook(rt, "onThemeChange", h),
         properties: {
           get title() { return mirror(rt, "workbook.title", ""); },
@@ -1565,6 +2704,9 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
           call(rt, "sheet.setRangeFormat", [sr, sc, er, ec, format]) as Promise<void>,
         clearFormatRange: (sr: number, sc: number, er: number, ec: number) =>
           call(rt, "sheet.clearRangeFormat", [sr, sc, er, ec]) as Promise<void>,
+        // Own-sheet format read-back (Wave 3), same clamp again.
+        readFormats: (sr: number, sc: number, er: number, ec: number) =>
+          call(rt, "sheet.getRangeFormat", [sr, sc, er, ec]) as Promise<ScriptCellFormat[][]>,
       };
       return {
         ...base,
@@ -1572,12 +2714,22 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         onDeactivate: (h: Handler) => registerHook(rt, "onDeactivate", h),
         onSelectionChange: (h: Handler) => registerHook(rt, "onSelectionChange", h),
         onDataChange: (h: Handler) => registerHook(rt, "onDataChange", h),
-        getCellValue: (row: number, col: number, sheetIndex?: number) =>
-          call(rt, "sheet.getCellValue", [row, col, sheetIndex]),
-        setCellValue: (row: number, col: number, value: string, sheetIndex?: number) =>
-          call(rt, "sheet.setCellValue", [row, col, value, sheetIndex]),
-        getCellData: (row: number, col: number, sheetIndex?: number) =>
-          call(rt, "sheet.getCellData", [row, col, sheetIndex]),
+        // Cancellable CLICK hooks (Wave 4): REPLYING hooks on the
+        // onBeforeCommit machinery. Return false / "cancel" / { cancel: true }
+        // to stop what the click would do — edit mode for a double-click, the
+        // context menu for a right-click. 1.5s default-ALLOW deadline; the
+        // payload is { row, col, address }, always on the ACTIVE sheet (the
+        // only sheet a click can land on).
+        onBeforeDoubleClick: (h: (payload: unknown) => unknown) =>
+          registerReplyingHook(rt, "onBeforeDoubleClick", "__sheet_onBeforeDoubleClick", h),
+        onBeforeRightClick: (h: (payload: unknown) => unknown) =>
+          registerReplyingHook(rt, "onBeforeRightClick", "__sheet_onBeforeRightClick", h),
+        getCellValue: (row: number, col: number, sheet?: SheetRef) =>
+          call(rt, "sheet.getCellValue", [row, col, sheet]),
+        setCellValue: (row: number, col: number, value: ScriptCellValue, sheet?: SheetRef) =>
+          call(rt, "sheet.setCellValue", [row, col, value, sheet]),
+        getCellData: (row: number, col: number, sheet?: SheetRef) =>
+          call(rt, "sheet.getCellData", [row, col, sheet]),
         // Explicit formula read/write on THIS sheet, A1 or R1C1 (G4). Clamped
         // exactly like getCellValue/setCellValue above: naming another sheet is
         // unlocked-tier reach and is refused, not silently redirected.
@@ -1588,13 +2740,29 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         ) => call(rt, "sheet.setCellFormula", [row, col, formula, options]) as Promise<void>,
         setRangeFormat: (
           startRow: number, startCol: number, endRow: number, endCol: number,
-          format: ScriptFormat, sheetIndex?: number,
-        ) => call(rt, "sheet.setRangeFormat", [startRow, startCol, endRow, endCol, format, sheetIndex]),
+          format: ScriptFormat, sheet?: SheetRef,
+        ) => call(rt, "sheet.setRangeFormat", [startRow, startCol, endRow, endCol, format, sheet]),
         clearRangeFormat: (
-          startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number,
-        ) => call(rt, "sheet.clearRangeFormat", [startRow, startCol, endRow, endCol, sheetIndex]),
-        range: (address: string): ScriptRange =>
-          rangeFromAddress(sheetTransport, address),
+          startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+        ) => call(rt, "sheet.clearRangeFormat", [startRow, startCol, endRow, endCol, sheet]),
+        // Format read-back on THIS sheet (Wave 3), clamped like the rows above.
+        getRangeFormat: (
+          startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef,
+        ) => call(rt, "sheet.getRangeFormat", [startRow, startCol, endRow, endCol, sheet]) as
+          Promise<ScriptCellFormat[][]>,
+        getCellFormat: (row: number, col: number, sheet?: SheetRef) =>
+          call(rt, "sheet.getCellFormat", [row, col, sheet]) as Promise<ScriptCellFormat>,
+        // A "Sheet!" prefix is never silently dropped (it used to be — writing
+        // to whatever sheet was active). The NAME is passed through as the
+        // sheet argument on every call, so enforcement stays host-side: a
+        // restricted script is refused for any sheet that is not the active
+        // one; for an unlocked sheet script the prefix is real cross-sheet
+        // reach — the same tier rule the flat getCellValue/setCellValue obey.
+        range: (address: string): ScriptRange => {
+          const { sheetName, rest } = splitSheetPrefix(address);
+          if (sheetName === null) return rangeFromAddress(sheetTransport, address);
+          return makeRange(namedSheetTransport(rt, sheetName), parseA1Body(rest));
+        },
         cell: (row: number, col: number): ScriptRange =>
           makeRange(sheetTransport, {
             startRow: row,
@@ -1686,6 +2854,13 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         getSpec: () => mirror<Record<string, unknown>>(rt, "chart.spec", {}),
         updateSpec: (patch: unknown) => setState(rt, "chart.updateSpec", [patch]),
         replaceSpec: (fullSpec: unknown) => setState(rt, "chart.replaceSpec", [fullSpec]),
+        // Geometry + spec sugar (Wave 4): the same aspects the api.chart(id)
+        // handle sends — setGeometry is placement, the sugars are updateSpec
+        // patches through the extension's single schema validator.
+        setGeometry: (patch: ScriptChartGeometryShim) => setState(rt, "chart.setGeometry", [patch]),
+        setTitle: (title: string | null) => setState(rt, "chart.updateSpec", [{ title }]),
+        setType: (mark: string) => setState(rt, "chart.updateSpec", [{ mark }]),
+        setSourceRange: (range: string) => setState(rt, "chart.updateSpec", [{ data: range }]),
         style: {
           setProperty: (name: string, value: unknown) => setStateFire(rt, "chart.setStyleProperty", [name, value]),
         },
@@ -1714,6 +2889,21 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         setAggregation: (field: string, aggregation: string) =>
           setState(rt, "pivot.setAggregation", [field, aggregation]),
         setLayout: (directives: string[]) => setState(rt, "pivot.setLayout", [directives]),
+        // ---- Data aspects (Wave 3 item 4) ----
+        // Report filters, item visibility, sort and value number format — the
+        // same aspects api.pivot(id) exposes, on THIS pivot. getFieldInfo is
+        // the read twin (current filters + item visibility) so a macro can
+        // read-modify-write instead of guessing.
+        getFieldInfo: (field: string) => getState(rt, "pivot.getFieldInfo", [field]),
+        setFilter: (field: string, values: string[] | null) =>
+          setState(rt, "pivot.setFilter", [field, values]),
+        clearFilter: (field: string) => setState(rt, "pivot.clearFilter", [field]),
+        setItemVisibility: (field: string, item: string, visible: boolean) =>
+          setState(rt, "pivot.setItemVisibility", [field, item, visible]),
+        sortField: (field: string, direction: "asc" | "desc") =>
+          setState(rt, "pivot.sortField", [field, direction]),
+        setNumberFormat: (valueField: string, format: string) =>
+          setState(rt, "pivot.setNumberFormat", [valueField, format]),
       };
 
     case "shape":
@@ -1835,6 +3025,27 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
             endRow: row,
             endCol: colIndex,
           }),
+        // ---- Structure (Wave 4): the same aspects api.table(id) sends,
+        // pinned to THIS table by the mount. ----
+        rename: (newName: string) => setState(rt, "table.rename", [newName]),
+        resize: (startRow: number, startCol: number, endRow: number, endCol: number) =>
+          setState(rt, "table.resize", [startRow, startCol, endRow, endCol]),
+        addColumn: (name: string, position?: number) =>
+          setState(rt, "table.addColumn", [name, position]),
+        removeColumn: (name: string) => setState(rt, "table.removeColumn", [name]),
+        renameColumn: (oldName: string, newName: string) =>
+          setState(rt, "table.renameColumn", [oldName, newName]),
+        setTotalsRow: (show: boolean) => setState(rt, "table.setTotalsRow", [show]),
+        setTotalsFunction: (column: string, fn: string, customFormula?: string) =>
+          setState(rt, "table.setTotalsFunction", [column, fn, customFormula]),
+        setStyle: (style: string | { styleName?: string; styleOptions?: Record<string, boolean> }) =>
+          setState(rt, "table.setStyle", [style]),
+        convertToRange: () => setState(rt, "table.convertToRange", []),
+        insertRow: (position?: number) => setState(rt, "table.insertRow", [position]),
+        deleteRow: (position: number) => setState(rt, "table.deleteRow", [position]),
+        getColumns: () => getState(rt, "table.getColumns", []),
+        getStyle: () => getState(rt, "table.getStyle", []),
+        getTotals: () => getState(rt, "table.getTotals", []),
         properties: {
           get name() { return mirror(rt, "table.name", ""); },
           get sheetIndex() { return mirror(rt, "table.sheetIndex", 0); },
@@ -1852,6 +3063,12 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         getAddress: () => mirror(rt, "namedRange.address", ""),
         getValues: () => mirror<string[][]>(rt, "namedRange.values", []),
         setValues: (values: string[][]) => setState(rt, "namedRange.setValues", [values]),
+        // ---- Definition edit (Wave 4). A rename is safe from the OWN
+        // context too: the host re-keys this mount at the new name, so later
+        // own-object calls keep resolving. ----
+        update: (patch: ScriptNamedRangeUpdateShim) => setState(rt, "namedRange.update", [patch]),
+        setRefersTo: (refersTo: string) => setState(rt, "namedRange.update", [{ refersTo }]),
+        rename: (newName: string) => setState(rt, "namedRange.update", [{ newName }]),
         properties: {
           get refersTo() { return mirror(rt, "namedRange.refersTo", ""); },
           get scope() { return mirror(rt, "namedRange.scope", "workbook"); },

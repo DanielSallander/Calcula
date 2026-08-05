@@ -320,6 +320,65 @@ export async function performClearOutline(): Promise<void> {
   }
 }
 
+// ============================================================================
+// Controller Operations (the @api/groupingService seam)
+// ============================================================================
+//
+// Same backend calls, same grid sync as the perform* handlers above — the
+// difference is the CONTRACT. A ribbon handler swallows a failure into a
+// console.warn because the user is looking at the sheet; a script is not, so
+// the controller THROWS on failure and answers with what actually changed.
+
+/** Apply a result for the controller: sync the grid, then answer or throw. */
+async function applyForController(result: GroupResult): Promise<{
+  maxRowLevel: number;
+  maxColLevel: number;
+  hiddenRowsChanged: number[];
+  hiddenColsChanged: number[];
+}> {
+  if (!result.success) {
+    throw new Error(result.error || "The grouping operation failed");
+  }
+  await applyGroupResult(result);
+  return {
+    maxRowLevel: result.outline?.maxRowLevel ?? 0,
+    maxColLevel: result.outline?.maxColLevel ?? 0,
+    hiddenRowsChanged: result.hiddenRowsChanged ?? [],
+    hiddenColsChanged: result.hiddenColsChanged ?? [],
+  };
+}
+
+/** Controller: group a row span (throws on failure). */
+export async function controllerGroupRows(startRow: number, endRow: number) {
+  return applyForController(await apiGroupRows(startRow, endRow));
+}
+
+/** Controller: ungroup a row span (throws on failure). */
+export async function controllerUngroupRows(startRow: number, endRow: number) {
+  return applyForController(await apiUngroupRows(startRow, endRow));
+}
+
+/** Controller: group a column span (throws on failure). */
+export async function controllerGroupColumns(startCol: number, endCol: number) {
+  return applyForController(await apiGroupColumns(startCol, endCol));
+}
+
+/** Controller: ungroup a column span (throws on failure). */
+export async function controllerUngroupColumns(startCol: number, endCol: number) {
+  return applyForController(await apiUngroupColumns(startCol, endCol));
+}
+
+/** Controller: show rows/columns up to an outline level (null = leave that
+ *  axis alone). ONE backend call, so both axes land as one operation. */
+export async function controllerShowOutlineLevel(
+  rowLevel: number | null,
+  colLevel: number | null,
+) {
+  return applyForController(
+    await apiShowOutlineLevel(rowLevel ?? undefined, colLevel ?? undefined),
+  );
+}
+
 /** Reset all local state (called on sheet change). */
 export function resetGroupingState(): void {
   currentOutlineInfo = null;

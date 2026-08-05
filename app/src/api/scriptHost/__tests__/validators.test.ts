@@ -19,6 +19,7 @@ import {
   vRowColOp, MAX_STRUCTURAL_COUNT, vDimension, vFreeze,
   vSheetName, vSheetRename, vSheetVisibility,
   vSortRange, vFind, vReplace,
+  vRemoveDuplicates, vTextToColumns, vSpecialCells, vGoalSeek,
   vObjectKind, vObjectId, vObjectAspect,
   vCreateChart, vCreateTable, vCreateNamedRange, vNamedRangeName, vCreatePivot,
   checkPivotLayoutAspect, PIVOT_LAYOUT_ASPECTS,
@@ -87,17 +88,27 @@ describe("vRangeRef (bulk range read args)", () => {
     expect(vRangeRef([0, 0, 999, 999])).not.toBe(true); // 1,000,000 cells
   });
 
-  it("rejects a bad sheet index", () => {
+  it("rejects a bad sheet ref, accepts an index or a name (Wave 1)", () => {
     expect(vRangeRef([0, 0, 1, 1, -2])).not.toBe(true);
-    expect(vRangeRef([0, 0, 1, 1, "Sheet1"])).not.toBe(true);
+    expect(vRangeRef([0, 0, 1, 1, 1.5])).not.toBe(true);
+    expect(vRangeRef([0, 0, 1, 1, ""])).not.toBe(true);
+    expect(vRangeRef([0, 0, 1, 1, "Bad[Name]"])).not.toBe(true);
+    expect(vRangeRef([0, 0, 1, 1, true])).not.toBe(true);
+    // A sheet NAME is now a valid ref — resolution happens host-side.
+    expect(vRangeRef([0, 0, 1, 1, "Sheet1"])).toBe(true);
   });
 });
 
 describe("vRangeWrite (bulk range write args)", () => {
-  it("accepts a 2D array of strings, with holes", () => {
+  it("accepts a 2D array of typed values, with holes", () => {
     expect(vRangeWrite([0, 0, [["a", "b"], ["c"]]])).toBe(true);
+    // undefined = hole (leave the cell), null = CLEAR the cell (Wave 1)
     expect(vRangeWrite([0, 0, [["a", undefined, null]]])).toBe(true);
+    // Typed values: numbers and booleans land typed, not as text
+    expect(vRangeWrite([0, 0, [[42, -1.5, true, false]]])).toBe(true);
     expect(vRangeWrite([2, 3, [], 1])).toBe(true);
+    // A sheet NAME in the sheet slot is valid (resolved host-side)
+    expect(vRangeWrite([2, 3, [], "Data"])).toBe(true);
   });
 
   it("rejects a non-2D values argument", () => {
@@ -105,15 +116,19 @@ describe("vRangeWrite (bulk range write args)", () => {
     expect(vRangeWrite([0, 0, ["a", "b"]])).not.toBe(true);
   });
 
-  it("rejects non-string cell values", () => {
-    expect(vRangeWrite([0, 0, [[42]]])).not.toBe(true);
+  it("rejects non-writable cell values", () => {
     expect(vRangeWrite([0, 0, [[{ v: 1 }]]])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [[[1, 2]]]])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [[NaN]]])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [[Infinity]]])).not.toBe(true);
   });
 
-  it("rejects bad anchor coordinates and sheet index", () => {
+  it("rejects bad anchor coordinates and sheet refs", () => {
     expect(vRangeWrite([-1, 0, [["a"]]])).not.toBe(true);
     expect(vRangeWrite([0, 0.5, [["a"]]])).not.toBe(true);
-    expect(vRangeWrite([0, 0, [["a"]], "x"])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [["a"]], -1])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [["a"]], "has:colon"])).not.toBe(true);
+    expect(vRangeWrite([0, 0, [["a"]], false])).not.toBe(true);
   });
 
   it("rejects more than the cell ceiling in total", () => {
@@ -148,10 +163,15 @@ describe("checkFormatObject / vRangeFormat (the format-object gate)", () => {
   });
 
   it("rejects the protection + cell-control attributes the backend also accepts", () => {
-    for (const key of ["locked", "formulaHidden", "checkbox", "button", "fill"]) {
+    for (const key of ["locked", "formulaHidden", "checkbox", "button"]) {
       expect(checkFormatObject({ [key]: true }), key).not.toBe(true);
       expect(SCRIPT_FORMAT_KEYS.has(key), key).toBe(false);
     }
+    // `fill` joined the vocabulary in Wave 4 — but only with a VALID fill
+    // object; `fill: true` still fails with the shape spelled out.
+    expect(SCRIPT_FORMAT_KEYS.has("fill")).toBe(true);
+    expect(checkFormatObject({ fill: true })).not.toBe(true);
+    expect(checkFormatObject({ fill: { type: "solid", color: "#ff0000" } })).toBe(true);
   });
 
   it("rejects an empty / non-object format", () => {
@@ -225,11 +245,14 @@ describe("vRowColOp (insert/delete rows + columns)", () => {
     expect(vRowColOp([0, MAX_STRUCTURAL_COUNT + 1])).not.toBe(true);
   });
 
-  it("rejects a bad start or sheet index", () => {
+  it("rejects a bad start or sheet ref, accepts a sheet name", () => {
     expect(vRowColOp([-1, 1])).not.toBe(true);
     expect(vRowColOp([0.5, 1])).not.toBe(true);
     expect(vRowColOp([0, 1, -1])).not.toBe(true);
-    expect(vRowColOp([0, 1, "Sheet1"])).not.toBe(true);
+    expect(vRowColOp([0, 1, "Bad/Name"])).not.toBe(true);
+    // A sheet NAME is a valid ref (resolved host-side; refused there if the
+    // named sheet is not the active one).
+    expect(vRowColOp([0, 1, "Sheet1"])).toBe(true);
   });
 });
 
@@ -360,6 +383,112 @@ describe("vFind / vReplace", () => {
     expect(vFind(["a", { regex: true }])).not.toBe(true);
     expect(vFind(["a", { caseSensitive: "yes" }])).not.toBe(true);
     expect(vReplace(["a", "b", { searchFormulas: true }])).not.toBe(true);
+  });
+
+  it("accept the Wave-4 range option as a Box or an A1 string, on both", () => {
+    const box = { startRow: 1, startCol: 0, endRow: 9, endCol: 3 };
+    expect(vFind(["a", { range: box }])).toBe(true);
+    expect(vFind(["a", { range: "B2:D10" }])).toBe(true);
+    expect(vReplace(["a", "b", { range: box }])).toBe(true);
+    expect(vReplace(["a", "b", { range: "B2:D10", sheetIndex: "Data" }])).toBe(true);
+  });
+
+  it("reject a malformed range option", () => {
+    expect(vFind(["a", { range: 42 }])).not.toBe(true);
+    expect(vFind(["a", { range: "" }])).not.toBe(true);
+    expect(vFind(["a", { range: { startRow: 0, startCol: 0, endRow: 5 } }])).not.toBe(true);
+    expect(vFind(["a", { range: { startRow: 5, startCol: 0, endRow: 0, endCol: 0 } }])).not.toBe(true);
+    expect(vFind(["a", { range: { startRow: 0, startCol: 0, endRow: 1, endCol: 1, extra: 1 } }])).not.toBe(true);
+    expect(vReplace(["a", "b", { range: -1 }])).not.toBe(true);
+  });
+});
+
+describe("vRemoveDuplicates", () => {
+  it("accepts a rectangle with and without options", () => {
+    expect(vRemoveDuplicates([0, 0, 9, 3])).toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, { columns: [0, 2], hasHeaders: true }])).toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, null, "Data"])).toBe(true);
+  });
+
+  it("rejects bad geometry, bad options and out-of-range column offsets", () => {
+    expect(vRemoveDuplicates([9, 0, 0, 3])).not.toBe(true); // end before start
+    expect(vRemoveDuplicates([0, 0, 9, 3, { columns: [] }])).not.toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, { columns: [4] }])).not.toBe(true); // width is 4 -> max offset 3
+    expect(vRemoveDuplicates([0, 0, 9, 3, { columns: [-1] }])).not.toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, { columns: [1.5] }])).not.toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, { hasHeaders: "yes" }])).not.toBe(true);
+    expect(vRemoveDuplicates([0, 0, 9, 3, { keyColumns: [0] }])).not.toBe(true); // unknown key
+  });
+});
+
+describe("vTextToColumns", () => {
+  it("accepts a single-column source with the documented options", () => {
+    expect(vTextToColumns([0, 2, 9, 2])).toBe(true);
+    expect(vTextToColumns([0, 2, 9, 2, {
+      delimiters: [";", "\t"], consecutiveAsOne: true,
+      destination: { row: 0, col: 5 }, sheetIndex: "Data",
+    }])).toBe(true);
+  });
+
+  it("rejects a multi-column source", () => {
+    expect(vTextToColumns([0, 0, 9, 1])).not.toBe(true);
+  });
+
+  it("rejects bad delimiters and destinations", () => {
+    expect(vTextToColumns([0, 0, 9, 0, { delimiters: [] }])).not.toBe(true);
+    expect(vTextToColumns([0, 0, 9, 0, { delimiters: [";;"] }])).not.toBe(true);
+    expect(vTextToColumns([0, 0, 9, 0, { delimiters: [7] }])).not.toBe(true);
+    expect(vTextToColumns([0, 0, 9, 0, { destination: { row: -1, col: 0 } }])).not.toBe(true);
+    expect(vTextToColumns([0, 0, 9, 0, { destination: { row: 0 } }])).not.toBe(true);
+    expect(vTextToColumns([0, 0, 9, 0, { qualifier: "'" }])).not.toBe(true); // unknown key
+  });
+});
+
+describe("vSpecialCells", () => {
+  it("accepts each kind, with an optional sheet ref", () => {
+    for (const kind of ["constants", "formulas", "blanks", "visible"]) {
+      expect(vSpecialCells([0, 0, 99, 9, kind])).toBe(true);
+    }
+    expect(vSpecialCells([0, 0, 99, 9, "visible", "Data"])).toBe(true);
+  });
+
+  it("rejects an unknown kind, listing the accepted ones", () => {
+    const verdict = vSpecialCells([0, 0, 99, 9, "comments"]);
+    expect(verdict).not.toBe(true);
+    expect(String(verdict)).toMatch(/constants.*formulas.*blanks.*visible/);
+    expect(vSpecialCells([0, 0, 99, 9, 42])).not.toBe(true);
+  });
+
+  it("rejects bad geometry through the shared rectangle gate", () => {
+    expect(vSpecialCells([9, 0, 0, 9, "blanks"])).not.toBe(true);
+  });
+});
+
+describe("vGoalSeek", () => {
+  const good = {
+    targetRow: 9, targetCol: 1, targetValue: 250000,
+    variableRow: 1, variableCol: 1,
+  };
+
+  it("accepts the documented parameter object", () => {
+    expect(vGoalSeek([good])).toBe(true);
+    expect(vGoalSeek([{ ...good, maxIterations: 500, tolerance: 0.01, sheetIndex: 0 }])).toBe(true);
+  });
+
+  it("rejects a non-object, missing coordinates and a non-finite target", () => {
+    expect(vGoalSeek([undefined])).not.toBe(true);
+    expect(vGoalSeek([[]])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, targetRow: undefined }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, targetValue: Infinity }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, targetValue: "big" }])).not.toBe(true);
+  });
+
+  it("rejects target == variable, bad iteration/tolerance bounds and unknown keys", () => {
+    expect(vGoalSeek([{ ...good, variableRow: 9, variableCol: 1 }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, maxIterations: 0 }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, maxIterations: 100000 }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, tolerance: 0 }])).not.toBe(true);
+    expect(vGoalSeek([{ ...good, goal: 5 }])).not.toBe(true);
   });
 });
 

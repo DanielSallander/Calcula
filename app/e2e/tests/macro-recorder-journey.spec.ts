@@ -121,7 +121,53 @@ async function readDesignMode(page: Page): Promise<boolean> {
  * Idempotent and failure-tolerant — it runs BEFORE the journey (so a crashed
  * previous run cannot poison this one) and again in a finally.
  */
+/**
+ * End a recording session left running by a FAILED earlier run of this spec.
+ *
+ * THE RECORDER IS A SINGLETON WITH A TOGGLED MENU ITEM: one Developer-menu entry
+ * whose label is "Record Macro" when idle and "Stop Recording" while armed. So a
+ * session that outlives its test does not merely leave junk behind — it RENAMES
+ * the entry point this spec starts from, and every later run then fails at
+ * `/^Record Macro/` with a timeout that looks like a missing menu item.
+ *
+ * That is not hypothetical: one genuine failure here left a session armed and
+ * the next three runs failed for that reason alone, reporting nothing about the
+ * original cause. macro-live-edit.spec.ts has carried this guard since it hit
+ * the same wall; this spec needed it too.
+ *
+ * Stopping through the on-screen indicator — the control a user presses — so it
+ * cannot drift from the real stop path.
+ */
+async function ensureNotRecording(page: Page): Promise<void> {
+  const indicator = page.locator("[data-macro-recorder-indicator]");
+  if ((await indicator.count()) === 0) return;
+  if (!(await indicator.first().isVisible().catch(() => false))) return;
+
+  await indicator
+    .locator("button")
+    .filter({ hasText: /^Stop$/ })
+    .first()
+    .click()
+    .catch(() => {});
+
+  // Stopping opens the review dialog; the recording it describes is abandoned
+  // state, and cleanupArtifacts deletes whatever module it wrote on the way out.
+  const result = page.locator("[data-macro-result-dialog]");
+  await result.waitFor({ state: "visible", timeout: 20_000 }).catch(() => {});
+  await result
+    .locator("[data-macro-result-close]")
+    .first()
+    .click()
+    .catch(() => {});
+  await result.waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
+  // Leave the menu closed so the next openMenu() is not a toggle that shuts it.
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.waitForTimeout(150);
+}
+
 async function cleanupArtifacts(page: Page): Promise<void> {
+  // FIRST: a live recording renames the menu item this spec starts from.
+  await ensureNotRecording(page);
   await page.evaluate(
     async (a) => {
       const tauri = (window as any).__TAURI__;

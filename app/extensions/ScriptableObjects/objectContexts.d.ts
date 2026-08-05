@@ -97,6 +97,7 @@
 //     - cap.scheduleCancel: Cancel one of its own schedules
 //     - cap.scheduleEvery: Run one of its own methods over and over on a timer, even after you reopen this workbook (never more often than every 30 seconds, and only while Calcula is open)
 //     - cap.scheduleList: List the schedules it has set up in this workbook
+//     - cap.scheduleOnce: Run one of its own methods once at a set time — at least 5 seconds from now — even if you reopen this workbook first (only if Calcula is open at that time; the schedule removes itself after firing)
 //   storage
 //     - cap.storageGet: Read script-private data stored in the workbook
 //     - cap.storageSet: Store script-private data in the workbook (quota 256 KB)
@@ -152,6 +153,24 @@ declare interface ScriptEvaluatedValue {
   type: "number" | "text" | "boolean" | "empty" | "error";
 }
 
+/**
+ * How a sheet is addressed: a 0-based index, or a sheet NAME — `"Sheet1"` and
+ * `0` both work everywhere a sheet can be named. Names resolve when the call
+ * executes, against the live workbook: exact match first, then
+ * case-insensitively if that matches exactly one sheet. An unknown or
+ * ambiguous name rejects with an error that lists the actual sheet names.
+ */
+declare type SheetRef = number | string;
+
+/**
+ * What a cell write accepts. A number lands as a NUMBER and a boolean as a
+ * boolean (write `42`, read back `{ type: "number", value: 42 }`) — no
+ * stringifying, no locale surprises. `null` CLEARS the cell. Strings behave
+ * exactly as if typed into the cell (so `"=A1+B1"` is a formula and `"42"`
+ * is parsed like a user entry).
+ */
+declare type ScriptCellValue = string | number | boolean | null;
+
 /** Options for `getCellFormula` / `setCellFormula`. */
 declare interface ScriptFormulaOptions {
   /**
@@ -162,8 +181,9 @@ declare interface ScriptFormulaOptions {
    * user's View ▸ R1C1 setting.
    */
   style?: "A1" | "R1C1";
-  /** The sheet to act on. Defaults to the active sheet. */
-  sheetIndex?: number;
+  /** The sheet to act on — 0-based index or sheet name. Defaults to the
+   *  active sheet. */
+  sheetIndex?: SheetRef;
 }
 
 /** The size of a block that was copied or pasted. */
@@ -185,9 +205,10 @@ declare interface ScriptPasteOptions {
   transpose?: boolean;
   /** Leave the destination untouched wherever the source cell was empty. */
   skipBlanks?: boolean;
-  /** Must be the active sheet (or omitted) — paste carries formatting, and the
-   *  only write that can carry it has no sheet parameter. */
-  sheetIndex?: number;
+  /** Must resolve to the active sheet (or be omitted) — paste carries
+   *  formatting, and the only write that can carry it has no sheet parameter.
+   *  0-based index or sheet name. */
+  sheetIndex?: SheetRef;
 }
 
 // ============================================================================
@@ -552,8 +573,9 @@ declare interface ScheduledJob {
   scriptId: string;
   /** The exposed method the job invokes. */
   handler: string;
-  /** "every" (fixed interval) or "dailyAt" (a local wall-clock time). */
-  cadence: "every" | "dailyAt";
+  /** "every" (fixed interval), "dailyAt" (a local wall-clock time), or
+   *  "once" (a one-shot that removes itself after firing). */
+  cadence: "every" | "dailyAt" | "once";
   /** For "every": seconds between runs (never below 30). */
   intervalSecs: number;
   /** For "dailyAt": minutes since local midnight. */
@@ -602,6 +624,30 @@ declare interface ScriptScheduleApi {
    */
   at(
     timeOfDay: string,
+    handlerName: string,
+    options?: { label?: string },
+  ): Promise<ScheduledJob>;
+  /**
+   * Run `handlerName` ONCE at `at` — a `Date` or an epoch-millisecond number —
+   * the one-shot half of VBA's `Application.OnTime`. At least 5 seconds from
+   * now (an earlier time means "as soon as possible", never an error).
+   *
+   * The job is PERSISTED like every other schedule: reopening the workbook
+   * before it is due does not lose it, it fires only while Calcula is open,
+   * and it REMOVES ITSELF after firing — success or failure alike — so
+   * `list()` shows it only until it has run. For a plain pause inside a
+   * running script, use `api.sleep(ms)` instead: that one is session-only.
+   *
+   * ```js
+   * context.expose("sendReminder", async () => { ... });
+   * await context.caps.schedule.once(Date.now() + 60_000, "sendReminder");
+   * ```
+   *
+   * Calcula policy (generated): Run one of its own methods once at a set time — at least 5 seconds from now — even if you reopen this workbook first (only if Calcula is open at that time; the schedule removes itself after firing).
+   * Reach: broker `cap.scheduleOnce`, restricted tier, class mutate, requires the `schedule` capability. Limits: perMinute 30.
+   */
+  once(
+    at: number | Date,
     handlerName: string,
     options?: { label?: string },
   ): Promise<ScheduledJob>;
@@ -1644,11 +1690,85 @@ declare interface ScriptPublishApi {
   model(spec: ScriptPublishModelSpec): Promise<ScriptPublishResult>;
 }
 
+/** One of the document theme's 12 color slots. */
+declare type ScriptThemeSlot =
+  | "dark1" | "light1" | "dark2" | "light2"
+  | "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6"
+  | "hyperlink" | "followedHyperlink";
+
+/**
+ * A theme color reference: a slot of the DOCUMENT THEME plus an optional tint.
+ * `tint` is a FRACTION in -1..1 — positive blends toward white (Excel's
+ * "Lighter 40%" = 0.4), negative toward black ("Darker 25%" = -0.25).
+ */
+declare interface ScriptThemeColor {
+  theme: ScriptThemeSlot;
+  tint?: number;
+}
+
+/**
+ * Any color a format takes: "#RRGGBB(AA)" hex, or a theme reference.
+ * textColor / backgroundColor theme references are STORED as references (a
+ * later theme change restyles the cells; the read-back reports the theme
+ * object). Border-side theme references are resolved to their current hex at
+ * write time — the border store is absolute-only — and read back as that hex.
+ */
+declare type ScriptColor = string | ScriptThemeColor;
+
+/** A theme color as the read-back reports it (tint always present, 0 = none). */
+declare interface ScriptThemeColorReadback {
+  theme: ScriptThemeSlot;
+  tint: number;
+}
+
+/**
+ * A cell fill — Excel's Format Cells ▸ Fill, scripted. `{ type: "none" }`
+ * removes the fill; `backgroundColor` remains the shorthand for a solid one.
+ * Pattern names and gradient directions are the backend's own vocabulary; a
+ * typo is rejected with the accepted list.
+ */
+declare type ScriptFill =
+  | { type: "none" }
+  | { type: "solid"; color: ScriptColor }
+  | {
+      type: "pattern";
+      patternType:
+        | "solid" | "darkGray" | "mediumGray" | "lightGray" | "gray125" | "gray0625"
+        | "darkHorizontal" | "darkVertical" | "darkDown" | "darkUp" | "darkGrid" | "darkTrellis"
+        | "lightHorizontal" | "lightVertical" | "lightDown" | "lightUp" | "lightGrid" | "lightTrellis";
+      fgColor: ScriptColor;
+      bgColor: ScriptColor;
+    }
+  | {
+      type: "gradient";
+      color1: ScriptColor;
+      color2: ScriptColor;
+      direction: "horizontal" | "vertical" | "diagonalDown" | "diagonalUp" | "fromCenter";
+    };
+
+/** A fill as the read-back reports it (theme-referenced colors come back as
+ *  the theme object, absolute ones as canonical "#rrggbb"). */
+declare type ScriptFillReadback =
+  | { type: "none" }
+  | { type: "solid"; color: string | ScriptThemeColorReadback }
+  | {
+      type: "pattern";
+      patternType: string;
+      fgColor: string | ScriptThemeColorReadback;
+      bgColor: string | ScriptThemeColorReadback;
+    }
+  | {
+      type: "gradient";
+      color1: string | ScriptThemeColorReadback;
+      color2: string | ScriptThemeColorReadback;
+      direction: string;
+    };
+
 /** One border edge of a cell format. */
 declare interface ScriptBorderSide {
   style: "none" | "thin" | "medium" | "thick" | "dashed" | "dotted" | "double";
-  /** "#RRGGBB" or "#RRGGBBAA". */
-  color: string;
+  /** "#RRGGBB(AA)" hex or a theme reference (resolved to hex at write time). */
+  color: ScriptColor;
 }
 
 /**
@@ -1659,8 +1779,17 @@ declare interface ScriptBorderSide {
  * property is REJECTED (with the accepted list) rather than silently ignored,
  * so a typo fails loudly instead of doing nothing.
  *
- * Protection attributes (locked / formulaHidden) and the checkbox/button cell
- * controls are deliberately NOT here — they are separate surfaces.
+ * PER-CELL vs RANGE-EDGE borders. borderTop/borderRight/borderBottom/
+ * borderLeft apply to EVERY cell of the rectangle — borderTop on A1:C10 draws
+ * a line above all thirty cells, interior rows included. To draw a BOX, use
+ * the three range-edge keys instead: borderOutline puts each side only on the
+ * rectangle's edge cells, and borderInsideHorizontal / borderInsideVertical
+ * draw only the interior grid lines. Reads (getRangeFormat / getFormats)
+ * report the decomposed per-cell sides — never these three keys.
+ *
+ * `locked` / `formulaHidden` are accepted ONLY through the unlocked
+ * api.setRangeFormat — a restricted script's format call that names them is
+ * refused. The checkbox/button cell controls stay separate surfaces.
  */
 declare interface ScriptFormat {
   bold?: boolean;
@@ -1670,9 +1799,10 @@ declare interface ScriptFormat {
   /** Font size in POINTS (1-409). */
   fontSize?: number;
   fontFamily?: string;
-  /** "#RRGGBB" or "#RRGGBBAA". */
-  textColor?: string;
-  backgroundColor?: string;
+  /** "#RRGGBB(AA)" hex, or a theme reference like
+   *  `{ theme: "accent1", tint: 0.4 }` (Wave 4). */
+  textColor?: ScriptColor;
+  backgroundColor?: ScriptColor;
   textAlign?: "left" | "center" | "right" | "general";
   verticalAlign?: "top" | "middle" | "bottom";
   /** An Excel number-format code, e.g. "#,##0.00", "0.0%", "General". */
@@ -1682,12 +1812,137 @@ declare interface ScriptFormat {
   /** Indent steps (0-250). */
   indent?: number;
   shrinkToFit?: boolean;
+  /** Pattern/gradient/solid fill (Wave 4); `{ type: "none" }` removes it.
+   *  `backgroundColor` stays the shorthand for a solid fill. */
+  fill?: ScriptFill;
   borderTop?: ScriptBorderSide;
   borderRight?: ScriptBorderSide;
   borderBottom?: ScriptBorderSide;
   borderLeft?: ScriptBorderSide;
   borderDiagonalDown?: ScriptBorderSide;
   borderDiagonalUp?: ScriptBorderSide;
+  /** RANGE-EDGE: a border around the rectangle only (top row gets top, bottom
+   *  row bottom, left column left, right column right). */
+  borderOutline?: ScriptBorderSide;
+  /** RANGE-EDGE: the horizontal lines BETWEEN rows (never the outer top or
+   *  bottom edge). */
+  borderInsideHorizontal?: ScriptBorderSide;
+  /** RANGE-EDGE: the vertical lines BETWEEN columns (never the outer left or
+   *  right edge). */
+  borderInsideVertical?: ScriptBorderSide;
+  /** Whether the cells refuse edits while their sheet is protected (default
+   *  true for every cell). Unlocked api.setRangeFormat ONLY. */
+  locked?: boolean;
+  /** Whether the cells hide their formulas while their sheet is protected.
+   *  Unlocked api.setRangeFormat ONLY. */
+  formulaHidden?: boolean;
+}
+
+/**
+ * One cell's format as the READ-BACK reports it (api.getRangeFormat /
+ * getCellFormat, range.getFormats() / getFormat()): every writable key, fully
+ * populated, in the same vocabulary the write accepts. Colors come back in
+ * canonical lowercase "#rrggbb"; border sides come back as the same words you
+ * write (thin/medium/thick/dashed/dotted/double, "none" when absent);
+ * `textRotation` may additionally be `"custom:N"` (N in degrees) for a
+ * rotation set through the UI. `numberFormat` is the backend's name for the
+ * format — "General" round-trips exactly; a format code you wrote (say
+ * "0.00%") reads back as its recognized name ("Percentage (2 decimals)").
+ */
+declare interface ScriptCellFormat {
+  bold: boolean;
+  italic: boolean;
+  underline: string;
+  strikethrough: boolean;
+  fontSize: number;
+  fontFamily: string;
+  /** "#rrggbb" for an absolute color; `{ theme, tint }` for a theme-referenced
+   *  one. NOTE the DEFAULT cell is theme-referenced (text = dark1, background
+   *  = light1) — that is genuinely what the engine stores. */
+  textColor: string | ScriptThemeColorReadback;
+  /** The text color resolved against the current document theme ("#rrggbb"). */
+  textColorResolved: string;
+  backgroundColor: string | ScriptThemeColorReadback;
+  /** The background resolved against the current document theme ("#rrggbb"). */
+  backgroundColorResolved: string;
+  textAlign: string;
+  verticalAlign: string;
+  numberFormat: string;
+  wrapText: boolean;
+  textRotation: string;
+  indent: number;
+  shrinkToFit: boolean;
+  /** The cell's fill; `{ type: "none" }` when it has none. A plain
+   *  backgroundColor write reads back as a solid fill too (that IS how the
+   *  engine stores it). */
+  fill: ScriptFillReadback;
+  borderTop: { style: string; color: string };
+  borderRight: { style: string; color: string };
+  borderBottom: { style: string; color: string };
+  borderLeft: { style: string; color: string };
+  borderDiagonalDown: { style: string; color: string };
+  borderDiagonalUp: { style: string; color: string };
+  /** Whether the cell refuses edits while its sheet is protected. Readable at
+   *  both tiers; CHANGING it stays unlocked-only. */
+  locked: boolean;
+  /** Whether the cell hides its formula while its sheet is protected. */
+  formulaHidden: boolean;
+}
+
+/** One named cell style, as api.listNamedStyles / createNamedStyle report it. */
+declare interface ScriptNamedStyle {
+  /** The display name applyNamedStyle takes ("Good", "Heading 1", ...). */
+  name: string;
+  /** Built-in styles cannot be deleted. */
+  builtIn: boolean;
+  /** The Cell Styles gallery category ("Good, Bad and Neutral", "Custom", ...). */
+  category: string;
+}
+
+/** What api.getThemePalette answers. */
+declare interface ScriptThemePalette {
+  /** The theme's display name ("Office", ...). */
+  name: string;
+  /** All 12 slots resolved to canonical "#rrggbb" hex (keys are the
+   *  ScriptThemeSlot names: dark1, light1, ..., accent1-6, hyperlink,
+   *  followedHyperlink). */
+  colors: Record<ScriptThemeSlot, string>;
+  /** The heading/body font pair theme-referenced fonts resolve to. */
+  fonts: { heading: string; body: string };
+}
+
+/**
+ * api.protectSheet options: what stays ALLOWED while the sheet is protected
+ * (every flag optional; omitted flags default exactly like the Protect Sheet
+ * dialog — selection allowed, everything else refused), plus an optional
+ * password.
+ */
+declare interface ScriptProtectSheetOptions {
+  password?: string;
+  allowSelectLockedCells?: boolean;
+  allowSelectUnlockedCells?: boolean;
+  allowFormatCells?: boolean;
+  allowFormatColumns?: boolean;
+  allowFormatRows?: boolean;
+  allowInsertColumns?: boolean;
+  allowInsertRows?: boolean;
+  allowInsertHyperlinks?: boolean;
+  allowDeleteColumns?: boolean;
+  allowDeleteRows?: boolean;
+  allowSort?: boolean;
+  allowAutoFilter?: boolean;
+  allowPivotTables?: boolean;
+  allowEditObjects?: boolean;
+  allowEditScenarios?: boolean;
+}
+
+/** What api.getProtectionStatus answers for the active sheet. */
+declare interface ScriptProtectionStatus {
+  protected: boolean;
+  hasPassword: boolean;
+  /** The full permission flag set currently in force (defaults when the sheet
+   *  is unprotected). */
+  options: Required<Omit<ScriptProtectSheetOptions, "password">>;
 }
 
 /** A sort criterion for api.sortRange. */
@@ -1711,6 +1966,151 @@ declare interface ScriptSortField {
 declare interface ScriptFindMatch {
   row: number;
   col: number;
+}
+
+// ============================================================================
+// Data validation (Wave 3)
+// ============================================================================
+
+/**
+ * A data-validation rule — what future EDITS a cell will accept (Data ▸ Data
+ * Validation), in ONE flat shape used both to write (`api.setDataValidation`,
+ * `range.setValidation`) and to read back (`api.getDataValidation`,
+ * `range.validation()`), so a read can be passed straight back to a write.
+ *
+ * Which keys are legal depends on `type` (an out-of-place key is rejected with
+ * the accepted list):
+ * - `"wholeNumber" | "decimal" | "date" | "time" | "textLength"`: `operator` +
+ *   `formula1` (+ `formula2` for `"between"`/`"notBetween"`). Dates and times
+ *   use their SERIAL-NUMBER form (a time is a fraction of a day).
+ * - `"list"`: exactly one of `values` (literal dropdown entries) or
+ *   `sourceRange` (the rectangle the entries come from), plus `inCellDropdown`.
+ * - `"custom"`: `formula` — a formula that must evaluate TRUE for valid input.
+ *
+ * ```js
+ * await api.setDataValidation(1, 2, 100, 2, {
+ *   type: "list", values: ["Red", "Green", "Blue"],
+ *   inputTitle: "Colour", inputMessage: "Pick one of the three",
+ * });
+ * ```
+ */
+declare interface ScriptValidationRule {
+  type: "wholeNumber" | "decimal" | "list" | "date" | "time" | "textLength" | "custom";
+  operator?: "between" | "notBetween" | "equal" | "notEqual" | "greaterThan" | "lessThan" | "greaterThanOrEqual" | "lessThanOrEqual";
+  formula1?: number;
+  /** Only with the "between" / "notBetween" operators. */
+  formula2?: number;
+  /** custom only: the formula that must evaluate TRUE, e.g. "=A1>0". */
+  formula?: string;
+  /** list only: the literal dropdown entries. */
+  values?: string[];
+  /** list only: the rectangle the entries come from (0-based, inclusive;
+   *  sheetIndex optional). */
+  sourceRange?: { sheetIndex?: number; startRow: number; startCol: number; endRow: number; endCol: number };
+  /** list only: show the in-cell dropdown arrow (default true). */
+  inCellDropdown?: boolean;
+  /** Whether blank cells always pass (default true). */
+  ignoreBlanks?: boolean;
+  /** Prompt shown while a covered cell is selected. */
+  inputTitle?: string;
+  inputMessage?: string;
+  /** Defaults to true when a prompt title/message is given. */
+  showInput?: boolean;
+  /** Alert shown when invalid data is entered. */
+  errorTitle?: string;
+  errorMessage?: string;
+  /** "stop" (default) refuses the entry; "warning" / "information" allow it. */
+  errorStyle?: "stop" | "warning" | "information";
+  /** Default true. */
+  showError?: boolean;
+}
+
+/** One entry of api.listDataValidations: a covered rectangle + its rule. */
+declare interface ScriptValidationRangeInfo {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  rule: ScriptValidationRule;
+}
+
+// ============================================================================
+// Hyperlinks (Wave 3)
+// ============================================================================
+
+/**
+ * What a hyperlink points at — a union on `type` (an out-of-place key is
+ * rejected with the accepted list):
+ * - `"url"` / `"file"`: `target` is the address / path.
+ * - `"email"`: `target` is the address (a `mailto:` prefix is tolerated),
+ *   plus an optional `subject`.
+ * - `"internalReference"`: `cellReference` (an A1 cell like "B4") plus an
+ *   optional `sheetName` — the sheet the link JUMPS TO, which is different
+ *   from the sheet the link cell lives on.
+ */
+declare interface ScriptHyperlinkSpec {
+  type: "url" | "email" | "internalReference" | "file";
+  target?: string;
+  subject?: string;
+  sheetName?: string;
+  cellReference?: string;
+}
+
+declare interface ScriptHyperlinkOptions {
+  /** Text the cell shows instead of its stored value. */
+  displayText?: string;
+  /** Hover tooltip. */
+  tooltip?: string;
+}
+
+/** A hyperlink as scripts read it back. */
+declare interface ScriptHyperlink {
+  row: number;
+  col: number;
+  /** The sheet the link cell LIVES on (0-based). */
+  sheetIndex: number;
+  type: "url" | "email" | "internalReference" | "file";
+  target: string;
+  displayText: string | null;
+  tooltip: string | null;
+  /** internalReference only: the navigation-target sheet (null = same sheet). */
+  sheetName: string | null;
+  /** internalReference only: the A1 cell the link jumps to. */
+  cellReference: string | null;
+}
+
+// ============================================================================
+// Notes + comments (Wave 4)
+// ============================================================================
+
+/** One sticky note, as api.listNotes() reports it. */
+declare interface ScriptNoteInfo {
+  row: number;
+  col: number;
+  /** The note's text. */
+  text: string;
+  /** Who wrote it (a script's notes carry the script's name). */
+  author: string;
+}
+
+/** One reply in a comment thread. */
+declare interface ScriptCommentReply {
+  id: string;
+  text: string;
+  author: string;
+}
+
+/** One comment thread, as api.listComments() reports it. */
+declare interface ScriptCommentInfo {
+  /** The thread id (what reply/resolve/delete address). */
+  id: string;
+  row: number;
+  col: number;
+  /** The root comment's text. */
+  text: string;
+  author: string;
+  resolved: boolean;
+  replies: ScriptCommentReply[];
 }
 
 // ============================================================================
@@ -1848,6 +2248,245 @@ declare type ScriptPivotLayoutDirective =
   | "auto-fit"
   | "subtotals-top" | "subtotals-bottom" | "subtotals-off";
 
+// ============================================================================
+// Conditional formatting (Wave 3): the full rule vocabulary the Home ▸
+// Conditional Formatting dialogs write, reachable from a script. The shapes
+// mirror the backend's serde union EXACTLY — `type` is the discriminant.
+// ============================================================================
+
+/** How a color-scale / data-bar / icon-set anchor value is interpreted. */
+declare type ScriptCFValueType =
+  | "number" | "percent" | "formula" | "percentile" | "min" | "max"
+  | "autoMin" | "autoMax";
+
+/** One anchor point of a color scale. */
+declare interface ScriptCFColorScalePoint {
+  valueType: ScriptCFValueType;
+  value?: number;
+  formula?: string;
+  color: string;
+}
+
+/** 2- or 3-color scale (omit midPoint for 2-color). */
+declare interface ScriptCFColorScaleRule {
+  type: "colorScale";
+  minPoint: ScriptCFColorScalePoint;
+  midPoint?: ScriptCFColorScalePoint;
+  maxPoint: ScriptCFColorScalePoint;
+}
+
+/** In-cell data bar. */
+declare interface ScriptCFDataBarRule {
+  type: "dataBar";
+  minValueType: ScriptCFValueType;
+  minValue?: number;
+  minFormula?: string;
+  maxValueType: ScriptCFValueType;
+  maxValue?: number;
+  maxFormula?: string;
+  fillColor: string;
+  borderColor?: string;
+  negativeFillColor?: string;
+  negativeBorderColor?: string;
+  axisColor?: string;
+  axisPosition: "automatic" | "cellMidpoint" | "none";
+  direction: "context" | "leftToRight" | "rightToLeft";
+  showValue: boolean;
+  gradientFill: boolean;
+}
+
+/** One icon-set threshold. */
+declare interface ScriptCFIconSetThreshold {
+  valueType: ScriptCFValueType;
+  value: number;
+  operator: "greaterThan" | "greaterThanOrEqual";
+  formula?: string;
+}
+
+/** Icon set (3/4/5-icon families). */
+declare interface ScriptCFIconSetRule {
+  type: "iconSet";
+  iconSet:
+    | "threeArrows" | "threeArrowsGray" | "threeFlags" | "threeTrafficLights1"
+    | "threeTrafficLights2" | "threeSigns" | "threeSymbols" | "threeSymbols2"
+    | "threeStars" | "threeTriangles" | "fourArrows" | "fourArrowsGray"
+    | "fourRating" | "fourTrafficLights" | "fourRedToBlack" | "fiveArrows"
+    | "fiveArrowsGray" | "fiveRating" | "fiveQuarters" | "fiveBoxes";
+  thresholds: ScriptCFIconSetThreshold[];
+  reverseIcons: boolean;
+  showIconOnly: boolean;
+}
+
+/** "Cell value is ..." — value1/value2 are literals or formulas, as text. */
+declare interface ScriptCFCellValueRule {
+  type: "cellValue";
+  operator:
+    | "equal" | "notEqual" | "greaterThan" | "greaterThanOrEqual"
+    | "lessThan" | "lessThanOrEqual" | "between" | "notBetween";
+  value1: string;
+  value2?: string;
+}
+
+/** "Text contains / begins with / ends with ...". */
+declare interface ScriptCFContainsTextRule {
+  type: "containsText";
+  ruleType: "contains" | "notContains" | "beginsWith" | "endsWith";
+  text: string;
+}
+
+/** Top/bottom N items or percent. */
+declare interface ScriptCFTopBottomRule {
+  type: "topBottom";
+  ruleType: "topItems" | "topPercent" | "bottomItems" | "bottomPercent";
+  rank: number;
+}
+
+/** Above/below the range's average (with std-dev variants). */
+declare interface ScriptCFAboveAverageRule {
+  type: "aboveAverage";
+  ruleType:
+    | "aboveAverage" | "belowAverage" | "equalOrAboveAverage" | "equalOrBelowAverage"
+    | "oneStdDevAbove" | "oneStdDevBelow" | "twoStdDevAbove" | "twoStdDevBelow"
+    | "threeStdDevAbove" | "threeStdDevBelow";
+}
+
+/** Date cells falling in a rolling period. */
+declare interface ScriptCFTimePeriodRule {
+  type: "timePeriod";
+  period:
+    | "today" | "yesterday" | "tomorrow" | "last7Days" | "thisWeek" | "lastWeek"
+    | "nextWeek" | "thisMonth" | "lastMonth" | "nextMonth" | "thisQuarter"
+    | "lastQuarter" | "nextQuarter" | "thisYear" | "lastYear" | "nextYear";
+}
+
+/** Custom formula: applies where the formula evaluates to TRUE. */
+declare interface ScriptCFExpressionRule {
+  type: "expression";
+  formula: string;
+}
+
+/** The whole rule vocabulary (the parameter-free kinds are just their tag). */
+declare type ScriptCFRule =
+  | ScriptCFColorScaleRule
+  | ScriptCFDataBarRule
+  | ScriptCFIconSetRule
+  | ScriptCFCellValueRule
+  | ScriptCFContainsTextRule
+  | ScriptCFTopBottomRule
+  | ScriptCFAboveAverageRule
+  | ScriptCFTimePeriodRule
+  | ScriptCFExpressionRule
+  | { type: "duplicateValues" }
+  | { type: "uniqueValues" }
+  | { type: "blankCells" }
+  | { type: "noBlanks" }
+  | { type: "errorCells" }
+  | { type: "noErrors" };
+
+/** The style applied where a rule matches (only the keys present change). */
+declare interface ScriptCFFormat {
+  backgroundColor?: string;
+  textColor?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  numberFormat?: string;
+  borderTopColor?: string;
+  borderTopStyle?: string;
+  borderBottomColor?: string;
+  borderBottomStyle?: string;
+  borderLeftColor?: string;
+  borderLeftStyle?: string;
+  borderRightColor?: string;
+  borderRightStyle?: string;
+}
+
+/** One rectangle a rule covers (inclusive, 0-based). */
+declare interface ScriptCFRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** A CF range argument: the numeric box, or an A1 spelling ("B2:D10") that is
+ *  resolved before the call crosses. No "Sheet!" prefix — a rule's ranges are
+ *  rectangles on the sheet the rule lives on; use the `sheet` argument of
+ *  list/clear, or switch sheets first to author elsewhere. */
+declare type ScriptCFRangeInput = string | ScriptCFRange;
+
+/** One stored rule, as listConditionalFormats reports it. */
+declare interface ScriptCFDefinition {
+  /** The id update/delete address. */
+  id: number;
+  /** Evaluation order (lower = evaluated first). */
+  priority: number;
+  rule: ScriptCFRule;
+  format: ScriptCFFormat;
+  ranges: ScriptCFRange[];
+  /** Stop evaluating lower-priority rules on a match. */
+  stopIfTrue: boolean;
+  enabled: boolean;
+}
+
+/**
+ * The shape of a chart's spec, for IntelliSense on updateSpec/replaceSpec
+ * patches. AUTHORITY LIVES ELSEWHERE: the Charts extension validates every
+ * spec write against its full ChartSpec schema and rejects violations — this
+ * interface only names the common keys (all optional, extras allowed), it is
+ * not the contract.
+ */
+declare interface ScriptChartSpec {
+  /** Chart type — a built-in mark ("bar", "line", "pie", "scatter", "area",
+   *  ...) or a registered custom mark id. */
+  mark?: string;
+  /** Data source: an A1 reference ("Sheet1!A1:D10"), a named range name, or a
+   *  structured data-range object. */
+  data?: string | Record<string, unknown>;
+  /** Whether the first row/column of the range contains headers. */
+  hasHeaders?: boolean;
+  /** Whether series are laid out in columns or rows. */
+  seriesOrientation?: "columns" | "rows";
+  /** Index of the column/row used for category labels. */
+  categoryIndex?: number;
+  /** Series definitions. */
+  series?: Array<Record<string, unknown>>;
+  /** Chart title (null = no title). */
+  title?: string | null;
+  xAxis?: Record<string, unknown>;
+  yAxis?: Record<string, unknown>;
+  legend?: Record<string, unknown>;
+  /** Color palette name. */
+  palette?: string;
+  /** Per-series color overrides keyed by SERIES NAME (hex strings). */
+  seriesColors?: Record<string, string>;
+  /** Mark-specific options (depends on `mark`). */
+  markOptions?: Record<string, unknown>;
+  layers?: Array<Record<string, unknown>>;
+  transform?: Array<Record<string, unknown>>;
+  config?: Record<string, unknown>;
+  tooltip?: Record<string, unknown>;
+  trendlines?: Array<Record<string, unknown>>;
+  dataLabels?: Record<string, unknown>;
+  /** Non-destructive chart filters (hide series/categories). */
+  filters?: Record<string, unknown>;
+  encoding?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** A chart.setGeometry patch: PLACEMENT, not spec — position/size in sheet
+ *  pixels, the display name, and/or the sheet the chart floats over (index or
+ *  name, Wave-1 rules). Only the keys present change. */
+declare interface ScriptChartGeometry {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  name?: string;
+  sheetIndex?: SheetRef;
+}
+
 /** A handle on ANOTHER chart in the workbook (api.chart(id)). */
 declare interface ScriptChartHandle {
   readonly id: string;
@@ -1862,18 +2501,45 @@ declare interface ScriptChartHandle {
    * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
-  updateSpec(patch: Record<string, unknown>): Promise<void>;
+  updateSpec(patch: ScriptChartSpec): Promise<void>;
   /** Replace the whole spec (schema-validated; rejects if invalid).
    *
    * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
-  replaceSpec(fullSpec: Record<string, unknown>): Promise<void>;
+  replaceSpec(fullSpec: ScriptChartSpec): Promise<void>;
   /**
    * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
   setStyleProperty(name: string, value: string): Promise<void>;
+  /** Move / resize / rename / re-sheet this chart (only the keys present
+   *  change) — the ChartObject geometry macro:
+   *  `await api.chart(id).setGeometry({ x: 40, y: 20, width: 480 })`.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setGeometry(patch: ScriptChartGeometry): Promise<void>;
+  /** Set the chart title (null removes it). Sugar for updateSpec({ title }).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setTitle(title: string | null): Promise<void>;
+  /** Change the chart type ("bar", "line", ...). Sugar for updateSpec({ mark }).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setType(mark: string): Promise<void>;
+  /** Re-point the chart at another data range (A1 or a named range). Sugar for
+   *  updateSpec({ data: range }).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setSourceRange(range: string): Promise<void>;
   /** Delete this chart.
    *
    * Calcula policy (generated): Delete a chart.
@@ -1882,9 +2548,52 @@ declare interface ScriptChartHandle {
   delete(): Promise<void>;
 }
 
+/** A totals-row function name (the backend's own vocabulary). */
+declare type ScriptTableTotalsFunction =
+  | "none" | "average" | "count" | "countNumbers" | "max" | "min" | "sum"
+  | "stdDev" | "var" | "custom";
+
+/** The 7 boolean style flags of a table (Design tab checkboxes). */
+declare interface ScriptTableStyleOptions {
+  bandedRows?: boolean;
+  bandedColumns?: boolean;
+  headerRow?: boolean;
+  totalRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  showFilterButton?: boolean;
+}
+
+/** One table column, as table.getColumns() reports it. */
+declare interface ScriptTableColumnInfo {
+  name: string;
+  /** The totals-row function ("none" when the column has no total). */
+  totalsFunction: ScriptTableTotalsFunction;
+  /** The custom totals formula, when totalsFunction is "custom". */
+  totalsFormula?: string;
+  /** The calculated-column formula, when the column has one. */
+  calculatedFormula?: string;
+}
+
+/** A table's style, as table.getStyle() reports it. */
+declare interface ScriptTableStyle {
+  styleName: string;
+  styleOptions: Required<ScriptTableStyleOptions>;
+}
+
+/** A table's totals configuration, as table.getTotals() reports it. */
+declare interface ScriptTableTotals {
+  /** Whether the totals row is currently shown. */
+  shown: boolean;
+  columns: Array<{ name: string; function: ScriptTableTotalsFunction; formula?: string }>;
+}
+
 /** A handle on ANOTHER table (api.table(id)). Coordinates are TABLE-RELATIVE
  *  (row 0 = first data row, col 0 = first table column) and clamped to the
- *  table body, exactly as inside that table's own script. */
+ *  table body, exactly as inside that table's own script. The STRUCTURE
+ *  methods (rename/resize/columns/totals/style/convert/insert/delete row)
+ *  require the table's sheet to be ACTIVE — the backend commands they map to
+ *  address the active sheet; call api.setActiveSheet(...) first. */
 declare interface ScriptTableHandle {
   readonly id: string;
   /**
@@ -1902,14 +2611,148 @@ declare interface ScriptTableHandle {
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
   addRow(): Promise<void>;
+  /** A TABLE-RELATIVE range inside the body ("A1" = first data cell). A
+   *  "Sheet!" prefix is refused — use toRange() / api.range() for the grid. */
   range(address: string): ScriptRange;
   cell(row: number, colIndex: number): ScriptRange;
+  /** The table's DATA BODY (headers excluded) as a grid-absolute ScriptRange
+   *  on the table's sheet — unlike range()/cell(), which are table-relative.
+   *
+   * Calcula policy (generated): List the charts, tables, pivot tables, named ranges, slicers or form controls in this workbook (names and positions, never their contents).
+   * Reach: broker `api.listObjects`, unlocked tier, class read. Limits: maxObjects 5,000.
+   */
+  toRange(): Promise<ScriptRange>;
+  /** Rename the table (names and defined names share ONE namespace; a
+   *  collision rejects).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  rename(newName: string): Promise<void>;
+  /** Re-anchor the table over a new GRID rectangle (0-based, inclusive).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  resize(startRow: number, startCol: number, endRow: number, endCol: number): Promise<void>;
+  /** Add a column. `position` is the 0-based column index to insert at
+   *  (default: append at the right edge).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  addColumn(name: string, position?: number): Promise<void>;
+  /** Remove a column by name (its cells are cleared).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  removeColumn(name: string): Promise<void>;
+  /** Rename a column (structured references update).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  renameColumn(oldName: string, newName: string): Promise<void>;
+  /** Show or hide the totals row.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setTotalsRow(show: boolean): Promise<void>;
+  /** Set a column's totals-row function. A "custom" function needs the
+   *  formula as the third argument.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setTotalsFunction(column: string, fn: ScriptTableTotalsFunction, customFormula?: string): Promise<void>;
+  /** Set the table style by NAME, and/or patch the 7 style flags (only the
+   *  flags present change).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setStyle(style: string | { styleName?: string; styleOptions?: ScriptTableStyleOptions }): Promise<void>;
+  /** Dissolve the table back into plain cells (values and formatting stay;
+   *  structured references are rewritten to ranges).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  convertToRange(): Promise<void>;
+  /** Insert a data row BEFORE the 0-based data row `position`. A positioned
+   *  insert is a REAL sheet-row insert (rows below shift down); omit
+   *  `position` to append a row at the end (no shifting).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  insertRow(position?: number): Promise<void>;
+  /** Delete the 0-based data row `position` — a REAL sheet-row delete (rows
+   *  below shift up, the table shrinks).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  deleteRow(position: number): Promise<void>;
+  /** The column list with totals + calculated-column formulas (the read twin
+   *  of the column/totals methods).
+   *
+   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
+   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   */
+  getColumns(): Promise<ScriptTableColumnInfo[]>;
+  /** The table's style name + the 7 style flags.
+   *
+   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
+   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   */
+  getStyle(): Promise<ScriptTableStyle>;
+  /** The totals-row configuration (shown + per-column functions).
+   *
+   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
+   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   */
+  getTotals(): Promise<ScriptTableTotals>;
   /** Delete this table (the cells and their values are kept).
    *
    * Calcula policy (generated): Delete a table (the cells and their values are kept).
    * Reach: broker `api.deleteTable`, unlocked tier, class mutate.
    */
   delete(): Promise<void>;
+}
+
+/** One item of a pivot field, as pivot.getFieldInfo reports it. */
+declare interface ScriptPivotItemInfo {
+  id: number;
+  name: string;
+  isExpanded: boolean;
+  /** false = hidden by a manual filter / setItemVisibility. */
+  visible: boolean;
+}
+
+/** The filters currently applied to one pivot field. */
+declare interface ScriptPivotFieldFilters {
+  /** Explicit item selection (what setFilter writes): the names KEPT. */
+  manualFilter?: { selectedItems: string[] };
+  /** Text-based label filter, when the UI has applied one. */
+  labelFilter?: Record<string, unknown>;
+  /** Numeric value filter, when the UI has applied one. */
+  valueFilter?: Record<string, unknown>;
+  dateFilter?: unknown;
+}
+
+/** A pivot field's current state — the READ twin of setFilter /
+ *  setItemVisibility, so a macro can read-modify-write. */
+declare interface ScriptPivotFieldInfo {
+  id: number;
+  name: string;
+  showAllItems: boolean;
+  filters: ScriptPivotFieldFilters;
+  /** true when ANY filter (manual, label, value) is active on the field. */
+  isFiltered: boolean;
+  items: ScriptPivotItemInfo[];
 }
 
 /** A handle on ANOTHER pivot table (api.pivot(id)). */
@@ -1956,6 +2799,47 @@ declare interface ScriptPivotHandle {
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
   setLayout(directives: ScriptPivotLayoutDirective[]): Promise<void>;
+  /** A field's current filters and item visibility (the read twin of
+   *  setFilter / setItemVisibility). `field` is the SOURCE column name.
+   *
+   * Calcula policy (generated): Read another object in this workbook (its chart spec, table cells, slicer selection, ...).
+   * Reach: broker `api.objectGetState`, unlocked tier, class read.
+   */
+  getFieldInfo(field: string): Promise<ScriptPivotFieldInfo>;
+  /**
+   * Filter a field to exactly `values` (the item names to KEEP) — the report /
+   * page filter of the classic macro. `null` clears the field's filters.
+   * e.g. `await api.pivot(id).setFilter("Region", ["West"]); await api.pivot(id).refresh()`
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setFilter(field: string, values: string[] | null): Promise<void>;
+  /** Clear EVERY filter on a field (manual, label and value alike).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  clearFilter(field: string): Promise<void>;
+  /** Show or hide ONE item of a field (Excel's PivotItem.Visible).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setItemVisibility(field: string, item: string, visible: boolean): Promise<void>;
+  /** Sort a row/column field by its labels.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  sortField(field: string, direction: "asc" | "desc"): Promise<void>;
+  /** Set the number format of a VALUE field (by its alias "Sum of Sales" or
+   *  its source name), e.g. `"#,##0.00"`.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setNumberFormat(valueField: string, format: string): Promise<void>;
   /** Delete this pivot table.
    *
    * Calcula policy (generated): Delete a pivot table.
@@ -2015,7 +2899,22 @@ declare interface ScriptShapeHandle {
   sendMessage(type: string, data?: unknown): Promise<void>;
 }
 
-/** A handle on ANOTHER named range (api.namedRange(name)). */
+/** A namedRange.update patch. An ABSENT key keeps the stored value;
+ *  `sheetIndex: null` clears the scope to workbook; a sheet ref (index or
+ *  name) scopes the name to that sheet. */
+declare interface ScriptNamedRangeUpdate {
+  /** New target formula, e.g. "=Sheet1!$A$1:$B$10". */
+  refersTo?: string;
+  /** Rename the name. ONE undo step; the name's attached object scripts are
+   *  re-keyed (a rename is refused while a DISTRIBUTED script is attached). */
+  newName?: string;
+  comment?: string;
+  sheetIndex?: SheetRef | null;
+}
+
+/** A handle on ANOTHER named range (api.namedRange(name)). IDENTITY IS THE
+ *  NAME: a successful rename re-points this handle at the new name, so you
+ *  can keep calling it (the ScriptSheet.rename idiom). */
 declare interface ScriptNamedRangeHandle {
   readonly name: string;
   /**
@@ -2028,6 +2927,36 @@ declare interface ScriptNamedRangeHandle {
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
   setValues(values: string[][]): Promise<void>;
+  /** The name's grid rectangle as a full ScriptRange (offset/resize/getData/
+   *  format...), bound to the sheet its refersTo formula names. Rejects when
+   *  the name does not exist or does not refer to a rectangular range.
+   *
+   * Calcula policy (generated): List the charts, tables, pivot tables, named ranges, slicers or form controls in this workbook (names and positions, never their contents).
+   * Reach: broker `api.listObjects`, unlocked tier, class read. Limits: maxObjects 5,000.
+   */
+  toRange(): Promise<ScriptRange>;
+  /** Edit the DEFINITION of the name (target / scope / comment / the name
+   *  itself). Resolves to `{ name }` — the (possibly new) name.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  update(patch: ScriptNamedRangeUpdate): Promise<{ name: string }>;
+  /** Re-point the name at another target. Sugar for update({ refersTo }).
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  setRefersTo(refersTo: string): Promise<void>;
+  /** Rename the name (ONE undo step). Formulas that spell the OLD name are
+   *  NOT rewritten — they will show #NAME? until edited, exactly as after a
+   *  Name Manager delete+define. Resolves to `{ name }` and re-points this
+   *  handle.
+   *
+   * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
+   * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
+   */
+  rename(newName: string): Promise<{ name: string }>;
   /** Delete this name (formulas using it will break).
    *
    * Calcula policy (generated): Delete a named range (formulas using the name will break).
@@ -2036,16 +2965,104 @@ declare interface ScriptNamedRangeHandle {
   delete(): Promise<void>;
 }
 
-/** A worksheet facet of the canonical model (C3). Reached via api.workbook. */
+/**
+ * A worksheet facet of the canonical model (C3). Reached via api.workbook —
+ * and, since Wave 2, a HANDLE you can hold and drive, the VBA
+ * `Set ws = Worksheets("Data")` idiom:
+ *
+ * ```js
+ * const ws = await api.workbook.sheet("Data");
+ * await ws.rename("Data 2024");
+ * await ws.setTabColor("#0078D4");
+ * await ws.move({ after: "Summary" });
+ * const used = await ws.usedRange();
+ * if (used) await used.format({ bold: true });
+ * ```
+ *
+ * IDENTITY IS THE NAME. Every management call passes this sheet's NAME to the
+ * workbook (resolved there, per call, against the live sheet list) — never the
+ * index the handle was built with — so somebody re-ordering the tabs while
+ * your script runs cannot redirect a rename or delete to the wrong sheet.
+ * `rename()` re-points the handle at the new name; `index` stays the position
+ * at the time you got the handle (re-read via `api.workbook.sheet(...)` after
+ * a move).
+ */
 declare interface ScriptSheet {
   readonly index: number;
   readonly name: string;
-  /** A range on THIS sheet by A1 address ("A1", "A1:B5"). */
+  /** A range on this sheet by A1 address ("A1", "A1:B5"). A "Sheet!" prefix is
+   *  RESOLVED, never silently dropped: naming this sheet stays here; naming
+   *  another existing sheet REBINDS the returned range to that sheet; an
+   *  unknown name throws listing the workbook's sheets. */
   range(address: string): ScriptRange;
   /** A single cell on this sheet (0-based), as a single-cell range. */
   cell(row: number, col: number): ScriptRange;
   /** Make this the active sheet. */
   activate(): Promise<void>;
+  /** The rectangle of cells this sheet actually uses (the bounding box of
+   *  everything stored on it), as a live {@link ScriptRange} — offset, resize,
+   *  getData, setValues and format all work on it. Resolves `null` when the
+   *  sheet stores nothing at all. */
+  usedRange(): Promise<ScriptRange | null>;
+  /** Rename this sheet. Rejects a name that already exists. The handle follows
+   *  the new name — keep using it. */
+  rename(newName: string): Promise<void>;
+  /** Delete this sheet and everything on it. Rejects on the last remaining
+   *  sheet. The handle is dead afterwards. */
+  delete(): Promise<void>;
+  /** This sheet's current visibility. */
+  visibility(): Promise<"visible" | "hidden" | "veryHidden">;
+  /** Show or hide this sheet ("veryHidden" = only code can unhide it). Rejects
+   *  hiding the last visible sheet. */
+  setVisibility(visibility: "visible" | "hidden" | "veryHidden"): Promise<void>;
+  /** This sheet's tab colour ("#RRGGBB"), or `null` when it has none. */
+  tabColor(): Promise<string | null>;
+  /** Change this sheet's tab colour; `null` removes it. */
+  setTabColor(color: string | null): Promise<void>;
+  /**
+   * Move this sheet in the tab bar: to an absolute 0-based position, or
+   * relative to another sheet — `{ before: "Summary" }` / `{ after: 2 }`.
+   * Every other sheet is renumbered, so re-read any index you were holding;
+   * this handle keeps working (it holds the sheet by name).
+   */
+  move(to: number | { before: number | string } | { after: number | string }): Promise<void>;
+  /** Duplicate this sheet — cells, formatting and objects — as a new sheet
+   *  placed immediately after it. Resolves to the copy's index and name. */
+  copy(newName?: string): Promise<{ index: number; name: string }>;
+
+  // -- Structural ops ON THIS SHEET (no activate-dance; the handle passes its
+  //    own sheet to the sheet-addressable flat rows, by NAME, so a concurrent
+  //    tab re-order cannot redirect them) --
+
+  /** Insert `count` rows at `startRow` on THIS sheet. */
+  insertRows(startRow: number, count: number): Promise<void>;
+  /** Delete `count` rows from `startRow` on THIS sheet (contents are lost). */
+  deleteRows(startRow: number, count: number): Promise<void>;
+  /** Insert `count` columns at `startCol` on THIS sheet. */
+  insertColumns(startCol: number, count: number): Promise<void>;
+  /** Delete `count` columns from `startCol` on THIS sheet (contents are lost). */
+  deleteColumns(startCol: number, count: number): Promise<void>;
+  /** Merge a rectangle on THIS sheet (only the top-left value survives). */
+  mergeCells(startRow: number, startCol: number, endRow: number, endCol: number): Promise<void>;
+  /** Split the merged region containing (row, col) on THIS sheet. */
+  unmergeCells(row: number, col: number): Promise<void>;
+  /** Sort a rectangle on THIS sheet; resolves to the rows/columns moved. */
+  sortRange(startRow: number, startCol: number, endRow: number, endCol: number, fields: ScriptSortField[], options?: { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" }): Promise<number>;
+  /** Clear a rectangle on THIS sheet — everything, contents only, or formats
+   *  only — as one undo step. */
+  clearRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { applyTo?: "all" | "contents" | "formats" }): Promise<{ count: number }>;
+  /** Find every matching cell on THIS sheet, in reading order. */
+  findAll(query: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean }): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
+  /** Replace everywhere on THIS sheet (one undo step). */
+  replaceAll(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean }): Promise<{ replacementCount: number }>;
+  /** Size an inclusive column span to fit its contents on THIS sheet — the
+   *  double-click best-fit (extension chrome included; empty columns keep
+   *  their width). ACTIVE sheet only: measurement needs the rendered sheet,
+   *  so any other sheet is refused. Resolves to how many columns changed. */
+  autoFitColumns(startCol: number, endCol: number): Promise<{ count: number }>;
+  /** Size an inclusive row span to fit its contents on THIS sheet (empty rows
+   *  reset to the default height). ACTIVE sheet only, like autoFitColumns. */
+  autoFitRows(startRow: number, endRow: number): Promise<{ count: number }>;
 }
 
 /** What `save()` / `saveAs()` resolve to. `saved: false` is the cancelled case
@@ -2056,6 +3073,74 @@ declare interface ScriptSaveResult {
   saved: boolean;
   /** The file NAME written to; `null` when nothing was saved. Never a path. */
   name: string | null;
+}
+
+/** One rectangular area of a selection, normalized so `startRow <= endRow` and
+ *  `startCol <= endCol` — safe for arithmetic regardless of which corner the
+ *  user dragged from. */
+declare interface ScriptSelectionArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * The current selection, as `api.getSelection()` reports it — COORDINATES
+ * ONLY, never cell contents. The primary rectangle is spread onto the top
+ * level; a multi-area selection (Ctrl+Click) carries every area in `areas`.
+ */
+declare interface ScriptSelection extends ScriptSelectionArea {
+  /** The sheet the selection lives on (0-based). */
+  sheetIndex: number;
+  /** The active cell — the one a keystroke would land in (VBA's ActiveCell). */
+  activeRow: number;
+  activeCol: number;
+  /** EVERY selected area: the primary rectangle first, then each additional
+   *  Ctrl+Click area, all normalized. Always at least one entry. */
+  areas: ScriptSelectionArea[];
+}
+
+/** Options for `api.select`. */
+declare interface ScriptSelectOptions {
+  /** The sheet to select on — 0-based index or sheet name. Naming a sheet
+   *  other than the active one ACTIVATES it first (selection lives on the
+   *  active sheet). Defaults to the active sheet. */
+  sheetIndex?: SheetRef;
+  /** Scroll the selection into view. Default true — that is what
+   *  Application.Goto always did; pass false to select without moving the
+   *  viewport. */
+  scroll?: boolean;
+  /** Additional areas for a multi-area selection — the Ctrl+Click shape. The
+   *  positional arguments stay the primary area. Max 128 areas. */
+  ranges?: ScriptSelectionArea[];
+}
+
+/**
+ * A discovered rectangle, as `api.getCurrentRegion` / `api.getUsedRange`
+ * answer it. `empty: true` means nothing was found: for a current region the
+ * seed cell is isolated (the rectangle collapses to the seed cell itself —
+ * the VBA CurrentRegion convention); for a used range the sheet stores
+ * nothing at all (the coordinates are then meaningless zeros).
+ */
+declare interface ScriptRegion {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  empty: boolean;
+}
+
+/** One sheet as `api.getSheets()` lists it. */
+declare interface ScriptSheetInfo {
+  /** 0-based position in the tab bar. */
+  index: number;
+  name: string;
+  /** "visible" | "hidden" (unhidable from the UI) | "veryHidden" (only code
+   *  can unhide it — Excel's xlSheetVeryHidden). */
+  visibility: "visible" | "hidden" | "veryHidden";
+  /** The tab's colour ("#RRGGBB"), or null when it has none. */
+  tabColor: string | null;
 }
 
 /**
@@ -2133,6 +3218,85 @@ declare interface ScriptWorkbook {
   fileName(): Promise<string | null>;
 }
 
+/** The View settings `api.getViewOption` / `setViewOption` address by name.
+ *  The four toggles take a boolean; `"viewMode"` takes a ScriptViewMode. */
+declare type ScriptViewOptionName = "gridlines" | "headings" | "zeros" | "formulas" | "viewMode";
+
+/** The three view modes the grid can render. */
+declare type ScriptViewMode = "normal" | "pageLayout" | "pageBreakPreview";
+
+/** What `api.getPanes()` answers: both halves of View ▸ Window in one read.
+ *  A null axis means "not frozen" / "not split" on that axis. */
+declare interface ScriptPanes {
+  /** How many rows are frozen from the top; null when none are. */
+  freezeRow: number | null;
+  /** How many columns are frozen from the left; null when none are. */
+  freezeCol: number | null;
+  /** The row the horizontal split sits above; null when there is none. */
+  splitRow: number | null;
+  /** The column the vertical split sits left of; null when there is none. */
+  splitCol: number | null;
+}
+
+/** Where `addSheet` / `copySheet` place the new sheet: before OR after an
+ *  existing sheet (a 0-based index or a name) — naming both is refused. */
+declare interface ScriptSheetPosition {
+  before?: SheetRef;
+  after?: SheetRef;
+}
+
+/** The active sheet's page setup, as `api.getPageSetup` answers it and (any
+ *  subset of the writable keys) `api.setPageSetup` accepts. */
+declare interface ScriptPageSetup {
+  paperSize: "letter" | "a4" | "a3" | "legal" | "tabloid";
+  orientation: "portrait" | "landscape";
+  /** Margins, in INCHES. */
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+  marginHeader: number;
+  marginFooter: number;
+  /** Print scale percent (10-400); ignored while fitToWidth/fitToHeight are on. */
+  scale: number;
+  /** Fit-to pages across (0 = off). */
+  fitToWidth: number;
+  /** Fit-to pages down (0 = off). */
+  fitToHeight: number;
+  printGridlines: boolean;
+  printHeadings: boolean;
+  /** "A1:F20", or "" when the whole sheet prints. READ here; write with
+   *  `setPrintArea` / `clearPrintArea`. */
+  printArea: string;
+  /** Rows repeated at the top of every page, "1:2" ("" = none). Read-only here. */
+  printTitlesRows: string;
+  /** Columns repeated at the left of every page, "A:B" ("" = none). Read-only here. */
+  printTitlesCols: string;
+  centerHorizontally: boolean;
+  centerVertically: boolean;
+  /** Header template ("&L&F&C&P of &N&R&D"). */
+  header: string;
+  /** Footer template. */
+  footer: string;
+  /** Manual break positions. READ here; write with `addPageBreak` /
+   *  `removePageBreak` / `resetPageBreaks`. */
+  manualRowBreaks: number[];
+  manualColBreaks: number[];
+}
+
+/** What a grouping operation resolves to: the sheet's new outline depth plus
+ *  exactly which rows/columns changed visibility because of it. */
+declare interface ScriptGroupResult {
+  /** Deepest row group level afterwards (0 = no row groups). */
+  maxRowLevel: number;
+  /** Deepest column group level afterwards (0 = no column groups). */
+  maxColLevel: number;
+  /** Absolute row indices whose visibility the operation changed. */
+  hiddenRowsChanged: number[];
+  /** Absolute column indices whose visibility the operation changed. */
+  hiddenColsChanged: number[];
+}
+
 /** Extended API surface available only in "unlocked" access mode. */
 declare interface UnlockedAPI {
   /**
@@ -2141,30 +3305,57 @@ declare interface UnlockedAPI {
    * s.range("A1:B5").setValues(...)`. Cross-sheet reach (unlocked tier only).
    */
   readonly workbook: ScriptWorkbook;
+  /**
+   * The top-level range entry — VBA's `Range("...")`. One string reaches any
+   * rectangle in the workbook:
+   *
+   * ```js
+   * await api.range("A1:B5");           // the ACTIVE sheet
+   * await api.range("Data!A1:B5");      // another sheet, by name
+   * await api.range("'My Sheet'!A1");   // quoted name ('' escapes a quote)
+   * await api.range("SalesData");       // a named range
+   * await api.range("Orders");          // a table -> its DATA BODY (headers excluded)
+   * ```
+   *
+   * Resolution order: a "Sheet!" prefix is ALWAYS an address (an unknown sheet
+   * name rejects, listing the workbook's sheets); then A1-parse WINS — "A1" is
+   * the cell A1, never a named range or table called "A1"; then named ranges
+   * (exact name first, then unique case-insensitively); then table names.
+   * Anything else rejects listing the named ranges and tables that DO exist.
+   *
+   * Calcula policy (generated): List sheets.
+   * Reach: broker `api.getSheetNames`, unlocked tier, class read.
+   */
+  range(address: string): Promise<ScriptRange>;
   /** Read a cell value by row/col (active sheet) as a DISPLAY STRING.
    *
    * Calcula policy (generated): Read any cell.
    * Reach: broker `api.getCellValue`, unlocked tier, class read.
    */
   getCellValue(row: number, col: number): Promise<string>;
-  /** Write a cell value by row/col (active sheet).
+  /** Write a cell value by row/col. Numbers and booleans land TYPED (write
+   *  `42`, read back the number 42); `null` clears the cell. The sheet may be
+   *  a 0-based index or a name; omitted = the active sheet. Dependent formulas
+   *  recalculate either way.
    *
    * Calcula policy (generated): Write any cell.
    * Reach: broker `api.setCellValue`, unlocked tier, class mutate.
    */
-  setCellValue(row: number, col: number, value: string): Promise<void>;
-  /** Batch-update multiple cells (one undo step).
+  setCellValue(row: number, col: number, value: ScriptCellValue, sheet?: SheetRef): Promise<void>;
+  /** Batch-update multiple cells (one undo step). Values are typed exactly as
+   *  in `setCellValue` — numbers stay numbers, `null` clears.
    *
    * Calcula policy (generated): Write many cells at once.
    * Reach: broker `api.updateCellsBatch`, unlocked tier, class mutate. Limits: maxCells 100,000.
    */
-  updateCellsBatch(updates: Array<{ row: number; col: number; value: string }>): Promise<void>;
-  /** Read one cell WITH its type and formula (any sheet; defaults to active).
+  updateCellsBatch(updates: Array<{ row: number; col: number; value: ScriptCellValue }>): Promise<void>;
+  /** Read one cell WITH its type and formula (any sheet, by 0-based index or
+   *  name; defaults to active).
    *
    * Calcula policy (generated): Read any cell with its type and formula.
    * Reach: broker `api.getCellData`, unlocked tier, class read.
    */
-  getCellData(row: number, col: number, sheetIndex?: number): Promise<ScriptCell>;
+  getCellData(row: number, col: number, sheet?: SheetRef): Promise<ScriptCell>;
   /**
    * Read a whole rectangle in ONE call as typed cells (max 100 000 cells).
    * Prefer this over looping getCellValue: a 100x100 block is one round trip
@@ -2173,7 +3364,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Read a block of cells on any sheet in one go (values, types and formulas).
    * Reach: broker `api.getRangeValues`, unlocked tier, class read. Limits: maxCells 100,000.
    */
-  getRangeValues(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<ScriptCell[][]>;
+  getRangeValues(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<ScriptCell[][]>;
   /** Get all sheet names.
    *
    * Calcula policy (generated): List sheets.
@@ -2186,12 +3377,14 @@ declare interface UnlockedAPI {
    * Reach: broker `api.getActiveSheet`, unlocked tier, class read.
    */
   getActiveSheet(): Promise<number>;
-  /** Set the active sheet.
+  /** Set the active sheet — by 0-based index or by NAME:
+   *  `await api.setActiveSheet("Sheet1")`. An unknown name rejects with the
+   *  list of actual sheet names.
    *
-   * Calcula policy (generated): Switch sheets.
+   * Calcula policy (generated): Switch sheets (by 0-based index or by name).
    * Reach: broker `api.setActiveSheet`, unlocked tier, class mutate.
    */
-  setActiveSheet(index: number): Promise<void>;
+  setActiveSheet(sheet: SheetRef): Promise<void>;
   /** Emit a custom event on the global event bus. Any name you invent is
    *  namespaced to `userscript:*`, so it can never collide with an app event.
    *
@@ -2213,7 +3406,7 @@ declare interface UnlockedAPI {
    * | `app:sheet-renamed` | `{ sheetIndex, oldName, newName }` |
    * | `app:recalculation-completed` | `{ scope, cellsUpdated, durationMs }` — an explicit recalc pass (F9) finished |
    * | `app:cell-values-changed` | `{ changes, source }` |
-   * | `app:selection-changed` | the current selection |
+   * | `app:selection-changed` | `{ row, col, startRow, startCol, endRow, endCol, sheetIndex, areas }` — `areas` lists EVERY selected rectangle (multi-area aware); null when nothing is selected |
    * | `app:after-open` / `app:after-save` / `app:after-new` | workbook lifecycle |
    * | `app:edit-started` / `app:edit-ended` | cell editing |
    * | `app:rows-inserted` / `app:rows-deleted` / `app:columns-inserted` / `app:columns-deleted` | `{ startRow \| startCol, count }` |
@@ -2253,13 +3446,32 @@ declare interface UnlockedAPI {
   /**
    * Begin an undo transaction. All cell changes until commitBatch() are
    * grouped as a single undo entry.
+   *
+   * `{ deferRepaint: true }` additionally pauses screen repaints for the LIFE
+   * OF THE BATCH — the honest version of VBA's `ScreenUpdating = False`. The
+   * canvas repaints exactly once, at `commitBatch()` / `cancelBatch()`; and if
+   * your script crashes (or is stopped, or unmounted) before either, Calcula
+   * unfreezes the screen for you — a dead script can never leave the grid
+   * frozen, which is exactly the failure the VBA flag shipped.
+   *
+   * ```js
+   * await api.beginBatch("Import 10k rows", { deferRepaint: true });
+   * try {
+   *   // ...thousands of writes, zero intermediate repaints...
+   *   await api.commitBatch();      // ONE repaint, final state
+   * } catch (e) {
+   *   await api.cancelBatch();      // reverted, then ONE repaint
+   * }
+   * ```
+   *
    * @param description Human-readable description shown in the Undo menu.
    *
-   * Calcula policy (generated): Group changes for undo.
+   * Calcula policy (generated): Group changes into one undo step (optionally pausing screen repaints until the group ends).
    * Reach: broker `api.beginBatch`, unlocked tier, class mutate.
    */
-  beginBatch(description: string): Promise<void>;
-  /** Commit the current batch, finalizing it as a single undo entry.
+  beginBatch(description: string, options?: { deferRepaint?: boolean }): Promise<void>;
+  /** Commit the current batch, finalizing it as a single undo entry (and, for
+   *  a `deferRepaint` batch, firing the one trailing repaint).
    *
    * Calcula policy (generated): Commit a grouped change.
    * Reach: broker `api.commitBatch`, unlocked tier, class mutate.
@@ -2272,6 +3484,115 @@ declare interface UnlockedAPI {
    */
   cancelBatch(): Promise<void>;
 
+  // -- The Application cluster (VBA's Application object) --
+
+  /**
+   * Show a message in the status bar — VBA's `Application.StatusBar`. Pass
+   * `null` to restore the default "Ready".
+   *
+   * Updates appear LIVE while your script runs, so a long job can report
+   * progress; and the message is CLEARED AUTOMATICALLY when your script stops
+   * for any reason (finish, fault, unmount, workbook swap) — a dead script
+   * never pins a stale "Working…" in front of the user.
+   *
+   * ```js
+   * for (let i = 0; i < rows.length; i++) {
+   *   if (i % 100 === 0) await api.setStatusBar(`Importing… ${i}/${rows.length}`);
+   *   // ...
+   * }
+   * await api.setStatusBar(null);
+   * ```
+   *
+   * Calcula policy (generated): Show a short message in the status bar (cleared automatically when the script stops).
+   * Reach: broker `api.setStatusBar`, unlocked tier, class mutate. Limits: maxChars 512.
+   */
+  setStatusBar(text: string | null): Promise<void>;
+  /**
+   * Run one of this workbook's recorded macros — VBA's `Application.Run`. The
+   * argument may be the macro's display name (`"Monthly report"`) or its
+   * module id (`"macro-monthly-report"`); resolution is case-insensitive and
+   * an unknown name rejects listing what does exist.
+   *
+   * Resolves with the macro's display name once it has run to completion.
+   * Rejects when the macro does not exist, when its own code throws, when the
+   * Macro Recorder extension is disabled — and when the macro is ALREADY
+   * RUNNING: a macro can never run itself, directly or through another macro
+   * (the rejection names the call chain, e.g. `A -> B -> A`).
+   *
+   * Calcula policy (generated): Run one of this workbook's recorded macros by name, exactly as if its button had been clicked.
+   * Reach: broker `api.runMacro`, unlocked tier, class mutate.
+   */
+  runMacro(name: string): Promise<{ name: string }>;
+  /**
+   * The user's Windows user name — VBA's `Application.UserName`. This is the
+   * same display name Calcula attaches to writeback submissions. The name
+   * only: never the machine name, domain, or any folder path.
+   *
+   * Calcula policy (generated): Read your Windows user name.
+   * Reach: broker `api.userName`, unlocked tier, class read.
+   */
+  userName(): Promise<string>;
+  /**
+   * Read one of the View settings: `"gridlines"`, `"headings"`, `"zeros"` and
+   * `"formulas"` answer a boolean; `"viewMode"` answers `"normal"`,
+   * `"pageLayout"` or `"pageBreakPreview"`.
+   *
+   * Calcula policy (generated): Read one of the View settings (gridlines, headings, zero values, formula display, or the view mode).
+   * Reach: broker `api.getViewOption`, unlocked tier, class read.
+   */
+  getViewOption(name: ScriptViewOptionName): Promise<boolean | ScriptViewMode>;
+  /**
+   * Change one of the View settings — the SAME mechanism as the View menu, so
+   * the menu's checkmarks stay in step. The four toggles take a boolean;
+   * `"viewMode"` takes one of the three mode words. Display only: nothing in
+   * the document changes, and nothing here makes an undo entry.
+   *
+   * ```js
+   * await api.setViewOption("gridlines", false);
+   * await api.setViewOption("viewMode", "pageLayout");
+   * ```
+   *
+   * Calcula policy (generated): Change one of the View settings (gridlines, headings, zero values, formula display, or the view mode) — how the grid looks, never what it stores.
+   * Reach: broker `api.setViewOption`, unlocked tier, class mutate.
+   */
+  setViewOption(name: ScriptViewOptionName, value: boolean | ScriptViewMode): Promise<void>;
+  /** The grid's zoom level, in PERCENT (100 = 100%).
+   *
+   * Calcula policy (generated): Read the grid's zoom level, as a percentage.
+   * Reach: broker `api.getZoom`, unlocked tier, class read.
+   */
+  getZoom(): Promise<number>;
+  /** Zoom the grid, in PERCENT (10 to 400) — VBA's `ActiveWindow.Zoom`.
+   *
+   * Calcula policy (generated): Zoom the grid (10 to 400 percent) — what is on screen, never what is stored.
+   * Reach: broker `api.setZoom`, unlocked tier, class mutate.
+   */
+  setZoom(percent: number): Promise<void>;
+  /**
+   * Which rows/columns are frozen and where the window is split — the read
+   * half of `freezePanes` / `splitPanes` (VBA's `ActiveWindow.FreezePanes` /
+   * `.Split` state).
+   *
+   * Calcula policy (generated): Read which rows and columns are frozen, and where the window is split.
+   * Reach: broker `api.getPanes`, unlocked tier, class read.
+   */
+  getPanes(): Promise<ScriptPanes>;
+  /**
+   * Pause YOUR script for `ms` milliseconds — VBA's `Application.Wait` without
+   * the frozen app (Calcula keeps running; only this script waits).
+   *
+   * IN-SESSION ONLY and worker-local: no permission involved, and the pause
+   * dies with the script. Anything that must survive a reload — or fire while
+   * this script is not running — is `caps.schedule`'s business (see
+   * `caps.schedule.once` for the one-shot). Bounded to 30 seconds per call;
+   * loop if you genuinely need longer.
+   *
+   * ```js
+   * await api.sleep(2000); // give the refresh two seconds to settle
+   * ```
+   */
+  sleep(ms: number): Promise<void>;
+
   // -- Formatting --
 
   /**
@@ -2279,71 +3600,393 @@ declare interface UnlockedAPI {
    * undo step. Only the properties you set change. Works on ANY sheet.
    * e.g. `await api.setRangeFormat(0, 0, 0, 4, { bold: true, backgroundColor: "#EEEEEE" })`
    *
-   * Calcula policy (generated): Change how cells look on any sheet (font, colour, alignment, number format, borders).
+   * Calcula policy (generated): Change how cells look on any sheet (font, colour, alignment, number format, borders), including whether a cell is locked while its sheet is protected.
    * Reach: broker `api.setRangeFormat`, unlocked tier, class mutate. Limits: maxCells 100,000.
    */
-  setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheetIndex?: number): Promise<void>;
+  setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheet?: SheetRef): Promise<void>;
   /** Remove ALL formatting from a rectangle, keeping the values. ACTIVE SHEET
    *  only — call setActiveSheet() first for another sheet.
    *
    * Calcula policy (generated): Remove all formatting from a block of cells (the values are kept).
    * Reach: broker `api.clearRangeFormat`, unlocked tier, class mutate. Limits: maxCells 100,000.
    */
-  clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<void>;
+  clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Read a rectangle's formats as a dense rows x cols grid (max 100 000
+   * cells) — the READ-BACK twin of setRangeFormat: every key you can write
+   * reads back in the same vocabulary (`bold: true`, `textColor: "#ff0000"`,
+   * `borderTop: { style: "thin", color: "#000000" }`, ...). Works on ANY
+   * sheet. The three range-edge border keys read back as the per-cell sides
+   * they decomposed into.
+   *
+   * Calcula policy (generated): Read how a block of cells looks on any sheet (font, colour, alignment, number format, borders — never the values).
+   * Reach: broker `api.getRangeFormat`, unlocked tier, class read. Limits: maxCells 100,000.
+   */
+  getRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<ScriptCellFormat[][]>;
+  /** Read one cell's format (any sheet, by 0-based index or name).
+   *
+   * Calcula policy (generated): Read how one cell looks on any sheet (its font, colour, alignment, number format and borders — never its value).
+   * Reach: broker `api.getCellFormat`, unlocked tier, class read.
+   */
+  getCellFormat(row: number, col: number, sheet?: SheetRef): Promise<ScriptCellFormat>;
+
+  // -- Named cell styles + theme palette (Wave 4) --
+
+  /** The workbook's named cell styles — built-in ("Good", "Bad", "Heading 1",
+   *  "Total", ...) and custom — with each one's gallery category.
+   *
+   * Calcula policy (generated): List the workbook's named cell styles (built-in and custom), with each one's category.
+   * Reach: broker `api.listNamedStyles`, unlocked tier, class read.
+   */
+  listNamedStyles(): Promise<ScriptNamedStyle[]>;
+  /**
+   * Apply a named cell style to a rectangle (max 100 000 cells) — VBA's
+   * `Range.Style = "Good"`. One undo step. ACTIVE SHEET only — call
+   * setActiveSheet() first for another sheet.
+   * e.g. `await api.applyNamedStyle("Heading 1", 0, 0, 0, 5)`
+   *
+   * Calcula policy (generated): Apply a named cell style ("Good", "Heading 1", ...) to a block of cells on the active sheet (one undo step).
+   * Reach: broker `api.applyNamedStyle`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   */
+  applyNamedStyle(name: string, startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Create a CUSTOM named style from a format description — the same
+   * vocabulary setRangeFormat takes, minus the three range-edge border keys
+   * (a named style is per-cell) and `locked`/`formulaHidden`. The new style
+   * appears in the Cell Styles gallery under "Custom". A name that already
+   * exists (built-in or custom) is refused.
+   * e.g. `await api.createNamedStyle("Alert", { bold: true, textColor: "#ffffff", backgroundColor: "#c00000" })`
+   *
+   * Calcula policy (generated): Create a custom named cell style from a format description, for later applyNamedStyle calls (and the Cell Styles gallery).
+   * Reach: broker `api.createNamedStyle`, unlocked tier, class mutate.
+   */
+  createNamedStyle(name: string, format: ScriptFormat): Promise<ScriptNamedStyle>;
+  /** Delete a CUSTOM named style (built-ins are refused). Cells already
+   *  styled with it keep their look.
+   *
+   * Calcula policy (generated): Delete a custom named cell style (built-in styles are refused; cells already styled keep their look).
+   * Reach: broker `api.deleteNamedStyle`, unlocked tier, class mutate.
+   */
+  deleteNamedStyle(name: string): Promise<void>;
+  /** The document theme: its 12 named colors resolved to "#rrggbb" hex, and
+   *  its heading/body font pair. Theme references in formats resolve against
+   *  exactly these values.
+   *
+   * Calcula policy (generated): Read the document theme: its 12 named colors resolved to hex, and its heading/body font pair.
+   * Reach: broker `api.getThemePalette`, unlocked tier, class read.
+   */
+  getThemePalette(): Promise<ScriptThemePalette>;
+
+  // -- Calculation control --
+
+  /** Whether formulas recalculate automatically after every change, or only
+   *  when asked ("manual").
+   *
+   * Calcula policy (generated): See whether formulas recalculate automatically after every change, or only when asked.
+   * Reach: broker `api.getCalculationMode`, unlocked tier, class read.
+   */
+  getCalculationMode(): Promise<"automatic" | "manual">;
+  /**
+   * Switch recalculation between "automatic" and "manual" — VBA's
+   * `Application.Calculation`. In manual mode nothing recalculates until you
+   * call `recalculate()` (or the user presses F9), which is how a script makes
+   * ten thousand writes land fast.
+   *
+   * THE SAFETY NET: if your script set "manual" and then stops for ANY reason
+   * — unmount, a crash, the debugger's Stop, the workbook being swapped —
+   * Calcula restores "automatic". A dead script can never leave the workbook
+   * silently uncalculating. (If the USER had already set manual themselves,
+   * your unmount does not override their choice.)
+   *
+   * Calcula policy (generated): Switch formula recalculation between automatic and manual (Calcula switches it back to automatic if the script stops while it holds manual).
+   * Reach: broker `api.setCalculationMode`, unlocked tier, class mutate.
+   */
+  setCalculationMode(mode: "automatic" | "manual"): Promise<"automatic" | "manual">;
+  /**
+   * Recalculate now — the active sheet by default, the whole workbook with
+   * `{ full: true }` (what F9 does, including refreshing CUBE formulas).
+   * Resolves to how many formula cells were updated.
+   *
+   * ```js
+   * await api.setCalculationMode("manual");
+   * // ...thousands of writes...
+   * await api.recalculate({ full: true });
+   * await api.setCalculationMode("automatic");
+   * ```
+   *
+   * Calcula policy (generated): Recalculate formulas now — the active sheet, or the whole workbook (what pressing F9 does).
+   * Reach: broker `api.recalculate`, unlocked tier, class mutate.
+   */
+  recalculate(options?: { full?: boolean }): Promise<{ cellsUpdated: number }>;
+
+  // -- Sheet protection --
+
+  /**
+   * Protect the ACTIVE sheet — VBA's `Worksheet.Protect`. Locked cells (the
+   * default for every cell) refuse edits until the sheet is unprotected;
+   * which OTHER actions stay allowed is controlled by the option flags, which
+   * default exactly like the Protect Sheet dialog's checkboxes. Rejects if the
+   * sheet is already protected, or if `sheet` names a non-active sheet.
+   *
+   * NOT SUPPORTED (refused, loudly): `scriptsCanEdit` — VBA's
+   * UserInterfaceOnly. Protection currently binds scripts exactly as it binds
+   * the user, so protecting a sheet also blocks YOUR OWN writes to its locked
+   * cells: unprotect, write, re-protect (or mark your working cells
+   * `locked: false` via setRangeFormat first).
+   *
+   * ```js
+   * await api.setRangeFormat(0, 0, 99, 0, { locked: false }); // input column stays editable
+   * await api.protectSheet({ password: "s3cret", allowSort: true });
+   * ```
+   *
+   * Calcula policy (generated): Protect the active sheet (optionally with a password), so locked cells cannot be edited until it is unprotected.
+   * Reach: broker `api.protectSheet`, unlocked tier, class mutate.
+   */
+  protectSheet(options?: ScriptProtectSheetOptions, sheet?: SheetRef): Promise<{ protected: true; hasPassword: boolean }>;
+  /**
+   * Remove the ACTIVE sheet's protection. Resolves `false` — it never throws —
+   * when the password is wrong, so "try the password I have" is an `if`, not a
+   * try/catch. An already-unprotected sheet resolves `true` (it is in the
+   * state you asked for).
+   *
+   * Calcula policy (generated): Remove the active sheet's protection, so its cells can be edited again (a wrong password simply answers no).
+   * Reach: broker `api.unprotectSheet`, unlocked tier, class mutate.
+   */
+  unprotectSheet(password?: string, sheet?: SheetRef): Promise<boolean>;
+  /** Whether the ACTIVE sheet is protected, whether a password is set, and
+   *  what its protection still allows.
+   *
+   * Calcula policy (generated): See whether the active sheet is protected, whether a password is set, and what the protection still allows.
+   * Reach: broker `api.getProtectionStatus`, unlocked tier, class read.
+   */
+  getProtectionStatus(sheet?: SheetRef): Promise<ScriptProtectionStatus>;
 
   // -- Structure --
-  // Every method in this block acts on the ACTIVE sheet. Passing a sheetIndex
-  // that names another sheet REJECTS (it never silently retargets) — call
-  // setActiveSheet() first. Only formatting is genuinely sheet-scoped.
+  // SHEET-ADDRESSABLE: `sheet` is a 0-based index or a name (Wave-1 rules) and
+  // may be ANY sheet of this workbook — no activate-dance. On a non-visible
+  // sheet the operation runs with the full guard chain (protection, spills,
+  // writeback claims, undo, cross-sheet formula rewrite) and the canvas simply
+  // has nothing to repaint. EXCEPTIONS: setRowHeight / setColumnWidth still
+  // act on the ACTIVE sheet only and reject a sheet ref naming another one.
 
   /** Insert `count` rows at `startRow`, shifting everything below down.
    *
-   * Calcula policy (generated): Insert rows, shifting everything below them down.
+   * Calcula policy (generated): Insert rows on a sheet, shifting everything below them down.
    * Reach: broker `api.insertRows`, unlocked tier, class mutate.
    */
-  insertRows(startRow: number, count: number, sheetIndex?: number): Promise<void>;
+  insertRows(startRow: number, count: number, sheet?: SheetRef): Promise<void>;
   /** Delete `count` rows from `startRow` (their contents are lost).
    *
-   * Calcula policy (generated): Delete rows, shifting everything below them up (their contents are lost).
+   * Calcula policy (generated): Delete rows on a sheet, shifting everything below them up (their contents are lost).
    * Reach: broker `api.deleteRows`, unlocked tier, class mutate.
    */
-  deleteRows(startRow: number, count: number, sheetIndex?: number): Promise<void>;
+  deleteRows(startRow: number, count: number, sheet?: SheetRef): Promise<void>;
   /** Insert `count` columns at `startCol`, shifting everything right.
    *
-   * Calcula policy (generated): Insert columns, shifting everything to their right.
+   * Calcula policy (generated): Insert columns on a sheet, shifting everything to their right.
    * Reach: broker `api.insertColumns`, unlocked tier, class mutate.
    */
-  insertColumns(startCol: number, count: number, sheetIndex?: number): Promise<void>;
+  insertColumns(startCol: number, count: number, sheet?: SheetRef): Promise<void>;
   /** Delete `count` columns from `startCol` (their contents are lost).
    *
-   * Calcula policy (generated): Delete columns, shifting the rest left (their contents are lost).
+   * Calcula policy (generated): Delete columns on a sheet, shifting the rest left (their contents are lost).
    * Reach: broker `api.deleteColumns`, unlocked tier, class mutate.
    */
-  deleteColumns(startCol: number, count: number, sheetIndex?: number): Promise<void>;
+  deleteColumns(startCol: number, count: number, sheet?: SheetRef): Promise<void>;
   /** Merge a rectangle into one cell (only the top-left value survives).
    *
    * Calcula policy (generated): Merge a block of cells into one (only the top-left value is kept).
    * Reach: broker `api.mergeCells`, unlocked tier, class mutate.
    */
-  mergeCells(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<void>;
+  mergeCells(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
   /** Split the merged region containing (row, col) back into single cells.
    *
    * Calcula policy (generated): Split a merged block back into individual cells.
    * Reach: broker `api.unmergeCells`, unlocked tier, class mutate.
    */
-  unmergeCells(row: number, col: number, sheetIndex?: number): Promise<void>;
-  /** Set a row's height in pixels (0 restores the sheet default).
+  unmergeCells(row: number, col: number, sheet?: SheetRef): Promise<void>;
+  /** Set a row's height in pixels (0 restores the sheet default). ACTIVE
+   *  sheet only — a sheet ref naming another one rejects.
    *
    * Calcula policy (generated): Change a row's height.
    * Reach: broker `api.setRowHeight`, unlocked tier, class mutate.
    */
-  setRowHeight(row: number, height: number, sheetIndex?: number): Promise<void>;
-  /** Set a column's width in pixels (0 restores the sheet default).
+  setRowHeight(row: number, height: number, sheet?: SheetRef): Promise<void>;
+  /** Set a column's width in pixels (0 restores the sheet default). ACTIVE
+   *  sheet only — a sheet ref naming another one rejects.
    *
    * Calcula policy (generated): Change a column's width.
    * Reach: broker `api.setColumnWidth`, unlocked tier, class mutate.
    */
-  setColumnWidth(col: number, width: number, sheetIndex?: number): Promise<void>;
+  setColumnWidth(col: number, width: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Size an inclusive span of columns to fit their contents — EXACTLY the
+   * double-click best-fit: the same canvas measurement, per-cell fonts and
+   * formatted display text, and the same extension contributions (a pivot
+   * overlay or in-cell filter button is accounted for). Empty columns keep
+   * their width. Resolves to how many columns changed.
+   *
+   * ACTIVE sheet only — measurement needs the rendered sheet, so a sheet ref
+   * naming another one rejects rather than guessing:
+   * `await api.autoFitColumns(0, 5);`
+   *
+   * Calcula policy (generated): Size columns to fit their contents, exactly like double-clicking each column's resize handle.
+   * Reach: broker `api.autoFitColumns`, unlocked tier, class mutate. Limits: maxSpan 10,000.
+   */
+  autoFitColumns(startCol: number, endCol: number, sheet?: SheetRef): Promise<{ count: number }>;
+  /** Size an inclusive span of rows to fit their contents (wrap-text line
+   *  counts included; an empty row resets to the default height). ACTIVE
+   *  sheet only, like autoFitColumns. Resolves to how many rows changed.
+   *
+   * Calcula policy (generated): Size rows to fit their contents, exactly like double-clicking each row's resize handle.
+   * Reach: broker `api.autoFitRows`, unlocked tier, class mutate. Limits: maxSpan 10,000.
+   */
+  autoFitRows(startRow: number, endRow: number, sheet?: SheetRef): Promise<{ count: number }>;
+
+  // -- Data validation --
+
+  /**
+   * Set a data-validation rule on a rectangle — what future edits will accept,
+   * an optional dropdown list, and the prompt/error messages shown (Data ▸
+   * Data Validation). Overwrites any rule the cells had. The sheet may be any
+   * sheet of this workbook.
+   *
+   * ```js
+   * await api.setDataValidation(1, 3, 500, 3, {
+   *   type: "wholeNumber", operator: "between", formula1: 1, formula2: 100,
+   *   errorTitle: "Out of range", errorMessage: "Enter 1-100",
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Set a data-validation rule on a block of cells (what values future edits will accept, an optional dropdown list, and the messages shown).
+   * Reach: broker `api.setDataValidation`, unlocked tier, class mutate.
+   */
+  setDataValidation(startRow: number, startCol: number, endRow: number, endCol: number, rule: ScriptValidationRule, sheet?: SheetRef): Promise<void>;
+  /** Remove the data-validation rules from a rectangle.
+   *
+   * Calcula policy (generated): Remove the data-validation rules from a block of cells.
+   * Reach: broker `api.clearDataValidation`, unlocked tier, class mutate.
+   */
+  clearDataValidation(range: { startRow: number; startCol: number; endRow: number; endCol: number }, sheet?: SheetRef): Promise<void>;
+  /** The data-validation rule on one cell, in the same shape setDataValidation
+   *  accepts (a read can be written straight back); `null` when none.
+   *
+   * Calcula policy (generated): Read the data-validation rule on one cell (the rule itself — never the cell's value).
+   * Reach: broker `api.getDataValidation`, unlocked tier, class read.
+   */
+  getDataValidation(row: number, col: number, sheet?: SheetRef): Promise<ScriptValidationRule | null>;
+  /** Every data-validation rule on a sheet, with the rectangle each covers.
+   *
+   * Calcula policy (generated): List every data-validation rule on a sheet, with the cells each one covers.
+   * Reach: broker `api.listDataValidations`, unlocked tier, class read.
+   */
+  listDataValidations(sheet?: SheetRef): Promise<ScriptValidationRangeInfo[]>;
+
+  // -- Hyperlinks --
+  // Attach / read / remove only. There is deliberately NO "follow": opening an
+  // external target (web, file, email) is the user's click, never a script's;
+  // navigating to an internal target is api.select / api.scrollTo.
+
+  /**
+   * Attach a hyperlink to a cell; resolves to the link as stored. `sheet` is
+   * where the link CELL lives; for an internal reference, `link.sheetName` is
+   * where it JUMPS TO. The classic table-of-contents macro:
+   *
+   * ```js
+   * const sheets = await api.getSheets();
+   * for (let i = 0; i < sheets.length; i++) {
+   *   await api.addHyperlink(i, 0, {
+   *     type: "internalReference", sheetName: sheets[i].name, cellReference: "A1",
+   *   }, { displayText: sheets[i].name }, "TOC");
+   * }
+   * ```
+   *
+   * Calcula policy (generated): Attach a hyperlink to a cell (a web address, email address, file path, or a jump to another cell in this workbook) — scripts can never open one.
+   * Reach: broker `api.addHyperlink`, unlocked tier, class mutate.
+   */
+  addHyperlink(row: number, col: number, link: ScriptHyperlinkSpec, options?: ScriptHyperlinkOptions, sheet?: SheetRef): Promise<ScriptHyperlink>;
+  /** Remove the hyperlink from a cell (the cell's value stays). Resolves
+   *  `false` when there was none — the cell is in the state you asked for —
+   *  so cleanup loops need no try/catch; real refusals still reject.
+   *
+   * Calcula policy (generated): Remove the hyperlink from a cell (the cell's value stays).
+   * Reach: broker `api.removeHyperlink`, unlocked tier, class mutate.
+   */
+  removeHyperlink(row: number, col: number, sheet?: SheetRef): Promise<boolean>;
+  /** The hyperlink on one cell; `null` when it has none.
+   *
+   * Calcula policy (generated): Read the hyperlink on one cell (where it points and its display text).
+   * Reach: broker `api.getHyperlink`, unlocked tier, class read.
+   */
+  getHyperlink(row: number, col: number, sheet?: SheetRef): Promise<ScriptHyperlink | null>;
+  /** Every hyperlink on a sheet, with where each one points.
+   *
+   * Calcula policy (generated): List every hyperlink on a sheet, with where each one points.
+   * Reach: broker `api.listHyperlinks`, unlocked tier, class read.
+   */
+  listHyperlinks(sheet?: SheetRef): Promise<ScriptHyperlink[]>;
+
+  // -- Notes + comments --
+  // Notes are the one-text-per-cell kind (VBA Range.NoteText); comments are
+  // the threaded kind. The notes backend addresses THE ACTIVE SHEET — a named
+  // other sheet is refused with the fix spelled out; listComments alone is
+  // sheet-addressable. A cell can hold a note OR a comment thread, not both.
+
+  /**
+   * Set, replace or (with `null`) remove the note on a cell — the classic
+   * `Range.NoteText` one-liner:
+   * `await api.setNote(3, 1, "Reviewed by the nightly script");`
+   * Resolves to the note's id, or `null` after a removal.
+   *
+   * Calcula policy (generated): Add, change or remove the sticky note on a cell (the yellow Shift+F2 kind).
+   * Reach: broker `api.setNote`, unlocked tier, class mutate.
+   */
+  setNote(row: number, col: number, text: string | null, sheet?: SheetRef): Promise<{ id: string } | null>;
+  /** The note text on one cell; `null` when it has none.
+   *
+   * Calcula policy (generated): Read the sticky note on one cell.
+   * Reach: broker `api.getNote`, unlocked tier, class read.
+   */
+  getNote(row: number, col: number, sheet?: SheetRef): Promise<string | null>;
+  /** Every note on the active sheet, with its cell and author.
+   *
+   * Calcula policy (generated): List every sticky note on the sheet currently shown, with its cell and author.
+   * Reach: broker `api.listNotes`, unlocked tier, class read.
+   */
+  listNotes(sheet?: SheetRef): Promise<ScriptNoteInfo[]>;
+  /** Start a threaded comment on a cell, signed with the script's name.
+   *  Resolves to the thread's id.
+   *
+   * Calcula policy (generated): Start a threaded comment on a cell, signed with the script's name.
+   * Reach: broker `api.addComment`, unlocked tier, class mutate.
+   */
+  addComment(row: number, col: number, text: string): Promise<{ id: string }>;
+  /** Reply to a comment thread; resolves to the reply's id.
+   *
+   * Calcula policy (generated): Add a reply to an existing comment thread.
+   * Reach: broker `api.replyToComment`, unlocked tier, class mutate.
+   */
+  replyToComment(commentId: string, text: string): Promise<{ id: string }>;
+  /** Mark a thread resolved (default) or reopen it with `false`.
+   *
+   * Calcula policy (generated): Mark a comment thread resolved, or reopen it.
+   * Reach: broker `api.resolveComment`, unlocked tier, class mutate.
+   */
+  resolveComment(commentId: string, resolved?: boolean): Promise<void>;
+  /** Delete a comment thread and all its replies.
+   *
+   * Calcula policy (generated): Delete a comment thread and all its replies.
+   * Reach: broker `api.deleteComment`, unlocked tier, class mutate.
+   */
+  deleteComment(commentId: string): Promise<void>;
+  /** The comment threads on a sheet (default: the active sheet), optionally
+   *  only those inside a rectangle, with replies and resolved state.
+   *
+   * Calcula policy (generated): List the comment threads on a sheet (optionally only inside a block of cells), with their replies and resolved state.
+   * Reach: broker `api.listComments`, unlocked tier, class read.
+   */
+  listComments(range?: { startRow: number; startCol: number; endRow: number; endCol: number } | null, sheet?: SheetRef): Promise<ScriptCommentInfo[]>;
+
   /** Freeze rows/columns so they stay on screen while scrolling. `freezeRow` is
    *  how many rows to freeze from the top; null unfreezes that axis.
    *
@@ -2362,44 +4005,163 @@ declare interface UnlockedAPI {
    */
   splitPanes(splitRow: number | null, splitCol: number | null): Promise<void>;
 
+  // -- Page setup + print layout (VBA Worksheet.PageSetup) --
+  // ACTIVE SHEET only, like AutoFilter: every backend print command acts on
+  // the active sheet, so a sheet ref naming another one is refused — call
+  // setActiveSheet() first. Printing itself stays with the user (File menu)
+  // and with caps.file.exportPdf.
+
+  /** The active sheet's full page setup — paper, orientation, margins,
+   *  scaling, headers/footers, print area, print titles and manual breaks —
+   *  exactly as the Page Setup dialog shows it.
+   *
+   * Calcula policy (generated): Read the active sheet's page setup (paper size, orientation, margins, scaling, headers and footers, print area, page breaks).
+   * Reach: broker `api.getPageSetup`, unlocked tier, class read.
+   */
+  getPageSetup(sheet?: SheetRef): Promise<ScriptPageSetup>;
+  /**
+   * Patch the active sheet's page setup: only the properties you name change
+   * (`setRangeFormat`'s partial-write contract, applied to the page).
+   * The print area, print titles and manual breaks are READ-ONLY here — they
+   * have their own methods (`setPrintArea`, `addPageBreak`, ...), and a second
+   * spelling would drift from the first.
+   *
+   * ```js
+   * await api.setPageSetup({ orientation: "landscape", fitToWidth: 1, fitToHeight: 0 });
+   * ```
+   *
+   * Calcula policy (generated): Change part of the active sheet's page setup (paper size, orientation, margins, scaling, headers and footers) — only the properties named are touched.
+   * Reach: broker `api.setPageSetup`, unlocked tier, class mutate.
+   */
+  setPageSetup(patch: Partial<Omit<ScriptPageSetup, "printArea" | "printTitlesRows" | "printTitlesCols" | "manualRowBreaks" | "manualColBreaks">>, sheet?: SheetRef): Promise<void>;
+  /** Set which rectangle the active sheet prints (everything outside it stays
+   *  off the page). Resolves to the stored A1 form, e.g. `{ area: "A1:F20" }`.
+   *
+   * Calcula policy (generated): Set which block of cells the active sheet prints (everything outside it is left off the page).
+   * Reach: broker `api.setPrintArea`, unlocked tier, class mutate.
+   */
+  setPrintArea(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<{ area: string }>;
+  /** Remove the active sheet's print area, so the whole sheet prints again.
+   *
+   * Calcula policy (generated): Remove the active sheet's print area, so the whole sheet prints again.
+   * Reach: broker `api.clearPrintArea`, unlocked tier, class mutate.
+   */
+  clearPrintArea(sheet?: SheetRef): Promise<void>;
+  /** Insert a manual page break ABOVE row `index` (kind "row") or LEFT of
+   *  column `index` (kind "col"). `index` must be >= 1 — a break before the
+   *  first row/column has no page in front of it.
+   *
+   * Calcula policy (generated): Insert a manual page break above a row (or left of a column) on the active sheet.
+   * Reach: broker `api.addPageBreak`, unlocked tier, class mutate.
+   */
+  addPageBreak(kind: "row" | "col", index: number, sheet?: SheetRef): Promise<void>;
+  /** Remove the manual page break at `index`.
+   *
+   * Calcula policy (generated): Remove a manual page break from the active sheet.
+   * Reach: broker `api.removePageBreak`, unlocked tier, class mutate.
+   */
+  removePageBreak(kind: "row" | "col", index: number, sheet?: SheetRef): Promise<void>;
+  /** Remove every manual page break on the active sheet, returning it to
+   *  automatic pagination.
+   *
+   * Calcula policy (generated): Remove every manual page break from the active sheet, going back to automatic ones.
+   * Reach: broker `api.resetPageBreaks`, unlocked tier, class mutate.
+   */
+  resetPageBreaks(sheet?: SheetRef): Promise<void>;
+
+  // -- Outline grouping (Data ▸ Group / Ungroup) --
+  // ACTIVE SHEET only; spans are 0-based and INCLUSIVE. Driven through the
+  // Grouping feature so the outline bar and the hidden rows stay in step — if
+  // that feature is disabled these REJECT rather than grouping invisibly.
+
+  /**
+   * Group a band of rows into a collapsible outline group (VBA
+   * `Rows.Group`). Grouping an already-grouped band deepens it one level
+   * (max 8). Resolves with the sheet's new outline depth and exactly which
+   * rows/columns changed visibility.
+   *
+   * ```js
+   * await api.groupRows(5, 17);        // detail rows under a subtotal
+   * await api.showOutlineLevel(1, null); // collapse to the subtotals
+   * ```
+   *
+   * Calcula policy (generated): Group a band of rows on the active sheet, so they can be collapsed and expanded from the outline bar.
+   * Reach: broker `api.groupRows`, unlocked tier, class mutate.
+   */
+  groupRows(startRow: number, endRow: number, sheet?: SheetRef): Promise<ScriptGroupResult>;
+  /** Ungroup a band of rows (the rows and their values are kept).
+   *
+   * Calcula policy (generated): Ungroup a band of rows on the active sheet (the rows and their values are kept).
+   * Reach: broker `api.ungroupRows`, unlocked tier, class mutate.
+   */
+  ungroupRows(startRow: number, endRow: number, sheet?: SheetRef): Promise<ScriptGroupResult>;
+  /** Group a band of columns (VBA `Columns.Group`).
+   *
+   * Calcula policy (generated): Group a band of columns on the active sheet, so they can be collapsed and expanded from the outline bar.
+   * Reach: broker `api.groupColumns`, unlocked tier, class mutate.
+   */
+  groupColumns(startCol: number, endCol: number, sheet?: SheetRef): Promise<ScriptGroupResult>;
+  /** Ungroup a band of columns.
+   *
+   * Calcula policy (generated): Ungroup a band of columns on the active sheet (the columns and their values are kept).
+   * Reach: broker `api.ungroupColumns`, unlocked tier, class mutate.
+   */
+  ungroupColumns(startCol: number, endCol: number, sheet?: SheetRef): Promise<ScriptGroupResult>;
+  /** Collapse/expand the active sheet's groups to a depth — what the little
+   *  1/2/3 outline buttons do. Pass `null` to leave an axis alone.
+   *
+   * Calcula policy (generated): Collapse or expand the active sheet's row and column groups to a chosen depth — what the little 1/2/3 buttons do.
+   * Reach: broker `api.showOutlineLevel`, unlocked tier, class mutate.
+   */
+  showOutlineLevel(rowLevel: number | null, colLevel: number | null): Promise<ScriptGroupResult>;
+
   // -- Sheets --
 
-  /** Add a sheet (and make it active). Rejects a name that already exists.
+  /**
+   * Add a sheet (and make it active). Rejects a name that already exists.
+   * `position` places it before or after an existing sheet — VBA's
+   * `Sheets.Add Before:=/After:=`; omitted = at the end:
+   * `await api.addSheet("Summary", { before: 0 })`.
    *
-   * Calcula policy (generated): Add a new sheet to the workbook.
+   * Calcula policy (generated): Add a new sheet to the workbook (at the end, or before/after a named sheet).
    * Reach: broker `api.addSheet`, unlocked tier, class mutate.
    */
-  addSheet(name?: string): Promise<{ index: number; name: string }>;
-  /** Delete a sheet and everything on it. Rejects on the last remaining sheet.
+  addSheet(name?: string, position?: ScriptSheetPosition): Promise<{ index: number; name: string }>;
+  /** Delete a sheet (by 0-based index or name) and everything on it. Rejects
+   *  on the last remaining sheet.
    *
    * Calcula policy (generated): Delete a sheet and everything on it.
    * Reach: broker `api.deleteSheet`, unlocked tier, class mutate.
    */
-  deleteSheet(index: number): Promise<void>;
-  /** Rename a sheet. Rejects a name that already exists.
+  deleteSheet(sheet: SheetRef): Promise<void>;
+  /** Rename a sheet (addressed by 0-based index or current name). Rejects a
+   *  new name that already exists.
    *
    * Calcula policy (generated): Rename a sheet.
    * Reach: broker `api.renameSheet`, unlocked tier, class mutate.
    */
-  renameSheet(index: number, newName: string): Promise<void>;
-  /** Show or hide a sheet. Rejects hiding the last visible one.
+  renameSheet(sheet: SheetRef, newName: string): Promise<void>;
+  /** Show or hide a sheet (by 0-based index or name). Rejects hiding the last
+   *  visible one.
    *
    * Calcula policy (generated): Show or hide a sheet.
    * Reach: broker `api.setSheetVisibility`, unlocked tier, class mutate.
    */
-  setSheetVisibility(index: number, visibility: "visible" | "hidden" | "veryHidden"): Promise<void>;
+  setSheetVisibility(sheet: SheetRef, visibility: "visible" | "hidden" | "veryHidden"): Promise<void>;
   /**
    * Move a sheet to another position in the tab bar.
    *
    * EVERY OTHER SHEET IS RENUMBERED by this, so any index you were holding is
-   * stale afterwards — re-read with `getSheetNames()`. Rejects an unknown
-   * `fromIndex` or a `toIndex` past the last position (it never clamps
-   * silently, which would leave you believing a sheet moved where it did not).
+   * stale afterwards — re-read with `getSheetNames()`. `fromSheet` is a 0-based
+   * index or a sheet name; `toIndex` is the destination POSITION and stays a
+   * number. Rejects an unknown sheet or a `toIndex` past the last position (it
+   * never clamps silently, which would leave you believing a sheet moved where
+   * it did not).
    *
    * Calcula policy (generated): Move a sheet to a different position in the tab bar.
    * Reach: broker `api.moveSheet`, unlocked tier, class mutate.
    */
-  moveSheet(fromIndex: number, toIndex: number): Promise<void>;
+  moveSheet(fromSheet: SheetRef, toIndex: number): Promise<void>;
   /**
    * Duplicate a sheet — cells, formatting and objects — as a new sheet placed
    * immediately after its source. Resolves to the new sheet's index and name.
@@ -2407,26 +4169,93 @@ declare interface UnlockedAPI {
    * The insert RENUMBERS every sheet at or after that position, so re-read any
    * index you were holding. Rejects a name that already exists.
    *
+   * `position` places the copy before/after an existing sheet instead
+   * (VBA's `Copy Before:=/After:=`).
+   *
    * ```js
-   * const { index } = await api.copySheet(0, "February");
+   * const { index } = await api.copySheet(0, "February", { after: "January" });
    * await api.setActiveSheet(index);
    * ```
    *
    * Calcula policy (generated): Duplicate a sheet — its cells, formatting and objects — as a new sheet next to it.
    * Reach: broker `api.copySheet`, unlocked tier, class mutate.
    */
-  copySheet(sourceIndex: number, newName?: string): Promise<{ index: number; name: string }>;
+  copySheet(sourceSheet: SheetRef, newName?: string, position?: ScriptSheetPosition): Promise<{ index: number; name: string }>;
 
   // -- Sort + find/replace --
 
   /**
-   * Sort a rectangle by one or more criteria (ACTIVE SHEET). Resolves to the
-   * number of rows (or columns) moved.
+   * Sort a rectangle by one or more criteria, on any sheet of this workbook.
+   * Resolves to the number of rows (or columns) moved.
    *
-   * Calcula policy (generated): Sort a block of cells by one or more columns.
+   * Calcula policy (generated): Sort a block of cells on a sheet by one or more columns.
    * Reach: broker `api.sortRange`, unlocked tier, class mutate.
    */
-  sortRange(startRow: number, startCol: number, endRow: number, endCol: number, fields: ScriptSortField[], options?: { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" }, sheetIndex?: number): Promise<number>;
+  sortRange(startRow: number, startCol: number, endRow: number, endCol: number, fields: ScriptSortField[], options?: { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" }, sheet?: SheetRef): Promise<number>;
+
+  // -- Range ops (Data ▸ Remove Duplicates / Text to Columns, Goal Seek) --
+
+  /**
+   * Remove duplicate rows from a rectangle — Data ▸ Remove Duplicates. A row
+   * whose key columns repeat an earlier row is deleted and the rows below
+   * close up, as ONE undo step. `options.columns` are 0-based offsets FROM
+   * THE RANGE START (like sortRange keys); omit them to key on EVERY column
+   * of the range. With `hasHeaders: true` the first row is left alone.
+   *
+   * ACTIVE SHEET only, refused (never silently redirected) otherwise.
+   *
+   * ```js
+   * // Dedupe A1:D100 by its first two columns, keeping the header row
+   * const { removedCount } = await api.removeDuplicates(0, 0, 99, 3, {
+   *   columns: [0, 1], hasHeaders: true,
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Remove duplicate rows from a block of cells, keeping each first occurrence (one undo step).
+   * Reach: broker `api.removeDuplicates`, unlocked tier, class mutate.
+   */
+  removeDuplicates(startRow: number, startCol: number, endRow: number, endCol: number, options?: { columns?: number[]; hasHeaders?: boolean }, sheet?: SheetRef): Promise<{ removedCount: number }>;
+  /**
+   * Split ONE COLUMN of text into several columns — Data ▸ Text to Columns,
+   * the same parser the wizard runs. Each delimiter is a single character
+   * (`"\t"`, `";"`, `","`, `" "` combine freely, plus at most one custom
+   * character); omitting `delimiters` splits on commas. Quoted fields
+   * (`"a,b"`) hold together. `destination` is where the split lands (default:
+   * in place, first column overwritten). One undo step.
+   *
+   * ACTIVE SHEET only (`options.sheetIndex` naming another sheet is refused),
+   * and it REFUSES when the TextToColumns extension is not loaded.
+   *
+   * ```js
+   * await api.textToColumns(0, 0, 99, 0, { delimiters: [";"], destination: { row: 0, col: 5 } });
+   * ```
+   *
+   * Calcula policy (generated): Split one column of text into several columns at delimiters, exactly like Data > Text to Columns.
+   * Reach: broker `api.textToColumns`, unlocked tier, class mutate.
+   */
+  textToColumns(startRow: number, startCol: number, endRow: number, endCol: number, options?: { delimiters?: string[]; consecutiveAsOne?: boolean; destination?: { row: number; col: number }; sheetIndex?: SheetRef }): Promise<{ rowsProcessed: number; columnsProduced: number; cellsWritten: number }>;
+  /**
+   * Goal Seek — the single-variable solver behind What-If ▸ Goal Seek (VBA's
+   * `Range.GoalSeek`): iteratively adjust the VARIABLE cell (a constant)
+   * until the TARGET cell (a formula) evaluates to `targetValue`.
+   *
+   * `converged: false` is an ANSWER, not an error: the closest value found is
+   * left in the variable cell either way (undo restores the original).
+   * ACTIVE SHEET only.
+   *
+   * ```js
+   * // What monthly payment makes B10 (total cost) equal 250000?
+   * const r = await api.goalSeek({
+   *   targetRow: 9, targetCol: 1, targetValue: 250000,
+   *   variableRow: 1, variableCol: 1,
+   * });
+   * if (r.converged) context.log(`Payment: ${r.solution} (${r.iterations} iterations)`);
+   * ```
+   *
+   * Calcula policy (generated): Run Goal Seek: adjust one input cell until a formula cell reaches a target value.
+   * Reach: broker `api.goalSeek`, unlocked tier, class mutate.
+   */
+  goalSeek(params: { targetRow: number; targetCol: number; targetValue: number; variableRow: number; variableCol: number; maxIterations?: number; tolerance?: number; sheetIndex?: SheetRef }): Promise<{ converged: boolean; solution: number; iterations: number }>;
   // -- Column filtering (AutoFilter) --
 
   /**
@@ -2494,18 +4323,195 @@ declare interface UnlockedAPI {
     remove(): Promise<void>;
   };
 
-  /** Find every matching cell on the active sheet, in reading order.
+  // -- Selection + navigation (VBA's Selection / ActiveCell / Range.Select /
+  //    Application.Goto) --
+
+  /**
+   * The current selection: which cells, on which sheet, with every area of a
+   * multi-area (Ctrl+Click) selection. Coordinates only — reading what is IN
+   * the cells is `getRangeValues` / `selection()`. Resolves `null` when
+   * nothing is selected.
    *
-   * Calcula policy (generated): Find every cell on the active sheet matching a search text.
+   * ```js
+   * const sel = await api.getSelection();
+   * if (sel) context.log(`${sel.areas.length} area(s) on sheet ${sel.sheetIndex}`);
+   * ```
+   *
+   * Calcula policy (generated): See which cells are currently selected (where they are — never what is in them).
+   * Reach: broker `api.getSelection`, unlocked tier, class read.
+   */
+  getSelection(): Promise<ScriptSelection | null>;
+  /**
+   * The primary selected area as a live {@link ScriptRange} — offset, resize,
+   * getData, setValues and format all work on it immediately. Bound to the
+   * sheet the selection is on. Resolves `null` when nothing is selected.
+   *
+   * ```js
+   * const sel = await api.selection();
+   * if (sel) await sel.format({ bold: true });
+   * ```
+   *
+   * Calcula policy (generated): See which cells are currently selected (where they are — never what is in them).
+   * Reach: broker `api.getSelection`, unlocked tier, class read.
+   */
+  selection(): Promise<ScriptRange | null>;
+  /** The active cell as a single-cell {@link ScriptRange} (VBA's ActiveCell).
+   *  Resolves `null` when nothing is selected.
+   *
+   * Calcula policy (generated): See which cells are currently selected (where they are — never what is in them).
+   * Reach: broker `api.getSelection`, unlocked tier, class read.
+   */
+  activeCell(): Promise<ScriptRange | null>;
+  /**
+   * Select cells, exactly as if the user had clicked them — and scroll them
+   * into view unless told not to. Two spellings:
+   *
+   * ```js
+   * await api.select(0, 0, 9, 3);                      // rows/cols, 0-based
+   * await api.select(2, 2);                            // a single cell
+   * await api.select("A1:D10");                        // A1, active sheet
+   * await api.select("Data!A1:B5");                    // another sheet (activates it)
+   * await api.select(0, 0, 9, 3, { scroll: false });   // do not move the viewport
+   * await api.select(0, 0, 0, 3, {                     // multi-area (Ctrl+Click shape)
+   *   ranges: [{ startRow: 5, startCol: 0, endRow: 5, endCol: 3 }],
+   * });
+   * ```
+   *
+   * Naming a sheet (via the address prefix or `options.sheetIndex`) activates
+   * it first — the selection lives on the active sheet.
+   *
+   * Calcula policy (generated): Select a block of cells (or several blocks) and scroll it into view, exactly as if you had clicked it.
+   * Reach: broker `api.select`, unlocked tier, class mutate. Limits: maxAreas 128.
+   */
+  select(startRowOrAddress: number | string, startColOrOptions?: number | ScriptSelectOptions, endRow?: number | ScriptSelectOptions, endCol?: number, options?: ScriptSelectOptions): Promise<void>;
+  /**
+   * Scroll the grid so a cell is on screen WITHOUT changing the selection —
+   * ScrollIntoView. Naming another sheet activates it first.
+   *
+   * Calcula policy (generated): Scroll the grid so a cell is on screen, without changing what is selected.
+   * Reach: broker `api.scrollTo`, unlocked tier, class mutate.
+   */
+  scrollTo(row: number, col: number, sheet?: SheetRef): Promise<void>;
+  /**
+   * Clear a rectangle as ONE undo step. `applyTo` decides what goes:
+   * `"all"` (the default) removes contents AND formatting, `"contents"` is the
+   * Delete key (values and formulas go, formatting stays), `"formats"` strips
+   * formatting and keeps every value. Resolves to how many cells were touched.
+   * The sheet may be ANY sheet of this workbook (Wave-1 rules).
+   *
+   * ```js
+   * await api.clearRange(0, 0, 99, 3);                            // everything
+   * await api.clearRange(0, 0, 99, 3, { applyTo: "contents" });   // keep the look
+   * ```
+   *
+   * Calcula policy (generated): Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step).
+   * Reach: broker `api.clearRange`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   */
+  clearRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { applyTo?: "all" | "contents" | "formats" }, sheet?: SheetRef): Promise<{ count: number }>;
+  /** Every sheet with its visibility ("visible" | "hidden" | "veryHidden")
+   *  and tab colour — the metadata `getSheetNames()` throws away.
+   *
+   * Calcula policy (generated): List the sheets in this workbook, with each one's visibility and tab colour.
+   * Reach: broker `api.getSheets`, unlocked tier, class read.
+   */
+  getSheets(): Promise<ScriptSheetInfo[]>;
+  /** Change a sheet's tab colour (`"#RRGGBB"`); `null` removes it. The sheet
+   *  may be a 0-based index or a name.
+   *
+   * Calcula policy (generated): Change (or remove) the colour of a sheet's tab in the tab bar.
+   * Reach: broker `api.setTabColor`, unlocked tier, class mutate.
+   */
+  setTabColor(sheet: SheetRef, color: string | null): Promise<void>;
+
+  // -- Range discovery (VBA's Range.End / CurrentRegion / UsedRange) --
+  // All three are answered by the SAME engine function the grid's own
+  // Ctrl+Arrow / Ctrl+A use, so a script and a keystroke can never disagree
+  // about where an edge is. Coordinates only — reading what is IN the cells
+  // stays with getRangeValues. Nothing moves: these are reads, `select` /
+  // `scrollTo` are how you go there.
+
+  /**
+   * The cell where Ctrl+Arrow would land from (row, col) — VBA's `Range.End`,
+   * over the full Excel grid bounds. The last-row idiom:
+   *
+   * ```js
+   * const last = await api.getRangeEdge(1048575, 0, "up");   // bottom of column A
+   * ```
+   *
+   * Calcula policy (generated): Find the cell where Ctrl+Arrow would land from a starting cell (the edge of its data block).
+   * Reach: broker `api.getRangeEdge`, unlocked tier, class read.
+   */
+  getRangeEdge(row: number, col: number, direction: "up" | "down" | "left" | "right", sheet?: SheetRef): Promise<{ row: number; col: number }>;
+  /**
+   * The contiguous block of data around (row, col) — VBA's `CurrentRegion`,
+   * what Ctrl+A selects. `empty: true` (rectangle collapsed to the seed cell)
+   * when the cell is isolated.
+   *
+   * Calcula policy (generated): Find the edges of the contiguous block of data around a cell (what Ctrl+A would select).
+   * Reach: broker `api.getCurrentRegion`, unlocked tier, class read.
+   */
+  getCurrentRegion(row: number, col: number, sheet?: SheetRef): Promise<ScriptRegion>;
+  /**
+   * The bounding rectangle of everything a sheet stores — VBA's `UsedRange`.
+   * `empty: true` when the sheet stores nothing at all.
+   *
+   * ```js
+   * const used = await api.getUsedRange("Data");
+   * if (!used.empty) {
+   *   const rows = await api.getRangeValues(used.startRow, used.startCol, used.endRow, used.endCol, "Data");
+   * }
+   * ```
+   *
+   * Calcula policy (generated): Find the rectangle of cells a sheet actually uses (the bounding box of everything stored on it).
+   * Reach: broker `api.getUsedRange`, unlocked tier, class read.
+   */
+  getUsedRange(sheet?: SheetRef): Promise<ScriptRegion>;
+  /**
+   * The cells of one class inside a rectangle — Excel's Go To Special (VBA's
+   * `Range.SpecialCells`), answered by the backend. COORDINATES ONLY, like the
+   * other discovery rows.
+   *
+   * `"visible"` consults the authoritative hidden state (AutoFilter criteria,
+   * advanced filter, collapsed outline groups, outline-hidden columns), plus —
+   * on the ACTIVE sheet — rows/columns the user hid by hand (right-click
+   * Hide, which lives in frontend grid state; a background sheet has no such
+   * state to consult). The primitive behind "copy only the visible cells
+   * after filtering":
+   *
+   * ```js
+   * const vis = await api.getSpecialCells(1, 0, 500, 4, "visible");
+   * if (vis.truncated) context.log("warning: answer capped — narrow the range");
+   * for (const { row, col } of vis.cells) {
+   *   // read/copy exactly what the user can see
+   * }
+   * ```
+   *
+   * The rectangle is clamped to the sheet's used range; `truncated: true`
+   * means the 100,000-cell answer cap dropped entries.
+   *
+   * Calcula policy (generated): List which cells in a block are constants, formulas, blanks, or currently visible (coordinates only).
+   * Reach: broker `api.getSpecialCells`, unlocked tier, class read.
+   */
+  getSpecialCells(startRow: number, startCol: number, endRow: number, endCol: number, kind: "constants" | "formulas" | "blanks" | "visible", sheet?: SheetRef): Promise<{ cells: ScriptFindMatch[]; truncated: boolean }>;
+
+  /** Find every matching cell, in reading order. `options.sheetIndex` (a
+   *  0-based index or a name) searches that sheet; omit it for the active
+   *  sheet. `options.range` (a rectangle or an A1 spelling like "B2:D10")
+   *  clamps the search to that block — VBA's `Range.Find`.
+   *
+   * Calcula policy (generated): Find every cell on a sheet matching a search text.
    * Reach: broker `api.findAll`, unlocked tier, class read.
    */
-  findAll(query: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean }): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
-  /** Replace everywhere on the active sheet (one undo step).
+  findAll(query: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean; sheetIndex?: SheetRef; range?: { startRow: number; startCol: number; endRow: number; endCol: number } | string }): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
+  /** Replace everywhere on one sheet (one undo step) — `options.sheetIndex`
+   *  picks the sheet, the active one by default. `options.range` (a rectangle
+   *  or an A1 spelling) clamps the replace to that block — VBA's
+   *  `Range.Replace`. Formula cells are never rewritten.
    *
-   * Calcula policy (generated): Replace a search text everywhere on the active sheet (a single undo step).
+   * Calcula policy (generated): Replace a search text everywhere on a sheet (a single undo step).
    * Reach: broker `api.replaceAll`, unlocked tier, class mutate.
    */
-  replaceAll(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean }): Promise<{ replacementCount: number }>;
+  replaceAll(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; sheetIndex?: SheetRef; range?: { startRow: number; startCol: number; endRow: number; endCol: number } | string }): Promise<{ replacementCount: number }>;
 
   // -- Formula evaluation (VBA's Application.WorksheetFunction) --
 
@@ -2543,7 +4549,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Work out the answer to a spreadsheet formula (for example a lookup or a total) without writing it into a cell — it reads cells, it never changes anything.
    * Reach: broker `api.evaluate`, unlocked tier, class read. Limits: maxExpressions 64, maxChars 8,192.
    */
-  evaluate(expression: string, options?: { sheetIndex?: number }): Promise<ScriptEvaluatedValue>;
+  evaluate(expression: string, options?: { sheetIndex?: SheetRef }): Promise<ScriptEvaluatedValue>;
   /**
    * Evaluate several expressions in ONE round trip (max 64, each up to 8192
    * characters). Results come back in the order you asked for them; one bad
@@ -2557,7 +4563,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Work out the answer to a spreadsheet formula (for example a lookup or a total) without writing it into a cell — it reads cells, it never changes anything.
    * Reach: broker `api.evaluate`, unlocked tier, class read. Limits: maxExpressions 64, maxChars 8,192.
    */
-  evaluateAll(expressions: string[], options?: { sheetIndex?: number }): Promise<ScriptEvaluatedValue[]>;
+  evaluateAll(expressions: string[], options?: { sheetIndex?: SheetRef }): Promise<ScriptEvaluatedValue[]>;
 
   // -- Formulas, A1 or R1C1 (VBA's Range.Formula / Range.FormulaR1C1) --
 
@@ -2611,7 +4617,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Copy a block of cells into this script's own private clipboard (nothing leaves Calcula, and what YOU copied is untouched).
    * Reach: broker `api.copyRange`, unlocked tier, class read. Limits: maxCells 100,000.
    */
-  copyRange(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<ScriptClipboardSize>;
+  copyRange(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<ScriptClipboardSize>;
   /**
    * Paste what was copied, with its top-left corner at (row, col). ACTIVE SHEET
    * only, one undo step. Relative references are shifted per cell, exactly as a
@@ -2642,6 +4648,68 @@ declare interface UnlockedAPI {
    * Reach: broker `api.pasteRange`, unlocked tier, class mutate. Limits: maxCells 100,000.
    */
   pasteSpecial(row: number, col: number, options: ScriptPasteOptions): Promise<ScriptClipboardSize>;
+
+  // -- Fill / AutoFill --
+
+  /**
+   * Fill a rectangle from its leading band — VBA's `Range.FillDown` family and
+   * `Range.AutoFill`, run through the SAME machinery as dragging the fill
+   * handle: identical series inference (1, 2 -> 3, 4; dates; "Item 1" ->
+   * "Item 2"; custom fill lists), identical per-cell formula shifting,
+   * identical merge replication, one undo step.
+   *
+   * The rectangle is SOURCE + TARGET together: the band of
+   * `options.sourceSize` (default 1) rows/columns at the edge
+   * `options.direction` (default "down") starts from seeds the rest.
+   * `options.type` "copy" (default) tiles the band verbatim with formulas
+   * shifted — Excel's FillDown; "series" applies the drag handle's inference
+   * (a lone numeric seed counts up by 1, Excel's Fill > Series default).
+   *
+   * ```js
+   * // B1 holds a formula; copy it down through B100 (Excel FillDown)
+   * await api.fillRange(0, 1, 99, 1);
+   * // A1:A2 hold 1 and 2; continue 3, 4, ... through A20
+   * await api.fillRange(0, 0, 19, 0, { type: "series", sourceSize: 2 });
+   * ```
+   *
+   * ACTIVE sheet only — a sheet ref naming another one rejects. Resolves to
+   * how many cells were written (0 when the band already covers the range).
+   *
+   * Calcula policy (generated): Fill a block of cells from its leading rows or columns, exactly like dragging the fill handle — copying values and shifting formulas, or continuing a series (a single undo step).
+   * Reach: broker `api.fillRange`, unlocked tier, class mutate. Limits: maxCells 100,000.
+   */
+  fillRange(startRow: number, startCol: number, endRow: number, endCol: number, options?: { direction?: "down" | "up" | "right" | "left"; type?: "copy" | "series"; sourceSize?: number }, sheet?: SheetRef): Promise<{ count: number }>;
+
+  // -- Pure text helpers --
+
+  /**
+   * CSV in / CSV out, computed INSIDE the sandbox — no round trip, no
+   * capability, nothing leaves the worker. The parser/serializer is the very
+   * one the CSV Import/Export dialogs use (and the notebook realm's
+   * `Calcula.text` twin), so all three surfaces agree byte for byte:
+   *
+   * ```js
+   * const { headers, rows } = api.text.parseCsv(raw, { hasHeaders: true });
+   * const out = api.text.toCsv(rows, { delimiter: ";", headers });
+   * ```
+   */
+  text: {
+    /**
+     * Parse CSV text: quoted fields, doubled-quote escapes, mixed
+     * CRLF/LF/CR line endings. `delimiter`/`quote` are exactly one character
+     * (`quote: ""` disables quoting); `hasHeaders: true` splits the first row
+     * off as `headers`. Computed locally — the Promise resolves immediately.
+     */
+    parseCsv(content: string, options?: { delimiter?: string; quote?: string; hasHeaders?: boolean }): Promise<{ rows: string[][]; headers?: string[] }>;
+    /**
+     * Serialize rows to CSV text. Cells may be strings, numbers, booleans or
+     * null (null and holes become ""); fields containing the delimiter, the
+     * quote or a newline are quoted with inner quotes doubled. `lineEnding`
+     * is "\r\n" (default), "\n" or "\r"; `headers` is emitted as the first
+     * line. Computed locally — the Promise resolves immediately.
+     */
+    toCsv(rows: ReadonlyArray<ReadonlyArray<string | number | boolean | null>>, options?: { delimiter?: string; quote?: string; lineEnding?: "\r\n" | "\n" | "\r"; headers?: ReadonlyArray<string | number | boolean | null> }): Promise<string>;
+  };
 
   // -- Workbook objects: enumerate --
   // Identity and position only — never an object's contents.
@@ -2694,7 +4762,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Add a new chart to a sheet.
    * Reach: broker `api.createChart`, unlocked tier, class mutate.
    */
-  createChart(spec: Record<string, unknown>, options?: { name?: string; sheetIndex?: number; x?: number; y?: number; width?: number; height?: number }): Promise<string>;
+  createChart(spec: Record<string, unknown>, options?: { name?: string; sheetIndex?: SheetRef; x?: number; y?: number; width?: number; height?: number }): Promise<string>;
   /** Delete a chart by id.
    *
    * Calcula policy (generated): Delete a chart.
@@ -2723,7 +4791,7 @@ declare interface UnlockedAPI {
    * Calcula policy (generated): Create a named range (a name that formulas can use for a block of cells).
    * Reach: broker `api.createNamedRange`, unlocked tier, class mutate.
    */
-  createNamedRange(name: string, refersTo: string, options?: { sheetIndex?: number | null; comment?: string }): Promise<void>;
+  createNamedRange(name: string, refersTo: string, options?: { sheetIndex?: SheetRef | null; comment?: string }): Promise<void>;
   /** Delete a named range (formulas using the name will break).
    *
    * Calcula policy (generated): Delete a named range (formulas using the name will break).
@@ -2747,7 +4815,7 @@ declare interface UnlockedAPI {
       filters?: string[];
       values: Array<string | { field: string; aggregation?: ScriptAggregation }>;
     },
-    options?: { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean },
+    options?: { name?: string; sourceSheet?: SheetRef; destinationSheet?: SheetRef; hasHeaders?: boolean },
   ): Promise<ScriptObjectRef>;
   /** Delete a pivot table.
    *
@@ -2755,6 +4823,69 @@ declare interface UnlockedAPI {
    * Reach: broker `api.deletePivot`, unlocked tier, class mutate.
    */
   deletePivot(pivotId: string): Promise<void>;
+
+  // -- Conditional formatting --
+  // The rules the Home ▸ Conditional Formatting dialogs write, from code.
+  // Rule definitions live PER SHEET: list/clear take an optional sheet ref
+  // (index or name, Wave-1 rules) and default to the active sheet.
+  // add/update/delete address the ACTIVE sheet's rules (ranges are
+  // active-sheet rectangles) — switch sheets first to author elsewhere.
+
+  /** Every conditional-formatting rule on the given sheet (default: the
+   *  active sheet), in priority order.
+   *
+   * Calcula policy (generated): List the conditional-formatting rules on a sheet (what each rule tests, how it styles matches, and which cells it covers).
+   * Reach: broker `api.listConditionalFormats`, unlocked tier, class read.
+   */
+  listConditionalFormats(sheet?: SheetRef): Promise<ScriptCFDefinition[]>;
+  /**
+   * Add a conditional-formatting rule. Ranges may be spelled in A1.
+   * Resolves to the stored rule (whose `id` update/delete address).
+   *
+   * ```js
+   * await api.addConditionalFormat({
+   *   rule: { type: "cellValue", operator: "greaterThan", value1: "100" },
+   *   format: { bold: true, backgroundColor: "#FFC7CE" },
+   *   ranges: ["B2:B100"],
+   * });
+   * ```
+   *
+   * Calcula policy (generated): Add a conditional-formatting rule to the active sheet (a color scale, data bar, icon set, or a cell-value/text/date/formula rule).
+   * Reach: broker `api.addConditionalFormat`, unlocked tier, class mutate. Limits: maxRanges 64.
+   */
+  addConditionalFormat(spec: {
+    rule: ScriptCFRule;
+    format: ScriptCFFormat;
+    ranges: ScriptCFRangeInput[];
+    stopIfTrue?: boolean;
+  }): Promise<ScriptCFDefinition>;
+  /** Change an existing rule — only the keys present in the patch change.
+   *  Resolves to the updated rule.
+   *
+   * Calcula policy (generated): Change an existing conditional-formatting rule on the active sheet (its test, its style, the cells it covers, or whether it is enabled).
+   * Reach: broker `api.updateConditionalFormat`, unlocked tier, class mutate.
+   */
+  updateConditionalFormat(ruleId: number, patch: {
+    rule?: ScriptCFRule;
+    format?: ScriptCFFormat;
+    ranges?: ScriptCFRangeInput[];
+    stopIfTrue?: boolean;
+    enabled?: boolean;
+  }): Promise<ScriptCFDefinition>;
+  /** Delete one rule by id (the cells and their values are kept).
+   *
+   * Calcula policy (generated): Delete one conditional-formatting rule from the active sheet (the cells and their values are kept).
+   * Reach: broker `api.deleteConditionalFormat`, unlocked tier, class mutate.
+   */
+  deleteConditionalFormat(ruleId: number): Promise<void>;
+  /** Remove the rules whose every range lies INSIDE the given block (all
+   *  rules, when no block is given) on the given sheet (default: the active
+   *  sheet). Resolves to how many were removed.
+   *
+   * Calcula policy (generated): Remove the conditional-formatting rules inside a block of cells on a sheet (or all of them, when no block is named).
+   * Reach: broker `api.clearConditionalFormats`, unlocked tier, class mutate.
+   */
+  clearConditionalFormats(range?: ScriptCFRangeInput | null, sheet?: SheetRef): Promise<{ count: number }>;
 
   // -- Workbook objects: address ANOTHER instance --
   // A script is pinned to ONE object at mount. These handles reach any OTHER
@@ -2893,6 +5024,11 @@ declare interface WorkbookContext extends BaseObjectContext {
   /**
    * Called when the workbook is opened.
    *
+   * This INCLUDES the open that started your script: workbook scripts are
+   * mounted as part of opening the workbook, so the one open you could never
+   * otherwise observe is delivered to your handler right after `setup` wires
+   * it — once per open, never on a re-mount (Save & Apply).
+   *
    * The detail carries the workbook's FILE NAME only — never its folder. A
    * sandboxed script has no API that takes a path, so the directory would buy
    * it nothing, while a path names the user's account and folder layout. Use
@@ -2949,8 +5085,48 @@ declare interface WorkbookContext extends BaseObjectContext {
       | { cancel: true; reason?: string }
       | Promise<void | false | "cancel" | { cancel: true; reason?: string }>,
   ): () => void;
+  /**
+   * Called before the workbook is PRINTED or exported to PDF — and it can
+   * STOP it, with the same verdict shapes and deadline as
+   * {@link WorkbookContext.onBeforeSave} (VBA's `Workbook_BeforePrint`).
+   * Covers every exit of the printable document: File ▸ Print, File ▸ Export
+   * to PDF, and a script's own `caps.file.exportPdf`.
+   */
+  onBeforePrint(
+    handler: () =>
+      | void
+      | false
+      | "cancel"
+      | { cancel: true; reason?: string }
+      | Promise<void | false | "cancel" | { cancel: true; reason?: string }>,
+  ): () => void;
   /** Called when the active sheet changes. */
   onSheetChange(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
+  /**
+   * Called when a sheet is ADDED — by a person, a script or a package pull.
+   * `source` is `"new"` for an empty sheet, `"copy"` for a duplicate. The
+   * workbook mirror is refreshed BEFORE delivery, so `properties.sheetCount`
+   * and `properties.getSheetNames()` already show the new sheet inside the
+   * handler. The classic index-sheet macro:
+   *
+   * ```js
+   * workbook.onSheetAdd(async ({ sheetName }) => {
+   *   await context.api.setCellValue(0, 0, `Sheets: ${workbook.properties.sheetCount}`);
+   * });
+   * ```
+   */
+  onSheetAdd(handler: (detail: { sheetIndex: number; sheetName: string; source: "new" | "copy" }) => void): () => void;
+  /** Called when a sheet is DELETED. `sheetIndex` is the position the sheet
+   *  occupied BEFORE removal (it no longer exists when the handler runs); the
+   *  workbook mirror is refreshed first, like onSheetAdd. */
+  onSheetDelete(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
+  /** Called when a sheet is RENAMED — by a person, a script or a package
+   *  pull. The workbook mirror is refreshed first, like onSheetAdd, so
+   *  `properties.getSheetNames()` already shows `newName` in the handler. */
+  onSheetRename(handler: (detail: { sheetIndex: number; oldName: string; newName: string }) => void): () => void;
+  /** Called when a sheet is RENAMED. A script holding the old name should
+   *  re-resolve — names are how sheet refs bind. */
+  onSheetRename(handler: (detail: { sheetIndex: number; oldName: string; newName: string }) => void): () => void;
   /** Called when the theme changes. */
   onThemeChange(handler: () => void): () => void;
   /** Access workbook properties. */
@@ -3011,19 +5187,26 @@ declare interface ScriptRange {
    * Reach: broker `api.objectGetState`, unlocked tier, class read.
    */
   getFormulas(): Promise<string[][]>;
-  /** Set the top-left cell's value.
+  /** All formats as a rows x cols grid — ONE round trip. The read-back twin of
+   *  format(): every writable key reports back in the same vocabulary. */
+  getFormats(): Promise<ScriptCellFormat[][]>;
+  /** The top-left cell's format. */
+  getFormat(): Promise<ScriptCellFormat>;
+  /** Set the top-left cell's value. Numbers and booleans land TYPED; `null`
+   *  clears the cell.
    *
    * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
-  setValue(value: string): Promise<void>;
+  setValue(value: ScriptCellValue): Promise<void>;
   /** Set values from a 2D array (clamped to the range's dimensions) — ONE call,
-   *  one undo step.
+   *  one undo step. Numbers/booleans land typed; `null` clears a cell;
+   *  `undefined` leaves it untouched.
    *
    * Calcula policy (generated): Change another object in this workbook (its chart spec, slicer selection, pivot layout, shape properties, ...).
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
-  setValues(values: string[][]): Promise<void>;
+  setValues(values: Array<Array<ScriptCellValue | undefined>>): Promise<void>;
   /** Apply a PARTIAL format to every cell in the range — ONE call, one undo
    *  step. Absent properties are left alone:
    *  `await sheet.range("A1:C1").format({ bold: true })`.
@@ -3038,6 +5221,148 @@ declare interface ScriptRange {
    * Reach: broker `api.objectSetState`, unlocked tier, class mutate.
    */
   clearFormat(): Promise<void>;
+  /** Apply a NAMED cell style ("Good", "Heading 1", a custom one) to every
+   *  cell of this range — VBA's `Range.Style`. ACTIVE SHEET only. */
+  applyStyle(name: string): Promise<void>;
+  /**
+   * Set a data-validation rule on every cell of this range — what future
+   * edits will accept, an optional dropdown list, and the messages shown —
+   * or remove the rules with `null`:
+   * `await api.range("C2:C100").setValidation({ type: "list", values: ["Yes", "No"] })`.
+   */
+  setValidation(rule: ScriptValidationRule | null): Promise<void>;
+  /** The data-validation rule on this range's TOP-LEFT cell, in the same shape
+   *  setValidation() accepts (a read can be written straight back); `null`
+   *  when the cell has none. */
+  validation(): Promise<ScriptValidationRule | null>;
+
+  // -- Navigation + selection --
+
+  /**
+   * The single-cell range where Ctrl+Arrow would land from this range's
+   * TOP-LEFT cell — VBA's `Range.End`, over the full Excel grid bounds
+   * (1,048,576 rows x 16,384 columns). The classic last-row idiom:
+   *
+   * ```js
+   * const last = await api.range("A1048576").end("up");
+   * await api.range("A1").resize(last.endRow + 1, 1).getValues();
+   * ```
+   */
+  end(direction: "up" | "down" | "left" | "right"): Promise<ScriptRange>;
+  /** The contiguous block of data around this range's TOP-LEFT cell — VBA's
+   *  `CurrentRegion`, what Ctrl+A selects. An isolated cell yields itself. */
+  currentRegion(): Promise<ScriptRange>;
+  /** Select this range exactly as if you had clicked it — `Range.Select` —
+   *  activating its sheet first if needed, and scrolling it into view unless
+   *  `scroll` is false. */
+  select(scroll?: boolean): Promise<void>;
+
+  // -- Range algebra (pure coordinate math — no round trip, not async) --
+
+  /** True when the 0-based cell lies inside this range (inclusive; negative
+   *  coordinates are always outside). */
+  contains(row: number, col: number): boolean;
+  /** The overlapping rectangle, or `null` when the two do not overlap. `other`
+   *  may be any Range-shaped object; the result is bound to THIS range's
+   *  sheet. */
+  intersect(other: { startRow: number; startCol: number; endRow: number; endCol: number }): ScriptRange | null;
+  /** The smallest single rectangle covering both ranges. Named honestly: this
+   *  is NOT VBA Union's multi-area result — the gaps between the inputs are
+   *  included. Bound to THIS range's sheet. */
+  boundingUnion(other: { startRow: number; startCol: number; endRow: number; endCol: number }): ScriptRange;
+
+  // -- Fill + auto-fit (the fill-handle machinery and the double-click
+  //    best-fit; ACTIVE SHEET only — a range bound elsewhere is refused) --
+
+  /**
+   * Excel's Fill Down over this range: the FIRST row seeds the rest — values
+   * copied, formulas shifted per cell, styles carried, one undo step:
+   * `await api.range("B2:B100").fillDown()`. A one-row range fills nothing.
+   * Resolves to how many cells were written.
+   */
+  fillDown(): Promise<{ count: number }>;
+  /** Fill Up: the LAST row of this range seeds the rows above it. */
+  fillUp(): Promise<{ count: number }>;
+  /** Fill Right: the FIRST column of this range seeds the columns right of it. */
+  fillRight(): Promise<{ count: number }>;
+  /** Fill Left: the LAST column of this range seeds the columns left of it. */
+  fillLeft(): Promise<{ count: number }>;
+  /**
+   * VBA's `Range.AutoFill`: THIS range seeds `destination`, exactly like
+   * dragging the fill handle from it — same series inference (1, 2 -> 3, 4),
+   * same date/custom-list continuation, same formula shifting:
+   *
+   * ```js
+   * // A1:A2 hold 1 and 2; fill 3, 4, 5, ... down to A20
+   * await api.range("A1:A2").autoFill("A1:A20");
+   * ```
+   *
+   * `destination` (a Range-shaped object or an A1 address on the same sheet)
+   * must include this range and extend it in exactly ONE direction. `type`
+   * defaults to `"series"` (the drag's inference); `"copy"` tiles the seed
+   * verbatim instead (Ctrl+drag).
+   */
+  autoFill(destination: { startRow: number; startCol: number; endRow: number; endCol: number } | string, type?: "copy" | "series"): Promise<{ count: number }>;
+  /** Size this range's COLUMNS to fit their contents — the double-click
+   *  best-fit, extension-rendered chrome included. Empty columns keep their
+   *  width. Resolves to how many columns changed. */
+  autoFit(): Promise<{ count: number }>;
+
+  // -- Range ops (find/replace, dedupe, split, special cells, goal seek) --
+
+  /**
+   * Find every matching cell INSIDE this range, in reading order — VBA's
+   * `Range.Find` (all matches at once). Coordinates are grid-absolute:
+   *
+   * ```js
+   * const hits = await api.range("B2:D100").find("overdue", { matchEntireCell: true });
+   * for (const { row, col } of hits.matches) { ... }
+   * ```
+   */
+  find(query: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean; searchFormulas?: boolean }): Promise<{ matches: ScriptFindMatch[]; totalCount: number }>;
+  /** Replace INSIDE this range only, as one undo step — VBA's
+   *  `Range.Replace`. Formula cells are never rewritten. */
+  replace(search: string, replacement: string, options?: { caseSensitive?: boolean; matchEntireCell?: boolean }): Promise<{ replacementCount: number }>;
+  /** Remove duplicate rows from this range (Data ▸ Remove Duplicates), one
+   *  undo step. `columns` are offsets FROM THE RANGE START; omitted = every
+   *  column. ACTIVE SHEET only. */
+  removeDuplicates(options?: { columns?: number[]; hasHeaders?: boolean }): Promise<{ removedCount: number }>;
+  /** Split this ONE-COLUMN range into columns by delimiters (Data ▸ Text to
+   *  Columns), writing at `destination` (default: in place). ACTIVE SHEET
+   *  only; refuses when the TextToColumns extension is not loaded. */
+  textToColumns(options?: { delimiters?: string[]; consecutiveAsOne?: boolean; destination?: { row: number; col: number } }): Promise<{ rowsProcessed: number; columnsProduced: number; cellsWritten: number }>;
+  /**
+   * The cells of one class inside this range — Excel's Go To Special (VBA's
+   * `Range.SpecialCells`). `"visible"` answers what survives AutoFilter /
+   * advanced-filter / outline hiding, plus manual row/column hides on the
+   * active sheet — the "copy visible cells only" idiom:
+   *
+   * ```js
+   * const vis = await api.range("A2:E500").specialCells("visible");
+   * ```
+   */
+  specialCells(kind: "constants" | "formulas" | "blanks" | "visible"): Promise<{ cells: ScriptFindMatch[]; truncated: boolean }>;
+  /**
+   * Goal Seek from a range — VBA's `Range.GoalSeek`: drive `changingCell` (an
+   * A1 address on this sheet, or a single-cell Range shape) until THIS
+   * range's TOP-LEFT formula cell evaluates to `targetValue`. ACTIVE SHEET
+   * only. `converged: false` is an answer, not an error.
+   *
+   * ```js
+   * const r = await api.range("B10").goalSeek(250000, "B2");
+   * ```
+   */
+  goalSeek(targetValue: number, changingCell: string | { startRow: number; startCol: number; endRow: number; endCol: number }): Promise<{ converged: boolean; solution: number; iterations: number }>;
+  /**
+   * Group this range's ROWS into a collapsible outline group — Data ▸ Group,
+   * VBA `Range.Rows.Group`: `await api.range("A6:A18").group()`. Rows only,
+   * deliberately: a range that guessed which axis you meant would guess wrong
+   * half the time — columns are `api.groupColumns`. ACTIVE SHEET only, and
+   * requires the Grouping feature (rejects loudly when it is disabled).
+   */
+  group(): Promise<ScriptGroupResult>;
+  /** Ungroup this range's ROWS (VBA `Range.Rows.Ungroup`). ACTIVE SHEET only. */
+  ungroup(): Promise<ScriptGroupResult>;
 }
 
 /** Context for Sheet-level scripts (applies to all sheets). */
@@ -3046,36 +5371,76 @@ declare interface SheetContext extends BaseObjectContext {
   onActivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
   /** Called when any sheet is deactivated (switched away from). */
   onDeactivate(handler: (detail: { sheetIndex: number; sheetName: string }) => void): () => void;
-  /** Called when the selection changes on any sheet. */
-  onSelectionChange(handler: (detail: { sheetIndex: number; row: number; col: number; endRow: number; endCol: number }) => void): () => void;
+  /** Called when the selection changes on any sheet. `(row, col)` is the
+   *  ANCHOR corner and `(endRow, endCol)` the active cell; `areas` lists EVERY
+   *  selected rectangle (normalized, primary first) — a plain click has one
+   *  entry, a Ctrl+Click multi-selection has one per area. */
+  onSelectionChange(handler: (detail: { sheetIndex: number; row: number; col: number; endRow: number; endCol: number; areas: ScriptSelectionArea[] }) => void): () => void;
   /**
    * Called when data changes.
    *
    * `detail.sheetIndex` is the sheet on screen; each change ALSO carries its own
    * `sheetIndex`, which is the one to use — a change is never re-stamped with
-   * the active sheet's index. A restricted script is delivered only the changes
-   * on the sheet it can reach, matching what `getCellValue` will let it read.
+   * the active sheet's index — and its `address`, the A1 spelling of the same
+   * coordinates (`row: 6, col: 1` -> `"B7"`) on that change's sheet. A
+   * restricted script is delivered only the changes on the sheet it can reach,
+   * matching what `getCellValue` will let it read.
+   *
+   * Your OWN writes never re-fire this handler: a change this script made
+   * through the API is dropped before delivery, so the classic timestamp
+   * pattern — writing a neighbouring cell from inside the handler — cannot
+   * loop. Edits made by the user (or another script) in the same flush still
+   * arrive.
+   *
+   * Deliveries within one frame are batched. `truncated: true` means the batch
+   * overflowed the delivery cap and `changes` is INCOMPLETE — re-read the cells
+   * you care about (e.g. `getRangeValues`) instead of trusting the list.
    */
-  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; sheetIndex: number; oldValue?: string; newValue: string }> }) => void): () => void;
-  /** Read a cell's DISPLAY STRING from the specified (or active) sheet.
+  onDataChange(handler: (detail: { sheetIndex: number; changes: Array<{ row: number; col: number; sheetIndex: number; address: string; oldValue?: string; newValue: string }>; truncated?: boolean }) => void): () => void;
+  /**
+   * Called before a double-click ENTERS EDIT MODE — and it can stop it
+   * (VBA's `Workbook_SheetBeforeDoubleClick`). Return `false`, `"cancel"` or
+   * `{ cancel: true }` to keep the cell out of edit mode; anything else — or a
+   * verdict later than the ~1.5s deadline — lets editing begin, so a slow
+   * handler can never make the grid feel broken. The payload is always on the
+   * ACTIVE sheet (the only sheet a click can land on).
+   *
+   * ```js
+   * sheet.onBeforeDoubleClick(({ row, col, address }) => {
+   *   if (address === "B2") return { cancel: true }; // this cell opens a dialog instead
+   * });
+   * ```
+   */
+  onBeforeDoubleClick(handler: (detail: { row: number; col: number; address: string }) => void | false | "cancel" | { cancel: true } | Promise<void | false | "cancel" | { cancel: true }>): () => void;
+  /**
+   * Called before the CELL CONTEXT MENU opens on a right-click — and it can
+   * suppress it (VBA's `Workbook_SheetBeforeRightClick`). Same verdict shapes,
+   * deadline and default-allow as {@link SheetContext.onBeforeDoubleClick}.
+   * Shift+right-click (the browser menu) and right-clicks on floating objects
+   * never reach this hook.
+   */
+  onBeforeRightClick(handler: (detail: { row: number; col: number; address: string }) => void | false | "cancel" | { cancel: true } | Promise<void | false | "cancel" | { cancel: true }>): () => void;
+  /** Read a cell's DISPLAY STRING from the specified (or active) sheet — the
+   *  sheet may be a 0-based index or a name.
    *
    * Calcula policy (generated): Read cells on the sheet currently shown.
    * Reach: broker `sheet.getCellValue`, restricted tier, class read.
    */
-  getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
-  /** Write a cell value.
+  getCellValue(row: number, col: number, sheet?: SheetRef): Promise<string>;
+  /** Write a cell value. Numbers and booleans land TYPED; `null` clears the
+   *  cell. The sheet may be a 0-based index or a name.
    *
    * Calcula policy (generated): Write cells on the sheet currently shown.
    * Reach: broker `sheet.setCellValue`, restricted tier, class mutate.
    */
-  setCellValue(row: number, col: number, value: string, sheetIndex?: number): Promise<void>;
+  setCellValue(row: number, col: number, value: ScriptCellValue, sheet?: SheetRef): Promise<void>;
   /** Read one cell WITH its type and formula. Restricted scripts may only name
    *  their own (active) sheet.
    *
    * Calcula policy (generated): Read one cell on the sheet currently shown, with its type and formula.
    * Reach: broker `sheet.getCellData`, restricted tier, class read.
    */
-  getCellData(row: number, col: number, sheetIndex?: number): Promise<ScriptCell>;
+  getCellData(row: number, col: number, sheet?: SheetRef): Promise<ScriptCell>;
   /**
    * Read the formula in a cell on this sheet, in A1 or R1C1 notation. Resolves
    * `null` when the cell holds a plain value, is empty, or has its formula
@@ -3105,22 +5470,41 @@ declare interface SheetContext extends BaseObjectContext {
   setCellFormula(row: number, col: number, formula: string | null, options?: ScriptFormulaOptions): Promise<void>;
   /** Apply a PARTIAL format to a rectangle on this sheet — one call, one undo
    *  step. Only the properties you set change. Restricted scripts may only name
-   *  their own (active) sheet.
+   *  their own (active) sheet, and may not set `locked` / `formulaHidden`.
    *
    * Calcula policy (generated): Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders).
    * Reach: broker `sheet.setRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
-  setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheetIndex?: number): Promise<void>;
+  setRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, format: ScriptFormat, sheet?: SheetRef): Promise<void>;
   /** Remove ALL formatting from a rectangle on this sheet, keeping the values.
    *
    * Calcula policy (generated): Remove all formatting from a block of cells on the sheet currently shown (the values are kept).
    * Reach: broker `sheet.clearRangeFormat`, restricted tier, class mutate. Limits: maxCells 100,000.
    */
-  clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheetIndex?: number): Promise<void>;
+  clearRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<void>;
+  /** Read a rectangle's formats on this sheet as a dense rows x cols grid —
+   *  the read-back twin of setRangeFormat, same vocabulary. Restricted scripts
+   *  may only name their own (active) sheet.
+   *
+   * Calcula policy (generated): Read how a block of cells looks on the sheet currently shown (font, colour, alignment, number format, borders — never the values).
+   * Reach: broker `sheet.getRangeFormat`, restricted tier, class read. Limits: maxCells 100,000.
+   */
+  getRangeFormat(startRow: number, startCol: number, endRow: number, endCol: number, sheet?: SheetRef): Promise<ScriptCellFormat[][]>;
+  /** Read one cell's format on this sheet.
+   *
+   * Calcula policy (generated): Read how one cell looks on the sheet currently shown (its font, colour, alignment, number format and borders — never its value).
+   * Reach: broker `sheet.getCellFormat`, restricted tier, class read.
+   */
+  getCellFormat(row: number, col: number, sheet?: SheetRef): Promise<ScriptCellFormat>;
   /**
    * A range on THIS sheet by A1 address ("A1", "A1:B5") — the canonical model
-   * facet (C3). Reads/writes are clamped to this sheet. Prefer this over the
-   * flat getCellValue/setCellValue: `sheet.range("A1:B5").setValues(...)`.
+   * facet (C3). Prefer this over the flat getCellValue/setCellValue:
+   * `sheet.range("A1:B5").setValues(...)`.
+   *
+   * A "Sheet!" prefix is never silently dropped: the named sheet is carried on
+   * every call and resolved host-side under the same tier rule as the flat
+   * methods — a restricted script is refused for any sheet that is not the
+   * active one; an unlocked script gets real cross-sheet reach.
    */
   range(address: string): ScriptRange;
   /** A single cell on this sheet (0-based), as a single-cell range. */
@@ -3129,7 +5513,9 @@ declare interface SheetContext extends BaseObjectContext {
 
 /** Context for Cell-level scripts (applies to all cells). */
 declare interface CellContext extends BaseObjectContext {
-  /** Called when any cell is edited (value committed). */
+  /** Called when any cell is edited (value committed). Your OWN writes never
+   *  re-fire this handler — writing a cell from inside it cannot loop; user
+   *  (and other-script) edits in the same flush still arrive. */
   onEdit(handler: (detail: { row: number; col: number; sheetIndex: number; oldValue?: string; newValue: string; formula?: string | null }) => void): () => void;
   /** Called when a cell is selected. */
   onSelect(handler: (detail: { row: number; col: number; sheetIndex: number }) => void): () => void;
@@ -3292,14 +5678,40 @@ declare interface ChartContext extends BaseObjectContext {
    * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
    * Reach: broker `object.setState`, aspect `chart.updateSpec`, restricted tier, class mutate.
    */
-  updateSpec(patch: Record<string, unknown>): Promise<void>;
+  updateSpec(patch: ScriptChartSpec): Promise<void>;
   /** Replace the entire chart specification (full re-author). Schema-validated —
    *  the promise rejects on an invalid spec.
    *
    * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
    * Reach: broker `object.setState`, aspect `chart.replaceSpec`, restricted tier, class mutate.
    */
-  replaceSpec(fullSpec: Record<string, unknown>): Promise<void>;
+  replaceSpec(fullSpec: ScriptChartSpec): Promise<void>;
+  /** Move / resize / rename / re-sheet THIS chart (only the keys present
+   *  change). Placement, not spec.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `chart.setGeometry`, restricted tier, class mutate.
+   */
+  setGeometry(patch: ScriptChartGeometry): Promise<void>;
+  /** Set the chart title (null removes it). Sugar for updateSpec({ title }).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `chart.updateSpec`, restricted tier, class mutate.
+   */
+  setTitle(title: string | null): Promise<void>;
+  /** Change the chart type ("bar", "line", ...). Sugar for updateSpec({ mark }).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `chart.updateSpec`, restricted tier, class mutate.
+   */
+  setType(mark: string): Promise<void>;
+  /** Re-point the chart at another data range (A1 or a named range). Sugar for
+   *  updateSpec({ data: range }).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `chart.updateSpec`, restricted tier, class mutate.
+   */
+  setSourceRange(range: string): Promise<void>;
   /** Style customization. */
   style: {
     /** Set a canvas-style property override (stored in chart spec).
@@ -3384,6 +5796,51 @@ declare interface PivotContext extends BaseObjectContext {
    * Reach: broker `object.setState`, aspect `pivot.setLayout`, restricted tier, class mutate.
    */
   setLayout(directives: ScriptPivotLayoutDirective[]): Promise<void>;
+
+  // -- Data: filters, item visibility, sort, number format --
+  // The same aspects api.pivot(id) exposes, on THIS pivot.
+
+  /** A field's current filters and item visibility (the read twin of
+   *  setFilter / setItemVisibility). `field` is the SOURCE column name.
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `pivot.getFieldInfo`, restricted tier, class read.
+   */
+  getFieldInfo(field: string): Promise<ScriptPivotFieldInfo>;
+  /**
+   * Filter a field to exactly `values` (the item names to KEEP) — the report /
+   * page filter of the classic macro. `null` clears the field's filters.
+   * e.g. `await pivot.setFilter("Region", ["West"]); await pivot.refresh()`
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `pivot.setFilter`, restricted tier, class mutate.
+   */
+  setFilter(field: string, values: string[] | null): Promise<void>;
+  /** Clear EVERY filter on a field (manual, label and value alike).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `pivot.clearFilter`, restricted tier, class mutate.
+   */
+  clearFilter(field: string): Promise<void>;
+  /** Show or hide ONE item of a field (Excel's PivotItem.Visible).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `pivot.setItemVisibility`, restricted tier, class mutate.
+   */
+  setItemVisibility(field: string, item: string, visible: boolean): Promise<void>;
+  /** Sort a row/column field by its labels.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `pivot.sortField`, restricted tier, class mutate.
+   */
+  sortField(field: string, direction: "asc" | "desc"): Promise<void>;
+  /** Set the number format of a VALUE field (by its alias "Sum of Sales" or
+   *  its source name), e.g. `"#,##0.00"`.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `pivot.setNumberFormat`, restricted tier, class mutate.
+   */
+  setNumberFormat(valueField: string, format: string): Promise<void>;
 }
 
 // ============================================================================
@@ -3519,10 +5976,107 @@ declare interface TableContext extends BaseObjectContext {
    * A canonical-model Range over the table's data body, in TABLE-RELATIVE
    * coordinates (row 0 = first data row, col 0 = first table column). The same
    * ScriptRange the sheet context exposes: `table.range("A1:C5").getValues()`.
+   * A "Sheet!" prefix is refused — table addresses are table-relative.
    */
   range(address: string): ScriptRange;
   /** A single table cell (0-based data row + column index) as a ScriptRange. */
   cell(row: number, colIndex: number): ScriptRange;
+
+  // -- Structure (Wave 4) --
+  // The ListObject management family, pinned to THIS table. The backend
+  // commands address the ACTIVE sheet — call api.setActiveSheet(...) first
+  // when this table lives elsewhere (unlocked scripts).
+
+  /** Rename the table (names and defined names share ONE namespace).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.rename`, restricted tier, class mutate.
+   */
+  rename(newName: string): Promise<void>;
+  /** Re-anchor the table over a new GRID rectangle (0-based, inclusive).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.resize`, restricted tier, class mutate.
+   */
+  resize(startRow: number, startCol: number, endRow: number, endCol: number): Promise<void>;
+  /** Add a column. `position` is the 0-based column index to insert at
+   *  (default: append at the right edge).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.addColumn`, restricted tier, class mutate.
+   */
+  addColumn(name: string, position?: number): Promise<void>;
+  /** Remove a column by name (its cells are cleared).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.removeColumn`, restricted tier, class mutate.
+   */
+  removeColumn(name: string): Promise<void>;
+  /** Rename a column (structured references update).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.renameColumn`, restricted tier, class mutate.
+   */
+  renameColumn(oldName: string, newName: string): Promise<void>;
+  /** Show or hide the totals row.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.setTotalsRow`, restricted tier, class mutate.
+   */
+  setTotalsRow(show: boolean): Promise<void>;
+  /** Set a column's totals-row function. A "custom" function needs the
+   *  formula as the third argument.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.setTotalsFunction`, restricted tier, class mutate.
+   */
+  setTotalsFunction(column: string, fn: ScriptTableTotalsFunction, customFormula?: string): Promise<void>;
+  /** Set the table style by NAME, and/or patch the 7 style flags (only the
+   *  flags present change).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.setStyle`, restricted tier, class mutate.
+   */
+  setStyle(style: string | { styleName?: string; styleOptions?: ScriptTableStyleOptions }): Promise<void>;
+  /** Dissolve the table back into plain cells (this script's object goes with
+   *  it — the mount ends).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.convertToRange`, restricted tier, class mutate.
+   */
+  convertToRange(): Promise<void>;
+  /** Insert a data row BEFORE the 0-based data row `position` (a REAL
+   *  sheet-row insert); omit `position` to append at the end.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.insertRow`, restricted tier, class mutate.
+   */
+  insertRow(position?: number): Promise<void>;
+  /** Delete the 0-based data row `position` (a REAL sheet-row delete).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `table.deleteRow`, restricted tier, class mutate.
+   */
+  deleteRow(position: number): Promise<void>;
+  /** The column list with totals + calculated-column formulas.
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `table.getColumns`, restricted tier, class read.
+   */
+  getColumns(): Promise<ScriptTableColumnInfo[]>;
+  /** The table's style name + the 7 style flags.
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `table.getStyle`, restricted tier, class read.
+   */
+  getStyle(): Promise<ScriptTableStyle>;
+  /** The totals-row configuration (shown + per-column functions).
+   *
+   * Calcula policy (generated): Read its own object's properties / selection / spec.
+   * Reach: broker `object.getState`, aspect `table.getTotals`, restricted tier, class read.
+   */
+  getTotals(): Promise<ScriptTableTotals>;
+
   /** Table properties (read-only). */
   readonly properties: {
     readonly name: string;
@@ -3551,6 +6105,27 @@ declare interface NamedRangeContext extends BaseObjectContext {
    * Reach: broker `object.setState`, aspect `namedRange.setValues`, restricted tier, class mutate.
    */
   setValues(values: string[][]): Promise<void>;
+  /** Edit the DEFINITION of this name (target / scope / comment / the name
+   *  itself). A rename is safe from here: the host re-keys this script's
+   *  mount at the new name. Resolves to `{ name }`.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `namedRange.update`, restricted tier, class mutate.
+   */
+  update(patch: ScriptNamedRangeUpdate): Promise<{ name: string }>;
+  /** Re-point the name at another target. Sugar for update({ refersTo }).
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `namedRange.update`, restricted tier, class mutate.
+   */
+  setRefersTo(refersTo: string): Promise<void>;
+  /** Rename this name (ONE undo step). Formulas that spell the OLD name are
+   *  NOT rewritten — they will show #NAME? until edited.
+   *
+   * Calcula policy (generated): Change its own object (slicer selection, shape properties, chart spec, panel badge, ...).
+   * Reach: broker `object.setState`, aspect `namedRange.update`, restricted tier, class mutate.
+   */
+  rename(newName: string): Promise<{ name: string }>;
   /** Named range properties (read-only). */
   readonly properties: {
     readonly refersTo: string;

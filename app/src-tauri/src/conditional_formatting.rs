@@ -582,6 +582,28 @@ pub struct UpdateCFParams {
 // COMMANDS
 // ============================================================================
 
+/// Resolve an optional 0-based sheet index: None = the active sheet, Some(i)
+/// must be in range. The CF storage is a HashMap keyed by sheet index, so
+/// without this an out-of-range index would silently read (or clear) a phantom
+/// sheet's rule list instead of erroring.
+fn resolve_cf_sheet(state: &AppState, sheet_index: Option<usize>) -> Result<usize, String> {
+    let active = *state.active_sheet.lock().unwrap();
+    match sheet_index {
+        None => Ok(active),
+        Some(idx) => {
+            let count = state.sheet_names.lock().unwrap().len();
+            if idx < count {
+                Ok(idx)
+            } else {
+                Err(format!(
+                    "Sheet index {} out of range: workbook has {} sheet(s)",
+                    idx, count
+                ))
+            }
+        }
+    }
+}
+
 /// Add a conditional format rule
 #[tauri::command]
 pub fn add_conditional_format(
@@ -719,18 +741,19 @@ pub fn get_conditional_format(
         .and_then(|rules| rules.iter().find(|r| r.id == rule_id).cloned())
 }
 
-/// Get all conditional format rules for the current sheet
+/// Get all conditional format rules for the current sheet (or `sheet_index`).
 #[tauri::command]
 pub fn get_all_conditional_formats(
     state: State<AppState>,
-) -> Vec<ConditionalFormatDefinition> {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    sheet_index: Option<usize>,
+) -> Result<Vec<ConditionalFormatDefinition>, String> {
+    let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
     let cf_storage = state.conditional_formats.lock().unwrap();
 
-    cf_storage
-        .get(&active_sheet)
+    Ok(cf_storage
+        .get(&target_sheet)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Evaluate conditional formats for a range
@@ -815,7 +838,7 @@ pub fn evaluate_conditional_formats(
     EvaluateCFResult { cells: result }
 }
 
-/// Clear conditional formats in a range
+/// Clear conditional formats in a range (on the active sheet, or `sheet_index`).
 #[tauri::command]
 pub fn clear_conditional_formats_in_range(
     state: State<AppState>,
@@ -823,8 +846,9 @@ pub fn clear_conditional_formats_in_range(
     start_col: u32,
     end_row: u32,
     end_col: u32,
-) -> u32 {
-    let active_sheet = *state.active_sheet.lock().unwrap();
+    sheet_index: Option<usize>,
+) -> Result<u32, String> {
+    let target_sheet = resolve_cf_sheet(&state, sheet_index)?;
     let mut cf_storage = state.conditional_formats.lock().unwrap();
 
     let min_row = start_row.min(end_row);
@@ -832,9 +856,9 @@ pub fn clear_conditional_formats_in_range(
     let min_col = start_col.min(end_col);
     let max_col = start_col.max(end_col);
 
-    let rules = match cf_storage.get_mut(&active_sheet) {
+    let rules = match cf_storage.get_mut(&target_sheet) {
         Some(r) => r,
-        None => return 0,
+        None => return Ok(0),
     };
 
     let initial_len = rules.len();
@@ -848,7 +872,7 @@ pub fn clear_conditional_formats_in_range(
         })
     });
 
-    (initial_len - rules.len()) as u32
+    Ok((initial_len - rules.len()) as u32)
 }
 
 // ============================================================================

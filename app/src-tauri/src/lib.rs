@@ -4342,6 +4342,7 @@ pub fn run() {
             commands::sort_range,
             commands::fill_range,
             commands::update_cell_on_sheets,
+            commands::recalculate_sheets_after_script_write,
             commands::clear_range_on_sheets,
             commands::remove_duplicates,
             commands::get_grid_bounds,
@@ -4354,7 +4355,9 @@ pub fn run() {
             commands::find_ctrl_arrow_target,
             commands::detect_data_region,
             commands::get_current_region,
+            commands::get_range_edge,
             commands::go_to_special,
+            commands::get_special_cells,
             // Dimension commands
             commands::set_column_width,
             commands::get_column_width,
@@ -5040,6 +5043,7 @@ pub fn run() {
             named_styles_cmd::create_named_style,
             named_styles_cmd::delete_named_style,
             named_styles_cmd::apply_named_style,
+            named_styles_cmd::apply_named_style_range,
             // Error checking indicators
             error_checking::get_error_indicators,
             // Chart persistence commands

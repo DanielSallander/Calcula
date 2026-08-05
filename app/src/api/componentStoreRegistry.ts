@@ -89,6 +89,11 @@ export interface IChartStoreService {
   replaceChartSpec(chartId: string, fullSpec: Record<string, unknown>): void;
   /** Set a canvas-style property override on a chart. */
   setStyleProperty(chartId: string, name: string, value: string): void;
+  /** Move / resize / rename / re-sheet an existing chart (Wave 4 — the
+   *  ChartObject geometry VBA scripts drive). Only the keys present change;
+   *  the SAME store path the drag-move/resize handles use, so a script move
+   *  persists and repaints identically. Throws when no chart has that id. */
+  updateChartPlacement(chartId: string, placement: ChartPlacement): void;
 }
 
 // ============================================================================

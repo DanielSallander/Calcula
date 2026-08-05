@@ -13,6 +13,27 @@ import type {
   AddInManifest,
 } from "./types";
 import { emitAppEvent, AppEvents } from "../../api/events";
+import { getGridStateSnapshot } from "../../core/state/GridContext";
+
+/** One rectangular area of the selection, normalized (start <= end per axis). */
+interface SelectionEventArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** Normalize a rectangle: Core keeps the ANCHOR in start and the ACTIVE CELL in
+ *  end, so a drag up-and-left yields start > end — correct for the grid,
+ *  hostile for arithmetic in a script. */
+function normalizedArea(a: SelectionEventArea): SelectionEventArea {
+  return {
+    startRow: Math.min(a.startRow, a.endRow),
+    startCol: Math.min(a.startCol, a.endCol),
+    endRow: Math.max(a.startRow, a.endRow),
+    endCol: Math.max(a.startCol, a.endCol),
+  };
+}
 
 // Re-export types so they can be consumed by index.ts and other modules
 export type {
@@ -174,6 +195,28 @@ class ExtensionRegistryImpl {
     // can observe selection — they can't reach this main-thread callback registry.
     // AppEvents.SELECTION_CHANGED is allowlisted for scripts; this is its emitter.
     if (selection) {
+      // WAVE 2: Core's Selection carries sheetIndex and additionalRanges that
+      // this payload used to DROP, leaving scripts unable to tell which sheet
+      // the selection was on or that it had more than one area. sheetIndex
+      // falls back to the live grid state's active sheet (Core selections live
+      // on the active sheet by construction and rarely stamp their own).
+      const sheetIndex =
+        selection.sheetIndex ??
+        getGridStateSnapshot()?.sheetContext?.activeSheetIndex ??
+        0;
+      // Every selected area, primary first, normalized — only when the primary
+      // rectangle is actually numeric (defensive: tests feed partial shapes).
+      const hasPrimary =
+        typeof selection.startRow === "number" &&
+        typeof selection.startCol === "number" &&
+        typeof selection.endRow === "number" &&
+        typeof selection.endCol === "number";
+      const areas: SelectionEventArea[] = hasPrimary
+        ? [
+            normalizedArea(selection),
+            ...(selection.additionalRanges ?? []).map(normalizedArea),
+          ]
+        : [];
       emitAppEvent(AppEvents.SELECTION_CHANGED, {
         // Active cell (anchor is start; end is the active cell per Selection type).
         row: selection.endRow,
@@ -182,6 +225,8 @@ class ExtensionRegistryImpl {
         startCol: selection.startCol,
         endRow: selection.endRow,
         endCol: selection.endCol,
+        sheetIndex,
+        areas,
       });
     } else {
       emitAppEvent(AppEvents.SELECTION_CHANGED, null);

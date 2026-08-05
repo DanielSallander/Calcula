@@ -21,8 +21,24 @@
 // Reach it via `Calcula.workbook`.
 
 /**
+ * A sheet reference: a 0-based index or a sheet NAME. Names resolve by exact
+ * match first, then by a UNIQUE case-insensitive match; an unknown or
+ * ambiguous name THROWS listing the workbook's sheet names. A negative or
+ * out-of-range index also throws (for optional parameters, a negative index
+ * keeps its legacy meaning of "the active sheet").
+ */
+type SheetKey = number | string;
+
+/**
+ * What a cell write accepts: numbers land numeric, booleans boolean, `null`
+ * CLEARS the cell, and strings coerce like a keystroke ("7" becomes the
+ * number 7, "TRUE" a boolean). NaN/Infinity, objects and arrays throw.
+ */
+type NotebookCellValue = string | number | boolean | null;
+
+/**
  * A rectangular range (a single cell is a 1x1 range) on a sheet.
- * Values are display strings. All offsets/indices are 0-based.
+ * Values read as display strings. All offsets/indices are 0-based.
  */
 interface NotebookRange {
   /** A1 address ("A1" or "A1:B5"). */
@@ -43,10 +59,35 @@ interface NotebookRange {
   getValue(): string;
   /** All values as a rows x cols grid of display strings. */
   getValues(): string[][];
-  /** Set the top-left cell's value. */
-  setValue(value: string): void;
-  /** Set values from a 2D array (clamped to the range's dimensions). */
-  setValues(values: string[][]): void;
+  /** Set the top-left cell's value (typed: 42 lands as the NUMBER 42,
+   *  `null` clears the cell). */
+  setValue(value: NotebookCellValue): void;
+  /** Set values from a 2D array (clamped to the range's dimensions). Typed
+   *  like setValue; a malformed payload throws BEFORE any cell is written. */
+  setValues(values: NotebookCellValue[][]): void;
+  /**
+   * Excel Ctrl+Arrow / VBA `Range.End` edge navigation from this range's
+   * TOP-LEFT cell: from a non-empty cell, the last non-empty cell before a
+   * gap; from an empty cell, the next non-empty cell or the grid edge.
+   * The last-row idiom: `sheet.range("A1048576").end("up")`.
+   * @param direction - "up" | "down" | "left" | "right" (anything else throws)
+   * @returns A single-cell range at the target
+   */
+  end(direction: "up" | "down" | "left" | "right"): NotebookRange;
+  /** True when the 0-based cell (row, col) lies inside this range. */
+  contains(row: number, col: number): boolean;
+  /**
+   * The overlap of this range and `other` (max of the starts, min of the
+   * ends), or `null` when they are disjoint. Pure coordinate math on this
+   * range's sheet.
+   */
+  intersect(other: NotebookRange): NotebookRange | null;
+  /**
+   * The smallest single rectangle covering both ranges (min of the starts,
+   * max of the ends). NOT VBA Union's multi-area result: the gap between the
+   * inputs is included.
+   */
+  boundingUnion(other: NotebookRange): NotebookRange;
 }
 
 /** A worksheet: the navigation level above a NotebookRange. */
@@ -55,7 +96,10 @@ interface NotebookSheet {
   readonly index: number;
   /** Sheet name (tab label). */
   readonly name: string;
-  /** A range on THIS sheet by A1 address (a "Sheet!" prefix is ignored). */
+  /** A range on THIS sheet by A1 address. A "Sheet!" prefix (quoted or bare)
+   *  is RESOLVED, never dropped: naming this sheet stays here, naming another
+   *  EXISTING sheet rebinds the returned range to that sheet, and an unknown
+   *  name throws listing the workbook's sheets. */
   range(address: string): NotebookRange;
   /** A single cell on this sheet (0-based). */
   cell(row: number, col: number): NotebookRange;
@@ -100,24 +144,25 @@ declare namespace Calcula {
    * Get the display value of a cell.
    * @param row - 0-based row index
    * @param col - 0-based column index
-   * @param sheetIndex - Optional sheet index (defaults to active sheet)
+   * @param sheet - Optional sheet index or name (defaults to active sheet)
    * @returns The cell value as a string, or empty string if the cell is empty.
    */
-  function getCellValue(row: number, col: number, sheetIndex?: number): string;
+  function getCellValue(row: number, col: number, sheet?: SheetKey): string;
 
   /**
-   * Set the value of a cell.
-   * Numbers, booleans ("TRUE"/"FALSE"), and text are auto-detected from the string.
+   * Set the value of a cell. TYPED: a number lands as a number, a boolean as
+   * a boolean, `null` clears the cell; strings coerce like a keystroke ("7"
+   * becomes the number 7, "TRUE" a boolean).
    * @param row - 0-based row index
    * @param col - 0-based column index
-   * @param value - The value to set (as string)
-   * @param sheetIndex - Optional sheet index (defaults to active sheet)
+   * @param value - The value to set (string | number | boolean | null)
+   * @param sheet - Optional sheet index or name (defaults to active sheet)
    */
   function setCellValue(
     row: number,
     col: number,
-    value: string,
-    sheetIndex?: number,
+    value: NotebookCellValue,
+    sheet?: SheetKey,
   ): void;
 
   /**
@@ -126,7 +171,7 @@ declare namespace Calcula {
    * @param startCol - 0-based start column
    * @param endRow - 0-based end row (inclusive)
    * @param endCol - 0-based end column (inclusive)
-   * @param sheetIndex - Optional sheet index (defaults to active sheet)
+   * @param sheet - Optional sheet index or name (defaults to active sheet)
    * @returns JSON string of a 2D array of cell values (string[][])
    */
   function getRange(
@@ -134,34 +179,36 @@ declare namespace Calcula {
     startCol: number,
     endRow: number,
     endCol: number,
-    sheetIndex?: number,
+    sheet?: SheetKey,
   ): string;
 
   /**
-   * Set a rectangular range of cell values.
+   * Set a rectangular range of cell values. Typed like setCellValue. A
+   * malformed payload THROWS before any cell is written.
    * @param startRow - 0-based start row
    * @param startCol - 0-based start column
-   * @param valuesJson - JSON string of a 2D array of values (string[][])
-   * @param sheetIndex - Optional sheet index (defaults to active sheet)
+   * @param values - A 2D array of values (rows of string | number | boolean
+   *   | null), or the same as a JSON string
+   * @param sheet - Optional sheet index or name (defaults to active sheet)
    */
   function setRange(
     startRow: number,
     startCol: number,
-    valuesJson: string,
-    sheetIndex?: number,
+    values: NotebookCellValue[][] | string,
+    sheet?: SheetKey,
   ): void;
 
   /**
    * Get the formula of a cell.
    * @param row - 0-based row index
    * @param col - 0-based column index
-   * @param sheetIndex - Optional sheet index (defaults to active sheet)
+   * @param sheet - Optional sheet index or name (defaults to active sheet)
    * @returns The formula string (without leading '='), or empty string if none.
    */
   function getCellFormula(
     row: number,
     col: number,
-    sheetIndex?: number,
+    sheet?: SheetKey,
   ): string;
 
   // --------------------------------------------------------------------------
@@ -181,10 +228,11 @@ declare namespace Calcula {
   function getSheetNames(): string;
 
   /**
-   * Switch the active sheet.
-   * @param index - 0-based sheet index
+   * Switch the active sheet. THROWS on an unknown name or an out-of-range
+   * index (it used to be a silent no-op), listing the workbook's sheets.
+   * @param sheet - 0-based sheet index or sheet name
    */
-  function setActiveSheet(index: number): void;
+  function setActiveSheet(sheet: SheetKey): void;
 
   /**
    * Get the total number of sheets.
@@ -214,19 +262,21 @@ declare namespace Calcula {
 
   /**
    * Set the view mode (applied after the script completes).
-   * @param mode - "normal" or "pageBreakPreview"
+   * Throws on anything other than the three supported modes.
+   * @param mode - "normal", "pageLayout", or "pageBreakPreview"
    */
   function setViewMode(mode: string): void;
 
   /**
-   * Get the current zoom level as a decimal (1.0 = 100%).
-   * @returns The zoom factor
+   * Get the current zoom as a REAL percent (100 = 100%).
+   * @returns The zoom percent
    */
   function getZoom(): number;
 
   /**
    * Set the zoom level (applied after the script completes).
-   * @param percent - Zoom factor as a decimal (1.0 = 100%)
+   * Throws when the percent is outside [10, 400].
+   * @param percent - Zoom as a real percent (e.g. 150 for 150%)
    */
   function setZoom(percent: number): void;
 
@@ -254,23 +304,23 @@ declare namespace Calcula {
 
   /**
    * Get a sheet's visibility.
-   * @param index - 0-based sheet index
+   * @param sheet - 0-based sheet index or sheet name
    * @returns "visible", "hidden", or "veryHidden"
    */
-  function getSheetVisibility(index: number): string;
+  function getSheetVisibility(sheet: SheetKey): string;
 
   /**
    * Hide a sheet (applied after the script completes).
-   * @param index - 0-based sheet index
+   * @param sheet - 0-based sheet index or sheet name
    * @param level - Optional: "hidden" (default) or "veryHidden"
    */
-  function hideSheet(index: number, level?: string): void;
+  function hideSheet(sheet: SheetKey, level?: string): void;
 
   /**
    * Make a hidden sheet visible again (applied after the script completes).
-   * @param index - 0-based sheet index
+   * @param sheet - 0-based sheet index or sheet name
    */
-  function unhideSheet(index: number): void;
+  function unhideSheet(sheet: SheetKey): void;
 
   // --------------------------------------------------------------------------
   // Workbook Properties
@@ -303,10 +353,19 @@ declare namespace Calcula {
   /**
    * Apply a named style to a cell (applied after the script completes).
    * @param styleName - The named style to apply
-   * @param row - 0-based row index
-   * @param col - 0-based column index
+   * @param row - 0-based row index (top-left row when a range is given)
+   * @param col - 0-based column index (top-left column when a range is given)
+   * @param endRow - Optional inclusive end row; give endRow AND endCol to
+   *   style the whole rectangle as one undo step (omitting exactly one throws)
+   * @param endCol - Optional inclusive end column
    */
-  function applyNamedStyle(styleName: string, row: number, col: number): void;
+  function applyNamedStyle(
+    styleName: string,
+    row: number,
+    col: number,
+    endRow?: number,
+    endCol?: number,
+  ): void;
 
   // --------------------------------------------------------------------------
   // Calculation
@@ -372,11 +431,31 @@ declare namespace Calcula {
 
   /**
    * Get the contiguous data region surrounding a cell (like Ctrl+Shift+*).
+   * `empty: true` means the cell is isolated and empty (the box collapses to
+   * the starting cell).
    * @param row - 0-based row index
    * @param col - 0-based column index
-   * @returns JSON string of `{ startRow, startCol, endRow, endCol }`
+   * @param sheet - Sheet index or name (defaults to the active sheet)
+   * @returns JSON string of `{ startRow, startCol, endRow, endCol, empty: boolean }`
    */
-  function getCurrentRegion(row: number, col: number): string;
+  function getCurrentRegion(row: number, col: number, sheet?: SheetKey): string;
+
+  /**
+   * Excel Ctrl+Arrow / VBA `Range.End` edge navigation over the full grid
+   * bounds (1,048,576 rows x 16,384 columns) — the same algorithm as the
+   * keyboard's Ctrl+Arrow.
+   * @param row - 0-based starting row
+   * @param col - 0-based starting column
+   * @param direction - "up" | "down" | "left" | "right" (anything else throws)
+   * @param sheet - Sheet index or name (defaults to the active sheet)
+   * @returns JSON string of `{ row, col }` — the target cell
+   */
+  function getRangeEdge(
+    row: number,
+    col: number,
+    direction: "up" | "down" | "left" | "right",
+    sheet?: SheetKey,
+  ): string;
 
   /**
    * Compute the product of a list of numbers.
@@ -390,10 +469,11 @@ declare namespace Calcula {
   // --------------------------------------------------------------------------
 
   /**
-   * Get the used range of the active sheet (bounding box of non-empty cells).
+   * Get the used range of a sheet (bounding box of stored cells).
+   * @param sheet - Sheet index or name (defaults to the active sheet)
    * @returns JSON string of `{ startRow, startCol, endRow, endCol, empty: boolean }`
    */
-  function getUsedRange(): string;
+  function getUsedRange(sheet?: SheetKey): string;
 
   /** Whether zero values are displayed on the active sheet. */
   function getDisplayZeros(): boolean;
@@ -459,6 +539,19 @@ declare namespace Calcula {
 
   /** Whether row/column headings are displayed on the active sheet. */
   function getDisplayHeadings(): boolean;
+
+  /**
+   * Whether the grid shows formula text instead of computed values (the
+   * formula-view toggle, Ctrl+`).
+   */
+  function getDisplayFormulas(): boolean;
+
+  /**
+   * Show formula text instead of computed values (applied after the script
+   * completes).
+   * @param value - true to show formulas, false to show values
+   */
+  function setDisplayFormulas(value: boolean): void;
 
   // --------------------------------------------------------------------------
   // Application Object (modelled after Excel's Application object)
@@ -566,9 +659,17 @@ declare namespace Calcula {
      *
      * @param row - 0-based row index
      * @param col - 0-based column index
-     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     * @param sheet - Optional sheet index or name (defaults to active sheet)
      */
-    function goto(row: number, col: number, sheetIndex?: number): void;
+    function goto(row: number, col: number, sheet?: SheetKey): void;
+    /**
+     * A1 form: navigate to a cell OR select a whole range after the script
+     * completes ("B3", "A1:C5", "Sheet2!A1:B2", "'My Sheet'!A1"). The sheet
+     * comes from the address prefix (or the active sheet without one);
+     * passing extra arguments after an address throws.
+     * @param address - A1 address, optionally with a sheet prefix
+     */
+    function goto(address: string): void;
   }
 
   // --------------------------------------------------------------------------
@@ -586,14 +687,14 @@ declare namespace Calcula {
      * Add a cell bookmark. The bookmark is created after the script completes.
      * @param row - 0-based row index
      * @param col - 0-based column index
-     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     * @param sheet - Optional sheet index or name (defaults to active sheet)
      * @param label - Optional label (defaults to cell reference)
      * @param color - Optional color: "blue"|"green"|"orange"|"red"|"purple"|"yellow"
      */
     function addCellBookmark(
       row: number,
       col: number,
-      sheetIndex?: number,
+      sheet?: SheetKey,
       label?: string,
       color?: string,
     ): void;
@@ -602,12 +703,12 @@ declare namespace Calcula {
      * Remove a cell bookmark at the specified location.
      * @param row - 0-based row index
      * @param col - 0-based column index
-     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     * @param sheet - Optional sheet index or name (defaults to active sheet)
      */
     function removeCellBookmark(
       row: number,
       col: number,
-      sheetIndex?: number,
+      sheet?: SheetKey,
     ): void;
 
     /**
@@ -643,6 +744,50 @@ declare namespace Calcula {
      * @param id - The view bookmark ID
      */
     function activateViewBookmark(id: string): void;
+  }
+
+  // --------------------------------------------------------------------------
+  // Text utilities (pure compute -- no grid access)
+  // --------------------------------------------------------------------------
+
+  namespace text {
+    /**
+     * Parse CSV text into rows of string fields.
+     *
+     * Same semantics as the CSV Import dialog (RFC-4180-ish): quoted fields,
+     * escaped quotes by doubling, delimiters/newlines inside quotes are field
+     * content, and \r\n / \n / \r all end a row.
+     *
+     * @param content - The CSV text
+     * @param options.delimiter - Field delimiter, exactly one character (default ",")
+     * @param options.quote - Quote character, exactly one character; "" disables quoting (default '"')
+     * @param options.hasHeaders - When true, the first row is split off into `headers`
+     * @returns rows (and headers when hasHeaders was true)
+     */
+    function parseCsv(
+      content: string,
+      options?: { delimiter?: string; quote?: string; hasHeaders?: boolean },
+    ): { rows: string[][]; headers?: string[] };
+
+    /**
+     * Serialize rows to CSV text. Fields containing the delimiter, the quote
+     * character, or a newline are quoted with inner quotes doubled.
+     *
+     * @param rows - Cell values; numbers/booleans stringify, null/undefined become ""
+     * @param options.delimiter - Field delimiter, exactly one character (default ",")
+     * @param options.quote - Quote character, exactly one character (default '"')
+     * @param options.lineEnding - "\r\n" (default), "\n" or "\r"
+     * @param options.headers - Optional header row emitted first
+     */
+    function toCsv(
+      rows: (string | number | boolean | null)[][],
+      options?: {
+        delimiter?: string;
+        quote?: string;
+        lineEnding?: string;
+        headers?: (string | number | boolean | null)[];
+      },
+    ): string;
   }
 }
 

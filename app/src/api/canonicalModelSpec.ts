@@ -29,6 +29,15 @@ export const CANONICAL_RANGE_MEMBERS = [
   "getValues",
   "setValue",
   "setValues",
+  // Wave 2: edge navigation (VBA Range.End) + range algebra. The algebra
+  // semantics are pinned by the Rust twin (core/script-engine/src/ops/
+  // canonical_model.rs): contains is inclusive with negatives outside,
+  // intersect is max-starts/min-ends (null when disjoint), boundingUnion is
+  // min-starts/max-ends — honestly named, NOT VBA Union's multi-area result.
+  "end",
+  "contains",
+  "intersect",
+  "boundingUnion",
 ] as const;
 
 /** Members every `Sheet` facet must expose. */

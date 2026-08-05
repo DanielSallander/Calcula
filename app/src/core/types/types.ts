@@ -667,6 +667,15 @@ export interface FormattingOptions {
   indent?: number;
   shrinkToFit?: boolean;
   fill?: FillParam;
+  /** Theme slot for text color (e.g. "accent1"); overrides textColor when set.
+   *  Mirrors FormattingParams.text_color_theme. */
+  textColorTheme?: string;
+  /** Theme tint for text color, in PERMILLE (-1000..1000). */
+  textColorTint?: number;
+  /** Theme slot for background color; overrides backgroundColor when set. */
+  bgColorTheme?: string;
+  /** Theme tint for background color, in PERMILLE (-1000..1000). */
+  bgColorTint?: number;
   locked?: boolean;
   formulaHidden?: boolean;
 }
@@ -1929,6 +1938,8 @@ export interface ClearRangeParams {
   endRow: number;
   endCol: number;
   applyTo?: ClearApplyTo;
+  /** Target sheet (0-based). Omit/null = the active sheet (Wave 3 cross-sheet ops). */
+  sheetIndex?: number | null;
 }
 
 /**
@@ -2002,6 +2013,8 @@ export interface SortRangeParams {
   hasHeaders?: boolean;
   /** Sort orientation (rows or columns). Default: "rows" */
   orientation?: SortOrientation;
+  /** Target sheet (0-based). Omit/null = the active sheet (Wave 3 cross-sheet ops). */
+  sheetIndex?: number | null;
 }
 
 /**

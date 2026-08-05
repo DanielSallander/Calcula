@@ -285,9 +285,15 @@ pub struct ScriptSummary {
 pub struct HostViewState {
     pub display_zeros: Option<bool>,
     pub view_mode: Option<String>,
-    /// Zoom FACTOR (1.0 = 100%), matching `Calcula.getZoom()`.
+    /// Zoom as a REAL PERCENT in [10, 400] (100 = 100%), matching
+    /// `Calcula.getZoom()`. Wave 4 healed the factor/percent split-brain:
+    /// callers must send the percent the UI shows, not the render factor.
+    /// An out-of-range value is IGNORED (the engine default of 100 stands)
+    /// rather than poisoning the getters with a nonsense zoom.
     pub zoom: Option<f64>,
     pub display_headings: Option<bool>,
+    /// Whether the grid shows formula text instead of values (Ctrl+`).
+    pub display_formulas: Option<bool>,
 }
 
 /// Merge the frontend-owned view state onto a host state built from AppState.
@@ -299,15 +305,23 @@ pub fn apply_view_state(
         host.display_zeros = v;
     }
     if let Some(v) = &view.view_mode {
-        host.view_mode = v.clone();
+        if script_engine::types::VALID_VIEW_MODES.contains(&v.as_str()) {
+            host.view_mode = v.clone();
+        }
     }
     if let Some(v) = view.zoom {
-        if v.is_finite() && v > 0.0 {
+        if v.is_finite()
+            && (script_engine::types::ZOOM_MIN_PERCENT..=script_engine::types::ZOOM_MAX_PERCENT)
+                .contains(&v)
+        {
             host.zoom = v;
         }
     }
     if let Some(v) = view.display_headings {
         host.display_headings = v;
+    }
+    if let Some(v) = view.display_formulas {
+        host.display_formulas = v;
     }
 }
 

@@ -5,10 +5,11 @@
 //! read-write control properties (screenUpdating, statusBar), and
 //! deferred action methods (calculate, goto, statusBar).
 
-use rquickjs::{Function, Object};
+use rquickjs::{Ctx, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ops::resolve_opt_sheet_key;
 use crate::types::{DeferredAction, ScriptContext};
 
 /// Register the `Calcula.application` sub-object with Application-level API.
@@ -166,26 +167,90 @@ pub fn register_application_ops<'js>(
             .map_err(|e| format!("Failed to set application.calculate: {}", e))?;
     }
 
-    // goto(row, col, sheetIndex?) - navigate to a cell after script completes
+    // goto(row, col, sheet?) - navigate to a cell after script completes.
+    // goto(address)         - A1 form: "B3", "A1:C5", "Sheet2!A1:B2",
+    //                         "'My Sheet'!A1". A range address selects the
+    //                         WHOLE range (endRow/endCol on the action); the
+    //                         sheet comes from the address prefix (or the
+    //                         active sheet without one). Extra arguments after
+    //                         an address THROW instead of being ignored.
+    // `sheet` is a 0-based index or a sheet name; a miss THROWS (ops/mod.rs).
     {
         let sc = shared_ctx.clone();
         let func = Function::new(
             ctx.clone(),
-            move |row: i32, col: i32, sheet_index: rquickjs::function::Opt<i32>| {
+            move |ctx: Ctx<'js>,
+                  first: Value<'js>,
+                  col: rquickjs::function::Opt<Value<'js>>,
+                  sheet: rquickjs::function::Opt<Value<'js>>|
+                  -> rquickjs::Result<()> {
                 let ctx_ref = sc.borrow();
-                let si = match sheet_index.0 {
-                    Some(i) if i >= 0 => i as usize,
-                    _ => ctx_ref.active_sheet,
-                };
+                if let Some(s) = first.as_string() {
+                    // A1 form.
+                    let address = s.to_string()?;
+                    let extra_arg_given = col
+                        .0
+                        .as_ref()
+                        .map(|v| !v.is_undefined() && !v.is_null())
+                        .unwrap_or(false)
+                        || sheet
+                            .0
+                            .as_ref()
+                            .map(|v| !v.is_undefined() && !v.is_null())
+                            .unwrap_or(false);
+                    if extra_arg_given {
+                        return Err(rquickjs::Exception::throw_message(
+                            &ctx,
+                            "goto(address) takes no additional arguments - put the sheet in the address prefix (e.g. \"Sheet2!A1:B5\")",
+                        ));
+                    }
+                    let (b, target_sheet) = crate::ops::canonical_model::parse_a1(
+                        &address,
+                        &ctx_ref.sheet_names,
+                        ctx_ref.active_sheet,
+                    )
+                    .map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))?;
+                    let is_single = b.start_row == b.end_row && b.start_col == b.end_col;
+                    ctx_ref
+                        .deferred_actions
+                        .borrow_mut()
+                        .push(DeferredAction::Goto {
+                            row: b.start_row,
+                            col: b.start_col,
+                            end_row: if is_single { None } else { Some(b.end_row) },
+                            end_col: if is_single { None } else { Some(b.end_col) },
+                            sheet_index: target_sheet,
+                            select: true,
+                        });
+                    return Ok(());
+                }
+
+                // Numeric form: goto(row, col, sheet?).
+                let row = first.as_number().ok_or_else(|| {
+                    rquickjs::Exception::throw_message(
+                        &ctx,
+                        "goto expects (row, col, sheet?) or an A1 address string",
+                    )
+                })?;
+                let col_num = col.0.as_ref().and_then(|v| v.as_number()).ok_or_else(|| {
+                    rquickjs::Exception::throw_message(
+                        &ctx,
+                        "goto expects (row, col, sheet?) or an A1 address string",
+                    )
+                })?;
+                let si = resolve_opt_sheet_key(&ctx, &ctx_ref, sheet.0.as_ref())?;
                 ctx_ref
                     .deferred_actions
                     .borrow_mut()
                     .push(DeferredAction::Goto {
-                        row: row.max(0) as u32,
-                        col: col.max(0) as u32,
+                        row: (row as i64).max(0) as u32,
+                        col: (col_num as i64).max(0) as u32,
+                        end_row: None,
+                        end_col: None,
                         sheet_index: si,
                         select: true,
                     });
+                Ok(())
             },
         )
         .map_err(|e| format!("Failed to create application.goto: {}", e))?;

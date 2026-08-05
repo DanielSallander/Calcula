@@ -18,48 +18,76 @@ use rquickjs::{Array, Ctx, Function, Object, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use engine::cell::Cell;
 use engine::coord::{col_to_index, index_to_col};
 
-use crate::types::{
-    cell_value_to_string, string_to_cell_value, write_is_effective, ScriptContext,
-};
+use crate::types::{cell_value_to_string, ScriptContext};
 
 /// An inclusive 0-based cell box, the geometry behind a Range.
 #[derive(Clone, Copy)]
-struct Box {
-    start_row: u32,
-    start_col: u32,
-    end_row: u32,
-    end_col: u32,
+pub(crate) struct Box {
+    pub(crate) start_row: u32,
+    pub(crate) start_col: u32,
+    pub(crate) end_row: u32,
+    pub(crate) end_col: u32,
 }
 
-/// Parse an A1 address ("A1", "A1:B5", "$A$1:$B$5"). A leading "Sheet!" prefix
-/// is ignored — a range built from a sheet context is bound to THAT sheet
-/// (mirrors the worker's parseA1). Returns an error string on a malformed ref.
-fn parse_a1(address: &str) -> Result<Box, String> {
+/// Parse an A1 address ("A1", "A1:B5", "$A$1:$B$5", "Sheet2!A1",
+/// "'My Sheet'!A1:B5") against the sheet the range is being built FROM.
+///
+/// A leading "Sheet!" prefix is resolved, never silently dropped (dropping it
+/// sent a `sheet("Alpha").range("Beta!A1")` write to Alpha — the WRONG sheet):
+/// - prefix naming the bound sheet: fine, stays on the bound sheet;
+/// - prefix naming ANOTHER existing sheet: the range REBINDS to that sheet
+///   (`sheet.range()` returns a fresh Range carrying its own sheet index, so
+///   the call shape allows it);
+/// - prefix naming NO sheet: error listing the workbook's sheet names.
+///
+/// Returns (box, resolved sheet index), or an error string on a malformed ref.
+/// pub(crate): the A1 form of `application.goto` (ops/application.rs) reuses
+/// this parser so goto and Range addresses can never diverge.
+pub(crate) fn parse_a1(
+    address: &str,
+    sheet_names: &[String],
+    bound_sheet: usize,
+) -> Result<(Box, usize), String> {
     let mut work = address.trim();
+    let mut resolved_sheet = bound_sheet;
     if let Some(bang) = work.find('!') {
-        work = &work[bang + 1..];
+        let (raw_prefix, rest) = work.split_at(bang);
+        // Unquote 'Sheet Name' (Excel quoting; '' escapes a literal quote).
+        let trimmed = raw_prefix.trim();
+        let name = if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+            trimmed[1..trimmed.len() - 1].replace("''", "'")
+        } else {
+            trimmed.to_string()
+        };
+        resolved_sheet = crate::ops::resolve_sheet_name(sheet_names, &name)?;
+        work = &rest[1..];
     }
     let cleaned: String = work.chars().filter(|c| *c != '$').collect();
     let parts: Vec<&str> = cleaned.split(':').collect();
     let (sr, sc) = parse_ref(parts[0])?;
     if parts.len() == 1 {
-        return Ok(Box {
-            start_row: sr,
-            start_col: sc,
-            end_row: sr,
-            end_col: sc,
-        });
+        return Ok((
+            Box {
+                start_row: sr,
+                start_col: sc,
+                end_row: sr,
+                end_col: sc,
+            },
+            resolved_sheet,
+        ));
     }
     let (er, ec) = parse_ref(parts[1])?;
-    Ok(Box {
-        start_row: sr.min(er),
-        start_col: sc.min(ec),
-        end_row: sr.max(er),
-        end_col: sc.max(ec),
-    })
+    Ok((
+        Box {
+            start_row: sr.min(er),
+            start_col: sc.min(ec),
+            end_row: sr.max(er),
+            end_col: sc.max(ec),
+        },
+        resolved_sheet,
+    ))
 }
 
 /// Parse a single A1 cell reference ("A1", "AA100") to 0-based (row, col).
@@ -237,43 +265,240 @@ fn make_range<'js>(
         obj.set("getValues", f)?;
     }
 
-    // setValue(value) -> write the top-left cell.
+    // setValue(value) -> write the top-left cell. TYPED like the flat
+    // setCellValue op: numbers land numeric, booleans boolean, null/undefined
+    // clears, strings coerce like a keystroke — the same contract the worker
+    // realm's ScriptRange.setValue promises, so `range.setValue(42)` means the
+    // NUMBER 42 in both realms.
     {
         let sc = shared_ctx.clone();
-        let f = Function::new(ctx.clone(), move |value: String| {
-            let mut ctx = sc.borrow_mut();
-            write_cell(&mut ctx, sheet_index, b.start_row, b.start_col, &value);
-        })?;
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<()> {
+                let cell_value = crate::ops::cells::js_value_to_cell_value(&ctx, &value)?;
+                let mut ctx_ref = sc.borrow_mut();
+                if crate::ops::cells::write_typed_cell(
+                    &mut ctx_ref,
+                    sheet_index,
+                    b.start_row,
+                    b.start_col,
+                    cell_value,
+                ) {
+                    *ctx_ref.cells_modified.borrow_mut() += 1;
+                }
+                Ok(())
+            },
+        )?;
         obj.set("setValue", f)?;
     }
 
     // setValues(values) -> write each cell, clamped to rowCount/colCount.
+    // Typed like setValue; the whole payload is converted BEFORE any cell is
+    // written, so a malformed row throws without a partial write.
     {
         let sc = shared_ctx.clone();
-        let f = Function::new(ctx.clone(), move |values: Vec<Vec<String>>| {
-            let mut ctx = sc.borrow_mut();
-            for (ri, row) in values.iter().enumerate() {
-                if ri as u32 >= row_count {
-                    break;
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, values: Value<'js>| -> rquickjs::Result<()> {
+                let arr = values.as_array().ok_or_else(|| {
+                    rquickjs::Exception::throw_message(
+                        &ctx,
+                        "setValues expects a 2D array (an array of row arrays)",
+                    )
+                })?;
+                let mut typed: Vec<Vec<engine::cell::CellValue>> = Vec::new();
+                for row_val in arr.iter::<Value<'_>>() {
+                    let row_val = row_val?;
+                    let row_arr = row_val.as_array().ok_or_else(|| {
+                        rquickjs::Exception::throw_message(
+                            &ctx,
+                            "setValues expects a 2D array (an array of row arrays)",
+                        )
+                    })?;
+                    let mut out_row: Vec<engine::cell::CellValue> = Vec::new();
+                    for cell_val in row_arr.iter::<Value<'_>>() {
+                        out_row
+                            .push(crate::ops::cells::js_value_to_cell_value(&ctx, &cell_val?)?);
+                    }
+                    typed.push(out_row);
                 }
-                for (ci, val) in row.iter().enumerate() {
-                    if ci as u32 >= col_count {
+                let mut ctx_ref = sc.borrow_mut();
+                let mut modified: u32 = 0;
+                for (ri, row) in typed.into_iter().enumerate() {
+                    if ri as u32 >= row_count {
                         break;
                     }
-                    write_cell(
-                        &mut ctx,
-                        sheet_index,
-                        b.start_row + ri as u32,
-                        b.start_col + ci as u32,
-                        val,
-                    );
+                    for (ci, cell_value) in row.into_iter().enumerate() {
+                        if ci as u32 >= col_count {
+                            break;
+                        }
+                        if crate::ops::cells::write_typed_cell(
+                            &mut ctx_ref,
+                            sheet_index,
+                            b.start_row + ri as u32,
+                            b.start_col + ci as u32,
+                            cell_value,
+                        ) {
+                            modified += 1;
+                        }
+                    }
                 }
-            }
-        })?;
+                *ctx_ref.cells_modified.borrow_mut() += modified;
+                Ok(())
+            },
+        )?;
         obj.set("setValues", f)?;
     }
 
+    // end(direction) -> single-cell Range at the Ctrl+Arrow target from this
+    // range's TOP-LEFT cell (VBA Range.End operates on the range's first
+    // cell). Direction is "up" | "down" | "left" | "right"; anything else
+    // throws. Bounds are the full Excel grid, matching the keyboard handler.
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, direction: String| -> rquickjs::Result<Object<'js>> {
+                let dir = engine::navigation::EdgeDirection::parse(&direction).ok_or_else(|| {
+                    throw(
+                        &ctx,
+                        format!(
+                            "Invalid direction \"{}\": expected \"up\", \"down\", \"left\", or \"right\"",
+                            direction
+                        ),
+                    )
+                })?;
+                let (target_row, target_col) = {
+                    let ctx_ref = sc.borrow();
+                    let grid = ctx_ref.grids.get(sheet_index).ok_or_else(|| {
+                        throw(&ctx, format!("Sheet index {} is out of range", sheet_index))
+                    })?;
+                    engine::navigation::range_edge(
+                        grid,
+                        b.start_row,
+                        b.start_col,
+                        dir,
+                        engine::navigation::EXCEL_MAX_ROW_INDEX,
+                        engine::navigation::EXCEL_MAX_COL_INDEX,
+                    )
+                };
+                let cell = Box {
+                    start_row: target_row,
+                    start_col: target_col,
+                    end_row: target_row,
+                    end_col: target_col,
+                };
+                make_range(&ctx, sc.clone(), sheet_index, cell)
+            },
+        )?;
+        obj.set("end", f)?;
+    }
+
+    // contains(row, col) -> true when the 0-based cell lies inside this range.
+    {
+        let f = Function::new(ctx.clone(), move |row: i32, col: i32| -> bool {
+            row >= 0
+                && col >= 0
+                && (row as u32) >= b.start_row
+                && (row as u32) <= b.end_row
+                && (col as u32) >= b.start_col
+                && (col as u32) <= b.end_col
+        })?;
+        obj.set("contains", f)?;
+    }
+
+    // intersect(other) -> the overlapping Range, or null when disjoint.
+    // Pure coordinate math: max of the starts, min of the ends. The result is
+    // bound to THIS range's sheet.
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, other: Value<'js>| -> rquickjs::Result<Value<'js>> {
+                let o = box_from_range_value(&ctx, &other, "intersect")?;
+                let start_row = b.start_row.max(o.start_row);
+                let start_col = b.start_col.max(o.start_col);
+                let end_row = b.end_row.min(o.end_row);
+                let end_col = b.end_col.min(o.end_col);
+                if start_row > end_row || start_col > end_col {
+                    return Ok(Value::new_null(ctx.clone()));
+                }
+                let range = make_range(
+                    &ctx,
+                    sc.clone(),
+                    sheet_index,
+                    Box {
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                    },
+                )?;
+                Ok(range.into_value())
+            },
+        )?;
+        obj.set("intersect", f)?;
+    }
+
+    // boundingUnion(other) -> the smallest single rectangle covering both
+    // ranges (min of the starts, max of the ends). Named honestly: this is
+    // NOT VBA Union's multi-area result — gaps between the inputs are
+    // included. Bound to THIS range's sheet.
+    {
+        let sc = shared_ctx.clone();
+        let f = Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, other: Value<'js>| -> rquickjs::Result<Object<'js>> {
+                let o = box_from_range_value(&ctx, &other, "boundingUnion")?;
+                make_range(
+                    &ctx,
+                    sc.clone(),
+                    sheet_index,
+                    Box {
+                        start_row: b.start_row.min(o.start_row),
+                        start_col: b.start_col.min(o.start_col),
+                        end_row: b.end_row.max(o.end_row),
+                        end_col: b.end_col.max(o.end_col),
+                    },
+                )
+            },
+        )?;
+        obj.set("boundingUnion", f)?;
+    }
+
     Ok(obj)
+}
+
+/// Read another Range's geometry off a JS value: any object exposing numeric
+/// `startRow`/`startCol`/`endRow`/`endCol` (every canonical Range does).
+fn box_from_range_value<'js>(
+    ctx: &Ctx<'js>,
+    value: &Value<'js>,
+    method: &str,
+) -> rquickjs::Result<Box> {
+    let err = || {
+        throw(
+            ctx,
+            format!(
+                "{} expects a Range (an object with startRow/startCol/endRow/endCol)",
+                method
+            ),
+        )
+    };
+    let obj = value.as_object().ok_or_else(err)?;
+    let start_row: Option<u32> = obj.get("startRow").ok();
+    let start_col: Option<u32> = obj.get("startCol").ok();
+    let end_row: Option<u32> = obj.get("endRow").ok();
+    let end_col: Option<u32> = obj.get("endCol").ok();
+    match (start_row, start_col, end_row, end_col) {
+        (Some(start_row), Some(start_col), Some(end_row), Some(end_col)) => Ok(Box {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        }),
+        _ => Err(err()),
+    }
 }
 
 /// Read a cell's display value from a grid (empty string if absent).
@@ -285,27 +510,9 @@ fn read_cell(ctx: &ScriptContext, sheet_index: usize, row: u32, col: u32) -> Str
         .unwrap_or_default()
 }
 
-/// Write a value into a grid cell, preserving the existing style index and
-/// bumping the cells-modified counter for EFFECTIVE changes only (mirrors the
-/// flat setCellValue op, so the audit number means the same thing on both).
-fn write_cell(ctx: &mut ScriptContext, sheet_index: usize, row: u32, col: u32, value: &str) {
-    if let Some(grid) = ctx.grids.get_mut(sheet_index) {
-        let new_value = string_to_cell_value(value);
-        let existing = grid.get_cell(row, col);
-        let style_index = existing.map(|c| c.style_index).unwrap_or(0);
-        let effective = write_is_effective(existing, &new_value);
-        let cell = Cell {
-            ast: None,
-            value: new_value,
-            style_index,
-            rich_text: None,
-        };
-        grid.set_cell(row, col, cell);
-        if effective {
-            *ctx.cells_modified.borrow_mut() += 1;
-        }
-    }
-}
+// (Cell writes go through crate::ops::cells::write_typed_cell — the ONE typed
+// write shared with the flat setCellValue/setRange ops, so style preservation
+// and effective-change counting mean the same thing on every surface.)
 
 // ---------------------------------------------------------------------------
 // Sheet
@@ -329,14 +536,19 @@ fn make_sheet<'js>(
     obj.set("index", index as u32)?;
     obj.set("name", name)?;
 
-    // range(address) -> a Range on THIS sheet (A1 parsed; "Sheet!" prefix ignored).
+    // range(address) -> a Range on THIS sheet. A "Sheet!" prefix must resolve:
+    // it stays here if it names THIS sheet, REBINDS the range if it names
+    // another existing sheet, and throws (listing the sheet names) otherwise.
     {
         let sc = shared_ctx.clone();
         let f = Function::new(
             ctx.clone(),
             move |ctx: Ctx<'js>, address: String| -> rquickjs::Result<Object<'js>> {
-                let b = parse_a1(&address).map_err(|e| throw(&ctx, e))?;
-                make_range(&ctx, sc.clone(), index, b)
+                let (b, target) = {
+                    let ctx_ref = sc.borrow();
+                    parse_a1(&address, &ctx_ref.sheet_names, index).map_err(|e| throw(&ctx, e))?
+                };
+                make_range(&ctx, sc.clone(), target, b)
             },
         )?;
         obj.set("range", f)?;
@@ -665,6 +877,248 @@ mod tests {
         "#;
         let (out, _grids) = run_logged(src, grids, registry, names, 0);
         assert_eq!(out, "onbeta");
+    }
+
+    #[test]
+    fn range_prefix_naming_the_bound_sheet_stays_bound() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            Calcula.workbook.sheet("Alpha").range("Alpha!A1").setValue("here");
+            Calcula.log(Calcula.workbook.sheet(0).cell(0,0).getValue());
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "here");
+        assert!(grids[1].get_cell(0, 0).is_none(), "Beta must be untouched");
+    }
+
+    #[test]
+    fn range_prefix_naming_another_sheet_rebinds() {
+        let (grids, registry, names) = two_sheets();
+        // Built FROM Alpha, but the address names Beta: the write must land on
+        // Beta — silently dropping the prefix put it on Alpha.
+        let src = r#"
+            var r = Calcula.workbook.sheet("Alpha").range("Beta!A1:B1");
+            r.setValues([["b1","b2"]]);
+            Calcula.log(r.address);
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "A1:B1");
+        assert!(grids[0].get_cell(0, 0).is_none(), "Alpha must be untouched");
+        assert_eq!(
+            cell_value_to_string(&grids[1].get_cell(0, 0).unwrap().value),
+            "b1"
+        );
+        assert_eq!(
+            cell_value_to_string(&grids[1].get_cell(0, 1).unwrap().value),
+            "b2"
+        );
+    }
+
+    #[test]
+    fn canonical_range_set_value_writes_typed() {
+        let (mut grids, registry, names) = two_sheets();
+        seed(&mut grids[0], 0, 2, "old"); // A cell for null to clear.
+        let src = r#"
+            var s = Calcula.workbook.sheet(0);
+            s.range("A1").setValue(42.5);
+            s.range("B1").setValue(true);
+            s.range("C1").setValue(null);
+            s.range("D1").setValue("7");
+            Calcula.log("done");
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "done");
+        assert_eq!(grids[0].get_cell(0, 0).unwrap().value, CellValue::Number(42.5));
+        assert_eq!(grids[0].get_cell(0, 1).unwrap().value, CellValue::Boolean(true));
+        // null cleared the seeded cell.
+        assert!(
+            grids[0].get_cell(0, 2).is_none()
+                || grids[0].get_cell(0, 2).unwrap().value == CellValue::Empty
+        );
+        // Strings keep keystroke coercion: "7" lands numeric.
+        assert_eq!(grids[0].get_cell(0, 3).unwrap().value, CellValue::Number(7.0));
+    }
+
+    #[test]
+    fn canonical_range_set_values_writes_typed_grid() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            Calcula.workbook.sheet(0).range("A1:B2")
+                .setValues([[1, true], ["x", null]]);
+            Calcula.log("done");
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "done");
+        assert_eq!(grids[0].get_cell(0, 0).unwrap().value, CellValue::Number(1.0));
+        assert_eq!(grids[0].get_cell(0, 1).unwrap().value, CellValue::Boolean(true));
+        assert_eq!(
+            grids[0].get_cell(1, 0).unwrap().value,
+            CellValue::Text("x".to_string())
+        );
+        assert!(
+            grids[0].get_cell(1, 1).is_none()
+                || grids[0].get_cell(1, 1).unwrap().value == CellValue::Empty
+        );
+    }
+
+    #[test]
+    fn canonical_range_set_value_rejects_nan_and_objects() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var s = Calcula.workbook.sheet(0);
+            var msgs = [];
+            try { s.range("A1").setValue(0/0); msgs.push("nan-ok"); }
+            catch (e) { msgs.push("nan-threw"); }
+            try { s.range("A1").setValue({}); msgs.push("obj-ok"); }
+            catch (e) { msgs.push("obj-threw"); }
+            Calcula.log(msgs.join(","));
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "nan-threw,obj-threw");
+        assert!(grids[0].get_cell(0, 0).is_none(), "no write may have landed");
+    }
+
+    #[test]
+    fn canonical_range_set_values_malformed_throws_before_any_write() {
+        let (grids, registry, names) = two_sheets();
+        // Second row is not an array: the whole call must throw with NO cell
+        // written (conversion happens before the first write).
+        let src = r#"
+            try {
+                Calcula.workbook.sheet(0).range("A1:B2").setValues([["a","b"], "nope"]);
+                Calcula.log("no-throw");
+            } catch (e) {
+                Calcula.log("threw");
+            }
+        "#;
+        let (out, grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "threw");
+        assert!(grids[0].get_cell(0, 0).is_none(), "row 1 must not be written");
+    }
+
+    #[test]
+    fn range_prefix_supports_quoted_sheet_names() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            Calcula.workbook.sheet("Alpha").range("'Beta'!B2").setValue("q");
+            Calcula.log(Calcula.workbook.sheet("Beta").cell(1,1).getValue());
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "q");
+    }
+
+    #[test]
+    fn range_prefix_naming_no_sheet_throws_listing_names() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            try {
+                Calcula.workbook.sheet(0).range("Nope!A1");
+                Calcula.log("no-throw");
+            } catch (e) {
+                Calcula.log("threw:" + e.message);
+            }
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert!(out.starts_with("threw:"), "{out}");
+        assert!(out.contains("No sheet named \"Nope\""), "{out}");
+        assert!(out.contains("\"Alpha\""), "{out}");
+        assert!(out.contains("\"Beta\""), "{out}");
+    }
+
+    #[test]
+    fn range_end_navigates_ctrl_arrow_style() {
+        let (mut grids, registry, names) = two_sheets();
+        // Data block A1:A4 on Alpha.
+        for r in 0..4 {
+            seed(&mut grids[0], r, 0, "x");
+        }
+        let src = r#"
+            var s = Calcula.workbook.sheet(0);
+            Calcula.log(JSON.stringify([
+                s.range("A1").end("down").address,      // block end
+                s.range("A10").end("up").address,       // gap jump back to data
+                s.range("A2:C9").end("up").address,     // multi-cell: from TOP-LEFT
+                s.range("B1").end("down").address       // empty column -> grid edge
+            ]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, r#"["A4","A4","A1","B1048576"]"#);
+    }
+
+    #[test]
+    fn range_end_rejects_a_bad_direction() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            try {
+                Calcula.workbook.sheet(0).range("A1").end("xlUp");
+                Calcula.log("no-throw");
+            } catch (e) {
+                Calcula.log("threw:" + (e.message.indexOf("xlUp") >= 0));
+            }
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "threw:true");
+    }
+
+    #[test]
+    fn range_contains_checks_inclusive_bounds() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("B2:C4"); // rows 1..3, cols 1..2
+            Calcula.log(JSON.stringify([
+                r.contains(1, 1), r.contains(3, 2),  // corners
+                r.contains(2, 2),                     // inside
+                r.contains(0, 1), r.contains(4, 1),  // above / below
+                r.contains(1, 3),                     // right of
+                r.contains(-1, -1)                    // negative
+            ]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "[true,true,true,false,false,false,false]");
+    }
+
+    #[test]
+    fn range_intersect_is_max_starts_min_ends_or_null() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var s = Calcula.workbook.sheet(0);
+            var a = s.range("A1:C3");
+            var overlap = a.intersect(s.range("B2:D4"));
+            var contained = a.intersect(s.range("B2"));
+            var disjoint = a.intersect(s.range("E5:F6"));
+            var touchingIsDisjoint = a.intersect(s.range("D1:E3"));
+            Calcula.log(JSON.stringify([
+                overlap.address, contained.address, disjoint, touchingIsDisjoint
+            ]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, r#"["B2:C3","B2",null,null]"#);
+    }
+
+    #[test]
+    fn range_bounding_union_covers_both_including_the_gap() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var s = Calcula.workbook.sheet(0);
+            var u = s.range("A1:B2").boundingUnion(s.range("D4:E5"));
+            Calcula.log(JSON.stringify([u.address, u.rowCount, u.colCount]));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, r#"["A1:E5",5,5]"#);
+    }
+
+    #[test]
+    fn range_algebra_rejects_a_non_range_argument() {
+        let (grids, registry, names) = two_sheets();
+        let src = r#"
+            var r = Calcula.workbook.sheet(0).range("A1:B2");
+            var msgs = [];
+            try { r.intersect(42); msgs.push("num-ok"); } catch (e) { msgs.push("num-threw"); }
+            try { r.boundingUnion({}); msgs.push("obj-ok"); } catch (e) { msgs.push("obj-threw"); }
+            Calcula.log(msgs.join(","));
+        "#;
+        let (out, _grids) = run_logged(src, grids, registry, names, 0);
+        assert_eq!(out, "num-threw,obj-threw");
     }
 
     #[test]

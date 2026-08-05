@@ -81,6 +81,42 @@ pub fn apply_named_style(
     rows: Vec<u32>,
     cols: Vec<u32>,
 ) -> Result<FormattingResult, String> {
+    apply_named_style_impl(&state, &file_state, &name, &rows, &cols)
+}
+
+/// Apply a named style to a rectangular range (inclusive bounds), under ONE
+/// undo transaction. Wave-4 companion to `apply_named_style`: the script
+/// surface addresses ranges as rects, not row/col lists, and expanding a big
+/// rect into two vectors on the JS side just to have Rust cross-product them
+/// back is wasted IPC. Bounds are normalized (start/end may arrive swapped).
+#[tauri::command]
+pub fn apply_named_style_range(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    name: String,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<FormattingResult, String> {
+    let (r1, r2) = (start_row.min(end_row), start_row.max(end_row));
+    let (c1, c2) = (start_col.min(end_col), start_col.max(end_col));
+    let rows: Vec<u32> = (r1..=r2).collect();
+    let cols: Vec<u32> = (c1..=c2).collect();
+    apply_named_style_impl(&state, &file_state, &name, &rows, &cols)
+}
+
+/// Shared body of `apply_named_style` / `apply_named_style_range`: applies the
+/// named style to the CROSS PRODUCT of `rows` x `cols` on the active sheet, in
+/// a single undo transaction. Takes plain references so it is unit-testable
+/// with `create_app_state()` (same pattern as off_sheet_structural_edit).
+pub(crate) fn apply_named_style_impl(
+    state: &AppState,
+    file_state: &FileState,
+    name: &str,
+    rows: &[u32],
+    cols: &[u32],
+) -> Result<FormattingResult, String> {
     // Sheet protection. Applying a named style rewrites the target cells'
     // style_index wholesale, so once `CellStyle.locked` is authoritative this is
     // an unlock vector too — the built-in "Normal" style carries locked:true,
@@ -88,18 +124,18 @@ pub fn apply_named_style(
     {
         let active_sheet = *state.active_sheet.lock().unwrap();
         crate::protection::check_sheet_protection_cells(
-            &state,
+            state,
             active_sheet,
             rows.iter().flat_map(|r| cols.iter().map(move |c| (*r, *c))),
         )?;
         // Second protection axis, same as apply_formatting.
-        crate::protection::check_sheet_action(&state, active_sheet, "formatCells", "apply a named style")?;
+        crate::protection::check_sheet_action(state, active_sheet, "formatCells", "apply a named style")?;
     }
 
     // Look up the named style
     let style_index = {
         let named = state.named_styles.lock().unwrap();
-        match named.get(&name) {
+        match named.get(name) {
             Some(ns) => ns.style_index,
             None => return Err(format!("Named style '{}' not found", name)),
         }
@@ -118,8 +154,8 @@ pub fn apply_named_style(
     let cell_count = rows.len() * cols.len();
     undo_stack.begin_transaction(format!("Apply style '{}' to {} cells", name, cell_count));
 
-    for &row in &rows {
-        for &col in &cols {
+    for &row in rows {
+        for &col in cols {
             // Record previous state for undo
             let previous_cell = grid.get_cell(row, col).cloned();
 
@@ -218,6 +254,82 @@ pub fn apply_named_style(
         cells: updated_cells,
         styles: updated_styles,
     })
+}
+
+// ============================================================================
+// Tests — the rect entry point (Wave 4)
+// ============================================================================
+
+#[cfg(test)]
+mod rect_apply_tests {
+    use super::apply_named_style_impl;
+    use crate::persistence::FileState;
+
+    /// apply_named_style_range's contract: every cell of the rect gets the
+    /// style, and the whole rect is ONE undo transaction (a single Ctrl+Z
+    /// reverts all of it).
+    #[test]
+    fn rect_apply_is_a_single_undo_step() {
+        let state = crate::create_app_state();
+        let file_state = FileState::default();
+        // The 3x2 rect rows 1..=3 x cols 0..=1, exactly as the range command
+        // expands it.
+        let rows: Vec<u32> = (1..=3).collect();
+        let cols: Vec<u32> = (0..=1).collect();
+        let result =
+            apply_named_style_impl(&state, &file_state, "Good", &rows, &cols).expect("apply");
+        assert_eq!(result.cells.len(), 6, "every cell of the rect is reported");
+
+        let good_index = state
+            .named_styles
+            .lock()
+            .unwrap()
+            .get("Good")
+            .expect("built-in style")
+            .style_index;
+        {
+            let grid = state.grid.lock().unwrap();
+            for r in 1..=3u32 {
+                for c in 0..=1u32 {
+                    assert_eq!(
+                        grid.get_cell(r, c).map(|cell| cell.style_index),
+                        Some(good_index),
+                        "({}, {}) must carry the named style",
+                        r,
+                        c
+                    );
+                }
+            }
+        }
+        assert!(
+            *file_state.is_modified.lock().unwrap(),
+            "applying a style dirties the workbook"
+        );
+
+        let mut undo = state.undo_stack.lock().unwrap();
+        assert_eq!(undo.undo_depth(), 1, "ONE undoable action for the whole rect");
+        let transaction = undo.pop_undo().expect("a transaction");
+        assert_eq!(
+            transaction.changes.len(),
+            6,
+            "the single transaction covers all six cells"
+        );
+    }
+
+    /// An unknown style name refuses cleanly: no cells touched, nothing on the
+    /// undo stack. (The lookup happens after the transaction would have been
+    /// pointless — the error path must not leak a dangling transaction.)
+    #[test]
+    fn rect_apply_of_an_unknown_style_changes_nothing() {
+        let state = crate::create_app_state();
+        let file_state = FileState::default();
+        let err = apply_named_style_impl(&state, &file_state, "NoSuchStyle", &[0, 1], &[0])
+            .expect_err("must refuse");
+        assert!(err.contains("not found"), "got: {}", err);
+        assert_eq!(state.undo_stack.lock().unwrap().undo_depth(), 0);
+        assert!(state.grid.lock().unwrap().get_cell(0, 0).is_none());
+        assert!(!*file_state.is_modified.lock().unwrap());
+    }
 }
 
 // ============================================================================

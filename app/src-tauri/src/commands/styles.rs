@@ -195,9 +195,14 @@ pub fn apply_formatting(
     let mut updated_styles = Vec::new();
     let mut used_style_indices = std::collections::HashSet::new();
 
-    // Begin undo transaction for batch formatting
+    // Begin undo transaction for batch formatting — unless the frontend
+    // already opened one (e.g. a script's withScriptUndoBatch wrapping a
+    // multi-key setRangeFormat decomposition into ONE undo step).
     let cell_count = params.rows.len() * params.cols.len();
-    undo_stack.begin_transaction(format!("Format {} cells", cell_count));
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction(format!("Format {} cells", cell_count));
+    }
 
     // Optimization: cache computed style index per (base style, needs-explicit)
     // pair. When many cells share the same base style (common case: formatting a
@@ -444,8 +449,11 @@ pub fn apply_formatting(
         }
     }
 
-    // Commit undo transaction
-    undo_stack.commit_transaction();
+    // Commit undo transaction (only the one this command opened — an outer
+    // frontend transaction is committed by its owner).
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
 
     // Collect only the styles that were used/created (not the entire registry)
     let theme = state.theme.lock().unwrap();
@@ -844,24 +852,32 @@ fn is_custom_format_string(s: &str) -> bool {
         || s.contains("ss")
 }
 
-/// Parse a text rotation string.
+/// Parse a text rotation string into the engine's TextRotation.
+///
+/// The FULL vocabulary the app itself emits round-trips here:
+/// - `StyleData::from_cell_style` (api_types.rs) emits "none" | "rotate90" |
+///   "rotate270" | "custom:N", and the FormatCells dialog + script surface
+///   send those same strings back — "rotate90"/"rotate270"/"custom:N" used to
+///   fall through to the integer parser, fail, and silently apply None.
+/// - Bare integer degrees ("45", "-30") and the legacy aliases
+///   ("0"/"90"/"270"/"-90"/"up"/"down") are accepted too; angles clamp to
+///   -90..90, and a clamped 0/90/-90 collapses to the named variant so the
+///   emitted form stays canonical.
 fn parse_text_rotation(rotation: &str) -> TextRotation {
-    match rotation.to_lowercase().as_str() {
+    let lower = rotation.trim().to_lowercase();
+    match lower.as_str() {
         "none" | "0" => TextRotation::None,
-        "90" | "up" => TextRotation::Rotate90,
-        "270" | "-90" | "down" => TextRotation::Rotate270,
+        "rotate90" | "90" | "up" => TextRotation::Rotate90,
+        "rotate270" | "270" | "-90" | "down" => TextRotation::Rotate270,
         _ => {
-            // Try to parse as a number
-            if let Ok(angle) = rotation.parse::<i16>() {
+            let angle_str = lower.strip_prefix("custom:").unwrap_or(&lower).trim();
+            if let Ok(angle) = angle_str.parse::<i16>() {
                 let clamped = angle.clamp(-90, 90);
-                if clamped == 0 {
-                    TextRotation::None
-                } else if clamped == 90 {
-                    TextRotation::Rotate90
-                } else if clamped == -90 {
-                    TextRotation::Rotate270
-                } else {
-                    TextRotation::Custom(clamped)
+                match clamped {
+                    0 => TextRotation::None,
+                    90 => TextRotation::Rotate90,
+                    -90 => TextRotation::Rotate270,
+                    other => TextRotation::Custom(other),
                 }
             } else {
                 TextRotation::None
@@ -1131,7 +1147,12 @@ pub fn apply_border_preset(
     let no_border = BorderStyle::default();
 
     let cell_count = ((end_row - start_row + 1) * (end_col - start_col + 1)) as usize;
-    undo_stack.begin_transaction(format!("Border preset '{}' on {} cells", preset, cell_count));
+    // Join an already-open frontend transaction (script undo batching) instead
+    // of opening a nested one.
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction(format!("Border preset '{}' on {} cells", preset, cell_count));
+    }
 
     let mut updated_cells = Vec::new();
 
@@ -1267,7 +1288,9 @@ pub fn apply_border_preset(
         }
     }
 
-    undo_stack.commit_transaction();
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
 
     let mut updated_styles = Vec::new();
     let theme = state.theme.lock().unwrap();
@@ -1286,4 +1309,94 @@ pub fn apply_border_preset(
         cells: updated_cells,
         styles: updated_styles,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_text_rotation;
+    use crate::api_types::StyleData;
+    use engine::theme::ThemeDefinition;
+    use engine::{CellStyle, TextRotation};
+
+    /// StyleData.text_rotation as the app emits it for a given rotation
+    /// (mirrors StyleData::from_cell_style, exercised through the real
+    /// conversion below).
+    fn emit(rotation: TextRotation) -> String {
+        let mut style = CellStyle::default();
+        style.text_rotation = rotation;
+        StyleData::from_cell_style(&style, &ThemeDefinition::default()).text_rotation
+    }
+
+    /// THE round-trip: StyleData -> FormattingParams.text_rotation ->
+    /// parse_text_rotation -> StyleData again. Every rotation the app can
+    /// hold must survive the loop unchanged — "rotate90"/"rotate270"/
+    /// "custom:N" used to fall through to the integer parser and silently
+    /// apply None.
+    #[test]
+    fn style_data_round_trips_over_the_full_vocabulary() {
+        let vocabulary = [
+            TextRotation::None,
+            TextRotation::Rotate90,
+            TextRotation::Rotate270,
+            TextRotation::Custom(1),
+            TextRotation::Custom(45),
+            TextRotation::Custom(89),
+            TextRotation::Custom(-1),
+            TextRotation::Custom(-45),
+            TextRotation::Custom(-89),
+        ];
+        for rotation in vocabulary {
+            let emitted = emit(rotation);
+            let parsed = parse_text_rotation(&emitted);
+            assert_eq!(
+                parsed, rotation,
+                "StyleData \"{}\" must parse back to {:?}",
+                emitted, rotation
+            );
+            // And the re-emitted form is byte-identical (canonical).
+            assert_eq!(emit(parsed), emitted);
+        }
+    }
+
+    /// The exact strings the FormatCells dialog emits (AlignmentTab
+    /// ROTATION_OPTIONS) and the script surface validates (TEXT_ROTATIONS).
+    #[test]
+    fn dialog_vocabulary_is_accepted() {
+        assert_eq!(parse_text_rotation("none"), TextRotation::None);
+        assert_eq!(parse_text_rotation("rotate90"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("rotate270"), TextRotation::Rotate270);
+    }
+
+    #[test]
+    fn custom_prefix_is_accepted() {
+        assert_eq!(parse_text_rotation("custom:45"), TextRotation::Custom(45));
+        assert_eq!(parse_text_rotation("custom:-45"), TextRotation::Custom(-45));
+        // Canonical collapse: a custom angle equal to a named variant becomes
+        // that variant, so re-emission stays canonical.
+        assert_eq!(parse_text_rotation("custom:0"), TextRotation::None);
+        assert_eq!(parse_text_rotation("custom:90"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("custom:-90"), TextRotation::Rotate270);
+    }
+
+    #[test]
+    fn bare_integer_degrees_are_accepted() {
+        assert_eq!(parse_text_rotation("45"), TextRotation::Custom(45));
+        assert_eq!(parse_text_rotation("-30"), TextRotation::Custom(-30));
+        assert_eq!(parse_text_rotation("0"), TextRotation::None);
+        assert_eq!(parse_text_rotation("90"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("-90"), TextRotation::Rotate270);
+    }
+
+    #[test]
+    fn legacy_aliases_and_clamping() {
+        assert_eq!(parse_text_rotation("up"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("down"), TextRotation::Rotate270);
+        assert_eq!(parse_text_rotation("270"), TextRotation::Rotate270);
+        // Out-of-range angles clamp to the -90..90 band.
+        assert_eq!(parse_text_rotation("120"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("custom:120"), TextRotation::Rotate90);
+        assert_eq!(parse_text_rotation("custom:-500"), TextRotation::Rotate270);
+        // Garbage still degrades to None rather than erroring the whole apply.
+        assert_eq!(parse_text_rotation("sideways"), TextRotation::None);
+    }
 }

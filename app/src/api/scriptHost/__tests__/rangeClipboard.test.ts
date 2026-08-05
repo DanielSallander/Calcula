@@ -69,6 +69,13 @@ function makeLib(opts: { typed?: TypedCell[]; styled?: StyledCell[] } = {}) {
   const shiftCalls: Array<{ formula: string; rowDelta: number; colDelta: number }> = [];
   const lib = {
     getActiveSheet: vi.fn(async () => 0),
+    // Sheet-ref resolution (Wave 1) reads the live list: five sheets so a test
+    // can name an EXISTING non-active sheet and hit the active-sheet refusal
+    // rather than the unknown-sheet one.
+    getSheets: vi.fn(async () => ({
+      sheets: [0, 1, 2, 3, 4].map((i) => ({ index: i, name: `Sheet${i + 1}` })),
+      activeIndex: 0,
+    })),
     getRangeCellsTyped: vi.fn(async () => opts.typed ?? []),
     getViewportCells: vi.fn(async () => opts.styled ?? []),
     getUndoState: vi.fn(async () => ({ transactionOpen: false })),

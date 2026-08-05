@@ -19,6 +19,7 @@ pub mod id_operations;
 pub mod identity_graph;
 pub mod grid;
 pub mod locale;
+pub mod navigation;
 pub mod lookup_cache;
 pub mod number_format;
 pub mod style;
@@ -45,6 +46,10 @@ pub use grid::CellMap;
 pub use evaluator::{EvalContext, EvalResult, Evaluator, GatherRegionData, GatherSubmission};
 pub use grid::Grid;
 pub use lookup_cache::{begin_pass as begin_lookup_pass, PassGuard as LookupPassGuard};
+pub use navigation::{
+    current_region, range_edge, used_range, EdgeDirection, EXCEL_MAX_COL_INDEX,
+    EXCEL_MAX_ROW_INDEX,
+};
 pub use formula_locale::{delocalize_formula, localize_formula};
 pub use locale::{LocaleCurrencyPosition, LocaleSettings};
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};

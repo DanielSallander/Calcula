@@ -34,7 +34,7 @@ describe('AppEvents', () => {
     // anything downstream — save, .calp publish, a script that just awaited
     // calculateNow — learns that a pass STOPPED rather than finished, which a
     // half-recalculated workbook cannot otherwise be distinguished from.
-    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`67`);
+    expect(Object.keys(AppEvents).length).toMatchInlineSnapshot(`68`);
   });
 
   it('all values use the app: prefix', () => {

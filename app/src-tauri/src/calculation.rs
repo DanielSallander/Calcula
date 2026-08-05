@@ -28,17 +28,26 @@ pub struct IterationSettings {
 // CALCULATION MODE COMMANDS
 // ============================================================================
 
-/// Set the calculation mode ("automatic" or "manual")
+/// Set the calculation mode ("automatic" or "manual").
+///
+/// STRICT: anything else is an error, not a silent coercion. The old behavior
+/// (default to "automatic" on a typo) meant a script calling
+/// `api.setCalculationMode("Manual ")` silently flipped the workbook to
+/// automatic — the exact opposite of what it asked for — and the author never
+/// learned why their batch writes were recalculating per-cell.
 #[tauri::command]
-pub fn set_calculation_mode(state: State<AppState>, mode: String) -> String {
+pub fn set_calculation_mode(state: State<AppState>, mode: String) -> Result<String, String> {
     log_enter_info!("CMD", "set_calculation_mode", "mode={}", mode);
 
     let valid_mode = match mode.to_lowercase().as_str() {
-        "automatic" | "auto" => "automatic".to_string(),
+        "automatic" => "automatic".to_string(),
         "manual" => "manual".to_string(),
         _ => {
-            log_warn!("CMD", "invalid calculation mode: {}, defaulting to automatic", mode);
-            "automatic".to_string()
+            log_warn!("CMD", "invalid calculation mode rejected: {}", mode);
+            return Err(format!(
+                "Invalid calculation mode '{}': expected 'automatic' or 'manual'",
+                mode
+            ));
         }
     };
 
@@ -46,7 +55,7 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> String {
     *calc_mode = valid_mode.clone();
 
     log_exit_info!("CMD", "set_calculation_mode", "set to {}", valid_mode);
-    valid_mode
+    Ok(valid_mode)
 }
 
 /// Get the current calculation mode

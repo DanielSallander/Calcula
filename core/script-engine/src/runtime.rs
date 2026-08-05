@@ -139,6 +139,10 @@ fn register_calcula_api<'js>(
     // Utility operations (log)
     ops::utility::register_utility_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Text operations (Calcula.text.parseCsv / toCsv) — pure compute, no
+    // ScriptContext needed.
+    ops::text::register_text_ops(ctx, &calcula)?;
+
     // Bookmark operations
     ops::bookmarks::register_bookmark_ops(ctx, &calcula, shared_ctx.clone())?;
 

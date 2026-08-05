@@ -84,6 +84,7 @@ import {
   updateChartSpec,
   replaceChartSpec as storeReplaceChartSpec,
   mergeSpecPreview,
+  updateChartPlacement as storeUpdateChartPlacement,
 } from "./lib/chartStore";
 import { chartsBackend } from "./lib/chartsBackend";
 import { registerChartRenderingApi } from "@api/rendering";
@@ -344,6 +345,18 @@ function activate(context: ExtensionContext): void {
       // Canvas-style override stored in chart spec as a reserved _style_ key
       // (tolerated by validation). Separate constrained name+value setter.
       updateChartSpec(chartId, { [`_style_${name}`]: value } as Partial<ChartSpec>);
+    },
+    updateChartPlacement(chartId: string, placement) {
+      // Same store fields the drag-move/resize handles mutate, same debounced
+      // persist — then the same repaint choreography createChart runs, so a
+      // script move lands exactly like a hand move.
+      const updated = storeUpdateChartPlacement(chartId, placement);
+      if (!updated) {
+        throw new Error(`No chart with id "${chartId}"`);
+      }
+      invalidateChartCache(chartId);
+      syncChartRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
     },
   });
 

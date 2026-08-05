@@ -662,8 +662,6 @@ fn shift_per_sheet_range_stores(
 /// Only the active-sheet mirror is touched — `all_merged_regions[active]` is
 /// stale by design until the next sheet switch.
 fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit) {
-    use crate::commands::coord_shift::{shift_range, CellRange};
-
     let Ok(mut merges) = state.merged_regions.lock() else {
         return;
     };
@@ -671,7 +669,21 @@ fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit)
         return;
     }
 
-    let shifted: std::collections::HashSet<crate::api_types::MergedRegion> = merges
+    let shifted = shift_merge_set(&merges, edit);
+    *merges = shifted;
+}
+
+/// The set-transform core of `shift_merged_regions`, shared with the off-sheet
+/// path below. A merge that shrank to a single cell is DROPPED, not kept:
+/// `merge_cells` refuses to create a 1x1, the renderer skips spans of 1 so it
+/// would be invisible, yet it would still block future merges over that cell
+/// and make xlsx export fail.
+fn shift_merge_set(
+    merges: &std::collections::HashSet<crate::api_types::MergedRegion>,
+    edit: calp::writeback::StructuralEdit,
+) -> std::collections::HashSet<crate::api_types::MergedRegion> {
+    use crate::commands::coord_shift::{shift_range, CellRange};
+    merges
         .iter()
         .filter_map(|m| {
             let n = shift_range(
@@ -683,10 +695,6 @@ fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit)
                 },
                 edit,
             )?;
-            // A merge that shrank to a single cell must be DROPPED, not kept:
-            // `merge_cells` refuses to create a 1x1, the renderer skips spans
-            // of 1 so it would be invisible, yet it would still block future
-            // merges over that cell and make xlsx export fail.
             if n.start_row == n.end_row && n.start_col == n.end_col {
                 return None;
             }
@@ -697,9 +705,26 @@ fn shift_merged_regions(state: &AppState, edit: calp::writeback::StructuralEdit)
                 end_col: n.end_col,
             })
         })
-        .collect();
+        .collect()
+}
 
-    *merges = shifted;
+/// Move a NAMED sheet's merged regions through a structural edit — the
+/// off-sheet twin of `shift_merged_regions`. Resolves the mirror-vs-per-sheet
+/// store split via `with_sheet_merges`; records NO undo entry for the same
+/// reason as the active twin (the structural snapshot already carries the
+/// pre-shift merge set).
+fn shift_merged_regions_for_sheet(
+    state: &AppState,
+    sheet_index: usize,
+    edit: calp::writeback::StructuralEdit,
+) {
+    crate::report::with_sheet_merges(state, sheet_index, |merges| {
+        if merges.is_empty() {
+            return;
+        }
+        let shifted = shift_merge_set(merges, edit);
+        *merges = shifted;
+    });
 }
 
 /// Move every per-sheet CELL-KEYED store through a structural edit, recording
@@ -769,6 +794,18 @@ fn shift_style_tiers(
     sheet_index: usize,
     edit: calp::writeback::StructuralEdit,
 ) {
+    shift_style_tiers_single(grid, edit);
+    // Both mirrors, or the tier becomes invisible to readers that resolve
+    // against `grids[active_sheet]`.
+    if let Some(g) = grids.get_mut(sheet_index) {
+        shift_style_tiers_single(g, edit);
+    }
+}
+
+/// The one-grid core of `shift_style_tiers`, split out so the OFF-SHEET
+/// structural path (which has no mirror to keep in step — only
+/// `grids[target]`) can renumber a single grid's tiers.
+fn shift_style_tiers_single(grid: &mut engine::Grid, edit: calp::writeback::StructuralEdit) {
     use calp::writeback::{interval_delete, interval_insert, StructuralEdit as SE};
 
     // Only the matching axis moves: row edits renumber rows, column edits
@@ -795,7 +832,7 @@ fn shift_style_tiers(
         out
     };
 
-    let apply = |grid: &mut engine::Grid| match edit {
+    match edit {
         SE::RowInsert { at, count } => {
             grid.row_styles = shift_axis(&grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, true)
                 .into_iter().collect();
@@ -812,13 +849,6 @@ fn shift_style_tiers(
             grid.column_styles = shift_axis(&grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect(), at, count, false)
                 .into_iter().collect();
         }
-    };
-
-    apply(grid);
-    // Both mirrors, or the tier becomes invisible to readers that resolve
-    // against `grids[active_sheet]`.
-    if let Some(g) = grids.get_mut(sheet_index) {
-        apply(g);
     }
 }
 
@@ -1240,9 +1270,29 @@ pub fn insert_rows(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     row: u32,
     count: u32,
+    sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path (state
+    // updates only; the active canvas shows nothing from that sheet, so the
+    // empty payload is the correct "no repaint" answer).
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                off_sheet_structural_edit(
+                    &state, &file_state, &pivot_state, &user_files_state,
+                    &pane_control_state, &ribbon_filter_state,
+                    target, calp::writeback::StructuralEdit::RowInsert { at: row, count },
+                )?;
+                return Ok(Vec::new());
+            }
+        }
+    }
     // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
@@ -1561,9 +1611,28 @@ pub fn insert_columns(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     col: u32,
     count: u32,
+    sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path (see
+    // insert_rows).
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                off_sheet_structural_edit(
+                    &state, &file_state, &pivot_state, &user_files_state,
+                    &pane_control_state, &ribbon_filter_state,
+                    target, calp::writeback::StructuralEdit::ColInsert { at: col, count },
+                )?;
+                return Ok(Vec::new());
+            }
+        }
+    }
     // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
@@ -2265,9 +2334,28 @@ pub fn delete_rows(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     row: u32,
     count: u32,
+    sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path (see
+    // insert_rows).
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                off_sheet_structural_edit(
+                    &state, &file_state, &pivot_state, &user_files_state,
+                    &pane_control_state, &ribbon_filter_state,
+                    target, calp::writeback::StructuralEdit::RowDelete { at: row, count },
+                )?;
+                return Ok(Vec::new());
+            }
+        }
+    }
     // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
@@ -2635,9 +2723,28 @@ pub fn delete_columns(
     state: State<AppState>,
     file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     col: u32,
     count: u32,
+    sheet_index: Option<usize>,
 ) -> Result<Vec<CellData>, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path (see
+    // insert_rows).
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                off_sheet_structural_edit(
+                    &state, &file_state, &pivot_state, &user_files_state,
+                    &pane_control_state, &ribbon_filter_state,
+                    target, calp::writeback::StructuralEdit::ColDelete { at: col, count },
+                )?;
+                return Ok(Vec::new());
+            }
+        }
+    }
     // Sheet protection OPTION gate. Distinct from the per-cell gate: this asks
     // whether the sheet allows this KIND of structural change at all, which is
     // what the Protect Sheet dialog's checkboxes control.
@@ -4264,6 +4371,88 @@ fn shift_cross_sheet_formulas(
     }
 }
 
+/// The OFF-SHEET twin of `shift_cross_sheet_formulas`: the EDITED sheet is not
+/// the active one, so the loop must rewrite every sheet EXCEPT the edited one
+/// — including the active sheet, whose rewrite must land in BOTH the mirror
+/// (`state.grid`, the visible source of truth that clobbers `grids[active]`
+/// on the next sheet switch) and `grids[active]`.
+#[allow(clippy::too_many_arguments)]
+fn shift_cross_sheet_formulas_for_off_sheet_edit(
+    undo_stack: &mut engine::UndoStack,
+    mirror: &mut engine::Grid,
+    grids: &mut [engine::Grid],
+    edited_sheet: usize,
+    active_sheet: usize,
+    edited_sheet_name: &str,
+    sheet_names: &[String],
+    edit: calp::writeback::StructuralEdit,
+) {
+    use calp::writeback::StructuralEdit as SE;
+
+    for (idx, grid) in grids.iter_mut().enumerate() {
+        if idx == edited_sheet {
+            continue; // Handled in-command against grids[edited_sheet].
+        }
+        let Some(this_sheet) = sheet_names.get(idx) else { continue };
+        let is_active = idx == active_sheet;
+
+        // For the ACTIVE sheet, the MIRROR is the source of truth (grids[idx]
+        // can lag behind it) — scan the mirror's cells there.
+        let candidates: Vec<((u32, u32), engine::Cell)> = {
+            let source: &engine::Grid = if is_active { &*mirror } else { &*grid };
+            source
+                .cells
+                .iter()
+                .filter(|(_, c)| c.ast.is_some())
+                .map(|(&pos, c)| (pos, c.clone()))
+                .collect()
+        };
+
+        let mut previous: Vec<((u32, u32), Option<engine::Cell>)> = Vec::new();
+        for ((r, c), cell) in candidates {
+            let Some(formula) = cell.formula_string() else { continue };
+            // Only QUALIFIED references can reach the edited sheet from here.
+            if !formula.contains('!') {
+                continue;
+            }
+            let updated = match edit {
+                SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, count as i32,
+                ),
+                SE::RowDelete { at, count } => shift_formula_rows_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, -(count as i32),
+                ),
+                SE::ColInsert { at, count } => shift_formula_cols_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, count as i32,
+                ),
+                SE::ColDelete { at, count } => shift_formula_cols_sheet_aware(
+                    &formula, this_sheet, edited_sheet_name, at, -(count as i32),
+                ),
+            };
+            if updated == formula {
+                continue;
+            }
+            if let Ok(ast) = parser::parse(&updated) {
+                previous.push(((r, c), Some(cell.clone())));
+                let mut next = cell;
+                next.ast = Some(Box::new(ast));
+                grid.set_cell(r, c, next.clone());
+                if is_active {
+                    mirror.set_cell(r, c, next);
+                }
+            }
+        }
+
+        if !previous.is_empty() {
+            undo_stack.record_custom_restore(
+                "obj_cross_sheet_formulas".to_string(),
+                crate::undo_commands::cross_sheet_formulas_snapshot_bytes(idx, previous),
+                "Shift cross-sheet formulas",
+            );
+        }
+    }
+}
+
 /// Shift on-grid controls, moving their cell key and their object-script
 /// binding TOGETHER.
 ///
@@ -4408,4 +4597,459 @@ mod control_identity_tests {
         let (nr, nc) = shift_cell(1, 2, StructuralEdit::RowInsert { at: 5, count: 3 }).unwrap();
         assert_eq!(control_id(0, nr, nc), control_id(0, 1, 2), "unchanged");
     }
+}
+
+// ============================================================================
+// OFF-SHEET STRUCTURAL EDITS (Wave 3, item 12)
+// ============================================================================
+
+/// Insert/delete rows/columns on a NON-ACTIVE sheet — the whole chain the
+/// active-sheet commands run, re-anchored to `grids[target]` and the per-sheet
+/// stores instead of the mirrors:
+///
+///  - protection OPTION gate + writeback SHIFT guard on the TARGET sheet
+///  - spill partial-overlap refusal for deletes (target-sheet spill ranges)
+///  - undo via ONE "sheet_structural_snapshot" CustomRestore (sheet-tagged,
+///    so undo restores the right sheet no matter what is active by then),
+///    with every store shift's own CustomRestore in the SAME transaction
+///  - every coordinate-anchored store shifted with `sheet_index = target`
+///    (cell types/behaviors, writeback drafts, autofilter, comments/notes/
+///    hyperlinks, style tiers, outline/scenario/computed/advanced-filter,
+///    named ranges, print/scroll areas, controls, conditional formats +
+///    validations, spill twins, pivot regions, table boundaries, IdRegistry)
+///  - cross-sheet formula rewrite on every OTHER sheet, including the active
+///    mirror (`shift_cross_sheet_formulas_for_off_sheet_edit`)
+///  - same-sheet formula rewrite + cell moves + heights/widths + merges on
+///    the target's per-sheet stores
+///  - dependency-map rebuild for the active sheet + a cross-sheet recalc
+///    (`recalc_after_off_sheet_write`), so dependents anywhere see the shift
+///
+/// The caller guarantees `target != active` (the active case takes the
+/// existing command path, which the frontend refresh contract is built on).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn off_sheet_structural_edit(
+    state: &AppState,
+    file_state: &FileState,
+    pivot_state: &PivotState,
+    user_files_state: &crate::persistence::UserFilesState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    target: usize,
+    edit: calp::writeback::StructuralEdit,
+) -> Result<(), String> {
+    use calp::writeback::StructuralEdit as SE;
+
+    // Bounds first, so every later step can index freely.
+    {
+        let sheet_count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+        if target >= sheet_count {
+            return Err(format!(
+                "Sheet index {} out of range: workbook has {} sheet(s)",
+                target, sheet_count
+            ));
+        }
+    }
+
+    // Protection OPTION gate on the TARGET sheet.
+    let (action_key, action_label) = match edit {
+        SE::RowInsert { .. } => ("insertRows", "insert rows"),
+        SE::RowDelete { .. } => ("deleteRows", "delete rows"),
+        SE::ColInsert { .. } => ("insertColumns", "insert columns"),
+        SE::ColDelete { .. } => ("deleteColumns", "delete columns"),
+    };
+    crate::protection::check_sheet_action(state, target, action_key, action_label)?;
+
+    // WRITEBACK SHIFT GUARD, on the target sheet (same window as the
+    // active-sheet ensure_row/col_shift_unclaimed).
+    match edit {
+        SE::RowInsert { at, .. } => crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state, "insert rows here", &[target], at, 0, u32::MAX, u32::MAX,
+        )?,
+        SE::RowDelete { at, .. } => crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state, "delete rows here", &[target], at, 0, u32::MAX, u32::MAX,
+        )?,
+        SE::ColInsert { at, .. } => crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state, "insert columns here", &[target], 0, at, u32::MAX, u32::MAX,
+        )?,
+        SE::ColDelete { at, .. } => crate::calp_commands::ensure_range_unclaimed_on_sheets(
+            state, "delete columns here", &[target], 0, at, u32::MAX, u32::MAX,
+        )?,
+    }
+
+    // Spill partial-overlap refusal for deletes (same policy as the
+    // active-sheet commands, scanned against the TARGET sheet's spill ranges).
+    match edit {
+        SE::RowDelete { at, count } => {
+            let spill_ranges = state.spill_ranges.lock().map_err(|e| e.to_string())?;
+            for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
+                if sheet_idx != target {
+                    continue;
+                }
+                let mut min_r = origin_row;
+                let mut max_r = origin_row;
+                for &(sr, _) in spill_cells {
+                    min_r = min_r.min(sr);
+                    max_r = max_r.max(sr);
+                }
+                let del_end = at + count - 1;
+                let overlaps = at <= max_r && del_end >= min_r;
+                let fully_inside = at <= min_r && del_end >= max_r;
+                if overlaps && !fully_inside {
+                    let col_letter = crate::pivot::utils::col_index_to_letter(origin_col);
+                    return Err(format!(
+                        "Can't delete rows\n\nThis would affect a spilled array from the formula in {}{}. Delete or modify that formula first.",
+                        col_letter, origin_row + 1
+                    ));
+                }
+            }
+        }
+        SE::ColDelete { at, count } => {
+            let spill_ranges = state.spill_ranges.lock().map_err(|e| e.to_string())?;
+            for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
+                if sheet_idx != target {
+                    continue;
+                }
+                let mut min_c = origin_col;
+                let mut max_c = origin_col;
+                for &(_, sc) in spill_cells {
+                    min_c = min_c.min(sc);
+                    max_c = max_c.max(sc);
+                }
+                let del_end = at + count - 1;
+                let overlaps = at <= max_c && del_end >= min_c;
+                let fully_inside = at <= min_c && del_end >= max_c;
+                if overlaps && !fully_inside {
+                    let col_letter = crate::pivot::utils::col_index_to_letter(origin_col);
+                    return Err(format!(
+                        "Can't delete columns\n\nThis would affect a spilled array from the formula in {}{}. Delete or modify that formula first.",
+                        col_letter, origin_row + 1
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Capture the per-sheet snapshot BEFORE any mutation (takes its own locks).
+    let snapshot = crate::undo_commands::capture_sheet_structural_snapshot(state, target)?;
+
+    let description = match edit {
+        SE::RowInsert { count, .. } => format!("Insert {} row(s) on sheet {}", count, target + 1),
+        SE::RowDelete { count, .. } => format!("Delete {} row(s) on sheet {}", count, target + 1),
+        SE::ColInsert { count, .. } => format!("Insert {} column(s) on sheet {}", count, target + 1),
+        SE::ColDelete { count, .. } => format!("Delete {} column(s) on sheet {}", count, target + 1),
+    };
+
+    {
+        // Canonical lock order (matches insert_rows): mirror, grids,
+        // active_sheet, undo_stack. The per-store shift helpers take their own
+        // sublocks while these are held, exactly as the active-sheet path does.
+        let mut mirror = state.grid.lock().map_err(|e| e.to_string())?;
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+
+        while grids.len() <= target {
+            grids.push(engine::grid::Grid::new());
+        }
+
+        undo_stack.begin_transaction(description.clone());
+        undo_stack.record_custom_restore(
+            "sheet_structural_snapshot".to_string(),
+            crate::undo_commands::sheet_structural_snapshot_bytes(&snapshot),
+            &description,
+        );
+
+        // Cell-type assignments move with the edit (same transaction).
+        {
+            let mut cell_types = state.cell_types.lock().map_err(|e| e.to_string())?;
+            let previous = crate::cell_types::entries_for_sheet(&cell_types, target);
+            let changed = match edit {
+                SE::RowInsert { at, count } => crate::cell_types::shift_rows_for_insert(&mut cell_types, target, at, count),
+                SE::RowDelete { at, count } => crate::cell_types::shift_rows_for_delete(&mut cell_types, target, at, count),
+                SE::ColInsert { at, count } => crate::cell_types::shift_cols_for_insert(&mut cell_types, target, at, count),
+                SE::ColDelete { at, count } => crate::cell_types::shift_cols_for_delete(&mut cell_types, target, at, count),
+            };
+            if changed {
+                undo_stack.record_custom_restore(
+                    "obj_cell_types".to_string(),
+                    crate::undo_commands::cell_types_snapshot_bytes(target, previous),
+                    "Shift cell types",
+                );
+            }
+        }
+        // Cell-behavior bindings track their target ranges the same way.
+        {
+            let mut behaviors = state.cell_behaviors.lock().map_err(|e| e.to_string())?;
+            let previous = crate::cell_behaviors::all_bindings(&behaviors);
+            let changed = match edit {
+                SE::RowInsert { at, count } => crate::cell_behaviors::shift_rows_for_insert(&mut behaviors, target, at, count),
+                SE::RowDelete { at, count } => crate::cell_behaviors::shift_rows_for_delete(&mut behaviors, target, at, count),
+                SE::ColInsert { at, count } => crate::cell_behaviors::shift_cols_for_insert(&mut behaviors, target, at, count),
+                SE::ColDelete { at, count } => crate::cell_behaviors::shift_cols_for_delete(&mut behaviors, target, at, count),
+            };
+            if changed {
+                undo_stack.record_custom_restore(
+                    "obj_cell_behaviors".to_string(),
+                    crate::undo_commands::cell_behaviors_snapshot_bytes(previous),
+                    "Shift cell behaviors",
+                );
+            }
+        }
+
+        // The generic-edit store shifts, all sheet-parameterized already.
+        shift_writeback_draft_regions(state, &mut undo_stack, target, edit);
+        shift_sheet_auto_filter(state, &mut undo_stack, target, edit);
+        shift_per_sheet_cell_stores(state, &mut undo_stack, target, edit);
+        shift_style_tiers_single(&mut grids[target], edit);
+        shift_misc_coordinate_stores(state, &mut undo_stack, target, edit);
+
+        let sheet_names_snapshot: Vec<String> =
+            state.sheet_names.lock().map(|n| n.clone()).unwrap_or_default();
+        let edited_sheet_name = sheet_names_snapshot
+            .get(target)
+            .cloned()
+            .unwrap_or_default();
+
+        shift_named_ranges(state, &mut undo_stack, target, &edited_sheet_name, edit);
+        shift_sheet_range_strings(state, &mut undo_stack, target, edit);
+        shift_controls(state, &mut undo_stack, target, edit);
+        shift_per_sheet_range_stores(state, &mut undo_stack, target, edit);
+        shift_flat_cell_stores(state, target, edit);
+
+        // Every OTHER sheet (including the ACTIVE mirror) may reference the
+        // edited sheet by name. BEFORE commit, so the rewrites join THIS
+        // transaction.
+        shift_cross_sheet_formulas_for_off_sheet_edit(
+            &mut undo_stack,
+            &mut mirror,
+            &mut grids,
+            target,
+            active_sheet,
+            &edited_sheet_name,
+            &sheet_names_snapshot,
+            edit,
+        );
+        undo_stack.commit_transaction();
+
+        // --- Same-sheet transform on grids[target] ---
+        let grid = &mut grids[target];
+
+        // Formula references within the edited sheet itself.
+        let all_cells: Vec<((u32, u32), Cell)> = grid
+            .cells
+            .iter()
+            .map(|(&pos, cell)| (pos, cell.clone()))
+            .collect();
+        for ((r, c), cell) in &all_cells {
+            if let Some(formula) = cell.formula_string() {
+                let updated = match edit {
+                    SE::RowInsert { at, count } => shift_formula_rows_sheet_aware(
+                        &formula, &edited_sheet_name, &edited_sheet_name, at, count as i32,
+                    ),
+                    SE::RowDelete { at, count } => shift_formula_rows_sheet_aware(
+                        &formula, &edited_sheet_name, &edited_sheet_name, at, -(count as i32),
+                    ),
+                    SE::ColInsert { at, count } => shift_formula_cols_sheet_aware(
+                        &formula, &edited_sheet_name, &edited_sheet_name, at, count as i32,
+                    ),
+                    SE::ColDelete { at, count } => shift_formula_cols_sheet_aware(
+                        &formula, &edited_sheet_name, &edited_sheet_name, at, -(count as i32),
+                    ),
+                };
+                if updated != formula {
+                    let mut updated_cell = cell.clone();
+                    updated_cell.ast = parser::parse(&updated).ok().map(Box::new);
+                    grid.cells.insert((*r, *c), updated_cell);
+                }
+            }
+        }
+
+        // Cell moves.
+        match edit {
+            SE::RowInsert { at, count } => {
+                let mut cells_to_move: Vec<((u32, u32), Cell)> = grid
+                    .cells
+                    .iter()
+                    .filter(|(&(r, _), _)| r >= at)
+                    .map(|(&pos, cell)| (pos, cell.clone()))
+                    .collect();
+                cells_to_move.sort_by(|a, b| b.0 .0.cmp(&a.0 .0));
+                for ((r, c), cell) in cells_to_move {
+                    grid.cells.remove(&(r, c));
+                    grid.cells.insert((r + count, c), cell);
+                }
+            }
+            SE::RowDelete { at, count } => {
+                let cells_to_delete: Vec<(u32, u32)> = grid
+                    .cells
+                    .keys()
+                    .filter(|(r, _)| *r >= at && *r < at + count)
+                    .cloned()
+                    .collect();
+                for pos in cells_to_delete {
+                    grid.cells.remove(&pos);
+                }
+                let mut cells_to_move: Vec<((u32, u32), Cell)> = grid
+                    .cells
+                    .iter()
+                    .filter(|(&(r, _), _)| r >= at + count)
+                    .map(|(&pos, cell)| (pos, cell.clone()))
+                    .collect();
+                cells_to_move.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+                for ((r, c), cell) in cells_to_move {
+                    grid.cells.remove(&(r, c));
+                    grid.cells.insert((r - count, c), cell);
+                }
+            }
+            SE::ColInsert { at, count } => {
+                let mut cells_to_move: Vec<((u32, u32), Cell)> = grid
+                    .cells
+                    .iter()
+                    .filter(|(&(_, c), _)| c >= at)
+                    .map(|(&pos, cell)| (pos, cell.clone()))
+                    .collect();
+                cells_to_move.sort_by(|a, b| b.0 .1.cmp(&a.0 .1));
+                for ((r, c), cell) in cells_to_move {
+                    grid.cells.remove(&(r, c));
+                    grid.cells.insert((r, c + count), cell);
+                }
+            }
+            SE::ColDelete { at, count } => {
+                let cells_to_delete: Vec<(u32, u32)> = grid
+                    .cells
+                    .keys()
+                    .filter(|(_, c)| *c >= at && *c < at + count)
+                    .cloned()
+                    .collect();
+                for pos in cells_to_delete {
+                    grid.cells.remove(&pos);
+                }
+                let mut cells_to_move: Vec<((u32, u32), Cell)> = grid
+                    .cells
+                    .iter()
+                    .filter(|(&(_, c), _)| c >= at + count)
+                    .map(|(&pos, cell)| (pos, cell.clone()))
+                    .collect();
+                cells_to_move.sort_by(|a, b| a.0 .1.cmp(&b.0 .1));
+                for ((r, c), cell) in cells_to_move {
+                    grid.cells.remove(&(r, c));
+                    grid.cells.insert((r, c - count), cell);
+                }
+            }
+        }
+        grid.recalculate_bounds();
+    }
+
+    // Heights / widths live in the per-sheet stores while the target is not
+    // active (take-semantics; the caller guarantees target != active).
+    match edit {
+        SE::RowInsert { at, count } => {
+            let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            if let Some(heights) = all_rh.get_mut(target) {
+                let old: Vec<(u32, f64)> = heights.iter().map(|(&r, &h)| (r, h)).collect();
+                heights.clear();
+                for (r, h) in old {
+                    heights.insert(if r >= at { r + count } else { r }, h);
+                }
+            }
+        }
+        SE::RowDelete { at, count } => {
+            let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+            if let Some(heights) = all_rh.get_mut(target) {
+                let old: Vec<(u32, f64)> = heights.iter().map(|(&r, &h)| (r, h)).collect();
+                heights.clear();
+                for (r, h) in old {
+                    if r >= at && r < at + count {
+                        continue;
+                    }
+                    heights.insert(if r >= at + count { r - count } else { r }, h);
+                }
+            }
+        }
+        SE::ColInsert { at, count } => {
+            let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+            if let Some(widths) = all_cw.get_mut(target) {
+                let old: Vec<(u32, f64)> = widths.iter().map(|(&c, &w)| (c, w)).collect();
+                widths.clear();
+                for (c, w) in old {
+                    widths.insert(if c >= at { c + count } else { c }, w);
+                }
+            }
+        }
+        SE::ColDelete { at, count } => {
+            let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+            if let Some(widths) = all_cw.get_mut(target) {
+                let old: Vec<(u32, f64)> = widths.iter().map(|(&c, &w)| (c, w)).collect();
+                widths.clear();
+                for (c, w) in old {
+                    if c >= at && c < at + count {
+                        continue;
+                    }
+                    widths.insert(if c >= at + count { c - count } else { c }, w);
+                }
+            }
+        }
+    }
+
+    // Merges follow the edit (per-sheet store; undo restores them from the
+    // structural snapshot, so no undo entry here — same rule as the active
+    // twin).
+    shift_merged_regions_for_sheet(state, target, edit);
+
+    // Pivot regions + table boundaries on the target sheet.
+    match edit {
+        SE::RowInsert { at, count } => {
+            shift_pivot_regions_for_row_insert(state, pivot_state, at, count, target);
+            shift_table_boundaries_for_row_insert(state, at, count, target);
+        }
+        SE::RowDelete { at, count } => {
+            shift_pivot_regions_for_row_delete(state, pivot_state, at, count, target);
+            shift_table_boundaries_for_row_delete(state, at, count, target);
+        }
+        SE::ColInsert { at, count } => {
+            shift_pivot_regions_for_col_insert(state, pivot_state, at, count, target);
+            shift_table_boundaries_for_col_insert(state, at, count, target);
+        }
+        SE::ColDelete { at, count } => {
+            shift_pivot_regions_for_col_delete(state, pivot_state, at, count, target);
+            shift_table_boundaries_for_col_delete(state, at, count, target);
+        }
+    }
+
+    // IdRegistry follows the shift on the TARGET sheet's id.
+    {
+        let sheet_ids = state.sheet_ids.lock().map_err(|e| e.to_string())?;
+        if let Some(&sid) = sheet_ids.get(target) {
+            let mut id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            match edit {
+                SE::RowInsert { at, count } => id_reg.shift_rows_down(sid, at, count),
+                SE::RowDelete { at, count } => id_reg.shift_rows_up(sid, at, count),
+                SE::ColInsert { at, count } => id_reg.shift_cols_right(sid, at, count),
+                SE::ColDelete { at, count } => id_reg.shift_cols_left(sid, at, count),
+            }
+        }
+    }
+
+    // The active sheet's formulas may have been rewritten (cross-sheet refs
+    // into the edited sheet) — its dependency maps are stale now.
+    crate::undo_commands::rebuild_all_dependencies(state);
+
+    // Dependents anywhere (the edited sheet, the active sheet, chains across
+    // both) recalculate now — same recalc the off-sheet WRITE path uses.
+    crate::commands::data::recalc_after_off_sheet_write(
+        state,
+        user_files_state,
+        pivot_state,
+        pane_control_state,
+        ribbon_filter_state,
+        &[target],
+    );
+
+    // Mark workbook as dirty.
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+
+    Ok(())
 }

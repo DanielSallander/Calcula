@@ -8382,6 +8382,37 @@ pub(crate) fn ensure_cells_unclaimed(
     Ok(())
 }
 
+/// CELL-LIST guard for a NAMED sheet (the off-sheet twin of
+/// `ensure_cells_unclaimed`, for Wave 3's cross-sheet `replace_all`): checked
+/// against the actual match list on the TARGET sheet, resolved by index the
+/// same way `ensure_range_unclaimed_on_sheets` does.
+pub(crate) fn ensure_cells_unclaimed_on_sheet(
+    state: &AppState,
+    action: &str,
+    sheet_index: usize,
+    cells: &[(u32, u32)],
+) -> Result<(), String> {
+    if writeback_index_is_empty(state)? {
+        return Ok(());
+    }
+    let Some(sheet_id) = state
+        .sheet_ids
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(sheet_index)
+        .copied()
+    else {
+        return Ok(());
+    };
+    let index = state.writeback_index.lock().map_err(|e| e.to_string())?;
+    for &(row, col) in cells {
+        if let Some(region_id) = index.region_id_at(sheet_id, row, col) {
+            return Err(claim_refusal_cell(action, region_id, row, col));
+        }
+    }
+    Ok(())
+}
+
 /// SHIFT guard for `insert_rows` / `delete_rows`: refuse when the shift window
 /// (every row from `first_row` downwards, across all columns) touches a claimed
 /// region. See point 3 of the policy note above for why a shift that only moves

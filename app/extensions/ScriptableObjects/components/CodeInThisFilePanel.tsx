@@ -894,8 +894,12 @@ function ScheduledJobRow({
     [run, job.id, job.enabled],
   );
 
-  const cancel = useCallback(() => {
-    const ok = window.confirm(
+  const cancel = useCallback(async () => {
+    // AWAIT the confirm: under Tauri `window.confirm` is overridden to return a
+    // Promise<boolean> (native dialog). A synchronous `if (!ok) return` tests
+    // `!Promise`, which is ALWAYS false — the job was deleted even when the
+    // user pressed Cancel.
+    const ok = await window.confirm(
       `Stop this scheduled job for good?\n\n${job.target}\n${job.cadence}\nOwner: ${job.ownerName}\n\n` +
         "The schedule is deleted from this workbook. The script can create it again the next time it runs.",
     );

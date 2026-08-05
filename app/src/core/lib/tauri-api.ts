@@ -578,13 +578,18 @@ export async function clearRange(
 
 /**
  * Clear a range with options for what to clear.
+ *
+ * `sheetIndex` (Wave 3): clear on a NON-ACTIVE sheet. State updates backend-
+ * side only — the result's `updatedCells` is empty and the active canvas needs
+ * no repaint (the target sheet re-materializes from its grid on switch).
  */
 export async function clearRangeWithOptions(
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
-  applyTo: ClearApplyTo = "all"
+  applyTo: ClearApplyTo = "all",
+  sheetIndex?: number
 ): Promise<unknown> {
   const result = await invoke("clear_range_with_options", {
     params: {
@@ -593,6 +598,7 @@ export async function clearRangeWithOptions(
       endRow,
       endCol,
       applyTo,
+      sheetIndex: sheetIndex ?? null,
     },
   });
   recordGridEvent({ kind: "clearRange", startRow, startCol, endRow, endCol, applyTo });
@@ -624,8 +630,12 @@ export async function getCellCount(): Promise<number> {
   return invoke<number>("get_cell_count");
 }
 
-export async function getUsedRange(): Promise<UsedRangeResult> {
-  return invoke<UsedRangeResult>("get_used_range");
+/**
+ * Get the bounding box of all stored cells on a sheet.
+ * @param sheetIndex - Sheet to inspect (defaults to the active sheet)
+ */
+export async function getUsedRange(sheetIndex?: number): Promise<UsedRangeResult> {
+  return invoke<UsedRangeResult>("get_used_range", { sheetIndex });
 }
 
 /**
@@ -736,12 +746,90 @@ export interface CurrentRegionResult {
  * Get the current region around a cell as a structured result.
  * Returns a CurrentRegionResult with `empty: true` if the cell is isolated,
  * or the bounding rectangle of the contiguous data region otherwise.
+ * @param sheetIndex - Sheet to inspect (defaults to the active sheet)
  */
 export async function getCurrentRegion(
   row: number,
-  col: number
+  col: number,
+  sheetIndex?: number
 ): Promise<CurrentRegionResult> {
-  return invoke<CurrentRegionResult>("get_current_region", { row, col });
+  return invoke<CurrentRegionResult>("get_current_region", { row, col, sheetIndex });
+}
+
+/**
+ * Target cell of a Ctrl+Arrow / Range.End edge navigation (getRangeEdge).
+ */
+export interface RangeEdgeResult {
+  row: number;
+  col: number;
+}
+
+/**
+ * Excel Ctrl+Arrow / Range.End edge navigation, resolved entirely server-side
+ * against the full Excel grid bounds (1,048,576 rows x 16,384 columns).
+ * Same algorithm as the keyboard's findCtrlArrowTarget — one implementation
+ * in engine::navigation.
+ * @param row - Starting row (0-based)
+ * @param col - Starting column (0-based)
+ * @param direction - "up" | "down" | "left" | "right"
+ * @param sheetIndex - Sheet to navigate on (defaults to the active sheet)
+ */
+export async function getRangeEdge(
+  row: number,
+  col: number,
+  direction: ArrowDirection,
+  sheetIndex?: number
+): Promise<RangeEdgeResult> {
+  return invoke<RangeEdgeResult>("get_range_edge", {
+    row,
+    col,
+    direction,
+    sheetIndex,
+  });
+}
+
+/** The cell classes getSpecialCells can select (Excel Range.SpecialCells). */
+export type SpecialCellsKind = "constants" | "formulas" | "blanks" | "visible";
+
+/** One cell coordinate in a getSpecialCells answer. */
+export interface SpecialCellRef {
+  row: number;
+  col: number;
+}
+
+/**
+ * Result of getSpecialCells. `cells` is row-major sorted and capped at
+ * 100,000 entries; `truncated` reports whether the cap dropped anything.
+ */
+export interface SpecialCellsResult {
+  cells: SpecialCellRef[];
+  truncated: boolean;
+}
+
+/**
+ * Excel's Range.SpecialCells / Go To Special, resolved server-side.
+ *
+ * "visible" is the backend-only kind: it consults the authoritative hidden-row
+ * state (AutoFilter criteria, advanced filter, collapsed outline groups) and
+ * outline-hidden columns. The rect (inclusive, normalized) is clamped to the
+ * sheet's used range. `sheetIndex` defaults to the active sheet.
+ */
+export async function getSpecialCells(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  kind: SpecialCellsKind,
+  sheetIndex?: number
+): Promise<SpecialCellsResult> {
+  return invoke<SpecialCellsResult>("get_special_cells", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    kind,
+    sheetIndex,
+  });
 }
 
 // ============================================================================
@@ -868,6 +956,10 @@ export async function applyFormatting(
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
       fill: formatting.fill,
+      textColorTheme: formatting.textColorTheme,
+      textColorTint: formatting.textColorTint,
+      bgColorTheme: formatting.bgColorTheme,
+      bgColorTint: formatting.bgColorTint,
       locked: formatting.locked,
       formulaHidden: formatting.formulaHidden,
     },
@@ -954,15 +1046,31 @@ export async function applyBorderPreset(
 
 /**
  * Replicate a cell value update to multiple non-active sheets.
- * Used when sheet grouping is active.
+ * Used when sheet grouping is active, and by the script host's off-sheet
+ * single-cell write. Dependent formulas (written sheets + active sheet) are
+ * recalculated by the backend unless `recalc` is false — the bulk script path
+ * passes false per cell and calls recalculateSheetsAfterScriptWrite ONCE.
  */
 export async function updateCellOnSheets(
   sheetIndices: number[],
   row: number,
   col: number,
-  value: string
+  value: string,
+  invariant?: boolean,
+  recalc?: boolean
+): Promise<number[]> {
+  return invoke<number[]>("update_cell_on_sheets", { sheetIndices, row, col, value, invariant, recalc });
+}
+
+/**
+ * The recalc half of updateCellOnSheets on its own: evaluate every named sheet
+ * plus the active sheet (twice — the second pass propagates one more
+ * cross-sheet hop). Called once after a bulk off-sheet script write.
+ */
+export async function recalculateSheetsAfterScriptWrite(
+  sheetIndices: number[]
 ): Promise<void> {
-  return invoke<void>("update_cell_on_sheets", { sheetIndices, row, col, value });
+  return invoke<void>("recalculate_sheets_after_script_write", { sheetIndices });
 }
 
 /**
@@ -1004,6 +1112,10 @@ export async function applyFormattingToSheets(
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
       fill: formatting.fill,
+      textColorTheme: formatting.textColorTheme,
+      textColorTint: formatting.textColorTint,
+      bgColorTheme: formatting.bgColorTheme,
+      bgColorTint: formatting.bgColorTint,
       locked: formatting.locked,
       formulaHidden: formatting.formulaHidden,
     },
@@ -1339,12 +1451,32 @@ export async function previousSheet(): Promise<SheetsResult> {
 }
 
 /**
+ * Wave 3 cross-sheet dispatch for the four structural commands: when
+ * `sheetIndex` names a NON-ACTIVE sheet, the backend runs the whole
+ * off-sheet chain (state only) and the frontend must NOT emit its
+ * active-canvas structural events — those shift frontend stores that
+ * describe the VISIBLE sheet (pinned controls, selections, ...), which the
+ * edit never touched. Returns true when the off-sheet path applies.
+ */
+async function isOffSheetTarget(sheetIndex: number | undefined): Promise<boolean> {
+  if (sheetIndex === undefined || sheetIndex === null) return false;
+  const active = await invoke<number>("get_active_sheet");
+  return active !== sheetIndex;
+}
+
+/**
  * Insert rows at the specified position, shifting existing rows down.
  * @param row - The row index where new rows will be inserted
  * @param count - Number of rows to insert
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet.
+ *   A non-active target updates backend state only (empty result, no
+ *   canvas events) — the sheet re-materializes from its grid on switch.
  */
-export async function insertRows(row: number, count: number): Promise<CellData[]> {
+export async function insertRows(row: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] insertRows(${row}, ${count})`);
+  if (await isOffSheetTarget(sheetIndex)) {
+    return invoke<CellData[]>("insert_rows", { row, count, sheetIndex });
+  }
   const result = await invoke<CellData[]>("insert_rows", { row, count });
   console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_INSERTED, { startRow: row, count });
@@ -1356,9 +1488,13 @@ export async function insertRows(row: number, count: number): Promise<CellData[]
  * Insert columns at the specified position, shifting existing columns right.
  * @param col - The column index where new columns will be inserted
  * @param count - Number of columns to insert
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function insertColumns(col: number, count: number): Promise<CellData[]> {
+export async function insertColumns(col: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] insertColumns(${col}, ${count})`);
+  if (await isOffSheetTarget(sheetIndex)) {
+    return invoke<CellData[]>("insert_columns", { col, count, sheetIndex });
+  }
   const result = await invoke<CellData[]>("insert_columns", { col, count });
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_INSERTED, { startCol: col, count });
@@ -1370,9 +1506,13 @@ export async function insertColumns(col: number, count: number): Promise<CellDat
  * Delete rows at the specified position, shifting remaining rows up.
  * @param row - The row index where deletion starts
  * @param count - Number of rows to delete
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function deleteRows(row: number, count: number): Promise<CellData[]> {
+export async function deleteRows(row: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] deleteRows(${row}, ${count})`);
+  if (await isOffSheetTarget(sheetIndex)) {
+    return invoke<CellData[]>("delete_rows", { row, count, sheetIndex });
+  }
   const result = await invoke<CellData[]>("delete_rows", { row, count });
   console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.ROWS_DELETED, { startRow: row, count });
@@ -1384,9 +1524,13 @@ export async function deleteRows(row: number, count: number): Promise<CellData[]
  * Delete columns at the specified position, shifting remaining columns left.
  * @param col - The column index where deletion starts
  * @param count - Number of columns to delete
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet (see insertRows).
  */
-export async function deleteColumns(col: number, count: number): Promise<CellData[]> {
+export async function deleteColumns(col: number, count: number, sheetIndex?: number): Promise<CellData[]> {
   console.log(`[tauri-api] deleteColumns(${col}, ${count})`);
+  if (await isOffSheetTarget(sheetIndex)) {
+    return invoke<CellData[]>("delete_columns", { col, count, sheetIndex });
+  }
   const result = await invoke<CellData[]>("delete_columns", { col, count });
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
   emitStructuralEvent(AppEvents.COLUMNS_DELETED, { startCol: col, count });
@@ -1503,6 +1647,8 @@ export interface FindOptions {
   caseSensitive?: boolean;
   matchEntireCell?: boolean;
   searchFormulas?: boolean;
+  /** Target sheet (0-based). Omit for the active sheet (Wave 3 cross-sheet ops). */
+  sheetIndex?: number;
 }
 
 /**
@@ -1517,6 +1663,7 @@ export async function findAll(
     caseSensitive = false,
     matchEntireCell = false,
     searchFormulas = false,
+    sheetIndex,
   } = options;
 
   return invoke<FindResult>("find_all", {
@@ -1524,6 +1671,7 @@ export async function findAll(
     caseSensitive,
     matchEntireCell,
     searchFormulas,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
@@ -1538,6 +1686,7 @@ export async function countMatches(
     caseSensitive = false,
     matchEntireCell = false,
     searchFormulas = false,
+    sheetIndex,
   } = options;
 
   return invoke<number>("count_matches", {
@@ -1545,18 +1694,23 @@ export async function countMatches(
     caseSensitive,
     matchEntireCell,
     searchFormulas,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
 /**
  * Replace all occurrences. This is an atomic operation for undo.
+ *
+ * `sheetIndex` (Wave 3): replace on a NON-ACTIVE sheet — the result's
+ * `updatedCells` is empty (no active-canvas repaint) and only
+ * `replacementCount` is meaningful.
  */
 export async function replaceAll(
   search: string,
   replacement: string,
-  options: { caseSensitive?: boolean; matchEntireCell?: boolean } = {}
+  options: { caseSensitive?: boolean; matchEntireCell?: boolean; sheetIndex?: number } = {}
 ): Promise<ReplaceResult> {
-  const { caseSensitive = false, matchEntireCell = false } = options;
+  const { caseSensitive = false, matchEntireCell = false, sheetIndex } = options;
 
   console.log(
     `[tauri-api] replaceAll("${search}" -> "${replacement}", caseSensitive=${caseSensitive})`
@@ -1567,6 +1721,7 @@ export async function replaceAll(
     replacement,
     caseSensitive,
     matchEntireCell,
+    sheetIndex: sheetIndex ?? null,
   });
 
   console.log(
@@ -1585,13 +1740,18 @@ export async function replaceAll(
 
 /**
  * Replace a single occurrence in a specific cell.
+ *
+ * `sheetIndex` (Wave 3): replace on a NON-ACTIVE sheet — the returned
+ * CellData (when a replacement happened) is a sheet-tagged stub with no
+ * display payload, so do not paint it.
  */
 export async function replaceSingle(
   row: number,
   col: number,
   search: string,
   replacement: string,
-  caseSensitive: boolean = false
+  caseSensitive: boolean = false,
+  sheetIndex?: number
 ): Promise<CellData | null> {
   return invoke<CellData | null>("replace_single", {
     row,
@@ -1599,6 +1759,7 @@ export async function replaceSingle(
     search,
     replacement,
     caseSensitive,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
@@ -1702,12 +1863,17 @@ export interface MergeResult {
 /**
  * Merge cells in the specified range.
  * The top-left cell becomes the master cell.
+ *
+ * `sheetIndex` (Wave 3): merge on a NON-ACTIVE sheet — `mergedRegions` in the
+ * result then describes the TARGET sheet's merge set and `updatedCells` is
+ * empty (no active-canvas repaint).
  */
 export async function mergeCells(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  sheetIndex?: number
 ): Promise<MergeResult> {
   console.log(`[tauri-api] mergeCells(${startRow}, ${startCol}, ${endRow}, ${endCol})`);
   const result = await invoke<MergeResult>("merge_cells", {
@@ -1715,6 +1881,7 @@ export async function mergeCells(
     startCol,
     endRow,
     endCol,
+    sheetIndex: sheetIndex ?? null,
   });
   console.log(`[tauri-api] mergeCells result:`, result);
   recordGridEvent({ kind: "mergeCells", startRow, startCol, endRow, endCol });
@@ -1723,10 +1890,16 @@ export async function mergeCells(
 
 /**
  * Unmerge cells at the specified position.
+ *
+ * `sheetIndex` (Wave 3): unmerge on a NON-ACTIVE sheet (see mergeCells).
  */
-export async function unmergeCells(row: number, col: number): Promise<MergeResult> {
+export async function unmergeCells(row: number, col: number, sheetIndex?: number): Promise<MergeResult> {
   console.log(`[tauri-api] unmergeCells(${row}, ${col})`);
-  const result = await invoke<MergeResult>("unmerge_cells", { row, col });
+  const result = await invoke<MergeResult>("unmerge_cells", {
+    row,
+    col,
+    sheetIndex: sheetIndex ?? null,
+  });
   console.log(`[tauri-api] unmergeCells result:`, result);
   recordGridEvent({ kind: "unmergeCells", row, col });
   return result;
@@ -1997,13 +2170,17 @@ export async function applyNamesToFormulas(
 
 /**
  * Set data validation on a range.
+ *
+ * `sheetIndex` (Wave 3): target a NON-ACTIVE sheet's validation store; omit
+ * for the active sheet.
  */
 export async function setDataValidation(
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
-  validation: DataValidation
+  validation: DataValidation,
+  sheetIndex?: number
 ): Promise<DataValidationResult> {
   console.log(
     `[tauri-api] setDataValidation(${startRow}, ${startCol}, ${endRow}, ${endCol})`,
@@ -2015,17 +2192,21 @@ export async function setDataValidation(
     endRow,
     endCol,
     validation,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
 /**
  * Clear data validation from a range.
+ *
+ * `sheetIndex` (Wave 3): target a NON-ACTIVE sheet; omit for the active sheet.
  */
 export async function clearDataValidation(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  sheetIndex?: number
 ): Promise<DataValidationResult> {
   console.log(
     `[tauri-api] clearDataValidation(${startRow}, ${startCol}, ${endRow}, ${endCol})`
@@ -2035,24 +2216,35 @@ export async function clearDataValidation(
     startCol,
     endRow,
     endCol,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
 /**
  * Get data validation for a specific cell.
+ *
+ * `sheetIndex` (Wave 3): read a NON-ACTIVE sheet; omit for the active sheet.
  */
 export async function getDataValidation(
   row: number,
-  col: number
+  col: number,
+  sheetIndex?: number
 ): Promise<DataValidation | null> {
-  return invoke<DataValidation | null>("get_data_validation", { row, col });
+  return invoke<DataValidation | null>("get_data_validation", {
+    row,
+    col,
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**
- * Get all validation ranges for the current sheet.
+ * Get all validation ranges for a sheet (the active sheet when `sheetIndex`
+ * is omitted).
  */
-export async function getAllDataValidations(): Promise<ValidationRange[]> {
-  return invoke<ValidationRange[]>("get_all_data_validations");
+export async function getAllDataValidations(sheetIndex?: number): Promise<ValidationRange[]> {
+  return invoke<ValidationRange[]>("get_all_data_validations", {
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**

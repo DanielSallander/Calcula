@@ -11,9 +11,11 @@ import {
   applyFormatting,
   applyBorderPreset,
   getActiveSheet,
+  getRangeEdge,
   getWatchCells,
   updateCellOnSheets,
 } from "./lib";
+import type { ArrowDirection } from "./lib";
 import type { CellUpdateInput } from "./lib";
 import { navigateToCell, navigateToRange, borderAround } from "./grid";
 
@@ -279,6 +281,58 @@ export class CellRange {
     );
   }
 
+  /**
+   * The overlapping rectangle, or null when disjoint — the CANONICAL-MODEL
+   * spelling of `intersection()` (canonicalModelSpec.ts pins the name across
+   * every runtime; the Rust twin is NotebookRange.intersect in
+   * core/script-engine/src/ops/canonical_model.rs). Accepts any Range-shaped
+   * object, so a rectangle from another surface can be intersected directly.
+   */
+  intersect(other: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  }): CellRange | null {
+    const startRow = Math.max(this.startRow, other.startRow);
+    const startCol = Math.max(this.startCol, other.startCol);
+    const endRow = Math.min(this.endRow, other.endRow);
+    const endCol = Math.min(this.endCol, other.endCol);
+    if (startRow > endRow || startCol > endCol) return null;
+    return new CellRange(startRow, startCol, endRow, endCol, this.sheetIndex);
+  }
+
+  /**
+   * The smallest single rectangle covering both ranges — the CANONICAL-MODEL
+   * spelling of `union()`, named honestly: this is NOT VBA Union's multi-area
+   * result, the gaps between the inputs are included.
+   */
+  boundingUnion(other: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  }): CellRange {
+    return new CellRange(
+      Math.min(this.startRow, other.startRow),
+      Math.min(this.startCol, other.startCol),
+      Math.max(this.endRow, other.endRow),
+      Math.max(this.endCol, other.endCol),
+      this.sheetIndex,
+    );
+  }
+
+  /**
+   * The single-cell range where Ctrl+Arrow would land from this range's
+   * TOP-LEFT cell (VBA Range.End), resolved by the same engine::navigation
+   * function the grid keyboard uses, over the full Excel grid bounds. The
+   * last-row idiom works: `CellRange.fromAddress("A1048576").end("up")`.
+   */
+  async end(direction: ArrowDirection): Promise<CellRange> {
+    const target = await getRangeEdge(this.startRow, this.startCol, direction, this.sheetIndex);
+    return CellRange.fromCell(target.row, target.col, this.sheetIndex);
+  }
+
   // --------------------------------------------------------------------------
   // Iteration
   // --------------------------------------------------------------------------
@@ -387,8 +441,12 @@ export class CellRange {
   async setValue(value: string): Promise<void> {
     const bg = await this.resolveBackgroundSheet();
     if (bg !== null) {
-      await updateCellOnSheets([bg], this.startRow, this.startCol, value);
-      return;
+      const written = await updateCellOnSheets([bg], this.startRow, this.startCol, value);
+      // `update_cell_on_sheets` SKIPS the active sheet and reports what it
+      // wrote. `bg` was another sheet when we resolved it a moment ago, so an
+      // absence here means it became the ACTIVE sheet in between — write it
+      // through the active path instead of silently losing the value.
+      if (Array.isArray(written) && written.includes(bg)) return;
     }
     await updateCellsBatch([{ row: this.startRow, col: this.startCol, value }]);
   }
@@ -404,12 +462,22 @@ export class CellRange {
       // Non-active sheet: route through the grouped-sheet write path (the same
       // command the object-script host uses for cross-sheet writes), one cell at
       // a time, sequentially so the writes land (and undo) in a stable order.
+      // A cell the backend SKIPPED (the target became the active sheet
+      // mid-block) is re-issued through the active path — never dropped; see
+      // the note in setValue.
+      const skipped: Array<{ row: number; col: number; value: string }> = [];
       for (let r = 0; r < values.length && r < this.rowCount; r++) {
         const row = values[r];
         for (let c = 0; c < row.length && c < this.colCount; c++) {
-          await updateCellOnSheets([bg], this.startRow + r, this.startCol + c, row[c]);
+          const written = await updateCellOnSheets(
+            [bg], this.startRow + r, this.startCol + c, row[c],
+          );
+          if (Array.isArray(written) && !written.includes(bg)) {
+            skipped.push({ row: this.startRow + r, col: this.startCol + c, value: row[c] });
+          }
         }
       }
+      if (skipped.length > 0) await updateCellsBatch(skipped);
       return;
     }
 

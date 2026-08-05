@@ -515,8 +515,25 @@ fn apply_changes(
                     &mut ribbon_filter_changed, &mut pane_control_changed,
                     &mut objects_changed,
                 );
-                if kind == "script_grid_cells" {
+                if kind == "script_grid_cells"
+                    || kind == "sheet_merge_regions"
+                    || kind == "sheet_structural_snapshot"
+                {
+                    // Off-active-sheet restores: the restored cells carry cached
+                    // values, but ACTIVE-sheet formulas referencing them must be
+                    // re-evaluated (see the comment on the recalc below).
                     script_cells_restored = true;
+                }
+                if kind == "sheet_structural_snapshot" {
+                    // Whole-sheet swap: when the restored sheet is (or has
+                    // become) the active one, the mirror changed shape — the
+                    // frontend must fully refresh and the dependency maps must
+                    // be rebuilt, exactly like an engine RestoreSnapshot.
+                    structural_restore = true;
+                    merge_changed = true;
+                }
+                if kind == "sheet_merge_regions" {
+                    merge_changed = true;
                 }
             }
             None => eprintln!("[undo] Unknown deferred custom restore kind: {}", kind),
@@ -648,6 +665,8 @@ fn r_pane_control_create(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf:
 fn r_pane_control_delete(_s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_pane_control_delete_restore(pc, d, inv); }
 fn r_object_swap(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, k: &str, d: &[u8], inv: &mut Transaction) { apply_object_swap_restore(s, k, d, inv); }
 fn r_script_grid_cells(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_script_grid_cells_restore(s, d, inv); }
+fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_merge_regions_restore(s, d, inv); }
+fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, d, inv); }
 fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, d, inv); }
 fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, d, inv); }
 
@@ -694,6 +713,12 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // undo/redo (re-fetches the active viewport when the restored sheet IS active;
     // a non-active restored sheet re-materializes from grids[idx] on sheet switch).
     m.insert("script_grid_cells", RestoreSpec { restore: r_script_grid_cells, change_class: Objects, defer: true });
+    // Wave 3 cross-sheet structural ops: per-sheet merge-set swap and per-sheet
+    // full structural snapshot. Deferred for the same reason as
+    // script_grid_cells (they re-acquire the grid/grids/active-sheet locks);
+    // tagged Objects so the frontend fires grid:refresh on undo/redo.
+    m.insert("sheet_merge_regions", RestoreSpec { restore: r_sheet_merge_regions, change_class: Objects, defer: true });
+    m.insert("sheet_structural_snapshot", RestoreSpec { restore: r_sheet_structural, change_class: Objects, defer: true });
     // Grid reports: cell-based restore of the report cells + definitions + region.
     // Tagged Objects so the frontend fires grid:refresh on undo/redo.
     m.insert("report_restore", RestoreSpec { restore: r_report_restore, change_class: Objects, defer: true });
@@ -802,6 +827,252 @@ fn apply_script_grid_cells_restore(
             cells: inverse_cells,
         })
         .unwrap_or_default(),
+    });
+}
+
+/// Serialized payload for the `"sheet_merge_regions"` CustomRestore — ONE
+/// sheet's full merged-region set as it was before an off-active-sheet
+/// merge/unmerge (Wave 3 cross-sheet structural ops). A whole-set swap, because
+/// per-sheet merge sets are small and the swap is symmetric: restore captures
+/// the then-current set as the inverse, so redo re-applies the post-op set.
+/// Slave-cell content travels separately as a `script_grid_cells` entry in the
+/// SAME transaction.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct SheetMergeRegionsSnapshot {
+    pub sheet_index: usize,
+    pub regions: Vec<crate::api_types::MergedRegion>,
+}
+
+/// Serialized "sheet_merge_regions" snapshot bytes (in-open-transaction
+/// contract, same as `script_grid_cells_snapshot_bytes`).
+pub(crate) fn sheet_merge_regions_snapshot_bytes(
+    sheet_index: usize,
+    regions: Vec<crate::api_types::MergedRegion>,
+) -> Vec<u8> {
+    serde_json::to_vec(&SheetMergeRegionsSnapshot { sheet_index, regions }).unwrap_or_default()
+}
+
+/// Restore (undo/redo) one sheet's merged-region set. `with_sheet_merges`
+/// resolves the mirror-vs-per-sheet-store split, so this works whether or not
+/// the target sheet is active at undo time.
+fn apply_sheet_merge_regions_restore(
+    state: &AppState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: SheetMergeRegionsSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize sheet_merge_regions snapshot: {}", e);
+            return;
+        }
+    };
+
+    let previous = crate::report::with_sheet_merges(state, snapshot.sheet_index, |merged| {
+        let prev: Vec<crate::api_types::MergedRegion> = merged.iter().cloned().collect();
+        merged.clear();
+        for r in &snapshot.regions {
+            merged.insert(r.clone());
+        }
+        prev
+    });
+
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "sheet_merge_regions".to_string(),
+        data: serde_json::to_vec(&SheetMergeRegionsSnapshot {
+            sheet_index: snapshot.sheet_index,
+            regions: previous,
+        })
+        .unwrap_or_default(),
+    });
+}
+
+/// Serialized payload for the `"sheet_structural_snapshot"` CustomRestore —
+/// one sheet's FULL grid state (cells, heights, widths, merges, style tiers)
+/// before an off-active-sheet insert/delete rows/columns (Wave 3 cross-sheet
+/// structural ops). The active-sheet twin of this is the engine-level
+/// `CellChange::RestoreSnapshot`, which can only ever target the mirror — this
+/// kind carries the sheet index so undo restores the RIGHT sheet no matter
+/// which sheet is active by then.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct SheetStructuralSnapshot {
+    pub sheet_index: usize,
+    pub cells: Vec<(u32, u32, engine::Cell)>,
+    pub row_heights: HashMap<u32, f64>,
+    pub column_widths: HashMap<u32, f64>,
+    pub merges: Vec<crate::api_types::MergedRegion>,
+    pub row_styles: Vec<(u32, usize)>,
+    pub column_styles: Vec<(u32, usize)>,
+}
+
+/// Serialized "sheet_structural_snapshot" bytes (in-open-transaction contract;
+/// a serialization failure restores nothing, so it is logged like
+/// `script_grid_cells_snapshot_bytes`).
+pub(crate) fn sheet_structural_snapshot_bytes(snapshot: &SheetStructuralSnapshot) -> Vec<u8> {
+    match serde_json::to_vec(snapshot) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            crate::log_error!(
+                "UNDO",
+                "sheet_structural_snapshot for sheet {} could not be serialized ({}); this undo entry will restore nothing",
+                snapshot.sheet_index + 1,
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Capture one sheet's full structural state (the counterpart of
+/// `capture_grid_snapshot` for a NON-ACTIVE sheet: reads `grids[idx]` and the
+/// per-sheet stores; reads the mirrors when `idx` IS active, since the
+/// per-sheet stores are then empty by take-semantics).
+pub(crate) fn capture_sheet_structural_snapshot(
+    state: &AppState,
+    sheet_index: usize,
+) -> Result<SheetStructuralSnapshot, String> {
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let grid = grids
+        .get(sheet_index)
+        .ok_or_else(|| format!("Sheet index {} out of range", sheet_index))?;
+    let is_active = sheet_index == active;
+
+    let row_heights = if is_active {
+        state.row_heights.lock().map_err(|e| e.to_string())?.clone()
+    } else {
+        state
+            .all_row_heights
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(sheet_index)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let column_widths = if is_active {
+        state.column_widths.lock().map_err(|e| e.to_string())?.clone()
+    } else {
+        state
+            .all_column_widths
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(sheet_index)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let cells = grid
+        .cells
+        .iter()
+        .map(|(&(r, c), cell)| (r, c, cell.clone()))
+        .collect();
+    let row_styles = grid.row_styles.iter().map(|(k, v)| (*k, *v)).collect();
+    let column_styles = grid.column_styles.iter().map(|(k, v)| (*k, *v)).collect();
+    drop(grids);
+
+    let merges = crate::report::with_sheet_merges(state, sheet_index, |merged| {
+        merged.iter().cloned().collect::<Vec<_>>()
+    });
+
+    Ok(SheetStructuralSnapshot {
+        sheet_index,
+        cells,
+        row_heights,
+        column_widths,
+        merges,
+        row_styles,
+        column_styles,
+    })
+}
+
+/// Restore (undo/redo) one sheet's full structural state, capturing the
+/// then-current state as the symmetric inverse. Follows the calp_reset
+/// restore's lock order (grids, active_sheet, mirror, mirror dims, all dims);
+/// merges go through `with_sheet_merges` in their own scope. Cells carry their
+/// cached values, so no recalc of the restored sheet is needed; the caller
+/// (`apply_changes`) re-evaluates the active sheet and rebuilds dependency
+/// maps via the `sheet_structural_snapshot` kind checks.
+fn apply_sheet_structural_restore(
+    state: &AppState,
+    data: &[u8],
+    inverse_transaction: &mut Transaction,
+) {
+    let snapshot: SheetStructuralSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] Failed to deserialize sheet_structural_snapshot: {}", e);
+            return;
+        }
+    };
+    let idx = snapshot.sheet_index;
+
+    let mut inverse = {
+        let mut grids = state.grids.lock().unwrap();
+        let active = *state.active_sheet.lock().unwrap();
+        let mut mirror = state.grid.lock().unwrap();
+        let mut mirror_cw = state.column_widths.lock().unwrap();
+        let mut mirror_rh = state.row_heights.lock().unwrap();
+        let mut all_cw = state.all_column_widths.lock().unwrap();
+        let mut all_rh = state.all_row_heights.lock().unwrap();
+        if idx >= grids.len() {
+            return;
+        }
+        let is_active = idx == active;
+
+        let inverse = SheetStructuralSnapshot {
+            sheet_index: idx,
+            cells: grids[idx]
+                .cells
+                .iter()
+                .map(|(&(r, c), cell)| (r, c, cell.clone()))
+                .collect(),
+            row_heights: if is_active {
+                mirror_rh.clone()
+            } else {
+                all_rh.get(idx).cloned().unwrap_or_default()
+            },
+            column_widths: if is_active {
+                mirror_cw.clone()
+            } else {
+                all_cw.get(idx).cloned().unwrap_or_default()
+            },
+            merges: Vec::new(), // filled in the merge pass below
+            row_styles: grids[idx].row_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+            column_styles: grids[idx].column_styles.iter().map(|(k, v)| (*k, *v)).collect(),
+        };
+
+        let mut restored = engine::Grid::new();
+        for (row, col, cell) in &snapshot.cells {
+            restored.set_cell(*row, *col, cell.clone());
+        }
+        restored.row_styles = snapshot.row_styles.iter().map(|(k, v)| (*k, *v)).collect();
+        restored.column_styles = snapshot.column_styles.iter().map(|(k, v)| (*k, *v)).collect();
+        grids[idx] = restored;
+        if idx < all_cw.len() {
+            all_cw[idx] = snapshot.column_widths.clone();
+        }
+        if idx < all_rh.len() {
+            all_rh[idx] = snapshot.row_heights.clone();
+        }
+        if is_active {
+            *mirror = grids[idx].clone();
+            *mirror_cw = snapshot.column_widths.clone();
+            *mirror_rh = snapshot.row_heights.clone();
+        }
+        inverse
+    };
+
+    inverse.merges = crate::report::with_sheet_merges(state, idx, |merged| {
+        let prev: Vec<crate::api_types::MergedRegion> = merged.iter().cloned().collect();
+        merged.clear();
+        for m in &snapshot.merges {
+            merged.insert(m.clone());
+        }
+        prev
+    });
+
+    inverse_transaction.add_change(CellChange::CustomRestore {
+        kind: "sheet_structural_snapshot".to_string(),
+        data: sheet_structural_snapshot_bytes(&inverse),
     });
 }
 
@@ -2974,6 +3245,8 @@ mod restore_registry_tests {
             ("obj_named_range", true, CustomRestoreKind::Objects),
             ("obj_freeze", true, CustomRestoreKind::Objects),
             ("script_grid_cells", true, CustomRestoreKind::Objects),
+            ("sheet_merge_regions", true, CustomRestoreKind::Objects),
+            ("sheet_structural_snapshot", true, CustomRestoreKind::Objects),
             ("obj_extension_data", true, CustomRestoreKind::Objects),
             ("obj_cell_types", true, CustomRestoreKind::Objects),
             ("obj_cell_behaviors", true, CustomRestoreKind::Objects),
@@ -3021,6 +3294,8 @@ mod restore_registry_tests {
                 || kind.starts_with("pane_control")
                 || kind.starts_with("obj_")
                 || *kind == "script_grid_cells"
+                || *kind == "sheet_merge_regions"
+                || *kind == "sheet_structural_snapshot"
                 || *kind == "report_restore"
                 || *kind == "calp_reset";
             assert_eq!(
@@ -3156,4 +3431,156 @@ pub(crate) fn controls_snapshot_bytes(
 ) -> Vec<u8> {
     serde_json::to_vec(&ControlsObjSnapshot { controls, script_instance_ids })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod sheet_tagged_restore_tests {
+    //! Wave 3: the RESTORE half of the sheet-tagged undo kinds. The command
+    //! tests (commands/off_sheet_tests.rs) prove the payloads are recorded
+    //! with the right sheet index; these prove replaying a payload mutates
+    //! exactly that sheet and captures a symmetric inverse for redo.
+
+    use super::*;
+    use engine::{Cell, CellValue};
+    use std::collections::HashSet;
+
+    fn two_sheet_state() -> AppState {
+        let state = crate::create_app_state();
+        state.grids.lock().unwrap().push(engine::Grid::new());
+        state.sheet_names.lock().unwrap().push("Sheet2".to_string());
+        state.all_column_widths.lock().unwrap().push(HashMap::new());
+        state.all_row_heights.lock().unwrap().push(HashMap::new());
+        // create_app_state leaves all_merged_regions EMPTY (the mirror holds
+        // the active sheet's set); size it for both sheets so tests can index.
+        {
+            let mut all = state.all_merged_regions.lock().unwrap();
+            while all.len() < 2 {
+                all.push(HashSet::new());
+            }
+        }
+        state
+            .sheet_ids
+            .lock()
+            .unwrap()
+            .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+        state
+    }
+
+    #[test]
+    fn sheet_structural_restore_targets_the_named_sheet_and_captures_the_inverse() {
+        let state = two_sheet_state();
+        // Sheet 0 (active) sentinel that must survive untouched.
+        state.grid.lock().unwrap().set_cell(0, 0, Cell::new_number(999.0));
+        state.grids.lock().unwrap()[0].set_cell(0, 0, Cell::new_number(999.0));
+
+        // Pre-edit state of sheet 2, captured as the undo snapshot.
+        state.grids.lock().unwrap()[1].set_cell(4, 0, Cell::new_number(2.0));
+        state.all_row_heights.lock().unwrap()[1].insert(4, 33.0);
+        let snapshot = capture_sheet_structural_snapshot(&state, 1).expect("capture");
+
+        // Simulate the post-edit state (as if 3 rows were inserted at 2).
+        {
+            let mut grids = state.grids.lock().unwrap();
+            grids[1].clear_cell(4, 0);
+            grids[1].set_cell(7, 0, Cell::new_number(2.0));
+            let mut all_rh = state.all_row_heights.lock().unwrap();
+            all_rh[1].clear();
+            all_rh[1].insert(7, 33.0);
+        }
+
+        // Undo: replay the pre-edit snapshot.
+        let mut inverse = Transaction::new("test");
+        apply_sheet_structural_restore(
+            &state,
+            &sheet_structural_snapshot_bytes(&snapshot),
+            &mut inverse,
+        );
+
+        let grids = state.grids.lock().unwrap();
+        assert_eq!(
+            grids[1].get_cell(4, 0).map(|c| c.value.clone()),
+            Some(CellValue::Number(2.0)),
+            "sheet 2 restored to its pre-edit shape"
+        );
+        assert!(grids[1].get_cell(7, 0).is_none(), "post-edit position vacated");
+        assert_eq!(
+            grids[0].get_cell(0, 0).map(|c| c.value.clone()),
+            Some(CellValue::Number(999.0)),
+            "sheet 1 untouched by a sheet-2 restore"
+        );
+        drop(grids);
+        assert_eq!(
+            state.all_row_heights.lock().unwrap()[1].get(&4),
+            Some(&33.0),
+            "per-sheet row heights restored"
+        );
+
+        // The inverse (redo) captures the post-edit state, sheet-tagged.
+        let redo = inverse
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                CellChange::CustomRestore { kind, data }
+                    if kind == "sheet_structural_snapshot" =>
+                {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .expect("symmetric inverse recorded");
+        let redo_snapshot: SheetStructuralSnapshot = serde_json::from_slice(redo).unwrap();
+        assert_eq!(redo_snapshot.sheet_index, 1);
+        assert!(
+            redo_snapshot
+                .cells
+                .iter()
+                .any(|(r, _, cell)| *r == 7 && cell.value == CellValue::Number(2.0)),
+            "redo re-applies the post-edit state"
+        );
+    }
+
+    #[test]
+    fn sheet_merge_regions_restore_swaps_only_the_named_sheets_set() {
+        let state = two_sheet_state();
+        // Active mirror holds a merge that must survive.
+        state.merged_regions.lock().unwrap().insert(crate::api_types::MergedRegion {
+            start_row: 0, start_col: 0, end_row: 1, end_col: 1,
+        });
+        // Sheet 2 currently holds a post-merge region; the snapshot says the
+        // pre-merge set was empty.
+        state.all_merged_regions.lock().unwrap()[1].insert(crate::api_types::MergedRegion {
+            start_row: 3, start_col: 3, end_row: 4, end_col: 4,
+        });
+
+        let mut inverse = Transaction::new("test");
+        apply_sheet_merge_regions_restore(
+            &state,
+            &sheet_merge_regions_snapshot_bytes(1, Vec::new()),
+            &mut inverse,
+        );
+
+        assert!(
+            state.all_merged_regions.lock().unwrap()[1].is_empty(),
+            "sheet 2's set swapped to the snapshot (empty)"
+        );
+        assert_eq!(
+            state.merged_regions.lock().unwrap().len(),
+            1,
+            "the ACTIVE sheet's merge set is untouched"
+        );
+
+        let redo = inverse
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                CellChange::CustomRestore { kind, data } if kind == "sheet_merge_regions" => {
+                    Some(data)
+                }
+                _ => None,
+            })
+            .expect("symmetric inverse recorded");
+        let redo_snapshot: SheetMergeRegionsSnapshot = serde_json::from_slice(redo).unwrap();
+        assert_eq!(redo_snapshot.sheet_index, 1);
+        assert_eq!(redo_snapshot.regions.len(), 1, "redo re-applies the post-merge set");
+    }
 }

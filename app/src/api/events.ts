@@ -106,6 +106,13 @@ export const AppEvents = {
   // Named ranges
   NAMED_RANGES_CHANGED: "app:named-ranges-changed",
 
+  // Conditional-format DEFINITIONS changed by something OTHER than the CF
+  // extension's own dialogs (today: the script rows api.*ConditionalFormat).
+  // The CF extension re-reads its rule cache and repaints on this; its own
+  // dialogs call their internal invalidateAndRefresh() directly and never
+  // emit it.
+  CONDITIONAL_FORMATS_CHANGED: "app:conditional-formats-changed",
+
   // Table (ListObject) lifecycle. These live in @api rather than inside the
   // Table extension because Pivot, Charts and AutoFilter all need to know when
   // a table's geometry or column set changes — an extension reaching into

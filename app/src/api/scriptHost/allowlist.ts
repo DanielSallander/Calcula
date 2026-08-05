@@ -7,25 +7,37 @@
 
 import {
   vAny, vNotify, vExpose, vUnexpose, vCall, vCallImport, vHook, vGetState, vSetState, vDecl, vNone,
-  vHtml, vCellRef, vCellSet, vBatch, vIndex, vEvent, vCommand, vFetch, vBiQuery, vBiSql,
+  vHtml, vCellRef, vCellSet, vBatch, vSheetRef, vEvent, vCommand, vFetch, vBiQuery, vBiSql,
   vCubeValue, vCubeKpi, vCubeMembers, vBiModelInfo, vBiModelMutation,
   vBiModelValidate, vBiModelLineage, vBiModelBatch,
   vConnectorRegister, vConnectorRemove,
-  vScheduleEvery, vScheduleAt, vScheduleCancel,
+  vScheduleEvery, vScheduleAt, vScheduleCancel, vScheduleOnce,
   vWritebackRegionId, vWritebackSaveDraft, vWritebackListSubmissions, vWritebackReview,
   vDistRegistry, vDistPackageRef, vDistNextVersion, vDistPublishPreview,
   vDistPublish, vDistPublishModel,
   vKey, vKV, vUdf, vRangeRef, vRangeWrite, MAX_RANGE_CELLS,
-  vRangeFormat, vRowColOp, vDimension, vFreeze,
-  vSheetName, vSheetRename, vSheetVisibility, vSortRange, vFind, vReplace,
+  vRangeFormat, vRangeFormatUnlocked, vRowColOp, vDimension, vFreeze,
+  vNamedStyleApply, vNamedStyleCreate, vNamedStyleName,
+  vAutoFitSpan, MAX_AUTOFIT_SPAN, vFillRange,
+  vCalculationMode, vRecalculate, vProtectSheet, vUnprotectSheet, vProtectionStatus,
+  vSheetRename, vSheetVisibility, vSortRange, vFind, vReplace,
+  vRemoveDuplicates, vTextToColumns, vSpecialCells, vGoalSeek,
+  vDataValidationSet, vDataValidationClear, vSheetScopedList, vAddHyperlink,
   vObjectKind, vObjectId, vObjectAspect, vCreateChart, vCreateTable,
   vCreateNamedRange, vNamedRangeName, vCreatePivot, MAX_OBJECT_LIST,
+  vSetNote, vAddComment, vCommentReply, vResolveComment, vListComments,
+  vCFSpec, vCFUpdate, vCFRuleId, vCFList, vCFClear, MAX_CF_RANGES,
   vDialogMessage, vDialogPrompt, vDialogForm,
   vFileExport, vFileImport, MAX_FILE_TEXT_CHARS, MAX_FILE_NAME,
   vShortcutBind, vShortcutUnbind,
   vEvaluate, MAX_EVAL_EXPRESSIONS, MAX_EVAL_EXPRESSION_CHARS,
+  vStatusBar, MAX_STATUS_BAR_CHARS, vBeginBatch, vRunMacro,
+  vViewOptionGet, vViewOptionSet, vZoom,
   vFormulaRead, vFormulaWrite, vPasteRange, vPrintPdf,
-  vMoveSheet, vCopySheet, vSplit,
+  vSelect, vScrollTo, vClearRange, MAX_SELECT_AREAS,
+  vRangeEdge, vUsedRange, vTabColor,
+  vMoveSheet, vCopySheet, vAddSheet, vSplit,
+  vPageSetupPatch, vPrintArea, vPageBreak, vGroupSpan, vOutlineLevel,
   vAutoFilterRange, vAutoFilterColumn, vAutoFilterClear, vAutoFilterCriteria,
   MAX_AUTOFILTER_COLUMNS, MAX_AUTOFILTER_VALUES,
   type Validator,
@@ -134,6 +146,14 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Change how cells look on the sheet currently shown (font, colour, alignment, number format, borders)" },
   "sheet.clearRangeFormat":{ tier: "restricted", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Remove all formatting from a block of cells on the sheet currently shown (the values are kept)" },
+  // FORMAT READ-BACK (Wave 3). The other half of the two rows above: a format
+  // read is addressed exactly like a value read (same validators, same clamp),
+  // and it discloses strictly less than sheet.getCellValue already does — how
+  // a cell LOOKS, never what it says.
+  "sheet.getRangeFormat":  { tier: "restricted", class: "read",   validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Read how a block of cells looks on the sheet currently shown (font, colour, alignment, number format, borders — never the values)" },
+  "sheet.getCellFormat":   { tier: "restricted", class: "read",   validate: vCellRef,
+                             desc: "Read how one cell looks on the sheet currently shown (its font, colour, alignment, number format and borders — never its value)" },
   // ---- unlocked: whole-workbook reach ----
   "api.getCellValue":      { tier: "unlocked", class: "read",   validate: vCellRef,  desc: "Read any cell" },
   "api.getCellData":       { tier: "unlocked", class: "read",   validate: vCellRef,  desc: "Read any cell with its type and formula" },
@@ -143,29 +163,137 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.updateCellsBatch":  { tier: "unlocked", class: "mutate", validate: vBatch,    limits: { maxCells: 100_000 }, desc: "Write many cells at once" },
   "api.getSheetNames":     { tier: "unlocked", class: "read",   validate: vNone,     desc: "List sheets" },
   "api.getActiveSheet":    { tier: "unlocked", class: "read",   validate: vNone,     desc: "Read the active sheet" },
-  "api.setActiveSheet":    { tier: "unlocked", class: "mutate", validate: vIndex,    desc: "Switch sheets" },
+  "api.setActiveSheet":    { tier: "unlocked", class: "mutate", validate: vSheetRef, desc: "Switch sheets (by 0-based index or by name)" },
   "api.emitEvent":         { tier: "unlocked", class: "emit",   validate: vEvent,    desc: "Emit a custom app event (auto-namespaced userscript:*)" },
   "api.onEvent":           { tier: "unlocked", class: "read",   validate: vHook,     desc: "Listen for custom events (userscript:*) and a read-only set of app events" },
   "api.executeCommand":    { tier: "unlocked", class: "mutate", validate: vCommand,  desc: "Run commands flagged scriptSafe by their extension" },
-  "api.beginBatch":        { tier: "unlocked", class: "mutate", validate: vAny,      desc: "Group changes for undo" },
+  // deferRepaint (Wave 4) is the honest ScreenUpdating: repaints pause ONLY for
+  // the life of the batch, and the host releases them at commit/cancel AND at
+  // unmount/fault — a dead script can never leave the canvas frozen, which is
+  // exactly the failure a standalone screenUpdating flag shipped in VBA.
+  "api.beginBatch":        { tier: "unlocked", class: "mutate", validate: vBeginBatch,
+                             desc: "Group changes into one undo step (optionally pausing screen repaints until the group ends)" },
   "api.commitBatch":       { tier: "unlocked", class: "mutate", validate: vNone,     desc: "Commit a grouped change" },
   "api.cancelBatch":       { tier: "unlocked", class: "mutate", validate: vNone,     desc: "Cancel a grouped change" },
   // ---- unlocked: formatting + structure (B2). Every row below reaches the
   //      WHOLE workbook, which is the same bar api.setCellValue already sets —
   //      no capability is involved, because none of this touches anything
   //      outside the document (no network, no disk, no other workbook). ----
-  "api.setRangeFormat":    { tier: "unlocked", class: "mutate", validate: vRangeFormat, limits: { maxCells: MAX_RANGE_CELLS },
-                             desc: "Change how cells look on any sheet (font, colour, alignment, number format, borders)" },
+  // vRangeFormatUnlocked, NOT vRangeFormat: this ONE row additionally accepts
+  // the protection attributes locked / formulaHidden (Wave 3 item 8). The
+  // restricted rows keep refusing them — a distributed script is forced to the
+  // restricted tier at pull, so packaged code can never unlock cells.
+  "api.setRangeFormat":    { tier: "unlocked", class: "mutate", validate: vRangeFormatUnlocked, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Change how cells look on any sheet (font, colour, alignment, number format, borders), including whether a cell is locked while its sheet is protected" },
   "api.clearRangeFormat":  { tier: "unlocked", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Remove all formatting from a block of cells (the values are kept)" },
-  "api.insertRows":        { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Insert rows, shifting everything below them down" },
-  "api.deleteRows":        { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete rows, shifting everything below them up (their contents are lost)" },
-  "api.insertColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Insert columns, shifting everything to their right" },
-  "api.deleteColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete columns, shifting the rest left (their contents are lost)" },
+  // FORMAT READ-BACK (Wave 3, item 1) — the inverse of api.setRangeFormat.
+  // Same address validators as the value reads, and strictly less disclosure
+  // than api.getRangeValues (appearance only, never contents), so the same
+  // tier with no capability is the honest classification.
+  "api.getRangeFormat":    { tier: "unlocked", class: "read",   validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Read how a block of cells looks on any sheet (font, colour, alignment, number format, borders — never the values)" },
+  "api.getCellFormat":     { tier: "unlocked", class: "read",   validate: vCellRef,
+                             desc: "Read how one cell looks on any sheet (its font, colour, alignment, number format and borders — never its value)" },
+  // ---- unlocked: NAMED CELL STYLES (Wave 4, formatting breadth). VBA's
+  //      Styles collection / Range.Style, over the same named_styles commands
+  //      the Cell Styles gallery calls. Same bar as api.setRangeFormat (pure
+  //      document appearance, nothing outside it); apply is ACTIVE-SHEET only
+  //      because the backend command is. Deleting a BUILT-IN style is refused
+  //      backend-side; creating a style never touches the user's cells (the
+  //      one scratch write it needs is reverted in the same breath). ----
+  "api.listNamedStyles":   { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "List the workbook's named cell styles (built-in and custom), with each one's category" },
+  "api.applyNamedStyle":   { tier: "unlocked", class: "mutate", validate: vNamedStyleApply, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Apply a named cell style (\"Good\", \"Heading 1\", ...) to a block of cells on the active sheet (one undo step)" },
+  "api.createNamedStyle":  { tier: "unlocked", class: "mutate", validate: vNamedStyleCreate,
+                             desc: "Create a custom named cell style from a format description, for later applyNamedStyle calls (and the Cell Styles gallery)" },
+  "api.deleteNamedStyle":  { tier: "unlocked", class: "mutate", validate: vNamedStyleName,
+                             desc: "Delete a custom named cell style (built-in styles are refused; cells already styled keep their look)" },
+  // Theme palette read: strictly less than getRangeFormat already discloses
+  // (12 workbook-level colors + the font pair, never a cell), so the same
+  // unlocked/no-capability classification is the honest one.
+  "api.getThemePalette":   { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read the document theme: its 12 named colors resolved to hex, and its heading/body font pair" },
+  // ---- unlocked: CALCULATION CONTROL (Wave 3, item 7). VBA's
+  //      Application.Calculation / Calculate. Manual mode changes WHEN formulas
+  //      compute, never what they say — but a workbook left uncalculating looks
+  //      exactly like a workbook that is wrong, so the host tracks every script
+  //      that flips automatic -> manual and RESTORES automatic when that script
+  //      unmounts, faults or is stopped in the debugger (and on workbook swap).
+  //      A dead script can therefore never leave the workbook stale. ----
+  "api.getCalculationMode":{ tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "See whether formulas recalculate automatically after every change, or only when asked" },
+  "api.setCalculationMode":{ tier: "unlocked", class: "mutate", validate: vCalculationMode,
+                             desc: "Switch formula recalculation between automatic and manual (Calcula switches it back to automatic if the script stops while it holds manual)" },
+  "api.recalculate":       { tier: "unlocked", class: "mutate", validate: vRecalculate,
+                             desc: "Recalculate formulas now — the active sheet, or the whole workbook (what pressing F9 does)" },
+  // ---- unlocked: SHEET PROTECTION (Wave 3, item 8). VBA's Worksheet.Protect /
+  //      Unprotect, over the SAME backend commands the Review ribbon calls —
+  //      active sheet only, like the structure rows above. Unlocked-tier ONLY,
+  //      and deliberately so: protection guards the USER's cells, and a
+  //      distributed script (always restricted) must not be able to lock the
+  //      user out of their own sheet or lift a protection someone relies on.
+  //      A wrong password on unprotect answers false rather than failing. ----
+  "api.protectSheet":      { tier: "unlocked", class: "mutate", validate: vProtectSheet,
+                             desc: "Protect the active sheet (optionally with a password), so locked cells cannot be edited until it is unprotected" },
+  "api.unprotectSheet":    { tier: "unlocked", class: "mutate", validate: vUnprotectSheet,
+                             desc: "Remove the active sheet's protection, so its cells can be edited again (a wrong password simply answers no)" },
+  "api.getProtectionStatus": { tier: "unlocked", class: "read", validate: vProtectionStatus,
+                             desc: "See whether the active sheet is protected, whether a password is set, and what the protection still allows" },
+  // Structural ops are SHEET-ADDRESSABLE since Wave 3: the backend commands
+  // grew an optional sheetIndex with the full off-sheet guard chain
+  // (protection, spill, writeback claims, sheet-tagged undo, cross-sheet
+  // formula rewrite), so the activate-dance is gone. Same tier, no capability:
+  // reaching another sheet of the SAME workbook was already this tier's grid
+  // reach (api.setCellValue has done it since Wave 1).
+  "api.insertRows":        { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Insert rows on a sheet, shifting everything below them down" },
+  "api.deleteRows":        { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete rows on a sheet, shifting everything below them up (their contents are lost)" },
+  "api.insertColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Insert columns on a sheet, shifting everything to their right" },
+  "api.deleteColumns":     { tier: "unlocked", class: "mutate", validate: vRowColOp, desc: "Delete columns on a sheet, shifting the rest left (their contents are lost)" },
   "api.mergeCells":        { tier: "unlocked", class: "mutate", validate: vRangeRef, desc: "Merge a block of cells into one (only the top-left value is kept)" },
   "api.unmergeCells":      { tier: "unlocked", class: "mutate", validate: vCellRef,  desc: "Split a merged block back into individual cells" },
+  // ---- unlocked: DATA VALIDATION (Wave 3, item 5). Excel's Data ▸ Data
+  //      Validation over the same set_data_validation / clear_data_validation
+  //      commands the dialog calls, sheet-addressable. Same tier and no
+  //      capability as setRangeFormat: a validation rule shapes what future
+  //      EDITS a cell accepts — pure document state, nothing outside it. ----
+  "api.setDataValidation": { tier: "unlocked", class: "mutate", validate: vDataValidationSet,
+                             desc: "Set a data-validation rule on a block of cells (what values future edits will accept, an optional dropdown list, and the messages shown)" },
+  "api.clearDataValidation": { tier: "unlocked", class: "mutate", validate: vDataValidationClear,
+                             desc: "Remove the data-validation rules from a block of cells" },
+  "api.getDataValidation": { tier: "unlocked", class: "read",   validate: vCellRef,
+                             desc: "Read the data-validation rule on one cell (the rule itself — never the cell's value)" },
+  "api.listDataValidations": { tier: "unlocked", class: "read", validate: vSheetScopedList,
+                             desc: "List every data-validation rule on a sheet, with the cells each one covers" },
+  // ---- unlocked: HYPERLINKS (Wave 3, item 6). Insert ▸ Link over the same
+  //      add_hyperlink / remove_hyperlink commands the dialog calls,
+  //      sheet-addressable. DELIBERATE EXCLUSION: there is no "follow" —
+  //      a script can attach, read and remove links, never OPEN one (external
+  //      targets leave the sandbox; internal navigation is api.select). ----
+  "api.addHyperlink":      { tier: "unlocked", class: "mutate", validate: vAddHyperlink,
+                             desc: "Attach a hyperlink to a cell (a web address, email address, file path, or a jump to another cell in this workbook) — scripts can never open one" },
+  "api.removeHyperlink":   { tier: "unlocked", class: "mutate", validate: vCellRef,
+                             desc: "Remove the hyperlink from a cell (the cell's value stays)" },
+  "api.getHyperlink":      { tier: "unlocked", class: "read",   validate: vCellRef,
+                             desc: "Read the hyperlink on one cell (where it points and its display text)" },
+  "api.listHyperlinks":    { tier: "unlocked", class: "read",   validate: vSheetScopedList,
+                             desc: "List every hyperlink on a sheet, with where each one points" },
   "api.setRowHeight":      { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a row's height" },
   "api.setColumnWidth":    { tier: "unlocked", class: "mutate", validate: vDimension, desc: "Change a column's width" },
+  // AUTO-FIT (Wave 3, item 11): the SAME canvas-measured best-fit the
+  // double-click resize runs — same measurement code, same
+  // @api/autoFitContributors registry, so a pivot overlay or in-cell filter
+  // button is sized identically whether a person or a script asked. ACTIVE
+  // SHEET ONLY, refused (never silently redirected) otherwise: measurement is
+  // canvas text metrics over the rendered sheet's cells and theme fonts, and a
+  // "best fit" computed against a sheet nobody is looking at would be a guess
+  // wearing the name. Same tier as setColumnWidth — it IS setColumnWidth with
+  // the size measured instead of named.
+  "api.autoFitColumns":    { tier: "unlocked", class: "mutate", validate: vAutoFitSpan, limits: { maxSpan: MAX_AUTOFIT_SPAN },
+                             desc: "Size columns to fit their contents, exactly like double-clicking each column's resize handle" },
+  "api.autoFitRows":       { tier: "unlocked", class: "mutate", validate: vAutoFitSpan, limits: { maxSpan: MAX_AUTOFIT_SPAN },
+                             desc: "Size rows to fit their contents, exactly like double-clicking each row's resize handle" },
   "api.freezePanes":       { tier: "unlocked", class: "mutate", validate: vFreeze,   desc: "Freeze (or unfreeze) rows and columns so they stay on screen while scrolling" },
   // The other half of View ▸ Window, shipped one wave late (§6.6). Split is a
   // VIEW setting like freeze — it changes what is on screen, never a value —
@@ -173,8 +301,9 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // so a script setting it and a person setting it are the same act.
   "api.splitPanes":        { tier: "unlocked", class: "mutate", validate: vSplit,
                              desc: "Split the window into scrollable panes at a row and/or column (pass nothing to remove the split)" },
-  "api.addSheet":          { tier: "unlocked", class: "mutate", validate: vSheetName, desc: "Add a new sheet to the workbook" },
-  "api.deleteSheet":       { tier: "unlocked", class: "mutate", validate: vIndex,    desc: "Delete a sheet and everything on it" },
+  "api.addSheet":          { tier: "unlocked", class: "mutate", validate: vAddSheet,
+                             desc: "Add a new sheet to the workbook (at the end, or before/after a named sheet)" },
+  "api.deleteSheet":       { tier: "unlocked", class: "mutate", validate: vSheetRef, desc: "Delete a sheet and everything on it" },
   "api.renameSheet":       { tier: "unlocked", class: "mutate", validate: vSheetRename, desc: "Rename a sheet" },
   "api.setSheetVisibility":{ tier: "unlocked", class: "mutate", validate: vSheetVisibility, desc: "Show or hide a sheet" },
   // Move / copy (§2.4). Sheet CRUD shipped in B2 without them, which left the
@@ -186,9 +315,116 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Move a sheet to a different position in the tab bar" },
   "api.copySheet":         { tier: "unlocked", class: "mutate", validate: vCopySheet,
                              desc: "Duplicate a sheet — its cells, formatting and objects — as a new sheet next to it" },
-  "api.sortRange":         { tier: "unlocked", class: "mutate", validate: vSortRange, desc: "Sort a block of cells by one or more columns" },
-  "api.findAll":           { tier: "unlocked", class: "read",   validate: vFind,     desc: "Find every cell on the active sheet matching a search text" },
-  "api.replaceAll":        { tier: "unlocked", class: "mutate", validate: vReplace,  desc: "Replace a search text everywhere on the active sheet (a single undo step)" },
+  // ---- unlocked: PAGE SETUP + PRINT LAYOUT (Wave 4, SHEETS cluster). VBA's
+  //      Worksheet.PageSetup / HPageBreaks, over the same print.rs commands
+  //      the Page Setup dialog writes. ACTIVE SHEET ONLY — every backend
+  //      print command acts on the active sheet, so a named other sheet is
+  //      refused, never redirected. Same tier and no capability as
+  //      setRangeFormat: page setup shapes how the document PRINTS, changes
+  //      no value, and nothing leaves the file (printing itself stays behind
+  //      cap.filePrintPdf and the user's own File menu).
+  "api.getPageSetup":      { tier: "unlocked", class: "read",   validate: vSheetScopedList,
+                             desc: "Read the active sheet's page setup (paper size, orientation, margins, scaling, headers and footers, print area, page breaks)" },
+  "api.setPageSetup":      { tier: "unlocked", class: "mutate", validate: vPageSetupPatch,
+                             desc: "Change part of the active sheet's page setup (paper size, orientation, margins, scaling, headers and footers) — only the properties named are touched" },
+  "api.setPrintArea":      { tier: "unlocked", class: "mutate", validate: vPrintArea,
+                             desc: "Set which block of cells the active sheet prints (everything outside it is left off the page)" },
+  "api.clearPrintArea":    { tier: "unlocked", class: "mutate", validate: vSheetScopedList,
+                             desc: "Remove the active sheet's print area, so the whole sheet prints again" },
+  "api.addPageBreak":      { tier: "unlocked", class: "mutate", validate: vPageBreak,
+                             desc: "Insert a manual page break above a row (or left of a column) on the active sheet" },
+  "api.removePageBreak":   { tier: "unlocked", class: "mutate", validate: vPageBreak,
+                             desc: "Remove a manual page break from the active sheet" },
+  "api.resetPageBreaks":   { tier: "unlocked", class: "mutate", validate: vSheetScopedList,
+                             desc: "Remove every manual page break from the active sheet, going back to automatic ones" },
+  // ---- unlocked: OUTLINE GROUPING (Wave 4, SHEETS cluster). Excel's Data ▸
+  //      Group/Ungroup, through @api/groupingService — the feature-neutral
+  //      seam the Grouping extension registers (the autoFilterService
+  //      pattern), so a scripted group keeps the grid's hidden rows and the
+  //      outline bar in step with the backend. With the extension disabled
+  //      these REFUSE rather than grouping invisibly. ACTIVE SHEET ONLY
+  //      (every backend outline command is). Same tier and no capability as
+  //      sortRange: grouping decides which rows are SHOWN, changes no value,
+  //      and everything it touches is inside the document.
+  "api.groupRows":         { tier: "unlocked", class: "mutate", validate: vGroupSpan,
+                             desc: "Group a band of rows on the active sheet, so they can be collapsed and expanded from the outline bar" },
+  "api.ungroupRows":       { tier: "unlocked", class: "mutate", validate: vGroupSpan,
+                             desc: "Ungroup a band of rows on the active sheet (the rows and their values are kept)" },
+  "api.groupColumns":      { tier: "unlocked", class: "mutate", validate: vGroupSpan,
+                             desc: "Group a band of columns on the active sheet, so they can be collapsed and expanded from the outline bar" },
+  "api.ungroupColumns":    { tier: "unlocked", class: "mutate", validate: vGroupSpan,
+                             desc: "Ungroup a band of columns on the active sheet (the columns and their values are kept)" },
+  "api.showOutlineLevel":  { tier: "unlocked", class: "mutate", validate: vOutlineLevel,
+                             desc: "Collapse or expand the active sheet's row and column groups to a chosen depth — what the little 1/2/3 buttons do" },
+  "api.sortRange":         { tier: "unlocked", class: "mutate", validate: vSortRange, desc: "Sort a block of cells on a sheet by one or more columns" },
+  // ---- RANGE OPS (Wave 4). Data ▸ Remove Duplicates and Data ▸ Text to
+  //      Columns, scripted: both are the SAME backend/write paths the ribbon
+  //      drives, both land as one undo step, and both reach nothing outside
+  //      the document — the same tier-and-no-capability reasoning as
+  //      sortRange, their closest relative. removeDuplicates goes straight to
+  //      the shipped Rust command (active-sheet-only, refused otherwise);
+  //      textToColumns goes through @api/textToColumnsService — the
+  //      feature-neutral seam the TextToColumns extension registers — and
+  //      REFUSES when the extension is disabled rather than half-splitting
+  //      invisibly (the autoFilterService precedent).
+  "api.removeDuplicates":  { tier: "unlocked", class: "mutate", validate: vRemoveDuplicates,
+                             desc: "Remove duplicate rows from a block of cells, keeping each first occurrence (one undo step)" },
+  "api.textToColumns":     { tier: "unlocked", class: "mutate", validate: vTextToColumns,
+                             desc: "Split one column of text into several columns at delimiters, exactly like Data > Text to Columns" },
+  // Goal Seek: the single-variable solver the What-If ribbon runs. It WRITES
+  // (the variable cell keeps the found value), so it is a mutate at the same
+  // tier as the write rows whose reach it shares; protection and writeback
+  // claims are enforced by the Rust command itself. ACTIVE SHEET only.
+  "api.goalSeek":          { tier: "unlocked", class: "mutate", validate: vGoalSeek,
+                             desc: "Run Goal Seek: adjust one input cell until a formula cell reaches a target value" },
+  // ---- unlocked: SELECTION + NAVIGATION (Wave 2). VBA's Selection /
+  //      Range.Select / Application.Goto. Reading the selection is COORDINATES
+  //      ONLY — which cells, never what is in them (the contents stay behind
+  //      the read rows above). Setting it is a visible view change with no
+  //      data effect, same risk class as api.setActiveSheet, which already
+  //      sits at this tier: the user watches it happen and nothing needs
+  //      undoing. clearRange is the one row here that DESTROYS data, and its
+  //      reach is exactly api.setCellValue's (any cell, any sheet of this
+  //      workbook since Wave 3), as one backend-transactional undo step.
+  "api.getSelection":      { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "See which cells are currently selected (where they are — never what is in them)" },
+  "api.select":            { tier: "unlocked", class: "mutate", validate: vSelect, limits: { maxAreas: MAX_SELECT_AREAS },
+                             desc: "Select a block of cells (or several blocks) and scroll it into view, exactly as if you had clicked it" },
+  "api.scrollTo":          { tier: "unlocked", class: "mutate", validate: vScrollTo,
+                             desc: "Scroll the grid so a cell is on screen, without changing what is selected" },
+  "api.clearRange":        { tier: "unlocked", class: "mutate", validate: vClearRange, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Clear a block of cells on a sheet — everything, only their contents, or only their formatting (one undo step)" },
+  "api.getSheets":         { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "List the sheets in this workbook, with each one's visibility and tab colour" },
+  // Tab colour is the one sheet attribute the CRUD rows above left unreachable.
+  // Same tier and no capability as setSheetVisibility: pure document chrome,
+  // nothing outside the workbook.
+  "api.setTabColor":       { tier: "unlocked", class: "mutate", validate: vTabColor,
+                             desc: "Change (or remove) the colour of a sheet's tab in the tab bar" },
+  // ---- unlocked: RANGE DISCOVERY (Wave 2). VBA's Range.End / CurrentRegion /
+  //      UsedRange, answered by the SAME engine::navigation functions the
+  //      grid's own Ctrl+Arrow and Ctrl+A use. All three are COORDINATES ONLY
+  //      — where the data is, never what it says (contents stay behind the
+  //      read rows above) — and none of them moves the viewport or the
+  //      selection, which is why they are reads while api.select is a mutate.
+  "api.getRangeEdge":      { tier: "unlocked", class: "read",   validate: vRangeEdge,
+                             desc: "Find the cell where Ctrl+Arrow would land from a starting cell (the edge of its data block)" },
+  "api.getCurrentRegion":  { tier: "unlocked", class: "read",   validate: vCellRef,
+                             desc: "Find the edges of the contiguous block of data around a cell (what Ctrl+A would select)" },
+  "api.getUsedRange":      { tier: "unlocked", class: "read",   validate: vUsedRange,
+                             desc: "Find the rectangle of cells a sheet actually uses (the bounding box of everything stored on it)" },
+  // Since Wave 4 both take an optional `range` option (a Box or an A1
+  // spelling) that clamps the search/replace to a rectangle — VBA's
+  // Range.Find/Range.Replace. Same rows, same policy: a clamp narrows reach,
+  // it never widens it.
+  "api.findAll":           { tier: "unlocked", class: "read",   validate: vFind,     desc: "Find every cell on a sheet matching a search text" },
+  "api.replaceAll":        { tier: "unlocked", class: "mutate", validate: vReplace,  desc: "Replace a search text everywhere on a sheet (a single undo step)" },
+  // Go To Special (Range.SpecialCells), answered by the backend against the
+  // authoritative hidden-row state — COORDINATES ONLY, same read class as the
+  // range-discovery rows above. "visible" is what makes the classic "copy the
+  // visible cells after filtering" macro writable.
+  "api.getSpecialCells":   { tier: "unlocked", class: "read",   validate: vSpecialCells,
+                             desc: "List which cells in a block are constants, formulas, blanks, or currently visible (coordinates only)" },
   // ---- unlocked: COLUMN FILTERING / AutoFilter (§2.6). The feature has had a
   //      full UI since day one and NO script reach at all — so "filter to this
   //      month, export, clear" was a thing a person could do and a script could
@@ -277,6 +513,16 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Copy a block of cells into this script's own private clipboard (nothing leaves Calcula, and what YOU copied is untouched)" },
   "api.pasteRange":        { tier: "unlocked", class: "mutate", validate: vPasteRange, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Paste the block it copied earlier into another place on the sheet — everything, or only the values, or only the formulas (a single undo step)" },
+  // FILL / AUTOFILL (Wave 3, item 10): VBA's Range.FillDown/FillRight and
+  // Range.AutoFill, run through the SAME machinery as dragging the fill handle
+  // (core/lib/fillEngine.ts — one implementation, shared with the drag): same
+  // series inference, same custom fill lists, same per-cell formula shifting,
+  // same merge replication, one undo step. ACTIVE SHEET ONLY, refused (never
+  // silently redirected) otherwise: the fill machinery reads its source styles
+  // through the same active-sheet bulk path copyRange uses. Same tier as
+  // updateCellsBatch — it writes only cells the script names.
+  "api.fillRange":         { tier: "unlocked", class: "mutate", validate: vFillRange, limits: { maxCells: MAX_RANGE_CELLS },
+                             desc: "Fill a block of cells from its leading rows or columns, exactly like dragging the fill handle — copying values and shifting formulas, or continuing a series (a single undo step)" },
   // ---- unlocked: WORKBOOK FILE LIFECYCLE (G1). No capability, deliberately:
   //      this is reach over the document the script already lives in and can
   //      already rewrite cell by cell — it reaches nothing ambient. What it DOES
@@ -305,6 +551,47 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "api.workbookIsDirty":   { tier: "unlocked", class: "read",   validate: vNone, desc: "Check whether this workbook has unsaved changes" },
   "api.workbookFileName":  { tier: "unlocked", class: "read",   validate: vNone,
                              desc: "Read the file name of this workbook (just the name — never the folder it is in)" },
+  // ---- unlocked: the APPLICATION cluster (Wave 4). The Application-object
+  //      odds and ends VBA scattered — StatusBar, Run, UserName, the View
+  //      toggles, Zoom, panes. None of it touches document CONTENT, and none
+  //      of it leaves the app, so the bar is the one api.scrollTo already set:
+  //      view-state mutates at unlocked tier, no capability. ----
+  //
+  // The status bar is a DEFERRED-ACTION DEBT like manual calculation: the host
+  // remembers which script last put a message up and clears it when that
+  // script goes away (unmount, fault, debugger stop, workbook swap) — a dead
+  // script never pins a stale "Working…" in front of the user.
+  "api.setStatusBar":      { tier: "unlocked", class: "mutate", validate: vStatusBar,
+                             limits: { maxChars: MAX_STATUS_BAR_CHARS },
+                             desc: "Show a short message in the status bar (cleared automatically when the script stops)" },
+  // VBA's Application.Run, through the SAME @api/macroRunService seam a
+  // macro-linked button resolves on each click — one run path, one set of
+  // guarantees. With the Macro Recorder disabled this REFUSES rather than
+  // silently doing nothing, and a macro can never run ITSELF (directly or
+  // through another macro): the host tracks the running chain and refuses the
+  // cycle by name.
+  "api.runMacro":          { tier: "unlocked", class: "mutate", validate: vRunMacro,
+                             desc: "Run one of this workbook's recorded macros by name, exactly as if its button had been clicked" },
+  // VBA's Application.UserName. The name handed out is the SAME display name
+  // Calcula already attaches to writeback submissions (derived from the
+  // Windows user name) — one identity, not a second spelling of it. Name
+  // only: no machine id, no folder, no domain.
+  "api.userName":          { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read your Windows user name" },
+  // The View menu's five settings, readable and writable by name — backed by
+  // the SAME events the menu emits, so a script toggle and a menu click are
+  // one mechanism, and the menu's checkmarks stay honest.
+  "api.getViewOption":     { tier: "unlocked", class: "read",   validate: vViewOptionGet,
+                             desc: "Read one of the View settings (gridlines, headings, zero values, formula display, or the view mode)" },
+  "api.setViewOption":     { tier: "unlocked", class: "mutate", validate: vViewOptionSet,
+                             desc: "Change one of the View settings (gridlines, headings, zero values, formula display, or the view mode) — how the grid looks, never what it stores" },
+  "api.getZoom":           { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read the grid's zoom level, as a percentage" },
+  "api.setZoom":           { tier: "unlocked", class: "mutate", validate: vZoom,
+                             desc: "Zoom the grid (10 to 400 percent) — what is on screen, never what is stored" },
+  // The read half of api.freezePanes / api.splitPanes, which were write-only.
+  "api.getPanes":          { tier: "unlocked", class: "read",   validate: vNone,
+                             desc: "Read which rows and columns are frozen, and where the window is split" },
   // ---- unlocked: workbook OBJECTS (B3) — the "build a dashboard from code"
   //      surface. Same whole-workbook reach the rows above already have, so no
   //      capability is involved: charts, tables, pivots, named ranges, slicers
@@ -330,6 +617,47 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Create a pivot table over a block of cells and lay out its fields" },
   "api.deletePivot":       { tier: "unlocked", class: "mutate", validate: vObjectId,
                              desc: "Delete a pivot table" },
+  // ---- unlocked: NOTES + COMMENTS (Wave 4). Cell annotations are document
+  //      content the user already sees (Review menu); nothing leaves the file,
+  //      so no capability. The notes backend addresses THE ACTIVE SHEET —
+  //      naming another sheet is refused with the fix spelled out, exactly the
+  //      assertActiveSheet rule the table family follows. listComments alone
+  //      is sheet-addressable (the backend has a per-sheet read). ----
+  "api.setNote":           { tier: "unlocked", class: "mutate", validate: vSetNote,
+                             desc: "Add, change or remove the sticky note on a cell (the yellow Shift+F2 kind)" },
+  "api.getNote":           { tier: "unlocked", class: "read",   validate: vCellRef,
+                             desc: "Read the sticky note on one cell" },
+  "api.listNotes":         { tier: "unlocked", class: "read",   validate: vSheetScopedList,
+                             desc: "List every sticky note on the sheet currently shown, with its cell and author" },
+  "api.addComment":        { tier: "unlocked", class: "mutate", validate: vAddComment,
+                             desc: "Start a threaded comment on a cell, signed with the script's name" },
+  "api.replyToComment":    { tier: "unlocked", class: "mutate", validate: vCommentReply,
+                             desc: "Add a reply to an existing comment thread" },
+  "api.resolveComment":    { tier: "unlocked", class: "mutate", validate: vResolveComment,
+                             desc: "Mark a comment thread resolved, or reopen it" },
+  "api.deleteComment":     { tier: "unlocked", class: "mutate", validate: vObjectId,
+                             desc: "Delete a comment thread and all its replies" },
+  "api.listComments":      { tier: "unlocked", class: "read",   validate: vListComments,
+                             desc: "List the comment threads on a sheet (optionally only inside a block of cells), with their replies and resolved state" },
+  // ---- unlocked: CONDITIONAL FORMATTING CRUD (Wave 3 item 3). The full rule
+  //      vocabulary the Home ▸ Conditional Formatting dialogs write (color
+  //      scales, data bars, icon sets, cell-value/text/date rules, formulas)
+  //      finally reachable from a script. Same bar as api.setRangeFormat: it
+  //      changes how cells LOOK, never a value, and nothing leaves the
+  //      document — so no capability. Rule definitions live PER SHEET:
+  //      list/clear take an optional Wave-1 sheet ref (default: the active
+  //      sheet); add/update/delete address the active sheet's rules.
+  "api.listConditionalFormats": { tier: "unlocked", class: "read", validate: vCFList,
+                             desc: "List the conditional-formatting rules on a sheet (what each rule tests, how it styles matches, and which cells it covers)" },
+  "api.addConditionalFormat": { tier: "unlocked", class: "mutate", validate: vCFSpec,
+                             limits: { maxRanges: MAX_CF_RANGES },
+                             desc: "Add a conditional-formatting rule to the active sheet (a color scale, data bar, icon set, or a cell-value/text/date/formula rule)" },
+  "api.updateConditionalFormat": { tier: "unlocked", class: "mutate", validate: vCFUpdate,
+                             desc: "Change an existing conditional-formatting rule on the active sheet (its test, its style, the cells it covers, or whether it is enabled)" },
+  "api.deleteConditionalFormat": { tier: "unlocked", class: "mutate", validate: vCFRuleId,
+                             desc: "Delete one conditional-formatting rule from the active sheet (the cells and their values are kept)" },
+  "api.clearConditionalFormats": { tier: "unlocked", class: "mutate", validate: vCFClear,
+                             desc: "Remove the conditional-formatting rules inside a block of cells on a sheet (or all of them, when no block is named)" },
   // Cross-instance object access: the same aspects a script may already use on
   // ITS OWN object (chart spec, slicer selection, pivot layout, shape
   // properties, ...), aimed at ANOTHER object by id. Restricted scripts stay
@@ -424,6 +752,12 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.scheduleAt":        { tier: "restricted", capability: "schedule", class: "mutate",
                              validate: vScheduleAt, limits: { perMinute: 30 },
                              desc: "Run one of its own methods at a set time each day, even after you reopen this workbook (only while Calcula is open at that time)" },
+  // The one-shot half of Application.OnTime (Wave 4). Same EXISTING `schedule`
+  // capability, same Rust gate, same persistence — the job survives a reload
+  // and still fires once, then removes itself (success or failure alike).
+  "cap.scheduleOnce":      { tier: "restricted", capability: "schedule", class: "mutate",
+                             validate: vScheduleOnce, limits: { perMinute: 30 },
+                             desc: "Run one of its own methods once at a set time — at least 5 seconds from now — even if you reopen this workbook first (only if Calcula is open at that time; the schedule removes itself after firing)" },
   "cap.scheduleList":      { tier: "restricted", capability: "schedule", class: "read",
                              validate: vNone, limits: { perMinute: 60 },
                              desc: "List the schedules it has set up in this workbook" },

@@ -130,12 +130,16 @@ function activate(context: ExtensionContext): void {
       context.events.emit(AppEvents.GRID_REFRESH);
     });
   };
+  // ANNOTATIONS_CHANGED is in the set for annotations created OUTSIDE this
+  // extension's own UI — today the script rows (api.setNote / api.addComment
+  // / ...), whose triangles must appear without waiting for a sheet switch.
   for (const evt of [
     AppEvents.ROWS_INSERTED,
     AppEvents.COLUMNS_INSERTED,
     AppEvents.ROWS_DELETED,
     AppEvents.COLUMNS_DELETED,
     AppEvents.STRUCTURAL_UNDO,
+    AppEvents.ANNOTATIONS_CHANGED,
   ]) {
     cleanupFns.push(context.events.on(evt, onAnnotationsStale));
   }

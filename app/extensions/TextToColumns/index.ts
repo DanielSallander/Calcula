@@ -5,7 +5,9 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionRegistry } from "@api";
+import { registerTextToColumnsController } from "@api/textToColumnsService";
 import { TextToColumnsDialog } from "./components/TextToColumnsDialog";
+import { textToColumnsController } from "./lib/splitProvider";
 import {
   registerTextToColumnsMenuItem,
   setCurrentSelection,
@@ -35,7 +37,12 @@ function activate(context: ExtensionContext): void {
   // 2. Register menu item in Data menu
   registerTextToColumnsMenuItem(context);
 
-  // 3. Track current selection (for menu item to know active range)
+  // 3. Register the script-facing provider (Wave 4): the @api seam through
+  //    which api.textToColumns / range.textToColumns() run THIS extension's
+  //    split logic. With the extension disabled the seam refuses loudly.
+  cleanupFns.push(registerTextToColumnsController(textToColumnsController));
+
+  // 4. Track current selection (for menu item to know active range)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(
       sel

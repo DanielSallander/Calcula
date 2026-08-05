@@ -39,6 +39,7 @@ import {
   indexToCol,
 } from "@api/lib";
 import { registerPdfRenderer } from "@api/printService";
+import { checkLifecycleGuards } from "@api/lifecycleGuards";
 import { save } from "@tauri-apps/plugin-dialog";
 import { PageSetupDialog } from "./components/PageSetupDialog";
 import { executePrint } from "./lib/printGenerator";
@@ -79,6 +80,11 @@ function getSelectionBounds(): {
 
 async function handlePrint(): Promise<void> {
   try {
+    // Before-Print verdict (VBA's Workbook_BeforePrint): every workbook script
+    // that declared onBeforePrint is asked, with the standard default-ALLOW
+    // deadline. checkLifecycleGuards reports a cancellation to the user itself
+    // (with the objecting script's name), so returning silently is honest.
+    if (await checkLifecycleGuards("print", {})) return;
     const data = await getPrintData();
     executePrint(data);
   } catch (err) {
@@ -93,6 +99,10 @@ async function handlePrint(): Promise<void> {
 
 async function handleExportPdf(): Promise<void> {
   try {
+    // Same Before-Print verdict as handlePrint: a PDF export IS a print of the
+    // document, and a guard that could stop one but not the other would lie.
+    if (await checkLifecycleGuards("print", {})) return;
+
     // Show save dialog
     const filePath = await save({
       title: "Export to PDF",

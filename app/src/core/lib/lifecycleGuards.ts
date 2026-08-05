@@ -13,8 +13,10 @@
 // Types
 // ============================================================================
 
-/** The workbook operation a guard may cancel. */
-export type LifecycleAction = "save" | "close";
+/** The workbook operation a guard may cancel. "print" covers every exit of the
+ *  printable document: the OS print dialog, File ▸ Export to PDF, and a
+ *  script's PDF render (VBA's Workbook_BeforePrint(Cancel:=True)). */
+export type LifecycleAction = "save" | "close" | "print";
 
 /** Detail handed to guards. `path` is present for saves. */
 export interface LifecycleDetail {
@@ -137,7 +139,7 @@ export function lifecycleCancelMessage(
   action: LifecycleAction,
   result: LifecycleGuardResult,
 ): string {
-  const verb = action === "save" ? "save" : "close";
+  const verb = action === "save" ? "save" : action === "print" ? "print" : "close";
   const base = `Script "${result.by}" cancelled the ${verb}`;
   return result.reason ? `${base}: ${result.reason}` : `${base}.`;
 }

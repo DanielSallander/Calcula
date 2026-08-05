@@ -28,6 +28,7 @@ import {
   setScrollArea as apiSetScrollArea,
   setIterationSettings as apiSetIterationSettings,
   applyNamedStyle as apiApplyNamedStyle,
+  applyNamedStyleRange as apiApplyNamedStyleRange,
   calculateNow,
 } from "@api/lib";
 import type { CellData } from "@api/types";
@@ -85,10 +86,11 @@ export const liveDeferredActionHost: DeferredActionHost = {
     refreshGridData();
   },
 
-  gotoCell(row: number, col: number, select: boolean): void {
+  gotoCell(row: number, col: number, select: boolean, endRow: number, endCol: number): void {
     if (select) {
-      dispatchGridAction(setSelection(row, col, row, col));
+      dispatchGridAction(setSelection(row, col, endRow, endCol));
     }
+    // Always scroll to the range's top-left, selecting or not.
     dispatchGridAction(scrollToCell(row, col, false));
   },
 
@@ -132,6 +134,13 @@ export const liveDeferredActionHost: DeferredActionHost = {
     emitAppEvent(AppEvents.GRID_REFRESH);
   },
 
+  setDisplayFormulas(value: boolean): void {
+    // Same event the Ctrl+` keyboard toggle and the worker-script surface
+    // emit; the payload is the NEW value (set semantics, not toggle).
+    emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: value });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  },
+
   async fillDown(startRow, startCol, endRow, endCol): Promise<void> {
     // @api/grid.fillDown already emits the cell-change batch for the copies.
     await apiFillDown(startRow, startCol, endRow, endCol);
@@ -143,8 +152,19 @@ export const liveDeferredActionHost: DeferredActionHost = {
     refreshGridData();
   },
 
-  async applyNamedStyle(name: string, row: number, col: number): Promise<void> {
-    const result = await apiApplyNamedStyle(name, [row], [col]);
+  async applyNamedStyle(
+    name: string,
+    row: number,
+    col: number,
+    endRow?: number,
+    endCol?: number,
+  ): Promise<void> {
+    // The rect form goes through the range command (ONE undo transaction);
+    // a single cell keeps the row/col-list command.
+    const result =
+      endRow !== undefined && endCol !== undefined
+        ? await apiApplyNamedStyleRange(name, row, col, endRow, endCol)
+        : await apiApplyNamedStyle(name, [row], [col]);
     publishCellUpdates(result.cells);
     window.dispatchEvent(new CustomEvent("styles:refresh"));
     refreshGridData();

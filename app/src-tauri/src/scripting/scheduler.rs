@@ -66,6 +66,16 @@ pub const MAX_RUN_MS: i64 = 10 * 60 * 1000;
 /// the wire shape mirrors 1:1 into TS without tagged-union ceremony).
 pub const CADENCE_EVERY: &str = "every";
 pub const CADENCE_DAILY_AT: &str = "dailyAt";
+/// One-shot cadence (VBA Application.OnTime): fires ONCE at its scheduled
+/// time, then auto-removes on completion. Persisted, enumerable and
+/// cancellable exactly like the repeating cadences until it fires.
+pub const CADENCE_ONCE: &str = "once";
+
+/// Floor on how far in the future a ONE-SHOT job may be scheduled, in seconds.
+/// Deliberately below MIN_INTERVAL_SECS: a single deferred call is not a
+/// recurring CPU commitment, so "in five seconds" is a legitimate ask, while
+/// anything shorter is indistinguishable from setTimeout with extra consent.
+pub const MIN_ONCE_DELAY_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // Job model
@@ -95,9 +105,11 @@ pub struct ScheduledJob {
     pub object_type: String,
     pub instance_id: Option<String>,
     pub handler: String,
-    /// CADENCE_EVERY or CADENCE_DAILY_AT.
+    /// CADENCE_EVERY, CADENCE_DAILY_AT or CADENCE_ONCE.
     pub cadence: String,
     /// For CADENCE_EVERY: seconds between firings (>= MIN_INTERVAL_SECS).
+    /// For CADENCE_ONCE: seconds from registration to the single firing
+    /// (>= MIN_ONCE_DELAY_SECS).
     pub interval_secs: u64,
     /// For CADENCE_DAILY_AT: minutes since LOCAL midnight, [0, 1440).
     pub minute_of_day: u32,
@@ -209,6 +221,11 @@ fn next_daily_at_ms(minute_of_day: u32, from_ms: i64) -> i64 {
 fn compute_next_run(job: &ScheduledJob, from_ms: i64) -> i64 {
     if job.cadence == CADENCE_DAILY_AT {
         next_daily_at_ms(job.minute_of_day, from_ms)
+    } else if job.cadence == CADENCE_ONCE {
+        // The single slot. Re-arming paths (a denial push-forward, the
+        // watchdog on a repeating job) re-derive from now like the interval
+        // cadence, but with the one-shot floor.
+        from_ms + (job.interval_secs.max(MIN_ONCE_DELAY_SECS) as i64) * 1000
     } else {
         from_ms + (job.interval_secs.max(MIN_INTERVAL_SECS) as i64) * 1000
     }
@@ -252,6 +269,17 @@ fn validate_registration(
         CADENCE_DAILY_AT => {
             if minute_of_day >= 1440 {
                 return Err("minuteOfDay must be in [0, 1440)".to_string());
+            }
+        }
+        CADENCE_ONCE => {
+            if interval_secs < MIN_ONCE_DELAY_SECS {
+                return Err(format!(
+                    "delay must be at least {} seconds (got {})",
+                    MIN_ONCE_DELAY_SECS, interval_secs
+                ));
+            }
+            if interval_secs > 366 * 24 * 3600 {
+                return Err("delay must be at most one year".to_string());
             }
         }
         other => return Err(format!("unknown cadence '{}'", other)),
@@ -387,6 +415,10 @@ fn sweep_due(
     now: i64,
 ) -> DueSweep {
     let mut sweep = DueSweep { due: Vec::new(), denied: Vec::new(), watchdogged: Vec::new() };
+    // One-shot jobs whose single firing was handed out but never reported
+    // back: the watchdog retires them outright ("fires once" includes a run
+    // that died mid-flight — re-arming would be a second firing).
+    let mut spent_once_ids: Vec<String> = Vec::new();
 
     for job in inner.jobs.iter_mut() {
         // Watchdog first: release a run whose renderer never reported back, so
@@ -395,7 +427,11 @@ fn sweep_due(
             job.running = false;
             job.last_ok = false;
             job.last_error = Some("run did not report completion (timed out)".to_string());
-            job.next_run_ms = compute_next_run(job, now);
+            if job.cadence == CADENCE_ONCE {
+                spent_once_ids.push(job.id.clone());
+            } else {
+                job.next_run_ms = compute_next_run(job, now);
+            }
             sweep.watchdogged.push((job.script_id.clone(), job.handler.clone()));
             continue;
         }
@@ -427,10 +463,16 @@ fn sweep_due(
             handler: job.handler.clone(),
         });
     }
+    if !spent_once_ids.is_empty() {
+        inner.jobs.retain(|j| !spent_once_ids.contains(&j.id));
+    }
     sweep
 }
 
-/// Record the outcome of a firing and re-arm the job.
+/// Record the outcome of a firing and re-arm the job — except a CADENCE_ONCE
+/// job, which has now fired its single slot and AUTO-REMOVES (success or
+/// failure alike; the outcome is still audited by the caller). The returned
+/// snapshot of a removed one-shot carries `next_run_ms: 0` ("no next run").
 fn complete_job(
     inner: &mut SchedulerInner,
     job_id: &str,
@@ -438,13 +480,19 @@ fn complete_job(
     error: Option<String>,
     now: i64,
 ) -> Option<ScheduledJob> {
-    let job = inner.jobs.iter_mut().find(|j| j.id == job_id)?;
+    let idx = inner.jobs.iter().position(|j| j.id == job_id)?;
+    let job = &mut inner.jobs[idx];
     job.running = false;
     job.running_since_ms = 0;
     job.last_run_ms = now;
     job.last_ok = ok;
     job.last_error = error;
     job.run_count += 1;
+    if job.cadence == CADENCE_ONCE {
+        let mut done = inner.jobs.remove(idx);
+        done.next_run_ms = 0;
+        return Some(done);
+    }
     job.next_run_ms = compute_next_run(job, now);
     Some(job.clone())
 }
@@ -610,7 +658,9 @@ pub fn import_jobs_for_workbook(
         // One refusal ladder, evaluated before anything is moved out of `def`,
         // so every drop reason reaches the audit trail with the job's identity
         // still intact.
-        let refusal: Option<&str> = if def.cadence != CADENCE_EVERY && def.cadence != CADENCE_DAILY_AT
+        let refusal: Option<&str> = if def.cadence != CADENCE_EVERY
+            && def.cadence != CADENCE_DAILY_AT
+            && def.cadence != CADENCE_ONCE
         {
             Some("unknown cadence")
         } else if def.script_id.is_empty() || def.handler.is_empty() || def.id.is_empty() {
@@ -652,6 +702,8 @@ pub fn import_jobs_for_workbook(
             handler: def.handler,
             interval_secs: if def.cadence == CADENCE_EVERY {
                 def.interval_secs.max(MIN_INTERVAL_SECS)
+            } else if def.cadence == CADENCE_ONCE {
+                def.interval_secs.max(MIN_ONCE_DELAY_SECS)
             } else {
                 def.interval_secs
             },
@@ -725,7 +777,7 @@ pub(crate) fn scheduler_security_level(level: &Mutex<String>) -> String {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerRequest {
-    /// "every" | "at" | "list" | "cancel" | "setEnabled" | "due" | "complete"
+    /// "every" | "at" | "once" | "list" | "cancel" | "setEnabled" | "due" | "complete"
     pub op: String,
     /// Owning script id — REQUIRED for every op a script can reach. The host
     /// fills it from the authoritative script definition.
@@ -785,7 +837,7 @@ pub fn script_scheduler(
 
     // Ops a SCRIPT can reach carry a script_id and re-check the grant. `list`,
     // `cancel` without a script_id, and `setEnabled` are the trusted-UI paths.
-    let script_op = matches!(request.op.as_str(), "every" | "at");
+    let script_op = matches!(request.op.as_str(), "every" | "at" | "once");
     if script_op {
         let script_id = request
             .script_id
@@ -812,9 +864,18 @@ pub fn script_scheduler(
 
     match request.op.as_str() {
         // ---- Registration -------------------------------------------------
-        "every" | "at" => {
+        "every" | "at" | "once" => {
             let script_id = request.script_id.clone().unwrap_or_default();
-            let cadence = if request.op == "at" { CADENCE_DAILY_AT } else { CADENCE_EVERY };
+            let cadence = match request.op.as_str() {
+                "at" => CADENCE_DAILY_AT,
+                "once" => CADENCE_ONCE,
+                _ => CADENCE_EVERY,
+            };
+            let default_interval = if cadence == CADENCE_ONCE {
+                MIN_ONCE_DELAY_SECS
+            } else {
+                MIN_INTERVAL_SECS
+            };
             let job = {
                 let mut inner = scheduler().lock().unwrap();
                 upsert_job(
@@ -825,7 +886,7 @@ pub fn script_scheduler(
                     request.instance_id.clone(),
                     request.handler.as_deref().unwrap_or(""),
                     cadence,
-                    request.interval_secs.unwrap_or(MIN_INTERVAL_SECS),
+                    request.interval_secs.unwrap_or(default_interval),
                     request.minute_of_day.unwrap_or(0),
                     request.label.clone(),
                     now,
@@ -1603,5 +1664,133 @@ mod tests {
         i.jobs[0].enabled = true;
         i.jobs[0].next_run_ms = now;
         assert_eq!(sweep_due(&mut i, &mounted, GRANTED, now + 60_000).due.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // CADENCE_ONCE (Wave 4): fire once, then auto-remove
+    // -----------------------------------------------------------------------
+
+    fn add_once(inner: &mut SchedulerInner, script: &str, handler: &str, secs: u64, now: i64) -> ScheduledJob {
+        upsert_job(
+            inner, script, "object-script", "shape", Some("i1".into()), handler,
+            CADENCE_ONCE, secs, 0, None, now,
+        )
+        .expect("one-shot job should register")
+    }
+
+    #[test]
+    fn once_registration_enforces_the_5s_floor() {
+        let mut i = inner();
+        let err = upsert_job(
+            &mut i, "s1", "object-script", "shape", None, "later",
+            CADENCE_ONCE, 4, 0, None, 0,
+        )
+        .unwrap_err();
+        assert!(err.contains("at least 5 seconds"), "got: {}", err);
+        assert!(i.jobs.is_empty());
+
+        // Exactly at the floor is fine, and the slot lands delay seconds out.
+        let job = add_once(&mut i, "s1", "later", 5, 1_000_000);
+        assert_eq!(job.cadence, CADENCE_ONCE);
+        assert_eq!(job.next_run_ms, 1_000_000 + 5_000);
+    }
+
+    #[test]
+    fn a_once_job_fires_once_and_removes_itself() {
+        let mut i = inner();
+        let now = 1_000_000;
+        add_once(&mut i, "s1", "later", 60, now);
+        let mounted = vec!["s1".to_string()];
+
+        // Not yet due.
+        assert!(sweep_due(&mut i, &mounted, GRANTED, now + 59_000).due.is_empty());
+        // Enumerable and cancellable like any other cadence until it fires.
+        assert_eq!(i.jobs.len(), 1);
+
+        // Fires at its slot.
+        let sweep = sweep_due(&mut i, &mounted, GRANTED, now + 60_000);
+        assert_eq!(sweep.due.len(), 1);
+        let job_id = i.jobs[0].id.clone();
+
+        // Completion AUTO-REMOVES it (next_run_ms 0 = "no next run").
+        let done = complete_job(&mut i, &job_id, true, None, now + 61_000).expect("completes");
+        assert_eq!(done.next_run_ms, 0);
+        assert_eq!(done.run_count, 1);
+        assert!(i.jobs.is_empty(), "a one-shot auto-removes after firing");
+
+        // And nothing ever fires again.
+        assert!(sweep_due(&mut i, &mounted, GRANTED, now + 100_000_000).due.is_empty());
+    }
+
+    /// "Fires once" holds on the failure path too: a one-shot whose run
+    /// reported an error is still spent, not retried forever.
+    #[test]
+    fn a_failed_once_job_is_still_spent() {
+        let mut i = inner();
+        let now = 1_000_000;
+        add_once(&mut i, "s1", "later", 60, now);
+        let mounted = vec!["s1".to_string()];
+        assert_eq!(sweep_due(&mut i, &mounted, GRANTED, now + 60_000).due.len(), 1);
+        let job_id = i.jobs[0].id.clone();
+        complete_job(&mut i, &job_id, false, Some("boom".into()), now + 61_000);
+        assert!(i.jobs.is_empty(), "failure does not resurrect a one-shot");
+    }
+
+    #[test]
+    fn a_watchdogged_once_job_is_retired_not_rearmed() {
+        let mut i = inner();
+        let now = 1_000_000;
+        add_once(&mut i, "s1", "later", 60, now);
+        let mounted = vec!["s1".to_string()];
+        let t1 = now + 60_000;
+        assert_eq!(sweep_due(&mut i, &mounted, GRANTED, t1).due.len(), 1);
+
+        // The renderer died mid-run; the watchdog window elapses. A repeating
+        // job would re-arm here — a one-shot has spent its single firing.
+        let sweep = sweep_due(&mut i, &mounted, GRANTED, t1 + MAX_RUN_MS + 1);
+        assert_eq!(sweep.watchdogged.len(), 1, "the lost run is audited");
+        assert!(i.jobs.is_empty(), "the spent one-shot is gone");
+    }
+
+    #[test]
+    fn a_once_job_is_cancellable_before_it_fires() {
+        let mut i = inner();
+        add_once(&mut i, "s1", "later", 60, 0);
+        let job_id = i.jobs[0].id.clone();
+        assert!(!cancel_job(&mut i, &job_id, Some("s2")), "owner check still applies");
+        assert!(cancel_job(&mut i, &job_id, Some("s1")));
+        assert!(i.jobs.is_empty());
+        assert!(sweep_due(&mut i, &["s1".to_string()], GRANTED, 10_000_000).due.is_empty());
+    }
+
+    #[test]
+    fn a_once_job_survives_the_workbook_round_trip() {
+        let _g = global_guard();
+        reset_jobs();
+        let sources = hashes(&[("s1", "export function later() {}")]);
+        {
+            let mut i = scheduler().lock().unwrap();
+            add_once(&mut i, "s1", "later", 3600, 1_700_000_000_000);
+        }
+        let saved = export_jobs_for_workbook(&sources);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].cadence, CADENCE_ONCE);
+        reset_jobs();
+
+        let outcome = import_jobs_for_workbook(saved.clone(), &sources);
+        assert_eq!(outcome.restored, 1, "the pending one-shot is restored");
+        let restored = live_jobs();
+        assert_eq!(restored[0].cadence, CADENCE_ONCE);
+        assert_eq!(
+            restored[0].next_run_ms, saved[0].next_run_ms,
+            "the single slot is preserved (a past-due one-shot fires once on reopen)"
+        );
+
+        // A hand-edited sub-floor delay is raised back to the one-shot floor.
+        let mut fast = saved[0].clone();
+        fast.interval_secs = 1;
+        import_jobs_for_workbook(vec![fast], &sources);
+        assert_eq!(live_jobs()[0].interval_secs, MIN_ONCE_DELAY_SECS);
+        reset_jobs();
     }
 }

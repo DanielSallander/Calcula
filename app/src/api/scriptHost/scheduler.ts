@@ -44,7 +44,7 @@ export interface ScheduledJob {
   objectType: string;
   instanceId: string | null;
   handler: string;
-  /** "every" | "dailyAt" */
+  /** "every" | "dailyAt" | "once" */
   cadence: string;
   intervalSecs: number;
   minuteOfDay: number;
@@ -229,6 +229,33 @@ export async function scheduleEvery(
     instanceId: owner.instanceId,
     handler,
     intervalSecs: Math.floor(intervalSecs),
+    label: label ?? null,
+  });
+  void syncPump();
+  return job;
+}
+
+/**
+ * Register (or re-arm) a ONE-SHOT job that fires `delaySecs` from now (Rust
+ * CADENCE_ONCE). The job persists like every other schedule — a reload before
+ * it is due does not lose it — and Rust AUTO-REMOVES it after it fires,
+ * success or failure alike. The delay floor (MIN_ONCE_DELAY_SECS = 5) is
+ * enforced authoritatively in Rust; the floor here only keeps the wire honest.
+ */
+export async function scheduleOnce(
+  owner: ScheduleOwner,
+  delaySecs: number,
+  handler: string,
+  label?: string,
+): Promise<ScheduledJob> {
+  const job = await schedulerCall<ScheduledJob>({
+    op: "once",
+    scriptId: owner.scriptId,
+    surface: owner.surface,
+    objectType: owner.objectType,
+    instanceId: owner.instanceId,
+    handler,
+    intervalSecs: Math.max(5, Math.floor(delaySecs)),
     label: label ?? null,
   });
   void syncPump();

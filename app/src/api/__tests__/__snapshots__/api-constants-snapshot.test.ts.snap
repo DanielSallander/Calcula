@@ -20,6 +20,7 @@ exports[`AppEvents > all event values match snapshot 1`] = `
   "COLUMNS_DELETED": "app:columns-deleted",
   "COLUMNS_INSERTED": "app:columns-inserted",
   "COLUMN_RESIZED": "app:column-resized",
+  "CONDITIONAL_FORMATS_CHANGED": "app:conditional-formats-changed",
   "CONTEXT_MENU_CLOSE": "app:context-menu-close",
   "CONTEXT_MENU_REQUEST": "app:context-menu-request",
   "COPY": "app:copy",

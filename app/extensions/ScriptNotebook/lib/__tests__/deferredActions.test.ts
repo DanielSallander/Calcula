@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/ScriptNotebook/lib/__tests__/deferredActions.test.ts
 // PURPOSE: Tests for the deferred-action wire normalization + host dispatch map.
-// CONTEXT: The Rust engine queues 16 DeferredAction variants; these lock down
+// CONTEXT: The Rust engine queues 17 DeferredAction variants; these lock down
 //          that each one reaches a host call, in queue order, with validated
 //          payloads — and that the struct-variant FIELDS arrive camelCased
 //          (the Rust enum carries a per-variant rename_all; a regression to
@@ -12,7 +12,7 @@ vi.mock("@api/backend", () => ({ invokeBackend: vi.fn() }));
 
 import { normalizeDeferredActions } from "@api/workbookScripts";
 import type { DeferredAction } from "@api/workbookScripts";
-import { applyDeferredActions, zoomFactorToPercent } from "../deferredActions";
+import { applyDeferredActions } from "../deferredActions";
 import type { DeferredActionHost } from "../deferredActions";
 
 // ============================================================================
@@ -34,7 +34,8 @@ function createHost(activeSheetIndex = 0): RecordingHost {
     calls,
     getActiveSheetIndex: () => activeSheetIndex,
     activateSheet: async (sheetIndex) => record("activateSheet", sheetIndex),
-    gotoCell: (row, col, select) => record("gotoCell", row, col, select),
+    gotoCell: (row, col, select, endRow, endCol) =>
+      record("gotoCell", row, col, select, endRow, endCol),
     recalculate: async () => record("recalculate"),
     setStatusBar: (message) => record("setStatusBar", message),
     setViewMode: (mode) => record("setViewMode", mode),
@@ -43,9 +44,13 @@ function createHost(activeSheetIndex = 0): RecordingHost {
     setDisplayZeros: (value) => record("setDisplayZeros", value),
     setDisplayGridlines: (value) => record("setDisplayGridlines", value),
     setDisplayHeadings: (value) => record("setDisplayHeadings", value),
+    setDisplayFormulas: (value) => record("setDisplayFormulas", value),
     fillDown: async (sr, sc, er, ec) => record("fillDown", sr, sc, er, ec),
     fillRight: async (sr, sc, er, ec) => record("fillRight", sr, sc, er, ec),
-    applyNamedStyle: async (name, row, col) => record("applyNamedStyle", name, row, col),
+    applyNamedStyle: async (name, row, col, endRow, endCol) =>
+      endRow !== undefined
+        ? record("applyNamedStyle", name, row, col, endRow, endCol)
+        : record("applyNamedStyle", name, row, col),
     setScrollArea: async (area) => record("setScrollArea", area),
     setIterationSettings: async (enabled, maxIterations, maxChange) =>
       record("setIterationSettings", enabled, maxIterations, maxChange),
@@ -76,7 +81,7 @@ describe("normalizeDeferredActions", () => {
     ]);
 
     expect(actions).toEqual([
-      { action: "goto", row: 3, col: 4, sheetIndex: 2, select: false },
+      { action: "goto", row: 3, col: 4, endRow: null, endCol: null, sheetIndex: 2, select: false },
       { action: "activateSheet", sheetIndex: 1 },
       { action: "fillDown", startRow: 1, startCol: 2, endRow: 5, endCol: 6 },
       { action: "fillRight", startRow: 0, startCol: 0, endRow: 1, endCol: 9 },
@@ -101,13 +106,21 @@ describe("normalizeDeferredActions", () => {
     const [goto] = normalizeDeferredActions([
       { action: "goto", row: 1, col: 1, sheet_index: 2, select: true },
     ]);
-    expect(goto).toEqual({ action: "goto", row: 1, col: 1, sheetIndex: NaN, select: true });
+    expect(goto).toEqual({
+      action: "goto",
+      row: 1,
+      col: 1,
+      endRow: null,
+      endCol: null,
+      sheetIndex: NaN,
+      select: true,
+    });
     warn.mockRestore();
   });
 
   it("defaults goto.select to true (serde default_true) and keeps null payloads", () => {
     expect(normalizeDeferredActions([{ action: "goto", row: 0, col: 0, sheetIndex: 0 }])).toEqual([
-      { action: "goto", row: 0, col: 0, sheetIndex: 0, select: true },
+      { action: "goto", row: 0, col: 0, endRow: null, endCol: null, sheetIndex: 0, select: true },
     ]);
     expect(normalizeDeferredActions([{ action: "setStatusBar", message: null }])).toEqual([
       { action: "setStatusBar", message: null },
@@ -145,8 +158,16 @@ describe("applyDeferredActions", () => {
   it("maps every Rust DeferredAction variant onto a host call", async () => {
     const cases: Array<{ action: DeferredAction; expected: Call }> = [
       {
-        action: { action: "goto", row: 7, col: 2, sheetIndex: 0, select: true },
-        expected: ["gotoCell", 7, 2, true],
+        action: {
+          action: "goto",
+          row: 7,
+          col: 2,
+          endRow: null,
+          endCol: null,
+          sheetIndex: 0,
+          select: true,
+        },
+        expected: ["gotoCell", 7, 2, true, 7, 2],
       },
       { action: { action: "calculate" }, expected: ["recalculate"] },
       {
@@ -165,7 +186,7 @@ describe("applyDeferredActions", () => {
         action: { action: "setViewMode", mode: "pageBreakPreview" },
         expected: ["setViewMode", "pageBreakPreview"],
       },
-      { action: { action: "setZoom", percent: 1.5 }, expected: ["setZoomPercent", 150] },
+      { action: { action: "setZoom", percent: 150 }, expected: ["setZoomPercent", 150] },
       {
         action: { action: "setReferenceStyle", style: "R1C1" },
         expected: ["setReferenceStyle", "R1C1"],
@@ -179,6 +200,10 @@ describe("applyDeferredActions", () => {
         expected: ["setDisplayHeadings", true],
       },
       {
+        action: { action: "setDisplayFormulas", value: true },
+        expected: ["setDisplayFormulas", true],
+      },
+      {
         action: { action: "fillDown", startRow: 1, startCol: 2, endRow: 5, endCol: 3 },
         expected: ["fillDown", 1, 2, 5, 3],
       },
@@ -187,7 +212,14 @@ describe("applyDeferredActions", () => {
         expected: ["fillRight", 1, 2, 1, 8],
       },
       {
-        action: { action: "applyNamedStyle", name: "Heading 1", row: 0, col: 0 },
+        action: {
+          action: "applyNamedStyle",
+          name: "Heading 1",
+          row: 0,
+          col: 0,
+          endRow: null,
+          endCol: null,
+        },
         expected: ["applyNamedStyle", "Heading 1", 0, 0],
       },
       {
@@ -209,8 +241,8 @@ describe("applyDeferredActions", () => {
       },
     ];
 
-    // Guard: the Rust enum has 16 variants; a new one must land in this table.
-    expect(cases).toHaveLength(16);
+    // Guard: the Rust enum has 17 variants; a new one must land in this table.
+    expect(cases).toHaveLength(17);
 
     for (const { action, expected } of cases) {
       const host = createHost();
@@ -235,7 +267,7 @@ describe("applyDeferredActions", () => {
       ["setDisplayGridlines", false],
       ["fillDown", 0, 0, 4, 0],
       ["recalculate"],
-      ["gotoCell", 4, 0, true],
+      ["gotoCell", 4, 0, true, 4, 0],
     ]);
   });
 
@@ -244,12 +276,12 @@ describe("applyDeferredActions", () => {
     await run([{ action: "goto", row: 1, col: 1, sheetIndex: 2, select: true }], onSheet0);
     expect(onSheet0.calls).toEqual([
       ["activateSheet", 2],
-      ["gotoCell", 1, 1, true],
+      ["gotoCell", 1, 1, true, 1, 1],
     ]);
 
     const onSheet2 = createHost(2);
     await run([{ action: "goto", row: 1, col: 1, sheetIndex: 2, select: true }], onSheet2);
-    expect(onSheet2.calls).toEqual([["gotoCell", 1, 1, true]]);
+    expect(onSheet2.calls).toEqual([["gotoCell", 1, 1, true, 1, 1]]);
   });
 
   it("follows a script that switched sheets, and skips a redundant switch", async () => {
@@ -266,20 +298,71 @@ describe("applyDeferredActions", () => {
     const host = createHost(1);
     // No sheetIndex at all -> normalizes to NaN -> no sheet switch.
     await run([{ action: "goto", row: 2, col: 2 }], host);
-    expect(host.calls).toEqual([["gotoCell", 2, 2, true]]);
+    expect(host.calls).toEqual([["gotoCell", 2, 2, true, 2, 2]]);
   });
 
   it("scrolls without selecting when select is false", async () => {
     const host = createHost();
     await run([{ action: "goto", row: 9, col: 9, sheetIndex: 0, select: false }], host);
-    expect(host.calls).toEqual([["gotoCell", 9, 9, false]]);
+    expect(host.calls).toEqual([["gotoCell", 9, 9, false, 9, 9]]);
   });
 
-  it("converts the script's zoom factor to a host percentage", async () => {
-    expect(zoomFactorToPercent(1)).toBe(100);
+  it("selects the whole range for an A1-form goto with endRow/endCol", async () => {
     const host = createHost();
-    await run([{ action: "setZoom", percent: 0.75 }], host);
+    await run(
+      [{ action: "goto", row: 1, col: 1, endRow: 4, endCol: 2, sheetIndex: 0, select: true }],
+      host,
+    );
+    expect(host.calls).toEqual([["gotoCell", 1, 1, true, 4, 2]]);
+  });
+
+  it("rejects a half-set or inverted goto range", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const halfSet = createHost();
+    await run([{ action: "goto", row: 1, col: 1, endRow: 4, sheetIndex: 0 }], halfSet);
+    expect(halfSet.calls).toEqual([]);
+
+    const inverted = createHost();
+    await run(
+      [{ action: "goto", row: 5, col: 5, endRow: 2, endCol: 2, sheetIndex: 0 }],
+      inverted,
+    );
+    expect(inverted.calls).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("passes the zoom percent through verbatim and rejects the old factor form", async () => {
+    const host = createHost();
+    await run([{ action: "setZoom", percent: 75 }], host);
     expect(host.calls).toEqual([["setZoomPercent", 75]]);
+
+    // 0.75 was the pre-Wave-4 factor spelling of 75% — out of the [10, 400]
+    // percent range, so it is rejected rather than misread as "0.75%".
+    const stale = createHost();
+    await run([{ action: "setZoom", percent: 0.75 }], stale);
+    expect(stale.calls).toEqual([]);
+
+    const tooBig = createHost();
+    await run([{ action: "setZoom", percent: 500 }], tooBig);
+    expect(tooBig.calls).toEqual([]);
+  });
+
+  it("applies a named style to a rect and rejects a half-set range", async () => {
+    const host = createHost();
+    await run(
+      [{ action: "applyNamedStyle", name: "Good", row: 1, col: 1, endRow: 3, endCol: 4 }],
+      host,
+    );
+    expect(host.calls).toEqual([["applyNamedStyle", "Good", 1, 1, 3, 4]]);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const halfSet = createHost();
+    await run(
+      [{ action: "applyNamedStyle", name: "Good", row: 1, col: 1, endRow: 3 }],
+      halfSet,
+    );
+    expect(halfSet.calls).toEqual([]);
+    warn.mockRestore();
   });
 
   it("clears the scroll area when the script passes an empty range", async () => {

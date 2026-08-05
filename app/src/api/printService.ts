@@ -67,6 +67,17 @@ export async function renderWorkbookPdf(): Promise<Uint8Array> {
       "PDF export is unavailable: no print provider is registered (the Print extension is not loaded).",
     );
   }
+  // Before-Print verdict (VBA's Workbook_BeforePrint), checked at THIS seam so
+  // a script-rendered PDF (cap.filePrintPdf) is judged by the same guards as
+  // File ▸ Print / Export to PDF. checkLifecycleGuards has already told the
+  // user who objected; the throw tells the CALLER (the asking script) too.
+  const { checkLifecycleGuards, lifecycleCancelMessage } = await import(
+    "../core/lib/lifecycleGuards"
+  );
+  const objection = await checkLifecycleGuards("print", {});
+  if (objection) {
+    throw new Error(lifecycleCancelMessage("print", objection));
+  }
   const bytes = await pdfRenderer();
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
     throw new Error("PDF export produced no data.");

@@ -147,6 +147,21 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       } catch { /* store not available */ }
     });
 
+    // DISMISS TOASTS LEFT BY THE PREVIOUS TEST. One app instance serves every
+    // spec, and a toast lives 5s by default — long enough to outlive the test
+    // that raised it. The stack is fixed at the bottom-right ABOVE the grid, so
+    // a leftover toast physically covers cells there: the next test's
+    // `clickCell` lands on the toast, focus never reaches the grid, and the
+    // keystrokes go nowhere. That is exactly how macro-live-edit failed after
+    // macro-link-model (which ends by raising three of them) — an empty cell
+    // and a failure that looks like a dropped keystroke.
+    await sharedPage.evaluate(() => {
+      document
+        .querySelectorAll<HTMLElement>("[data-toast] button")
+        .forEach((b) => b.click());
+    });
+    await sharedPage.waitForTimeout(100);
+
     // Restore the ribbon to its expanded state. The ribbon minimize/expand
     // state (Ctrl+F1) is local React state shared by the single app instance,
     // so a prior test that left the ribbon minimized would shift every

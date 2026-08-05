@@ -12,6 +12,9 @@ import {
   makeRange,
   rangeFromAddress,
   parseA1,
+  parseA1Body,
+  splitSheetPrefix,
+  resolveSheetName,
   makeWorkbook,
   type RangeTransport,
   type ScriptCell,
@@ -53,14 +56,61 @@ describe("parseA1", () => {
   it("strips $ absolute markers", () => {
     expect(parseA1("$B$2:$C$4")).toEqual(box(1, 1, 3, 2));
   });
-  it("ignores a sheet name prefix (range is bound to the context sheet)", () => {
-    expect(parseA1("Other!A1:B2")).toEqual(box(0, 0, 1, 1));
+  it("REFUSES a sheet name prefix (a pinned range cannot address another sheet)", () => {
+    // The old behavior silently dropped the prefix and wrote to the bound
+    // sheet — the wrong one. Now it throws with a pointer to the surfaces
+    // that CAN rebind.
+    expect(() => parseA1("Other!A1:B2")).toThrow(/names sheet "Other"/);
+    expect(() => parseA1("Other!A1:B2")).toThrow(/api\.range\("Other!A1:B2"\)/);
   });
   it("handles multi-letter columns", () => {
     expect(parseA1("AA1")).toEqual(box(0, 26, 0, 26));
   });
   it("throws on a malformed ref", () => {
     expect(() => parseA1("notacell")).toThrow(/Invalid cell reference/);
+  });
+  it("rejects row 0 like Rust parse_ref does (no silent row -1)", () => {
+    // "A0" used to parse to row -1, which skipped the named-range fallback in
+    // api.range() and failed later with a coordinate error that never named
+    // the address. Twin behavior: canonical_model.rs parse_ref rejects row 0.
+    expect(() => parseA1("A0")).toThrow(/Invalid cell reference/);
+    expect(() => parseA1("A0:B2")).toThrow(/Invalid cell reference/);
+  });
+});
+
+describe("splitSheetPrefix", () => {
+  it("returns null sheetName when there is no prefix", () => {
+    expect(splitSheetPrefix("A1:B2")).toEqual({ sheetName: null, rest: "A1:B2" });
+  });
+  it("splits a bare prefix", () => {
+    expect(splitSheetPrefix("Data!A1:B5")).toEqual({ sheetName: "Data", rest: "A1:B5" });
+  });
+  it("unquotes 'My Sheet' and un-escapes '' to a literal quote", () => {
+    expect(splitSheetPrefix("'My Sheet'!A1")).toEqual({ sheetName: "My Sheet", rest: "A1" });
+    expect(splitSheetPrefix("'It''s here'!B2")).toEqual({ sheetName: "It's here", rest: "B2" });
+  });
+});
+
+describe("resolveSheetName (twin of resolve_sheet_name in core/script-engine/src/ops/mod.rs)", () => {
+  const names = ["Alpha", "Beta"];
+  it("resolves an exact match", () => {
+    expect(resolveSheetName(names, "Beta")).toBe(1);
+  });
+  it("resolves a UNIQUE case-insensitive match", () => {
+    expect(resolveSheetName(names, "beta")).toBe(1);
+  });
+  it("prefers the exact match when case-insensitive would be ambiguous", () => {
+    expect(resolveSheetName(["Data", "DATA"], "DATA")).toBe(1);
+  });
+  it("throws on a miss, listing the workbook's sheets", () => {
+    expect(() => resolveSheetName(names, "Nope")).toThrow(
+      'No sheet named "Nope". Sheets in this workbook: "Alpha", "Beta"',
+    );
+  });
+  it("throws on an ambiguous case-insensitive match", () => {
+    expect(() => resolveSheetName(["Data", "DATA"], "data")).toThrow(
+      /ambiguous: it case-insensitively matches more than one sheet/,
+    );
   });
 });
 
@@ -340,5 +390,138 @@ describe("Workbook navigation (unlocked, cross-sheet)", () => {
     await hidden!.range("A1:C1").clearFormat();
     expect(t.formats).toEqual([[2, 0, 0, 0, 2, { bold: true }]]);
     expect(t.formatClears).toEqual([[2, 0, 0, 0, 2]]);
+  });
+
+  // The TWIN of this decision table lives in the QuickJS realm:
+  // core/script-engine/src/ops/canonical_model.rs (tests
+  // range_prefix_naming_the_bound_sheet_stays_bound / _another_sheet_rebinds /
+  // _supports_quoted_sheet_names / _naming_no_sheet_throws_listing_names).
+  // Both realms MUST agree, case for case — a prefix is resolved, never
+  // silently dropped (dropping it sent sheet("Intro").range("Data!A1") writes
+  // to Intro, the WRONG sheet).
+  describe("sheet.range() with a 'Sheet!' prefix (twin table: canonical_model.rs)", () => {
+    it("prefix naming the BOUND sheet stays bound", async () => {
+      const t = makeTransport();
+      const wb = makeWorkbook(t);
+      const intro = await wb.sheet("Intro"); // index 0
+      await intro!.range("Intro!A1").setValue("here");
+      expect(t.writes).toEqual([[0, 0, 0, "here"]]);
+    });
+
+    it("prefix naming ANOTHER existing sheet REBINDS the range to that sheet", async () => {
+      const t = makeTransport();
+      const wb = makeWorkbook(t);
+      const intro = await wb.sheet("Intro"); // bound to 0
+      const r = intro!.range("Data!A1:B1"); // names sheet 1
+      await r.setValues([["b1", "b2"]]);
+      expect(r.address).toBe("A1:B1"); // geometry is unchanged by the rebind
+      expect(t.blockWrites).toEqual([[1, 0, 0, [["b1", "b2"]]]]);
+      // Nothing landed on the bound sheet.
+      expect(t.blockWrites.filter(([s]) => s === 0)).toEqual([]);
+    });
+
+    it("supports quoted sheet names ('Data'!B2)", async () => {
+      const t = makeTransport();
+      const wb = makeWorkbook(t);
+      const intro = await wb.sheet("Intro");
+      await intro!.range("'Data'!B2").setValue("q");
+      expect(t.writes).toEqual([[1, 1, 1, "q"]]);
+    });
+
+    it("resolves a UNIQUE case-insensitive prefix (shared resolver rule)", async () => {
+      const t = makeTransport();
+      const wb = makeWorkbook(t);
+      const intro = await wb.sheet("Intro");
+      await intro!.range("data!A1").setValue("ci");
+      expect(t.writes).toEqual([[1, 0, 0, "ci"]]);
+    });
+
+    it("prefix naming NO sheet throws, listing the workbook's sheet names", async () => {
+      const t = makeTransport();
+      const wb = makeWorkbook(t);
+      const intro = await wb.sheet("Intro");
+      expect(() => intro!.range("Nope!A1")).toThrow(
+        'No sheet named "Nope". Sheets in this workbook: "Intro", "Data", "Hidden"',
+      );
+      expect(t.writes).toEqual([]);
+    });
+  });
+});
+
+// ============================================================================
+// Wave 4 (RANGE-OPS cluster): range-scoped ops delegate with THIS range's box
+// ============================================================================
+
+describe("ScriptRange range ops (Wave 4)", () => {
+  it("find() forwards the box, the query and the options", async () => {
+    const findInRange = vi.fn(async () => ({ matches: [{ row: 2, col: 2 }], totalCount: 1 }));
+    const t: RangeTransport = { ...perCellTransport(), findInRange };
+    const result = await rangeFromAddress(t, "B2:D10").find("x", { caseSensitive: true });
+    expect(result.totalCount).toBe(1);
+    expect(findInRange).toHaveBeenCalledWith(1, 1, 9, 3, "x", { caseSensitive: true });
+  });
+
+  it("replace() forwards the box and both texts", async () => {
+    const replaceInRange = vi.fn(async () => ({ replacementCount: 4 }));
+    const t: RangeTransport = { ...perCellTransport(), replaceInRange };
+    const result = await rangeFromAddress(t, "A1:B2").replace("a", "b", { matchEntireCell: true });
+    expect(result.replacementCount).toBe(4);
+    expect(replaceInRange).toHaveBeenCalledWith(0, 0, 1, 1, "a", "b", { matchEntireCell: true });
+  });
+
+  it("removeDuplicates()/textToColumns()/specialCells() forward the box", async () => {
+    const removeDuplicates = vi.fn(async () => ({ removedCount: 2 }));
+    const textToColumns = vi.fn(async () => ({ rowsProcessed: 3, columnsProduced: 2, cellsWritten: 6 }));
+    const specialCells = vi.fn(async () => ({ cells: [], truncated: false }));
+    const t: RangeTransport = { ...perCellTransport(), removeDuplicates, textToColumns, specialCells };
+    const r = rangeFromAddress(t, "A1:C5");
+    await r.removeDuplicates({ columns: [1], hasHeaders: true });
+    expect(removeDuplicates).toHaveBeenCalledWith(0, 0, 4, 2, { columns: [1], hasHeaders: true });
+    await rangeFromAddress(t, "B1:B5").textToColumns({ delimiters: [";"] });
+    expect(textToColumns).toHaveBeenCalledWith(0, 1, 4, 1, { delimiters: [";"] });
+    await r.specialCells("visible");
+    expect(specialCells).toHaveBeenCalledWith(0, 0, 4, 2, "visible");
+  });
+
+  it("goalSeek() targets THIS range's top-left and parses the changing cell", async () => {
+    const goalSeek = vi.fn(async () => ({ converged: true, solution: 5, iterations: 3 }));
+    const t: RangeTransport = { ...perCellTransport(), goalSeek };
+    const result = await rangeFromAddress(t, "B10").goalSeek(250000, "B2");
+    expect(result).toEqual({ converged: true, solution: 5, iterations: 3 });
+    expect(goalSeek).toHaveBeenCalledWith(9, 1, 250000, 1, 1);
+  });
+
+  it("goalSeek() accepts a single-cell Range shape and refuses a block", async () => {
+    const goalSeek = vi.fn(async () => ({ converged: true, solution: 1, iterations: 1 }));
+    const t: RangeTransport = { ...perCellTransport(), goalSeek };
+    const changing = rangeFromAddress(t, "C3");
+    await rangeFromAddress(t, "A1").goalSeek(7, changing);
+    expect(goalSeek).toHaveBeenCalledWith(0, 0, 7, 2, 2);
+    await expect(rangeFromAddress(t, "A1").goalSeek(7, rangeFromAddress(t, "C3:D4")))
+      .rejects.toThrow(/single cell/);
+  });
+
+  it("goalSeek() refuses a sheet-prefixed changing cell (pinned transport)", async () => {
+    const goalSeek = vi.fn(async () => ({ converged: true, solution: 1, iterations: 1 }));
+    const t: RangeTransport = { ...perCellTransport(), goalSeek };
+    await expect(rangeFromAddress(t, "A1").goalSeek(7, "Data!C3")).rejects.toThrow(/another sheet/);
+    expect(goalSeek).not.toHaveBeenCalled();
+  });
+
+  it("every range op THROWS honestly without its transport op", async () => {
+    const r = rangeFromAddress(perCellTransport(), "A1:B2");
+    await expect(r.find("x")).rejects.toThrow(/not available for this range/);
+    await expect(r.replace("a", "b")).rejects.toThrow(/not available for this range/);
+    await expect(r.removeDuplicates()).rejects.toThrow(/not available for this range/);
+    await expect(r.textToColumns()).rejects.toThrow(/not available for this range/);
+    await expect(r.specialCells("blanks")).rejects.toThrow(/not available for this range/);
+    await expect(r.goalSeek(1, "B1")).rejects.toThrow(/not available for this range/);
+  });
+
+  it("a navigated range keeps the range-op transport", async () => {
+    const specialCells = vi.fn(async () => ({ cells: [], truncated: false }));
+    const t: RangeTransport = { ...perCellTransport(), specialCells };
+    await rangeFromAddress(t, "A1:C3").offset(1, 1).resize(2, 2).specialCells("formulas");
+    expect(specialCells).toHaveBeenCalledWith(1, 1, 2, 2, "formulas");
   });
 });

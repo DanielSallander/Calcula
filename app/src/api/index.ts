@@ -128,6 +128,10 @@ export {
   getScrollArea,
   indexToCol,
   colToIndex,
+  // Navigation
+  getRangeEdge,
+  getSpecialCells,
+  getUsedRange,
   setActiveSheet as setActiveSheetApi,
   setCellStyle,
   setCellRichText,
@@ -180,6 +184,10 @@ export type {
   LayoutConfig,
   AggregationType,
   CurrentRegionResult,
+  RangeEdgeResult,
+  SpecialCellsKind,
+  SpecialCellRef,
+  SpecialCellsResult,
   SheetInfo,
   SheetVisibility,
   SheetsResult,
@@ -2010,6 +2018,7 @@ export {
   createNamedStyle,
   deleteNamedStyle,
   applyNamedStyle,
+  applyNamedStyleRange,
 } from "./lib";
 
 export type {

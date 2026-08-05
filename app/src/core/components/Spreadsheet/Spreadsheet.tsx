@@ -42,6 +42,10 @@ import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dime
 import { computeRowHeaderWidth } from "../../lib/gridRenderer/layout/rowHeaderWidth";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { AppEvents, emitAppEvent } from "../../lib/events";
+import {
+  cellContextMenuInterceptorCount,
+  checkCellContextMenuInterceptors,
+} from "../../lib/cellContextMenuInterceptors";
 import { findFloatingRegionAt } from "../../hooks/useMouseSelection/layout/overlayMoveHandlers";
 import {
   gridCommands,
@@ -913,11 +917,30 @@ function SpreadsheetContent({
         dimensions,
       };
 
-      // Emit event for Shell to handle rendering
-      emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, {
+      const request = {
         position: { x: event.clientX, y: event.clientY },
         context: menuContext,
-      });
+      };
+
+      // Right-click INTERCEPTORS (the sheet.onBeforeRightClick gate): asked
+      // before the menu is requested, exactly as double-click interceptors are
+      // asked before edit mode. Async — the verdict may come from a sandboxed
+      // script — so the menu opens after the check resolves; a registry with
+      // nobody in it keeps the synchronous path (no added latency, ever).
+      // preventDefault() already ran above, so deferring the emit is safe.
+      if (clickedCell && cellContextMenuInterceptorCount() > 0) {
+        const { row, col } = clickedCell;
+        const eventData = { clientX: event.clientX, clientY: event.clientY };
+        void (async () => {
+          const suppressed = await checkCellContextMenuInterceptors(row, col, eventData);
+          if (suppressed) return;
+          emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, request);
+        })();
+        return;
+      }
+
+      // Emit event for Shell to handle rendering
+      emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, request);
     },
     [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
   );

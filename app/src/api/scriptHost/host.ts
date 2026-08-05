@@ -51,12 +51,24 @@ import {
 } from "./renderCache";
 import { ALLOWLIST, thinAppEventForScripts, thinWorkbookPathDetail } from "./allowlist";
 import type { CapabilityId } from "./capabilityIds";
-import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS } from "./validators";
+import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
 import type { AutoFilterColumnCriteria } from "../autoFilterService";
 import type { ScriptCell } from "../scriptableObjects";
-import type { TypedCellData } from "../lib";
-import type { CellData, FormattingOptions } from "../types";
+import type {
+  TypedCellData,
+  DataValidation,
+  DataValidationRule,
+  DataValidationOperator,
+  DataValidationAlertStyle,
+  ListSource,
+  Hyperlink,
+  AddHyperlinkParams,
+} from "../lib";
+// columnToLetter: the A1 spelling delivered on onDataChange change entries.
+// (The worker-side canonicalModel keeps a private twin, colToLetters; this is
+// the one exported, unit-tested implementation.)
+import { columnToLetter, type CellData, type FormattingOptions } from "../types";
 import {
   fetchOriginOf,
   grantBackendCapability,
@@ -90,10 +102,16 @@ import {
   type LifecycleDetail,
   type LifecycleGuardResult,
 } from "../../core/lib/lifecycleGuards";
+// The two click choke points Core already consults (Wave 4): double-click asks
+// before entering edit mode, right-click before requesting the context menu.
+// The script host registers one interceptor per declared onBefore*Click hook.
+import { registerCellDoubleClickInterceptor } from "../../core/lib/cellDoubleClickInterceptors";
+import { registerCellContextMenuInterceptor } from "../../core/lib/cellContextMenuInterceptors";
 import {
   rectRowsCols,
   tableCellCoord,
   tableDataRowCount,
+  tableHeaderOffset,
   tableHeaders,
   tableContains,
   namedRangeCells,
@@ -102,9 +120,23 @@ import {
   type NamedRangeCoordsLike,
 } from "./objectCoords";
 import { showToast } from "../notifications";
+// The fill-handle's own machinery (drag parity for api.fillRange): SHARED with
+// core/hooks/useFillHandle so a script fill and a drag fill cannot diverge.
+import {
+  detectPattern,
+  processPendingFills,
+  replicateMergeRegions,
+  type PatternResult,
+  type PendingFill,
+} from "../../core/lib/fillEngine";
 import { revokeScriptKeybindingsForScript } from "../keybindings";
+// A1 parsing for the Wave-4 `range` option: the SAME pure, dependency-free
+// parser the worker realm uses, so both realms read "B2:D10" identically.
+import {
+  parseA1Body as parseA1BodyHost,
+  splitSheetPrefix as splitSheetPrefixHost,
+} from "./worker/canonicalModel";
 import { getCellBehaviorById } from "../cellBehaviors";
-import { ExtensionRegistry } from "../extensionRegistry";
 import { getSlicerStoreService, getTimelineStoreService, getChartStoreService, getPivotStoreService, getPaneControlStoreService, getControlStoreService } from "../componentStoreRegistry";
 import type { ChartPlacement } from "../componentStoreRegistry";
 import {
@@ -125,6 +157,14 @@ import {
   type PivotArea,
 } from "./pivotLayoutVocabulary";
 import type { AggregationFunction, PivotApi, PivotAxis } from "../pivotTypes";
+import type {
+  ConditionalFormat,
+  ConditionalFormatRange,
+  ConditionalFormatRule,
+  SheetProtectionOptions,
+  Table as BackendTable,
+  TotalsRowFunction as BackendTotalsRowFunction,
+} from "../backend";
 import type { IStyleOverride } from "../styleInterceptors";
 
 type CleanupFn = () => void;
@@ -465,6 +505,16 @@ export interface HostMountDefinition {
    *  buildHandleFromDefinition; the broker denies any cap not in this set. */
   declaredCapabilities?: string[];
   apiVersion: string;
+  /**
+   * Why this mount is happening. `"open"` marks the workbook-open mount path
+   * (startup load and the AFTER_OPEN reload) — scripts are mounted FROM the
+   * AFTER_OPEN handler, so their live `workbook.onOpen` subscription is wired
+   * only after the open it exists to observe was broadcast, and the host
+   * REPLAYS that one delivery at mount. Absent for every other mount (Save &
+   * Apply, consent, template stamping, crash respawn): no replay. The flag is
+   * CONSUMED by the first mount that sees it, never inferred heuristically.
+   */
+  mountCause?: "open";
 }
 
 interface MountedWorker {
@@ -499,6 +549,12 @@ interface MountedWorker {
   /** Coalesced event queue, flushed per animation frame. */
   coalesced: Map<string, unknown>;
   coalesceScheduled: boolean;
+  /**
+   * True while this open-mount still owes its script the `workbook.onOpen`
+   * replay (see HostMountDefinition.mountCause). Cleared the moment the hook
+   * is wired, so a hook re-declared later in the same mount cannot replay twice.
+   */
+  openReplayPending: boolean;
   /** Crash bookkeeping (one free respawn; second crash within 30s faults). */
   lastCrashAt: number;
   respawned: boolean;
@@ -643,6 +699,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     nextReqId: 1,
     coalesced: new Map(),
     coalesceScheduled: false,
+    openReplayPending: definition.mountCause === "open",
     lastCrashAt: 0,
     respawned: false,
     shapeProps: new Map(),
@@ -651,6 +708,10 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     hostMirror: new Map(),
   };
   mounted.set(definition.id, mw);
+  // CONSUME the mount cause. The crash-respawn path re-calls mountWorker with
+  // this very definition object, and a respawn (or any later remount) is not an
+  // open — the replay belongs to the one mount the opener started.
+  definition.mountCause = undefined;
   mw.cleanupFns.push(registerMountedHandle(handle));
   // Re-establish this script's grants BEFORE the mount spec is built, so the
   // capability list the worker realm receives is the one it actually has:
@@ -815,6 +876,25 @@ export function hostUnmountScript(scriptId: string): void {
   // the user's data — so it must not outlive the code that captured it, and a
   // remounted successor must not inherit a buffer it never filled.
   clearScriptClipboard(scriptId);
+  // Hand the calculation mode back if THIS script flipped it to manual (Wave 3
+  // item 7). Fire-and-forget — unmount is synchronous and the worker is
+  // already gone — and covers every way a script ends: explicit unmount,
+  // fault (both crash paths route through here) and debugger stop.
+  if (manualCalcHolders.has(scriptId)) {
+    void getLib()
+      .then((lib) => releaseManualCalculation(lib, scriptId))
+      .catch(() => {
+        // Best-effort: the backend may already be gone (window teardown).
+      });
+  }
+  // Unfreeze the screen if THIS script paused repaints with
+  // beginBatch({ deferRepaint: true }) and died before its commit/cancel —
+  // same deferred-action discipline as the calculation mode above: the pause
+  // is a debt, and every way a script ends routes through here.
+  releaseDeferredRepaint(scriptId);
+  // ...and take its status-bar message down (Wave 4). A dead script must
+  // never pin a stale "Working…" in front of the user.
+  releaseScriptStatusBar(scriptId);
   mounted.delete(scriptId);
   // The worker is gone, so any pause died with it. Say so rather than leaving a
   // "paused" indicator standing in front of a script that no longer exists.
@@ -862,6 +942,25 @@ export function hostResetAll(): void {
   // ...and every private clipboard: those hold cells from the workbook that is
   // being replaced, and a style index from it means nothing in the next one.
   clearScriptClipboard();
+  // ...and the manual-calculation debt (Wave 3 item 7). Restored EXPLICITLY
+  // here rather than left to the per-script unmounts above: their restores are
+  // fire-and-forget microtasks, and clearing the tracking set below would win
+  // the race and swallow them. One direct restore covers the workbook swap.
+  if (manualCalcHolders.size > 0) {
+    resetManualCalculationTracking();
+    void getLib()
+      .then((lib) => lib.setCalculationMode("automatic"))
+      .catch(() => {
+        // Best-effort: the backend may already be gone (window teardown).
+      });
+  }
+  // ...and the Wave-4 application debts: a paused repaint (dropped without a
+  // flush — the document under the canvas is being replaced wholesale), the
+  // status-bar message (cleared — the new workbook owes the old one nothing),
+  // and the running-macro chain (those mounts were just torn down above).
+  resetDeferredRepaint();
+  resetStatusBarTracking();
+  resetMacroRunTracking();
   // ...and every library import table. The lockfile belongs to the workbook, so
   // a binding from the old one names a realm that is gone and a package the new
   // workbook may not even have installed.
@@ -2537,16 +2636,46 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return cell?.display ?? "";
     }
     case "api.setCellValue": {
-      const [row, col, value] = args as [number, number, string];
+      // The optional 4th argument is a sheet ref (0-based index or NAME) — the
+      // flat VBA idiom `api.setCellValue(r, c, v, "Sheet2")`. vCellSet always
+      // validated that slot; until the live-run fix the worker shim dropped it
+      // and this executor ignored it, so the value silently landed on the
+      // ACTIVE sheet — the exact wrong-sheet write class Wave 1 exists to kill.
+      const [row, col, rawValue, sheetRef] = args as
+        [number, number, ScriptCellWriteValue, (number | string)?];
       const lib = await getLib();
-      const sheetIndex = await activeSheetForWriteGuard(lib);
+      // Typed write: 42 lands as the NUMBER 42, true as a boolean, null clears
+      // — through the same invariant parse path a paste of a numeric cell takes.
+      const { value, invariant } = scriptCellInput(rawValue);
+      let sheetIndex: number;
+      if (sheetRef !== undefined && sheetRef !== null) {
+        const { sheets, activeIndex } = await lib.getSheets();
+        sheetIndex = resolveSheetRefIn(sheets, sheetRef, "setCellValue");
+        if (sheetIndex !== activeIndex) {
+          // Another sheet, by name or index: the same off-sheet path
+          // sheet.setCellValue takes (api.* is unlocked-only, so no tier clamp).
+          recordScriptWrite(definition.id, sheetIndex, row, col);
+          // Canonical US form + invariant flag — parse_cell_input_invariant,
+          // never delocalized (sv-SE would read "42.5" as 425). The backend
+          // recalculates dependents (written sheet + active) before returning;
+          // the writeback draft gate and the active-sheet-skip retry both live
+          // inside writeOffSheetCellTyped.
+          await writeOffSheetCellTyped(
+            lib, definition.id, sheetIndex, row, col, value, invariant,
+          );
+          return undefined;
+        }
+      } else {
+        sheetIndex = await activeSheetForWriteGuard(lib);
+      }
       recordScriptWrite(definition.id, sheetIndex, row, col);
-      // A .calp writeback cell is the publisher's input form: capture it as a
-      // schema-validated draft first, exactly like a human keystroke, and only
-      // then let the grid show the value. A rejection throws and nothing is
-      // written. See writebackWriteGuard.ts.
-      await captureWritebackWrite(definition.id, { sheetIndex, row, col, value });
-      const written = await lib.updateCell(row, col, value);
+      // writeActiveCellTyped runs the .calp writeback draft gate first — a cell
+      // that is a publisher's input form is captured as a schema-validated
+      // draft, exactly like a human keystroke, before the grid shows the value.
+      // A rejection throws and nothing is written. See writebackWriteGuard.ts.
+      const written = await writeActiveCellTyped(
+        lib, definition.id, sheetIndex, row, col, value, invariant,
+      );
       // THE CANVAS DOES NOT WATCH THE BACKEND. update_cell changes the engine
       // and returns the recalculated cells; nothing re-fetches them until
       // something dispatches `grid:refresh`. Without this line a script write
@@ -2554,13 +2683,15 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // reloads or edits a cell by hand — which is exactly what "I clicked the
       // macro button and nothing happened" looked like. Every other mutate
       // handler in this broker already does it; these two were the omission.
-      await afterCellDataChange(written.cells);
+      await afterCellDataChange(written);
       return undefined;
     }
     case "api.updateCellsBatch": {
-      const [updates] = args as [Array<{ row: number; col: number; value: string }>];
+      const [rawUpdates] = args as [Array<{ row: number; col: number; value: ScriptCellWriteValue }>];
       const lib = await getLib();
       const sheetIndex = await activeSheetForWriteGuard(lib);
+      // Typed writes, converted through the same invariant path as a paste.
+      const updates = rawUpdates.map((u) => ({ row: u.row, col: u.col, ...scriptCellInput(u.value) }));
       for (const u of updates) {
         recordScriptWrite(definition.id, sheetIndex, u.row, u.col);
       }
@@ -2568,11 +2699,17 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         definition.id,
         updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
       );
+      const invariantAt = new Map(updates.map((u) => [`${u.row},${u.col}`, u.invariant]));
       const changed: CellData[] = [];
       if (plain.length > 0) {
         changed.push(
           ...(await lib.updateCellsBatch(
-            plain.map((u) => ({ row: u.row, col: u.col, value: u.value })),
+            plain.map((u) => ({
+              row: u.row,
+              col: u.col,
+              value: u.value,
+              invariant: invariantAt.get(`${u.row},${u.col}`) || undefined,
+            })),
           )),
         );
       }
@@ -2587,18 +2724,20 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
     case "api.getCellData": {
-      // Typed single-cell read (any sheet). Unlike api.getCellValue this keeps
-      // the value's type and the cell's formula.
-      const [row, col, sheetIndex] = args as [number, number, number?];
+      // Typed single-cell read (any sheet, by index or name). Unlike
+      // api.getCellValue this keeps the value's type and the cell's formula.
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
       const lib = await getLib();
-      return readTypedCell(lib, sheetIndex, row, col);
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getCellData");
+      return readTypedCell(lib, target, row, col);
     }
     case "api.getRangeValues": {
-      // ONE round trip for a whole rectangle, on any sheet.
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      // ONE round trip for a whole rectangle, on any sheet (index or name).
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      return readTypedRange(lib, sheetIndex, startRow, startCol, endRow, endCol);
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getRangeValues");
+      return readTypedRange(lib, target, startRow, startCol, endRow, endCol);
     }
     case "api.getSheetNames": {
       const lib = await getLib();
@@ -2610,8 +2749,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return lib.getActiveSheet();
     }
     case "api.setActiveSheet": {
-      const [index] = args as [number];
+      // THE user-reported wall: api.setActiveSheet("Sheet1") used to fail with
+      // "index must be a non-negative integer". A sheet ref is an index OR a
+      // name, resolved here against the live list.
+      const [ref] = args as [number | string];
       const lib = await getLib();
+      const index = await resolveSheetRef(lib, ref, "setActiveSheet");
       const result = await lib.setActiveSheet(index);
       // The BACKEND's active sheet moved; Core's did not. Announcing it is what
       // keeps the tab bar, the canvas and every subsequent active-sheet write in
@@ -2639,102 +2782,195 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return await mod.CommandRegistry.execute(commandId, cmdArgs);
     }
     case "api.beginBatch": {
-      const [description] = args as [string];
+      // { deferRepaint: true } is ScreenUpdating done right (Wave 4): repaints
+      // pause only INSIDE a batch, so the pause has a guaranteed end — the
+      // commit/cancel below, or this script's unmount/fault, whichever comes
+      // first. There is deliberately NO standalone screenUpdating flag: a flag
+      // with no bracket is exactly how VBA left dead Excel windows frozen.
+      const [description, options] = args as [string, { deferRepaint?: boolean } | undefined];
       const lib = await getLib();
       await lib.beginUndoTransaction(description);
+      if (options?.deferRepaint === true) acquireDeferredRepaint(definition.id);
       return undefined;
     }
     case "api.commitBatch": {
       const lib = await getLib();
-      await lib.commitUndoTransaction();
+      try {
+        await lib.commitUndoTransaction();
+      } finally {
+        // Release EVEN when the commit throws — the batch is over either way,
+        // and a script must never keep the screen frozen past its bracket.
+        releaseDeferredRepaint(definition.id);
+      }
       return undefined;
     }
     case "api.cancelBatch": {
       const lib = await getLib();
-      await lib.cancelUndoTransaction();
+      try {
+        await lib.cancelUndoTransaction();
+      } finally {
+        // The cancel REVERTED whatever the batch wrote, so the single release
+        // repaint is what takes the reverted state to the screen.
+        releaseDeferredRepaint(definition.id);
+      }
       return undefined;
     }
 
     // ---- unlocked: formatting (B2) ----
     case "api.setRangeFormat": {
-      const [startRow, startCol, endRow, endCol, format, sheetIndex] = args as
-        [number, number, number, number, FormattingOptions, number?];
+      const [startRow, startCol, endRow, endCol, format, sheetRef] = args as
+        [number, number, number, number, FormattingOptions, (number | string)?];
       const lib = await getLib();
-      await applyRangeFormat(lib, sheetIndex, startRow, startCol, endRow, endCol, format);
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "setRangeFormat");
+      await applyRangeFormat(lib, target, startRow, startCol, endRow, endCol, format);
       return undefined;
     }
     case "api.clearRangeFormat": {
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      await clearRangeFormat(lib, sheetIndex, startRow, startCol, endRow, endCol);
+      await clearRangeFormat(lib, sheetRef, startRow, startCol, endRow, endCol);
       return undefined;
+    }
+    case "api.getRangeFormat": {
+      // Format READ-BACK (Wave 3): the inverse of api.setRangeFormat, on any
+      // sheet (index or name — the Wave-1 resolver owns the slot).
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getRangeFormat");
+      return readRangeFormats(lib, target, startRow, startCol, endRow, endCol);
+    }
+    case "api.getCellFormat": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getCellFormat");
+      return readCellFormat(lib, target, row, col);
     }
 
-    // ---- unlocked: structure (B2) ----
-    // Every backend command below acts on the ACTIVE sheet, so an explicit
-    // sheetIndex that names another one is REFUSED with an actionable message
-    // rather than silently applied to the wrong sheet (assertActiveSheet).
-    case "api.insertRows": {
-      const [start, count, sheetIndex] = args as [number, number, number?];
+    // ---- unlocked: named cell styles + theme palette (Wave 4) ----
+    case "api.listNamedStyles": {
       const lib = await getLib();
-      await assertActiveSheet(lib, sheetIndex, "insertRows");
-      await lib.insertRows(start, count);
-      await afterStructuralChange();
+      const styles = await lib.getNamedStyles();
+      return styles.map(
+        (s): ScriptNamedStyleInfo => ({ name: s.name, builtIn: s.builtIn, category: s.category }),
+      );
+    }
+    case "api.applyNamedStyle": {
+      const [name, startRow, startCol, endRow, endCol, sheetRef] = args as
+        [string, number, number, number, number, (number | string)?];
+      const lib = await getLib();
+      await executeApplyNamedStyle(lib, name, startRow, startCol, endRow, endCol, sheetRef);
       return undefined;
     }
-    case "api.deleteRows": {
-      const [start, count, sheetIndex] = args as [number, number, number?];
+    case "api.createNamedStyle": {
+      const [name, format] = args as [string, ScriptRangeFormat];
       const lib = await getLib();
-      await assertActiveSheet(lib, sheetIndex, "deleteRows");
-      await lib.deleteRows(start, count);
-      await afterStructuralChange();
+      return executeCreateNamedStyle(lib, name, format);
+    }
+    case "api.deleteNamedStyle": {
+      const [name] = args as [string];
+      const lib = await getLib();
+      await lib.deleteNamedStyle(name);
       return undefined;
     }
-    case "api.insertColumns": {
-      const [start, count, sheetIndex] = args as [number, number, number?];
+    case "api.getThemePalette": {
       const lib = await getLib();
-      await assertActiveSheet(lib, sheetIndex, "insertColumns");
-      await lib.insertColumns(start, count);
-      await afterStructuralChange();
-      return undefined;
+      const theme = await lib.getDocumentTheme();
+      const colors: Record<string, string> = {};
+      for (const [slot, hex] of Object.entries(theme.colors)) {
+        colors[slot] = applyThemeTint(hex as string, 0);
+      }
+      return {
+        name: theme.name,
+        colors,
+        fonts: { heading: theme.fonts.heading, body: theme.fonts.body },
+      };
     }
+
+    // ---- unlocked: calculation control (Wave 3, item 7) ----
+    case "api.getCalculationMode": {
+      const lib = await getLib();
+      const mode = await lib.getCalculationMode();
+      return mode === "manual" ? "manual" : "automatic";
+    }
+    case "api.setCalculationMode": {
+      const [mode] = args as ["automatic" | "manual"];
+      const lib = await getLib();
+      return executeSetCalculationMode(lib, definition.id, mode);
+    }
+    case "api.recalculate": {
+      const [options] = args as [{ full?: boolean }?];
+      const lib = await getLib();
+      return executeRecalculate(lib, options);
+    }
+
+    // ---- unlocked: sheet protection (Wave 3, item 8) ----
+    // The backend protection commands address the ACTIVE sheet only, so a
+    // sheet ref naming another one is refused with the fix spelled out
+    // (assertActiveSheet), exactly like the structure rows above.
+    case "api.protectSheet": {
+      const [options, sheetRef] = args as
+        [ScriptProtectSheetOptions?, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "protectSheet");
+      return executeProtectSheet(lib, options);
+    }
+    case "api.unprotectSheet": {
+      const [password, sheetRef] = args as [(string | null)?, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "unprotectSheet");
+      return executeUnprotectSheet(lib, password ?? undefined);
+    }
+    case "api.getProtectionStatus": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "getProtectionStatus");
+      const status = await lib.getProtectionStatus();
+      return {
+        protected: status.isProtected,
+        hasPassword: status.hasPassword,
+        options: status.options,
+      } satisfies ScriptProtectionStatus;
+    }
+
+    // ---- unlocked: structure (B2; sheet-addressable since Wave 3) ----
+    // The backend commands take an optional sheetIndex with the full off-sheet
+    // guard chain (protection, spill, writeback claims, sheet-tagged undo,
+    // cross-sheet formula rewrite, recalc). A non-visible target returns NO
+    // repaint payload — the sheet re-materializes from backend state on switch
+    // — so the canvas refresh is skipped for it. setRowHeight/setColumnWidth
+    // stay ACTIVE-SHEET-ONLY: those two commands still have no sheet param.
+    case "api.insertRows":
+    case "api.deleteRows":
+    case "api.insertColumns":
     case "api.deleteColumns": {
-      const [start, count, sheetIndex] = args as [number, number, number?];
+      const [start, count, sheetRef] = args as [number, number, (number | string)?];
       const lib = await getLib();
-      await assertActiveSheet(lib, sheetIndex, "deleteColumns");
-      await lib.deleteColumns(start, count);
-      await afterStructuralChange();
+      await executeStructuralOp(
+        lib,
+        method.slice("api.".length) as StructuralOpName,
+        start,
+        count,
+        sheetRef,
+      );
       return undefined;
     }
     case "api.mergeCells": {
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      const active = await assertActiveSheet(lib, sheetIndex, "mergeCells");
-      const result = await lib.mergeCells(startRow, startCol, endRow, endCol);
-      if (!result.success) {
-        throw new BrokerError("ValidationError", "mergeCells was refused (the range overlaps an existing merge)");
-      }
-      for (const cell of result.updatedCells) {
-        recordScriptWrite(definition.id, active, cell.row, cell.col);
-      }
-      await afterCellDataChange(result.updatedCells);
+      await executeMergeCells(lib, definition.id, startRow, startCol, endRow, endCol, sheetRef);
       return undefined;
     }
     case "api.unmergeCells": {
-      const [row, col, sheetIndex] = args as [number, number, number?];
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
       const lib = await getLib();
-      await assertActiveSheet(lib, sheetIndex, "unmergeCells");
-      const result = await lib.unmergeCells(row, col);
-      if (!result.success) {
-        throw new BrokerError("ValidationError", `No merged region at row=${row} col=${col}`);
-      }
-      await afterCellDataChange(result.updatedCells);
+      await executeUnmergeCells(lib, row, col, sheetRef);
       return undefined;
     }
     case "api.setRowHeight": {
-      const [row, height, sheetIndex] = args as [number, number, number?];
+      const [row, height, sheetIndex] = args as [number, number, (number | string)?];
       const lib = await getLib();
       await assertActiveSheet(lib, sheetIndex, "setRowHeight");
       await lib.setRowHeight(row, height);
@@ -2742,12 +2978,22 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
     case "api.setColumnWidth": {
-      const [col, width, sheetIndex] = args as [number, number, number?];
+      const [col, width, sheetIndex] = args as [number, number, (number | string)?];
       const lib = await getLib();
       await assertActiveSheet(lib, sheetIndex, "setColumnWidth");
       await lib.setColumnWidth(col, width);
       await syncDimensionToGrid("column", col, width);
       return undefined;
+    }
+    case "api.autoFitColumns": {
+      const [startCol, endCol, sheetIndex] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      return autoFitFromScript(lib, "columns", startCol, endCol, sheetIndex);
+    }
+    case "api.autoFitRows": {
+      const [startRow, endRow, sheetIndex] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      return autoFitFromScript(lib, "rows", startRow, endRow, sheetIndex);
     }
     case "api.freezePanes": {
       // The @api orchestrator persists AND emits FREEZE_CHANGED, which the
@@ -2768,27 +3014,171 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
 
+    // ---- unlocked: PAGE SETUP + PRINT LAYOUT (Wave 4, SHEETS cluster). ----
+    // Every backend print command acts on the ACTIVE SHEET (print.rs has no
+    // sheet parameter), so the optional trailing sheet ref is refused unless
+    // it names the active sheet — assertActiveSheet, the AutoFilter rule.
+    // Mutations end with GRID_REFRESH so the Print extension's page-break
+    // preview overlay repaints, exactly as its own menu handlers do.
+    case "api.getPageSetup": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "getPageSetup");
+      return lib.getPageSetup();
+    }
+    case "api.setPageSetup": {
+      // READ-MERGE-WRITE: the backend command takes the FULL PageSetup, the
+      // script hands over a PATCH (vPageSetupPatch enumerated its keys), so
+      // the current setup is read and only the named keys are replaced —
+      // setRangeFormat's partial-write contract applied to the page.
+      const [patch, sheetRef] = args as [Record<string, unknown>, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "setPageSetup");
+      const current = await lib.getPageSetup();
+      await lib.setPageSetup({ ...current, ...patch } as typeof current);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return undefined;
+    }
+    case "api.setPrintArea": {
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "setPrintArea");
+      // Answers the A1 spelling the backend stored ("A1:F20"), so the script
+      // can echo exactly what the Page Setup dialog would now show.
+      const area = await lib.setPrintArea(startRow, startCol, endRow, endCol);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return { area };
+    }
+    case "api.clearPrintArea": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "clearPrintArea");
+      await lib.clearPrintArea();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return undefined;
+    }
+    case "api.addPageBreak":
+    case "api.removePageBreak": {
+      const [kind, index, sheetRef] = args as ["row" | "col", number, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(
+        lib, sheetRef, method === "api.addPageBreak" ? "addPageBreak" : "removePageBreak",
+      );
+      if (method === "api.addPageBreak") {
+        // A break sits ABOVE its row / LEFT of its column, so index 0 names a
+        // break before the first row — a break with no page in front of it.
+        // Refused with the reason, matching the Print menu's own guard.
+        if (index <= 0) {
+          throw new BrokerError(
+            "ValidationError",
+            `a ${kind === "row" ? "row" : "column"} page break cannot sit before the first ${
+              kind === "row" ? "row" : "column"} (index must be >= 1)`,
+          );
+        }
+        await (kind === "row" ? lib.insertRowPageBreak(index) : lib.insertColPageBreak(index));
+      } else {
+        await (kind === "row" ? lib.removeRowPageBreak(index) : lib.removeColPageBreak(index));
+      }
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return undefined;
+    }
+    case "api.resetPageBreaks": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "resetPageBreaks");
+      await lib.resetAllPageBreaks();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+      return undefined;
+    }
+
+    // ---- unlocked: OUTLINE GROUPING (Wave 4, SHEETS cluster), through the
+    //      @api/groupingService seam the Grouping extension registers — the
+    //      autoFilterService pattern, and for the same reason: only the
+    //      extension's store pushes group-hidden rows/cols into the grid and
+    //      sizes the outline bar, so bypassing it would group invisibly.
+    //      requireGroupingController REFUSES (loudly) when the extension is
+    //      disabled. ACTIVE SHEET ONLY, like the backend it drives. ----
+    case "api.groupRows":
+    case "api.ungroupRows":
+    case "api.groupColumns":
+    case "api.ungroupColumns": {
+      const [start, end, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, method.slice("api.".length));
+      const { requireGroupingController } = await import("../groupingService");
+      const controller = requireGroupingController();
+      switch (method) {
+        case "api.groupRows": return controller.groupRows(start, end);
+        case "api.ungroupRows": return controller.ungroupRows(start, end);
+        case "api.groupColumns": return controller.groupColumns(start, end);
+        default: return controller.ungroupColumns(start, end);
+      }
+    }
+    case "api.showOutlineLevel": {
+      const [rowLevel, colLevel, sheetRef] = args as
+        [(number | null)?, (number | null)?, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "showOutlineLevel");
+      const { requireGroupingController } = await import("../groupingService");
+      return requireGroupingController().showOutlineLevel(rowLevel ?? null, colLevel ?? null);
+    }
+
     // ---- unlocked: sheet CRUD (B2) ----
     case "api.addSheet": {
-      const [name] = args as [string?];
+      // Optional POSITION (Wave 4 — VBA's Add Before:=/After:=). The backend
+      // has no position parameter (add_sheet always appends), so the position
+      // is composed as add + move under ONE undo transaction: the anchor is
+      // resolved against the PRE-ADD list (an append never renumbers it), the
+      // final index computed there, and move_sheet rotates the new sheet into
+      // place. A failed move CANCELS the transaction and rethrows — the caller
+      // is never told half the truth. (Sheet CRUD records no undo entries
+      // today, so the empty transaction commits as a no-op; the bracket is
+      // what keeps this one step if that ever changes.)
+      const [name, position] = args as [
+        string?,
+        { before?: number | string | null; after?: number | string | null }?,
+      ];
       const lib = await getLib();
       if (name !== undefined && name !== null) {
         await assertSheetNameFree(lib, name, null);
       }
-      const result = await lib.addSheet(name ?? undefined);
+      const before = await lib.getSheets();
+      const target = resolveSheetPosition(before.sheets, position, "addSheet");
+      if (target === null) {
+        const result = await lib.addSheet(name ?? undefined);
+        await announceSheetsChanged(result);
+        // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
+        // by array position (the two diverge once a sheet has been deleted).
+        const added = result.sheets.find((s) => s.index === result.activeIndex);
+        return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
+      }
+      await lib.beginUndoTransaction("Add sheet");
+      let result;
+      try {
+        result = await lib.addSheet(name ?? undefined);
+        const appendedAt = result.activeIndex;
+        if (target !== appendedAt) {
+          result = await lib.moveSheet(appendedAt, target);
+        }
+        await lib.commitUndoTransaction();
+      } catch (e) {
+        try {
+          await lib.cancelUndoTransaction();
+        } catch {
+          /* the throw below is the primary failure */
+        }
+        throw e;
+      }
       await announceSheetsChanged(result);
-      // add_sheet makes the new sheet active — resolve it by INDEX FIELD, not
-      // by array position (the two diverge once a sheet has been deleted).
-      const added = result.sheets.find((s) => s.index === result.activeIndex);
-      return { index: added?.index ?? result.activeIndex, name: added?.name ?? "" };
+      const added = result.sheets.find((s) => s.index === target);
+      return { index: added?.index ?? target, name: added?.name ?? "" };
     }
     case "api.deleteSheet": {
-      const [index] = args as [number];
+      const [ref] = args as [number | string];
       const lib = await getLib();
       const before = await lib.getSheets();
-      if (!before.sheets.some((s) => s.index === index)) {
-        throw new BrokerError("ValidationError", `No sheet with index ${index}`);
-      }
+      const index = resolveSheetRefIn(before.sheets, ref, "deleteSheet");
       if (before.sheets.length <= 1) {
         throw new BrokerError("ValidationError", "Cannot delete the last remaining sheet");
       }
@@ -2797,20 +3187,19 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
     case "api.renameSheet": {
-      const [index, newName] = args as [number, string];
+      const [ref, newName] = args as [number | string, string];
       const lib = await getLib();
+      const index = await resolveSheetRef(lib, ref, "renameSheet");
       await assertSheetNameFree(lib, newName, index);
       const result = await lib.renameSheet(index, newName);
       await announceSheetsChanged(result);
       return undefined;
     }
     case "api.setSheetVisibility": {
-      const [index, visibility] = args as [number, "visible" | "hidden" | "veryHidden"];
+      const [ref, visibility] = args as [number | string, "visible" | "hidden" | "veryHidden"];
       const lib = await getLib();
       const before = await lib.getSheets();
-      if (!before.sheets.some((s) => s.index === index)) {
-        throw new BrokerError("ValidationError", `No sheet with index ${index}`);
-      }
+      const index = resolveSheetRefIn(before.sheets, ref, "setSheetVisibility");
       if (visibility !== "visible" && before.sheets.filter((s) => s.visibility === "visible").length <= 1) {
         throw new BrokerError("ValidationError", "Cannot hide the last visible sheet");
       }
@@ -2826,12 +3215,10 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // re-read after this. Both ends are checked against the live list first:
       // move_sheet clamps out-of-range silently, and a silent clamp is a script
       // that thinks it moved a sheet somewhere it did not.
-      const [fromIndex, toIndex] = args as [number, number];
+      const [fromRef, toIndex] = args as [number | string, number];
       const lib = await getLib();
       const before = await lib.getSheets();
-      if (!before.sheets.some((s) => s.index === fromIndex)) {
-        throw new BrokerError("ValidationError", `No sheet with index ${fromIndex}`);
-      }
+      const fromIndex = resolveSheetRefIn(before.sheets, fromRef, "moveSheet");
       if (toIndex >= before.sheets.length) {
         throw new BrokerError(
           "ValidationError",
@@ -2849,110 +3236,382 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // the list BEFORE and AFTER rather than by arithmetic on the insert
       // position, so a backend that changes where it inserts cannot make this
       // return the wrong sheet.
-      const [sourceIndex, newName] = args as [number, string?];
+      const [sourceRef, newName, position] = args as [
+        number | string,
+        string?,
+        { before?: number | string | null; after?: number | string | null }?,
+      ];
       const lib = await getLib();
       const before = await lib.getSheets();
-      if (!before.sheets.some((s) => s.index === sourceIndex)) {
-        throw new BrokerError("ValidationError", `No sheet with index ${sourceIndex}`);
-      }
+      const sourceIndex = resolveSheetRefIn(before.sheets, sourceRef, "copySheet");
       if (newName !== undefined && newName !== null) {
         await assertSheetNameFree(lib, newName, null);
       }
-      const result = await lib.copySheet(sourceIndex, newName ?? undefined);
+      // Optional POSITION (Wave 4), same construction as addSheet: the anchor
+      // resolves against the PRE-COPY list, the final index is computed in the
+      // list WITHOUT the copy, and move_sheet rotates the copy there — which
+      // yields exactly "the base list with the copy inserted at target".
+      const target = resolveSheetPosition(before.sheets, position, "copySheet");
+      let result;
+      let added: { index: number; name: string } | undefined;
+      if (target === null) {
+        result = await lib.copySheet(sourceIndex, newName ?? undefined);
+        const beforeNames = new Set(before.sheets.map((s) => s.name));
+        added = result.sheets.find((s) => !beforeNames.has(s.name));
+      } else {
+        await lib.beginUndoTransaction("Copy sheet");
+        try {
+          result = await lib.copySheet(sourceIndex, newName ?? undefined);
+          const beforeNames = new Set(before.sheets.map((s) => s.name));
+          const copy = result.sheets.find((s) => !beforeNames.has(s.name));
+          if (copy && copy.index !== target) {
+            result = await lib.moveSheet(copy.index, target);
+            added = copy ? result.sheets.find((s) => s.name === copy.name) : undefined;
+          } else {
+            added = copy;
+          }
+          await lib.commitUndoTransaction();
+        } catch (e) {
+          try {
+            await lib.cancelUndoTransaction();
+          } catch {
+            /* the throw below is the primary failure */
+          }
+          throw e;
+        }
+      }
       await announceSheetsChanged(result);
-      const beforeNames = new Set(before.sheets.map((s) => s.name));
-      const added = result.sheets.find((s) => !beforeNames.has(s.name));
       if (!added) {
         throw new BrokerError("HostError", "The sheet was copied but the new sheet could not be identified");
       }
       return { index: added.index, name: added.name };
     }
 
-    // ---- unlocked: sort + find/replace (B2) ----
+    // ---- unlocked: sort + find/replace (B2; sheet-addressable since Wave 3) ----
     case "api.sortRange": {
       // vSortRange already enforced the field shape (key/ascending/sortOn/...),
       // so the cast lands on a validated payload.
-      const [startRow, startCol, endRow, endCol, fields, options, sheetIndex] = args as [
+      const [startRow, startCol, endRow, endCol, fields, options, sheetRef] = args as [
         number, number, number, number,
         Parameters<Awaited<ReturnType<typeof getLib>>["sortRange"]>[4],
         { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" } | undefined,
-        number?,
+        (number | string)?,
       ];
       const lib = await getLib();
-      const active = await assertActiveSheet(lib, sheetIndex, "sortRange");
-      const result = await lib.sortRange<SortRangeResultLike>(
-        startRow, startCol, endRow, endCol,
-        fields,
-        options ?? undefined,
+      return executeSortRange(
+        lib, definition.id, startRow, startCol, endRow, endCol, fields, options, sheetRef,
       );
-      if (!result.success) {
-        throw new BrokerError("ValidationError", result.error || "sortRange failed");
-      }
-      for (const cell of result.updatedCells) {
-        recordScriptWrite(definition.id, active, cell.row, cell.col);
-      }
-      await afterCellDataChange(result.updatedCells);
-      return result.sortedCount;
     }
     // ---- the WorksheetFunction bridge (G4) ----
     // Nothing is written and nothing is remembered: the Rust command builds a
     // throwaway evaluator over the live grid, answers, and drops it. So this is
     // a READ, and its reach is exactly api.getRangeValues' reach.
     case "api.evaluate": {
-      const [expressions, options] = args as [string[], { sheetIndex?: number } | undefined];
+      const [expressions, options] = args as
+        [string[], { sheetIndex?: number | string } | undefined];
       const mod = await import("../formulaEval");
-      return mod.evaluateFormulasTyped(expressions, options?.sheetIndex);
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, options?.sheetIndex, "evaluate");
+      return mod.evaluateFormulasTyped(expressions, target);
     }
     // ---- explicit formula read/write, A1 or R1C1 (G4) ----
     case "api.getCellFormula": {
       const [row, col, options] = args as [number, number, ScriptFormulaOptions | undefined];
       const lib = await getLib();
-      return readCellFormula(lib, options?.sheetIndex, row, col, options?.style);
+      const target = await resolveOptionalSheetRef(lib, options?.sheetIndex, "getCellFormula");
+      return readCellFormula(lib, target, row, col, options?.style);
     }
     case "api.setCellFormula": {
       const [row, col, formula, options] = args as
         [number, number, string | null, ScriptFormulaOptions | undefined];
       const lib = await getLib();
-      await writeCellFormula(lib, definition.id, options?.sheetIndex, row, col, formula, options?.style);
+      const target = await resolveOptionalSheetRef(lib, options?.sheetIndex, "setCellFormula");
+      await writeCellFormula(lib, definition.id, target, row, col, formula, options?.style);
       return undefined;
     }
     // ---- range copy / paste / paste special (G4) ----
     case "api.copyRange": {
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      return copyRangeToScriptClipboard(lib, definition.id, sheetIndex, startRow, startCol, endRow, endCol);
+      return copyRangeToScriptClipboard(lib, definition.id, sheetRef, startRow, startCol, endRow, endCol);
     }
     case "api.pasteRange": {
       const [row, col, options] = args as [number, number, ScriptPasteOptions | undefined];
       const lib = await getLib();
       return pasteScriptClipboard(lib, definition.id, row, col, options ?? {});
     }
-    case "api.findAll": {
-      const [query, options] = args as [string, Record<string, boolean> | undefined];
+    case "api.fillRange": {
+      const [startRow, startCol, endRow, endCol, options, sheetRef] = args as [
+        number, number, number, number, ScriptFillOptions | undefined, (number | string)?,
+      ];
       const lib = await getLib();
-      const result = await lib.findAll(query, options ?? {});
-      // Reshape the backend's [row, col] tuples into named fields — a script
-      // reading `m.row` cannot silently swap the two the way `m[0]` can.
-      return {
-        matches: result.matches.map(([row, col]) => ({ row, col })),
-        totalCount: result.totalCount,
-      };
+      return fillRangeFromScript(
+        lib, definition.id, startRow, startCol, endRow, endCol, options ?? {}, sheetRef,
+      );
+    }
+    case "api.findAll": {
+      const [query, options] = args as [string, ScriptFindAllOptions | undefined];
+      const lib = await getLib();
+      return executeFindAll(lib, query, options);
     }
     case "api.replaceAll": {
       const [search, replacement, options] = args as
-        [string, string, Record<string, boolean> | undefined];
+        [string, string, ScriptReplaceAllOptions | undefined];
       const lib = await getLib();
-      const active = await lib.getActiveSheet();
-      const result = await lib.replaceAll(search, replacement, options ?? {});
-      for (const cell of result.updatedCells) {
-        recordScriptWrite(definition.id, active, cell.row, cell.col);
+      return executeReplaceAll(lib, definition.id, search, replacement, options);
+    }
+
+    // ---- unlocked: range ops (Wave 4, RANGE-OPS cluster) ----
+    case "api.removeDuplicates": {
+      const [startRow, startCol, endRow, endCol, options, sheetRef] = args as [
+        number, number, number, number, ScriptRemoveDuplicatesOptions | undefined,
+        (number | string)?,
+      ];
+      const lib = await getLib();
+      return executeRemoveDuplicates(
+        lib, definition.id, startRow, startCol, endRow, endCol, options, sheetRef,
+      );
+    }
+    case "api.textToColumns": {
+      const [startRow, startCol, endRow, endCol, options] = args as [
+        number, number, number, number, ScriptTextToColumnsOptions | undefined,
+      ];
+      const lib = await getLib();
+      return executeTextToColumns(
+        lib, definition.id, startRow, startCol, endRow, endCol, options,
+      );
+    }
+    case "api.getSpecialCells": {
+      const [startRow, startCol, endRow, endCol, kind, sheetRef] = args as [
+        number, number, number, number,
+        "constants" | "formulas" | "blanks" | "visible", (number | string)?,
+      ];
+      const lib = await getLib();
+      return executeGetSpecialCells(lib, startRow, startCol, endRow, endCol, kind, sheetRef);
+    }
+    case "api.goalSeek": {
+      const [params] = args as [ScriptGoalSeekParams];
+      const lib = await getLib();
+      return executeGoalSeek(lib, definition.id, params);
+    }
+
+    // ---- unlocked: data validation (Wave 3, item 5) ----
+    case "api.setDataValidation": {
+      const [startRow, startCol, endRow, endCol, rule, sheetRef] = args as
+        [number, number, number, number, ScriptValidationRule, (number | string)?];
+      const lib = await getLib();
+      await executeSetDataValidation(lib, startRow, startCol, endRow, endCol, rule, sheetRef);
+      return undefined;
+    }
+    case "api.clearDataValidation": {
+      const [range, sheetRef] = args as [ScriptRangeBox, (number | string)?];
+      const lib = await getLib();
+      await executeClearDataValidation(lib, range, sheetRef);
+      return undefined;
+    }
+    case "api.getDataValidation": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      return executeGetDataValidation(lib, row, col, sheetRef);
+    }
+    case "api.listDataValidations": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      return executeListDataValidations(lib, sheetRef);
+    }
+
+    // ---- unlocked: hyperlinks (Wave 3, item 6) ----
+    // NO follow, by design: scripts attach/read/remove links; opening one is
+    // the user's click (external targets leave the sandbox entirely; internal
+    // navigation from a script is api.select / api.scrollTo).
+    case "api.addHyperlink": {
+      const [row, col, link, options, sheetRef] = args as [
+        number, number, ScriptHyperlinkSpec,
+        ScriptHyperlinkOptions | undefined, (number | string)?,
+      ];
+      const lib = await getLib();
+      return executeAddHyperlink(lib, row, col, link, options, sheetRef);
+    }
+    case "api.removeHyperlink": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      return executeRemoveHyperlink(lib, row, col, sheetRef);
+    }
+    case "api.getHyperlink": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      return executeGetHyperlink(lib, row, col, sheetRef);
+    }
+    case "api.listHyperlinks": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      return executeListHyperlinks(lib, sheetRef);
+    }
+
+    // ---- unlocked: selection + navigation (Wave 2) ----
+    case "api.getSelection": {
+      // COORDINATES ONLY, from Core's live grid state — the same snapshot the
+      // ribbon reads. Never cell contents: those stay behind the read rows.
+      const gridApi = await import("../grid");
+      const state = gridApi.getGridStateSnapshot();
+      const sel = state?.selection;
+      if (!state || !sel) return null;
+      return normalizeSelection(sel, state.sheetContext?.activeSheetIndex ?? 0);
+    }
+    case "api.select": {
+      // Application.Goto + Range.Select. The broker only ever sees NUMBERS
+      // here — the A1-string spelling resolves worker-side (contextShims) —
+      // plus an optional sheet ref resolved against the live list (Wave 1).
+      const [startRow, startCol, endRowArg, endColArg, options] = args as
+        [number, number, number?, number?, ScriptSelectOptions?];
+      const endRow = endRowArg ?? startRow;
+      const endCol = endColArg ?? startCol;
+      const opts = options ?? {};
+      if (opts.sheetIndex !== undefined && opts.sheetIndex !== null) {
+        const lib = await getLib();
+        const { sheets, activeIndex } = await lib.getSheets();
+        const target = resolveSheetRefIn(sheets, opts.sheetIndex, "select");
+        if (target !== activeIndex) {
+          // Selection lives on the ACTIVE sheet in Core, so naming another
+          // sheet activates it first — the same announce path setActiveSheet
+          // takes, or the tab bar and the canvas would disagree.
+          await announceSheetsChanged(await lib.setActiveSheet(target));
+        }
       }
-      await afterCellDataChange(result.updatedCells);
-      // No skip count: the backend guard now REFUSES a replace that touches a
-      // claimed writeback region outright (it rejects, naming the region),
-      // rather than silently completing a partial edit.
-      return { replacementCount: result.replacementCount };
+      const scroll = opts.scroll !== false;
+      const extraAreas = (opts.ranges ?? []).map(normalizeSelectionArea);
+      const [gridApi, dispatchMod] = await Promise.all([
+        import("../grid"),
+        import("../gridDispatch"),
+      ]);
+      if (extraAreas.length > 0) {
+        // Multi-area: SET_SELECTION already carries additionalRanges (the
+        // Select-Visible-Cells / Go To Special shape) — one dispatch.
+        dispatchMod.dispatchGridAction(gridApi.setSelection({
+          startRow, startCol, endRow, endCol,
+          type: "cells",
+          additionalRanges: extraAreas,
+        }));
+        if (scroll) {
+          dispatchMod.dispatchGridAction(gridApi.scrollToCell(endRow, endCol, false));
+        }
+        gridApi.refreshGridData();
+      } else if (scroll) {
+        // The same NAVIGATE_TO_CELL choreography pivot creation uses:
+        // selection + scroll + canvas refresh in the right order.
+        gridApi.navigateToRange(startRow, startCol, endRow, endCol);
+      } else {
+        dispatchMod.dispatchGridAction(
+          gridApi.setSelection(startRow, startCol, endRow, endCol, "cells"),
+        );
+      }
+      return undefined;
+    }
+    case "api.scrollTo": {
+      // ScrollIntoView: bring a cell on screen WITHOUT touching the selection.
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      if (sheetRef !== undefined && sheetRef !== null) {
+        const lib = await getLib();
+        const { sheets, activeIndex } = await lib.getSheets();
+        const target = resolveSheetRefIn(sheets, sheetRef, "scrollTo");
+        if (target !== activeIndex) {
+          await announceSheetsChanged(await lib.setActiveSheet(target));
+        }
+      }
+      const gridApi = await import("../grid");
+      // select: false is the whole point — scroll only.
+      gridApi.navigateToCell(row, col, false);
+      return undefined;
+    }
+    case "api.clearRange": {
+      // Range.Clear / ClearContents / ClearFormats over the existing
+      // clear_range_with_options backend (which opens its own transaction, so
+      // one call is ONE undo entry — see the B2 note above about not nesting).
+      // Sheet-addressable since Wave 3: the Wave-2 active-sheet residual is
+      // CLOSED — the Rust command grew a sheetIndex with the full off-sheet
+      // guard chain, so the activate-clear-restore dance never happened.
+      const [startRow, startCol, endRow, endCol, options, sheetRef] = args as [
+        number, number, number, number,
+        ({ applyTo?: "all" | "contents" | "formats" } | undefined)?,
+        (number | string)?,
+      ];
+      const lib = await getLib();
+      return executeClearRange(
+        lib, definition.id, startRow, startCol, endRow, endCol, options, sheetRef,
+      );
+    }
+    case "api.getSheets": {
+      // The rich sheet listing (Wave 2): getSheetNames discards visibility and
+      // tab colour that lib.getSheets already returns — this row stops that.
+      const lib = await getLib();
+      const { sheets } = await lib.getSheets();
+      return sheets.map((s) => ({
+        index: s.index,
+        name: s.name,
+        visibility: s.visibility,
+        tabColor: s.tabColor ?? null,
+      }));
+    }
+    case "api.setTabColor": {
+      // The one sheet attribute the CRUD rows left write-only-from-the-UI. The
+      // sheet may be named (Wave 1 rules); null removes the colour — the
+      // backend stores "" for "no colour", which build_sheet_list reports back
+      // as an absent tabColor.
+      const [ref, color] = args as [number | string, string | null];
+      const lib = await getLib();
+      const index = await resolveSheetRef(lib, ref, "setTabColor");
+      const result = await lib.setTabColor(index, color ?? "");
+      await announceSheetsChanged(result);
+      return undefined;
+    }
+
+    // ---- unlocked: range discovery (Wave 2) ----
+    // Range.End / CurrentRegion / UsedRange over the get_range_edge /
+    // get_current_region / get_used_range commands — ONE implementation
+    // (engine::navigation) behind the keyboard's Ctrl+Arrow, these rows and
+    // the QuickJS ops, so a script and a keystroke can never disagree about
+    // where an edge is. Results are rebuilt field-by-field (house rule: a
+    // field added to the backend result later is absent here by default
+    // instead of crossing to scripts by default).
+    case "api.getRangeEdge": {
+      const [row, col, direction, sheetRef] = args as
+        [number, number, "up" | "down" | "left" | "right", (number | string)?];
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getRangeEdge");
+      const edge = await lib.getRangeEdge(row, col, direction, target);
+      return { row: edge.row, col: edge.col };
+    }
+    case "api.getCurrentRegion": {
+      // `empty: true` = the seed cell is isolated; the rectangle then collapses
+      // to the seed cell itself (the VBA CurrentRegion convention, and exactly
+      // what the backend returns).
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getCurrentRegion");
+      const region = await lib.getCurrentRegion(row, col, target);
+      return {
+        startRow: region.startRow,
+        startCol: region.startCol,
+        endRow: region.endRow,
+        endCol: region.endCol,
+        empty: region.empty,
+      };
+    }
+    case "api.getUsedRange": {
+      // `empty: true` = the sheet stores nothing at all (the coordinates are
+      // then meaningless zeros — the shim's sheet.usedRange() maps this to null).
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      const target = await resolveOptionalSheetRef(lib, sheetRef, "getUsedRange");
+      const used = await lib.getUsedRange(target);
+      return {
+        startRow: used.startRow,
+        startCol: used.startCol,
+        endRow: used.endRow,
+        endCol: used.endCol,
+        empty: used.empty,
+      };
     }
 
     // ---- unlocked: column filtering / AutoFilter (G4) ----
@@ -3006,13 +3665,74 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return path ? fs.fileNameOf(path) : null;
     }
 
+    // ---- unlocked: the APPLICATION cluster (Wave 4) ----
+    case "api.setStatusBar": {
+      // Lands in the SAME service the QuickJS DeferredAction::SetStatusBar
+      // lands in (@api/grid setStatusBarText -> STATUS_BAR_TEXT_CHANGED), so
+      // both script surfaces drive one status bar. The worker realm is async,
+      // so a long-running script's progress messages appear LIVE mid-run.
+      const [text] = args as [string | null];
+      await executeSetStatusBar(definition.id, text);
+      return undefined;
+    }
+    case "api.runMacro": {
+      // VBA's Application.Run, through the @api/macroRunService seam.
+      const [ref] = args as [string];
+      return executeRunMacro(ref);
+    }
+    case "api.userName": {
+      // The SAME display name writeback submissions carry (derived from the
+      // Windows user name by calp::identity_provider) — one identity for the
+      // whole app, read through the existing calp_get_subscriber_identity
+      // command. Nothing else from the identity is disclosed (no machine id).
+      const dist = await import("../distribution");
+      return (await dist.getSubscriberIdentity()).displayName;
+    }
+    case "api.getViewOption": {
+      const [name] = args as [ScriptViewOptionName];
+      return executeGetViewOption(name);
+    }
+    case "api.setViewOption": {
+      const [name, value] = args as [ScriptViewOptionName, boolean | string];
+      await executeSetViewOption(name, value);
+      return undefined;
+    }
+    case "api.getZoom": {
+      // PERCENT, matching the setter — @api/grid owns the factor conversion.
+      const grid = await import("../grid");
+      return grid.getZoom();
+    }
+    case "api.setZoom": {
+      // vZoom proved 10..400; @api/grid setZoomLevel is the same setter the
+      // View menu and Ctrl+scroll drive, so Core's own clamp still applies.
+      const [percent] = args as [number];
+      const grid = await import("../grid");
+      grid.setZoomLevel(percent);
+      return undefined;
+    }
+    case "api.getPanes": {
+      return executeGetPanes();
+    }
+
     // ---- unlocked: workbook objects (B3) ----
     case "api.listObjects": {
       const [kind] = args as [ScriptObjectKind];
       return listWorkbookObjects(kind);
     }
     case "api.createChart": {
-      const [spec, options] = args as [Record<string, unknown>, ChartCreateOptions?];
+      const [spec, rawOptions] = args as [
+        Record<string, unknown>,
+        (Omit<ChartCreateOptions, "sheetIndex"> & { sheetIndex?: number | string })?,
+      ];
+      // The placement's sheet may be named; the chart store speaks indexes.
+      let options = rawOptions as ChartCreateOptions | undefined;
+      if (rawOptions && rawOptions.sheetIndex !== undefined) {
+        const lib = await getLib();
+        options = {
+          ...rawOptions,
+          sheetIndex: await resolveSheetRef(lib, rawOptions.sheetIndex, "createChart"),
+        };
+      }
       const store = requireChartStore();
       // The extension validates the spec against the ChartSpec schema and
       // throws on a violation -> brokerCall audits ok:false and the script's
@@ -3066,11 +3786,16 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "api.createNamedRange": {
       const [name, refersTo, options] = args as
-        [string, string, { sheetIndex?: number | null; comment?: string }?];
+        [string, string, { sheetIndex?: number | string | null; comment?: string }?];
       const lib = await getLib();
+      // null = workbook scope (the common case); a name resolves to its index.
+      let scope: number | null = null;
+      if (options?.sheetIndex !== undefined && options.sheetIndex !== null) {
+        scope = await resolveSheetRef(lib, options.sheetIndex, "createNamedRange");
+      }
       const result = await lib.createNamedRange(
         name,
-        options?.sheetIndex ?? null, // null = workbook scope (the common case)
+        scope,
         refersTo,
         options?.comment,
       );
@@ -3091,12 +3816,33 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       return undefined;
     }
     case "api.createPivot": {
-      const [sourceRange, destinationCell, fields, options] = args as [
+      const [sourceRange, destinationCell, fields, rawOptions] = args as [
         string,
         string,
         ScriptPivotFields,
-        { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean } | undefined,
+        {
+          name?: string;
+          sourceSheet?: number | string;
+          destinationSheet?: number | string;
+          hasHeaders?: boolean;
+        } | undefined,
       ];
+      // Either sheet may be named; the pivot facade speaks indexes.
+      let options:
+        | { name?: string; sourceSheet?: number; destinationSheet?: number; hasHeaders?: boolean }
+        | undefined;
+      if (rawOptions) {
+        const lib = await getLib();
+        options = {
+          ...rawOptions,
+          sourceSheet: await resolveOptionalSheetRef(lib, rawOptions.sourceSheet, "createPivot"),
+          destinationSheet: await resolveOptionalSheetRef(
+            lib,
+            rawOptions.destinationSheet,
+            "createPivot",
+          ),
+        };
+      }
       return createPivotFromScript(sourceRange, destinationCell, fields, options);
     }
     case "api.deletePivot": {
@@ -3106,6 +3852,117 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       announcePivotChanged();
       return undefined;
     }
+    // ---- unlocked: notes + comments (Wave 4) ----
+    // The notes/comments backend addresses THE ACTIVE SHEET; the optional
+    // sheet slot resolves by the Wave-1 rules and a non-active target is
+    // refused with the fix spelled out (assertActiveSheet). listComments is
+    // the one sheet-addressable read (the backend has a per-sheet query).
+    case "api.setNote": {
+      const [row, col, text, sheetRef] = args as
+        [number, number, string | null, (number | string)?];
+      return executeSetNote(definition.name, row, col, text, sheetRef);
+    }
+    case "api.getNote": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "getNote");
+      const note = await lib.getNote(row, col);
+      return note ? note.content : null;
+    }
+    case "api.listNotes": {
+      const [sheetRef] = args as [(number | string)?];
+      const lib = await getLib();
+      await assertActiveSheet(lib, sheetRef, "listNotes");
+      const notes = await lib.getAllNotes();
+      return notes.map((n) => ({
+        row: n.row, col: n.col, text: n.content, author: n.authorName,
+      }));
+    }
+    case "api.addComment": {
+      const [row, col, text] = args as [number, number, string];
+      const lib = await getLib();
+      const result = await lib.addComment({
+        row, col,
+        // Honest attribution: the thread is signed with the SCRIPT's name (no
+        // email — a script has none, and inventing the user's would be worse).
+        authorEmail: "",
+        authorName: definition.name,
+        content: text,
+      });
+      if (!result.success || !result.comment) {
+        throw new BrokerError("ValidationError", result.error || "addComment failed");
+      }
+      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+      return { id: result.comment.id };
+    }
+    case "api.replyToComment": {
+      const [commentId, text] = args as [string, string];
+      const lib = await getLib();
+      const result = await lib.addReply({
+        commentId,
+        authorEmail: "",
+        authorName: definition.name,
+        content: text,
+      });
+      if (!result.success || !result.reply) {
+        throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
+      }
+      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+      return { id: result.reply.id };
+    }
+    case "api.resolveComment": {
+      const [commentId, resolved] = args as [string, boolean?];
+      const lib = await getLib();
+      const result = await lib.resolveComment(commentId, resolved ?? true);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
+      }
+      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+      return undefined;
+    }
+    case "api.deleteComment": {
+      const [commentId] = args as [string];
+      const lib = await getLib();
+      const result = await lib.deleteComment(commentId);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || `No comment "${commentId}"`);
+      }
+      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+      return undefined;
+    }
+    case "api.listComments": {
+      const [range, sheetRef] = args as [
+        ({ startRow: number; startCol: number; endRow: number; endCol: number } | null)?,
+        (number | string)?,
+      ];
+      const lib = await getLib();
+      // Sheet-addressable READ: the backend stores comments per sheet, so a
+      // named other sheet is honored here (unlike the mutation rows).
+      const comments = sheetRef === undefined || sheetRef === null
+        ? await lib.getAllComments()
+        : await lib.getCommentsForSheet(await resolveSheetRef(lib, sheetRef, "listComments"));
+      const filtered = range
+        ? comments.filter((c) =>
+            c.row >= range.startRow && c.row <= range.endRow &&
+            c.col >= range.startCol && c.col <= range.endCol)
+        : comments;
+      return filtered.map((c) => ({
+        id: c.id,
+        row: c.row,
+        col: c.col,
+        text: c.content,
+        author: c.authorName,
+        resolved: c.resolved,
+        replies: c.replies.map((r) => ({ id: r.id, text: r.content, author: r.authorName })),
+      }));
+    }
+    // ---- unlocked: conditional formatting CRUD (Wave 3 item 3) ----
+    case "api.listConditionalFormats":
+    case "api.addConditionalFormat":
+    case "api.updateConditionalFormat":
+    case "api.deleteConditionalFormat":
+    case "api.clearConditionalFormats":
+      return executeConditionalFormat(method, args);
     case "api.objectGetState": {
       // Cross-instance READ. The aspect executors are the SAME ones the
       // own-object door uses — only the instance id differs, and only the
@@ -3120,15 +3977,16 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
 
     // ---- sheet scope ----
     case "sheet.getCellValue": {
-      const [row, col, sheetIndex] = args as [number, number, number?];
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
       const lib = await getLib();
-      if (sheetIndex !== undefined) {
-        const active = await lib.getActiveSheet();
-        if (sheetIndex !== active) {
+      if (sheetRef !== undefined && sheetRef !== null) {
+        const { sheets, activeIndex } = await lib.getSheets();
+        const target = resolveSheetRefIn(sheets, sheetRef, "getCellValue");
+        if (target !== activeIndex) {
           if (handle.tier !== "unlocked") {
             throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
           }
-          const results = await lib.getWatchCells([[sheetIndex, row, col]]);
+          const results = await lib.getWatchCells([[target, row, col]]);
           return results[0]?.display ?? "";
         }
       }
@@ -3137,39 +3995,41 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "sheet.getCellData": {
       // Typed single-cell read, clamped to the script's own sheet (an explicit
-      // OTHER sheetIndex is unlocked-tier reach — same rule as getCellValue).
-      const [row, col, sheetIndex] = args as [number, number, number?];
+      // OTHER sheet ref is unlocked-tier reach — same rule as getCellValue).
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const target = await clampSheetIndex(lib, handle, sheetRef, "getCellData");
       return readTypedCell(lib, target, row, col);
     }
     case "sheet.getRangeValues": {
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const target = await clampSheetIndex(lib, handle, sheetRef, "getRangeValues");
       return readTypedRange(lib, target, startRow, startCol, endRow, endCol);
     }
     case "sheet.setRangeValues": {
       // Bulk own-sheet write: same reach as N sheet.setCellValue calls, one RPC,
       // and ONE undo step. `values` is anchored at (startRow, startCol); an
-      // undefined/null entry leaves that cell untouched.
-      const [startRow, startCol, values, sheetIndex] = args as
-        [number, number, Array<Array<string | null | undefined>>, number?];
+      // undefined entry leaves that cell untouched, an explicit null CLEARS it,
+      // and numbers/booleans land typed (see scriptCellInput).
+      const [startRow, startCol, values, sheetRef] = args as
+        [number, number, Array<Array<ScriptCellWriteValue | undefined>>, (number | string)?];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const target = await clampSheetIndex(lib, handle, sheetRef, "setRangeValues");
       const active = await lib.getActiveSheet();
       const targetSheet = target ?? active;
-      const updates: Array<{ row: number; col: number; value: string }> = [];
+      const updates: Array<{ row: number; col: number; value: string; invariant?: boolean }> = [];
       for (let r = 0; r < values.length; r++) {
         const row = values[r];
         for (let c = 0; c < row.length; c++) {
           const v = row[c];
-          if (v === undefined || v === null) continue;
+          if (v === undefined) continue; // hole: leave the cell untouched
           const gridRow = startRow + r;
           const gridCol = startCol + c;
           recordScriptWrite(definition.id, targetSheet, gridRow, gridCol);
-          updates.push({ row: gridRow, col: gridCol, value: String(v) });
+          const { value, invariant } = scriptCellInput(v);
+          updates.push({ row: gridRow, col: gridCol, value, invariant });
         }
       }
       if (updates.length > MAX_RANGE_CELLS) {
@@ -3184,7 +4044,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     case "sheet.getCellFormula": {
       const [row, col, options] = args as [number, number, ScriptFormulaOptions | undefined];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, options?.sheetIndex);
+      const target = await clampSheetIndex(lib, handle, options?.sheetIndex, "getCellFormula");
       return readCellFormula(lib, target, row, col, options?.style);
     }
     case "sheet.setCellFormula": {
@@ -3193,39 +4053,56 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const lib = await getLib();
       // clampSheetIndex refuses a restricted script that named ANOTHER sheet
       // before a single character of the formula is drafted anywhere.
-      const target = await clampSheetIndex(lib, handle, options?.sheetIndex);
+      const target = await clampSheetIndex(lib, handle, options?.sheetIndex, "setCellFormula");
       await writeCellFormula(lib, definition.id, target, row, col, formula, options?.style);
       return undefined;
     }
     case "sheet.setRangeFormat": {
       // Own-sheet formatting: identical reach to sheet.setRangeValues (clamped
       // to the script's sheet), appearance instead of content.
-      const [startRow, startCol, endRow, endCol, format, sheetIndex] = args as
-        [number, number, number, number, FormattingOptions, number?];
+      const [startRow, startCol, endRow, endCol, format, sheetRef] = args as
+        [number, number, number, number, FormattingOptions, (number | string)?];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const target = await clampSheetIndex(lib, handle, sheetRef, "setRangeFormat");
       await applyRangeFormat(lib, target, startRow, startCol, endRow, endCol, format);
       return undefined;
     }
     case "sheet.clearRangeFormat": {
-      const [startRow, startCol, endRow, endCol, sheetIndex] = args as
-        [number, number, number, number, number?];
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
-      const target = await clampSheetIndex(lib, handle, sheetIndex);
+      const target = await clampSheetIndex(lib, handle, sheetRef, "clearRangeFormat");
       await clearRangeFormat(lib, target, startRow, startCol, endRow, endCol);
       return undefined;
     }
-    case "sheet.setCellValue": {
-      const [row, col, value, sheetIndex] = args as [number, number, string, number?];
+    case "sheet.getRangeFormat": {
+      // Format read-back, clamped exactly like sheet.getRangeValues: an
+      // explicit OTHER sheet ref is unlocked-tier reach.
+      const [startRow, startCol, endRow, endCol, sheetRef] = args as
+        [number, number, number, number, (number | string)?];
       const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetRef, "getRangeFormat");
+      return readRangeFormats(lib, target, startRow, startCol, endRow, endCol);
+    }
+    case "sheet.getCellFormat": {
+      const [row, col, sheetRef] = args as [number, number, (number | string)?];
+      const lib = await getLib();
+      const target = await clampSheetIndex(lib, handle, sheetRef, "getCellFormat");
+      return readCellFormat(lib, target, row, col);
+    }
+    case "sheet.setCellValue": {
+      const [row, col, rawValue, sheetRef] = args as
+        [number, number, ScriptCellWriteValue, (number | string)?];
+      const lib = await getLib();
+      const { value, invariant } = scriptCellInput(rawValue);
       // The TIER check runs first: a restricted script must be refused for
       // naming another sheet BEFORE anything of its value is drafted there.
       let offSheet = false;
       let target: number;
-      if (sheetIndex !== undefined) {
-        target = sheetIndex;
-        const active = await lib.getActiveSheet();
-        if (sheetIndex !== active) {
+      if (sheetRef !== undefined && sheetRef !== null) {
+        const { sheets, activeIndex } = await lib.getSheets();
+        target = resolveSheetRefIn(sheets, sheetRef, "setCellValue");
+        if (target !== activeIndex) {
           if (handle.tier !== "unlocked") {
             throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
           }
@@ -3235,15 +4112,22 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
         target = await activeSheetForWriteGuard(lib);
       }
       recordScriptWrite(definition.id, target, row, col);
-      await captureWritebackWrite(definition.id, { sheetIndex: target, row, col, value });
       if (offSheet) {
-        await lib.updateCellOnSheets([sheetIndex as number], row, col, value);
-        // No visible cell moved, but an active-sheet formula may depend on it.
-        scheduleGridDataRefresh();
+        // A typed value crosses in canonical US form + the invariant flag, so
+        // the backend parses it with parse_cell_input_invariant instead of
+        // delocalizing (sv-SE would read "42.5" as 425 otherwise). The
+        // writeback draft gate and the active-sheet-skip retry both live
+        // inside writeOffSheetCellTyped.
+        await writeOffSheetCellTyped(
+          lib, definition.id, target, row, col, value, invariant,
+        );
         return undefined;
       }
-      // Re-fetch the canvas — see the note on api.setCellValue.
-      await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
+      // Re-fetch the canvas — see the note on api.setCellValue. The writeback
+      // draft gate runs inside writeActiveCellTyped.
+      await afterCellDataChange(
+        await writeActiveCellTyped(lib, definition.id, target, row, col, value, invariant),
+      );
       return undefined;
     }
 
@@ -3839,6 +4723,33 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { scheduleAt } = await import("./scheduler");
       return scheduleAt(scheduleOwnerOf(definition), timeOfDay, handler, options?.label);
     }
+    case "cap.scheduleOnce": {
+      // One-shot Application.OnTime (Wave 4). The wire carries an ABSOLUTE
+      // epoch-ms time; the DELAY is computed here — the one clock-reading
+      // step a stateless validator cannot do — floored to the Rust
+      // MIN_ONCE_DELAY_SECS (5s: "at 3pm" given at 3pm means "now", not an
+      // error) and refused beyond a year (a typo'd year-2090 timestamp is a
+      // job that would never fire while anyone remembered consenting to it).
+      const [atMs, handler, options] = args as [
+        number,
+        string,
+        { label?: string } | undefined,
+      ];
+      const delaySecs = (atMs - Date.now()) / 1000;
+      if (delaySecs > 366 * 24 * 3600) {
+        throw new BrokerError(
+          "ValidationError",
+          "scheduleOnce: the time is more than a year away — check the timestamp",
+        );
+      }
+      const { scheduleOnce } = await import("./scheduler");
+      return scheduleOnce(
+        scheduleOwnerOf(definition),
+        Math.max(5, delaySecs),
+        handler,
+        options?.label,
+      );
+    }
     case "cap.scheduleList": {
       const { listScheduledJobsForScript } = await import("./scheduler");
       return listScheduledJobsForScript(definition.id);
@@ -3931,6 +4842,28 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       getChartStoreService()?.setStyleProperty(instanceId, name, value as string);
       return undefined;
     }
+    case "chart.setGeometry": {
+      // Move / resize / rename / re-sheet (Wave 4). Placement, not spec: the
+      // patch goes to the chart STORE's placement path (the one the drag
+      // handles use), never through the spec validator — geometry is not a
+      // spec key, and the extension throws for an unknown id.
+      const [rawPatch] = args as [
+        { x?: number; y?: number; width?: number; height?: number; name?: string; sheetIndex?: number | string },
+      ];
+      const store = getChartStoreService();
+      if (!store) throw new BrokerError("HostError", "The Charts extension is not loaded");
+      let placement: ChartPlacement = { ...rawPatch } as ChartPlacement;
+      if (rawPatch.sheetIndex !== undefined) {
+        // The target sheet may be NAMED (Wave 1); the store speaks indexes.
+        const lib = await getLib();
+        placement = {
+          ...placement,
+          sheetIndex: await resolveSheetRef(lib, rawPatch.sheetIndex, "chart.setGeometry"),
+        };
+      }
+      store.updateChartPlacement(instanceId, placement);
+      return undefined;
+    }
     case "pivot.refresh": {
       const store = getPivotStoreService();
       if (store) {
@@ -3956,6 +4889,25 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       announcePivotChanged();
       return undefined;
     }
+    // ---- pivot DATA mutation (Wave 3 item 4) ----
+    // Report filters, item visibility, sort and value number format — the
+    // aspects that finish the "set the page filter, refresh" macro. Fields are
+    // named the way the layout family names them (SOURCE column names, real
+    // names listed on a miss) and every one is a backend command that
+    // recalculates the pivot and rewrites its destination cells, so the same
+    // refresh choreography applies. Grid and BI pivots take the same path: the
+    // backend commands consult the pivot's bi_metadata themselves (calc-group
+    // filters trigger the BI re-query server-side).
+    case "pivot.setFilter":
+    case "pivot.clearFilter":
+    case "pivot.setItemVisibility":
+    case "pivot.sortField":
+    case "pivot.setNumberFormat": {
+      await executePivotDataAspect(instanceId, aspect, args);
+      if (isOwnInstance) pushPivotFieldsMirror(mw, instanceId);
+      announcePivotChanged();
+      return undefined;
+    }
     case "shape.setProperty": {
       const [key, value] = args as [string, string];
       // The shapeProps cache is this script's OWN mirror; a cross-instance write
@@ -3976,7 +4928,8 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       return undefined;
     }
     case "table.setCellValue": {
-      const [row, colIndex, value] = args as [number, number, string];
+      const [row, colIndex, rawValue] = args as [number, number, unknown];
+      assertCellWriteValue(rawValue, "table.setCellValue value");
       const lib = await getLib();
       const table = (await lib.getTableById(instanceId)) as TableLike | null;
       if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
@@ -3984,7 +4937,20 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       if (!coord) {
         throw new BrokerError("ValidationError", `Table cell out of range: row=${row} col=${colIndex}`);
       }
-      await writeCellOnSheet(lib, mw.definition.id, coord.sheetIndex, coord.row, coord.col, String(value));
+      // Typed write: 42 -> the NUMBER 42, true -> TRUE, null -> clear — via the
+      // same invariant conversion every other cell write uses (scriptCellInput).
+      const { value, invariant } = scriptCellInput(rawValue);
+      recordScriptWrite(mw.definition.id, coord.sheetIndex, coord.row, coord.col);
+      if (invariant) {
+        const active = await lib.getActiveSheet();
+        await writeCellsOnSheet(lib, mw.definition.id, coord.sheetIndex, active, [
+          { row: coord.row, col: coord.col, value, invariant: true },
+        ]);
+      } else {
+        // Strings keep the single-cell command (writeback draft gate + the
+        // cube prefetch a formula may need).
+        await writeCellOnSheet(lib, mw.definition.id, coord.sheetIndex, coord.row, coord.col, value);
+      }
       emitAppEvent("table:dataChanged", { tableId: instanceId });
       return undefined;
     }
@@ -3993,17 +4959,20 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       // is resolved through tableCellCoord, so the write stays inside the
       // table's body exactly like table.setCellValue — one RPC, one undo step.
       const [startRow, startCol, values] = args as
-        [number, number, Array<Array<string | null | undefined>>];
+        [number, number, Array<Array<ScriptCellWriteValue | undefined>>];
       const lib = await getLib();
       const table = (await lib.getTableById(instanceId)) as TableLike | null;
       if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
-      const updates: Array<{ row: number; col: number; value: string }> = [];
+      const updates: Array<{ row: number; col: number; value: string; invariant?: boolean }> = [];
       let sheetIndex = -1;
       for (let r = 0; r < values.length; r++) {
         const row = values[r];
         for (let c = 0; c < row.length; c++) {
           const v = row[c];
-          if (v === undefined || v === null) continue;
+          // vRangeWrite semantics: undefined = HOLE (leave the cell alone),
+          // an explicit null CLEARS it, numbers/booleans land typed.
+          if (v === undefined) continue;
+          assertCellWriteValue(v, "table.setRangeValues value");
           const coord = tableCellCoord(table, startRow + r, startCol + c);
           if (!coord) {
             throw new BrokerError(
@@ -4013,7 +4982,8 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
           }
           sheetIndex = coord.sheetIndex;
           recordScriptWrite(mw.definition.id, coord.sheetIndex, coord.row, coord.col);
-          updates.push({ row: coord.row, col: coord.col, value: String(v) });
+          const { value, invariant } = scriptCellInput(v);
+          updates.push({ row: coord.row, col: coord.col, value, invariant: invariant || undefined });
         }
       }
       if (updates.length === 0) return undefined;
@@ -4061,6 +5031,32 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       if (isOwnInstance) pushTableMirror(mw, instanceId);
       return undefined;
     }
+    // ---- table STRUCTURE mutation (Wave 4): the ListObject management
+    // family. Every aspect is ONE existing backend table command (the same
+    // ones the Table Design ribbon calls); the backend addresses tables on
+    // the ACTIVE sheet, so that is asserted first with the fix spelled out —
+    // the exact rule api.deleteTable already applies. After the mutation the
+    // Table extension reloads its store from the backend on
+    // TABLE_DEFINITIONS_UPDATED, the same announcement its own dialogs make.
+    case "table.rename":
+    case "table.resize":
+    case "table.addColumn":
+    case "table.removeColumn":
+    case "table.renameColumn":
+    case "table.setTotalsRow":
+    case "table.setTotalsFunction":
+    case "table.setStyle":
+    case "table.convertToRange":
+    case "table.insertRow":
+    case "table.deleteRow": {
+      await executeTableStructureAspect(instanceId, aspect, args);
+      // convertToRange DELETES the table — a mirror push would just log a
+      // "table not found" fetch; every other aspect refreshes the own mirror.
+      if (isOwnInstance && aspect !== "table.convertToRange") {
+        pushTableMirror(mw, instanceId);
+      }
+      return undefined;
+    }
     case "namedRange.setValues": {
       const [values] = args as [string[][]];
       const lib = await getLib();
@@ -4085,6 +5081,15 @@ async function executeSetState(mw: MountedWorker, instanceId: string, aspect: st
       await writeCellsOnSheet(lib, mw.definition.id, coords.sheetIndex, active, updates);
       emitAppEvent("namedRange:changed", { name: instanceId });
       return undefined;
+    }
+    case "namedRange.update": {
+      // Edit the DEFINITION of the name (refersTo / scope / comment / the name
+      // itself), mirroring MCP update_named_range — with one improvement: a
+      // rename lands as ONE undo step (delete+create inside a host-side undo
+      // transaction) instead of the MCP's two. Returns { name } so the worker
+      // handle can re-key itself after a rename.
+      const [patch] = args as [ScriptNamedRangeUpdate];
+      return executeNamedRangeUpdate(instanceId, patch);
     }
     case "range.setValues": {
       // Structurally clamped: a range behavior can only write inside its own
@@ -4195,6 +5200,10 @@ async function executeGetState(instanceId: string, aspect: string, args: unknown
       if (!store) throw new BrokerError("HostError", "The Pivot extension is not loaded");
       return store.getPivotFields(instanceId);
     }
+    case "pivot.getFieldInfo": {
+      const [field] = args as [string];
+      return executePivotFieldInfo(instanceId, field);
+    }
     case "namedRange.getValues": {
       const lib = await getLib();
       const coords = (await lib.resolveNamedRangeCoords(instanceId)) as NamedRangeCoordsLike;
@@ -4236,9 +5245,349 @@ async function executeGetState(instanceId: string, aspect: string, args: unknown
       }
       return readTypedRange(lib, first.sheetIndex, first.row, first.col, last.row, last.col);
     }
+    // ---- table STRUCTURE reads (Wave 4): the read twins of the management
+    // aspects — column list, style, totals config — straight off the stored
+    // Table definition, so a read-modify-write macro never guesses.
+    case "table.getColumns": {
+      const table = await requireFullTable(instanceId);
+      return table.columns.map((c) => {
+        const col: {
+          name: string;
+          totalsFunction: string;
+          totalsFormula?: string;
+          calculatedFormula?: string;
+        } = { name: c.name, totalsFunction: c.totalsRowFunction };
+        if (c.totalsRowFormula) col.totalsFormula = c.totalsRowFormula;
+        if (c.calculatedFormula) col.calculatedFormula = c.calculatedFormula;
+        return col;
+      });
+    }
+    case "table.getStyle": {
+      const table = await requireFullTable(instanceId);
+      return { styleName: table.styleName, styleOptions: { ...table.styleOptions } };
+    }
+    case "table.getTotals": {
+      const table = await requireFullTable(instanceId);
+      return {
+        shown: table.styleOptions.totalRow,
+        columns: table.columns.map((c) => {
+          const col: { name: string; function: string; formula?: string } = {
+            name: c.name,
+            function: c.totalsRowFunction,
+          };
+          if (c.totalsRowFormula) col.formula = c.totalsRowFormula;
+          return col;
+        }),
+      };
+    }
     default:
       throw new BrokerError("ValidationError", `Unknown getState aspect: ${aspect}`);
   }
+}
+
+/** The FULL stored Table definition (columns/style/totals), or a loud miss. */
+async function requireFullTable(tableId: string): Promise<BackendTable> {
+  const lib = await getLib();
+  const table = (await lib.getTableById(tableId)) as BackendTable | null;
+  if (!table) throw new BrokerError("ValidationError", `Table not found: ${tableId}`);
+  return table;
+}
+
+// ============================================================================
+// Table STRUCTURE aspects (Wave 4): the ListObject management family
+// ============================================================================
+// One aspect = one existing backend table command (the same ones the Table
+// Design ribbon calls). The backend addresses tables on the ACTIVE sheet, so
+// that is asserted first — the exact rule api.deleteTable already applies —
+// and every failure surfaces the backend's own error text. Exported for tests.
+
+export async function executeTableStructureAspect(
+  instanceId: string,
+  aspect: string,
+  args: unknown[],
+): Promise<void> {
+  const lib = await getLib();
+  const table = (await lib.getTableById(instanceId)) as BackendTable | null;
+  if (!table) throw new BrokerError("ValidationError", `Table not found: ${instanceId}`);
+  await assertActiveSheet(lib, table.sheetIndex, aspect);
+  const backend = await import("../backend");
+  const check = (result: { success: boolean; error?: string }): void => {
+    if (!result.success) {
+      throw new BrokerError("ValidationError", result.error || `${aspect} failed`);
+    }
+  };
+  switch (aspect) {
+    case "table.rename": {
+      const [newName] = args as [string];
+      check(await backend.renameTable(instanceId, newName));
+      break;
+    }
+    case "table.resize": {
+      const [startRow, startCol, endRow, endCol] = args as [number, number, number, number];
+      check(await backend.resizeTable({ tableId: instanceId, startRow, startCol, endRow, endCol }));
+      break;
+    }
+    case "table.addColumn": {
+      const [name, position] = args as [string, number?];
+      check(await backend.addTableColumn(instanceId, name, position ?? undefined));
+      break;
+    }
+    case "table.removeColumn": {
+      const [name] = args as [string];
+      check(await backend.removeTableColumn(instanceId, name));
+      break;
+    }
+    case "table.renameColumn": {
+      const [oldName, newName] = args as [string, string];
+      check(await backend.renameTableColumn(instanceId, oldName, newName));
+      break;
+    }
+    case "table.setTotalsRow": {
+      const [show] = args as [boolean];
+      check(await backend.toggleTotalsRow(instanceId, show));
+      break;
+    }
+    case "table.setTotalsFunction": {
+      const [column, fn, customFormula] = args as [string, BackendTotalsRowFunction, string?];
+      check(await backend.setTotalsRowFunction({
+        tableId: instanceId,
+        columnName: column,
+        function: fn,
+        customFormula: customFormula ?? undefined,
+      }));
+      break;
+    }
+    case "table.setStyle": {
+      const [style] = args as [
+        string | { styleName?: string; styleOptions?: Partial<BackendTable["styleOptions"]> },
+      ];
+      const styleName = typeof style === "string" ? style : style.styleName;
+      // The backend replaces the WHOLE options struct, so a partial patch is
+      // merged over the stored options here — `{ bandedRows: false }` must not
+      // silently reset the other six flags.
+      const styleOptions = typeof style === "string" || style.styleOptions === undefined
+        ? undefined
+        : { ...table.styleOptions, ...style.styleOptions };
+      check(await backend.updateTableStyle({ tableId: instanceId, styleName, styleOptions }));
+      break;
+    }
+    case "table.convertToRange": {
+      check(await backend.convertToRange(instanceId));
+      break;
+    }
+    case "table.insertRow": {
+      // position = the 0-based DATA row the new row is inserted BEFORE.
+      // Omitted = append (the same end_row expansion table.addRow does — no
+      // sheet rows shift). A positioned insert is a REAL sheet-row insert at
+      // that spot: the backend shifts rows down and expands this table (and
+      // keeps every other object on the sheet consistent, exactly like
+      // Insert Row in the grid).
+      const [position] = args as [number?];
+      if (position === undefined || position === null) {
+        await lib.addTableRow(instanceId);
+        break;
+      }
+      const dataRows = tableDataRowCount(table);
+      const maxInsertable = table.styleOptions.totalRow ? dataRows + 1 : dataRows;
+      if (position >= maxInsertable) {
+        throw new BrokerError(
+          "ValidationError",
+          `position ${position} is out of range (the table has ${dataRows} data row(s)); ` +
+            "omit position to append a row at the end",
+        );
+      }
+      const gridRow = table.startRow + tableHeaderOffset(table) + position;
+      await lib.insertRows(gridRow, 1, table.sheetIndex);
+      break;
+    }
+    case "table.deleteRow": {
+      // position = the 0-based DATA row to delete. A REAL sheet-row delete:
+      // rows below shift up and the table shrinks (backend bookkeeping).
+      const [position] = args as [number];
+      const dataRows = tableDataRowCount(table);
+      if (position >= dataRows) {
+        throw new BrokerError(
+          "ValidationError",
+          `position ${position} is out of range (the table has ${dataRows} data row(s))`,
+        );
+      }
+      const gridRow = table.startRow + tableHeaderOffset(table) + position;
+      await lib.deleteRows(gridRow, 1, table.sheetIndex);
+      break;
+    }
+    default:
+      throw new BrokerError("ValidationError", `Unknown table structure aspect: ${aspect}`);
+  }
+  // The Table extension reloads its store from the backend on this — the same
+  // announcement its own Design-tab dialogs make; Pivot/Charts/AutoFilter
+  // listen too. Then the generic objects refresh repaints the grid.
+  emitAppEvent(AppEvents.TABLE_DEFINITIONS_UPDATED, {});
+  await announceObjectsChanged();
+}
+
+// ============================================================================
+// namedRange.update (Wave 4): edit the DEFINITION of a name
+// ============================================================================
+
+/** The patch namedRange.update accepts (checkNamedRangeUpdate has proved it). */
+export interface ScriptNamedRangeUpdate {
+  refersTo?: string;
+  newName?: string;
+  comment?: string;
+  /** A sheet ref (index or name) scopes the name to that sheet; `null` clears
+   *  the scope to workbook; absent keeps the stored scope. */
+  sheetIndex?: number | string | null;
+}
+
+/**
+ * Mirrors MCP update_named_range, with two improvements the frontend can
+ * afford: a RENAME lands as ONE undo step (delete+create inside a host-side
+ * undo transaction — record_object_undo joins an open transaction), and the
+ * name's attached object scripts are re-keyed instead of silently pruned.
+ * A rename is refused while a DISTRIBUTED script is attached: re-creating one
+ * through the save command would launder its provenance to "local".
+ *
+ * Returns `{ name }` — the (possibly new) name — so worker handles re-key.
+ */
+export async function executeNamedRangeUpdate(
+  instanceId: string,
+  patch: ScriptNamedRangeUpdate,
+): Promise<{ name: string }> {
+  const lib = await getLib();
+  const existing = await lib.getNamedRange(instanceId);
+  if (!existing) {
+    throw new BrokerError("ValidationError", `No named range "${instanceId}"`);
+  }
+  // Merge: absent = keep. `sheetIndex: null` clears to workbook scope; a
+  // sheet NAME resolves against the live list (Wave 1).
+  const targetRefersTo = patch.refersTo ?? existing.refersTo;
+  const targetComment = patch.comment ?? existing.comment;
+  let targetScope: number | null = existing.sheetIndex;
+  if (patch.sheetIndex !== undefined) {
+    targetScope = patch.sheetIndex === null
+      ? null
+      : await resolveSheetRef(lib, patch.sheetIndex, "namedRange.update");
+  }
+  const targetName = patch.newName ?? existing.name;
+  const renaming = targetName.toUpperCase() !== existing.name.toUpperCase();
+
+  if (!renaming) {
+    const result = await lib.updateNamedRange(
+      existing.name, targetScope, targetRefersTo, targetComment, existing.folder,
+    );
+    if (!result.success) {
+      throw new BrokerError("ValidationError", result.error || "namedRange.update failed");
+    }
+    emitAppEvent(AppEvents.NAMED_RANGES_CHANGED, {});
+    return { name: existing.name };
+  }
+
+  // RENAME = delete + create (both fully validated + undoable — the raw
+  // rename_named_range command records no undo entry and skips the
+  // name-vs-table collision check, which is why MCP shuns it too). The
+  // delete PRUNES scripts attached to the name, so they are captured first
+  // and re-saved pointing at the new name afterwards.
+  const scriptBackend = await import("../objectScriptBackend");
+  const summaries = (await scriptBackend.listObjectScripts()).filter(
+    (s) => s.objectType === "namedRange" &&
+      (s.instanceId ?? "").toUpperCase() === existing.name.toUpperCase(),
+  );
+  if (summaries.some((s) => s.provenance === "distributed")) {
+    throw new BrokerError(
+      "ValidationError",
+      `Cannot rename "${existing.name}": a distributed script is attached to it. ` +
+        "Detach the script (or copy it to a local one) first.",
+    );
+  }
+  const attached = await Promise.all(summaries.map((s) => scriptBackend.getObjectScript(s.id)));
+
+  await withScriptUndoBatch(lib, `Rename name ${existing.name} -> ${targetName}`, async () => {
+    const removed = await lib.deleteNamedRange(existing.name);
+    if (!removed.success) {
+      throw new BrokerError(
+        "ValidationError",
+        removed.error || `Failed to remove named range "${existing.name}"`,
+      );
+    }
+    const created = await lib.createNamedRange(
+      targetName, targetScope, targetRefersTo, targetComment, existing.folder,
+    );
+    if (!created.success) {
+      // Put the original back so a rejected rename is not a silent delete
+      // (the throw below also cancels the undo transaction).
+      await lib.createNamedRange(
+        existing.name, existing.sheetIndex, existing.refersTo, existing.comment, existing.folder,
+      );
+      throw new BrokerError(
+        "ValidationError",
+        created.error || `Failed to create named range "${targetName}"`,
+      );
+    }
+  });
+
+  // Re-key the rescued scripts at the new name (persisted store)...
+  for (const script of attached) {
+    await scriptBackend.saveObjectScript({
+      ...script,
+      instanceId: targetName,
+    } as Parameters<typeof scriptBackend.saveObjectScript>[0]);
+  }
+  // ...and the LIVE mounts, so an attached script's own-object aspects keep
+  // resolving after the rename (instanceId is pinned at mount).
+  for (const other of mounted.values()) {
+    if (
+      other.definition.objectType === "namedRange" &&
+      (other.definition.instanceId ?? "").toUpperCase() === existing.name.toUpperCase()
+    ) {
+      other.definition.instanceId = targetName;
+      other.handle.instanceId = targetName;
+    }
+  }
+  emitAppEvent(AppEvents.NAMED_RANGES_CHANGED, {});
+  return { name: targetName };
+}
+
+// ============================================================================
+// Notes (Wave 4): the VBA Range.NoteText 90% case — one text per cell
+// ============================================================================
+
+/**
+ * Set / replace / remove the note on one cell. `text: null` removes it (the
+ * honest spelling of `Range.ClearNotes`); an existing note is UPDATED in
+ * place so its size/position survive a text change. Returns the note id, or
+ * null after a removal. Exported for tests.
+ */
+export async function executeSetNote(
+  scriptName: string,
+  row: number,
+  col: number,
+  text: string | null,
+  sheetRef?: number | string,
+): Promise<{ id: string } | null> {
+  const lib = await getLib();
+  await assertActiveSheet(lib, sheetRef, "setNote");
+  const existing = await lib.getNote(row, col);
+  if (text === null) {
+    if (existing) {
+      const result = await lib.deleteNote(existing.id);
+      if (!result.success) {
+        throw new BrokerError("ValidationError", result.error || "deleteNote failed");
+      }
+      emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+    }
+    // No note either way — the cell is in the state the script asked for.
+    return null;
+  }
+  const result = existing
+    ? await lib.updateNote({ noteId: existing.id, content: text })
+    : await lib.addNote({ row, col, authorName: scriptName, content: text });
+  if (!result.success || !result.note) {
+    // The one refusal worth translating: a cell can hold a note OR a comment
+    // thread, never both — the backend text already says so.
+    throw new BrokerError("ValidationError", result.error || "setNote failed");
+  }
+  emitAppEvent(AppEvents.ANNOTATIONS_CHANGED, {});
+  return { id: result.note.id };
 }
 
 // ============================================================================
@@ -4343,7 +5692,8 @@ async function readTypedCell(
 
 export interface ScriptFormulaOptions {
   style?: "A1" | "R1C1";
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name; resolved host-side at execution time. */
+  sheetIndex?: number | string;
 }
 
 // The four G4 helpers below are EXPORTED for the same reason executeWorkbookSave
@@ -4553,7 +5903,7 @@ export function scriptClipboardSize(scriptId: string): ScriptClipboardSize | nul
 export async function copyRangeToScriptClipboard(
   lib: Awaited<ReturnType<typeof getLib>>,
   scriptId: string,
-  sheetIndex: number | undefined,
+  sheetIndex: number | string | undefined,
   startRow: number,
   startCol: number,
   endRow: number,
@@ -4604,7 +5954,8 @@ export interface ScriptPasteOptions {
   mode?: "all" | "values" | "formulas";
   transpose?: boolean;
   skipBlanks?: boolean;
-  sheetIndex?: number;
+  /** 0-based sheet index or sheet name (must resolve to the active sheet). */
+  sheetIndex?: number | string;
 }
 
 /**
@@ -4749,6 +6100,322 @@ export async function pasteScriptClipboard(
   return { rows: destRows, cols: destCols };
 }
 
+// ============================================================================
+// Fill / AutoFill (Wave 3, item 10) + Auto-fit (item 11)
+// ============================================================================
+
+/** api.fillRange options. The rectangle handed over is SOURCE + TARGET
+ *  together; `sourceSize` is the thickness of the seed band at the edge the
+ *  fill starts from (1 = Excel's FillDown/FillRight shape). */
+export interface ScriptFillOptions {
+  direction?: "down" | "up" | "right" | "left";
+  /** "copy" (default): tile the band, shifting formulas — Excel FillDown.
+   *  "series": the drag-fill inference (series, dates, custom lists, ...). */
+  type?: "copy" | "series";
+  sourceSize?: number;
+}
+
+/**
+ * The series pattern a SCRIPT fill uses for one column/row band — the drag
+ * machinery's inference verbatim (same non-formula basis, same detectPattern),
+ * plus ONE deliberate addition: a lone numeric seed becomes a step-1 series.
+ * The drag gesture copies a lone number (so does Excel's drag without Ctrl),
+ * but a script that explicitly asked for `type: "series"` means "count on from
+ * here" — Excel's Fill > Series default — and answering it with a copy would
+ * make the option useless for the commonest case.
+ */
+function scriptSeriesPattern(values: string[]): PatternResult {
+  const nonFormulaValues = values.filter((v) => !v.startsWith("="));
+  const basis = nonFormulaValues.length > 0 ? nonFormulaValues : values;
+  const pattern = detectPattern(basis);
+  if (
+    pattern.type === "copy" &&
+    basis.length === 1 &&
+    basis[0].trim() !== "" &&
+    !Number.isNaN(parseFloat(basis[0]))
+  ) {
+    return { type: "series", baseValues: basis, step: 1 };
+  }
+  return pattern;
+}
+
+/**
+ * Fill a rectangle from its leading band — VBA Range.FillDown/FillRight/
+ * AutoFill, over the SAME machinery the drag fill-handle runs
+ * (core/lib/fillEngine.ts): identical series inference, identical per-cell
+ * formula shifting (batched), identical merge replication, one undo step.
+ *
+ * ACTIVE SHEET ONLY, refused (never silently redirected) otherwise: the fill
+ * machinery reads its source styles through `get_viewport_cells` — the same
+ * active-sheet-only bulk path copyRange documents — and writes through
+ * `update_cells_batch`, which carries style indexes only on the active sheet.
+ * Same rule, same message, as copyRange / sortRange.
+ */
+export async function fillRangeFromScript(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  options: ScriptFillOptions,
+  sheetRef: number | string | undefined,
+): Promise<{ count: number }> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  const active = await assertActiveSheet(lib, sheetRef, "fillRange");
+  const direction = options.direction ?? "down";
+  const fillType = options.type ?? "copy";
+  const sourceSize = options.sourceSize ?? 1;
+  const vertical = direction === "down" || direction === "up";
+  const axisSpan = vertical ? endRow - startRow + 1 : endCol - startCol + 1;
+  // The band covering the whole range means there is nothing left to fill —
+  // exactly Excel's FillDown on a one-row range, which does nothing.
+  if (sourceSize >= axisSpan) return { count: 0 };
+
+  // The source band: the edge slice the fill starts from.
+  let srcStartRow = startRow, srcEndRow = endRow, srcStartCol = startCol, srcEndCol = endCol;
+  if (direction === "down") srcEndRow = startRow + sourceSize - 1;
+  else if (direction === "up") srcStartRow = endRow - sourceSize + 1;
+  else if (direction === "right") srcEndCol = startCol + sourceSize - 1;
+  else srcStartCol = endCol - sourceSize + 1;
+
+  // Fetch the band once (values + formulas + style indexes), like completeFill.
+  const sourceCells = await lib.getViewportCells(srcStartRow, srcStartCol, srcEndRow, srcEndCol);
+  const cellMap = new Map<string, string>();
+  const styleMap = new Map<string, number>();
+  for (const cell of sourceCells) {
+    const key = `${cell.row},${cell.col}`;
+    cellMap.set(key, cell.formula || cell.display || "");
+    styleMap.set(key, cell.styleIndex ?? 0);
+  }
+  const getSourceValue = (row: number, col: number): string => cellMap.get(`${row},${col}`) || "";
+  const getSourceStyle = (row: number, col: number): number => styleMap.get(`${row},${col}`) || 0;
+
+  const patternFor = (values: string[]): PatternResult => {
+    if (fillType === "series") return scriptSeriesPattern(values);
+    return { type: "copy", baseValues: values, step: 0 };
+  };
+
+  // Build the pending fills with the drag machinery's own index arithmetic
+  // (useFillHandle completeFill, branch by branch).
+  const pendingFills: PendingFill[] = [];
+  const sourceValues: string[][] = [];
+
+  if (vertical) {
+    for (let c = srcStartCol; c <= srcEndCol; c++) {
+      const colValues: string[] = [];
+      for (let r = srcStartRow; r <= srcEndRow; r++) colValues.push(getSourceValue(r, c));
+      sourceValues.push(colValues);
+    }
+    const sourceCount = srcEndRow - srcStartRow + 1;
+    for (let c = srcStartCol; c <= srcEndCol; c++) {
+      const colIdx = c - srcStartCol;
+      const pattern = patternFor(sourceValues[colIdx]);
+      if (direction === "down") {
+        for (let r = srcEndRow + 1; r <= endRow; r++) {
+          const fillIndex = r - srcStartRow;
+          const sourceIndex = fillIndex % sourceCount;
+          const sourceRow = srcStartRow + sourceIndex;
+          pendingFills.push({
+            row: r, col: c,
+            sourceValue: sourceValues[colIdx][sourceIndex],
+            sourceRow, sourceCol: c,
+            pattern,
+            allSourceValues: sourceValues[colIdx],
+            fillIndex,
+            sourceStyleIndex: getSourceStyle(sourceRow, c),
+          });
+        }
+      } else {
+        // Fill up — mirror from the bottom of the band upward.
+        for (let r = srcStartRow - 1; r >= startRow; r--) {
+          const fillIndex = srcEndRow - r;
+          const sourceIndex = fillIndex % sourceCount;
+          const sourceRow = srcEndRow - sourceIndex;
+          pendingFills.push({
+            row: r, col: c,
+            sourceValue: sourceValues[colIdx][sourceCount - 1 - sourceIndex],
+            sourceRow, sourceCol: c,
+            pattern,
+            allSourceValues: sourceValues[colIdx].slice().reverse(),
+            fillIndex,
+            sourceStyleIndex: getSourceStyle(sourceRow, c),
+          });
+        }
+      }
+    }
+  } else {
+    for (let r = srcStartRow; r <= srcEndRow; r++) {
+      const rowValues: string[] = [];
+      for (let c = srcStartCol; c <= srcEndCol; c++) rowValues.push(getSourceValue(r, c));
+      sourceValues.push(rowValues);
+    }
+    const sourceCount = srcEndCol - srcStartCol + 1;
+    for (let r = srcStartRow; r <= srcEndRow; r++) {
+      const rowIdx = r - srcStartRow;
+      const pattern = patternFor(sourceValues[rowIdx]);
+      if (direction === "right") {
+        for (let c = srcEndCol + 1; c <= endCol; c++) {
+          const fillIndex = c - srcStartCol;
+          const sourceIndex = fillIndex % sourceCount;
+          const sourceCol = srcStartCol + sourceIndex;
+          pendingFills.push({
+            row: r, col: c,
+            sourceValue: sourceValues[rowIdx][sourceIndex],
+            sourceRow: r, sourceCol,
+            pattern,
+            allSourceValues: sourceValues[rowIdx],
+            fillIndex,
+            sourceStyleIndex: getSourceStyle(r, sourceCol),
+          });
+        }
+      } else {
+        // Fill left — mirror from the right of the band leftward.
+        for (let c = srcStartCol - 1; c >= startCol; c--) {
+          const fillIndex = srcEndCol - c;
+          const sourceIndex = fillIndex % sourceCount;
+          const sourceCol = srcEndCol - sourceIndex;
+          pendingFills.push({
+            row: r, col: c,
+            sourceValue: sourceValues[rowIdx][sourceCount - 1 - sourceIndex],
+            sourceRow: r, sourceCol,
+            pattern,
+            allSourceValues: sourceValues[rowIdx].slice().reverse(),
+            fillIndex,
+            sourceStyleIndex: getSourceStyle(r, sourceCol),
+          });
+        }
+      }
+    }
+  }
+
+  // Values + shifted formulas, through the SHARED engine (one batched shift).
+  const batchUpdates = await processPendingFills(pendingFills);
+
+  // The write, on the same terms as any other script write: attributed, and
+  // every .calp-writeback-claimed cell drafted through the authoritative gate.
+  for (const u of batchUpdates) recordScriptWrite(scriptId, active, u.row, u.col);
+  const { plain, drafted } = await captureWritebackWrites(
+    scriptId,
+    batchUpdates.map((u) => ({ sheetIndex: active, row: u.row, col: u.col, value: u.value })),
+  );
+  const byCoord = new Map(batchUpdates.map((u) => [`${u.row},${u.col}`, u]));
+  const updates = plain.map((w) => {
+    const u = byCoord.get(`${w.row},${w.col}`);
+    return { row: w.row, col: w.col, value: w.value, styleIndex: u?.styleIndex };
+  });
+
+  const srcBox = { startRow: srcStartRow, startCol: srcStartCol, endRow: srcEndRow, endCol: srcEndCol };
+  const targetBox = { startRow, startCol, endRow, endCol };
+  await withScriptUndoBatch(lib, `Fill ${batchUpdates.length} cells`, async () => {
+    if (updates.length > 0) {
+      const changed = await lib.updateCellsBatch(updates);
+      await afterCellDataChange(changed);
+    }
+    for (const w of drafted) {
+      await lib.updateCell(w.row, w.col, w.value);
+    }
+    // Merge patterns replicate from the band into the filled area, exactly as
+    // the drag does (same shared function, same clipping rules).
+    await replicateMergeRegions(srcBox, targetBox, direction);
+  });
+
+  // The same completion event the drag emits, so extensions that follow fills
+  // (e.g. sparklines) see a script fill too.
+  emitAppEvent(AppEvents.FILL_COMPLETED, {
+    sourceRange: srcBox,
+    targetRange: targetBox,
+    direction,
+  });
+
+  return { count: batchUpdates.length };
+}
+
+/**
+ * Auto-fit columns or rows to their contents — the double-click best-fit,
+ * scripted. The measurement is THE SAME code the double-click runs
+ * (core/lib/gridRenderer measureOptimalColumnWidth / measureOptimalRowHeight),
+ * including the @api/autoFitContributors registry, so extension-rendered
+ * content (pivot overlays, in-cell filter buttons) sizes identically whichever
+ * hand asked.
+ *
+ * ACTIVE SHEET ONLY, refused otherwise: measurement is canvas text metrics
+ * over the rendered sheet's cells (get_cells_in_cols/rows are active-sheet
+ * commands) and the live theme fonts — an off-sheet "best fit" would be a
+ * fabricated answer, so the honest response is the same refusal sortRange
+ * gives.
+ *
+ * Excel semantics, matching the double-click handler exactly: an empty COLUMN
+ * keeps its width (and contributes no undo entry); an empty ROW resets to the
+ * default height.
+ */
+export async function autoFitFromScript(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  kind: "columns" | "rows",
+  start: number,
+  end: number,
+  sheetRef: number | string | undefined,
+): Promise<{ count: number }> {
+  await assertActiveSheet(lib, sheetRef, kind === "columns" ? "autoFitColumns" : "autoFitRows");
+  const [{ measureOptimalColumnWidth, measureOptimalRowHeight }, { getActiveGridTheme }, { DEFAULT_GRID_CONFIG }] =
+    await Promise.all([
+      import("../../core/lib/gridRenderer"),
+      import("../../core/theme/skinLoader"),
+      import("../../core/types/types"),
+    ]);
+  const styles = await lib.getAllStyles();
+  const activeTheme = getActiveGridTheme();
+  const theme = { cellFontFamily: activeTheme.cellFontFamily, cellFontSize: activeTheme.cellFontSize };
+
+  if (kind === "columns") {
+    // Measure first (reads only), apply after — so a span of empty columns
+    // opens no undo transaction at all (the double-click handler cancels its
+    // transaction in that case; here it is simply never opened).
+    const fits: Array<{ col: number; width: number }> = [];
+    for (let c = start; c <= end; c++) {
+      const cells = await lib.getCellsInCols(c, c);
+      const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, DEFAULT_GRID_CONFIG.minColumnWidth);
+      // Excel: an empty column keeps its current width.
+      if (optimalWidth === null) continue;
+      fits.push({ col: c, width: optimalWidth });
+    }
+    if (fits.length === 0) return { count: 0 };
+    await withScriptUndoBatch(lib, "Auto-fit columns", async () => {
+      for (const { col, width } of fits) {
+        await lib.setColumnWidth(col, width);
+        await syncDimensionToGrid("column", col, width);
+      }
+    });
+    return { count: fits.length };
+  }
+
+  const [defaults, widths] = await Promise.all([lib.getDefaultDimensions(), lib.getAllColumnWidths()]);
+  const columnWidths = new Map(widths.map((d) => [d.index, d.size]));
+  const fits: Array<{ row: number; height: number }> = [];
+  for (let r = start; r <= end; r++) {
+    const cells = await lib.getCellsInRows(r, r);
+    const optimalHeight = measureOptimalRowHeight(
+      cells,
+      styles,
+      columnWidths,
+      defaults.defaultColumnWidth,
+      theme,
+      DEFAULT_GRID_CONFIG.minRowHeight,
+      defaults.defaultRowHeight,
+      r,
+    );
+    // Excel: an empty row RESETS to the default height (unlike columns).
+    fits.push({ row: r, height: optimalHeight ?? defaults.defaultRowHeight });
+  }
+  await withScriptUndoBatch(lib, "Auto-fit rows", async () => {
+    for (const { row, height } of fits) {
+      await lib.setRowHeight(row, height);
+      await syncDimensionToGrid("row", row, height);
+    }
+  });
+  return { count: fits.length };
+}
+
 /** The picker's pre-filled name for a script-requested PDF: this workbook's own
  *  file name with a .pdf extension, or a neutral default when it has never been
  *  saved. The FULL PATH is never used or returned — only the last segment, which
@@ -4770,20 +6437,23 @@ async function defaultPdfName(fs: typeof import("../filesystem")): Promise<strin
 
 /**
  * Resolve the sheet a sheet-scoped call may touch. `undefined` means "the
- * active sheet". Naming another sheet is unlocked-tier reach — the same clamp
+ * active sheet". The ref may be an index or a NAME (resolved against the live
+ * list); naming another sheet is unlocked-tier reach — the same clamp
  * sheet.getCellValue / sheet.setCellValue apply.
  */
 async function clampSheetIndex(
   lib: Awaited<ReturnType<typeof getLib>>,
   handle: ScriptHandle,
-  sheetIndex: number | undefined,
+  sheetRef: number | string | undefined,
+  method: string,
 ): Promise<number | undefined> {
-  if (sheetIndex === undefined || sheetIndex === null) return undefined;
-  const active = await lib.getActiveSheet();
-  if (sheetIndex !== active && handle.tier !== "unlocked") {
+  if (sheetRef === undefined || sheetRef === null) return undefined;
+  const { sheets, activeIndex } = await lib.getSheets();
+  const resolved = resolveSheetRefIn(sheets, sheetRef, method);
+  if (resolved !== activeIndex && handle.tier !== "unlocked") {
     throw new BrokerError("PermissionDenied", RESTRICTED_SHEET_CLAMP_MESSAGE);
   }
-  return sheetIndex;
+  return resolved;
 }
 
 /**
@@ -4835,6 +6505,71 @@ async function activeSheetForWriteGuard(
   return lib.getActiveSheet();
 }
 
+// ============================================================================
+// Typed cell writes (Wave 1)
+// ============================================================================
+
+/** What a script may hand any cell-write method. `null` clears the cell. */
+export type ScriptCellWriteValue = string | number | boolean | null;
+
+/**
+ * Turn a typed script value into the backend's input form — the SAME
+ * construction clipboardValueString uses for a paste, because it is the same
+ * problem: 42 must land as the NUMBER 42 on a sv-SE workbook whose decimal
+ * separator disagrees with JavaScript's. Numbers and booleans are written
+ * INVARIANT ("42.5", "TRUE") and flagged so the batch write path parses them
+ * with parse_cell_input_invariant instead of delocalizing; strings are the
+ * user-entry form they always were; null becomes the empty input, which is how
+ * a cell is cleared. Exported for tests.
+ */
+/**
+ * Assert an object-aspect argument is a legal cell-write value. The aspect
+ * dispatch (objSet) has no allowlist validator in front of it, so executors
+ * that accept cell values must gate here — the SAME rule vCellSet applies
+ * (checkCellWriteValue): string (<= 1 MB) | finite number | boolean | null.
+ * Throws a BrokerError naming the argument; never silently stringifies.
+ */
+function assertCellWriteValue(v: unknown, label: string): asserts v is ScriptCellWriteValue {
+  const verdict = checkCellWriteValue(v, label);
+  if (verdict !== true) throw new BrokerError("ValidationError", verdict);
+}
+
+export function scriptCellInput(v: ScriptCellWriteValue): { value: string; invariant: boolean } {
+  if (v === null) return { value: "", invariant: false };
+  if (typeof v === "number") return { value: String(v), invariant: true };
+  if (typeof v === "boolean") return { value: v ? "TRUE" : "FALSE", invariant: true };
+  return { value: v, invariant: false };
+}
+
+/**
+ * Write ONE cell on the ACTIVE sheet, honouring the invariant flag.
+ *
+ * The .calp writeback draft gate runs HERE, first: a cell claimed by a
+ * writeback region is captured as a schema-validated draft exactly like a
+ * human keystroke, or the whole call throws.
+ *
+ * The invariant path exists only on the batch command, so a typed value takes
+ * a single-element batch; a plain string keeps the single-cell command (which
+ * also runs the cube prefetch a formula may need). A writeback-DRAFTED cell
+ * always goes through update_cell — update_cells_batch drops writeback cells,
+ * and a draft that then painted nothing would look like a failed write.
+ */
+async function writeActiveCellTyped(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  sheetIndex: number,
+  row: number,
+  col: number,
+  value: string,
+  invariant: boolean,
+): Promise<CellData[]> {
+  const drafted = await captureWritebackWrite(scriptId, { sheetIndex, row, col, value });
+  if (invariant && !drafted) {
+    return lib.updateCellsBatch([{ row, col, value, invariant: true }]);
+  }
+  return (await lib.updateCell(row, col, value)).cells;
+}
+
 /**
  * Write many cells on ONE sheet as a single undo step. The active sheet takes
  * the batch command (which opens its own transaction); another sheet has no
@@ -4849,19 +6584,27 @@ async function writeCellsOnSheet(
   scriptId: string,
   sheetIndex: number,
   activeSheet: number,
-  updates: Array<{ row: number; col: number; value: string }>,
+  updates: Array<{ row: number; col: number; value: string; invariant?: boolean }>,
 ): Promise<void> {
   if (updates.length === 0) return;
   const { plain, drafted } = await captureWritebackWrites(
     scriptId,
     updates.map((u) => ({ sheetIndex, row: u.row, col: u.col, value: u.value })),
   );
+  // The guard's answer carries coordinates + value only; re-attach each cell's
+  // invariant flag (a typed number/boolean must not be delocalized).
+  const invariantAt = new Map(updates.map((u) => [`${u.row},${u.col}`, u.invariant === true]));
   if (sheetIndex === activeSheet) {
     const changed: CellData[] = [];
     if (plain.length > 0) {
       changed.push(
         ...(await lib.updateCellsBatch(
-          plain.map((u) => ({ row: u.row, col: u.col, value: u.value })),
+          plain.map((u) => ({
+            row: u.row,
+            col: u.col,
+            value: u.value,
+            invariant: invariantAt.get(`${u.row},${u.col}`) || undefined,
+          })),
         )),
       );
     }
@@ -4873,11 +6616,39 @@ async function writeCellsOnSheet(
     await afterCellDataChange(changed);
     return;
   }
+  // Cells the backend SKIPPED because the target became the active sheet
+  // mid-block — re-issued through the active path below rather than dropped
+  // (see writeOffSheetCellTyped for the whole story).
+  const skipped: Array<{ row: number; col: number; value: string; invariant?: boolean }> = [];
   await withScriptUndoBatch(lib, `Script write (${updates.length} cells)`, async () => {
     for (const u of updates) {
-      await lib.updateCellOnSheets([sheetIndex], u.row, u.col, u.value);
+      // Carry each cell's invariant flag: a typed number/boolean crossing to
+      // another sheet must not be delocalized (sv-SE reads "42.5" as 425).
+      // recalc: false — a full sheet evaluation per cell would be quadratic;
+      // ONE recalc for the whole block follows below.
+      const written = await lib.updateCellOnSheets(
+        [sheetIndex], u.row, u.col, u.value,
+        invariantAt.get(`${u.row},${u.col}`) || undefined,
+        false,
+      );
+      if (Array.isArray(written) && !written.includes(sheetIndex)) {
+        skipped.push({ ...u, invariant: invariantAt.get(`${u.row},${u.col}`) || undefined });
+      }
     }
   });
+  if (skipped.length > 0) {
+    await afterCellDataChange(
+      await lib.updateCellsBatch(
+        skipped.map((u) => ({
+          row: u.row, col: u.col, value: u.value, invariant: u.invariant,
+        })),
+      ),
+    );
+  }
+  // All cells are in: recalculate dependents once (the written sheet + the
+  // active sheet, double pass) — without this a formula reading the written
+  // block stayed stale until the next manual edit (found live).
+  await lib.recalculateSheetsAfterScriptWrite([sheetIndex]);
   // Another sheet: no visible cell moved, but a formula on the ACTIVE sheet may
   // depend on one, and the style caches key on the whole workbook. Refresh
   // without the per-cell event (we have no CellData for an off-sheet write).
@@ -4918,23 +6689,217 @@ interface SortRangeResultLike {
   error: string | null;
 }
 
+// ============================================================================
+// Sheet references (Wave 1): a sheet is addressed by 0-based INDEX or by NAME
+// ============================================================================
+// The ONE resolver every executor that receives a sheet ref calls, at
+// execution time, against the LIVE sheet list — never worker-side, so a name
+// always means what the workbook means by it when the call lands. A number
+// passes through bounds-checked; a string resolves by EXACT name first, then
+// case-insensitively IF unique. Every refusal lists the actual sheets, because
+// the error a VBA convert reads at 11pm must name them.
+
+/** A sheet as the resolver sees it (the subset of SheetInfo it needs). */
+interface SheetListEntry {
+  index: number;
+  name: string;
+}
+
+function describeSheets(sheets: SheetListEntry[]): string {
+  return sheets.map((s) => `"${s.name}" (${s.index})`).join(", ");
+}
+
+/** Pure resolution over a given sheet list. Exported for tests. */
+export function resolveSheetRefIn(
+  sheets: SheetListEntry[],
+  ref: number | string,
+  method: string,
+): number {
+  if (typeof ref === "number") {
+    if (sheets.some((s) => s.index === ref)) return ref;
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: no sheet with index ${ref} (sheets: ${describeSheets(sheets)})`,
+    );
+  }
+  const exact = sheets.filter((s) => s.name === ref);
+  if (exact.length === 1) return exact[0].index;
+  const lower = ref.toLowerCase();
+  const relaxed = sheets.filter((s) => s.name.toLowerCase() === lower);
+  if (relaxed.length === 1) return relaxed[0].index;
+  if (relaxed.length > 1) {
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: sheet name "${ref}" is ambiguous ignoring case ` +
+        `(matches ${describeSheets(relaxed)}) — use the exact name or the index`,
+    );
+  }
+  throw new BrokerError(
+    "ValidationError",
+    `${method}: no sheet named "${ref}" (sheets: ${describeSheets(sheets)})`,
+  );
+}
+
+/**
+ * Resolve an addSheet/copySheet `{ before | after }` position bag (Wave 4) to
+ * the FINAL tab-bar index the new sheet should land on, computed in the list
+ * WITHOUT the new sheet (`baseSheets` — the pre-add/pre-copy list). Since
+ * move_sheet rotates the moved sheet to exactly `toIndex`, and rotating equals
+ * "remove, then insert at toIndex", this answer feeds moveSheet directly.
+ * Null = no position requested (keep the historical placement).
+ */
+export function resolveSheetPosition(
+  baseSheets: SheetListEntry[],
+  position:
+    | { before?: number | string | null; after?: number | string | null }
+    | undefined
+    | null,
+  method: string,
+): number | null {
+  if (!position) return null;
+  const hasBefore = position.before !== undefined && position.before !== null;
+  const hasAfter = position.after !== undefined && position.after !== null;
+  if (!hasBefore && !hasAfter) return null;
+  // vAddSheet/vCopySheet already refused both-set; re-refused here so a caller
+  // that reaches this helper another way gets the same answer.
+  if (hasBefore && hasAfter) {
+    throw new BrokerError(
+      "ValidationError",
+      `${method}: position may name before OR after, not both`,
+    );
+  }
+  const anchor = resolveSheetRefIn(
+    baseSheets,
+    (hasBefore ? position.before : position.after) as number | string,
+    method,
+  );
+  return hasBefore ? anchor : anchor + 1;
+}
+
+/** Resolve a REQUIRED sheet ref against the live sheet list. */
+async function resolveSheetRef(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  ref: number | string,
+  method: string,
+): Promise<number> {
+  const { sheets } = await lib.getSheets();
+  return resolveSheetRefIn(sheets, ref, method);
+}
+
+/** Resolve an OPTIONAL sheet ref; undefined/null = "the active sheet". */
+async function resolveOptionalSheetRef(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  ref: number | string | undefined | null,
+  method: string,
+): Promise<number | undefined> {
+  if (ref === undefined || ref === null) return undefined;
+  return resolveSheetRef(lib, ref, method);
+}
+
 /**
  * Resolve the sheet an ACTIVE-SHEET-ONLY backend command may touch. `undefined`
- * means "the active sheet"; naming another one is refused with the fix spelled
- * out. Returns the active sheet index (for write attribution).
+ * means "the active sheet"; naming another one (by index or by name) is refused
+ * with the fix spelled out. Returns the active sheet index (for write
+ * attribution).
  */
 async function assertActiveSheet(
   lib: Awaited<ReturnType<typeof getLib>>,
-  sheetIndex: number | undefined,
+  sheetRef: number | string | undefined | null,
   method: string,
 ): Promise<number> {
-  const active = await lib.getActiveSheet();
-  if (sheetIndex === undefined || sheetIndex === null || sheetIndex === active) return active;
+  if (sheetRef === undefined || sheetRef === null) return lib.getActiveSheet();
+  const { sheets, activeIndex } = await lib.getSheets();
+  const resolved = resolveSheetRefIn(sheets, sheetRef, method);
+  if (resolved === activeIndex) return activeIndex;
   throw new BrokerError(
     "ValidationError",
-    `${method} can only target the active sheet (currently ${active}); ` +
-      `call api.setActiveSheet(${sheetIndex}) first`,
+    `${method} can only target the active sheet (currently ${activeIndex}); ` +
+      `call api.setActiveSheet(${JSON.stringify(sheetRef)}) first`,
   );
+}
+
+// ============================================================================
+// Selection (Wave 2): the normalized shape scripts see
+// ============================================================================
+// Core's Selection keeps its ANCHOR in startRow/startCol and its ACTIVE CELL in
+// endRow/endCol, so a drag up-and-left yields start > end — correct for the
+// grid, hostile for a script doing arithmetic on the rectangle. What crosses to
+// scripts is NORMALIZED (start <= end per axis) with the active cell carried
+// separately, plus EVERY area of a multi-area selection — additionalRanges,
+// which the script-facing emitters used to drop.
+
+/** One rectangular area of a selection, normalized (start <= end per axis). */
+export interface ScriptSelectionArea {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** What api.getSelection returns (null when nothing is selected). */
+export interface ScriptSelectionSnapshot extends ScriptSelectionArea {
+  /** The sheet the selection lives on (0-based). */
+  sheetIndex: number;
+  /** The active cell — the one a keystroke would land in. */
+  activeRow: number;
+  activeCol: number;
+  /** EVERY selected area: the primary rectangle first, then each Ctrl+Click
+   *  area, all normalized. Always at least one entry. */
+  areas: ScriptSelectionArea[];
+}
+
+/** api.select options (mirrors the worker shim's ScriptSelectOptions). */
+interface ScriptSelectOptions {
+  sheetIndex?: number | string;
+  /** Default true: scroll the selection into view (Application.Goto). */
+  scroll?: boolean;
+  /** Additional areas for a multi-area selection (Ctrl+Click shape). */
+  ranges?: ScriptSelectionArea[];
+}
+
+/** Normalize one rectangle so start <= end on both axes. */
+export function normalizeSelectionArea(a: {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}): ScriptSelectionArea {
+  return {
+    startRow: Math.min(a.startRow, a.endRow),
+    startCol: Math.min(a.startCol, a.endCol),
+    endRow: Math.max(a.startRow, a.endRow),
+    endCol: Math.max(a.startCol, a.endCol),
+  };
+}
+
+/**
+ * Core Selection -> the normalized script shape. Pure; exported for tests.
+ * `activeSheetIndex` is the fallback for a Selection that does not carry its
+ * own sheetIndex (Core's usually does not — it lives on the active sheet by
+ * construction).
+ */
+export function normalizeSelection(
+  sel: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+    sheetIndex?: number;
+    activeRow?: number;
+    activeCol?: number;
+    additionalRanges?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
+  },
+  activeSheetIndex: number,
+): ScriptSelectionSnapshot {
+  const primary = normalizeSelectionArea(sel);
+  return {
+    ...primary,
+    sheetIndex: sel.sheetIndex ?? activeSheetIndex,
+    // Selection's own convention: end IS the active cell (aliases may override).
+    activeRow: sel.activeRow ?? sel.endRow,
+    activeCol: sel.activeCol ?? sel.endCol,
+    areas: [primary, ...(sel.additionalRanges ?? []).map(normalizeSelectionArea)],
+  };
 }
 
 /**
@@ -4952,7 +6917,57 @@ async function assertActiveSheet(
  */
 let gridRefreshScheduled = false;
 
+// ---- Deferred repaint (Wave 4): api.beginBatch({ deferRepaint: true }) ----
+// ScreenUpdating with a guaranteed end. While ONE script holds the deferral,
+// this choke point — the broker's single door to the canvas after a mutate —
+// swallows every refresh broadcast and remembers that one is owed; the release
+// (commitBatch, cancelBatch, or the holder's unmount/fault) fires exactly ONE
+// trailing refresh. Ownership is a single holder, not a set: the deferral is
+// bracketed by one script's batch, and a second script asking while a batch is
+// open must not be able to extend (or steal) the first one's bracket.
+
+let deferredRepaintHolder: string | null = null;
+let repaintOwedWhileDeferred = false;
+
+/** Test seam: which script (if any) currently holds repaints paused. */
+export function scriptHoldingDeferredRepaint(): string | null {
+  return deferredRepaintHolder;
+}
+
+/** Pause repaint broadcasts for `scriptId`'s open batch. First holder wins —
+ *  a later script cannot take over a pause it does not own the bracket for. */
+export function acquireDeferredRepaint(scriptId: string): void {
+  if (deferredRepaintHolder === null) deferredRepaintHolder = scriptId;
+}
+
+/**
+ * End `scriptId`'s repaint pause (commit, cancel, unmount, fault) and fire the
+ * ONE trailing refresh the swallowed broadcasts are owed. A no-op for anyone
+ * who is not the holder, so an unrelated script's commitBatch can never
+ * unfreeze — or double-refresh — a bracket it does not own.
+ */
+export function releaseDeferredRepaint(scriptId: string): void {
+  if (deferredRepaintHolder !== scriptId) return;
+  deferredRepaintHolder = null;
+  if (repaintOwedWhileDeferred) {
+    repaintOwedWhileDeferred = false;
+    scheduleGridDataRefresh();
+  }
+}
+
+/** Workbook-swap sweep (hostResetAll): drop the pause without repainting — the
+ *  document under the canvas is being replaced wholesale anyway. */
+export function resetDeferredRepaint(): void {
+  deferredRepaintHolder = null;
+  repaintOwedWhileDeferred = false;
+}
+
 function scheduleGridDataRefresh(): void {
+  if (deferredRepaintHolder !== null) {
+    // A deferRepaint batch is open: swallow the broadcast, remember the debt.
+    repaintOwedWhileDeferred = true;
+    return;
+  }
   if (gridRefreshScheduled) return;
   gridRefreshScheduled = true;
   const fire = (): void => {
@@ -5042,33 +7057,361 @@ async function assertSheetNameFree(
   }
 }
 
+// ============================================================================
+// Theme colors + fills in the script format vocabulary (Wave 4)
+// ============================================================================
+// Wherever a format key takes a color, a script may write a HEX STRING or a
+// THEME REFERENCE `{ theme, tint? }` (slot = one of the 12 document-theme
+// slots; tint = a FRACTION -1..1, positive lighter). textColor /
+// backgroundColor theme refs ride the backend's *_theme/*_tint
+// FormattingParams fields — the engine stores the REFERENCE, so a later theme
+// change restyles the cells and the read-back reports the theme object.
+// Border-side colors have no theme slot in the border pipeline
+// (BorderSideParam is absolute-only), so a theme ref there is RESOLVED to its
+// current hex at write time and reads back as that hex.
+
+/** A theme color reference: a slot key ("accent1", "dark1", ...) plus an
+ *  optional tint FRACTION (-1..1; positive = lighter, negative = darker). */
+export interface ScriptThemeColorRef {
+  theme: string;
+  tint?: number;
+}
+
+/** Any color a script writes: "#rrggbb(aa)" hex or a theme reference. */
+export type ScriptColorValue = string | ScriptThemeColorRef;
+
+/** A theme color as the READ-BACK reports it (tint always present). */
+export interface ScriptThemeColorReadback {
+  theme: string;
+  tint: number;
+}
+
+/** A color as the read-back reports it: canonical "#rrggbb" hex for an
+ *  absolute color, the theme object for a theme-referenced one. */
+export type ScriptColorReadback = string | ScriptThemeColorReadback;
+
+/** The script `fill` vocabulary (write side) — mirrors the backend FillParam
+ *  union, with script colors in every slot. */
+export type ScriptFillSpec =
+  | { type: "none" }
+  | { type: "solid"; color: ScriptColorValue }
+  | { type: "pattern"; patternType: string; fgColor: ScriptColorValue; bgColor: ScriptColorValue }
+  | { type: "gradient"; color1: ScriptColorValue; color2: ScriptColorValue; direction: string };
+
+/** A fill as the read-back reports it ({ type: "none" } when the cell has no
+ *  fill beyond the default background). */
+export type ScriptFillReadback =
+  | { type: "none" }
+  | { type: "solid"; color: ScriptColorReadback }
+  | { type: "pattern"; patternType: string; fgColor: ScriptColorReadback; bgColor: ScriptColorReadback }
+  | { type: "gradient"; color1: ScriptColorReadback; color2: ScriptColorReadback; direction: string };
+
+/** One border edge as a script spells it ({ style, color } — no width; the
+ *  width IS the style: thin/medium/thick). */
+interface ScriptBorderSideSpec {
+  style: string;
+  color: ScriptColorValue;
+}
+
+/**
+ * What setRangeFormat accepts since Wave 3 item 2 (theme colors + fills since
+ * Wave 4): the per-cell FormattingOptions vocabulary with script COLORS in
+ * every color slot, plus the three RANGE-EDGE border keys, which describe the
+ * RECTANGLE and are decomposed host-side into per-cell truth.
+ */
+export interface ScriptRangeFormat
+  extends Omit<
+    FormattingOptions,
+    | "textColor" | "backgroundColor" | "fill"
+    | "borderTop" | "borderRight" | "borderBottom" | "borderLeft"
+    | "borderDiagonalDown" | "borderDiagonalUp"
+  > {
+  textColor?: ScriptColorValue;
+  backgroundColor?: ScriptColorValue;
+  fill?: ScriptFillSpec;
+  borderTop?: ScriptBorderSideSpec;
+  borderRight?: ScriptBorderSideSpec;
+  borderBottom?: ScriptBorderSideSpec;
+  borderLeft?: ScriptBorderSideSpec;
+  borderDiagonalDown?: ScriptBorderSideSpec;
+  borderDiagonalUp?: ScriptBorderSideSpec;
+  borderOutline?: ScriptBorderSideSpec;
+  borderInsideHorizontal?: ScriptBorderSideSpec;
+  borderInsideVertical?: ScriptBorderSideSpec;
+}
+
+const isThemeColorRef = (v: ScriptColorValue): v is ScriptThemeColorRef =>
+  typeof v === "object" && v !== null;
+
+/** Script tint fraction (-1..1) -> the engine's permille form. */
+const tintToPermille = (tint: number | undefined): number => Math.round((tint ?? 0) * 1000);
+/** Engine permille -> the script's fraction form. */
+const permilleToFraction = (permille: number | null | undefined): number => (permille ?? 0) / 1000;
+
+/**
+ * The engine's tint math (theme.rs apply_tint), channel for channel: positive
+ * blends toward white, negative toward black. `tint` is a FRACTION. Exported
+ * for the round-trip test.
+ */
+export function applyThemeTint(hex: string, tint: number): string {
+  const canonical = normalizeHexColor(hex);
+  if (tint === 0) return canonical;
+  const blend = (channel: number): number => {
+    const c = channel;
+    const result = tint > 0 ? c + (255 - c) * tint : c * (1 + tint);
+    return Math.max(0, Math.min(255, Math.round(result)));
+  };
+  const hexPart = (v: number): string => v.toString(16).padStart(2, "0");
+  const r = blend(parseInt(canonical.slice(1, 3), 16));
+  const g = blend(parseInt(canonical.slice(3, 5), 16));
+  const b = blend(parseInt(canonical.slice(5, 7), 16));
+  return `#${hexPart(r)}${hexPart(g)}${hexPart(b)}`;
+}
+
+/** Resolve a theme reference against the given document theme. Exported for
+ *  tests (and the border/write path below). */
+export function resolveThemeColorRef(
+  theme: { colors: Record<string, string> },
+  ref: ScriptThemeColorRef,
+): string {
+  const base = theme.colors[ref.theme];
+  return applyThemeTint(base ?? "#000000", ref.tint ?? 0);
+}
+
+/** The lowered (backend-vocabulary) form of a script format: plain
+ *  FormattingOptions plus the three edge keys with RESOLVED hex colors. */
+interface LoweredRangeFormat extends FormattingOptions {
+  borderOutline?: { style: string; color: string };
+  borderInsideHorizontal?: { style: string; color: string };
+  borderInsideVertical?: { style: string; color: string };
+}
+
+const BORDER_SPEC_KEYS = [
+  "borderTop", "borderRight", "borderBottom", "borderLeft",
+  "borderDiagonalDown", "borderDiagonalUp",
+  "borderOutline", "borderInsideHorizontal", "borderInsideVertical",
+] as const;
+
+/**
+ * Lower the SCRIPT format vocabulary onto the backend's: theme text/background
+ * colors become *Theme/*Tint FormattingParams fields (the engine stores the
+ * reference); theme border colors are resolved to hex (the border pipeline is
+ * absolute-only); fills become FillParam with theme fields where referenced.
+ * The document theme is fetched AT MOST ONCE, and only when something actually
+ * references it. Exported for tests.
+ */
+export async function lowerScriptFormat(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  format: ScriptRangeFormat,
+): Promise<LoweredRangeFormat> {
+  let theme: { colors: Record<string, string> } | null = null;
+  const resolveColor = async (c: ScriptColorValue): Promise<string> => {
+    if (!isThemeColorRef(c)) return c;
+    if (!theme) {
+      theme = (await lib.getDocumentTheme()) as unknown as { colors: Record<string, string> };
+    }
+    return resolveThemeColorRef(theme, c);
+  };
+  const {
+    textColor, backgroundColor, fill,
+    borderTop, borderRight, borderBottom, borderLeft,
+    borderDiagonalDown, borderDiagonalUp,
+    borderOutline, borderInsideHorizontal, borderInsideVertical,
+    ...rest
+  } = format;
+  const out: LoweredRangeFormat = { ...rest };
+  if (textColor !== undefined) {
+    if (isThemeColorRef(textColor)) {
+      out.textColorTheme = textColor.theme;
+      out.textColorTint = tintToPermille(textColor.tint);
+    } else {
+      out.textColor = textColor;
+    }
+  }
+  if (backgroundColor !== undefined) {
+    if (isThemeColorRef(backgroundColor)) {
+      out.bgColorTheme = backgroundColor.theme;
+      out.bgColorTint = tintToPermille(backgroundColor.tint);
+    } else {
+      out.backgroundColor = backgroundColor;
+    }
+  }
+  if (fill !== undefined) {
+    out.fill = await lowerFillSpec(fill, resolveColor);
+  }
+  const sides = {
+    borderTop, borderRight, borderBottom, borderLeft,
+    borderDiagonalDown, borderDiagonalUp,
+    borderOutline, borderInsideHorizontal, borderInsideVertical,
+  } as Record<(typeof BORDER_SPEC_KEYS)[number], ScriptBorderSideSpec | undefined>;
+  for (const key of BORDER_SPEC_KEYS) {
+    const side = sides[key];
+    if (side === undefined) continue;
+    out[key] = { style: side.style, color: await resolveColor(side.color) };
+  }
+  return out;
+}
+
+/** Script fill -> backend FillParam (theme colors carry BOTH the reference and
+ *  their current hex — the hex is the parse fallback, never the truth). */
+async function lowerFillSpec(
+  fill: ScriptFillSpec,
+  resolveColor: (c: ScriptColorValue) => Promise<string>,
+): Promise<NonNullable<FormattingOptions["fill"]>> {
+  const parts = async (
+    c: ScriptColorValue,
+  ): Promise<{ hex: string; theme?: string; tint?: number }> =>
+    isThemeColorRef(c)
+      ? { hex: await resolveColor(c), theme: c.theme, tint: tintToPermille(c.tint) }
+      : { hex: c };
+  switch (fill.type) {
+    case "none":
+      return { type: "none" };
+    case "solid": {
+      const c = await parts(fill.color);
+      return { type: "solid", color: c.hex, colorTheme: c.theme, colorTint: c.tint };
+    }
+    case "pattern": {
+      const fg = await parts(fill.fgColor);
+      const bg = await parts(fill.bgColor);
+      // patternType/direction were enumerated by the validator against the
+      // backend's own vocabulary, so the cast is a formality, not a loophole.
+      return {
+        type: "pattern",
+        patternType: fill.patternType,
+        fgColor: fg.hex,
+        bgColor: bg.hex,
+        fgColorTheme: fg.theme,
+        fgColorTint: fg.tint,
+        bgColorTheme: bg.theme,
+        bgColorTint: bg.tint,
+      } as NonNullable<FormattingOptions["fill"]>;
+    }
+    default: {
+      const c1 = await parts(fill.color1);
+      const c2 = await parts(fill.color2);
+      return {
+        type: "gradient",
+        color1: c1.hex,
+        color2: c2.hex,
+        direction: fill.direction,
+        color1Theme: c1.theme,
+        color1Tint: c1.tint,
+        color2Theme: c2.theme,
+        color2Tint: c2.tint,
+      } as NonNullable<FormattingOptions["fill"]>;
+    }
+  }
+}
+
+/**
+ * Map a script border side onto apply_border_preset's (style, color, width)
+ * vocabulary. The backend stores width + line style and REPORTS them back as
+ * one word (border_side_to_data: Solid/1 = "thin", Solid/2 = "medium",
+ * Solid/3 = "thick"), so this mapping is what makes the read-back word equal
+ * the word that was written. Exported for the round-trip test.
+ */
+export function borderPresetArgs(
+  side: { style: string; color: string },
+): { style: string; color: string; width: number } {
+  switch (side.style) {
+    case "none":   return { style: "solid",  color: side.color, width: 0 };
+    case "thin":   return { style: "solid",  color: side.color, width: 1 };
+    case "medium": return { style: "solid",  color: side.color, width: 2 };
+    case "thick":  return { style: "solid",  color: side.color, width: 3 };
+    case "dashed": return { style: "dashed", color: side.color, width: 1 };
+    case "dotted": return { style: "dotted", color: side.color, width: 1 };
+    case "double": return { style: "double", color: side.color, width: 1 };
+    // The validator enumerated the styles, so this arm is unreachable — kept
+    // total so a future style fails visibly rather than as undefined.
+    default:       return { style: "solid",  color: side.color, width: 1 };
+  }
+}
+
 /**
  * Apply a PARTIAL format to a rectangle. Absent properties are left alone, so a
  * script can bold a block without resetting its number format. The active sheet
  * takes apply_formatting (which also replicates to a grouped sheet selection,
  * exactly as a ribbon click would); another sheet takes the sheet-scoped
- * apply_formatting_to_sheets. Both are undoable as ONE step, backend-side.
+ * apply_formatting_to_sheets.
+ *
+ * RANGE-EDGE BORDERS (Wave 3, item 2). borderOutline / borderInsideHorizontal /
+ * borderInsideVertical are decomposed here into the per-cell truth via the SAME
+ * apply_border_preset command the ribbon's border menu calls ("outside" /
+ * "insideHorizontal" / "insideVertical") — outline puts each side only on its
+ * edge cells; the inside presets put the interior edges on BOTH adjoining
+ * cells, exactly as Excel stores them, so a later per-cell read reports what
+ * Excel would. These presets are ACTIVE-SHEET commands (no sheet parameter
+ * exists), so an off-sheet target combined with an edge key is refused.
+ *
+ * UNDO GRANULARITY: apply_formatting and apply_border_preset join an
+ * already-open frontend transaction (the `opened_transaction` guard
+ * update_cells_batch uses), so the withScriptUndoBatch wrap below makes a
+ * multi-call decomposition (base keys + several edge keys) a GENUINE single
+ * undo step; a single-key call — the common case — is one backend step and
+ * takes no wrap at all.
+ *
+ * Exported for tests (jsdom cannot spawn the worker realm; the recording-lib
+ * pattern rangeClipboard.test.ts uses applies here too).
  */
-async function applyRangeFormat(
+export async function applyRangeFormat(
   lib: Awaited<ReturnType<typeof getLib>>,
   sheetIndex: number | undefined,
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
-  format: FormattingOptions,
+  format: ScriptRangeFormat,
 ): Promise<void> {
   assertRangeSize(startRow, startCol, endRow, endCol);
+  // Lower the script vocabulary first (theme refs -> *Theme/*Tint or resolved
+  // hex, script fill -> FillParam) — a pure read, so it precedes every write.
+  const lowered = await lowerScriptFormat(lib, format);
+  const { borderOutline, borderInsideHorizontal, borderInsideVertical, ...base } = lowered;
+  // [preset, side] in application order: interiors first, outline last, so a
+  // border box reads visually correct even while a repaint lands mid-way.
+  const edges: Array<[preset: string, side: { style: string; color: string } | undefined]> = [
+    ["insideHorizontal", borderInsideHorizontal],
+    ["insideVertical", borderInsideVertical],
+    ["outside", borderOutline],
+  ];
+  const edgeCount = edges.filter(([, side]) => side !== undefined).length;
+  const hasBaseKeys = Object.values(base).some((v) => v !== undefined);
   const active = await lib.getActiveSheet();
   const target = sheetIndex ?? active;
-  const { rows, cols } = rectRowsCols(startRow, startCol, endRow, endCol);
-  if (target === active) {
-    const result = await lib.applyFormatting(rows, cols, format);
-    await afterCellDataChange(result.cells);
-    return;
+  if (edgeCount > 0 && target !== active) {
+    throw new BrokerError(
+      "ValidationError",
+      "borderOutline / borderInsideHorizontal / borderInsideVertical can only target " +
+        `the active sheet (currently ${active}); call api.setActiveSheet(...) first`,
+    );
   }
-  await lib.applyFormattingToSheets([target], rows, cols, format);
-  emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+  const { rows, cols } = rectRowsCols(startRow, startCol, endRow, endCol);
+  const work = async (): Promise<void> => {
+    if (hasBaseKeys || edgeCount === 0) {
+      if (target === active) {
+        const result = await lib.applyFormatting(rows, cols, base);
+        await afterCellDataChange(result.cells);
+      } else {
+        await lib.applyFormattingToSheets([target], rows, cols, base);
+        emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
+      }
+    }
+    for (const [preset, side] of edges) {
+      if (side === undefined) continue;
+      const args = borderPresetArgs(side);
+      const result = await lib.applyBorderPreset(
+        startRow, startCol, endRow, endCol, preset, args.style, args.color, args.width,
+      );
+      await afterCellDataChange(result.cells);
+    }
+  };
+  const backendCalls = (hasBaseKeys || edgeCount === 0 ? 1 : 0) + edgeCount;
+  if (backendCalls > 1) {
+    await withScriptUndoBatch(lib, "Format range", work);
+  } else {
+    await work();
+  }
 }
 
 /**
@@ -5078,7 +7421,7 @@ async function applyRangeFormat(
  */
 async function clearRangeFormat(
   lib: Awaited<ReturnType<typeof getLib>>,
-  sheetIndex: number | undefined,
+  sheetIndex: number | string | undefined,
   startRow: number,
   startCol: number,
   endRow: number,
@@ -5089,6 +7432,1692 @@ async function clearRangeFormat(
   await lib.clearRangeWithOptions(startRow, startCol, endRow, endCol, "formats");
   emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["styles"] });
   (await import("../grid")).refreshGridData();
+}
+
+// ============================================================================
+// Format READ-BACK (Wave 3, item 1)
+// ============================================================================
+// The inverse of applyRangeFormat: CellData.styleIndex -> StyleData ->
+// ScriptCellFormat, in the SAME vocabulary the write path accepts, so
+// setRangeFormat(X) followed by getRangeFormat reports X back (bold: true,
+// textColor "#rrggbb", the numberFormat string, textRotation incl. the
+// "custom:N" form StyleData emits, one { style, color } per border side).
+
+/** One border edge as a format read reports it. `style` uses the same word
+ *  vocabulary the write accepts (none/thin/medium/thick/dashed/dotted/double —
+ *  border_side_to_data folds width+line style back into the word). */
+export interface ScriptBorderSideReadback {
+  style: string;
+  color: string;
+}
+
+/**
+ * The FULLY-POPULATED form of a cell's format, as getRangeFormat /
+ * getCellFormat answer it. Every key writable through setRangeFormat reads
+ * back here (the three range-edge border keys read back as the per-cell sides
+ * they decomposed into), plus the two protection attributes — readable at both
+ * tiers, because whether a cell is locked is visible state, while CHANGING it
+ * stays unlocked-only.
+ *
+ * THEME COLORS (Wave 4): a theme-referenced textColor/backgroundColor reads
+ * back AS THE THEME OBJECT `{ theme, tint }` — the reference is what the
+ * engine stores, so the round trip preserves it — with the resolved hex
+ * additionally in textColorResolved / backgroundColorResolved. NOTE the
+ * DEFAULT cell reads back theme-referenced too (text = dark1, background =
+ * light1): that is genuinely what the engine stores for an untouched cell.
+ */
+export interface ScriptCellFormat {
+  bold: boolean;
+  italic: boolean;
+  underline: string;
+  strikethrough: boolean;
+  fontSize: number;
+  fontFamily: string;
+  /** "#rrggbb" for an absolute color; `{ theme, tint }` for a theme-referenced
+   *  one (tint as a FRACTION -1..1). */
+  textColor: ScriptColorReadback;
+  /** The text color resolved against the current document theme ("#rrggbb"). */
+  textColorResolved: string;
+  backgroundColor: ScriptColorReadback;
+  /** The background resolved against the current document theme ("#rrggbb"). */
+  backgroundColorResolved: string;
+  textAlign: string;
+  verticalAlign: string;
+  numberFormat: string;
+  wrapText: boolean;
+  /** "none" | "rotate90" | "rotate270" | "custom:N" (N in degrees — the form
+   *  StyleData emits for a rotation the UI set). */
+  textRotation: string;
+  indent: number;
+  shrinkToFit: boolean;
+  /** The cell's fill; `{ type: "none" }` when it has none. A plain
+   *  backgroundColor write reads back as a solid fill too (that IS how the
+   *  engine stores it). */
+  fill: ScriptFillReadback;
+  borderTop: ScriptBorderSideReadback;
+  borderRight: ScriptBorderSideReadback;
+  borderBottom: ScriptBorderSideReadback;
+  borderLeft: ScriptBorderSideReadback;
+  borderDiagonalDown: ScriptBorderSideReadback;
+  borderDiagonalUp: ScriptBorderSideReadback;
+  locked: boolean;
+  formulaHidden: boolean;
+}
+
+/** Canonical hex spelling: leading '#', lowercase — the form Color::to_css
+ *  emits, applied on the way OUT so a cached/mocked style with "#ABCDEF" and
+ *  the backend's "#abcdef" read back identically. */
+function normalizeHexColor(color: string): string {
+  const withHash = color.startsWith("#") ? color : `#${color}`;
+  return withHash.toLowerCase();
+}
+
+/** The fill fields of StyleData as this module reads them (structural — the
+ *  backend's FillData with every variant's keys flattened optional). */
+interface StyleFillLike {
+  type: string;
+  color?: string;
+  colorTheme?: string | null;
+  colorTint?: number | null;
+  patternType?: string;
+  fgColor?: string;
+  bgColor?: string;
+  fgColorTheme?: string | null;
+  fgColorTint?: number | null;
+  bgColorTheme?: string | null;
+  bgColorTint?: number | null;
+  color1?: string;
+  color2?: string;
+  direction?: string;
+  color1Theme?: string | null;
+  color1Tint?: number | null;
+  color2Theme?: string | null;
+  color2Tint?: number | null;
+}
+
+/** One color slot on the way OUT: the theme object when the engine stored a
+ *  reference, canonical hex otherwise. */
+function colorReadback(
+  resolvedHex: string,
+  theme: string | null | undefined,
+  tintPermille: number | null | undefined,
+): ScriptColorReadback {
+  if (theme) return { theme, tint: permilleToFraction(tintPermille) };
+  return normalizeHexColor(resolvedHex);
+}
+
+/** StyleData.fill -> the script fill read-back ({ type: "none" } when absent). */
+function fillReadback(fill: StyleFillLike | null | undefined): ScriptFillReadback {
+  if (!fill || fill.type === "none") return { type: "none" };
+  if (fill.type === "solid") {
+    return {
+      type: "solid",
+      color: colorReadback(fill.color ?? "#ffffff", fill.colorTheme, fill.colorTint),
+    };
+  }
+  if (fill.type === "pattern") {
+    return {
+      type: "pattern",
+      patternType: fill.patternType ?? "none",
+      fgColor: colorReadback(fill.fgColor ?? "#000000", fill.fgColorTheme, fill.fgColorTint),
+      bgColor: colorReadback(fill.bgColor ?? "#ffffff", fill.bgColorTheme, fill.bgColorTint),
+    };
+  }
+  return {
+    type: "gradient",
+    color1: colorReadback(fill.color1 ?? "#ffffff", fill.color1Theme, fill.color1Tint),
+    color2: colorReadback(fill.color2 ?? "#ffffff", fill.color2Theme, fill.color2Tint),
+    direction: fill.direction ?? "horizontal",
+  };
+}
+
+/**
+ * StyleData -> the script vocabulary. PURE, and the exact inverse of the
+ * applyRangeFormat write path key for key — the round-trip test in
+ * __tests__/formatReadback.test.ts is the contract. Exported for tests.
+ */
+export function styleDataToScriptFormat(style: {
+  bold: boolean;
+  italic: boolean;
+  underline: string;
+  strikethrough: boolean;
+  fontSize: number;
+  fontFamily: string;
+  textColor: string;
+  backgroundColor: string;
+  textAlign: string;
+  verticalAlign: string;
+  numberFormat: string;
+  wrapText: boolean;
+  textRotation: string;
+  indent: number;
+  shrinkToFit: boolean;
+  borderTop: { style: string; color: string };
+  borderRight: { style: string; color: string };
+  borderBottom: { style: string; color: string };
+  borderLeft: { style: string; color: string };
+  borderDiagonalDown: { style: string; color: string };
+  borderDiagonalUp: { style: string; color: string };
+  textColorTheme?: string | null;
+  textColorTint?: number | null;
+  bgColorTheme?: string | null;
+  bgColorTint?: number | null;
+  fill?: StyleFillLike | null;
+  locked: boolean;
+  formulaHidden: boolean;
+}): ScriptCellFormat {
+  const side = (s: { style: string; color: string }): ScriptBorderSideReadback => ({
+    style: s.style,
+    color: normalizeHexColor(s.color),
+  });
+  return {
+    bold: style.bold,
+    italic: style.italic,
+    underline: style.underline,
+    strikethrough: style.strikethrough,
+    fontSize: style.fontSize,
+    fontFamily: style.fontFamily,
+    textColor: colorReadback(style.textColor, style.textColorTheme, style.textColorTint),
+    textColorResolved: normalizeHexColor(style.textColor),
+    backgroundColor: colorReadback(style.backgroundColor, style.bgColorTheme, style.bgColorTint),
+    backgroundColorResolved: normalizeHexColor(style.backgroundColor),
+    textAlign: style.textAlign,
+    verticalAlign: style.verticalAlign,
+    numberFormat: style.numberFormat,
+    wrapText: style.wrapText,
+    textRotation: style.textRotation,
+    indent: style.indent,
+    shrinkToFit: style.shrinkToFit,
+    fill: fillReadback(style.fill),
+    borderTop: side(style.borderTop),
+    borderRight: side(style.borderRight),
+    borderBottom: side(style.borderBottom),
+    borderLeft: side(style.borderLeft),
+    borderDiagonalDown: side(style.borderDiagonalDown),
+    borderDiagonalUp: side(style.borderDiagonalUp),
+    locked: style.locked,
+    formulaHidden: style.formulaHidden,
+  };
+}
+
+/**
+ * Read a rectangle's formats as a DENSE rows x cols grid.
+ *
+ * The ACTIVE sheet reads style indexes through get_viewport_cells (which also
+ * carries the row/column-tier style of an EMPTY cell — a styled empty column
+ * reads back styled); another sheet has no bulk cells-with-style command, so
+ * it goes through get_watch_cells one triple per cell (bounded by the same
+ * MAX_RANGE_CELLS every bulk read obeys). Cells the backend does not answer
+ * for hold the default style (index 0).
+ *
+ * Styles are fetched ONCE per distinct index and the RESULT OBJECTS ARE
+ * SHARED across cells of the same style — safe because the grid crosses to
+ * the worker realm by structured clone, so a script mutating its copy can
+ * never corrupt a neighbour's. Exported for tests.
+ */
+export async function readRangeFormats(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<ScriptCellFormat[][]> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  const active = await lib.getActiveSheet();
+  const target = sheetIndex ?? active;
+  const rows = endRow - startRow + 1;
+  const cols = endCol - startCol + 1;
+  const styleIndexAt: number[][] = [];
+  for (let r = 0; r < rows; r++) styleIndexAt.push(new Array<number>(cols).fill(0));
+
+  if (target === active) {
+    const cells = await lib.getViewportCells(startRow, startCol, endRow, endCol);
+    for (const cell of cells) {
+      const r = cell.row - startRow;
+      const c = cell.col - startCol;
+      if (r >= 0 && r < rows && c >= 0 && c < cols) styleIndexAt[r][c] = cell.styleIndex;
+    }
+  } else {
+    const requests: Array<[number, number, number]> = [];
+    for (let r = startRow; r <= endRow; r++) {
+      for (let c = startCol; c <= endCol; c++) requests.push([target, r, c]);
+    }
+    const results = await lib.getWatchCells(requests);
+    let i = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++, i++) {
+        const cell = results[i];
+        if (cell) styleIndexAt[r][c] = cell.styleIndex;
+      }
+    }
+  }
+
+  const cache = new Map<number, ScriptCellFormat>();
+  const formatFor = async (index: number): Promise<ScriptCellFormat> => {
+    const hit = cache.get(index);
+    if (hit) return hit;
+    const format = styleDataToScriptFormat(await lib.getStyle(index));
+    cache.set(index, format);
+    return format;
+  };
+  const out: ScriptCellFormat[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row: ScriptCellFormat[] = [];
+    for (let c = 0; c < cols; c++) row.push(await formatFor(styleIndexAt[r][c]));
+    out.push(row);
+  }
+  return out;
+}
+
+/** Read ONE cell's format (same source as readRangeFormats). */
+export async function readCellFormat(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetIndex: number | undefined,
+  row: number,
+  col: number,
+): Promise<ScriptCellFormat> {
+  const grid = await readRangeFormats(lib, sheetIndex, row, col, row, col);
+  return grid[0][0];
+}
+
+// ============================================================================
+// Named cell styles (Wave 4, formatting breadth)
+// ============================================================================
+// VBA's Styles / Range.Style over the named_styles commands the Cell Styles
+// gallery calls. Apply rides the Wave-4 rect command (one undo transaction);
+// CREATE has no backend "style from params" command, so it mints the style
+// index through the transient-write pattern: one apply_formatting on a scratch
+// cell far outside the used range, read the minted index, register the name,
+// then revert the cell and drop the undo record — the user's grid and their
+// Ctrl+Z history end exactly where they started.
+
+/** What list/create answer a script per style (styleIndex stays internal). */
+export interface ScriptNamedStyleInfo {
+  name: string;
+  builtIn: boolean;
+  category: string;
+}
+
+/** Apply a named style to a rectangle. ACTIVE SHEET only (the backend command
+ *  is); one undo step backend-side. Exported for tests. */
+export async function executeApplyNamedStyle(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  name: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  assertRangeSize(startRow, startCol, endRow, endCol);
+  await assertActiveSheet(lib, sheetRef, "applyNamedStyle");
+  const result = await lib.applyNamedStyleRange(name, startRow, startCol, endRow, endCol);
+  await afterCellDataChange(result.cells);
+}
+
+/**
+ * A cell to derive a style from: outside the used range, no cell stored, no
+ * row/column-tier style (getViewportCells synthesizes entries for tier-styled
+ * empty cells, so "absent or effective index 0 and empty" IS virgin). Walks a
+ * short diagonal in case the first candidate is styled.
+ */
+async function findScratchCell(
+  lib: Awaited<ReturnType<typeof getLib>>,
+): Promise<{ row: number; col: number }> {
+  const used = await lib.getUsedRange();
+  const baseRow = used.empty ? 0 : used.endRow + 2;
+  const baseCol = used.empty ? 0 : used.endCol + 2;
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const row = baseRow + attempt * 3;
+    const col = baseCol + attempt * 5;
+    const cells = await lib.getViewportCells(row, col, row, col);
+    const cell = cells.find((c) => c.row === row && c.col === col);
+    if (!cell || (cell.styleIndex === 0 && !cell.display && !cell.formula)) {
+      return { row, col };
+    }
+  }
+  throw new BrokerError(
+    "HostError",
+    "could not find an unstyled scratch cell to derive the style from",
+  );
+}
+
+/**
+ * Create a custom named style from a script format. Transient-write dance (see
+ * the section comment): the scratch write joins ONE transaction that is
+ * CANCELLED (records dropped) after the cell is reverted — unless the script
+ * already holds an open batch, in which case the apply+revert pair simply
+ * nets to nothing inside it (cancelling would destroy the script's batch).
+ * Exported for tests.
+ */
+export async function executeCreateNamedStyle(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  name: string,
+  format: ScriptRangeFormat,
+): Promise<ScriptNamedStyleInfo> {
+  const existing = await lib.getNamedStyles();
+  const clash = existing.find((s) => s.name.toLowerCase() === name.toLowerCase());
+  if (clash) {
+    throw new BrokerError("ValidationError", `a named style called "${clash.name}" already exists`);
+  }
+  const lowered = await lowerScriptFormat(lib, format);
+  const scratch = await findScratchCell(lib);
+  const alreadyOpen = (await lib.getUndoState()).transactionOpen;
+  if (!alreadyOpen) await lib.beginUndoTransaction(`Create named style '${name}'`);
+  let applied = false;
+  try {
+    const result = await lib.applyFormatting([scratch.row], [scratch.col], lowered);
+    applied = true;
+    const cell = result.cells.find((c) => c.row === scratch.row && c.col === scratch.col);
+    if (!cell) {
+      throw new BrokerError("HostError", "the backend reported no style index for the format");
+    }
+    const created = await lib.createNamedStyle(name, cell.styleIndex, "Custom");
+    return { name: created.name, builtIn: created.builtIn, category: created.category };
+  } finally {
+    if (applied) {
+      try {
+        // Revert the scratch cell entirely (the style stays in the registry —
+        // that is what the named style points at).
+        await lib.clearRangeWithOptions(scratch.row, scratch.col, scratch.row, scratch.col, "all");
+      } catch {
+        // Best effort: the cancel below still drops the undo record, and the
+        // scratch cell is outside the used range.
+      }
+    }
+    if (!alreadyOpen) await lib.cancelUndoTransaction();
+  }
+}
+
+// ============================================================================
+// Cross-sheet structural + data ops (Wave 3, items 5/6/12)
+// ============================================================================
+// The backend commands behind these grew an optional sheetIndex carrying the
+// FULL off-sheet guard chain (protection options + per-cell protection on the
+// TARGET sheet, spill refusal, writeback claims, subscriber overrides,
+// sheet-tagged undo, cross-sheet formula rewrite, recalc of the target and the
+// active mirror). Two invariants every executor below keeps:
+//   - `sheetRef` absent/null OR resolving to the ACTIVE sheet = the unchanged
+//     active path (repaint + events exactly as before Wave 3);
+//   - a NON-active target is state-only: the backend returns an empty repaint
+//     payload and the canvas is deliberately NOT refreshed (the sheet
+//     re-materializes from backend state when the user switches to it).
+
+/** Where a sheet-addressable write goes. */
+export interface SheetWriteTarget {
+  /** The resolved index to pass to the backend; undefined = active sheet. */
+  target: number | undefined;
+  /** True when the write lands on a sheet OTHER than the visible one. */
+  offSheet: boolean;
+  /** The concrete sheet index, for write attribution. */
+  sheet: number;
+}
+
+/** Resolve an optional sheet ref for a WRITE, deciding the repaint question in
+ *  the same breath. Exported for tests. */
+export async function resolveSheetWriteTarget(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef: number | string | undefined | null,
+  method: string,
+): Promise<SheetWriteTarget> {
+  if (sheetRef === undefined || sheetRef === null) {
+    const active = await lib.getActiveSheet();
+    return { target: undefined, offSheet: false, sheet: active };
+  }
+  const { sheets, activeIndex } = await lib.getSheets();
+  const resolved = resolveSheetRefIn(sheets, sheetRef, method);
+  return { target: resolved, offSheet: resolved !== activeIndex, sheet: resolved };
+}
+
+/** Non-cell document state changed (validation rules, hyperlinks) on the
+ *  VISIBLE sheet: the same announce the editing dialogs make, so the
+ *  indicator/dropdown chrome repaints without waiting for the next edit. */
+function announceNonCellMutation(offSheet: boolean): void {
+  if (offSheet) return;
+  emitAppEvent(AppEvents.DATA_CHANGED, {});
+  scheduleGridDataRefresh();
+}
+
+/** The four row/column structural commands (identical shapes). */
+export type StructuralOpName = "insertRows" | "deleteRows" | "insertColumns" | "deleteColumns";
+
+export async function executeStructuralOp(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  op: StructuralOpName,
+  start: number,
+  count: number,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, op);
+  // The lib wrappers self-detect an off-sheet target and skip the
+  // ROWS_INSERTED-family events + macro recording (those describe the visible
+  // canvas); passing the resolved index through is all that is needed here.
+  switch (op) {
+    case "insertRows": await lib.insertRows(start, count, t.target); break;
+    case "deleteRows": await lib.deleteRows(start, count, t.target); break;
+    case "insertColumns": await lib.insertColumns(start, count, t.target); break;
+    case "deleteColumns": await lib.deleteColumns(start, count, t.target); break;
+  }
+  if (!t.offSheet) await afterStructuralChange();
+}
+
+export async function executeMergeCells(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "mergeCells");
+  const result = await lib.mergeCells(startRow, startCol, endRow, endCol, t.target);
+  if (!result.success) {
+    throw new BrokerError("ValidationError", "mergeCells was refused (the range overlaps an existing merge)");
+  }
+  // Off-sheet, updatedCells is [] by contract — attribution and repaint
+  // degrade to no-ops together.
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
+  }
+  if (!t.offSheet) await afterCellDataChange(result.updatedCells);
+}
+
+export async function executeUnmergeCells(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  row: number,
+  col: number,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "unmergeCells");
+  const result = await lib.unmergeCells(row, col, t.target);
+  if (!result.success) {
+    throw new BrokerError("ValidationError", `No merged region at row=${row} col=${col}`);
+  }
+  if (!t.offSheet) await afterCellDataChange(result.updatedCells);
+}
+
+export async function executeSortRange(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  fields: Parameters<Awaited<ReturnType<typeof getLib>>["sortRange"]>[4],
+  options?: { matchCase?: boolean; hasHeaders?: boolean; orientation?: "rows" | "columns" },
+  sheetRef?: number | string | null,
+): Promise<number> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "sortRange");
+  const result = await lib.sortRange<SortRangeResultLike>(
+    startRow, startCol, endRow, endCol,
+    fields,
+    { ...(options ?? {}), sheetIndex: t.target },
+  );
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "sortRange failed");
+  }
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
+  }
+  if (!t.offSheet) await afterCellDataChange(result.updatedCells);
+  return result.sortedCount;
+}
+
+/** The rectangle a range-clamped find/replace names: a plain Box or an A1
+ *  spelling ("B2:D10") resolved here, host-side (Wave 4). */
+export type ScriptRangeSpec = ScriptRangeBox | string;
+
+/** Resolve a `range` option to a normalized Box. The A1 spelling may NOT name
+ *  a sheet — the sheet slot is `options.sheetIndex`, and two competing sheet
+ *  claims in one call is exactly the ambiguity this refuses. */
+export function resolveScriptRangeSpec(spec: ScriptRangeSpec, method: string): ScriptRangeBox {
+  if (typeof spec === "string") {
+    const { sheetName, rest } = splitSheetPrefixHost(spec);
+    if (sheetName !== null) {
+      throw new BrokerError(
+        "ValidationError",
+        `${method}: options.range must not name a sheet ("${spec}") — use options.sheetIndex`,
+      );
+    }
+    try {
+      return parseA1BodyHost(rest);
+    } catch {
+      throw new BrokerError(
+        "ValidationError",
+        `${method}: options.range "${spec}" is not an A1 range like "B2:D10"`,
+      );
+    }
+  }
+  return {
+    startRow: Math.min(spec.startRow, spec.endRow),
+    startCol: Math.min(spec.startCol, spec.endCol),
+    endRow: Math.max(spec.startRow, spec.endRow),
+    endCol: Math.max(spec.startCol, spec.endCol),
+  };
+}
+
+/** Whether (row, col) lies inside the inclusive box. */
+function rangeSpecContains(box: ScriptRangeBox, row: number, col: number): boolean {
+  return row >= box.startRow && row <= box.endRow && col >= box.startCol && col <= box.endCol;
+}
+
+/** api.findAll options: the search flags plus the Wave-3 sheet slot and the
+ *  Wave-4 range clamp. */
+export interface ScriptFindAllOptions {
+  caseSensitive?: boolean;
+  matchEntireCell?: boolean;
+  searchFormulas?: boolean;
+  sheetIndex?: number | string;
+  /** Restrict the search to this rectangle (VBA Range.Find). */
+  range?: ScriptRangeSpec;
+}
+
+export async function executeFindAll(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  query: string,
+  options?: ScriptFindAllOptions,
+): Promise<{ matches: Array<{ row: number; col: number }>; totalCount: number }> {
+  const target = await resolveOptionalSheetRef(lib, options?.sheetIndex, "findAll");
+  // The range clamp is applied HERE, over the backend's whole-sheet answer:
+  // the find command has no rectangle parameter, and filtering coordinates is
+  // exactly equivalent (matching is per cell). Resolved BEFORE the backend
+  // call so a malformed range fails without the search running.
+  const box =
+    options?.range !== undefined && options?.range !== null
+      ? resolveScriptRangeSpec(options.range, "findAll")
+      : null;
+  const result = await lib.findAll(query, {
+    caseSensitive: options?.caseSensitive ?? false,
+    matchEntireCell: options?.matchEntireCell ?? false,
+    searchFormulas: options?.searchFormulas ?? false,
+    sheetIndex: target,
+  });
+  // Reshape the backend's [row, col] tuples into named fields — a script
+  // reading `m.row` cannot silently swap the two the way `m[0]` can.
+  const matches = result.matches
+    .filter(([row, col]) => box === null || rangeSpecContains(box, row, col))
+    .map(([row, col]) => ({ row, col }));
+  return { matches, totalCount: matches.length };
+}
+
+/** api.replaceAll options: the replace flags plus the Wave-3 sheet slot and
+ *  the Wave-4 range clamp. */
+export interface ScriptReplaceAllOptions {
+  caseSensitive?: boolean;
+  matchEntireCell?: boolean;
+  sheetIndex?: number | string;
+  /** Restrict the replace to this rectangle (VBA Range.Replace). */
+  range?: ScriptRangeSpec;
+}
+
+/** Case-insensitive replace-all-occurrences. TWIN of `replace_case_insensitive`
+ *  in app/src-tauri/src/commands/search.rs — same walk, same result. */
+export function replaceCaseInsensitiveAll(
+  text: string,
+  search: string,
+  replacement: string,
+): string {
+  if (search.length === 0) return text;
+  const searchLower = search.toLowerCase();
+  const textLower = text.toLowerCase();
+  let result = "";
+  let lastEnd = 0;
+  let at = textLower.indexOf(searchLower);
+  while (at !== -1) {
+    result += text.slice(lastEnd, at) + replacement;
+    lastEnd = at + search.length;
+    at = textLower.indexOf(searchLower, lastEnd);
+  }
+  return result + text.slice(lastEnd);
+}
+
+/**
+ * The value transform for a RANGE-CLAMPED replace: what the cell's new INPUT
+ * becomes, or null to leave it alone. TWIN of `compute_replacement_value` in
+ * app/src-tauri/src/commands/search.rs, over the typed-read cell instead of
+ * the engine CellValue: text and number cells only, formula cells skipped,
+ * entire-cell mode requires the whole (normalized) text to be the match.
+ * Exported for tests.
+ */
+export function computeRangeReplacement(
+  cell: ScriptCell,
+  search: string,
+  replacement: string,
+  caseSensitive: boolean,
+  matchEntireCell: boolean,
+): { value: string; invariant: boolean } | null {
+  if (cell.formula) return null; // formulas are never rewritten (same as Replace All)
+  const searchNormalized = caseSensitive ? search : search.toLowerCase();
+  if (cell.type === "text") {
+    const text = typeof cell.value === "string" ? cell.value : cell.display;
+    const newText = caseSensitive
+      ? text.split(search).join(replacement)
+      : replaceCaseInsensitiveAll(text, search, replacement);
+    if (matchEntireCell && newText !== replacement) return null;
+    if (newText === text) return null;
+    return { value: newText, invariant: false };
+  }
+  if (cell.type === "number" && typeof cell.value === "number") {
+    // The Rust twin matches against the number's canonical text ("{:.0}" for
+    // integers, "{}" otherwise) — String(n) is that same spelling in JS.
+    const text = String(cell.value);
+    const textNormalized = caseSensitive ? text : text.toLowerCase();
+    if (matchEntireCell) {
+      return textNormalized === searchNormalized ? { value: replacement, invariant: false } : null;
+    }
+    if (!textNormalized.includes(searchNormalized)) return null;
+    const newText = caseSensitive
+      ? text.split(search).join(replacement)
+      : replaceCaseInsensitiveAll(text, search, replacement);
+    const asNumber = Number(newText);
+    // A digit-swap that still reads as a number stays a NUMBER (the Rust twin
+    // re-parses too) — written invariant so sv-SE cannot re-read "42.5" as 425.
+    if (newText.trim().length > 0 && Number.isFinite(asNumber)) {
+      return { value: newText, invariant: true };
+    }
+    return { value: newText, invariant: false };
+  }
+  return null; // boolean / error / empty: nothing to replace, same as Rust
+}
+
+export async function executeReplaceAll(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  search: string,
+  replacement: string,
+  options?: ScriptReplaceAllOptions,
+): Promise<{ replacementCount: number }> {
+  const t = await resolveSheetWriteTarget(lib, options?.sheetIndex, "replaceAll");
+  // ---- Range-clamped path (Wave 4): the backend replace command has no
+  //      rectangle parameter, so the clamp is done host-side — typed read of
+  //      the rectangle, the SAME value transform the Rust command applies
+  //      (computeRangeReplacement), and one guarded batch write
+  //      (writeCellsOnSheet: one undo step, writeback draft gate, protection
+  //      enforced by the write commands themselves).
+  if (options?.range !== undefined && options?.range !== null) {
+    const box = resolveScriptRangeSpec(options.range, "replaceAll");
+    const grid = await readTypedRange(
+      lib, t.target, box.startRow, box.startCol, box.endRow, box.endCol,
+    );
+    const caseSensitive = options?.caseSensitive ?? false;
+    const matchEntireCell = options?.matchEntireCell ?? false;
+    const updates: Array<{ row: number; col: number; value: string; invariant?: boolean }> = [];
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        const next = computeRangeReplacement(
+          grid[r][c], search, replacement, caseSensitive, matchEntireCell,
+        );
+        if (next === null) continue;
+        updates.push({
+          row: box.startRow + r,
+          col: box.startCol + c,
+          value: next.value,
+          invariant: next.invariant,
+        });
+      }
+    }
+    for (const u of updates) {
+      recordScriptWrite(scriptId, t.sheet, u.row, u.col);
+    }
+    const active = await lib.getActiveSheet();
+    await writeCellsOnSheet(lib, scriptId, t.sheet, active, updates);
+    return { replacementCount: updates.length };
+  }
+  const result = await lib.replaceAll(search, replacement, {
+    caseSensitive: options?.caseSensitive ?? false,
+    matchEntireCell: options?.matchEntireCell ?? false,
+    sheetIndex: t.target,
+  });
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
+  }
+  if (!t.offSheet) await afterCellDataChange(result.updatedCells);
+  // No skip count: the backend guard REFUSES a replace that touches a claimed
+  // writeback region outright (it rejects, naming the region), rather than
+  // silently completing a partial edit.
+  return { replacementCount: result.replacementCount };
+}
+
+// ============================================================================
+// Range ops (Wave 4, RANGE-OPS cluster): removeDuplicates / textToColumns /
+// getSpecialCells / goalSeek
+// ============================================================================
+
+/** api.removeDuplicates options: key columns as RANGE-START OFFSETS
+ *  (sortRange-style; the backend takes absolutes, converted here). */
+export interface ScriptRemoveDuplicatesOptions {
+  columns?: number[];
+  hasHeaders?: boolean;
+}
+
+export async function executeRemoveDuplicates(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  options?: ScriptRemoveDuplicatesOptions,
+  sheetRef?: number | string | null,
+): Promise<{ removedCount: number }> {
+  // remove_duplicates is ACTIVE-SHEET-ONLY (no sheet parameter to pass), so a
+  // ref naming another sheet is refused, never silently redirected.
+  const active = await assertActiveSheet(lib, sheetRef, "removeDuplicates");
+  // Offsets -> absolute column indexes; omitted = every column of the range
+  // (Excel's default: the whole row is the key).
+  const offsets =
+    options?.columns ?? Array.from({ length: endCol - startCol + 1 }, (_, i) => i);
+  const keyColumns = offsets.map((o) => startCol + o);
+  const result = await lib.removeDuplicates(
+    startRow, startCol, endRow, endCol, keyColumns, options?.hasHeaders ?? false,
+  );
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "removeDuplicates failed");
+  }
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, active, cell.row, cell.col);
+  }
+  await afterCellDataChange(result.updatedCells);
+  return { removedCount: result.duplicatesRemoved };
+}
+
+/** api.textToColumns options (the sheet slot must resolve to the ACTIVE
+ *  sheet — the provider writes through the visible grid). */
+export interface ScriptTextToColumnsOptions {
+  delimiters?: string[];
+  consecutiveAsOne?: boolean;
+  destination?: { row: number; col: number };
+  sheetIndex?: number | string;
+}
+
+export async function executeTextToColumns(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  options?: ScriptTextToColumnsOptions,
+): Promise<{ rowsProcessed: number; columnsProduced: number; cellsWritten: number }> {
+  const active = await assertActiveSheet(lib, options?.sheetIndex, "textToColumns");
+  // The feature-neutral seam (autoFilterService precedent): the TextToColumns
+  // extension registered the ONE split implementation the wizard also runs.
+  // With the extension disabled this REFUSES rather than half-splitting.
+  const { requireTextToColumnsController } = await import("../textToColumnsService");
+  const controller = requireTextToColumnsController();
+  const result = await controller.split({
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    delimiters: options?.delimiters,
+    consecutiveAsOne: options?.consecutiveAsOne,
+    destination: options?.destination,
+  });
+  for (const cell of result.writtenCells) {
+    recordScriptWrite(scriptId, active, cell.row, cell.col);
+  }
+  return {
+    rowsProcessed: result.rowsProcessed,
+    columnsProduced: result.columnsProduced,
+    cellsWritten: result.cellsWritten,
+  };
+}
+
+export async function executeGetSpecialCells(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  kind: "constants" | "formulas" | "blanks" | "visible",
+  sheetRef?: number | string | null,
+): Promise<{ cells: Array<{ row: number; col: number }>; truncated: boolean }> {
+  const target = await resolveOptionalSheetRef(lib, sheetRef, "getSpecialCells");
+  const result = await lib.getSpecialCells(startRow, startCol, endRow, endCol, kind, target);
+  if (kind !== "visible") {
+    return { cells: result.cells, truncated: result.truncated };
+  }
+  // "visible" gap the backend cannot close: rows/cols hidden BY HAND (right-
+  // click Hide) live only in frontend Core state (`manuallyHiddenRows/Cols`),
+  // while filter/outline hides are backend-authoritative and already excluded
+  // by get_special_cells. Union the manual hides here — but ONLY for the
+  // ACTIVE sheet, the one whose grid state the frontend holds; a background
+  // sheet has no manual-hide state to consult, so its answer passes through.
+  const gridApi = await import("../grid");
+  const state = gridApi.getGridStateSnapshot();
+  if (!state) return { cells: result.cells, truncated: result.truncated };
+  const activeIndex = state.sheetContext?.activeSheetIndex ?? 0;
+  if (target !== undefined && target !== activeIndex) {
+    return { cells: result.cells, truncated: result.truncated };
+  }
+  const manualRows = state.dimensions?.manuallyHiddenRows;
+  const manualCols = state.dimensions?.manuallyHiddenCols;
+  if ((!manualRows || manualRows.size === 0) && (!manualCols || manualCols.size === 0)) {
+    return { cells: result.cells, truncated: result.truncated };
+  }
+  const cells = result.cells.filter(
+    (c) => !(manualRows?.has(c.row) ?? false) && !(manualCols?.has(c.col) ?? false),
+  );
+  return { cells, truncated: result.truncated };
+}
+
+/** api.goalSeek parameters (mirrors the backend's GoalSeekParams + the sheet
+ *  slot, which must resolve to the ACTIVE sheet). */
+export interface ScriptGoalSeekParams {
+  targetRow: number;
+  targetCol: number;
+  targetValue: number;
+  variableRow: number;
+  variableCol: number;
+  maxIterations?: number;
+  tolerance?: number;
+  sheetIndex?: number | string;
+}
+
+export async function executeGoalSeek(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  params: ScriptGoalSeekParams,
+): Promise<{ converged: boolean; solution: number; iterations: number }> {
+  // goal_seek is ACTIVE-SHEET-ONLY (no sheet parameter), refused otherwise —
+  // and it WRITES the variable cell, so it is a write-attribution op too.
+  const active = await assertActiveSheet(lib, params.sheetIndex, "goalSeek");
+  const result = await lib.goalSeek({
+    targetRow: params.targetRow,
+    targetCol: params.targetCol,
+    targetValue: params.targetValue,
+    variableRow: params.variableRow,
+    variableCol: params.variableCol,
+    maxIterations: params.maxIterations,
+    tolerance: params.tolerance,
+  });
+  if (result.error) {
+    throw new BrokerError("ValidationError", result.error);
+  }
+  for (const cell of result.updatedCells) {
+    recordScriptWrite(scriptId, active, cell.row, cell.col);
+  }
+  await afterCellDataChange(result.updatedCells);
+  // `converged: false` is an ANSWER, not an error (Excel reports it the same
+  // way): the closest value found is left in the cell either way.
+  return {
+    converged: result.foundSolution,
+    solution: result.variableValue,
+    iterations: result.iterations,
+  };
+}
+
+export async function executeClearRange(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  options?: { applyTo?: "all" | "contents" | "formats" },
+  sheetRef?: number | string | null,
+): Promise<{ count: number }> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "clearRange");
+  const applyTo = options?.applyTo ?? "all";
+  const result = (await lib.clearRangeWithOptions(
+    startRow, startCol, endRow, endCol, applyTo, t.target,
+  )) as { count: number; updatedCells?: CellData[] };
+  const updated = result.updatedCells ?? [];
+  // Own-write attribution, so a script's onDataChange never re-fires on its
+  // own clear (same rule as mergeCells / replaceAll).
+  for (const cell of updated) {
+    recordScriptWrite(scriptId, t.sheet, cell.row, cell.col);
+  }
+  if (!t.offSheet) await afterCellDataChange(updated);
+  return { count: result.count };
+}
+
+// ============================================================================
+// Data validation (Wave 3, item 5)
+// ============================================================================
+// The script-facing rule is FLAT (checkValidationRule in validators.ts is the
+// gate); these two mappers are the single place it meets the backend's nested
+// DataValidation union — mirrored field for field, so a validation() read can
+// be passed straight back to setValidation().
+
+/** A plain rectangle argument ({ startRow, startCol, endRow, endCol }). */
+export interface ScriptRangeBox {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** The flat validation rule scripts speak (the write AND read-back shape). */
+export interface ScriptValidationRule {
+  type: "wholeNumber" | "decimal" | "list" | "date" | "time" | "textLength" | "custom";
+  operator?: DataValidationOperator;
+  formula1?: number;
+  formula2?: number;
+  /** custom only: the formula that must evaluate TRUE. */
+  formula?: string;
+  /** list only: literal dropdown entries (exactly one of values/sourceRange). */
+  values?: string[];
+  /** list only: the rectangle the entries come from. */
+  sourceRange?: { sheetIndex?: number } & ScriptRangeBox;
+  /** list only: show the in-cell dropdown arrow (default true). */
+  inCellDropdown?: boolean;
+  ignoreBlanks?: boolean;
+  inputTitle?: string;
+  inputMessage?: string;
+  showInput?: boolean;
+  errorTitle?: string;
+  errorMessage?: string;
+  errorStyle?: DataValidationAlertStyle;
+  showError?: boolean;
+}
+
+/** Flat script rule -> backend DataValidation. Exported for tests. */
+export function scriptRuleToDataValidation(rule: ScriptValidationRule): DataValidation {
+  let dvRule: DataValidationRule;
+  switch (rule.type) {
+    case "custom":
+      dvRule = { custom: { formula: rule.formula ?? "" } };
+      break;
+    case "list": {
+      const source: ListSource =
+        rule.values !== undefined
+          ? { values: [...rule.values] }
+          : { range: { ...(rule.sourceRange as { sheetIndex?: number } & ScriptRangeBox) } };
+      dvRule = { list: { source, inCellDropdown: rule.inCellDropdown !== false } };
+      break;
+    }
+    default: {
+      const compare = {
+        formula1: rule.formula1 as number,
+        formula2: rule.formula2,
+        operator: rule.operator as DataValidationOperator,
+      };
+      dvRule =
+        rule.type === "wholeNumber" ? { wholeNumber: compare }
+        : rule.type === "decimal" ? { decimal: compare }
+        : rule.type === "date" ? { date: compare }
+        : rule.type === "time" ? { time: compare }
+        : { textLength: compare };
+    }
+  }
+  return {
+    rule: dvRule,
+    errorAlert: {
+      title: rule.errorTitle ?? "",
+      message: rule.errorMessage ?? "",
+      style: rule.errorStyle ?? "stop",
+      showAlert: rule.showError ?? true,
+    },
+    prompt: {
+      title: rule.inputTitle ?? "",
+      message: rule.inputMessage ?? "",
+      // Providing a prompt is asking for it to show; an explicit flag wins.
+      showPrompt: rule.showInput ?? (rule.inputTitle !== undefined || rule.inputMessage !== undefined),
+    },
+    ignoreBlanks: rule.ignoreBlanks ?? true,
+  };
+}
+
+/** Backend DataValidation -> the flat script rule ("none" answers null).
+ *  Exported for tests. */
+export function dataValidationToScriptRule(v: DataValidation): ScriptValidationRule | null {
+  const r = v.rule as Record<string, unknown>;
+  let flat: ScriptValidationRule;
+  const compareKind = (["wholeNumber", "decimal", "date", "time", "textLength"] as const).find(
+    (k) => k in r,
+  );
+  if (compareKind !== undefined) {
+    const c = r[compareKind] as { formula1: number; formula2?: number; operator: DataValidationOperator };
+    const twoBound = c.operator === "between" || c.operator === "notBetween";
+    flat = {
+      type: compareKind,
+      operator: c.operator,
+      formula1: c.formula1,
+      // Only the two-bound operators carry formula2, so a read-back always
+      // re-validates as a write.
+      ...(twoBound && c.formula2 !== undefined ? { formula2: c.formula2 } : {}),
+    };
+  } else if ("custom" in r) {
+    flat = { type: "custom", formula: (r.custom as { formula: string }).formula };
+  } else if ("list" in r) {
+    const list = r.list as { source: ListSource; inCellDropdown: boolean };
+    flat = {
+      type: "list",
+      ...("values" in list.source
+        ? { values: [...list.source.values] }
+        : { sourceRange: { ...list.source.range } }),
+      inCellDropdown: list.inCellDropdown,
+    };
+  } else {
+    return null; // "none" (or an unknown future kind): no rule to report
+  }
+  flat.ignoreBlanks = v.ignoreBlanks;
+  flat.inputTitle = v.prompt.title;
+  flat.inputMessage = v.prompt.message;
+  flat.showInput = v.prompt.showPrompt;
+  flat.errorTitle = v.errorAlert.title;
+  flat.errorMessage = v.errorAlert.message;
+  flat.errorStyle = v.errorAlert.style;
+  flat.showError = v.errorAlert.showAlert;
+  return flat;
+}
+
+export async function executeSetDataValidation(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  rule: ScriptValidationRule,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "setDataValidation");
+  const result = await lib.setDataValidation(
+    startRow, startCol, endRow, endCol, scriptRuleToDataValidation(rule), t.target,
+  );
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "setDataValidation failed");
+  }
+  announceNonCellMutation(t.offSheet);
+}
+
+export async function executeClearDataValidation(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  range: ScriptRangeBox,
+  sheetRef?: number | string | null,
+): Promise<void> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "clearDataValidation");
+  const result = await lib.clearDataValidation(
+    range.startRow, range.startCol, range.endRow, range.endCol, t.target,
+  );
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "clearDataValidation failed");
+  }
+  announceNonCellMutation(t.offSheet);
+}
+
+export async function executeGetDataValidation(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  row: number,
+  col: number,
+  sheetRef?: number | string | null,
+): Promise<ScriptValidationRule | null> {
+  const target = await resolveOptionalSheetRef(lib, sheetRef, "getDataValidation");
+  const validation = await lib.getDataValidation(row, col, target);
+  return validation ? dataValidationToScriptRule(validation) : null;
+}
+
+/** One entry of api.listDataValidations: the covered rectangle + its rule. */
+export interface ScriptValidationRangeInfo extends ScriptRangeBox {
+  rule: ScriptValidationRule;
+}
+
+export async function executeListDataValidations(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef?: number | string | null,
+): Promise<ScriptValidationRangeInfo[]> {
+  const target = await resolveOptionalSheetRef(lib, sheetRef, "listDataValidations");
+  const ranges = await lib.getAllDataValidations(target);
+  const out: ScriptValidationRangeInfo[] = [];
+  for (const entry of ranges) {
+    const rule = dataValidationToScriptRule(entry.validation);
+    if (rule === null) continue; // a stored "none" rule is not a rule
+    out.push({
+      startRow: entry.startRow,
+      startCol: entry.startCol,
+      endRow: entry.endRow,
+      endCol: entry.endCol,
+      rule,
+    });
+  }
+  return out;
+}
+
+// ============================================================================
+// Hyperlinks (Wave 3, item 6)
+// ============================================================================
+// Attach / read / remove only. There is NO follow-a-link method, deliberately:
+// an external target (url/file/email) opens outside the sandbox and a script
+// must never do that on its own; internal navigation already exists as
+// api.select / api.scrollTo.
+
+/** What api.addHyperlink accepts — a union on `type`, gated by vAddHyperlink. */
+export interface ScriptHyperlinkSpec {
+  type: "url" | "email" | "internalReference" | "file";
+  /** url / file: the address or path. email: the address (a mailto: prefix is
+   *  tolerated and stripped backend-side). */
+  target?: string;
+  /** email only. */
+  subject?: string;
+  /** internalReference only: the NAVIGATION-target sheet (omit = same sheet).
+   *  Distinct from the `sheet` argument, which is where the link CELL lives. */
+  sheetName?: string;
+  /** internalReference only: the A1 cell to jump to, e.g. "B4". */
+  cellReference?: string;
+}
+
+export interface ScriptHyperlinkOptions {
+  displayText?: string;
+  tooltip?: string;
+}
+
+/** A hyperlink as scripts read it back (rebuilt field by field — house rule:
+ *  a field the backend adds later stays out until deliberately crossed). */
+export interface ScriptHyperlink {
+  row: number;
+  col: number;
+  /** The sheet the link cell LIVES on (0-based). */
+  sheetIndex: number;
+  type: "url" | "email" | "internalReference" | "file";
+  target: string;
+  displayText: string | null;
+  tooltip: string | null;
+  /** internalReference only: the navigation-target sheet (null = same sheet). */
+  sheetName: string | null;
+  /** internalReference only: the A1 cell the link jumps to. */
+  cellReference: string | null;
+}
+
+/** Backend Hyperlink -> the script shape. Exported for tests. */
+export function hyperlinkToScript(h: Hyperlink): ScriptHyperlink {
+  return {
+    row: h.row,
+    col: h.col,
+    sheetIndex: h.sheetIndex,
+    type: h.linkType,
+    target: h.target,
+    displayText: h.displayText ?? null,
+    tooltip: h.tooltip ?? null,
+    sheetName: h.internalRef?.sheetName ?? null,
+    cellReference: h.internalRef?.cellReference ?? null,
+  };
+}
+
+export async function executeAddHyperlink(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  row: number,
+  col: number,
+  link: ScriptHyperlinkSpec,
+  options?: ScriptHyperlinkOptions,
+  sheetRef?: number | string | null,
+): Promise<ScriptHyperlink> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "addHyperlink");
+  const params: AddHyperlinkParams = {
+    row,
+    col,
+    sheetIndex: t.target,
+    linkType: link.type,
+    // The backend's internal-reference arm reads cellReference (target is its
+    // legacy fallback slot); every other arm reads target.
+    target: link.type === "internalReference" ? (link.cellReference ?? "") : (link.target ?? ""),
+    displayText: options?.displayText,
+    tooltip: options?.tooltip,
+    sheetName: link.type === "internalReference" ? link.sheetName : undefined,
+    cellReference: link.type === "internalReference" ? link.cellReference : undefined,
+    emailSubject: link.type === "email" ? link.subject : undefined,
+  };
+  const result = await lib.addHyperlink(params);
+  if (!result.success || !result.hyperlink) {
+    throw new BrokerError("ValidationError", result.error || "addHyperlink failed");
+  }
+  announceNonCellMutation(t.offSheet);
+  return hyperlinkToScript(result.hyperlink);
+}
+
+export async function executeRemoveHyperlink(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  row: number,
+  col: number,
+  sheetRef?: number | string | null,
+): Promise<boolean> {
+  const t = await resolveSheetWriteTarget(lib, sheetRef, "removeHyperlink");
+  const result = await lib.removeHyperlink(row, col, t.target);
+  if (result.success) {
+    announceNonCellMutation(t.offSheet);
+    return true;
+  }
+  // "There was nothing to remove" answers false (the cell is in the state you
+  // asked for — the unprotectSheet convention); real refusals still throw.
+  if (result.error && /no hyperlink/i.test(result.error)) return false;
+  throw new BrokerError("ValidationError", result.error || "removeHyperlink failed");
+}
+
+export async function executeGetHyperlink(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  row: number,
+  col: number,
+  sheetRef?: number | string | null,
+): Promise<ScriptHyperlink | null> {
+  const target = await resolveOptionalSheetRef(lib, sheetRef, "getHyperlink");
+  const h = await lib.getHyperlink(row, col, target);
+  return h ? hyperlinkToScript(h) : null;
+}
+
+export async function executeListHyperlinks(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  sheetRef?: number | string | null,
+): Promise<ScriptHyperlink[]> {
+  const target = await resolveOptionalSheetRef(lib, sheetRef, "listHyperlinks");
+  const links = await lib.getAllHyperlinks(target);
+  return links.map(hyperlinkToScript);
+}
+
+// ============================================================================
+// Calculation control (Wave 3, item 7)
+// ============================================================================
+// VBA's Application.Calculation, with the safety VBA never had: the host
+// remembers every script that flipped automatic -> manual, and hands the mode
+// back to automatic when the LAST such script goes away — unmount, fault,
+// debugger stop (all of which pass through hostUnmountScript) and workbook
+// swap (hostResetAll). A dead script must never leave the workbook silently
+// uncalculating: a stale cell looks exactly like a correct one.
+
+/** Scripts currently holding calculation in manual (only scripts that
+ *  actually FLIPPED it — a user's own manual setting is never overridden). */
+const manualCalcHolders = new Set<string>();
+
+/** Test seam: which scripts the host would restore automatic for. */
+export function scriptsHoldingManualCalculation(): ReadonlySet<string> {
+  return manualCalcHolders;
+}
+
+/** Test seam / workbook-swap sweep: forget all manual-mode tracking. */
+export function resetManualCalculationTracking(): void {
+  manualCalcHolders.clear();
+}
+
+/**
+ * The api.setCalculationMode executor body. Tracks the flip BEFORE the backend
+ * write so a crash between the two still restores; a script that sets manual
+ * while the mode is ALREADY manual (the user's own choice) is deliberately not
+ * tracked — its unmount must not override what the user set by hand.
+ */
+export async function executeSetCalculationMode(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  mode: "automatic" | "manual",
+): Promise<"automatic" | "manual"> {
+  if (mode === "manual") {
+    const before = await lib.getCalculationMode();
+    // Track the flip — and ALSO a second script joining an existing
+    // script-held manual (the mode reads "manual" then, but that manual is
+    // script debt, not the user's choice, and the joiner must keep it alive
+    // until IT ends too). Only "the USER already had manual and no script is
+    // involved" goes untracked.
+    if (before !== "manual" || manualCalcHolders.size > 0) {
+      manualCalcHolders.add(scriptId);
+    }
+  } else {
+    manualCalcHolders.delete(scriptId);
+  }
+  const applied = await lib.setCalculationMode(mode);
+  return applied === "manual" ? "manual" : "automatic";
+}
+
+/**
+ * Give the calculation mode back for one departing script: automatic again
+ * once NO tracked script still holds manual. Exported for tests and called
+ * (fire-and-forget) from hostUnmountScript.
+ */
+export async function releaseManualCalculation(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+): Promise<void> {
+  if (!manualCalcHolders.delete(scriptId)) return;
+  if (manualCalcHolders.size > 0) return;
+  await lib.setCalculationMode("automatic");
+}
+
+/**
+ * The api.recalculate executor body: the active sheet by default, the whole
+ * workbook with { full: true } (calculate_now — same command as F9, including
+ * the cube prefetch and the RECALCULATION_COMPLETED announcement the lib
+ * wrappers make). The returned cells are pushed through the same refresh
+ * choreography every script write uses, so the canvas shows the result.
+ */
+export async function executeRecalculate(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  options?: { full?: boolean },
+): Promise<{ cellsUpdated: number }> {
+  const cells = options?.full === true ? await lib.calculateNow() : await lib.calculateSheet();
+  await afterCellDataChange(cells);
+  return { cellsUpdated: cells.length };
+}
+
+// ============================================================================
+// Status bar (Wave 4): Application.StatusBar with the restore VBA never had
+// ============================================================================
+// The bar is last-write-wins chrome, so ownership is a single holder: the
+// script whose message is (or may be) on screen right now. The holder is a
+// DEBT exactly like manualCalcHolders — when that script ends in ANY way
+// (unmount, fault, debugger stop: all route through hostUnmountScript; and
+// workbook swap: hostResetAll) the host clears the bar, so a dead script can
+// never pin a stale "Working…" in front of the user.
+
+let statusBarHolder: string | null = null;
+
+/** Test seam: which script's message the host believes is on the bar. */
+export function scriptHoldingStatusBar(): string | null {
+  return statusBarHolder;
+}
+
+/**
+ * The api.setStatusBar executor body. Writes the SAME @api/grid service the
+ * QuickJS DeferredAction::SetStatusBar lands in (deferredActionHost.ts), so
+ * every script surface drives one status bar. `null` restores the default
+ * "Ready" — and an explicit null always clears, even a message another script
+ * put up, because "make the bar say nothing" is a statement about the bar,
+ * not about who wrote last.
+ */
+export async function executeSetStatusBar(scriptId: string, text: string | null): Promise<void> {
+  const grid = await import("../grid");
+  if (text === null) {
+    statusBarHolder = null;
+    grid.clearStatusBarText();
+    return;
+  }
+  statusBarHolder = scriptId;
+  grid.setStatusBarText(text);
+}
+
+/**
+ * Clear the bar for one departing script — but ONLY if its message is the one
+ * standing. Called from hostUnmountScript; a script whose message was already
+ * replaced owes nothing, and clearing then would erase the replacement.
+ */
+export function releaseScriptStatusBar(scriptId: string): void {
+  if (statusBarHolder !== scriptId) return;
+  statusBarHolder = null;
+  void import("../grid")
+    .then((grid) => grid.clearStatusBarText())
+    .catch(() => {
+      // Best-effort: the window may already be tearing down.
+    });
+}
+
+/** Workbook-swap sweep (hostResetAll) / test reset: clear bar + tracking. */
+export function resetStatusBarTracking(): void {
+  if (statusBarHolder === null) return;
+  statusBarHolder = null;
+  void import("../grid")
+    .then((grid) => grid.clearStatusBarText())
+    .catch(() => {
+      // Best-effort: the window may already be tearing down.
+    });
+}
+
+// ============================================================================
+// Run-macro (Wave 4): Application.Run over the @api/macroRunService seam
+// ============================================================================
+
+/**
+ * Macros currently running through api.runMacro, in call order: module id ->
+ * display name. Insertion order IS the chain — a nested runMacro awaits inside
+ * its caller's entry — which is what lets the cycle refusal name the path
+ * (A -> B -> A) instead of just saying "busy".
+ */
+const runningMacros = new Map<string, string>();
+
+/** Test seam / workbook-swap sweep: forget the running-macro chain. */
+export function resetMacroRunTracking(): void {
+  runningMacros.clear();
+}
+
+/**
+ * Resolve a script's macro reference — module id, display name, or the
+ * recorder's slug spelling — against the workbook's script list. Exported for
+ * tests. Every failure names what WOULD have matched, because "no macro named
+ * X" with no list is a puzzle, not an error message.
+ */
+export function resolveMacroRef(
+  scripts: ReadonlyArray<{ id: string; name: string }>,
+  ref: string,
+): { id: string; name: string } {
+  const trimmed = ref.trim();
+  // 1. Exact module id ("macro-monthly-report").
+  const byId = scripts.find((s) => s.id === trimmed);
+  if (byId) return { id: byId.id, name: byId.name };
+  // 2. Display name, case-insensitive. Ambiguity is refused WITH the ids —
+  //    running one of two same-named scripts at random is the silent-wrong-
+  //    macro failure this whole seam exists to prevent.
+  const lower = trimmed.toLowerCase();
+  const byName = scripts.filter((s) => s.name.toLowerCase() === lower);
+  if (byName.length === 1) return { id: byName[0].id, name: byName[0].name };
+  if (byName.length > 1) {
+    throw new BrokerError(
+      "ValidationError",
+      `"${trimmed}" names ${byName.length} scripts — run it by module id instead: ` +
+        byName.map((s) => `"${s.id}"`).join(", "),
+    );
+  }
+  // 3. The recorder's slug spelling ("monthly report" -> "macro-monthly-report",
+  //    same derivation as macroScriptId in the Macro Recorder's library).
+  const slug = lower.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (slug.length > 0) {
+    const bySlug = scripts.find((s) => s.id === `macro-${slug}`);
+    if (bySlug) return { id: bySlug.id, name: bySlug.name };
+  }
+  const names = scripts.map((s) => `"${s.name}"`).join(", ");
+  throw new BrokerError(
+    "ValidationError",
+    `no macro named "${trimmed}" in this workbook` +
+      (names.length > 0 ? `. Available: ${names}` : " (it holds no scripts at all)"),
+  );
+}
+
+/**
+ * The api.runMacro executor body. One resolution rule, one run path (the same
+ * MacroRunProvider a macro-linked button resolves), three explicit outcomes:
+ * resolve with the macro's name, or a named throw for notFound / failed. The
+ * chain guard runs BEFORE the provider so a self-call (or A -> B -> A) is
+ * refused by name instead of recursing until something worse happens.
+ */
+export async function executeRunMacro(ref: string): Promise<{ name: string }> {
+  const macroService = await import("../macroRunService");
+  if (!macroService.hasMacroRunProvider()) {
+    throw new BrokerError(
+      "HostError",
+      "the Macro Recorder extension is not loaded, so no macro can run — enable it and try again",
+    );
+  }
+  const scripts = await import("../workbookScripts");
+  const summaries = await scripts.listWorkbookScripts();
+  const resolved = resolveMacroRef(summaries, ref);
+  if (runningMacros.has(resolved.id)) {
+    const chain = [...runningMacros.values(), resolved.name].join(" -> ");
+    throw new BrokerError(
+      "HostError",
+      `macro "${resolved.name}" is already running (call chain: ${chain}) — ` +
+        "a macro cannot run itself, directly or through another macro",
+    );
+  }
+  runningMacros.set(resolved.id, resolved.name);
+  let outcome: import("../macroRunService").MacroRunOutcome;
+  try {
+    outcome = await macroService.requireMacroRunProvider().runMacroByRef(resolved.id);
+  } finally {
+    runningMacros.delete(resolved.id);
+  }
+  switch (outcome.status) {
+    case "ran":
+      return { name: outcome.name };
+    case "notFound":
+      // The list said it existed a moment ago; the store disagrees now (a
+      // deletion raced the run). Same first-class refusal the button gives.
+      throw new BrokerError(
+        "ValidationError",
+        `no macro with id "${outcome.macroId}" exists in this workbook (it may have just been deleted)`,
+      );
+    case "failed":
+      throw new BrokerError("HostError", `macro "${outcome.name}" failed: ${outcome.message}`);
+  }
+}
+
+// ============================================================================
+// View / window state (Wave 4): the View menu's settings, by name
+// ============================================================================
+
+/** The names api.getViewOption / setViewOption speak (vViewOptionSet enforces
+ *  the per-name value type before the executor runs). */
+export type ScriptViewOptionName = "gridlines" | "headings" | "zeros" | "formulas" | "viewMode";
+
+/**
+ * Read one View setting from Core's live grid state. The defaults mirror
+ * getInitialState (gridlines/headings/zeros on, formulas off, mode normal) so
+ * a headless read before the grid mounts answers what the user WOULD see.
+ */
+export async function executeGetViewOption(
+  name: ScriptViewOptionName,
+): Promise<boolean | "normal" | "pageLayout" | "pageBreakPreview"> {
+  const grid = await import("../grid");
+  const state = grid.getGridStateSnapshot();
+  switch (name) {
+    case "gridlines": return state?.displayGridlines ?? true;
+    case "headings": return state?.displayHeadings ?? true;
+    case "zeros": return state?.displayZeros ?? true;
+    case "formulas": return state?.showFormulas ?? false;
+    case "viewMode": return grid.getViewMode();
+  }
+}
+
+/**
+ * Write one View setting through the SAME app events the View menu emits
+ * (the Shell bridges each into Core state, and — for gridlines — persists the
+ * backend flag), so a script toggle and a menu click are one mechanism and
+ * the menu's checkmarks stay honest. Mirrors the QuickJS deferred-action host
+ * (deferredActionHost.ts), which is the other script surface for these.
+ */
+export async function executeSetViewOption(
+  name: ScriptViewOptionName,
+  value: boolean | string,
+): Promise<void> {
+  const grid = await import("../grid");
+  switch (name) {
+    case "gridlines":
+      emitAppEvent(AppEvents.DISPLAY_GRIDLINES_TOGGLED, { displayGridlines: value === true });
+      break;
+    case "headings":
+      emitAppEvent(AppEvents.DISPLAY_HEADINGS_TOGGLED, { displayHeadings: value === true });
+      break;
+    case "zeros":
+      emitAppEvent(AppEvents.DISPLAY_ZEROS_TOGGLED, { displayZeros: value === true });
+      break;
+    case "formulas":
+      emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: value === true });
+      break;
+    case "viewMode":
+      // changeViewMode emits VIEW_MODE_CHANGED + GRID_REFRESH itself.
+      grid.changeViewMode(value as "normal" | "pageLayout" | "pageBreakPreview");
+      return;
+  }
+  // The toggles repaint what the canvas already holds; nothing was re-stored.
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/** What api.getPanes answers: both halves of View ▸ Window in one read. */
+export interface ScriptPanes {
+  freezeRow: number | null;
+  freezeCol: number | null;
+  splitRow: number | null;
+  splitCol: number | null;
+}
+
+/**
+ * The api.getPanes executor body: the backend's freeze + split state (the same
+ * get_freeze_panes / get_split_window the Shell loads at startup), combined —
+ * the read half of the api.freezePanes / api.splitPanes writers.
+ */
+export async function executeGetPanes(): Promise<ScriptPanes> {
+  const tauriApi = await import("../../core/lib/tauri-api");
+  const [freeze, split] = await Promise.all([
+    tauriApi.getFreezePanes(),
+    tauriApi.getSplitWindow(),
+  ]);
+  return {
+    freezeRow: freeze.freezeRow ?? null,
+    freezeCol: freeze.freezeCol ?? null,
+    splitRow: split.splitRow ?? null,
+    splitCol: split.splitCol ?? null,
+  };
+}
+
+// ============================================================================
+// Sheet protection (Wave 3, item 8)
+// ============================================================================
+// Thin, honest wiring over the SAME protect_sheet / unprotect_sheet /
+// get_protection_status commands the Review ribbon calls — active sheet only,
+// because that is all the backend addresses.
+//
+// DEFERRED, SAID LOUDLY: `scriptsCanEdit` (VBA's UserInterfaceOnly — "the
+// protection guards users, the owning workbook's scripts keep write access")
+// is NOT implemented. Script writes are checked against sheet protection by
+// the same authoritative Rust gates a keystroke hits, and exempting scripts
+// requires plumbing an origin flag through every backend write path — a
+// Rust-side change out of scope for this TS wave. vProtectSheet refuses the
+// key with exactly this reason, so no script author can believe it worked.
+
+/** api.protectSheet options: the SheetProtectionOptions flags (all optional)
+ *  plus an optional password. */
+export interface ScriptProtectSheetOptions extends Partial<SheetProtectionOptions> {
+  password?: string;
+}
+
+/** What api.getProtectionStatus answers. */
+export interface ScriptProtectionStatus {
+  protected: boolean;
+  hasPassword: boolean;
+  options: SheetProtectionOptions;
+}
+
+/**
+ * The api.protectSheet executor body. Partial flags are merged over the SAME
+ * defaults the Protect Sheet dialog starts from (DEFAULT_PROTECTION_OPTIONS),
+ * so an empty call protects exactly like clicking OK in the dialog. Protecting
+ * an already-protected sheet is the backend's refusal, surfaced as a
+ * ValidationError naming it. Exported for tests.
+ */
+export async function executeProtectSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  options?: ScriptProtectSheetOptions,
+): Promise<{ protected: true; hasPassword: boolean }> {
+  const { password, ...flags } = options ?? {};
+  const merged: SheetProtectionOptions = { ...lib.DEFAULT_PROTECTION_OPTIONS };
+  for (const key of Object.keys(flags) as Array<keyof SheetProtectionOptions>) {
+    const value = flags[key];
+    if (value !== undefined) merged[key] = value;
+  }
+  const usePassword = typeof password === "string" && password.length > 0;
+  const result = await lib.protectSheet({
+    password: usePassword ? password : undefined,
+    options: merged,
+  });
+  if (!result.success) {
+    throw new BrokerError("ValidationError", result.error || "protectSheet was refused");
+  }
+  return { protected: true, hasPassword: usePassword };
+}
+
+/**
+ * The api.unprotectSheet executor body. THE CONTRACT: a wrong password answers
+ * false — never a throw — because "try the password I have" is a legitimate
+ * program shape and an exception would make it exception-driven control flow.
+ * An already-unprotected sheet answers true (it is in the asked-for state).
+ * Any other backend refusal is a real error and throws. Exported for tests.
+ */
+export async function executeUnprotectSheet(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  password?: string,
+): Promise<boolean> {
+  const result = await lib.unprotectSheet(password);
+  if (result.success) return true;
+  const error = result.error || "";
+  if (/incorrect password/i.test(error)) return false;
+  if (/not protected/i.test(error)) return true;
+  throw new BrokerError("HostError", error || "unprotectSheet failed");
 }
 
 // ============================================================================
@@ -5155,6 +9184,118 @@ async function announceObjectsChanged(): Promise<void> {
  *  own refresh, which re-reads the view and repaints the destination cells. */
 function announcePivotChanged(): void {
   emitAppEvent(AppEvents.MUTATION_REFRESH, { domains: ["pivot"] });
+}
+
+// ============================================================================
+// Conditional formatting CRUD (Wave 3 item 3)
+// ============================================================================
+
+/** The spec api.addConditionalFormat receives (vCFSpec has already proved it). */
+interface ScriptCFSpec {
+  rule: ConditionalFormatRule;
+  format: ConditionalFormat;
+  ranges: ConditionalFormatRange[];
+  stopIfTrue?: boolean;
+}
+
+/** The patch api.updateConditionalFormat receives (vCFUpdate has proved it). */
+interface ScriptCFPatch {
+  rule?: ConditionalFormatRule;
+  format?: ConditionalFormat;
+  ranges?: ConditionalFormatRange[];
+  stopIfTrue?: boolean;
+  enabled?: boolean;
+}
+
+/** Whole-sheet rectangle for clearConditionalFormats with no range: the
+ *  backend keeps any rule with a range OUTSIDE the cleared rect, so "clear
+ *  all" is spelled as the largest rectangle a script can address. */
+const CF_WHOLE_SHEET = { startRow: 0, startCol: 0, endRow: 10_000_000, endCol: 10_000_000 };
+
+/** CF DEFINITIONS changed outside the CF extension's own dialogs. The
+ *  extension re-reads its rule cache and repaints on this event (its dialogs
+ *  call invalidateAndRefresh() directly and never emit it). */
+function announceConditionalFormatsChanged(): void {
+  emitAppEvent(AppEvents.CONDITIONAL_FORMATS_CHANGED, {});
+}
+
+/**
+ * Execute one conditional-formatting method over the finished backend CRUD
+ * (conditional_formatting.rs), via the same backend.ts wrappers the CF
+ * extension's dialogs call.
+ *
+ * SHEET SLOT: `listConditionalFormats` / `clearConditionalFormats` carry an
+ * optional Wave-1 sheet ref (index or name), resolved host-side and passed to
+ * the sheet-aware backend commands. Rule DEFINITIONS live per sheet, so
+ * add/update/delete address rules on the sheet they were created on — the
+ * add path is active-sheet scoped (its ranges are active-sheet rectangles).
+ *
+ * Exported for tests: driven with a mocked ../backend (a live worker realm is
+ * not available under jsdom).
+ */
+export async function executeConditionalFormat(method: string, args: unknown[]): Promise<unknown> {
+  const backend = await import("../backend");
+  const lib = await getLib();
+  switch (method) {
+    case "api.listConditionalFormats": {
+      const [sheet] = args as [(number | string | null)?];
+      const target = await resolveOptionalSheetRef(lib, sheet, "listConditionalFormats");
+      return backend.getAllConditionalFormats(target);
+    }
+    case "api.addConditionalFormat": {
+      const [spec] = args as [ScriptCFSpec];
+      const result = await backend.addConditionalFormat({
+        rule: spec.rule,
+        format: spec.format,
+        ranges: spec.ranges,
+        stopIfTrue: spec.stopIfTrue ?? false,
+      });
+      if (!result.success || !result.rule) {
+        throw new BrokerError("ValidationError", result.error || "addConditionalFormat failed");
+      }
+      announceConditionalFormatsChanged();
+      return result.rule;
+    }
+    case "api.updateConditionalFormat": {
+      const [ruleId, patch] = args as [number, ScriptCFPatch];
+      const result = await backend.updateConditionalFormat({ ruleId, ...patch });
+      if (!result.success || !result.rule) {
+        throw new BrokerError(
+          "ValidationError",
+          result.error || `No conditional-format rule with id ${ruleId}`,
+        );
+      }
+      announceConditionalFormatsChanged();
+      return result.rule;
+    }
+    case "api.deleteConditionalFormat": {
+      const [ruleId] = args as [number];
+      const result = await backend.deleteConditionalFormat(ruleId);
+      if (!result.success) {
+        throw new BrokerError(
+          "ValidationError",
+          result.error || `No conditional-format rule with id ${ruleId}`,
+        );
+      }
+      announceConditionalFormatsChanged();
+      return undefined;
+    }
+    case "api.clearConditionalFormats": {
+      const [range, sheet] = args as [
+        { startRow: number; startCol: number; endRow: number; endCol: number } | null | undefined,
+        (number | string | null)?,
+      ];
+      const target = await resolveOptionalSheetRef(lib, sheet, "clearConditionalFormats");
+      const box = range ?? CF_WHOLE_SHEET;
+      const count = await backend.clearConditionalFormatsInRange(
+        box.startRow, box.startCol, box.endRow, box.endCol, target,
+      );
+      if (count > 0) announceConditionalFormatsChanged();
+      return { count };
+    }
+    default:
+      throw new BrokerError("UnknownMethod", `No conditional-format implementation for ${method}`);
+  }
 }
 
 /**
@@ -5423,6 +9564,116 @@ async function executePivotLayoutAspect(pivotId: string, aspect: string, args: u
   }
 }
 
+/**
+ * The READ twin of the pivot DATA aspects (getState aspect
+ * "pivot.getFieldInfo"): the field's current filters, whether it is filtered
+ * at all, and every item with its visibility — what a macro needs for
+ * read-modify-write ("keep what is visible, add one more"). Sort order has no
+ * backend read, so it is honestly absent. Exported for tests.
+ */
+export async function executePivotFieldInfo(pivotId: string, field: unknown): Promise<unknown> {
+  if (typeof field !== "string" || field.trim().length === 0) {
+    throw new BrokerError("ValidationError", "field must be a non-empty field name");
+  }
+  const api = await requirePivotApi();
+  const hierarchies = await api.getHierarchies(pivotId);
+  const source = resolveSourceField(hierarchies.hierarchies as SourceFieldLike[], field);
+  return api.getFieldInfo(pivotId, source.index);
+}
+
+/**
+ * Execute one pivot DATA aspect (Wave 3 item 4): report filters, item
+ * visibility, sort, value number format. Reached from BOTH the own-object door
+ * and api.objectSetState, exactly like executePivotLayoutAspect above — the
+ * reach difference lives in the allowlist tier, never here.
+ *
+ * FIELD ADDRESSING, two deliberate spellings:
+ *   - filter / visibility / sort aspects take a SOURCE column name; the
+ *     backend requests carry the source field INDEX (their field_index is
+ *     matched against FieldConfig.source_index in Rust).
+ *   - setNumberFormat takes a VALUE field (a data hierarchy — by its display
+ *     alias "Sum of Sales" or its source name); the backend request carries
+ *     the POSITION in the value-field list, exactly like setAggregation.
+ *
+ * Exported for tests: driven with a registered fake PivotApi (a live worker
+ * realm is not available under jsdom).
+ */
+export async function executePivotDataAspect(pivotId: string, aspect: string, args: unknown[]): Promise<void> {
+  const api = await requirePivotApi();
+  const hierarchies = await api.getHierarchies(pivotId);
+  const sourceFields = hierarchies.hierarchies as SourceFieldLike[];
+
+  switch (aspect) {
+    case "pivot.setFilter": {
+      // values = the item names to KEEP (a manual filter); null = clear the
+      // field's filters entirely, the honest spelling of "no page filter".
+      const [field, values] = args as [string, string[] | null];
+      const source = resolveSourceField(sourceFields, field);
+      if (values === null) {
+        await api.clearFilter({ pivotId, fieldIndex: source.index });
+      } else {
+        await api.applyFilter({
+          pivotId,
+          fieldIndex: source.index,
+          filters: { manualFilter: { selectedItems: values } },
+        });
+      }
+      return;
+    }
+    case "pivot.clearFilter": {
+      // No filterType argument = the backend clears EVERY filter kind on the
+      // field (manual, label, value), which is what "clear" should mean.
+      const [field] = args as [string];
+      const source = resolveSourceField(sourceFields, field);
+      await api.clearFilter({ pivotId, fieldIndex: source.index });
+      return;
+    }
+    case "pivot.setItemVisibility": {
+      const [field, item, visible] = args as [string, string, boolean];
+      const source = resolveSourceField(sourceFields, field);
+      await api.setItemVisibility({
+        pivotId,
+        fieldIndex: source.index,
+        itemName: item,
+        visible,
+      });
+      return;
+    }
+    case "pivot.sortField": {
+      const [field, direction] = args as [string, "asc" | "desc"];
+      const source = resolveSourceField(sourceFields, field);
+      await api.sortField({
+        pivotId,
+        fieldIndex: source.index,
+        sortBy: direction === "asc" ? "ascending" : "descending",
+      });
+      return;
+    }
+    case "pivot.setNumberFormat": {
+      const [valueField, numberFormat] = args as [string, string];
+      const placed = findPlacedField(hierarchies.dataHierarchies, sourceFields, valueField);
+      if (!placed) {
+        const placedNames = hierarchies.dataHierarchies.map((d) => d.name).join(", ") || "(none)";
+        throw new BrokerError(
+          "ValidationError",
+          `Field "${valueField}" is not a value field of this pivot. Value fields: ${placedNames}`,
+        );
+      }
+      // valueFieldIndex is the POSITION in the pivot's value-field list, which
+      // is exactly what getHierarchies reports as `position` (same contract as
+      // pivot.setAggregation above).
+      await api.setNumberFormat({
+        pivotId,
+        valueFieldIndex: placed.position,
+        numberFormat,
+      });
+      return;
+    }
+    default:
+      throw new BrokerError("ValidationError", `Unknown pivot data aspect: ${aspect}`);
+  }
+}
+
 /** DSL area -> PivotAxis, with the accepted list on a miss. */
 function requireAxis(area: string): PivotAxis {
   const axis = areaToAxis(area);
@@ -5462,6 +9713,50 @@ async function readCellOnSheet(
 }
 
 /**
+ * The off-sheet single-cell write, with the ACTIVE-SHEET SKIP handled.
+ *
+ * `update_cell_on_sheets` refuses to write the sheet that is active (correct
+ * for sheet grouping, where `update_cell` already wrote it) and reports which
+ * sheets it did write. A script's write has no such prior write, so a skip
+ * would silently DROP the value — and the skip is decided at COMMAND time,
+ * after the host already resolved the target from a `get_sheets` snapshot. A
+ * macro that writes sheet A while the active sheet becomes A (the user
+ * switching tabs, or the macro's own `setActiveSheet`) therefore lost the write
+ * with no error anywhere. Caught live by vba-idioms-wave1.spec.ts.
+ *
+ * So: if the target comes back unwritten, it IS the active sheet now — write it
+ * through the active-sheet path, which is the correct path for it.
+ *
+ * THE WRITEBACK GATE IS OWNED HERE, not by the callers: this function is the
+ * single door every off-sheet single-cell script write goes through, so a new
+ * caller cannot forget it (writebackGateway.test.ts pins that).
+ */
+async function writeOffSheetCellTyped(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  scriptId: string,
+  sheetIndex: number,
+  row: number,
+  col: number,
+  value: string,
+  invariant: boolean,
+): Promise<void> {
+  await captureWritebackWrite(scriptId, { sheetIndex, row, col, value });
+  const written = await lib.updateCellOnSheets(
+    [sheetIndex], row, col, value, invariant || undefined,
+  );
+  if (Array.isArray(written) && !written.includes(sheetIndex)) {
+    // It became the active sheet between the resolve and the call.
+    await afterCellDataChange(
+      await writeActiveCellTyped(lib, scriptId, sheetIndex, row, col, value, invariant),
+    );
+    return;
+  }
+  // Another sheet: no visible cell moved, but an active-sheet formula may
+  // depend on one, and the style caches key on the whole workbook.
+  scheduleGridDataRefresh();
+}
+
+/**
  * Write a single cell on a specific sheet, recalc + undoable. Uses updateCell
  * on the active sheet, otherwise updateCellOnSheets for a non-active sheet.
  * Passes the .calp writeback draft gate first, like every other script write.
@@ -5479,10 +9774,16 @@ async function writeCellOnSheet(
   if (sheetIndex === active) {
     // Re-fetch the canvas — see the note on api.setCellValue.
     await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
-  } else {
-    await lib.updateCellOnSheets([sheetIndex], row, col, value);
-    scheduleGridDataRefresh();
+    return;
   }
+  const written = await lib.updateCellOnSheets([sheetIndex], row, col, value);
+  if (Array.isArray(written) && !written.includes(sheetIndex)) {
+    // It became the active sheet between the read above and the call — write
+    // it, do not drop it (see writeOffSheetCellTyped).
+    await afterCellDataChange((await lib.updateCell(row, col, value)).cells);
+    return;
+  }
+  scheduleGridDataRefresh();
 }
 
 function parseCellRef(ref: string): { row: number; col: number } | null {
@@ -5561,6 +9862,88 @@ export async function callRangeBeforeCommit(
 }
 
 // ============================================================================
+// Sheet onBeforeDoubleClick / onBeforeRightClick (Wave 4): cancellable click
+// verdicts — the onBeforeCommit machinery pointed at two more choke points.
+// ============================================================================
+//
+// Both ride EXISTING @api-visible seams that Core already consults before it
+// acts: the double-click verdict is a cellDoubleClickInterceptors entry (asked
+// before edit mode is entered — VBA's Workbook_SheetBeforeDoubleClick), the
+// right-click verdict a cellContextMenuInterceptors entry (asked before the
+// grid's context menu request is emitted — ...BeforeRightClick). Same relay
+// (registerReplyingHook worker-side, relayMethodCall here), same 1.5s
+// BEFORE_COMMIT_DEADLINE_MS, same DEFAULT-ALLOW on timeout/throw/pause: a slow
+// script must never make the grid feel broken. ACTIVE SHEET by construction —
+// interceptors only ever fire for the grid the user is looking at.
+
+/** The relayed method name for each cancellable click hook. */
+const CLICK_RELAY: Record<"onBeforeDoubleClick" | "onBeforeRightClick", string> = {
+  onBeforeDoubleClick: "__sheet_onBeforeDoubleClick",
+  onBeforeRightClick: "__sheet_onBeforeRightClick",
+};
+
+/**
+ * Ask ONE mounted script for a click verdict. Answers TRUE when the script
+ * cancelled (suppress edit mode / the context menu), FALSE to proceed —
+ * timeouts, throws, unmounted and debugger-paused scripts all answer false.
+ * Exported for tests (same reason raceLifecycleVerdict is).
+ */
+export async function callSheetBeforeClick(
+  scriptId: string,
+  hook: "onBeforeDoubleClick" | "onBeforeRightClick",
+  payload: { row: number; col: number; address: string },
+): Promise<boolean> {
+  const mw = mounted.get(scriptId);
+  if (!mw) return false;
+  if (isScriptDebugPaused(scriptId)) {
+    // A breakpointed script cannot answer inside 1.5s; waiting out the
+    // deadline would only add latency to every click before allowing anyway.
+    return false;
+  }
+  try {
+    const result = await Promise.race([
+      relayMethodCall(mw, CLICK_RELAY[hook], [payload]),
+      new Promise<typeof BEFORE_COMMIT_TIMEOUT>((resolve) =>
+        setTimeout(() => resolve(BEFORE_COMMIT_TIMEOUT), BEFORE_COMMIT_DEADLINE_MS),
+      ),
+    ]);
+    if (result === BEFORE_COMMIT_TIMEOUT) {
+      console.warn(
+        `[ScriptHost] ${hook} of "${mw.definition.name}" exceeded ` +
+          `${BEFORE_COMMIT_DEADLINE_MS}ms — allowing the click`,
+      );
+      return false;
+    }
+    // The same cancel vocabulary every Before* hook accepts.
+    return normalizeLifecycleVerdict(result) !== null;
+  } catch {
+    return false; // handler threw — allow (error already surfaced via console)
+  }
+}
+
+/**
+ * Wire a cancellable click hook: register a Core interceptor that pulls this
+ * script's verdict when the grid is double- or right-clicked. Returned cleanup
+ * is stored as the hook's forwarder, so unmount removes the interceptor with
+ * it — an unmounted script can never eat a click.
+ */
+function wireClickVerdictForwarder(
+  mw: MountedWorker,
+  hook: "onBeforeDoubleClick" | "onBeforeRightClick",
+): CleanupFn {
+  const scriptId = mw.definition.id;
+  const interceptor = (row: number, col: number): Promise<boolean> =>
+    callSheetBeforeClick(scriptId, hook, {
+      row,
+      col,
+      address: `${columnToLetter(col)}${row + 1}`,
+    });
+  return hook === "onBeforeDoubleClick"
+    ? registerCellDoubleClickInterceptor(interceptor)
+    : registerCellContextMenuInterceptor(interceptor);
+}
+
+// ============================================================================
 // Workbook onBeforeSave / onBeforeClose (B5): cancellable lifecycle verdicts
 // ============================================================================
 
@@ -5576,10 +9959,20 @@ const BEFORE_LIFECYCLE_DEADLINE_MS = 3000;
 
 const BEFORE_LIFECYCLE_TIMEOUT = Symbol("beforeLifecycleTimeout");
 
+/** The hook name for a lifecycle action, for log lines ("onBeforeSave"). */
+function lifecycleHookName(action: LifecycleAction): string {
+  return action === "save"
+    ? "onBeforeSave"
+    : action === "print"
+      ? "onBeforePrint"
+      : "onBeforeClose";
+}
+
 /** The relayed method name for each cancellable workbook hook. */
 const LIFECYCLE_RELAY: Record<LifecycleAction, string> = {
   save: "__workbook_onBeforeSave",
   close: "__workbook_onBeforeClose",
+  print: "__workbook_onBeforePrint",
 };
 
 /** Verdict a workbook script's onBeforeSave / onBeforeClose may return. */
@@ -5638,7 +10031,7 @@ export async function raceLifecycleVerdict(
     ]);
     if (result === BEFORE_LIFECYCLE_TIMEOUT) {
       console.warn(
-        `[ScriptHost] onBefore${action === "save" ? "Save" : "Close"} of "${scriptName}" ` +
+        `[ScriptHost] ${lifecycleHookName(action)} of "${scriptName}" ` +
           `exceeded ${deadlineMs}ms — allowing the ${action}`,
       );
       return null;
@@ -5669,7 +10062,7 @@ export async function callWorkbookBeforeLifecycle(
     // and let the save/close through immediately.
     console.warn(
       `[ScriptHost] "${mw.definition.name}" is paused in the debugger — its ` +
-        `onBefore${action === "save" ? "Save" : "Close"} verdict is skipped (allowing the ${action}).`,
+        `${lifecycleHookName(action)} verdict is skipped (allowing the ${action}).`,
     );
     return null;
   }
@@ -5771,9 +10164,44 @@ function resumeMethodCallDeadlines(mw: MountedWorker): void {
 // Event forwarding — only hooks the worker declared, filters host-side
 // ============================================================================
 
+/**
+ * Cap on the merged `changes` array a coalesced onDataChange delivery may carry
+ * — the same bound range.onChange puts on its own entries. Beyond it the
+ * payload says `truncated: true` instead of lying by omission: the script is
+ * told its picture is incomplete and can re-read via getRangeValues.
+ */
+const MAX_COALESCED_CHANGE_ENTRIES = 1000;
+
+/**
+ * Merge two onDataChange payloads that landed inside ONE animation frame.
+ *
+ * The coalescing map used to keep only the LATEST payload per hook — right for
+ * "latest state wins" hooks (onSelectionChange, onThemeChange), but
+ * sheet.onDataChange carries a BATCH, so two CELL_VALUES_CHANGED flushes in one
+ * rAF (a paste next to a fill, a recalc landing beside a user edit) silently
+ * dropped the first batch and an audit script missed edits under load. Batches
+ * CONCATENATE, in arrival order; the newer payload's top-level fields (the
+ * active sheet) win. Payloads without a `changes` array — chart.onDataChange
+ * posts `undefined` — keep the latest-wins behavior.
+ */
+function mergeCoalescedChangePayloads(prev: unknown, next: unknown): unknown {
+  const p = prev as { changes?: unknown[]; truncated?: boolean } | null | undefined;
+  const n = next as { changes?: unknown[]; truncated?: boolean } | null | undefined;
+  if (!p || !n || !Array.isArray(p.changes) || !Array.isArray(n.changes)) return next;
+  const merged = p.changes.concat(n.changes);
+  const truncated =
+    p.truncated === true || n.truncated === true || merged.length > MAX_COALESCED_CHANGE_ENTRIES;
+  if (merged.length > MAX_COALESCED_CHANGE_ENTRIES) merged.length = MAX_COALESCED_CHANGE_ENTRIES;
+  return { ...(n as object), changes: merged, ...(truncated ? { truncated: true } : {}) };
+}
+
 function forwardEvent(mw: MountedWorker, hook: string, payload: unknown): void {
   if (COALESCE_HOOKS.has(hook)) {
-    mw.coalesced.set(hook, payload);
+    const queued =
+      hook === "onDataChange" && mw.coalesced.has(hook)
+        ? mergeCoalescedChangePayloads(mw.coalesced.get(hook), payload)
+        : payload;
+    mw.coalesced.set(hook, queued);
     if (!mw.coalesceScheduled) {
       mw.coalesceScheduled = true;
       requestAnimationFrame(() => {
@@ -5899,6 +10327,33 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
         pushWorkbookMirror(mw);
         forwardEvent(mw, hook, thinAppEventForScripts(AppEvents.AFTER_OPEN, d));
       }));
+      // REPLAY AT MOUNT — once per open-mount. Scripts are mounted FROM the
+      // AFTER_OPEN handler, so the live subscription above always comes into
+      // being AFTER the broadcast it exists to observe: without this, the
+      // advertised onOpen hook could never see its own workbook's open. The
+      // payload is the SAME thinned `{ fileName }` shape the live path
+      // delivers, rebuilt from the current file (the event detail is long
+      // gone), via the exact source api.workbookFileName reads. Guarded by the
+      // consumed mountCause flag — a remount, Save & Apply or crash respawn
+      // never replays (see HostMountDefinition.mountCause).
+      if (mw.openReplayPending) {
+        mw.openReplayPending = false;
+        void (async () => {
+          let fileName: string | null = null;
+          try {
+            const fs = await import("../filesystem");
+            const path = await fs.getCurrentFilePath();
+            fileName = path ? fs.fileNameOf(path) : null;
+          } catch {
+            // No backend (or no file yet) — the open still happened; deliver
+            // the same `{ fileName: null }` an untitled workbook's open does.
+          }
+          // The mount may have been torn down while the name was fetched; a
+          // dead realm gets nothing.
+          if (mounted.get(mw.definition.id) !== mw) return;
+          forwardEvent(mw, hook, { fileName });
+        })();
+      }
       break;
     // onBeforeSave / onBeforeClose are REPLYING hooks (B5): no event forwarder —
     // the SAVE and CLOSE paths pull a verdict through the lifecycle-guard
@@ -5914,8 +10369,38 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "workbook.onBeforeClose":
       addForwarder(mw, hook, wireLifecycleGuardForwarder(mw, "close"));
       break;
+    // The third cancellable lifecycle hook (Wave 4): VBA's Workbook_BeforePrint.
+    // Same replying-guard construction as save/close — the Print extension's
+    // handlePrint/Export-PDF choke points (and the script PDF seam,
+    // @api/printService) all pull the verdict through checkLifecycleGuards.
+    case "workbook.onBeforePrint":
+      addForwarder(mw, hook, wireLifecycleGuardForwarder(mw, "print"));
+      break;
     case "workbook.onSheetChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.SHEET_CHANGED, (d) => {
+        pushWorkbookMirror(mw);
+        forwardEvent(mw, hook, d);
+      }));
+      break;
+    // Sheet COLLECTION hooks (Wave 4): pure forwarders over the SHEET_ADDED /
+    // SHEET_DELETED / SHEET_RENAMED events the tauri-api sheet wrappers emit
+    // (their payload shapes are public — see events.ts). The workbook mirror
+    // is pushed FIRST, the onSheetChange pattern, so a handler reading
+    // properties.sheetCount or getSheetNames() sees the post-change truth.
+    case "workbook.onSheetAdd":
+      addForwarder(mw, hook, onAppEvent(AppEvents.SHEET_ADDED, (d) => {
+        pushWorkbookMirror(mw);
+        forwardEvent(mw, hook, d);
+      }));
+      break;
+    case "workbook.onSheetDelete":
+      addForwarder(mw, hook, onAppEvent(AppEvents.SHEET_DELETED, (d) => {
+        pushWorkbookMirror(mw);
+        forwardEvent(mw, hook, d);
+      }));
+      break;
+    case "workbook.onSheetRename":
+      addForwarder(mw, hook, onAppEvent(AppEvents.SHEET_RENAMED, (d) => {
         pushWorkbookMirror(mw);
         forwardEvent(mw, hook, d);
       }));
@@ -5927,6 +10412,15 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     // ---- sheet ----
     case "sheet.onActivate":
       wireAppEventForwarder(mw, hook, AppEvents.SHEET_CHANGED);
+      break;
+    // Cancellable CLICK hooks (Wave 4): replying hooks, not event forwarders —
+    // the grid pulls a verdict through the Core interceptor registries before
+    // it acts (edit-mode entry / the context menu). See wireClickVerdictForwarder.
+    case "sheet.onBeforeDoubleClick":
+      addForwarder(mw, hook, wireClickVerdictForwarder(mw, "onBeforeDoubleClick"));
+      break;
+    case "sheet.onBeforeRightClick":
+      addForwarder(mw, hook, wireClickVerdictForwarder(mw, "onBeforeRightClick"));
       break;
     case "sheet.onDeactivate": {
       let lastSheet = { sheetIndex: -1, sheetName: "" };
@@ -5941,37 +10435,80 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     }
     case "sheet.onSelectionChange":
     case "cell.onSelect": {
-      const unsub = ExtensionRegistry.onSelectionChange((sel) => {
-        if (!sel) return;
-        const row = sel.row ?? sel.startRow;
-        const col = sel.col ?? sel.startCol;
+      // Driven by the SELECTION_CHANGED app event — the emitter the Shell
+      // actually feeds (registries/ExtensionRegistry.notifySelectionChange).
+      // This hook previously subscribed to @api/extensionRegistry's callback
+      // registry, a singleton NOTHING notifies at runtime (the Shell drives
+      // its own registry through the service seam), so the hook never fired
+      // outside tests. The app event is also where the Wave 2 payload lives:
+      // sheetIndex + every area of a multi-area selection.
+      addForwarder(mw, hook, onAppEvent(AppEvents.SELECTION_CHANGED, (detail) => {
+        const d = detail as {
+          startRow?: number;
+          startCol?: number;
+          endRow?: number;
+          endCol?: number;
+          sheetIndex?: number;
+          areas?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
+        } | null;
+        if (!d) return;
+        // Anchor corner (raw), matching the hook's historical row/col meaning.
+        const row = d.startRow ?? 0;
+        const col = d.startCol ?? 0;
+        const sheetIndex = d.sheetIndex ?? activeSheetIndexForEvents;
         const payload = hook === "onSelect"
-          ? { row, col, sheetIndex: sel.sheetIndex ?? 0 }
+          ? { row, col, sheetIndex }
           : {
-              sheetIndex: sel.sheetIndex ?? 0,
+              sheetIndex,
               row,
               col,
-              endRow: sel.endRow ?? row,
-              endCol: sel.endCol ?? col,
+              endRow: d.endRow ?? row,
+              endCol: d.endCol ?? col,
+              // EVERY area (Wave 2): primary + Ctrl+Click extras, normalized —
+              // additionalRanges used to be dropped on this path.
+              areas: d.areas ?? [
+                normalizeSelectionArea({
+                  startRow: row,
+                  startCol: col,
+                  endRow: d.endRow ?? row,
+                  endCol: d.endCol ?? col,
+                }),
+              ],
             };
         forwardEvent(mw, hook, payload);
-      });
-      addForwarder(mw, hook, unsub);
+      }));
       break;
     }
     case "sheet.onDataChange":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
-        const d = detail as { changes?: Array<{ sheetIndex?: number } & Record<string, unknown>> };
+        const d = detail as {
+          changes?: Array<{ row: number; col: number; sheetIndex?: number } & Record<string, unknown>>;
+        };
         // Per-change sheetIndex is CARRIED, not flattened. The top-level
         // `sheetIndex` used to be the only sheet in the payload, so a cross-sheet
         // change (a fill that spilled, a table refresh on another sheet) arrived
         // stamped with the ACTIVE sheet's index — a script acting on
         // `{ sheetIndex, change.row, change.col }` then read or wrote the wrong
         // sheet's cell and had no way to tell.
-        const changes = clampChangesToTier(mw, d.changes ?? []).map((c) => ({
-          ...c,
-          sheetIndex: c.sheetIndex ?? activeSheetIndexForEvents,
-        }));
+        //
+        // OWN WRITES ARE DROPPED PER CHANGE, exactly as range.onChange drops
+        // them: the typings promise a script's own writes never re-fire its
+        // handlers, and without this filter the canonical VBA timestamp macro —
+        // an onDataChange handler writing a neighbouring cell — re-entered
+        // itself forever. A user's edit in the same flush still crosses.
+        const changes = clampChangesToTier(mw, d.changes ?? [])
+          .filter((c) => !isOwnScriptWrite(
+            definition.id, c.sheetIndex ?? activeSheetIndexForEvents, c.row, c.col,
+          ))
+          .map((c) => ({
+            ...c,
+            sheetIndex: c.sheetIndex ?? activeSheetIndexForEvents,
+            // The A1 spelling of the same coordinates, on that change's sheet.
+            address: `${columnToLetter(c.col)}${c.row + 1}`,
+          }));
+        // A flush that was ONLY this script's own echo (or entirely outside a
+        // restricted script's reach) says nothing — do not fire.
+        if (changes.length === 0) return;
         forwardEvent(mw, hook, { sheetIndex: activeSheetIndexForEvents, changes });
       }));
       break;
@@ -5980,8 +10517,13 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "cell.onEdit":
       addForwarder(mw, hook, onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
         const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number; oldValue?: string; newValue: string; formula?: string | null }> };
-        forwardEvent(mw, hook, {
-          changes: clampChangesToTier(mw, d.changes ?? []).map((change) => ({
+        // Own-write echo guard, same as sheet.onDataChange above: an onEdit
+        // handler that writes a cell must not be re-fired by that very write.
+        const changes = clampChangesToTier(mw, d.changes ?? [])
+          .filter((change) => !isOwnScriptWrite(
+            definition.id, change.sheetIndex ?? activeSheetIndexForEvents, change.row, change.col,
+          ))
+          .map((change) => ({
             row: change.row,
             col: change.col,
             // Per-change sheet when the emitter tagged a cross-sheet edit; else the
@@ -5990,8 +10532,10 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
             oldValue: change.oldValue,
             newValue: change.newValue,
             formula: change.formula,
-          })),
-        });
+          }));
+        // Echo-only (or fully clamped) flush: nothing happened the script may act on.
+        if (changes.length === 0) return;
+        forwardEvent(mw, hook, { changes });
       }));
       break;
     case "cell.onEditStart":

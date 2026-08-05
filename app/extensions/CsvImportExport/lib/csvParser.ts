@@ -1,6 +1,10 @@
 //! FILENAME: app/extensions/CsvImportExport/lib/csvParser.ts
 // PURPOSE: Pure CSV parser with support for delimiters, text qualifiers, and encoding.
 // CONTEXT: Used by the CSV Import dialog to parse raw text into a 2D array.
+//          The core parsing loop is the shared @api/csvText module (facade
+//          rule), which the script worker's api.text.parseCsv also uses.
+
+import { parseCsvText } from "@api/csvText";
 
 // ============================================================================
 // Types
@@ -83,78 +87,14 @@ export function detectDelimiter(text: string): string {
 /**
  * Parse a CSV text string into a 2D array of strings.
  * Handles quoted fields, escaped quotes (doubled), and mixed line endings.
+ *
+ * The parsing itself lives in @api/csvText — ONE parser shared with the
+ * script surfaces (api.text.parseCsv and the Rust QuickJS Calcula.text twin),
+ * so the import dialog and a script can never disagree about what a CSV means.
  */
 export function parseCsv(text: string, options: CsvParseOptions): string[][] {
   const { delimiter, textQualifier, skipRows } = options;
-  const rows: string[][] = [];
-  const hasQualifier = textQualifier.length > 0;
-
-  let i = 0;
-  const len = text.length;
-
-  while (i < len) {
-    const row: string[] = [];
-    let field = "";
-    let inQuoted = false;
-
-    while (i < len) {
-      const ch = text[i];
-
-      // Handle text qualifier
-      if (hasQualifier && ch === textQualifier) {
-        if (!inQuoted) {
-          // Start of quoted field (only valid at field start or after delimiter)
-          if (field.length === 0) {
-            inQuoted = true;
-            i++;
-            continue;
-          }
-        } else {
-          // Inside quoted field - check for escaped qualifier (doubled)
-          if (i + 1 < len && text[i + 1] === textQualifier) {
-            field += textQualifier;
-            i += 2;
-            continue;
-          }
-          // End of quoted region
-          inQuoted = false;
-          i++;
-          continue;
-        }
-      }
-
-      // Delimiter outside quotes = next field
-      if (!inQuoted && ch === delimiter) {
-        row.push(field);
-        field = "";
-        i++;
-        continue;
-      }
-
-      // Line ending outside quotes = end of row
-      if (!inQuoted && (ch === "\r" || ch === "\n")) {
-        // Handle \r\n
-        if (ch === "\r" && i + 1 < len && text[i + 1] === "\n") {
-          i++;
-        }
-        i++;
-        break;
-      }
-
-      field += ch;
-      i++;
-    }
-
-    // Push the last field of the row
-    row.push(field);
-
-    // Don't push completely empty trailing row
-    if (i >= len && row.length === 1 && row[0] === "") {
-      break;
-    }
-
-    rows.push(row);
-  }
+  const rows = parseCsvText(text, delimiter, textQualifier.length > 0 ? textQualifier : null);
 
   // Apply skipRows
   if (skipRows > 0) {

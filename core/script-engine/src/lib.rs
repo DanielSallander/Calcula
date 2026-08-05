@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn one_off_reads_host_state() {
         let mut host = HostState::default();
-        host.zoom = 0.8;
+        host.zoom = 80.0;
         host.named_style_names = vec!["Total".to_string()];
         host.view_mode = "pageBreakPreview".to_string();
         let options = ScriptRunOptions {
@@ -252,7 +252,7 @@ mod tests {
         match result {
             ScriptResult::Success { output, .. } => assert_eq!(
                 output.last().map(|i| i.to_text()).as_deref(),
-                Some(r#"0.8|pageBreakPreview|["Total"]"#)
+                Some(r#"80|pageBreakPreview|["Total"]"#)
             ),
             other => panic!("expected success, got {:?}", other),
         }
@@ -370,16 +370,17 @@ mod tests {
         }
     }
 
-    /// An out-of-range sheet index is ignored entirely — no retarget, no queued
-    /// activation the host would have to reject.
+    /// An out-of-range sheet switch THROWS — it used to be silently ignored,
+    /// which left every following write landing on the WRONG sheet. Nothing is
+    /// queued for the host to reject.
     #[test]
-    fn an_out_of_range_sheet_switch_queues_nothing() {
+    fn an_out_of_range_sheet_switch_throws_and_queues_nothing() {
         let (result, _) = run("Calcula.setActiveSheet(7);", ScriptRunOptions::default());
         match result {
-            ScriptResult::Success { deferred_actions, .. } => {
-                assert!(deferred_actions.is_empty(), "{:?}", deferred_actions)
+            ScriptResult::Error { message, .. } => {
+                assert!(message.contains("out of range"), "{}", message)
             }
-            other => panic!("expected success, got {:?}", other),
+            other => panic!("expected an error, got {:?}", other),
         }
     }
 
@@ -391,7 +392,14 @@ mod tests {
         use crate::types::{BookmarkMutation, DeferredAction};
 
         let actions = vec![
-            DeferredAction::Goto { row: 1, col: 2, sheet_index: 3, select: true },
+            DeferredAction::Goto {
+                row: 1,
+                col: 2,
+                end_row: Some(3),
+                end_col: Some(4),
+                sheet_index: 3,
+                select: true,
+            },
             DeferredAction::ActivateSheet { sheet_index: 4 },
             DeferredAction::FillDown { start_row: 1, start_col: 2, end_row: 3, end_col: 4 },
             DeferredAction::FillRight { start_row: 1, start_col: 2, end_row: 3, end_col: 4 },
@@ -448,5 +456,458 @@ mod tests {
         assert!(json.contains("dimensionsJson"), "{}", json);
         assert!(!json.contains("sheet_index"), "{}", json);
         assert!(!json.contains("dimensions_json"), "{}", json);
+    }
+
+    // -- application.goto: numeric + A1 forms --------------------------------
+
+    use crate::types::DeferredAction;
+    use engine::cell::{Cell, CellValue};
+
+    fn text_cell(text: &str) -> Cell {
+        Cell {
+            ast: None,
+            value: CellValue::Text(text.to_string()),
+            style_index: 0,
+            rich_text: None,
+        }
+    }
+
+    fn run_two_sheets(src: &str, grids: Vec<Grid>) -> (ScriptResult, Vec<Grid>) {
+        ScriptEngine::run_with_options(
+            src,
+            "test.js",
+            grids,
+            StyleRegistry::new(),
+            vec!["Sheet1".to_string(), "Sheet2".to_string()],
+            0,
+            ScriptRunOptions::default(),
+        )
+    }
+
+    fn deferred(result: ScriptResult) -> Vec<DeferredAction> {
+        match result {
+            ScriptResult::Success { deferred_actions, .. } => deferred_actions,
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn goto_numeric_form_queues_a_single_cell_goto() {
+        let (result, _) = run_two_sheets(
+            "Calcula.application.goto(4, 5, 'Sheet2');",
+            vec![Grid::new(), Grid::new()],
+        );
+        assert_eq!(
+            deferred(result),
+            vec![DeferredAction::Goto {
+                row: 4,
+                col: 5,
+                end_row: None,
+                end_col: None,
+                sheet_index: 1,
+                select: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn goto_a1_form_queues_a_range_goto_with_sheet_prefix() {
+        let (result, _) = run_two_sheets(
+            "Calcula.application.goto('Sheet2!B2:C5'); Calcula.application.goto('B3');",
+            vec![Grid::new(), Grid::new()],
+        );
+        assert_eq!(
+            deferred(result),
+            vec![
+                DeferredAction::Goto {
+                    row: 1,
+                    col: 1,
+                    end_row: Some(4),
+                    end_col: Some(2),
+                    sheet_index: 1,
+                    select: true,
+                },
+                // Single-cell address: end fields stay None, active sheet.
+                DeferredAction::Goto {
+                    row: 2,
+                    col: 1,
+                    end_row: None,
+                    end_col: None,
+                    sheet_index: 0,
+                    select: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn goto_a1_form_rejects_extra_arguments_and_bad_sheets() {
+        let (result, _) = run_two_sheets(
+            r#"
+            var msgs = [];
+            try { Calcula.application.goto('A1', 1); msgs.push('extra-ok'); }
+            catch (e) { msgs.push('extra-threw'); }
+            try { Calcula.application.goto('Nope!A1'); msgs.push('sheet-ok'); }
+            catch (e) { msgs.push('sheet-threw:' + (e.message.indexOf('Nope') >= 0)); }
+            Calcula.log(msgs.join(','));
+            "#,
+            vec![Grid::new(), Grid::new()],
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(
+                    output.last().map(|i| i.to_text()).as_deref(),
+                    Some("extra-threw,sheet-threw:true")
+                );
+                assert!(deferred_actions.is_empty(), "nothing may be queued");
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    // -- getRangeEdge / getCurrentRegion / getUsedRange ops: parity with the
+    //    shared engine::navigation implementation the Tauri commands call ----
+
+    /// A grid with a block at A1:D1 and a lone cell at G1.
+    fn edge_fixture() -> Grid {
+        let mut g = Grid::new();
+        for (c, t) in ["a", "b", "c", "d"].iter().enumerate() {
+            g.set_cell(0, c as u32, text_cell(t));
+        }
+        g.set_cell(0, 6, text_cell("g"));
+        g
+    }
+
+    #[test]
+    fn get_range_edge_op_matches_engine_navigation() {
+        let grid = edge_fixture();
+        let cases: Vec<(u32, u32, &str)> =
+            vec![(0, 0, "right"), (0, 3, "right"), (0, 6, "left"), (0, 20, "left"), (5, 0, "up")];
+        let expected: Vec<(u32, u32)> = cases
+            .iter()
+            .map(|&(r, c, d)| {
+                engine::navigation::range_edge(
+                    &grid,
+                    r,
+                    c,
+                    engine::navigation::EdgeDirection::parse(d).unwrap(),
+                    engine::navigation::EXCEL_MAX_ROW_INDEX,
+                    engine::navigation::EXCEL_MAX_COL_INDEX,
+                )
+            })
+            .collect();
+        let src = format!(
+            r#"
+            var cases = {};
+            var out = [];
+            for (var i = 0; i < cases.length; i++) {{
+                var res = JSON.parse(Calcula.getRangeEdge(cases[i][0], cases[i][1], cases[i][2]));
+                out.push([res.row, res.col]);
+            }}
+            Calcula.log(JSON.stringify(out));
+            "#,
+            serde_json::json!(cases
+                .iter()
+                .map(|&(r, c, d)| (r, c, d.to_string()))
+                .collect::<Vec<_>>())
+        );
+        let (result, _) = run_two_sheets(&src, vec![grid, Grid::new()]);
+        match result {
+            ScriptResult::Success { output, .. } => {
+                let logged = output.last().map(|i| i.to_text()).unwrap_or_default();
+                let got: Vec<(u32, u32)> = serde_json::from_str(&logged).unwrap();
+                assert_eq!(got, expected, "op answers must equal engine::navigation");
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_range_edge_op_rejects_a_bad_direction() {
+        let (result, _) = run_two_sheets(
+            r#"
+            try { Calcula.getRangeEdge(0, 0, 'sideways'); Calcula.log('no-throw'); }
+            catch (e) { Calcula.log('threw:' + (e.message.indexOf('sideways') >= 0)); }
+            "#,
+            vec![Grid::new(), Grid::new()],
+        );
+        match result {
+            ScriptResult::Success { output, .. } => assert_eq!(
+                output.last().map(|i| i.to_text()).as_deref(),
+                Some("threw:true")
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_current_region_op_matches_engine_navigation_and_takes_a_sheet() {
+        // Block at B2:C4 on Sheet2; Sheet1 stays empty.
+        let mut sheet2 = Grid::new();
+        for r in 1..=3 {
+            for c in 1..=2 {
+                sheet2.set_cell(r, c, text_cell("x"));
+            }
+        }
+        let expected = engine::navigation::current_region(&sheet2, 2, 2).unwrap();
+        let (result, _) = run_two_sheets(
+            r#"
+            var hit = JSON.parse(Calcula.getCurrentRegion(2, 2, 'Sheet2'));
+            var miss = JSON.parse(Calcula.getCurrentRegion(50, 50, 1));
+            var active = JSON.parse(Calcula.getCurrentRegion(0, 0));
+            Calcula.log(JSON.stringify([hit, miss, active.empty]));
+            "#,
+            vec![Grid::new(), sheet2],
+        );
+        match result {
+            ScriptResult::Success { output, .. } => {
+                let logged = output.last().map(|i| i.to_text()).unwrap_or_default();
+                let parsed: serde_json::Value = serde_json::from_str(&logged).unwrap();
+                let hit = &parsed[0];
+                assert_eq!(hit["startRow"].as_u64().unwrap() as u32, expected.0);
+                assert_eq!(hit["startCol"].as_u64().unwrap() as u32, expected.1);
+                assert_eq!(hit["endRow"].as_u64().unwrap() as u32, expected.2);
+                assert_eq!(hit["endCol"].as_u64().unwrap() as u32, expected.3);
+                assert_eq!(hit["empty"].as_bool(), Some(false));
+                // Isolated empty cell: collapsed box + empty flag.
+                let miss = &parsed[1];
+                assert_eq!(miss["empty"].as_bool(), Some(true));
+                assert_eq!(miss["startRow"].as_u64(), Some(50));
+                // Active sheet (Sheet1) is empty at A1.
+                assert_eq!(parsed[2].as_bool(), Some(true));
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_used_range_op_takes_a_sheet_arg() {
+        let mut sheet2 = Grid::new();
+        sheet2.set_cell(2, 3, text_cell("a"));
+        sheet2.set_cell(7, 1, text_cell("b"));
+        let (result, _) = run_two_sheets(
+            r#"
+            var byName = JSON.parse(Calcula.getUsedRange('Sheet2'));
+            var byIndex = JSON.parse(Calcula.getUsedRange(1));
+            var active = JSON.parse(Calcula.getUsedRange());
+            Calcula.log(JSON.stringify([byName, byIndex.startCol, active.empty]));
+            "#,
+            vec![Grid::new(), sheet2],
+        );
+        match result {
+            ScriptResult::Success { output, .. } => {
+                let logged = output.last().map(|i| i.to_text()).unwrap_or_default();
+                let parsed: serde_json::Value = serde_json::from_str(&logged).unwrap();
+                assert_eq!(parsed[0]["startRow"].as_u64(), Some(2));
+                assert_eq!(parsed[0]["startCol"].as_u64(), Some(1));
+                assert_eq!(parsed[0]["endRow"].as_u64(), Some(7));
+                assert_eq!(parsed[0]["endCol"].as_u64(), Some(3));
+                assert_eq!(parsed[0]["empty"].as_bool(), Some(false));
+                assert_eq!(parsed[1].as_u64(), Some(1), "index arg = name arg");
+                assert_eq!(parsed[2].as_bool(), Some(true), "active sheet is empty");
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_used_range_op_rejects_an_unknown_sheet() {
+        let (result, _) = run_two_sheets(
+            r#"
+            try { Calcula.getUsedRange('Nope'); Calcula.log('no-throw'); }
+            catch (e) { Calcula.log('threw:' + (e.message.indexOf('Nope') >= 0)); }
+            "#,
+            vec![Grid::new(), Grid::new()],
+        );
+        match result {
+            ScriptResult::Success { output, .. } => assert_eq!(
+                output.last().map(|i| i.to_text()).as_deref(),
+                Some("threw:true")
+            ),
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 4: zoom-as-percent, strict view mode, displayFormulas,
+    // ranged applyNamedStyle
+    // -----------------------------------------------------------------------
+
+    /// setZoom takes a REAL percent, getZoom answers the same number, and the
+    /// deferred action carries it out unchanged — the factor/percent
+    /// split-brain is gone in both directions.
+    #[test]
+    fn zoom_is_a_real_percent_end_to_end() {
+        let (result, _) = run(
+            "Calcula.setZoom(150); Calcula.log(String(Calcula.getZoom()));",
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("150"));
+                assert!(
+                    deferred_actions.iter().any(|a| matches!(
+                        a,
+                        crate::types::DeferredAction::SetZoom { percent } if *percent == 150.0
+                    )),
+                    "SetZoom must carry the percent verbatim: {:?}",
+                    deferred_actions
+                );
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// Out-of-range zoom THROWS and queues nothing — 1.0 (the old factor form)
+    /// is now an invalid percent, which is exactly what catches un-migrated
+    /// callers.
+    #[test]
+    fn zoom_outside_10_to_400_throws() {
+        for bad in ["1.0", "9.9", "400.5", "0", "-25", "NaN"] {
+            let (result, _) = run(
+                &format!(
+                    "try {{ Calcula.setZoom({}); Calcula.log('no-throw'); }} \
+                     catch (e) {{ Calcula.log('threw:' + (e.message.indexOf('Invalid zoom') >= 0)); }}",
+                    bad
+                ),
+                ScriptRunOptions::default(),
+            );
+            match result {
+                ScriptResult::Success { output, deferred_actions, .. } => {
+                    assert_eq!(
+                        output.last().map(|i| i.to_text()).as_deref(),
+                        Some("threw:true"),
+                        "setZoom({}) must throw",
+                        bad
+                    );
+                    assert!(
+                        deferred_actions.is_empty(),
+                        "a rejected zoom must queue nothing: {:?}",
+                        deferred_actions
+                    );
+                }
+                other => panic!("expected success, got {:?}", other),
+            }
+        }
+    }
+
+    /// Boundary percents are accepted (the range is inclusive).
+    #[test]
+    fn zoom_bounds_are_inclusive() {
+        let (result, _) = run(
+            "Calcula.setZoom(10); Calcula.setZoom(400); Calcula.log(String(Calcula.getZoom()));",
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("400"));
+                assert_eq!(deferred_actions.len(), 2);
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// setViewMode accepts exactly the three Core view modes and THROWS on
+    /// anything else instead of shipping a silent no-op to the frontend.
+    #[test]
+    fn view_mode_is_strictly_validated() {
+        let (result, _) = run(
+            r#"
+            Calcula.setViewMode('pageLayout');
+            var ok = Calcula.getViewMode();
+            var threw = false;
+            try { Calcula.setViewMode('slideshow'); }
+            catch (e) { threw = e.message.indexOf('Invalid view mode') >= 0; }
+            Calcula.log(ok + '|' + threw + '|' + Calcula.getViewMode());
+            "#,
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(
+                    output.last().map(|i| i.to_text()).as_deref(),
+                    Some("pageLayout|true|pageLayout"),
+                    "the rejected mode must not stick"
+                );
+                let modes: Vec<&String> = deferred_actions
+                    .iter()
+                    .filter_map(|a| match a {
+                        crate::types::DeferredAction::SetViewMode { mode } => Some(mode),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(modes, vec!["pageLayout"], "only the valid mode is queued");
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// displayFormulas: read-back defaults to false, the setter round-trips and
+    /// queues the deferred toggle for the host.
+    #[test]
+    fn display_formulas_round_trips() {
+        let (result, _) = run(
+            "var before = Calcula.getDisplayFormulas(); \
+             Calcula.setDisplayFormulas(true); \
+             Calcula.log(before + '|' + Calcula.getDisplayFormulas());",
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(
+                    output.last().map(|i| i.to_text()).as_deref(),
+                    Some("false|true")
+                );
+                assert!(deferred_actions.iter().any(|a| matches!(
+                    a,
+                    crate::types::DeferredAction::SetDisplayFormulas { value: true }
+                )));
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
+    }
+
+    /// applyNamedStyle: the single-cell form queues no range corner, the
+    /// four-corner form queues the inclusive rect, and a half-rect THROWS.
+    #[test]
+    fn apply_named_style_takes_an_optional_range() {
+        let (result, _) = run(
+            r#"
+            Calcula.applyNamedStyle('Total', 1, 2);
+            Calcula.applyNamedStyle('Good', 1, 1, 3, 4);
+            var threw = false;
+            try { Calcula.applyNamedStyle('Bad', 0, 0, 5); }
+            catch (e) { threw = e.message.indexOf('together') >= 0; }
+            Calcula.log(String(threw));
+            "#,
+            ScriptRunOptions::default(),
+        );
+        match result {
+            ScriptResult::Success { output, deferred_actions, .. } => {
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("true"));
+                let styles: Vec<_> = deferred_actions
+                    .iter()
+                    .filter_map(|a| match a {
+                        crate::types::DeferredAction::ApplyNamedStyle {
+                            name,
+                            row,
+                            col,
+                            end_row,
+                            end_col,
+                        } => Some((name.as_str(), *row, *col, *end_row, *end_col)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    styles,
+                    vec![
+                        ("Total", 1, 2, None, None),
+                        ("Good", 1, 1, Some(3), Some(4)),
+                    ],
+                    "the half-rect call must queue NOTHING"
+                );
+            }
+            other => panic!("expected success, got {:?}", other),
+        }
     }
 }

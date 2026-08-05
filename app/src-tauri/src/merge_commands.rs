@@ -18,6 +18,134 @@ fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
     }
 }
 
+/// Merge cells in a range on a NON-ACTIVE sheet (Wave 3 cross-sheet ops).
+///
+/// The same chain as the active path — protection (per-cell + formatCells
+/// option) on the TARGET sheet, writeback claim guard, overlap refusal — but
+/// against `grids[target]` and the per-sheet merge store. Undo is two
+/// sheet-tagged CustomRestores in ONE transaction: the slave cells
+/// ("script_grid_cells") and the sheet's merge set ("sheet_merge_regions"),
+/// so one Ctrl+Z restores content and geometry together on the RIGHT sheet.
+pub(crate) fn merge_cells_off_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    target: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<MergeResult, String> {
+    crate::protection::check_sheet_protection_range(
+        state,
+        target,
+        start_row.min(end_row),
+        start_col.min(end_col),
+        start_row.max(end_row),
+        start_col.max(end_col),
+    )?;
+    crate::protection::check_sheet_action(state, target, "formatCells", "merge cells")?;
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        state, "merge these cells", &[target], start_row, start_col, end_row, end_col,
+    )?;
+
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    // Read the target sheet's merge set (mirror-vs-store resolved by the
+    // helper) for the overlap check and the undo snapshot.
+    let previous_regions: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, target, |merged| merged.iter().cloned().collect());
+
+    if min_row == max_row && min_col == max_col {
+        return Ok(MergeResult {
+            success: false,
+            merged_regions: previous_regions,
+            updated_cells: Vec::new(),
+        });
+    }
+
+    for region in &previous_regions {
+        let overlaps = !(max_row < region.start_row
+            || min_row > region.end_row
+            || max_col < region.start_col
+            || min_col > region.end_col);
+        if overlaps {
+            return Err("Cannot merge: selection overlaps with existing merged region".to_string());
+        }
+    }
+
+    let new_region = MergedRegion {
+        start_row: min_row,
+        start_col: min_col,
+        end_row: max_row,
+        end_col: max_col,
+    };
+
+    // Clear slave cells on the target grid, capturing their prior state.
+    let mut previous_cells: Vec<(u32, u32, Option<engine::Cell>)> = Vec::new();
+    {
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        let grid = grids
+            .get_mut(target)
+            .ok_or_else(|| format!("Sheet index {} out of range", target))?;
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                if row == min_row && col == min_col {
+                    continue; // Master cell keeps its content.
+                }
+                let previous = grid.get_cell(row, col).cloned();
+                if previous.is_some() {
+                    previous_cells.push((row, col, previous));
+                    grid.clear_cell(row, col);
+                }
+            }
+        }
+    }
+
+    // ONE transaction: slave cells + merge geometry.
+    {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let opened_transaction = !undo_stack.has_open_transaction();
+        if opened_transaction {
+            undo_stack.begin_transaction("Merge cells".to_string());
+        }
+        if !previous_cells.is_empty() {
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(target, previous_cells),
+                "Merge cells",
+            );
+        }
+        undo_stack.record_custom_restore(
+            "sheet_merge_regions".to_string(),
+            crate::undo_commands::sheet_merge_regions_snapshot_bytes(target, previous_regions),
+            "Merge cells",
+        );
+        if opened_transaction {
+            undo_stack.commit_transaction();
+        }
+    }
+
+    // Add the merged region to the target sheet's set.
+    let merged_regions: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, target, |merged| {
+            merged.insert(new_region.clone());
+            merged.iter().cloned().collect()
+        });
+
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
+    // No updated_cells: the active canvas shows nothing from the target sheet,
+    // and the sheet re-materializes from grids[target] on switch.
+    Ok(MergeResult {
+        success: true,
+        merged_regions,
+        updated_cells: Vec::new(),
+    })
+}
+
 /// Merge cells in the specified range.
 /// The top-left cell becomes the "master" cell containing the merged content.
 /// All other cells in the range are cleared.
@@ -29,7 +157,26 @@ pub fn merge_cells(
     start_col: u32,
     end_row: u32,
     end_col: u32,
+    sheet_index: Option<usize>,
 ) -> Result<MergeResult, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path.
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                let count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+                if target >= count {
+                    return Err(format!(
+                        "Sheet index {} out of range: workbook has {} sheet(s)",
+                        target, count
+                    ));
+                }
+                return merge_cells_off_sheet(
+                    &state, &file_state, target, start_row, start_col, end_row, end_col,
+                );
+            }
+        }
+    }
     // Sheet protection, BEFORE any lock below (the gate takes its own locks).
     // Merging clears every non-master cell in the range — on a protected sheet
     // that is a content-destroying write, so it needs the same per-cell gate as
@@ -183,6 +330,76 @@ pub fn merge_cells(
     })
 }
 
+/// Unmerge on a NON-ACTIVE sheet (Wave 3 cross-sheet ops). Undo restores the
+/// sheet's merge set via ONE sheet-tagged "sheet_merge_regions" entry —
+/// unmerging destroys no cell content (the slaves were emptied at merge time).
+pub(crate) fn unmerge_cells_off_sheet(
+    state: &AppState,
+    file_state: &FileState,
+    target: usize,
+    row: u32,
+    col: u32,
+) -> Result<MergeResult, String> {
+    crate::protection::check_sheet_action(state, target, "formatCells", "unmerge cells")?;
+
+    let previous_regions: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, target, |merged| merged.iter().cloned().collect());
+
+    let region_to_remove = previous_regions
+        .iter()
+        .find(|r| row >= r.start_row && row <= r.end_row && col >= r.start_col && col <= r.end_col)
+        .cloned();
+
+    let Some(region) = region_to_remove else {
+        return Ok(MergeResult {
+            success: false,
+            merged_regions: previous_regions,
+            updated_cells: Vec::new(),
+        });
+    };
+
+    // Same claim policy as the active twin: checked against the FOUND region.
+    crate::calp_commands::ensure_range_unclaimed_on_sheets(
+        state,
+        "unmerge these cells",
+        &[target],
+        region.start_row,
+        region.start_col,
+        region.end_row,
+        region.end_col,
+    )?;
+
+    {
+        let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        let opened_transaction = !undo_stack.has_open_transaction();
+        if opened_transaction {
+            undo_stack.begin_transaction("Unmerge cells".to_string());
+        }
+        undo_stack.record_custom_restore(
+            "sheet_merge_regions".to_string(),
+            crate::undo_commands::sheet_merge_regions_snapshot_bytes(target, previous_regions),
+            "Unmerge cells",
+        );
+        if opened_transaction {
+            undo_stack.commit_transaction();
+        }
+    }
+
+    let merged_regions: Vec<MergedRegion> =
+        crate::report::with_sheet_merges(state, target, |merged| {
+            merged.remove(&region);
+            merged.iter().cloned().collect()
+        });
+
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
+    Ok(MergeResult {
+        success: true,
+        merged_regions,
+        updated_cells: Vec::new(),
+    })
+}
+
 /// Unmerge cells at the specified position.
 /// If the cell is part of a merged region, the region is dissolved.
 #[tauri::command]
@@ -191,7 +408,24 @@ pub fn unmerge_cells(
     file_state: State<FileState>,
     row: u32,
     col: u32,
+    sheet_index: Option<usize>,
 ) -> Result<MergeResult, String> {
+    // Wave 3: an explicit non-active target takes the off-sheet path.
+    {
+        let active = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+        if let Some(target) = sheet_index {
+            if target != active {
+                let count = state.sheet_names.lock().map_err(|e| e.to_string())?.len();
+                if target >= count {
+                    return Err(format!(
+                        "Sheet index {} out of range: workbook has {} sheet(s)",
+                        target, count
+                    ));
+                }
+                return unmerge_cells_off_sheet(&state, &file_state, target, row, col);
+            }
+        }
+    }
     // Same gate as merge_cells: merge structure is a format attribute, and
     // Excel refuses to change it on a protected sheet without formatCells.
     {

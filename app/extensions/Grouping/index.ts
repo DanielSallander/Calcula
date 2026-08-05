@@ -9,6 +9,7 @@ import {
   ExtensionRegistry,
   registerPostHeaderOverlay,
 } from "@api";
+import { registerGroupingController } from "@api/groupingService";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
 import {
@@ -23,6 +24,11 @@ import {
   performExpandColumn,
   performShowLevel,
   performShowColLevel,
+  controllerGroupRows,
+  controllerUngroupRows,
+  controllerGroupColumns,
+  controllerUngroupColumns,
+  controllerShowOutlineLevel,
   getCurrentOutlineInfo,
   getLastRenderedState,
 } from "./lib/groupingStore";
@@ -322,6 +328,21 @@ function activate(context: ExtensionContext): void {
     resetGroupingState();
   });
   cleanupFns.push(unsubSheet);
+
+  // 9. Publish the grouping driver through the feature-neutral seam
+  //    (@api/groupingService), so the script broker's api.groupRows family can
+  //    drive the outline WITHOUT importing this extension — and so a scripted
+  //    group keeps the grid's hidden rows, the outline bar and the backend in
+  //    step exactly as a ribbon click does (same store, same sync).
+  cleanupFns.push(
+    registerGroupingController({
+      groupRows: controllerGroupRows,
+      ungroupRows: controllerUngroupRows,
+      groupColumns: controllerGroupColumns,
+      ungroupColumns: controllerUngroupColumns,
+      showOutlineLevel: controllerShowOutlineLevel,
+    }),
+  );
 
   isActivated = true;
   console.log("[Grouping] Activated successfully.");

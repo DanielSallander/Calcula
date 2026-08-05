@@ -20,6 +20,7 @@ export {
   getWatchCells,
   getRangeCellsTyped,
   getCellsInCols,
+  getCellsInRows,
   getCellCollection,
   getCollectionTexts,
   updateCell,
@@ -39,6 +40,9 @@ export {
   findCtrlArrowTarget,
   detectDataRegion,
   getCurrentRegion,
+  getRangeEdge,
+  getSpecialCells,
+  getUsedRange,
   indexToCol,
   colToIndex,
 
@@ -64,6 +68,7 @@ export {
 
   // Multi-Sheet (Sheet Grouping) Operations
   updateCellOnSheets,
+  recalculateSheetsAfterScriptWrite,
   applyFormattingToSheets,
   clearRangeOnSheets,
 
@@ -229,6 +234,10 @@ export type {
   CollectionPreviewResult,
   ArrowDirection,
   CurrentRegionResult,
+  RangeEdgeResult,
+  SpecialCellsKind,
+  SpecialCellRef,
+  SpecialCellsResult,
   SheetInfo,
   SheetVisibility,
   SheetsResult,
@@ -385,6 +394,29 @@ export {
 
 export type {
   NamedRangeCoords,
+} from "./backend";
+
+// ============================================================================
+// Hyperlink API (Wave 3: sheet-addressable add/get/remove/list)
+// ============================================================================
+
+export {
+  addHyperlink,
+  updateHyperlink,
+  removeHyperlink,
+  getHyperlink,
+  getAllHyperlinks,
+  getHyperlinksInRange,
+  hasHyperlink,
+} from "./backend";
+
+export type {
+  AddHyperlinkParams,
+  UpdateHyperlinkParams,
+  Hyperlink,
+  HyperlinkResult,
+  HyperlinkIndicator,
+  HyperlinkType,
 } from "./backend";
 
 // ============================================================================
@@ -814,11 +846,24 @@ export {
   createNamedStyle,
   deleteNamedStyle,
   applyNamedStyle,
+  applyNamedStyleRange,
 } from "./backend";
 
 export type {
   NamedCellStyle,
 } from "./backend";
+
+// ============================================================================
+// Document Theme API (read side — the script surface's palette source)
+// ============================================================================
+
+export { getDocumentTheme } from "./theme";
+
+export type {
+  ThemeDefinitionData,
+  ThemeColorsData,
+  ThemeFontsData,
+} from "../core/types/types";
 
 // ============================================================================
 // Workbook Properties API

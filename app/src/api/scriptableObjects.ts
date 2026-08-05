@@ -424,7 +424,10 @@ export interface ScriptPivotFieldSpec {
 }
 
 /** A worksheet facet of the canonical model (C3) — the navigation level above a
- *  ScriptRange. Reached via the unlocked `api.workbook`. */
+ *  ScriptRange, and since Wave 2 a HANDLE the script can hold and drive
+ *  (rename/delete/move/copy/visibility/tab colour). Identity is the sheet's
+ *  NAME: management calls survive a concurrent tab re-order, and `rename()`
+ *  re-points the handle. Reached via the unlocked `api.workbook`. */
 export interface ScriptSheet {
   readonly index: number;
   readonly name: string;
@@ -434,6 +437,26 @@ export interface ScriptSheet {
   cell(row: number, col: number): ScriptRange;
   /** Make this the active sheet. */
   activate(): Promise<void>;
+  /** The rectangle of cells this sheet actually uses, as a live ScriptRange —
+   *  null when the sheet stores nothing at all. */
+  usedRange(): Promise<ScriptRange | null>;
+  /** Rename this sheet. The handle follows the new name. */
+  rename(newName: string): Promise<void>;
+  /** Delete this sheet and everything on it (rejects on the last sheet). */
+  delete(): Promise<void>;
+  /** This sheet's current visibility. */
+  visibility(): Promise<"visible" | "hidden" | "veryHidden">;
+  /** Show or hide this sheet (rejects hiding the last visible one). */
+  setVisibility(visibility: "visible" | "hidden" | "veryHidden"): Promise<void>;
+  /** This sheet's tab colour ("#RRGGBB"), or null when it has none. */
+  tabColor(): Promise<string | null>;
+  /** Change this sheet's tab colour (null removes it). */
+  setTabColor(color: string | null): Promise<void>;
+  /** Move this sheet: to an absolute position, or `{ before: "Sheet" }` /
+   *  `{ after: 2 }` relative to another sheet. */
+  move(to: number | { before: number | string } | { after: number | string }): Promise<void>;
+  /** Duplicate this sheet as a new sheet placed immediately after it. */
+  copy(newName?: string): Promise<{ index: number; name: string }>;
 }
 
 /** The workbook facet of the canonical model (C3): navigate Workbook -> Sheet ->
@@ -780,8 +803,29 @@ export interface WorkbookContext extends BaseObjectContext {
    *  {@link WorkbookContext.onBeforeSave}. */
   onBeforeClose(handler: BeforeLifecycleHandler): CleanupFn;
 
+  /** Called before the workbook is printed OR exported to PDF — CANCELLABLE,
+   *  exactly like {@link WorkbookContext.onBeforeSave} (Wave 4; VBA's
+   *  Workbook_BeforePrint). */
+  onBeforePrint(handler: BeforeLifecycleHandler): CleanupFn;
+
   /** Called when the active sheet changes. */
   onSheetChange(handler: EventHandler<{ sheetIndex: number; sheetName: string }>): CleanupFn;
+
+  /** Called when a sheet is added (Wave 4). `source` is "new" for an empty
+   *  sheet, "copy" for a duplicate. The workbook mirror is refreshed FIRST, so
+   *  `properties.sheetCount` is current inside the handler. */
+  onSheetAdd(
+    handler: EventHandler<{ sheetIndex: number; sheetName: string; source: "new" | "copy" }>,
+  ): CleanupFn;
+
+  /** Called when a sheet is deleted (Wave 4). `sheetIndex` is the index the
+   *  sheet occupied BEFORE removal. */
+  onSheetDelete(handler: EventHandler<{ sheetIndex: number; sheetName: string }>): CleanupFn;
+
+  /** Called when a sheet is renamed (Wave 4). */
+  onSheetRename(
+    handler: EventHandler<{ sheetIndex: number; oldName: string; newName: string }>,
+  ): CleanupFn;
 
   /** Called when the theme changes. */
   onThemeChange(handler: EventHandler): CleanupFn;
@@ -841,6 +885,36 @@ export interface ScriptRange {
   format(format: ScriptFormat): Promise<void>;
   /** Remove ALL formatting from the range, keeping the values. */
   clearFormat(): Promise<void>;
+  // ---- Navigation + selection (Wave 2) ----
+  /** The single-cell range where Ctrl+Arrow would land from this range's
+   *  TOP-LEFT cell (VBA Range.End), over the full Excel grid bounds. */
+  end(direction: "up" | "down" | "left" | "right"): Promise<ScriptRange>;
+  /** The contiguous block of data around this range's TOP-LEFT cell (VBA
+   *  CurrentRegion / Ctrl+A). An isolated cell yields itself. */
+  currentRegion(): Promise<ScriptRange>;
+  /** Select this range as the user would, scrolling it into view unless
+   *  `scroll` is false. */
+  select(scroll?: boolean): Promise<void>;
+  // ---- Range algebra (Wave 2): pure coordinate math (twin table:
+  //      core/script-engine/src/ops/canonical_model.rs NotebookRange) ----
+  /** True when the 0-based cell lies inside this range (inclusive). */
+  contains(row: number, col: number): boolean;
+  /** The overlapping rectangle, or null when disjoint; bound to THIS range's
+   *  sheet. */
+  intersect(other: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  }): ScriptRange | null;
+  /** The smallest single rectangle covering both ranges (gaps included — NOT
+   *  VBA Union's multi-area result). Bound to THIS range's sheet. */
+  boundingUnion(other: {
+    startRow: number;
+    startCol: number;
+    endRow: number;
+    endCol: number;
+  }): ScriptRange;
 }
 
 /** Context for Sheet-level scripts (applies to all sheets). */
@@ -867,6 +941,27 @@ export interface SheetContext extends BaseObjectContext {
     sheetIndex: number;
     changes: Array<{ row: number; col: number; oldValue?: string; newValue: string }>;
   }>): CleanupFn;
+
+  /**
+   * Called before a double-click enters edit mode — CANCELLABLE (Wave 4;
+   * VBA's Workbook_SheetBeforeDoubleClick). Return `false`, `"cancel"` or
+   * `{ cancel: true }` to keep the cell out of edit mode; anything else (or a
+   * verdict later than the ~1.5s deadline) lets editing begin. The payload is
+   * always on the ACTIVE sheet — the only sheet a click can land on.
+   */
+  onBeforeDoubleClick(
+    handler: BeforeLifecycleHandler<{ row: number; col: number; address: string }>,
+  ): CleanupFn;
+
+  /**
+   * Called before the cell context menu opens on a right-click — CANCELLABLE
+   * (Wave 4; VBA's Workbook_SheetBeforeRightClick). Return `false`, `"cancel"`
+   * or `{ cancel: true }` to suppress the menu; same deadline and default-allow
+   * as {@link SheetContext.onBeforeDoubleClick}.
+   */
+  onBeforeRightClick(
+    handler: BeforeLifecycleHandler<{ row: number; col: number; address: string }>,
+  ): CleanupFn;
 
   /** Read a cell's DISPLAY STRING from the specified (or active) sheet. */
   getCellValue(row: number, col: number, sheetIndex?: number): Promise<string>;
@@ -1500,8 +1595,14 @@ export interface IObjectScriptAPI {
    * work after a reload") for a script that was never going to run. A caller
    * that cannot act on the failure must still SHOW it; `console.warn` is not
    * user feedback.
+   *
+   * `options.cause: "open"` marks a workbook-open mount (startup load or the
+   * AFTER_OPEN reload). Scripts mount FROM the AFTER_OPEN handler, so their
+   * `workbook.onOpen` hook is wired after the open was broadcast; the host
+   * replays that one delivery for an open-mount, and ONLY for an open-mount —
+   * Save & Apply, consent and template-stamping mounts pass nothing.
    */
-  mountScript(scriptId: string): Promise<void>;
+  mountScript(scriptId: string, options?: { cause?: "open" }): Promise<void>;
 
   /** Unmount a running script. */
   unmountScript(scriptId: string): void;
@@ -1586,7 +1687,7 @@ export const ObjectScriptManager: IObjectScriptAPI = {
     return Array.from(registeredScripts.values());
   },
 
-  async mountScript(scriptId: string): Promise<void> {
+  async mountScript(scriptId: string, options?: { cause?: "open" }): Promise<void> {
     const definition = registeredScripts.get(scriptId);
     if (!definition) {
       throw new Error(
@@ -1675,6 +1776,7 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         packageVersion: definition.packageVersion,
         declaredCapabilities: definition.declaredCapabilities,
         apiVersion: SCRIPT_API_VERSION,
+        mountCause: options?.cause,
       });
       mounted.cleanupFns.push(() => hostUnmountScript(definition.id));
       mountedScripts.set(scriptId, mounted);

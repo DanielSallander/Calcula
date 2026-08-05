@@ -69,9 +69,13 @@ pub struct HostState {
     pub display_zeros: bool,
     /// Whether the workbook has unsaved changes.
     pub is_dirty: bool,
-    /// Current view mode: "normal" or "pageBreakPreview".
+    /// Current view mode: "normal", "pageLayout" or "pageBreakPreview".
     pub view_mode: String,
-    /// Current zoom level (1.0 = 100%).
+    /// Current zoom as a REAL PERCENT in [10, 400] (100 = 100%). This field
+    /// carried a factor (1.0 = 100%) while its setter was documented as a
+    /// percent — the split-brain is healed to percent END-TO-END: the host
+    /// feeds a percent in, `Calcula.getZoom()` answers it, `Calcula.setZoom()`
+    /// validates it, and `DeferredAction::SetZoom.percent` carries it out.
     pub zoom: f64,
     /// Reference style: "A1" or "R1C1".
     pub reference_style: String,
@@ -93,6 +97,11 @@ pub struct HostState {
     pub display_gridlines: bool,
     /// Whether row/column headings are displayed.
     pub display_headings: bool,
+    /// Whether the grid shows formula TEXT instead of computed values
+    /// (Excel's Ctrl+` formula view). Frontend-owned like the other view
+    /// fields; defaults to false.
+    #[serde(default)]
+    pub display_formulas: bool,
 }
 
 impl Default for HostState {
@@ -101,7 +110,7 @@ impl Default for HostState {
             display_zeros: true,
             is_dirty: false,
             view_mode: "normal".to_string(),
-            zoom: 1.0,
+            zoom: 100.0,
             reference_style: "A1".to_string(),
             sheet_visibility: Vec::new(),
             workbook_properties: HashMap::new(),
@@ -112,9 +121,21 @@ impl Default for HostState {
             scroll_area: None,
             display_gridlines: true,
             display_headings: true,
+            display_formulas: false,
         }
     }
 }
+
+/// The view modes the app's grid actually supports (Core `ViewMode` union).
+/// `Calcula.setViewMode` validates against this list and THROWS on anything
+/// else — an unvalidated mode used to travel all the way to the frontend and
+/// silently no-op there.
+pub const VALID_VIEW_MODES: [&str; 3] = ["normal", "pageLayout", "pageBreakPreview"];
+
+/// Inclusive zoom bounds for the SCRIPT surface, in REAL percent. Deliberately
+/// tighter than the UI slider's ceiling: 10-400 is the Excel-parity range.
+pub const ZOOM_MIN_PERCENT: f64 = 10.0;
+pub const ZOOM_MAX_PERCENT: f64 = 400.0;
 
 fn default_true() -> bool {
     true
@@ -185,14 +206,20 @@ impl ScriptOutputItem {
 /// one. Without them `sheet_index` / `start_row` / `max_change` went over the
 /// IPC boundary snake_cased, in violation of the Golden Rule. Mirrored in TS as
 /// `DeferredAction` (app/src/api/workbookScripts.ts).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "action")]
 pub enum DeferredAction {
-    /// Navigate to a specific cell (Excel: Application.Goto)
+    /// Navigate to a cell or range (Excel: Application.Goto)
     #[serde(rename_all = "camelCase")]
     Goto {
         row: u32,
         col: u32,
+        /// Inclusive end of a multi-cell target range (set by the A1 form of
+        /// `application.goto`); None = a single cell at (row, col).
+        #[serde(default)]
+        end_row: Option<u32>,
+        #[serde(default)]
+        end_col: Option<u32>,
         sheet_index: usize,
         /// If false, only scroll without changing selection (default: true)
         #[serde(default = "default_true")]
@@ -218,12 +245,14 @@ pub enum DeferredAction {
     SetDisplayZeros {
         value: bool,
     },
-    /// Set the view mode ("normal" or "pageBreakPreview")
+    /// Set the view mode ("normal", "pageLayout" or "pageBreakPreview";
+    /// validated at the op, so an invalid mode never reaches the host)
     #[serde(rename_all = "camelCase")]
     SetViewMode {
         mode: String,
     },
-    /// Set the zoom level (percentage, e.g. 1.0 = 100%)
+    /// Set the zoom level as a REAL PERCENT in [10, 400] (100 = 100%).
+    /// The field always SAID percent; it now finally carries one.
     #[serde(rename_all = "camelCase")]
     SetZoom {
         percent: f64,
@@ -243,6 +272,12 @@ pub enum DeferredAction {
     SetDisplayHeadings {
         value: bool,
     },
+    /// Set whether the grid shows formula text instead of values
+    /// (the app's Ctrl+` formula-view toggle)
+    #[serde(rename_all = "camelCase")]
+    SetDisplayFormulas {
+        value: bool,
+    },
     /// Fill down: copy first row of range to remaining rows
     #[serde(rename_all = "camelCase")]
     FillDown {
@@ -259,12 +294,19 @@ pub enum DeferredAction {
         end_row: u32,
         end_col: u32,
     },
-    /// Apply a named style to a cell
+    /// Apply a named style to a cell or a rectangular range. `end_row` /
+    /// `end_col` are the INCLUSIVE far corner; None = the single cell at
+    /// (row, col). The host applies a range via apply_named_style_range
+    /// (one undo transaction), a single cell via apply_named_style.
     #[serde(rename_all = "camelCase")]
     ApplyNamedStyle {
         name: String,
         row: u32,
         col: u32,
+        #[serde(default)]
+        end_row: Option<u32>,
+        #[serde(default)]
+        end_col: Option<u32>,
     },
     /// Set or clear the scroll area restriction
     #[serde(rename_all = "camelCase")]

@@ -624,6 +624,12 @@ export async function sortRange<TResult>(
     matchCase?: boolean;
     hasHeaders?: boolean;
     orientation?: SortOrientation;
+    /**
+     * Target sheet (0-based). Omit for the active sheet (Wave 3 cross-sheet
+     * ops): a non-active target permutes backend state only — the result's
+     * `updatedCells` is empty and the active canvas needs no repaint.
+     */
+    sheetIndex?: number;
   }
 ): Promise<TResult> {
   const matchCase = options?.matchCase ?? false;
@@ -640,6 +646,7 @@ export async function sortRange<TResult>(
       matchCase,
       hasHeaders,
       orientation,
+      sheetIndex: options?.sheetIndex ?? null,
     },
   });
 
@@ -1151,6 +1158,12 @@ export interface HyperlinkIndicator {
 export interface AddHyperlinkParams {
   row: number;
   col: number;
+  /**
+   * Sheet the hyperlink is ATTACHED to (0-based). Omit for the active sheet
+   * (Wave 3 cross-sheet ops). Distinct from `sheetName`, which is the
+   * NAVIGATION TARGET of an internal-reference link.
+   */
+  sheetIndex?: number;
   linkType: HyperlinkType;
   target: string;
   displayText?: string;
@@ -1197,34 +1210,48 @@ export async function updateHyperlink(
  * Remove a hyperlink from a cell.
  * @param row - Row index (0-based)
  * @param col - Column index (0-based)
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet (Wave 3)
  * @returns Result with the removed hyperlink
  */
 export async function removeHyperlink(
   row: number,
-  col: number
+  col: number,
+  sheetIndex?: number
 ): Promise<HyperlinkResult> {
-  return invoke<HyperlinkResult>("remove_hyperlink", { row, col });
+  return invoke<HyperlinkResult>("remove_hyperlink", {
+    row,
+    col,
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**
  * Get hyperlink at a specific cell.
  * @param row - Row index (0-based)
  * @param col - Column index (0-based)
+ * @param sheetIndex - Target sheet (0-based); omit for the active sheet (Wave 3)
  * @returns The hyperlink or null if none exists
  */
 export async function getHyperlink(
   row: number,
-  col: number
+  col: number,
+  sheetIndex?: number
 ): Promise<Hyperlink | null> {
-  return invoke<Hyperlink | null>("get_hyperlink", { row, col });
+  return invoke<Hyperlink | null>("get_hyperlink", {
+    row,
+    col,
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**
- * Get all hyperlinks in the current sheet.
- * @returns Array of hyperlinks
+ * Get all hyperlinks on a sheet (the active sheet when `sheetIndex` is
+ * omitted).
  */
-export async function getAllHyperlinks(): Promise<Hyperlink[]> {
-  return invoke<Hyperlink[]>("get_all_hyperlinks", {});
+export async function getAllHyperlinks(sheetIndex?: number): Promise<Hyperlink[]> {
+  return invoke<Hyperlink[]>("get_all_hyperlinks", {
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**
@@ -2388,13 +2415,17 @@ export async function getConditionalFormat(
 }
 
 /**
- * Get all conditional format rules for the current sheet.
+ * Get all conditional format rules for the current sheet (or `sheetIndex`).
+ * @param sheetIndex - Optional 0-based sheet index; omitted = the active sheet.
+ *                     An out-of-range index rejects.
  * @returns Array of rules sorted by priority
  */
-export async function getAllConditionalFormats(): Promise<
-  ConditionalFormatDefinition[]
-> {
-  return invoke<ConditionalFormatDefinition[]>("get_all_conditional_formats", {});
+export async function getAllConditionalFormats(
+  sheetIndex?: number
+): Promise<ConditionalFormatDefinition[]> {
+  return invoke<ConditionalFormatDefinition[]>("get_all_conditional_formats", {
+    sheetIndex: sheetIndex ?? null,
+  });
 }
 
 /**
@@ -2421,24 +2452,28 @@ export async function evaluateConditionalFormats(
 }
 
 /**
- * Clear conditional formats in a range.
+ * Clear conditional formats in a range (on the active sheet, or `sheetIndex`).
  * @param startRow - Start row
  * @param startCol - Start column
  * @param endRow - End row
  * @param endCol - End column
+ * @param sheetIndex - Optional 0-based sheet index; omitted = the active sheet.
+ *                     An out-of-range index rejects.
  * @returns Number of rules removed
  */
 export async function clearConditionalFormatsInRange(
   startRow: number,
   startCol: number,
   endRow: number,
-  endCol: number
+  endCol: number,
+  sheetIndex?: number
 ): Promise<number> {
   return invoke<number>("clear_conditional_formats_in_range", {
     startRow,
     startCol,
     endRow,
     endCol,
+    sheetIndex: sheetIndex ?? null,
   });
 }
 
@@ -6131,6 +6166,26 @@ export async function applyNamedStyle(
   cols: number[],
 ): Promise<FormattingResult> {
   return invoke<FormattingResult>("apply_named_style", { name, rows, cols });
+}
+
+/**
+ * Apply a named style to a rectangular range (inclusive bounds) as ONE undo
+ * transaction. Bounds may arrive swapped; the backend normalizes them.
+ */
+export async function applyNamedStyleRange(
+  name: string,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<FormattingResult> {
+  return invoke<FormattingResult>("apply_named_style_range", {
+    name,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
 }
 
 // ============================================================================

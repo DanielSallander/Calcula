@@ -723,7 +723,7 @@ mod tests {
     fn host_state_backs_the_getters() {
         let session = session(None);
         let mut host = HostState::default();
-        host.zoom = 1.75;
+        host.zoom = 175.0;
         host.reference_style = "R1C1".to_string();
         host.named_style_names = vec!["Heading 1".to_string(), "Total".to_string()];
         host.display_gridlines = false;
@@ -749,7 +749,7 @@ mod tests {
             ScriptResult::Success { output, .. } => {
                 assert_eq!(
                     output.first().map(|i| i.to_text()).as_deref(),
-                    Some(r#"1.75|R1C1|["Heading 1","Total"]|false|true|A1:D10|42|Daniel"#)
+                    Some(r#"175|R1C1|["Heading 1","Total"]|false|true|A1:D10|42|Daniel"#)
                 );
             }
             other => panic!("expected success, got {:?}", other),
@@ -801,18 +801,18 @@ mod tests {
     fn host_state_is_reapplied_per_cell() {
         let session = session(None);
         let mut first = input();
-        first.host_state.zoom = 2.0;
+        first.host_state.zoom = 200.0;
         let (r1, _) = session.run_cell("Calcula.getZoom()", first);
         match r1 {
             ScriptResult::Success { output, .. } => {
-                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("2"))
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("200"))
             }
             other => panic!("expected success, got {:?}", other),
         }
         let (r2, _) = session.run_cell("Calcula.getZoom()", input());
         match r2 {
             ScriptResult::Success { output, .. } => {
-                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("1"))
+                assert_eq!(output.last().map(|i| i.to_text()).as_deref(), Some("100"))
             }
             other => panic!("expected success, got {:?}", other),
         }

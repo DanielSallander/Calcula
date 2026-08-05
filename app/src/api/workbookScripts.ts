@@ -52,19 +52,39 @@ export interface WorkbookScript {
  * this union is a literal mirror; `normalizeDeferredActions()` only validates.
  */
 export type DeferredAction =
-  | { action: "goto"; row: number; col: number; sheetIndex: number; select: boolean }
+  | {
+      action: "goto";
+      row: number;
+      col: number;
+      /** Inclusive end of a multi-cell target range (A1-form goto); null = single cell. */
+      endRow: number | null;
+      endCol: number | null;
+      sheetIndex: number;
+      select: boolean;
+    }
   | { action: "calculate" }
   | { action: "activateSheet"; sheetIndex: number }
   | { action: "setStatusBar"; message: string | null }
   | { action: "setDisplayZeros"; value: boolean }
   | { action: "setViewMode"; mode: string }
+  /** `percent` is a REAL percent in [10, 400] (Wave 4 healed the old factor form). */
   | { action: "setZoom"; percent: number }
   | { action: "setReferenceStyle"; style: string }
   | { action: "setDisplayGridlines"; value: boolean }
   | { action: "setDisplayHeadings"; value: boolean }
+  /** Formula view (Ctrl+`): show formula text instead of computed values. */
+  | { action: "setDisplayFormulas"; value: boolean }
   | { action: "fillDown"; startRow: number; startCol: number; endRow: number; endCol: number }
   | { action: "fillRight"; startRow: number; startCol: number; endRow: number; endCol: number }
-  | { action: "applyNamedStyle"; name: string; row: number; col: number }
+  /** endRow/endCol: inclusive far corner of a rect; null = the single cell. */
+  | {
+      action: "applyNamedStyle";
+      name: string;
+      row: number;
+      col: number;
+      endRow: number | null;
+      endCol: number | null;
+    }
   | { action: "setScrollArea"; area: string | null }
   | {
       action: "setIterationSettings";
@@ -168,6 +188,8 @@ function normalizeDeferredAction(raw: unknown): DeferredAction | null {
         action: "goto",
         row,
         col,
+        endRow: num(r.endRow) ?? null,
+        endCol: num(r.endCol) ?? null,
         sheetIndex: sheetIndex === undefined ? Number.NaN : sheetIndex,
         select: bool(r.select) ?? true,
       };
@@ -204,6 +226,10 @@ function normalizeDeferredAction(raw: unknown): DeferredAction | null {
       const value = bool(r.value);
       return value === undefined ? null : { action: "setDisplayHeadings", value };
     }
+    case "setDisplayFormulas": {
+      const value = bool(r.value);
+      return value === undefined ? null : { action: "setDisplayFormulas", value };
+    }
     case "fillDown":
     case "fillRight": {
       const startRow = num(r.startRow);
@@ -225,7 +251,14 @@ function normalizeDeferredAction(raw: unknown): DeferredAction | null {
       const row = num(r.row);
       const col = num(r.col);
       if (!name || row === undefined || col === undefined) return null;
-      return { action: "applyNamedStyle", name, row, col };
+      return {
+        action: "applyNamedStyle",
+        name,
+        row,
+        col,
+        endRow: num(r.endRow) ?? null,
+        endCol: num(r.endCol) ?? null,
+      };
     }
     case "setScrollArea":
       return { action: "setScrollArea", area: nullableStr(r.area) };
@@ -580,15 +613,21 @@ export interface RunWorkbookScriptOptions {
 export interface HostViewState {
   displayZeros: boolean;
   viewMode: string;
-  /** Zoom FACTOR (1.0 = 100%), the unit `Calcula.getZoom()` reports. */
+  /**
+   * Zoom as a REAL PERCENT (100 = 100%), the unit `Calcula.getZoom()` reports.
+   * Wave 4 healed the old factor form: Core state holds a factor, so senders
+   * convert (x100) before the wire; the backend IGNORES out-of-range values.
+   */
   zoom: number;
   displayHeadings: boolean;
+  /** Whether the grid shows formula text instead of values (Ctrl+`). */
+  displayFormulas: boolean;
 }
 
 /**
- * Snapshot the four view fields the backend cannot read for itself.
+ * Snapshot the view fields the backend cannot read for itself.
  *
- * Without this `Calcula.getZoom()` answered 1.0 on a 150%-zoomed workbook and
+ * Without this `Calcula.getZoom()` answered 100 on a 150%-zoomed workbook and
  * `getViewMode()` always said "normal" — getters that lie. Returns undefined
  * when the grid is not mounted (a background window), so the request simply
  * omits them and the engine defaults stand.
@@ -599,8 +638,10 @@ export function currentHostViewState(): HostViewState | undefined {
   return {
     displayZeros: state.displayZeros,
     viewMode: state.viewMode,
-    zoom: state.zoom,
+    // Core state stores the render FACTOR; the script surface speaks percent.
+    zoom: state.zoom * 100,
     displayHeadings: state.displayHeadings,
+    displayFormulas: state.showFormulas,
   };
 }
 
