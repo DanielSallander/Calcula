@@ -19,6 +19,7 @@ import {
   vRangeFormat, vRangeFormatUnlocked, vRowColOp, vDimension, vFreeze,
   vNamedStyleApply, vNamedStyleCreate, vNamedStyleName,
   vAutoFitSpan, MAX_AUTOFIT_SPAN, vFillRange,
+  vHiddenSpan, vHiddenQuery, MAX_HIDDEN_SPAN,
   vCalculationMode, vRecalculate, vProtectSheet, vUnprotectSheet, vProtectionStatus,
   vSheetRename, vSheetVisibility, vSortRange, vFind, vReplace,
   vRemoveDuplicates, vTextToColumns, vSpecialCells, vGoalSeek,
@@ -294,6 +295,35 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "Size columns to fit their contents, exactly like double-clicking each column's resize handle" },
   "api.autoFitRows":       { tier: "unlocked", class: "mutate", validate: vAutoFitSpan, limits: { maxSpan: MAX_AUTOFIT_SPAN },
                              desc: "Size rows to fit their contents, exactly like double-clicking each row's resize handle" },
+  // HIDE / UNHIDE (VBA `Rows("5:10").Hidden = True`). Hiding a row IS a row
+  // format — Excel gates it with the same protection option as resizing one,
+  // and so does the Rust command behind these rows, which is why they sit at
+  // the same tier and carry no capability as setRowHeight/setColumnWidth.
+  // A hide changes which rows are SHOWN, never a value, and reaches nothing
+  // outside the document.
+  //
+  // ONE AUTHORITY, THREE SOURCES. What a script hides here is the USER-hidden
+  // set, which is INDEPENDENT of the sets a filter or an outline produces:
+  //
+  //     effectiveHidden(row) = userHidden OR filterHidden OR outlineHidden
+  //
+  // So a script unhiding a band does NOT resurrect a filter-hidden row, and
+  // clearing a filter does NOT un-hide what the script hid. The read rows
+  // return BOTH sets under distinct names rather than making the caller guess
+  // which one it got.
+  //
+  // ACTIVE SHEET ONLY for the setters (the backend commands take no sheet
+  // parameter), refused — never silently redirected — when a ref names another
+  // sheet. The READS answer for ANY sheet: they are the primitive behind "is
+  // row 5 of the Data sheet visible?", which must not need an activate-dance.
+  "api.setRowsHidden":     { tier: "unlocked", class: "mutate", validate: vHiddenSpan, limits: { maxSpan: MAX_HIDDEN_SPAN },
+                             desc: "Hide (or unhide) a band of rows on the active sheet — the same act as right-click ▸ Hide, in one undo step" },
+  "api.setColumnsHidden":  { tier: "unlocked", class: "mutate", validate: vHiddenSpan, limits: { maxSpan: MAX_HIDDEN_SPAN },
+                             desc: "Hide (or unhide) a band of columns on the active sheet — the same act as right-click ▸ Hide, in one undo step" },
+  "api.getHiddenRows":     { tier: "unlocked", class: "read",   validate: vHiddenQuery,
+                             desc: "List which rows are hidden on a sheet — separately: the ones hidden by hand, and the ones hidden by anything at all (hand, filter, or collapsed group)" },
+  "api.getHiddenColumns":  { tier: "unlocked", class: "read",   validate: vHiddenQuery,
+                             desc: "List which columns are hidden on a sheet — separately: the ones hidden by hand, and the ones hidden by anything at all (hand or collapsed group)" },
   "api.freezePanes":       { tier: "unlocked", class: "mutate", validate: vFreeze,   desc: "Freeze (or unfreeze) rows and columns so they stay on screen while scrolling" },
   // The other half of View ▸ Window, shipped one wave late (§6.6). Split is a
   // VIEW setting like freeze — it changes what is on screen, never a value —

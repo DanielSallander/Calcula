@@ -291,6 +291,15 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             merged_regions,
             freeze_row,
             freeze_col,
+            // Excel writes ONE `hidden="1"` bit with no provenance, and this
+            // reader imports no outline structure (`outlines: Vec::new()`
+            // below), so nothing in Calcula would re-derive these. Routing them
+            // into the USER set is the honest mapping and the only one that
+            // survives: `hidden_rows` is a derived cache the app rebuilds from
+            // filter+outline at every save, so an import that landed only there
+            // came back with every hidden row visible.
+            user_hidden_rows: hidden_rows.clone(),
+            user_hidden_cols: hidden_cols.clone(),
             hidden_rows,
             hidden_cols,
             tab_color,

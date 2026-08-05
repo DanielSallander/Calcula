@@ -22,12 +22,8 @@ import {
   setShowFormulas,
   setFreezeConfig,
   setSplitConfig,
-  setHiddenRows,
-  setHiddenCols,
-  setManuallyHiddenRows,
-  setManuallyHiddenCols,
-  setGroupHiddenRows,
-  setGroupHiddenCols,
+  hideRows,
+  hideColumns,
   setColumnWidth,
   setRowHeight,
   setActiveSheet,
@@ -163,12 +159,18 @@ export async function captureCurrentState(
     };
   }
 
+  // Capture the USER's by-hand hides only, not the effective union. A bookmark
+  // may not own the filter/outline sources: those are restored by their own
+  // authorities (the `autoFilter` dimension below re-applies the filter, which
+  // recomputes its hidden rows). Snapshotting the union and restoring it as a
+  // filter result used to strand rows in a state where they were hidden, could
+  // not be unhidden from the row header, and vanished on reload.
   if (dimensions.hiddenRows) {
-    snapshot.hiddenRows = setToArray(state.dimensions.hiddenRows);
+    snapshot.hiddenRows = setToArray(state.dimensions.manuallyHiddenRows);
   }
 
   if (dimensions.hiddenCols) {
-    snapshot.hiddenCols = setToArray(state.dimensions.hiddenCols);
+    snapshot.hiddenCols = setToArray(state.dimensions.manuallyHiddenCols);
   }
 
   if (dimensions.columnWidths) {
@@ -253,12 +255,28 @@ export async function restoreState(
     );
   }
 
+  // Restore the user's hides through the backend authority, as a DELTA against
+  // what is hidden now, so the bookmark both hides what it captured and reveals
+  // what it did not. Going through the authority is what makes the restored
+  // state persist, undo, and mark the document dirty.
   if (dimensions.hiddenRows && snapshot.hiddenRows) {
-    dispatchGridAction(setHiddenRows(snapshot.hiddenRows));
+    const target = new Set(snapshot.hiddenRows);
+    const current =
+      getGridStateSnapshot()?.dimensions.manuallyHiddenRows ?? new Set<number>();
+    const toShow = Array.from(current).filter((row) => !target.has(row));
+    const toHide = snapshot.hiddenRows.filter((row) => !current.has(row));
+    if (toShow.length > 0) await hideRows(toShow, false);
+    if (toHide.length > 0) await hideRows(toHide, true);
   }
 
   if (dimensions.hiddenCols && snapshot.hiddenCols) {
-    dispatchGridAction(setHiddenCols(snapshot.hiddenCols));
+    const target = new Set(snapshot.hiddenCols);
+    const current =
+      getGridStateSnapshot()?.dimensions.manuallyHiddenCols ?? new Set<number>();
+    const toShow = Array.from(current).filter((col) => !target.has(col));
+    const toHide = snapshot.hiddenCols.filter((col) => !current.has(col));
+    if (toShow.length > 0) await hideColumns(toShow, false);
+    if (toHide.length > 0) await hideColumns(toHide, true);
   }
 
   if (dimensions.columnWidths && snapshot.columnWidths) {

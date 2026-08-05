@@ -34,6 +34,27 @@ function logViewport(label: string, data: Record<string, unknown>): void {
 }
 
 /**
+ * Compose the EFFECTIVE hidden set from its independent sources.
+ *
+ *     effectiveHidden(index) = userHidden OR filterHidden OR outlineHidden
+ *
+ * The three sources never write into each other: clearing a filter leaves a
+ * hand-hidden row hidden, unhiding by hand does not resurrect a filter-hidden
+ * row, and expanding an outline group does not clear a user hide. Every hidden
+ * reducer case goes through this one helper so the rule cannot drift per case.
+ */
+export function composeHidden(
+  ...sources: (ReadonlySet<number> | undefined)[]
+): Set<number> {
+  const combined = new Set<number>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const index of source) combined.add(index);
+  }
+  return combined;
+}
+
+/**
  * Clamp a value between min and max bounds.
  */
 export function clamp(value: number, min: number, max: number): number {
@@ -1042,9 +1063,14 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SET_ALL_DIMENSIONS: {
+      // NON-DESTRUCTIVE. This fires on every sheet switch and every structural
+      // undo/redo; replacing the whole object (as it used to) silently dropped
+      // all six hidden sets, so a hide had a lifetime of "until you click
+      // another sheet tab". Sizes are the only thing this action owns.
       return {
         ...state,
         dimensions: {
+          ...state.dimensions,
           columnWidths: action.payload.columnWidths,
           rowHeights: action.payload.rowHeights,
         },
@@ -1103,101 +1129,113 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    // -----------------------------------------------------------------------
+    // Hidden rows/columns.
+    //
+    // THREE INDEPENDENT SOURCES, one derived union. Each action below owns
+    // exactly ONE source and recomputes `hiddenRows`/`hiddenCols` through
+    // composeHidden(); no action may write another source's set.
+    //   - filterHidden*  : AutoFilter / Advanced Filter (SET_HIDDEN_*)
+    //   - manuallyHidden*: the USER's hides, a mirror of the backend authority
+    //                      (SET_MANUALLY_HIDDEN_*, fed by core/lib/hiddenRowsCols)
+    //   - groupHidden*   : outline group collapse (SET_GROUP_HIDDEN_*)
+    // -----------------------------------------------------------------------
     case GRID_ACTIONS.SET_HIDDEN_ROWS: {
-      // Union filter-hidden rows with manually-hidden rows
       const filterHiddenRows = new Set(action.payload.rows);
-      const manuallyHidden = state.dimensions.manuallyHiddenRows ?? new Set<number>();
-      const combinedHidden = new Set([...filterHiddenRows, ...manuallyHidden]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
-          hiddenRows: combinedHidden,
+          filterHiddenRows,
+          hiddenRows: composeHidden(
+            filterHiddenRows,
+            state.dimensions.manuallyHiddenRows,
+            state.dimensions.groupHiddenRows
+          ),
         },
       };
     }
 
     case GRID_ACTIONS.SET_HIDDEN_COLS: {
-      const hiddenCols = new Set(action.payload.cols);
+      // Unions rather than replaces: this used to overwrite hiddenCols wholesale,
+      // so any dispatch (a view-bookmark restore) resurrected every hand-hidden
+      // column — and now that the user set is backend-owned, that would also put
+      // the mirror out of sync with the authority.
+      const filterHiddenCols = new Set(action.payload.cols);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
-          hiddenCols,
+          filterHiddenCols,
+          hiddenCols: composeHidden(
+            filterHiddenCols,
+            state.dimensions.manuallyHiddenCols,
+            state.dimensions.groupHiddenCols
+          ),
         },
       };
     }
 
     case GRID_ACTIONS.SET_MANUALLY_HIDDEN_ROWS: {
       const manuallyHiddenRows = new Set(action.payload.rows);
-      // Derive filter-hidden rows: old hiddenRows minus old manuallyHiddenRows minus old groupHiddenRows
-      const oldManual = state.dimensions.manuallyHiddenRows ?? new Set<number>();
-      const oldGroup = state.dimensions.groupHiddenRows ?? new Set<number>();
-      const oldHidden = state.dimensions.hiddenRows ?? new Set<number>();
-      const filterHidden = new Set<number>();
-      oldHidden.forEach((r) => {
-        if (!oldManual.has(r) && !oldGroup.has(r)) filterHidden.add(r);
-      });
-      // Recompute combined: filter + new manual + group
-      const hiddenRows = new Set([...filterHidden, ...manuallyHiddenRows, ...oldGroup]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
           manuallyHiddenRows,
-          hiddenRows,
+          hiddenRows: composeHidden(
+            state.dimensions.filterHiddenRows,
+            manuallyHiddenRows,
+            state.dimensions.groupHiddenRows
+          ),
         },
       };
     }
 
     case GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS: {
       const manuallyHiddenCols = new Set(action.payload.cols);
-      // hiddenCols = manuallyHiddenCols ∪ groupHiddenCols
-      const groupHiddenColsForManual = state.dimensions.groupHiddenCols ?? new Set<number>();
-      const hiddenColsForManual = new Set([...manuallyHiddenCols, ...groupHiddenColsForManual]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
           manuallyHiddenCols,
-          hiddenCols: hiddenColsForManual,
+          hiddenCols: composeHidden(
+            state.dimensions.filterHiddenCols,
+            manuallyHiddenCols,
+            state.dimensions.groupHiddenCols
+          ),
         },
       };
     }
 
     case GRID_ACTIONS.SET_GROUP_HIDDEN_ROWS: {
       const groupHiddenRows = new Set(action.payload.rows);
-      // Combined hiddenRows = filterHidden ∪ manuallyHidden ∪ groupHidden
-      // Derive filter-hidden: old hiddenRows minus old manuallyHiddenRows minus old groupHiddenRows
-      const oldManualRows = state.dimensions.manuallyHiddenRows ?? new Set<number>();
-      const oldGroupRows = state.dimensions.groupHiddenRows ?? new Set<number>();
-      const oldHiddenRows = state.dimensions.hiddenRows ?? new Set<number>();
-      const filterHiddenRows = new Set<number>();
-      oldHiddenRows.forEach((r) => {
-        if (!oldManualRows.has(r) && !oldGroupRows.has(r)) filterHiddenRows.add(r);
-      });
-      const combinedHiddenRows = new Set([...filterHiddenRows, ...oldManualRows, ...groupHiddenRows]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
           groupHiddenRows,
-          hiddenRows: combinedHiddenRows,
+          hiddenRows: composeHidden(
+            state.dimensions.filterHiddenRows,
+            state.dimensions.manuallyHiddenRows,
+            groupHiddenRows
+          ),
         },
       };
     }
 
     case GRID_ACTIONS.SET_GROUP_HIDDEN_COLS: {
       const groupHiddenCols = new Set(action.payload.cols);
-      // hiddenCols = manuallyHiddenCols ∪ groupHiddenCols
-      const manualColsForGroup = state.dimensions.manuallyHiddenCols ?? new Set<number>();
-      const hiddenColsForGroup = new Set([...manualColsForGroup, ...groupHiddenCols]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
           groupHiddenCols,
-          hiddenCols: hiddenColsForGroup,
+          hiddenCols: composeHidden(
+            state.dimensions.filterHiddenCols,
+            state.dimensions.manuallyHiddenCols,
+            groupHiddenCols
+          ),
         },
       };
     }

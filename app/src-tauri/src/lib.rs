@@ -228,6 +228,23 @@ pub struct AppState {
     pub all_column_widths: Mutex<Vec<HashMap<u32, f64>>>,
     /// Per-sheet row heights storage (indexed by sheet index)
     pub all_row_heights: Mutex<Vec<HashMap<u32, f64>>>,
+    /// Rows the USER hid by hand on the currently active sheet (swapped on
+    /// sheet switch, exactly like `row_heights`).
+    ///
+    /// Named `user_hidden` and NOT `hidden` on purpose: `Sheet::hidden_rows` in
+    /// the persistence crate is a DERIVED cache rebuilt at every save from the
+    /// filter + outline authorities. This is a third, independent authority —
+    /// the only hidden-ness with nowhere else to live — and the composition
+    /// rule is a union, never an overwrite:
+    ///   effectiveHidden(row) = userHidden OR filterHidden OR outlineHidden
+    /// (see `commands::nav::collect_hidden_rows_for_sheet`).
+    pub user_hidden_rows: Mutex<HashSet<u32>>,
+    /// Columns the user hid by hand on the active sheet (see `user_hidden_rows`).
+    pub user_hidden_cols: Mutex<HashSet<u32>>,
+    /// Per-sheet user-hidden rows storage (indexed by sheet index)
+    pub all_user_hidden_rows: Mutex<Vec<HashSet<u32>>>,
+    /// Per-sheet user-hidden columns storage (indexed by sheet index)
+    pub all_user_hidden_cols: Mutex<Vec<HashSet<u32>>>,
     /// Default row height for rows without custom heights (pixels)
     pub default_row_height: Mutex<f64>,
     /// Default column width for columns without custom widths (pixels)
@@ -468,6 +485,10 @@ pub fn create_app_state() -> AppState {
         row_heights: Mutex::new(HashMap::new()),
         all_column_widths: Mutex::new(vec![HashMap::new()]),
         all_row_heights: Mutex::new(vec![HashMap::new()]),
+        user_hidden_rows: Mutex::new(HashSet::new()),
+        user_hidden_cols: Mutex::new(HashSet::new()),
+        all_user_hidden_rows: Mutex::new(vec![HashSet::new()]),
+        all_user_hidden_cols: Mutex::new(vec![HashSet::new()]),
         default_row_height: Mutex::new(20.0), // Excel default: Calibri 11 => 15pt = 20px
         default_column_width: Mutex::new(64.29), // Excel default: 8.47 chars => 8.47*7+5 = 64.29px
         dependents: Mutex::new(DependencyMap::default()),
@@ -4365,6 +4386,12 @@ pub fn run() {
             commands::set_row_height,
             commands::get_row_height,
             commands::get_all_row_heights,
+            commands::set_rows_hidden,
+            commands::set_cols_hidden,
+            commands::get_user_hidden_rows,
+            commands::get_user_hidden_cols,
+            commands::get_hidden_rows_info,
+            commands::get_hidden_cols_info,
             commands::get_default_dimensions,
             commands::set_default_row_height,
             commands::set_default_column_width,

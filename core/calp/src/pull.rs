@@ -370,6 +370,8 @@ pub fn pull(
             freeze_col: metadata.freeze_col,
             hidden_rows: metadata.hidden_rows,
             hidden_cols: metadata.hidden_cols,
+            user_hidden_rows: metadata.user_hidden_rows,
+            user_hidden_cols: metadata.user_hidden_cols,
             tab_color: metadata.tab_color,
             visibility: metadata.visibility,
             notes: metadata.notes,

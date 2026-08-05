@@ -809,10 +809,11 @@ export interface SpecialCellsResult {
 /**
  * Excel's Range.SpecialCells / Go To Special, resolved server-side.
  *
- * "visible" is the backend-only kind: it consults the authoritative hidden-row
- * state (AutoFilter criteria, advanced filter, collapsed outline groups) and
- * outline-hidden columns. The rect (inclusive, normalized) is clamped to the
- * sheet's used range. `sheetIndex` defaults to the active sheet.
+ * "visible" is the backend-only kind: it consults the authoritative hidden
+ * state for ANY sheet -- rows/columns hidden BY HAND, AutoFilter criteria, an
+ * applied advanced filter, and collapsed outline groups, composed by
+ * `collect_hidden_rows_for_sheet`. The rect (inclusive, normalized) is clamped
+ * to the sheet's used range. `sheetIndex` defaults to the active sheet.
  */
 export async function getSpecialCells(
   startRow: number,
@@ -860,6 +861,66 @@ export async function getRowHeight(row: number): Promise<number | null> {
 
 export async function getAllRowHeights(): Promise<DimensionData[]> {
   return invoke<DimensionData[]>("get_all_row_heights");
+}
+
+/**
+ * Hide or unhide ROWS on the active sheet. Returns the resulting user-hidden
+ * row set, ascending.
+ *
+ * This is the USER-hide authority, and it is deliberately separate from the
+ * hidden sets a filter or an outline produces:
+ *
+ *     effectiveHidden(row) = userHidden OR filterHidden OR outlineHidden
+ *
+ * So clearing a filter leaves a hand-hidden row hidden, and unhiding by hand
+ * does not resurrect a filter-hidden row. Range-taking so a 500-row "Hide" is
+ * one IPC call and one undo step; it is undoable and marks the document dirty.
+ */
+export async function setRowsHidden(rows: number[], hidden: boolean): Promise<number[]> {
+  return invoke<number[]>("set_rows_hidden", { rows, hidden });
+}
+
+/** Hide or unhide COLUMNS on the active sheet (see {@link setRowsHidden}). */
+export async function setColsHidden(cols: number[], hidden: boolean): Promise<number[]> {
+  return invoke<number[]>("set_cols_hidden", { cols, hidden });
+}
+
+/** Rows the user hid by hand on the active sheet, ascending. */
+export async function getUserHiddenRows(): Promise<number[]> {
+  return invoke<number[]>("get_user_hidden_rows");
+}
+
+/** Columns the user hid by hand on the active sheet, ascending. */
+export async function getUserHiddenCols(): Promise<number[]> {
+  return invoke<number[]>("get_user_hidden_cols");
+}
+
+/**
+ * Which rows (or columns) are hidden on ONE sheet, split by authority --
+ * mirrors Rust `HiddenLinesInfo`.
+ *
+ * Two different questions, deliberately not conflated:
+ *   - `user`      -- what was hidden BY HAND ("what did I hide?")
+ *   - `effective` -- hidden by ANY authority: user OR filter OR outline
+ *                    ("is this row visible?")
+ *
+ * `user` is always a subset of `effective`; both are ascending.
+ */
+export interface HiddenLinesInfo {
+  user: number[];
+  effective: number[];
+}
+
+/** Hidden ROWS on `sheetIndex` (the active sheet by default), split into the
+ *  by-hand set and the effective union. Works for ANY sheet. */
+export async function getHiddenRowsInfo(sheetIndex?: number): Promise<HiddenLinesInfo> {
+  return invoke<HiddenLinesInfo>("get_hidden_rows_info", { sheetIndex });
+}
+
+/** Hidden COLUMNS on `sheetIndex` (see {@link getHiddenRowsInfo}). There are no
+ *  column filters, so `effective` here is user OR outline. */
+export async function getHiddenColsInfo(sheetIndex?: number): Promise<HiddenLinesInfo> {
+  return invoke<HiddenLinesInfo>("get_hidden_cols_info", { sheetIndex });
 }
 
 export async function getDefaultDimensions(): Promise<DefaultDimensions> {
@@ -1577,6 +1638,10 @@ export interface UndoResult {
   /** Object state restored (charts, sparklines, tables, autofilters,
    *  validation, named ranges, freeze panes) — stores must refresh. */
   objectsChanged: boolean;
+  /** User-hidden rows/columns restored (a hide/unhide undo, or the coordinate
+   *  shift a structural undo reverses). Re-read getUserHiddenRows/Cols:
+   *  nothing in updatedCells reveals that a row's visibility changed. */
+  hiddenChanged: boolean;
 }
 
 /**

@@ -316,15 +316,28 @@ pub fn go_to_special(
 /// row IPC payload; `truncated: true` says the cap dropped something.
 pub const SPECIAL_CELLS_CAP: usize = 100_000;
 
-/// Union of every backend authority that can hide a ROW on `sheet_index`:
-/// AutoFilter criteria, an applied advanced filter, and collapsed outline
-/// (grouping) rows. Manual hide/unhide lives in frontend Core state only and
-/// is deliberately NOT consulted here — the backend answers with what IT owns.
+/// Union of every authority that can hide a ROW on `sheet_index`: AutoFilter
+/// criteria, an applied advanced filter, collapsed outline (grouping) rows, and
+/// the rows the USER hid by hand.
+///
+/// THIS IS THE COMPOSITION RULE, and it is a union of independent sources:
+///
+///     effectiveHidden(row) = userHidden OR filterHidden OR outlineHidden
+///
+/// No source ever writes another's set. That is what makes "clear the filter"
+/// leave a hand-hidden row hidden, and "Unhide" on a selection leave a
+/// filter-hidden row hidden. (User hide used to live in frontend Core state
+/// only and was deliberately excluded here; it is now backend state like the
+/// other three, so every consumer of "visible" agrees.)
 pub(crate) fn collect_hidden_rows_for_sheet(
     state: &AppState,
     sheet_index: usize,
 ) -> std::collections::HashSet<u32> {
     let mut hidden: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    hidden.extend(
+        crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index)
+            .into_iter(),
+    );
     {
         let auto_filters = state.auto_filters.lock().unwrap();
         if let Some(af) = auto_filters.get(&sheet_index) {
@@ -346,17 +359,19 @@ pub(crate) fn collect_hidden_rows_for_sheet(
     hidden
 }
 
-/// Columns hidden on `sheet_index` by collapsed outline groups (the only
-/// backend authority that hides columns).
+/// Columns hidden on `sheet_index`: collapsed outline groups, plus the columns
+/// the USER hid by hand. Same union rule as `collect_hidden_rows_for_sheet`
+/// (there are no column filters, so those two are the whole set).
 pub(crate) fn collect_hidden_cols_for_sheet(
     state: &AppState,
     sheet_index: usize,
 ) -> std::collections::HashSet<u32> {
+    let mut hidden = crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
     let outlines = state.outlines.lock().unwrap();
-    outlines
-        .get(&sheet_index)
-        .map(|o| o.get_hidden_cols())
-        .unwrap_or_default()
+    if let Some(o) = outlines.get(&sheet_index) {
+        hidden.extend(o.get_hidden_cols());
+    }
+    hidden
 }
 
 /// Pure selector behind get_special_cells: pick the cells of `kind` inside the

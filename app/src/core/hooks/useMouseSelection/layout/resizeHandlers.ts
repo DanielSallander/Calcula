@@ -270,10 +270,10 @@ export function createResizeHandlers(deps: ResizeDependencies): ResizeHandlers {
           } else {
             colsToHide.push(index);
           }
-          // Reset width back to default before hiding (hiding is via manuallyHiddenCols)
-          if (onColumnResize) {
-            onColumnResize(index, config.defaultCellWidth);
-          }
+          // The hide handler also resets the dragged-to-nothing width, so the
+          // whole gesture is ONE undo step. Resetting it here (a second backend
+          // write, outside the handler's transaction) split "hide by drag" into
+          // two Ctrl+Z presses.
           if (onHideColumns) {
             onHideColumns(colsToHide);
           }
@@ -298,10 +298,8 @@ export function createResizeHandlers(deps: ResizeDependencies): ResizeHandlers {
           } else {
             rowsToHide.push(index);
           }
-          // Reset height back to default before hiding
-          if (onRowResize) {
-            onRowResize(index, config.defaultCellHeight);
-          }
+          // See the column branch: the hide handler resets the height too, so
+          // the gesture stays a single undo step.
           if (onHideRows) {
             onHideRows(rowsToHide);
           }

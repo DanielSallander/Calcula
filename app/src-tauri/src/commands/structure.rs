@@ -3367,7 +3367,7 @@ pub fn relocate_cell_references(
 ///
 /// Records ONE `obj_coord_stores` undo entry covering all four, since a single
 /// edit shifts them together and they should undo together.
-fn shift_misc_coordinate_stores(
+pub(crate) fn shift_misc_coordinate_stores(
     state: &AppState,
     undo_stack: &mut engine::UndoStack,
     sheet_index: usize,
@@ -3510,6 +3510,53 @@ fn shift_misc_coordinate_stores(
         before
     };
 
+    // --- User-hidden rows/cols: the SAME shape as the advanced-filter set
+    //     above (a set of indices on one axis), one axis per edit kind. An
+    //     unshifted hide points at the wrong row after an insert, which hides
+    //     data the user never asked to hide and reveals data they did. ---
+    let (prev_user_rows, prev_user_cols) = {
+        let mut rows_before: Option<Vec<u32>> = None;
+        let mut cols_before: Option<Vec<u32>> = None;
+        if row_edit {
+            let before = crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
+            if !before.is_empty() {
+                let mut sorted: Vec<u32> = before.iter().copied().collect();
+                sorted.sort_unstable();
+                let mut shifted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for r in before.iter().copied() {
+                    if let Some(n) = shift_index(r) {
+                        if n != r { changed = true; }
+                        shifted.insert(n);
+                    } else {
+                        changed = true;
+                    }
+                }
+                let cols = crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
+                crate::commands::dimensions::set_user_hidden_for_sheet(state, sheet_index, shifted, cols);
+                rows_before = Some(sorted);
+            }
+        } else {
+            let before = crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
+            if !before.is_empty() {
+                let mut sorted: Vec<u32> = before.iter().copied().collect();
+                sorted.sort_unstable();
+                let mut shifted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for c in before.iter().copied() {
+                    if let Some(n) = shift_index(c) {
+                        if n != c { changed = true; }
+                        shifted.insert(n);
+                    } else {
+                        changed = true;
+                    }
+                }
+                let rows = crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
+                crate::commands::dimensions::set_user_hidden_for_sheet(state, sheet_index, rows, shifted);
+                cols_before = Some(sorted);
+            }
+        }
+        (rows_before, cols_before)
+    };
+
     if changed {
         undo_stack.record_custom_restore(
             "obj_coord_stores".to_string(),
@@ -3518,6 +3565,19 @@ fn shift_misc_coordinate_stores(
             ),
             "Shift positional stores",
         );
+        // Recorded as its OWN change (not folded into obj_coord_stores) because
+        // the user-hidden restore is INLINE while obj_coord_stores is deferred,
+        // and because it must set `hidden_changed` so the frontend re-reads.
+        // Both land in the same open transaction, so they still undo together.
+        if prev_user_rows.is_some() || prev_user_cols.is_some() {
+            undo_stack.record_custom_restore(
+                crate::undo_commands::USER_HIDDEN_RESTORE_KIND.to_string(),
+                crate::undo_commands::user_hidden_snapshot_bytes(
+                    sheet_index, prev_user_rows, prev_user_cols,
+                ),
+                "Shift hidden rows/columns",
+            );
+        }
     }
 }
 

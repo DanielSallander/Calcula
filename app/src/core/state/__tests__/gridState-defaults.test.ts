@@ -125,6 +125,8 @@ describe("getInitialState - dimensions empty", () => {
     const { dimensions } = getInitialState();
     expect(dimensions.hiddenRows.size).toBe(0);
     expect(dimensions.hiddenCols.size).toBe(0);
+    expect(dimensions.filterHiddenRows.size).toBe(0);
+    expect(dimensions.filterHiddenCols.size).toBe(0);
     expect(dimensions.manuallyHiddenRows.size).toBe(0);
     expect(dimensions.manuallyHiddenCols.size).toBe(0);
     expect(dimensions.groupHiddenRows.size).toBe(0);

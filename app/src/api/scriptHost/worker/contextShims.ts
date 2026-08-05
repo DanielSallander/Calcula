@@ -28,6 +28,8 @@ import {
   type EdgeDirection,
   type FillCount,
   type GoalSeekOutcome,
+  type HiddenLinesAnswer,
+  type HiddenLinesCount,
   type RangeGroupResult,
   type RangeTransport,
   type RegionResult,
@@ -1724,6 +1726,19 @@ function makeWorkbookTransport(rt: WorkerRuntime): WorkbookTransport {
       call(rt, "api.groupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
     ungroupRows: (sheet, startRow, endRow) =>
       call(rt, "api.ungroupRows", [startRow, endRow, sheet]) as Promise<RangeGroupResult>,
+    // Hide/unhide sugar for range.setRowsHidden()/setColumnsHidden(). ACTIVE
+    // SHEET only (asserted host-side); the answer is the sheet's USER-hidden
+    // set afterwards, never the effective union.
+    setRowsHidden: (sheet, startRow, endRow, hidden) =>
+      call(rt, "api.setRowsHidden", [startRow, endRow, hidden, sheet]) as
+        Promise<HiddenLinesCount>,
+    setColumnsHidden: (sheet, startCol, endCol, hidden) =>
+      call(rt, "api.setColumnsHidden", [startCol, endCol, hidden, sheet]) as
+        Promise<HiddenLinesCount>,
+    getHiddenRows: (sheet) =>
+      call(rt, "api.getHiddenRows", [sheet]) as Promise<HiddenLinesAnswer>,
+    getHiddenColumns: (sheet) =>
+      call(rt, "api.getHiddenColumns", [sheet]) as Promise<HiddenLinesAnswer>,
   };
 }
 
@@ -2190,6 +2205,21 @@ function buildUnlockedShim(rt: WorkerRuntime): Record<string, unknown> {
       call(rt, "api.autoFitColumns", [startCol, endCol, sheet]) as Promise<FillCount>,
     autoFitRows: (startRow: number, endRow: number, sheet?: SheetRef) =>
       call(rt, "api.autoFitRows", [startRow, endRow, sheet]) as Promise<FillCount>,
+    // ---- Hide / unhide (VBA Rows("5:10").Hidden = True) ----
+    // The SETTERS are ACTIVE SHEET only (the backend commands take no sheet
+    // parameter) and refuse — never redirect — a ref naming another sheet.
+    // The READS answer for ANY sheet, and answer BOTH questions under distinct
+    // names: `user` is what was hidden by hand, `effective` is hidden by
+    // anything at all (hand OR filter OR collapsed group).
+    setRowsHidden: (startRow: number, endRow: number, hidden: boolean, sheet?: SheetRef) =>
+      call(rt, "api.setRowsHidden", [startRow, endRow, hidden, sheet]) as Promise<HiddenLinesCount>,
+    setColumnsHidden: (startCol: number, endCol: number, hidden: boolean, sheet?: SheetRef) =>
+      call(rt, "api.setColumnsHidden", [startCol, endCol, hidden, sheet]) as
+        Promise<HiddenLinesCount>,
+    getHiddenRows: (sheet?: SheetRef) =>
+      call(rt, "api.getHiddenRows", [sheet]) as Promise<HiddenLinesAnswer>,
+    getHiddenColumns: (sheet?: SheetRef) =>
+      call(rt, "api.getHiddenColumns", [sheet]) as Promise<HiddenLinesAnswer>,
     freezePanes: (freezeRow: number | null, freezeCol: number | null) =>
       call(rt, "api.freezePanes", [freezeRow, freezeCol]),
     /** The other half of View ▸ Window (G4): scrollable panes, not frozen ones. */

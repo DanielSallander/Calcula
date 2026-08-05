@@ -62,9 +62,20 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let max_row = grid.max_row;
     let max_col = grid.max_col;
 
+    // Hidden rows/columns must not print. The print renderer builds its own
+    // layout from PrintData, so it never sees the frontend's zero-size hiding
+    // trick — before this, printing a filtered table printed the filtered-out
+    // rows, and printing a sheet with hand-hidden rows printed those too.
+    // Same authority the rest of the app asks (filter + outline + user hide).
+    let hidden_rows = crate::commands::nav::collect_hidden_rows_for_sheet(&state, active_sheet);
+    let hidden_cols = crate::commands::nav::collect_hidden_cols_for_sheet(&state, active_sheet);
+
     // Collect all cells with display values
     let mut cells = Vec::new();
     for (&(row, col), cell) in &grid.cells {
+        if hidden_rows.contains(&row) || hidden_cols.contains(&col) {
+            continue;
+        }
         // Printed appearance honours the row/column style tiers.
         let effective_style_index = grid.effective_style_index(row, col);
         let style = styles.get(effective_style_index);
@@ -111,14 +122,25 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     }
 
     // Collect column widths and row heights as arrays
+    // A hidden row/column contributes ZERO size, mirroring how the on-screen
+    // renderer hides it (`gridRenderer/layout/dimensions.ts` returns 0). The
+    // arrays stay dense so every index still means the same row/column.
     let mut col_widths = Vec::with_capacity((max_col + 1) as usize);
     for c in 0..=max_col {
-        col_widths.push(*col_widths_map.get(&c).unwrap_or(&100.0));
+        col_widths.push(if hidden_cols.contains(&c) {
+            0.0
+        } else {
+            *col_widths_map.get(&c).unwrap_or(&100.0)
+        });
     }
 
     let mut row_heights = Vec::with_capacity((max_row + 1) as usize);
     for r in 0..=max_row {
-        row_heights.push(*row_heights_map.get(&r).unwrap_or(&24.0));
+        row_heights.push(if hidden_rows.contains(&r) {
+            0.0
+        } else {
+            *row_heights_map.get(&r).unwrap_or(&24.0)
+        });
     }
 
     // Collect merged regions

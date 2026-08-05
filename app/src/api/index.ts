@@ -93,6 +93,12 @@ export {
   setGroupHiddenRows,
   setGroupHiddenCols,
   setZoom,
+  // Perform a USER hide/unhide. Prefer these over dispatching
+  // setManuallyHidden* by hand: the action creator only moves the frontend
+  // mirror, while these go through the backend authority, so the hide is
+  // persisted, undoable and marks the document dirty.
+  hideRows,
+  hideColumns,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";
@@ -188,6 +194,7 @@ export type {
   SpecialCellsKind,
   SpecialCellRef,
   SpecialCellsResult,
+  HiddenLinesInfo,
   SheetInfo,
   SheetVisibility,
   SheetsResult,

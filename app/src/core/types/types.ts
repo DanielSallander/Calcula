@@ -94,13 +94,37 @@ export interface DimensionOverrides {
   columnWidths: Map<number, number>;
   /** Custom row heights (row index -> height) */
   rowHeights: Map<number, number>;
-  /** Combined set of all hidden row indices (filter + manual + group) */
+  /**
+   * EFFECTIVE hidden rows — the precomputed union of the three INDEPENDENT
+   * sources below. Renderers, scroll math and navigation read ONLY this; they
+   * must not care why a row is hidden. Recomputed by the reducer whenever any
+   * source changes; never assigned directly.
+   */
   hiddenRows?: Set<number>;
-  /** Combined set of all hidden column indices (manual + group) */
+  /** EFFECTIVE hidden columns — union of the three column sources below. */
   hiddenCols?: Set<number>;
-  /** Rows hidden by user action (distinct from filter-hidden and group-hidden) */
+  /**
+   * Rows hidden by a filter (AutoFilter / Advanced Filter). Held explicitly
+   * rather than reconstructed by subtracting the other sets: a row that is BOTH
+   * filter-hidden and hand-hidden would otherwise lose its filter attribution,
+   * so unhiding it by hand would resurrect a row the filter is hiding.
+   */
+  filterHiddenRows?: Set<number>;
+  /**
+   * Columns hidden by a source that is neither a user hide nor an outline
+   * collapse (today: a restored view bookmark). Same reasoning as
+   * filterHiddenRows.
+   */
+  filterHiddenCols?: Set<number>;
+  /**
+   * Rows the USER hid by hand (right-click Hide, or dragging the header edge
+   * to zero). This is a MIRROR of the backend authority (`user_hidden_rows` on
+   * the active sheet) — never the source of truth. Write it only by dispatching
+   * the result of a set_rows_hidden call or a getUserHiddenRows re-read; see
+   * core/lib/hiddenRowsCols.ts.
+   */
   manuallyHiddenRows?: Set<number>;
-  /** Columns hidden by user action */
+  /** Columns the USER hid by hand — mirror of backend `user_hidden_cols`. */
   manuallyHiddenCols?: Set<number>;
   /** Rows hidden by outline group collapse */
   groupHiddenRows?: Set<number>;
@@ -117,6 +141,8 @@ export function createEmptyDimensionOverrides(): DimensionOverrides {
     rowHeights: new Map(),
     hiddenRows: new Set(),
     hiddenCols: new Set(),
+    filterHiddenRows: new Set(),
+    filterHiddenCols: new Set(),
     manuallyHiddenRows: new Set(),
     manuallyHiddenCols: new Set(),
     groupHiddenRows: new Set(),

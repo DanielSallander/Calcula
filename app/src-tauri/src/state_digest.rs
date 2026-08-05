@@ -66,6 +66,12 @@ pub struct SheetDigest {
     pub freeze_col: Option<u32>,
     pub col_widths: BTreeMap<u32, f64>,
     pub row_heights: BTreeMap<u32, f64>,
+    /// Rows/columns the user hid by hand, ascending. In the digest because the
+    /// save/reload oracle was structurally blind to them: hiding a row produced
+    /// an identical digest before and after a round-trip, which is exactly how
+    /// the hide-is-never-persisted bug stayed green.
+    pub user_hidden_rows: Vec<u32>,
+    pub user_hidden_cols: Vec<u32>,
     /// Row/column style tiers (`Grid.row_styles` / `Grid.column_styles`).
     /// Without these the round-trip oracles were structurally blind to tier
     /// loss — a whole-column lock or format change produced an identical
@@ -264,6 +270,8 @@ pub fn get_workbook_state_digest(
                     freeze_col: None,
                     col_widths: BTreeMap::new(),
                     row_heights: BTreeMap::new(),
+                    user_hidden_rows: Vec::new(),
+                    user_hidden_cols: Vec::new(),
                     row_styles: BTreeMap::new(),
                     column_styles: BTreeMap::new(),
                     tab_color: String::new(),
@@ -323,6 +331,17 @@ pub fn get_workbook_state_digest(
                     .or_insert_with(|| to_value_or_null(&styles.get(idx)));
             }
 
+            let mut user_hidden_rows: Vec<u32> =
+                crate::commands::dimensions::user_hidden_rows_for_sheet(&state, i)
+                    .into_iter()
+                    .collect();
+            user_hidden_rows.sort_unstable();
+            let mut user_hidden_cols: Vec<u32> =
+                crate::commands::dimensions::user_hidden_cols_for_sheet(&state, i)
+                    .into_iter()
+                    .collect();
+            user_hidden_cols.sort_unstable();
+
             let fc = freeze_configs.get(i);
             sheets.push(SheetDigest {
                 name: sheet_names.get(i).cloned().unwrap_or_default(),
@@ -332,6 +351,8 @@ pub fn get_workbook_state_digest(
                 freeze_col: fc.and_then(|f| f.freeze_col),
                 col_widths,
                 row_heights,
+                user_hidden_rows,
+                user_hidden_cols,
                 row_styles,
                 column_styles,
                 tab_color: tab_colors.get(i).cloned().unwrap_or_default(),

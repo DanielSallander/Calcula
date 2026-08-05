@@ -1387,6 +1387,20 @@ fn materialize_pulled_sheet_state(
         }
     }
     {
+        // User-hidden rows/cols ride along with the rest of the sheet's
+        // presentation state. The package carries them as their own authority
+        // (PublishedSheetMetadata.user_hidden_*), so a subscriber can unhide by
+        // hand what the publisher hid by hand.
+        for (idx, p) in &targets {
+            crate::commands::dimensions::set_user_hidden_for_sheet(
+                state,
+                *idx,
+                p.user_hidden_rows.clone(),
+                p.user_hidden_cols.clone(),
+            );
+        }
+    }
+    {
         let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
         for (idx, p) in &targets {
             ensure_slot(&mut all_merged, *idx, std::collections::HashSet::new());

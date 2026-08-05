@@ -49,6 +49,12 @@ pub struct UndoResult {
     /// autofilters, validation, named ranges, freeze panes) — frontend
     /// should refresh the corresponding stores.
     pub objects_changed: bool,
+    /// Whether the USER-hidden row/column sets were restored (a hide/unhide
+    /// undo, or the coordinate shift a structural undo reverses). The frontend
+    /// must re-read `get_user_hidden_rows` / `get_user_hidden_cols`: unlike a
+    /// cell edit, nothing in `updated_cells` reveals that a row's visibility
+    /// changed.
+    pub hidden_changed: bool,
 }
 
 /// Get current undo/redo state
@@ -261,6 +267,7 @@ fn apply_changes(
     let mut ribbon_filter_changed = false;
     let mut pane_control_changed = false;
     let mut objects_changed = false;
+    let mut hidden_changed = false;
     // True when an off-active-sheet script/AI write was undone/redone — drives a
     // post-restore active-sheet recalc (see the deferred-restore loop below).
     let mut script_cells_restored = false;
@@ -474,7 +481,7 @@ fn apply_changes(
                             spec.change_class,
                             &mut pivot_changed, &mut slicer_changed,
                             &mut ribbon_filter_changed, &mut pane_control_changed,
-                            &mut objects_changed,
+                            &mut objects_changed, &mut hidden_changed,
                         );
                     }
                     None => eprintln!("[undo] Unknown custom restore kind: {}", kind),
@@ -513,7 +520,7 @@ fn apply_changes(
                     spec.change_class,
                     &mut pivot_changed, &mut slicer_changed,
                     &mut ribbon_filter_changed, &mut pane_control_changed,
-                    &mut objects_changed,
+                    &mut objects_changed, &mut hidden_changed,
                 );
                 if kind == "script_grid_cells"
                     || kind == "sheet_merge_regions"
@@ -583,6 +590,7 @@ fn apply_changes(
         ribbon_filter_changed,
         pane_control_changed,
         objects_changed,
+        hidden_changed,
     }
 }
 
@@ -596,6 +604,8 @@ enum CustomRestoreKind {
     /// Pane controls (Controls pane) — drives `pane_control_changed`.
     PaneControl,
     Objects,
+    /// User-hidden rows/columns — drives `hidden_changed`.
+    Hidden,
     Other,
 }
 
@@ -669,6 +679,7 @@ fn r_sheet_merge_regions(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: 
 fn r_sheet_structural(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_sheet_structural_restore(s, d, inv); }
 fn r_report_restore(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_report_restore(s, d, inv); }
 fn r_calp_reset(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_calp_reset_restore(s, d, inv); }
+fn r_user_hidden(s: &AppState, _p: &PivotState, _sl: &SlicerState, _rf: &RibbonFilterState, _pc: &PaneControlState, _k: &str, d: &[u8], inv: &mut Transaction) { apply_user_hidden_restore(s, d, inv); }
 
 /// The kind → spec table, built once.
 static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(|| {
@@ -726,6 +737,11 @@ static RESTORE_REGISTRY: Lazy<HashMap<&'static str, RestoreSpec>> = Lazy::new(||
     // override-layer swap for the reset sheets. Deferred (re-acquires grid
     // locks); tagged Objects so the frontend fires grid:refresh on undo/redo.
     m.insert("calp_reset", RestoreSpec { restore: r_calp_reset, change_class: Objects, defer: true });
+    // User hide/unhide of rows/columns. Inline: it touches only the
+    // user_hidden_* AppState sublocks, which nothing else holds while the grid
+    // locks are held. Its own change class so the frontend re-reads the hidden
+    // sets — no cell in `updated_cells` reveals a visibility change.
+    m.insert(USER_HIDDEN_RESTORE_KIND, RestoreSpec { restore: r_user_hidden, change_class: Hidden, defer: false });
     m
 });
 
@@ -742,6 +758,7 @@ fn set_restore_change_flag(
     ribbon_filter_changed: &mut bool,
     pane_control_changed: &mut bool,
     objects_changed: &mut bool,
+    hidden_changed: &mut bool,
 ) {
     match class {
         CustomRestoreKind::Pivot => *pivot_changed = true,
@@ -749,6 +766,7 @@ fn set_restore_change_flag(
         CustomRestoreKind::RibbonFilter => *ribbon_filter_changed = true,
         CustomRestoreKind::PaneControl => *pane_control_changed = true,
         CustomRestoreKind::Objects => *objects_changed = true,
+        CustomRestoreKind::Hidden => *hidden_changed = true,
         CustomRestoreKind::Other => {}
     }
 }
@@ -1510,6 +1528,7 @@ pub fn undo(
                     ribbon_filter_changed: false,
                     pane_control_changed: false,
                     objects_changed: false,
+                    hidden_changed: false,
                 };
             }
         }
@@ -1547,6 +1566,7 @@ pub fn redo(
                     ribbon_filter_changed: false,
                     pane_control_changed: false,
                     objects_changed: false,
+                    hidden_changed: false,
                 };
             }
         }
@@ -3267,6 +3287,9 @@ mod restore_registry_tests {
             ("obj_workbook_protection", true, CustomRestoreKind::Objects),
             ("report_restore", true, CustomRestoreKind::Objects),
             ("calp_reset", true, CustomRestoreKind::Objects),
+            // User hide/unhide: inline (only touches the user_hidden_* sublocks)
+            // and its own change class so the frontend re-reads the sets.
+            ("user_hidden", false, CustomRestoreKind::Hidden),
         ];
         for (kind, defer, class) in expected {
             let spec = restore_spec(kind).unwrap_or_else(|| panic!("missing restore kind: {kind}"));
@@ -3344,6 +3367,73 @@ pub(crate) fn coord_stores_snapshot_bytes(
         hidden_rows,
     })
     .unwrap_or_default()
+}
+
+/// CustomRestore `kind` for the user-hidden row/column sets.
+pub(crate) const USER_HIDDEN_RESTORE_KIND: &str = "user_hidden";
+
+/// Snapshot for the `"user_hidden"` CustomRestore — one sheet's hand-hidden
+/// row and/or column set BEFORE a hide/unhide (or a structural shift).
+///
+/// Whole-set rather than per-index deltas, for the same reason
+/// `obj_named_ranges` is whole-map: one gesture ("Hide" over a 500-row
+/// selection) touches many indices at once, the set is small, and a partial
+/// restore could leave the grid disagreeing with itself about which rows exist.
+/// `None` for an axis means "this change did not touch it" — restoring then
+/// leaves that axis alone rather than clearing it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UserHiddenSnapshot {
+    sheet_index: usize,
+    rows: Option<Vec<u32>>,
+    cols: Option<Vec<u32>>,
+}
+
+/// Serialized `"user_hidden"` snapshot bytes (in-open-transaction contract).
+pub(crate) fn user_hidden_snapshot_bytes(
+    sheet_index: usize,
+    rows: Option<Vec<u32>>,
+    cols: Option<Vec<u32>>,
+) -> Vec<u8> {
+    serde_json::to_vec(&UserHiddenSnapshot { sheet_index, rows, cols }).unwrap_or_default()
+}
+
+/// Restore one sheet's user-hidden sets, capturing the CURRENT sets as the
+/// inverse so redo re-applies the hide.
+pub(crate) fn apply_user_hidden_restore(state: &AppState, data: &[u8], inverse_transaction: &mut Transaction) {
+    let snap: UserHiddenSnapshot = match serde_json::from_slice(data) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[undo] bad user_hidden snapshot: {}", e);
+            return;
+        }
+    };
+    let idx = snap.sheet_index;
+    let cur_rows = snap.rows.as_ref().map(|rows| {
+        let mut current: Vec<u32> =
+            crate::commands::dimensions::user_hidden_rows_for_sheet(state, idx)
+                .into_iter()
+                .collect();
+        current.sort_unstable();
+        let restored: std::collections::HashSet<u32> = rows.iter().copied().collect();
+        let cols = crate::commands::dimensions::user_hidden_cols_for_sheet(state, idx);
+        crate::commands::dimensions::set_user_hidden_for_sheet(state, idx, restored, cols);
+        current
+    });
+    let cur_cols = snap.cols.as_ref().map(|cols| {
+        let mut current: Vec<u32> =
+            crate::commands::dimensions::user_hidden_cols_for_sheet(state, idx)
+                .into_iter()
+                .collect();
+        current.sort_unstable();
+        let restored: std::collections::HashSet<u32> = cols.iter().copied().collect();
+        let rows = crate::commands::dimensions::user_hidden_rows_for_sheet(state, idx);
+        crate::commands::dimensions::set_user_hidden_for_sheet(state, idx, rows, restored);
+        current
+    });
+    inverse_transaction.add_change(engine::undo::CellChange::CustomRestore {
+        kind: USER_HIDDEN_RESTORE_KIND.to_string(),
+        data: user_hidden_snapshot_bytes(idx, cur_rows, cur_cols),
+    });
 }
 
 /// Snapshot for the "obj_named_ranges" CustomRestore — the whole named-range

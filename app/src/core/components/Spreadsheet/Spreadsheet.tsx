@@ -6,7 +6,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport, updateConfig, setDisplayGridlines } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setZoom, setSplitConfig, setSplitViewport, updateConfig, setDisplayGridlines } from "../../state/gridActions";
+import { refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
@@ -275,6 +276,11 @@ function SpreadsheetContent({
         defaultCellWidth: defaults.defaultColumnWidth,
         defaultCellHeight: defaults.defaultRowHeight,
       }));
+      // The user-hidden sets are per-sheet in the backend and swap with the
+      // active sheet, so this re-read is what makes a hide survive a sheet
+      // switch and a file load. (It used to be frontend-only session state that
+      // this very function wiped on the way to the other sheet.)
+      await refreshUserHidden(dispatch);
       console.log("[Spreadsheet] Dimensions refreshed from backend");
     } catch (error) {
       console.error("[Spreadsheet] Failed to refresh dimensions:", error);
@@ -335,27 +341,11 @@ function SpreadsheetContent({
     };
   }, [refreshDimensions]);
 
-  // -------------------------------------------------------------------------
-  // Hide/Unhide Row/Column Listeners (from context menu)
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    const handleHideRows = (event: Event) => {
-      const { rows } = (event as CustomEvent<{ rows: number[] }>).detail;
-      dispatch(setManuallyHiddenRows(rows));
-    };
-    const handleHideCols = (event: Event) => {
-      const { cols } = (event as CustomEvent<{ cols: number[] }>).detail;
-      dispatch(setManuallyHiddenCols(cols));
-    };
-
-    window.addEventListener("grid:set-manually-hidden-rows", handleHideRows);
-    window.addEventListener("grid:set-manually-hidden-cols", handleHideCols);
-
-    return () => {
-      window.removeEventListener("grid:set-manually-hidden-rows", handleHideRows);
-      window.removeEventListener("grid:set-manually-hidden-cols", handleHideCols);
-    };
-  }, [dispatch]);
+  // NOTE: the "grid:set-manually-hidden-rows"/"-cols" window events are GONE.
+  // They wrote a hand-computed set straight into the reducer and nowhere else,
+  // which is exactly how hiding a row stayed invisible to the backend, to the
+  // file, and to undo. Hide/unhide now goes through core/lib/hiddenRowsCols,
+  // which calls the backend authority and dispatches its result.
 
   // -------------------------------------------------------------------------
   // Sheet Switch Listener (for normal sheet switching without page reload)

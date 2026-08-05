@@ -2542,6 +2542,34 @@ declare interface ScriptSheet {
   /** Size an inclusive row span to fit its contents on THIS sheet (empty rows
    *  reset to the default height). ACTIVE sheet only, like autoFitColumns. */
   autoFitRows(startRow: number, endRow: number): Promise<{ count: number }>;
+  /**
+   * Which rows are hidden on THIS sheet — ANY sheet, active or not, so
+   * "is row 5 of the Data sheet visible?" needs no activate-dance.
+   *
+   * Two different questions, kept apart by name:
+   *   - `user`      — hidden BY HAND (right-click ▸ Hide, or a script)
+   *   - `effective` — hidden by ANYTHING: by hand OR by a filter OR by a
+   *                   collapsed outline group
+   * `user` is always a subset of `effective`; both are ascending.
+   *
+   * ```js
+   * const { user, effective } = await sheet.getHiddenRows();
+   * const visible = !effective.includes(5);
+   * ```
+   */
+  getHiddenRows(): Promise<ScriptHiddenLines>;
+  /** Which columns are hidden on THIS sheet (see getHiddenRows). There are no
+   *  column filters, so `effective` is by hand OR collapsed outline group. */
+  getHiddenColumns(): Promise<ScriptHiddenLines>;
+}
+
+/** Which rows (or columns) are hidden on one sheet, split by authority.
+ *  `user` = hidden by hand; `effective` = hidden by anything at all (hand,
+ *  filter, or collapsed outline group). `user` is a subset of `effective`;
+ *  both are ascending. */
+declare interface ScriptHiddenLines {
+  user: number[];
+  effective: number[];
 }
 
 /** What `save()` / `saveAs()` resolve to. `saved: false` is the cancelled case
@@ -3123,6 +3151,55 @@ declare interface UnlockedAPI {
    *  sheet only, like autoFitColumns. Resolves to how many rows changed. */
   autoFitRows(startRow: number, endRow: number, sheet?: SheetRef): Promise<{ count: number }>;
 
+  // -- Hide / unhide rows and columns --
+  // VBA's `Rows("5:10").Hidden = True` / `Columns("C").Hidden = False`.
+  //
+  // ONE AUTHORITY, THREE SOURCES. What you hide here is the USER-hidden set,
+  // and it is INDEPENDENT of what a filter or a collapsed outline group hides:
+  //
+  //     hidden = byHand OR byFilter OR byCollapsedGroup
+  //
+  // So unhiding a band does NOT resurrect a filter-hidden row, and clearing a
+  // filter does NOT unhide what you hid. A hide is persisted with the
+  // workbook, marks it modified, is undoable as ONE step per call, and shifts
+  // correctly when rows or columns are inserted or deleted.
+
+  /**
+   * Hide (or unhide) an inclusive span of rows on the ACTIVE sheet, in one
+   * undo step. Resolves to the sheet's by-hand hidden rows afterwards.
+   *
+   * ```js
+   * await api.setRowsHidden(4, 9, true);    // hide rows 5..10 (0-based 4..9)
+   * await api.setRowsHidden(4, 9, false);   // and back
+   * ```
+   *
+   * ACTIVE sheet only — a sheet ref naming another one rejects rather than
+   * quietly hiding the wrong rows.
+   */
+  setRowsHidden(startRow: number, endRow: number, hidden: boolean, sheet?: SheetRef): Promise<{ hidden: number[] }>;
+  /** Hide (or unhide) an inclusive span of columns on the ACTIVE sheet.
+   *  Same rules and same answer shape as setRowsHidden. */
+  setColumnsHidden(startCol: number, endCol: number, hidden: boolean, sheet?: SheetRef): Promise<{ hidden: number[] }>;
+  /**
+   * Which rows are hidden — on ANY sheet (name or index), not just the active
+   * one. Two different questions, answered separately so nothing has to guess
+   * which one you meant:
+   *   - `user`      — hidden BY HAND (right-click ▸ Hide, or a script)
+   *   - `effective` — hidden by ANYTHING: by hand OR by a filter OR by a
+   *                   collapsed outline group
+   * `user` is always a subset of `effective`; both are ascending.
+   *
+   * ```js
+   * const rows = await api.getHiddenRows("Data");
+   * if (rows.effective.includes(5)) context.log("row 6 is not visible");
+   * if (rows.user.includes(5))      context.log("...and someone hid it by hand");
+   * ```
+   */
+  getHiddenRows(sheet?: SheetRef): Promise<ScriptHiddenLines>;
+  /** Which columns are hidden, on any sheet (see getHiddenRows). There are no
+   *  column filters, so `effective` is by hand OR collapsed outline group. */
+  getHiddenColumns(sheet?: SheetRef): Promise<ScriptHiddenLines>;
+
   // -- Data validation --
 
   /**
@@ -3544,12 +3621,11 @@ declare interface UnlockedAPI {
    * `Range.SpecialCells`), answered by the backend. COORDINATES ONLY, like the
    * other discovery rows.
    *
-   * `"visible"` consults the authoritative hidden state (AutoFilter criteria,
-   * advanced filter, collapsed outline groups, outline-hidden columns), plus —
-   * on the ACTIVE sheet — rows/columns the user hid by hand (right-click
-   * Hide, which lives in frontend grid state; a background sheet has no such
-   * state to consult). The primitive behind "copy only the visible cells
-   * after filtering":
+   * `"visible"` consults the authoritative hidden state of the sheet you name
+   * — ANY sheet, not just the active one: rows/columns hidden BY HAND,
+   * AutoFilter criteria, an applied advanced filter, and collapsed outline
+   * groups, composed as `byHand OR byFilter OR byCollapsedGroup`. The
+   * primitive behind "copy only the visible cells after filtering":
    *
    * ```js
    * const vis = await api.getSpecialCells(1, 0, 500, 4, "visible");
@@ -4282,6 +4358,25 @@ declare interface ScriptRange {
   group(): Promise<ScriptGroupResult>;
   /** Ungroup this range's ROWS (VBA `Range.Rows.Ungroup`). ACTIVE SHEET only. */
   ungroup(): Promise<ScriptGroupResult>;
+  /**
+   * Hide (or unhide) this range's ROWS — VBA `Range.EntireRow.Hidden = True`,
+   * i.e. right-click ▸ Hide, as ONE undo step:
+   *
+   * ```js
+   * await api.range("A5:A10").setRowsHidden(true);   // hide rows 5..10
+   * await api.range("A5:A10").setRowsHidden(false);  // and back
+   * ```
+   *
+   * This is the USER-hidden set, one of THREE independent authorities:
+   * `hidden = byHand OR byFilter OR byCollapsedGroup`. Unhiding here does NOT
+   * resurrect a row a filter is hiding, and clearing a filter does NOT unhide
+   * what you hid here. Resolves to the sheet's by-hand set afterwards.
+   * ACTIVE SHEET only.
+   */
+  setRowsHidden(hidden: boolean): Promise<{ hidden: number[] }>;
+  /** Hide (or unhide) this range's COLUMNS — VBA
+   *  `Range.EntireColumn.Hidden = True`. Same rules as setRowsHidden. */
+  setColumnsHidden(hidden: boolean): Promise<{ hidden: number[] }>;
 }
 
 /** Context for Sheet-level scripts (applies to all sheets). */

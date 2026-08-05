@@ -16,7 +16,7 @@ use crate::features::scheduled_jobs::{
 };
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
-    PENDING_RECALC_MIN_FORMAT_VERSION,
+    PENDING_RECALC_MIN_FORMAT_VERSION, USER_HIDDEN_MIN_FORMAT_VERSION,
     CALA_MAX_SUPPORTED_FORMAT_VERSION,
 };
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
@@ -110,6 +110,19 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     if workbook.pending_recalc.as_ref().is_some_and(|p| !p.cells.is_empty()) {
         manifest.features.push("pending_recalc".to_string());
         stamp_feature_format_version(&mut manifest, PENDING_RECALC_MIN_FORMAT_VERSION);
+    }
+    // User-hidden rows/columns: an authority that lives nowhere else, so an
+    // older reader would not merely ignore it — it would rebuild the effective
+    // hidden set from filter+outline on its next save and bring the user's
+    // hidden rows back VISIBLE. Stamped only when a sheet actually carries one,
+    // so ordinary workbooks stay openable by older builds.
+    if workbook
+        .sheets
+        .iter()
+        .any(|s| !s.user_hidden_rows.is_empty() || !s.user_hidden_cols.is_empty())
+    {
+        manifest.features.push("user_hidden".to_string());
+        stamp_feature_format_version(&mut manifest, USER_HIDDEN_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -531,6 +544,8 @@ pub fn read_calcula_bytes(bytes: &[u8]) -> Result<Workbook, FormatError> {
             freeze_col: None,
             hidden_rows: std::collections::HashSet::new(),
             hidden_cols: std::collections::HashSet::new(),
+            user_hidden_rows: std::collections::HashSet::new(),
+            user_hidden_cols: std::collections::HashSet::new(),
             tab_color: String::new(),
             visibility: "visible".to_string(),
             notes: Vec::new(),
@@ -1083,6 +1098,8 @@ mod tests {
             freeze_col: None,
             hidden_rows: std::collections::HashSet::new(),
             hidden_cols: std::collections::HashSet::new(),
+            user_hidden_rows: std::collections::HashSet::new(),
+            user_hidden_cols: std::collections::HashSet::new(),
             tab_color: String::new(),
             visibility: "visible".to_string(),
             notes: Vec::new(),
@@ -1471,6 +1488,53 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert!(manifest.format_version < PENDING_RECALC_MIN_FORMAT_VERSION);
         assert!(!manifest.features.iter().any(|f| f == "pending_recalc"));
+    }
+
+    /// The rows/columns the user hid BY HAND must survive a .cala round-trip,
+    /// separately from the derived filter/outline cache — and must take their
+    /// link in the format-version chain, because an older reader would rebuild
+    /// the derived set from filter+outline alone and bring them back visible.
+    #[test]
+    fn test_user_hidden_rows_survive_the_cala_roundtrip_and_stamp_v4() {
+        let mut workbook = make_test_workbook();
+        workbook.sheets[0].user_hidden_rows = [3u32, 9].into_iter().collect();
+        workbook.sheets[0].user_hidden_cols = [2u32].into_iter().collect();
+        // A filter hid row 5; that lives in the derived cache and must NOT be
+        // confused with the user set.
+        workbook.sheets[0].hidden_rows = [5u32].into_iter().collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hidden.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let loaded = read_calcula(&path).unwrap();
+
+        let mut rows: Vec<u32> = loaded.sheets[0].user_hidden_rows.iter().copied().collect();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![3, 9], "hand-hidden rows must come back hidden");
+        let cols: Vec<u32> = loaded.sheets[0].user_hidden_cols.iter().copied().collect();
+        assert_eq!(cols, vec![2]);
+        assert_eq!(
+            loaded.sheets[0].hidden_rows,
+            [5u32].into_iter().collect::<std::collections::HashSet<u32>>(),
+            "the derived cache stays its own set"
+        );
+
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, USER_HIDDEN_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "user_hidden"));
+    }
+
+    /// A workbook with no hand-hidden rows must NOT be stamped up the chain —
+    /// otherwise every ordinary save demands a newer reader for nothing.
+    #[test]
+    fn test_no_user_hidden_means_no_version_stamp() {
+        let workbook = make_test_workbook();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < USER_HIDDEN_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "user_hidden"));
     }
 
     /// EVERY cell error must survive a save/reload as ITSELF.

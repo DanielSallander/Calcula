@@ -374,6 +374,37 @@ describe("Workbook navigation (unlocked, cross-sheet)", () => {
     expect(t.writes).toEqual([]);
   });
 
+  // The hidden-state read is the one that MUST work off the active sheet:
+  // "is row 5 of the Data sheet visible?" cannot require an activate-dance,
+  // and the two questions it answers must stay apart.
+  it("getHiddenRows()/getHiddenColumns() carry THIS sheet and keep user vs effective apart",
+    async () => {
+      const t = {
+        ...makeTransport(),
+        getHiddenRows: vi.fn(async () => ({ user: [4], effective: [4, 11] })),
+        getHiddenColumns: vi.fn(async () => ({ user: [], effective: [6] })),
+      };
+      const wb = makeWorkbook(t);
+      const hidden = await wb.sheet("Hidden"); // index 2, NOT the active sheet (1)
+      expect(await hidden!.getHiddenRows()).toEqual({ user: [4], effective: [4, 11] });
+      expect(t.getHiddenRows).toHaveBeenCalledWith("Hidden");
+      // Row 11 is hidden by a filter or a collapsed group, NOT by hand.
+      expect(await hidden!.getHiddenColumns()).toEqual({ user: [], effective: [6] });
+      expect(t.getHiddenColumns).toHaveBeenCalledWith("Hidden");
+    });
+
+  it("a sheet-bound range's hide sugar carries THAT sheet's index", async () => {
+    const setRowsHidden = vi.fn(async () => ({ hidden: [0, 1] }));
+    const setColumnsHidden = vi.fn(async () => ({ hidden: [2] }));
+    const t = { ...makeTransport(), setRowsHidden, setColumnsHidden };
+    const wb = makeWorkbook(t);
+    const hidden = await wb.sheet("Hidden"); // index 2
+    await hidden!.range("A1:C2").setRowsHidden(true);
+    expect(setRowsHidden).toHaveBeenCalledWith(2, 0, 1, true);
+    await hidden!.range("C1:C2").setColumnsHidden(true);
+    expect(setColumnsHidden).toHaveBeenCalledWith(2, 2, 2, true);
+  });
+
   it("activate() switches to that sheet", async () => {
     const t = makeTransport();
     const wb = makeWorkbook(t);
@@ -508,6 +539,29 @@ describe("ScriptRange range ops (Wave 4)", () => {
     expect(goalSeek).not.toHaveBeenCalled();
   });
 
+  // VBA's Range.EntireRow.Hidden / Range.EntireColumn.Hidden: the ROW sugar
+  // forwards the range's ROW band and the COLUMN sugar its COLUMN band — the
+  // one place a range could plausibly forward the wrong axis.
+  it("setRowsHidden()/setColumnsHidden() forward the right axis of the box", async () => {
+    const setRowsHidden = vi.fn(async () => ({ hidden: [4, 5, 6] }));
+    const setColumnsHidden = vi.fn(async () => ({ hidden: [1, 2] }));
+    const t: RangeTransport = { ...perCellTransport(), setRowsHidden, setColumnsHidden };
+    const r = rangeFromAddress(t, "B5:C7");
+    const rows = await r.setRowsHidden(true);
+    expect(setRowsHidden).toHaveBeenCalledWith(4, 6, true);
+    expect(rows).toEqual({ hidden: [4, 5, 6] });
+    const cols = await r.setColumnsHidden(false);
+    expect(setColumnsHidden).toHaveBeenCalledWith(1, 2, false);
+    expect(cols).toEqual({ hidden: [1, 2] });
+  });
+
+  it("a navigated range hides the band it MOVED to, not the original", async () => {
+    const setRowsHidden = vi.fn(async () => ({ hidden: [] }));
+    const t: RangeTransport = { ...perCellTransport(), setRowsHidden };
+    await rangeFromAddress(t, "A1:C3").offset(4, 0).setRowsHidden(true);
+    expect(setRowsHidden).toHaveBeenCalledWith(4, 6, true);
+  });
+
   it("every range op THROWS honestly without its transport op", async () => {
     const r = rangeFromAddress(perCellTransport(), "A1:B2");
     await expect(r.find("x")).rejects.toThrow(/not available for this range/);
@@ -516,6 +570,8 @@ describe("ScriptRange range ops (Wave 4)", () => {
     await expect(r.textToColumns()).rejects.toThrow(/not available for this range/);
     await expect(r.specialCells("blanks")).rejects.toThrow(/not available for this range/);
     await expect(r.goalSeek(1, "B1")).rejects.toThrow(/not available for this range/);
+    await expect(r.setRowsHidden(true)).rejects.toThrow(/not available for this range/);
+    await expect(r.setColumnsHidden(true)).rejects.toThrow(/not available for this range/);
   });
 
   it("a navigated range keeps the range-op transport", async () => {

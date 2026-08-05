@@ -620,10 +620,22 @@ pub struct Sheet {
     pub freeze_row: Option<u32>,
     /// Freeze pane column (cols 0..freeze_col are frozen at left)
     pub freeze_col: Option<u32>,
-    /// Hidden row indices
+    /// EFFECTIVE hidden row indices — a DERIVED, write-only cache rebuilt at
+    /// every save from the filter + outline + user authorities. Exporters
+    /// (xlsx, .calp HTML) read it; the app's load path never does. Never treat
+    /// it as the home of any one authority — see `user_hidden_rows`.
     pub hidden_rows: HashSet<u32>,
-    /// Hidden column indices
+    /// EFFECTIVE hidden column indices (see `hidden_rows`).
     pub hidden_cols: HashSet<u32>,
+    /// Rows the USER hid by hand (right-click Hide / drag-to-zero). This is an
+    /// AUTHORITY, not a cache: it is the only hidden-ness with nowhere else to
+    /// live, so it round-trips save/reload on its own. Kept distinct from
+    /// `hidden_rows` because that set is regenerated from filter+outline on
+    /// every save — merging the two would drop the user's hides the first time
+    /// an outline group was expanded.
+    pub user_hidden_rows: HashSet<u32>,
+    /// Columns the user hid by hand (see `user_hidden_rows`).
+    pub user_hidden_cols: HashSet<u32>,
     /// Tab color as CSS hex string (e.g. "#ff0000"). Empty = no color.
     pub tab_color: String,
     /// Sheet visibility: "visible", "hidden", or "veryHidden"
@@ -657,6 +669,8 @@ impl Sheet {
             freeze_col: None,
             hidden_rows: HashSet::new(),
             hidden_cols: HashSet::new(),
+            user_hidden_rows: HashSet::new(),
+            user_hidden_cols: HashSet::new(),
             tab_color: String::new(),
             visibility: "visible".to_string(),
             notes: Vec::new(),
@@ -693,6 +707,8 @@ impl Sheet {
             freeze_col: None,
             hidden_rows: HashSet::new(),
             hidden_cols: HashSet::new(),
+            user_hidden_rows: HashSet::new(),
+            user_hidden_cols: HashSet::new(),
             tab_color: String::new(),
             visibility: "visible".to_string(),
             notes: Vec::new(),

@@ -211,6 +211,54 @@ fn restore_tables(
 // PUBLIC HELPERS
 // ============================================================================
 
+/// Copy sheet `i`'s USER-hidden rows/cols out of AppState onto the saved sheet.
+///
+/// These are an AUTHORITY with nowhere else to live, so they are saved as
+/// themselves. `Sheet::hidden_rows`/`hidden_cols` is a DERIVED cache rebuilt
+/// from filter+outline+user at every save: a hide stored only there would be
+/// lost the first time an outline group was expanded, and it is never read back
+/// at load anyway.
+pub(crate) fn apply_user_hidden_to_sheet(
+    state: &AppState,
+    sheet: &mut persistence::Sheet,
+    sheet_index: usize,
+) {
+    sheet.user_hidden_rows =
+        crate::commands::dimensions::user_hidden_rows_for_sheet(state, sheet_index);
+    sheet.user_hidden_cols =
+        crate::commands::dimensions::user_hidden_cols_for_sheet(state, sheet_index);
+}
+
+/// Re-hydrate every sheet's USER-hidden sets from a loaded workbook.
+///
+/// LOAD IS HALF THE FIX: without this the save is write-only, exactly like the
+/// derived `hidden_rows` cache (which the app has never read back). The active
+/// sheet's sets go to the mirror, everything else to the per-sheet vectors —
+/// the same split the dimension maps use.
+pub(crate) fn restore_user_hidden_from_workbook(
+    state: &AppState,
+    workbook: &Workbook,
+    active_idx: usize,
+) -> Result<(), String> {
+    let mut all_uhr = state.all_user_hidden_rows.lock().map_err(|e| e.to_string())?;
+    let mut all_uhc = state.all_user_hidden_cols.lock().map_err(|e| e.to_string())?;
+    let mut active_uhr = state.user_hidden_rows.lock().map_err(|e| e.to_string())?;
+    let mut active_uhc = state.user_hidden_cols.lock().map_err(|e| e.to_string())?;
+    all_uhr.clear();
+    all_uhc.clear();
+    active_uhr.clear();
+    active_uhc.clear();
+    for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
+        if sheet_idx == active_idx {
+            *active_uhr = sheet.user_hidden_rows.clone();
+            *active_uhc = sheet.user_hidden_cols.clone();
+        }
+        all_uhr.push(sheet.user_hidden_rows.clone());
+        all_uhc.push(sheet.user_hidden_cols.clone());
+    }
+    Ok(())
+}
+
 /// Build a Workbook from the current AppState (used by save_file and export_as_package).
 ///
 /// Captures ALL sheets, not just the active one (BUG-0011: the old
@@ -265,9 +313,9 @@ pub fn build_workbook_for_save(
             .get(i)
             .cloned()
             .unwrap_or_else(|| format!("Sheet{}", i + 1));
-        workbook
-            .sheets
-            .push(persistence::Sheet::from_grid(id, name, grid_ref, &styles, &dimensions));
+        let mut sheet = persistence::Sheet::from_grid(id, name, grid_ref, &styles, &dimensions);
+        apply_user_hidden_to_sheet(&state, &mut sheet, i);
+        workbook.sheets.push(sheet);
     }
 
     drop(grids);
@@ -491,7 +539,28 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState, sheet_ids
         }
     }
 
-    // ---- Hidden rows/cols (from autofilter + grouping) ----
+    // ---- Hidden rows/cols: the DERIVED effective-hidden cache ----
+    // Rebuilt from every authority at every save, for the exporters that have
+    // only one hidden bit (xlsx `hidden="1"`, .calp HTML report). The
+    // authorities themselves are saved separately: filters in their own state,
+    // outlines in `workbook.outlines`, user hides in `user_hidden_*` above.
+    // User hides
+    {
+        let rows = crate::commands::dimensions::user_hidden_rows_for_sheet(state, i);
+        let cols = crate::commands::dimensions::user_hidden_cols_for_sheet(state, i);
+        workbook.sheets[i].hidden_rows.extend(rows);
+        workbook.sheets[i].hidden_cols.extend(cols);
+    }
+    // Advanced-filter hidden rows (the runtime authority
+    // `collect_hidden_rows_for_sheet` counts them; the cache used not to,
+    // so an advanced filter's rows exported visible)
+    if let Ok(adv) = state.advanced_filter_hidden_rows.lock() {
+        if let Some(rows) = adv.get(&i) {
+            for row in rows {
+                workbook.sheets[i].hidden_rows.insert(*row);
+            }
+        }
+    }
     // AutoFilter hidden rows
     if let Ok(auto_filters) = state.auto_filters.lock() {
         if let Some(af) = auto_filters.get(&i) {
@@ -2236,6 +2305,9 @@ pub fn open_file(
             all_merged.push(sheet_merges);
         }
 
+        // ---- User-hidden rows/cols for ALL sheets ----
+        restore_user_hidden_from_workbook(&state, &workbook, active_idx)?;
+
         // ---- Per-sheet gridlines visibility ----
         let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
         show_gridlines.clear();
@@ -2945,6 +3017,16 @@ pub fn new_file(
         let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
         all_merged.clear();
         all_merged.push(std::collections::HashSet::new());
+
+        // Reset user-hidden rows/cols
+        state.user_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
+        state.user_hidden_cols.lock().map_err(|e| e.to_string())?.clear();
+        let mut all_uhr = state.all_user_hidden_rows.lock().map_err(|e| e.to_string())?;
+        all_uhr.clear();
+        all_uhr.push(std::collections::HashSet::new());
+        let mut all_uhc = state.all_user_hidden_cols.lock().map_err(|e| e.to_string())?;
+        all_uhc.clear();
+        all_uhc.push(std::collections::HashSet::new());
 
         // Reset gridlines visibility
         let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;

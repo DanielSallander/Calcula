@@ -418,6 +418,11 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         *column_widths = std::mem::take(&mut all_column_widths[index]);
         *row_heights = std::mem::take(&mut all_row_heights[index]);
 
+        // User-hidden rows/cols ride along with the dimensions: they are the
+        // same kind of per-sheet, index-keyed view state.
+        crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
+        crate::commands::dimensions::load_active_user_hidden(&state, index);
+
         // Swap merged regions: save current to old sheet, load from new sheet
         if old_index < all_merged_regions.len() {
             all_merged_regions[old_index] = std::mem::take(&mut *merged_regions);
@@ -528,6 +533,8 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     // New sheet gets empty dimensions and merged regions
     all_column_widths.push(HashMap::new());
     all_row_heights.push(HashMap::new());
+    crate::commands::dimensions::stash_active_user_hidden(&state, old_index);
+    crate::commands::dimensions::push_user_hidden_sheet(&state);
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
         // Save current sheet's merged regions before switching
@@ -780,6 +787,8 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     if index < all_row_heights.len() {
         all_row_heights.remove(index);
     }
+    crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
+    crate::commands::dimensions::remove_user_hidden_sheet(&state, index);
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
         // Save current merged regions before deleting
@@ -822,6 +831,7 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     if new_active < all_row_heights.len() {
         *row_heights = std::mem::take(&mut all_row_heights[new_active]);
     }
+    crate::commands::dimensions::load_active_user_hidden(&state, new_active);
     // Load new active sheet's merged regions
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
@@ -1066,6 +1076,8 @@ pub fn move_sheet(
     rotate_element(&mut *sheet_visibility, from_index, to_index);
     rotate_element(&mut *all_column_widths, from_index, to_index);
     rotate_element(&mut *all_row_heights, from_index, to_index);
+    crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
+    crate::commands::dimensions::rotate_user_hidden_sheet(&state, from_index, to_index, count);
     rotate_element(&mut *page_setups, from_index, to_index);
     {
         let mut gridlines = state.show_gridlines.lock().unwrap();
@@ -1105,6 +1117,7 @@ pub fn move_sheet(
     *current_grid = grids[new_active].clone();
     *column_widths = std::mem::take(&mut all_column_widths[new_active]);
     *row_heights = std::mem::take(&mut all_row_heights[new_active]);
+    crate::commands::dimensions::load_active_user_hidden(&state, new_active);
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
         let mut current_merged = state.merged_regions.lock().unwrap();
@@ -1265,6 +1278,8 @@ pub fn copy_sheet(
     }
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
+    crate::commands::dimensions::stash_active_user_hidden(&state, old_active);
+    crate::commands::dimensions::duplicate_user_hidden_sheet(&state, source_index, insert_at);
     page_setups.insert(insert_at, cloned_page_setup);
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
@@ -1281,6 +1296,7 @@ pub fn copy_sheet(
     *current_grid = cloned_grid;
     *column_widths = std::mem::take(&mut all_column_widths[new_index]);
     *row_heights = std::mem::take(&mut all_row_heights[new_index]);
+    crate::commands::dimensions::load_active_user_hidden(&state, new_index);
     {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
         let mut current_merged = state.merged_regions.lock().unwrap();

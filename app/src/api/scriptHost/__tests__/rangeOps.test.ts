@@ -367,12 +367,14 @@ describe("executeGetSpecialCells", () => {
     expect(lib.getSpecialCells).toHaveBeenCalledWith(0, 0, 9, 9, "blanks", undefined);
   });
 
-  // The backend's "visible" authority covers filter + outline hides only —
-  // rows/cols hidden BY HAND live in frontend Core state (manuallyHiddenRows/
-  // Cols), so the executor must union them for the active sheet (the Rust
-  // get_special_cells contract says exactly that) and must NOT pretend to
-  // know them for a background sheet.
-  it('"visible" also drops manually hidden rows/cols on the ACTIVE sheet', async () => {
+  // "visible" USED TO be patched here: hand-hidden rows/cols lived only in
+  // frontend Core state (manuallyHiddenRows/Cols), so the executor unioned them
+  // for the ACTIVE sheet and let a background sheet's answer pass through
+  // unfiltered — silently wrong on every sheet the user was not looking at.
+  // User hide is backend state now and get_special_cells composes all three
+  // authorities per sheet, so the executor must NOT touch the grid snapshot at
+  // all: a second copy of the same fact could only be staler.
+  it('"visible" trusts the backend verbatim — no frontend hidden-state union', async () => {
     const lib = makeLib();
     lib.getSpecialCells.mockResolvedValueOnce({
       cells: [
@@ -383,6 +385,8 @@ describe("executeGetSpecialCells", () => {
       ],
       truncated: false,
     });
+    // A grid snapshot claiming rows/cols are hidden must change NOTHING: the
+    // backend already excluded whatever is hidden, on whichever sheet.
     gridMock.getGridStateSnapshot.mockReturnValueOnce({
       sheetContext: { activeSheetIndex: 0 },
       dimensions: {
@@ -391,20 +395,29 @@ describe("executeGetSpecialCells", () => {
       },
     });
     const result = await executeGetSpecialCells(asLib(lib), 0, 0, 99, 9, "visible");
-    expect(result.cells).toEqual([{ row: 1, col: 0 }, { row: 5, col: 0 }]);
+    expect(result.cells).toEqual([
+      { row: 1, col: 0 },
+      { row: 3, col: 2 },
+      { row: 5, col: 0 },
+      { row: 6, col: 4 },
+    ]);
+    expect(gridMock.getGridStateSnapshot).not.toHaveBeenCalled();
   });
 
-  it('"visible" on a BACKGROUND sheet passes through (no manual-hide state exists for it)', async () => {
+  it('"visible" on a BACKGROUND sheet is answered by that sheet\'s own hidden state', async () => {
     const lib = makeLib();
-    gridMock.getGridStateSnapshot.mockReturnValueOnce({
-      sheetContext: { activeSheetIndex: 0 },
-      dimensions: { manuallyHiddenRows: new Set([1, 3]) },
+    lib.getSpecialCells.mockResolvedValueOnce({
+      // The backend already dropped the Data sheet's hidden rows.
+      cells: [{ row: 1, col: 0 }, { row: 9, col: 3 }],
+      truncated: false,
     });
     const result = await executeGetSpecialCells(asLib(lib), 0, 0, 99, 9, "visible", "Data");
-    expect(result.cells).toEqual([{ row: 1, col: 0 }, { row: 3, col: 2 }]);
+    expect(lib.getSpecialCells).toHaveBeenCalledWith(0, 0, 99, 9, "visible", 1);
+    expect(result.cells).toEqual([{ row: 1, col: 0 }, { row: 9, col: 3 }]);
+    expect(gridMock.getGridStateSnapshot).not.toHaveBeenCalled();
   });
 
-  it('non-"visible" kinds never consult the grid snapshot', async () => {
+  it("no kind consults the grid snapshot", async () => {
     const lib = makeLib();
     await executeGetSpecialCells(asLib(lib), 0, 0, 9, 9, "constants");
     expect(gridMock.getGridStateSnapshot).not.toHaveBeenCalled();

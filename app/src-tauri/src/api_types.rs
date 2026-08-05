@@ -2251,6 +2251,22 @@ pub struct SpecialCellsResult {
     pub truncated: bool,
 }
 
+/// Which rows (or columns) are hidden on ONE sheet, split by authority.
+///
+/// The two questions a caller can ask are genuinely different and the shape
+/// refuses to conflate them:
+///   - `user`      -- what a person (or a script) hid BY HAND. "What did I hide?"
+///   - `effective` -- hidden by ANY authority: user OR filter OR outline.
+///                    "Is this row visible?"
+///
+/// `user` is always a subset of `effective`. Both are ascending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenLinesInfo {
+    pub user: Vec<u32>,
+    pub effective: Vec<u32>,
+}
+
 // ============================================================================
 // Chart Entry (opaque JSON persistence)
 // ============================================================================

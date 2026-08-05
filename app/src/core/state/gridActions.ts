@@ -707,8 +707,13 @@ export function setFreezeConfig(
 }
 
 /**
- * Set which rows are hidden (e.g., by AutoFilter).
- * @param rows - Array of row indices to hide (empty array to show all)
+ * Set the FILTER-hidden rows (AutoFilter / Advanced Filter).
+ *
+ * This owns one of the three independent hidden sources; the reducer recomputes
+ * the effective union. Passing [] clears the filter's contribution only — rows
+ * the user hid by hand and rows an outline collapsed stay hidden.
+ *
+ * @param rows - Array of filter-hidden row indices (empty array to clear)
  */
 export function setHiddenRows(rows: number[]): SetHiddenRowsAction {
   return {
@@ -718,8 +723,11 @@ export function setHiddenRows(rows: number[]): SetHiddenRowsAction {
 }
 
 /**
- * Set which columns are hidden (combined set).
- * @param cols - Array of column indices to hide (empty array to show all)
+ * Set the non-user, non-outline hidden columns (today: a restored view
+ * bookmark). Like setHiddenRows this owns ONE source; it no longer replaces the
+ * effective set, so it cannot resurrect a hand-hidden column.
+ *
+ * @param cols - Array of column indices (empty array to clear this source)
  */
 export function setHiddenCols(cols: number[]): SetHiddenColsAction {
   return {
@@ -729,8 +737,14 @@ export function setHiddenCols(cols: number[]): SetHiddenColsAction {
 }
 
 /**
- * Set which rows are manually hidden by the user (distinct from filter-hidden).
- * @param rows - Array of row indices manually hidden
+ * Refresh the MIRROR of the backend's user-hidden row set for the active sheet.
+ *
+ * The authority is the backend (`set_rows_hidden` / `get_user_hidden_rows`);
+ * this action only reflects it. Do not dispatch a hand-computed set — call
+ * core/lib/hiddenRowsCols.applyRowsHidden(), which performs the gesture (undo,
+ * dirty flag, protection gate) and dispatches the authoritative result.
+ *
+ * @param rows - The resulting user-hidden row indices for the active sheet
  */
 export function setManuallyHiddenRows(rows: number[]): SetManuallyHiddenRowsAction {
   return {
@@ -740,8 +754,10 @@ export function setManuallyHiddenRows(rows: number[]): SetManuallyHiddenRowsActi
 }
 
 /**
- * Set which columns are manually hidden by the user.
- * @param cols - Array of column indices manually hidden
+ * Refresh the MIRROR of the backend's user-hidden column set for the active
+ * sheet. See {@link setManuallyHiddenRows} — the backend is the authority.
+ *
+ * @param cols - The resulting user-hidden column indices for the active sheet
  */
 export function setManuallyHiddenCols(cols: number[]): SetManuallyHiddenColsAction {
   return {

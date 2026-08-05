@@ -14,6 +14,9 @@ pub mod utils;
 #[cfg(test)]
 mod off_sheet_tests;
 
+#[cfg(test)]
+mod user_hidden_tests;
+
 // Re-export commands so they are accessible via crate::commands::*
 pub use data::*;
 pub use dimensions::*;

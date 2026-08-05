@@ -2995,6 +2995,27 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const lib = await getLib();
       return autoFitFromScript(lib, "rows", startRow, endRow, sheetIndex);
     }
+    // Hide / unhide (VBA Rows("5:10").Hidden = True). The USER-hidden set is one
+    // of three independent authorities — see the ALLOWLIST rows.
+    case "api.setRowsHidden":
+    case "api.setColumnsHidden": {
+      const [start, end, hidden, sheetIndex] = args as
+        [number, number, boolean, (number | string)?];
+      const lib = await getLib();
+      return executeSetLinesHidden(
+        lib,
+        method === "api.setRowsHidden" ? "rows" : "columns",
+        start, end, hidden, sheetIndex,
+      );
+    }
+    case "api.getHiddenRows":
+    case "api.getHiddenColumns": {
+      const [sheetIndex] = args as [(number | string)?];
+      const lib = await getLib();
+      return executeGetHiddenLines(
+        lib, method === "api.getHiddenRows" ? "rows" : "columns", sheetIndex,
+      );
+    }
     case "api.freezePanes": {
       // The @api orchestrator persists AND emits FREEZE_CHANGED, which the
       // Shell bridges into Core's freeze config — same path the View ribbon uses.
@@ -8276,32 +8297,90 @@ export async function executeGetSpecialCells(
   sheetRef?: number | string | null,
 ): Promise<{ cells: Array<{ row: number; col: number }>; truncated: boolean }> {
   const target = await resolveOptionalSheetRef(lib, sheetRef, "getSpecialCells");
+  // "visible" is answered ENTIRELY by the backend, on ANY sheet. It used to be
+  // patched here: hand-hidden rows/cols lived only in frontend Core state, so
+  // the executor unioned them for the ACTIVE sheet and let a background sheet's
+  // answer pass through (silently wrong). User hide is backend state now, and
+  // collect_hidden_rows_for_sheet composes all three authorities per sheet —
+  // there is nothing left for the frontend to add, and adding it would be the
+  // second, staler copy of the same fact.
   const result = await lib.getSpecialCells(startRow, startCol, endRow, endCol, kind, target);
-  if (kind !== "visible") {
-    return { cells: result.cells, truncated: result.truncated };
-  }
-  // "visible" gap the backend cannot close: rows/cols hidden BY HAND (right-
-  // click Hide) live only in frontend Core state (`manuallyHiddenRows/Cols`),
-  // while filter/outline hides are backend-authoritative and already excluded
-  // by get_special_cells. Union the manual hides here — but ONLY for the
-  // ACTIVE sheet, the one whose grid state the frontend holds; a background
-  // sheet has no manual-hide state to consult, so its answer passes through.
-  const gridApi = await import("../grid");
-  const state = gridApi.getGridStateSnapshot();
-  if (!state) return { cells: result.cells, truncated: result.truncated };
-  const activeIndex = state.sheetContext?.activeSheetIndex ?? 0;
-  if (target !== undefined && target !== activeIndex) {
-    return { cells: result.cells, truncated: result.truncated };
-  }
-  const manualRows = state.dimensions?.manuallyHiddenRows;
-  const manualCols = state.dimensions?.manuallyHiddenCols;
-  if ((!manualRows || manualRows.size === 0) && (!manualCols || manualCols.size === 0)) {
-    return { cells: result.cells, truncated: result.truncated };
-  }
-  const cells = result.cells.filter(
-    (c) => !(manualRows?.has(c.row) ?? false) && !(manualCols?.has(c.col) ?? false),
+  return { cells: result.cells, truncated: result.truncated };
+}
+
+// ============================================================================
+// Hide / unhide rows and columns (VBA Rows(...).Hidden / Columns(...).Hidden)
+// ============================================================================
+
+/** What api.getHiddenRows / api.getHiddenColumns answer.
+ *
+ *  TWO DIFFERENT QUESTIONS, never conflated:
+ *    - `user`      — hidden BY HAND ("what did I hide?")
+ *    - `effective` — hidden by ANY authority: user OR filter OR outline
+ *                    ("is this row visible?")
+ *  `user` is always a subset of `effective`; both are ascending. */
+export interface ScriptHiddenLines {
+  user: number[];
+  effective: number[];
+}
+
+/**
+ * api.setRowsHidden / api.setColumnsHidden — the whole inclusive span in ONE
+ * backend call, so a 500-row Hide is one IPC round-trip and ONE undo step.
+ *
+ * ACTIVE SHEET ONLY (set_rows_hidden/set_cols_hidden take no sheet parameter),
+ * refused rather than redirected when a ref names another sheet. The answer is
+ * the sheet's resulting USER-hidden set, which is also what Core's grid state
+ * is synced to — no second read anywhere.
+ */
+export async function executeSetLinesHidden(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  axis: "rows" | "columns",
+  start: number,
+  end: number,
+  hidden: boolean,
+  sheetRef?: number | string | null,
+): Promise<{ hidden: number[] }> {
+  const method = axis === "rows" ? "setRowsHidden" : "setColumnsHidden";
+  await assertActiveSheet(lib, sheetRef, method);
+  const span = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+  const result =
+    axis === "rows"
+      ? await lib.setRowsHidden(span, hidden)
+      : await lib.setColsHidden(span, hidden);
+  await syncHiddenLinesToGrid(axis, result);
+  return { hidden: result };
+}
+
+/** Push the backend's authoritative USER-hidden set into Core's grid state and
+ *  repaint. The reducer composes it with the filter/outline sets it already
+ *  holds — this never writes another authority's set. */
+async function syncHiddenLinesToGrid(axis: "rows" | "columns", lines: number[]): Promise<void> {
+  const [gridApi, dispatchMod] = await Promise.all([import("../grid"), import("../gridDispatch")]);
+  dispatchMod.dispatchGridAction(
+    axis === "rows"
+      ? gridApi.setManuallyHiddenRows(lines)
+      : gridApi.setManuallyHiddenCols(lines),
   );
-  return { cells, truncated: result.truncated };
+  gridApi.refreshGridData();
+}
+
+/**
+ * api.getHiddenRows / api.getHiddenColumns — ANY sheet (name or index), because
+ * "is row 5 of the Data sheet visible?" must not need an activate-dance.
+ */
+export async function executeGetHiddenLines(
+  lib: Awaited<ReturnType<typeof getLib>>,
+  axis: "rows" | "columns",
+  sheetRef?: number | string | null,
+): Promise<ScriptHiddenLines> {
+  const method = axis === "rows" ? "getHiddenRows" : "getHiddenColumns";
+  const target = await resolveOptionalSheetRef(lib, sheetRef, method);
+  const info =
+    axis === "rows"
+      ? await lib.getHiddenRowsInfo(target)
+      : await lib.getHiddenColsInfo(target);
+  return { user: info.user, effective: info.effective };
 }
 
 /** api.goalSeek parameters (mirrors the backend's GoalSeekParams + the sheet

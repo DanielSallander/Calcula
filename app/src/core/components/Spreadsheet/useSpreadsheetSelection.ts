@@ -46,7 +46,8 @@ import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
-import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
+import { setColumnWidth, setRowHeight, setAllDimensions, updateConfig } from "../../state/gridActions";
+import { applyRowsHidden, applyColsHidden, refreshUserHidden } from "../../lib/hiddenRowsCols";
 import { cellEvents, cellToChange } from "../../lib/cellEvents";
 import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry, CoreCommands } from "../../../api/commands";
@@ -492,30 +493,68 @@ export function useSpreadsheetSelection({
   );
 
   // -------------------------------------------------------------------------
-  // Hide Columns/Rows (drag to zero width/height)
+  // Hide Columns/Rows (drag the header edge to zero width/height)
+  //
+  // Same authority as the right-click Hide: the backend owns the user-hidden
+  // set (persisted, undoable, marks the document dirty). This used to write the
+  // reducer directly, which is how a drag-hide survived only until the next
+  // sheet switch and never reached the file.
   // -------------------------------------------------------------------------
   const handleHideColumns = useCallback(
     (cols: number[]) => {
-      const currentHidden = new Set(dimensions?.manuallyHiddenCols ?? []);
-      for (const col of cols) {
-        currentHidden.add(col);
-      }
-      dispatch(setManuallyHiddenCols(Array.from(currentHidden)));
-      canvasRef.current?.redraw();
+      void (async () => {
+        try {
+          // One undo step for the whole gesture: the drag left the column at
+          // ~0 width, so restore a sane width (it would come back as a 1px
+          // sliver on unhide) and hide it inside the same transaction.
+          await beginUndoTransaction("Hide columns");
+          try {
+            for (const col of cols) {
+              dispatch(setColumnWidth(col, config.defaultCellWidth));
+              await setColumnWidthApi(col, config.defaultCellWidth);
+            }
+            // Reports its own refusal and re-syncs the mirror; never throws.
+            await applyColsHidden(cols, true, dispatch);
+          } finally {
+            // Commit even on a partial failure: cancelling would DISCARD the
+            // undo entries for writes that already landed, leaving them
+            // permanently un-undoable. An empty transaction commits to nothing.
+            await commitUndoTransaction();
+          }
+        } catch (err) {
+          console.error("Failed to hide columns:", err);
+          alert(err instanceof Error ? err.message : String(err));
+        }
+        canvasRef.current?.redraw();
+      })();
     },
-    [dimensions?.manuallyHiddenCols, dispatch, canvasRef]
+    [dispatch, canvasRef, config.defaultCellWidth]
   );
 
   const handleHideRows = useCallback(
     (rows: number[]) => {
-      const currentHidden = new Set(dimensions?.manuallyHiddenRows ?? []);
-      for (const row of rows) {
-        currentHidden.add(row);
-      }
-      dispatch(setManuallyHiddenRows(Array.from(currentHidden)));
-      canvasRef.current?.redraw();
+      void (async () => {
+        try {
+          // See handleHideColumns — restore the dragged-away height and hide in
+          // ONE undo step.
+          await beginUndoTransaction("Hide rows");
+          try {
+            for (const row of rows) {
+              dispatch(setRowHeight(row, config.defaultCellHeight));
+              await setRowHeightApi(row, config.defaultCellHeight);
+            }
+            await applyRowsHidden(rows, true, dispatch);
+          } finally {
+            await commitUndoTransaction();
+          }
+        } catch (err) {
+          console.error("Failed to hide rows:", err);
+          alert(err instanceof Error ? err.message : String(err));
+        }
+        canvasRef.current?.redraw();
+      })();
     },
-    [dimensions?.manuallyHiddenRows, dispatch, canvasRef]
+    [dispatch, canvasRef, config.defaultCellHeight]
   );
 
   // Handle fill handle double-click (auto-fill to edge)
@@ -599,6 +638,9 @@ export function useSpreadsheetSelection({
         defaultCellWidth: defaults.defaultColumnWidth,
         defaultCellHeight: defaults.defaultRowHeight,
       }));
+      // A structural restore renumbers the user-hidden indices in the backend
+      // too; re-read the mirror or the wrong rows stay hidden.
+      await refreshUserHidden(dispatch);
     } catch (error) {
       console.error("[useSpreadsheetSelection] refreshDimensionsFromBackend failed:", error);
     }
@@ -640,7 +682,11 @@ export function useSpreadsheetSelection({
 
       // For structural restores (insert/delete rows/cols undo), refresh dimensions
       // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
-      if (result.structuralRestore || result.mergeChanged) {
+      // hiddenChanged: a hide/unhide undo changes NOTHING in updatedCells —
+      // visibility is not a cell value — so without a re-read the row stays
+      // hidden on screen while the backend considers it visible. Sizes come
+      // along because a drag-hide restores the row height in the same step.
+      if (result.structuralRestore || result.mergeChanged || result.hiddenChanged) {
         await refreshDimensionsFromBackend();
       }
 
@@ -700,7 +746,8 @@ export function useSpreadsheetSelection({
 
       // For structural restores, refresh dimensions
       // IMPORTANT: await before refreshing cells so canvas renders with correct dimensions
-      if (result.structuralRestore || result.mergeChanged) {
+      // See handleUndo: a hide/unhide redo is invisible in updatedCells.
+      if (result.structuralRestore || result.mergeChanged || result.hiddenChanged) {
         await refreshDimensionsFromBackend();
       }
 

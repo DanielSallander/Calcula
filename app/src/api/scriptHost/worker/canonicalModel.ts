@@ -196,6 +196,32 @@ export interface RangeTransport {
   groupRows?: (startRow: number, endRow: number) => Promise<RangeGroupResult>;
   /** Ungroup the rectangle's ROWS (api.ungroupRows). */
   ungroupRows?: (startRow: number, endRow: number) => Promise<RangeGroupResult>;
+  /** Hide or unhide the rectangle's ROWS (api.setRowsHidden). */
+  setRowsHidden?: (startRow: number, endRow: number, hidden: boolean) => Promise<HiddenLinesCount>;
+  /** Hide or unhide the rectangle's COLUMNS (api.setColumnsHidden). */
+  setColumnsHidden?: (
+    startCol: number,
+    endCol: number,
+    hidden: boolean,
+  ) => Promise<HiddenLinesCount>;
+}
+
+/** What a hide/unhide resolves to: the sheet's USER-hidden set afterwards,
+ *  ascending. NOT the effective set — a filter's or an outline's hides are
+ *  separate authorities and are never folded in here. */
+export interface HiddenLinesCount {
+  hidden: number[];
+}
+
+/** What sheet.getHiddenRows()/getHiddenColumns() answer — two different
+ *  questions kept apart by name:
+ *    - `user`      hidden BY HAND ("what did I hide?")
+ *    - `effective` hidden by ANY authority: user OR filter OR outline
+ *                  ("is this row visible?")
+ *  `user` is always a subset of `effective`; both are ascending. */
+export interface HiddenLinesAnswer {
+  user: number[];
+  effective: number[];
 }
 
 /** What a range group()/ungroup() resolves to (mirrors GroupingOpResult in
@@ -816,6 +842,14 @@ export interface ScriptRange {
   /** Ungroup this range's ROWS (Data ▸ Ungroup — VBA `Range.Rows.Ungroup`).
    *  ACTIVE SHEET only; requires the Grouping feature to be enabled. */
   ungroup(): Promise<RangeGroupResult>;
+  /** Hide (or unhide) this range's ROWS — VBA `Range.EntireRow.Hidden = True`.
+   *  Right-click ▸ Hide, in ONE undo step. This is the USER-hidden set: it
+   *  does not touch, and is not touched by, filter or outline hiding. ACTIVE
+   *  SHEET only. */
+  setRowsHidden(hidden: boolean): Promise<HiddenLinesCount>;
+  /** Hide (or unhide) this range's COLUMNS — VBA
+   *  `Range.EntireColumn.Hidden = True`. Same rules as setRowsHidden. */
+  setColumnsHidden(hidden: boolean): Promise<HiddenLinesCount>;
 }
 
 /**
@@ -1234,6 +1268,22 @@ export function makeRange(t: RangeTransport, box: Box): ScriptRange {
       }
       return t.ungroupRows(box.startRow, box.endRow);
     },
+    async setRowsHidden(hidden) {
+      if (!t.setRowsHidden) {
+        throw new Error(
+          "setRowsHidden() is not available for this range — its context provides value access only",
+        );
+      }
+      return t.setRowsHidden(box.startRow, box.endRow, hidden);
+    },
+    async setColumnsHidden(hidden) {
+      if (!t.setColumnsHidden) {
+        throw new Error(
+          "setColumnsHidden() is not available for this range — its context provides value access only",
+        );
+      }
+      return t.setColumnsHidden(box.startCol, box.endCol, hidden);
+    },
   };
   /** Insist the transport can fill, in the same honest-refusal style the
    *  format()/end() paths use. */
@@ -1362,6 +1412,13 @@ export interface ScriptSheet {
   /** Size an inclusive row span to fit its contents ON THIS SHEET (empty rows
    *  reset to the default height). ACTIVE sheet only, like autoFitColumns. */
   autoFitRows(startRow: number, endRow: number): Promise<FillCount>;
+  /** Which rows are hidden ON THIS SHEET — `user` (hidden by hand) and
+   *  `effective` (hidden by anything: hand, filter, or collapsed group) kept
+   *  apart. Works for ANY sheet, active or not. */
+  getHiddenRows(): Promise<HiddenLinesAnswer>;
+  /** Which columns are hidden ON THIS SHEET (see getHiddenRows; there are no
+   *  column filters, so `effective` is hand or collapsed group). */
+  getHiddenColumns(): Promise<HiddenLinesAnswer>;
 }
 
 /** The workbook facet: navigate Workbook -> Sheet -> Range across sheets. */
@@ -1554,6 +1611,10 @@ export interface WorkbookTransport {
   autoFitColumns?(sheet: number | string, startCol: number, endCol: number): Promise<FillCount>;
   /** Best-fit a row span to its contents on one sheet (api.autoFitRows). */
   autoFitRows?(sheet: number | string, startRow: number, endRow: number): Promise<FillCount>;
+  /** Hidden rows on one sheet, by-hand and effective (api.getHiddenRows). */
+  getHiddenRows?(sheet: number | string): Promise<HiddenLinesAnswer>;
+  /** Hidden columns on one sheet (api.getHiddenColumns). */
+  getHiddenColumns?(sheet: number | string): Promise<HiddenLinesAnswer>;
   // ---- Range-scoped ops (Wave 4). Same optionality contract. ----
   /** Find inside a rectangle of one sheet (api.findAll + range option). */
   findInRange?(
@@ -1617,6 +1678,21 @@ export interface WorkbookTransport {
   groupRows?(sheetIndex: number, startRow: number, endRow: number): Promise<RangeGroupResult>;
   /** Ungroup a row band on one sheet (api.ungroupRows). */
   ungroupRows?(sheetIndex: number, startRow: number, endRow: number): Promise<RangeGroupResult>;
+  /** Hide/unhide a row band on one sheet (api.setRowsHidden — ACTIVE sheet
+   *  only, refused host-side otherwise). */
+  setRowsHidden?(
+    sheetIndex: number,
+    startRow: number,
+    endRow: number,
+    hidden: boolean,
+  ): Promise<HiddenLinesCount>;
+  /** Hide/unhide a column band on one sheet (api.setColumnsHidden). */
+  setColumnsHidden?(
+    sheetIndex: number,
+    startCol: number,
+    endCol: number,
+    hidden: boolean,
+  ): Promise<HiddenLinesCount>;
 }
 
 /** The per-sheet RangeTransport a WorkbookTransport implies for ONE sheet:
@@ -1689,6 +1765,13 @@ export function sheetRangeTransport(t: WorkbookTransport, index: number): RangeT
       : undefined,
     ungroupRows: t.ungroupRows
       ? (startRow, endRow) => t.ungroupRows!(index, startRow, endRow)
+      : undefined,
+    // Hide/unhide sugar, same forwarding contract.
+    setRowsHidden: t.setRowsHidden
+      ? (startRow, endRow, hidden) => t.setRowsHidden!(index, startRow, endRow, hidden)
+      : undefined,
+    setColumnsHidden: t.setColumnsHidden
+      ? (startCol, endCol, hidden) => t.setColumnsHidden!(index, startCol, endCol, hidden)
       : undefined,
   };
 }
@@ -1876,6 +1959,12 @@ function makeSheet(
     },
     async autoFitRows(startRow, endRow) {
       return requireOp(t.autoFitRows, "autoFitRows").call(t, currentName, startRow, endRow);
+    },
+    async getHiddenRows() {
+      return requireOp(t.getHiddenRows, "getHiddenRows").call(t, currentName);
+    },
+    async getHiddenColumns() {
+      return requireOp(t.getHiddenColumns, "getHiddenColumns").call(t, currentName);
     },
   };
 }

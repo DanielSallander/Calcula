@@ -34,7 +34,10 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 /// reason the scheduler did: an older reader would not merely ignore it, it
 /// would drop it on the next save and the workbook would come back looking
 /// fully calculated while still holding pre-recalculation values.
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 3;
+///
+/// v4 adds the user-hidden row/column sets
+/// (`USER_HIDDEN_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 4;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -47,6 +50,23 @@ pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 3;
 /// failure; quietly laundering wrong numbers into trustworthy-looking ones is
 /// not.
 pub const PENDING_RECALC_MIN_FORMAT_VERSION: u32 = 3;
+
+/// Minimum `.cala` format version a reader must be to handle the per-sheet
+/// `userHiddenRows` / `userHiddenCols` sets in `metadata.json` — the rows and
+/// columns the user hid BY HAND, as opposed to the derived `hiddenRows` cache
+/// a filter or an outline produces.
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes,
+/// and not cosmetically. An older reader drops the section, then rebuilds
+/// `hiddenRows` from filter+outline alone on its next save — so the manual
+/// hides are gone permanently, and the rows come back VISIBLE. A row is very
+/// often hidden precisely to keep working data out of a distributed report;
+/// silently resurrecting it is a disclosure, not a lost preference. Refusing
+/// the open is the honest failure.
+///
+/// Stamped ONLY when some sheet actually carries a user hide, so an ordinary
+/// workbook still writes v1-v3 and stays openable by older builds.
+pub const USER_HIDDEN_MIN_FORMAT_VERSION: u32 = 4;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

@@ -948,6 +948,33 @@ export const vAutoFitSpan: Validator = ([start, end, sheetIndex]) => {
   return checkOptionalSheetRef(sheetIndex);
 };
 
+/** The most rows (or columns) one hide/unhide call may name. A hide is one
+ *  index per line in the set, so the ceiling is the grid's own row count —
+ *  this catches an inverted or garbage span, not an abusive one. */
+export const MAX_HIDDEN_SPAN = 1_048_576;
+
+/** api.setRowsHidden / api.setColumnsHidden args:
+ *  [start, end, hidden, sheet?] — an INCLUSIVE index span (the ribbon's and
+ *  autoFit's vocabulary), plus the boolean that says which way. */
+export const vHiddenSpan: Validator = ([start, end, hidden, sheet]) => {
+  if (!isCellCoord(start)) return "start must be a non-negative integer";
+  if (!isCellCoord(end)) return "end must be a non-negative integer";
+  if ((end as number) < (start as number)) return "end must be >= start";
+  const span = (end as number) - (start as number) + 1;
+  if (span > MAX_HIDDEN_SPAN) {
+    return `span too large: ${span} (max ${MAX_HIDDEN_SPAN})`;
+  }
+  if (typeof hidden !== "boolean") {
+    return "hidden must be a boolean (true hides, false unhides)";
+  }
+  return checkOptionalSheetRef(sheet, "sheet");
+};
+
+/** api.getHiddenRows / api.getHiddenColumns args: [sheet?] — nothing else.
+ *  The answer carries BOTH the by-hand set and the effective union, so there
+ *  is no "which one do you want" flag to validate. */
+export const vHiddenQuery: Validator = ([sheet]) => checkOptionalSheetRef(sheet, "sheet");
+
 /** What api.fillRange accepts for options.direction / options.type. */
 const FILL_DIRECTIONS = new Set(["down", "up", "right", "left"]);
 const FILL_TYPES = new Set(["copy", "series"]);

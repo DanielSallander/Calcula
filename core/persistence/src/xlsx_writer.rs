@@ -123,12 +123,17 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
         }
 
         // ---- Hidden rows ----
-        for row in &sheet.hidden_rows {
+        // The EFFECTIVE set: the derived filter/outline cache UNION the rows
+        // the user hid by hand. Excel has one `hidden="1"` bit and no notion of
+        // provenance, so both authorities collapse into it here. Writing only
+        // the derived cache exported a workbook whose hand-hidden rows were
+        // visible again.
+        for row in sheet.hidden_rows.union(&sheet.user_hidden_rows) {
             worksheet.set_row_hidden(*row)?;
         }
 
         // ---- Hidden columns ----
-        for col in &sheet.hidden_cols {
+        for col in sheet.hidden_cols.union(&sheet.user_hidden_cols) {
             worksheet.set_column_hidden(*col as u16)?;
         }
 
@@ -1051,5 +1056,66 @@ fn is_default_background(color: &engine::theme::ThemeColor) -> bool {
         engine::theme::ThemeColor::Theme { slot: engine::theme::ThemeColorSlot::Light1, tint } if tint.0 == 0 => true,
         engine::theme::ThemeColor::Absolute(c) => c.r == 255 && c.g == 255 && c.b == 255 && c.a == 255,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SavedCell, SavedCellValue, Sheet};
+
+    /// Hidden rows and columns must survive an xlsx export/import.
+    ///
+    /// This used to be a second copy of the .cala data-loss bug: the writer
+    /// only emitted the DERIVED filter/outline cache (so a hand-hidden row was
+    /// exported visible), and the reader dropped what it parsed into the same
+    /// derived cache, which the app never reads back (so an Excel file with
+    /// hidden rows imported with every row visible).
+    #[test]
+    fn test_hidden_rows_and_cols_survive_the_xlsx_roundtrip() {
+        let mut workbook = Workbook::new();
+        workbook.sheets.clear();
+        let mut sheet = Sheet::new("Data".to_string());
+        // Some content so the sheet has a used range covering the hidden rows.
+        for r in 0..12u32 {
+            sheet.cells.insert(
+                (r, 0),
+                SavedCell {
+                    value: SavedCellValue::Number(r as f64),
+                    formula: None,
+                    style_index: 0,
+                    rich_text: None,
+                },
+            );
+            sheet.cells.insert(
+                (r, 3),
+                SavedCell {
+                    value: SavedCellValue::Text(format!("row{r}")),
+                    formula: None,
+                    style_index: 0,
+                    rich_text: None,
+                },
+            );
+        }
+        // A filter hid row 2 (derived cache); the user hid rows 5 and 9 and
+        // column 1 by hand.
+        sheet.hidden_rows = [2u32].into_iter().collect();
+        sheet.user_hidden_rows = [5u32, 9].into_iter().collect();
+        sheet.user_hidden_cols = [1u32].into_iter().collect();
+        workbook.sheets.push(sheet);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hidden.xlsx");
+        save_xlsx(&workbook, &path).unwrap();
+        let loaded = crate::xlsx_reader::load_xlsx(&path).unwrap();
+
+        let s = &loaded.sheets[0];
+        // Excel has one hidden bit, so BOTH authorities come back as the user
+        // set (the only authority an import can honestly claim).
+        let mut rows: Vec<u32> = s.user_hidden_rows.iter().copied().collect();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 5, 9], "every hidden row must survive export+import");
+        let cols: Vec<u32> = s.user_hidden_cols.iter().copied().collect();
+        assert_eq!(cols, vec![1], "hidden column must survive export+import");
     }
 }

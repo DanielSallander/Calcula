@@ -106,6 +106,7 @@ import { getGridStateSnapshot } from "../core/state/GridContext";
 import { dispatchGridAction } from "./gridDispatch";
 import { invokeBackend } from "./backend";
 import { setZoom as setZoomAction } from "../core/state/gridActions";
+import { applyRowsHidden, applyColsHidden } from "../core/lib/hiddenRowsCols";
 
 /**
  * Set freeze panes via backend and emit events for Shell/Core sync.
@@ -458,4 +459,37 @@ export async function convertFormulaStyle(
     baseRow,
     baseCol,
   });
+}
+// ============================================================================
+// Hidden rows/columns — the USER's by-hand hides
+// ============================================================================
+// The backend owns the user-hidden sets per sheet; the grid reducer's
+// manuallyHidden* is a mirror of that authority. Extensions must perform a
+// hide through these two functions rather than dispatching setManuallyHidden*
+// themselves: the action creator only moves the mirror, so a hand-dispatched
+// set is not persisted, not undoable, does not mark the document dirty, and
+// silently disagrees with the backend on the next read.
+//
+// The user set is ONE of three independent sources of "hidden" (the others
+// being filters and outline groups) and writing it never disturbs the other
+// two — see `commands::nav::collect_hidden_rows_for_sheet` for the union.
+
+/**
+ * Hide or unhide ROWS on the active sheet, as the user's own hide.
+ *
+ * @param rows   Row indices to act on (the DELTA, not the resulting set).
+ * @param hidden true to hide, false to unhide.
+ * @returns true when the backend accepted the change; false when it refused
+ *          (a protected sheet), in which case the mirror has been re-synced
+ *          from the backend and the refusal surfaced to the user.
+ */
+export function hideRows(rows: number[], hidden: boolean): Promise<boolean> {
+  return applyRowsHidden(rows, hidden, dispatchGridAction);
+}
+
+/**
+ * Hide or unhide COLUMNS on the active sheet. See {@link hideRows}.
+ */
+export function hideColumns(cols: number[], hidden: boolean): Promise<boolean> {
+  return applyColsHidden(cols, hidden, dispatchGridAction);
 }

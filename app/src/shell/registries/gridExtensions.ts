@@ -62,6 +62,8 @@ const GROUP_ORDER: Record<string, number> = {
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
 import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight, getDefaultDimensions } from "../../core/lib/tauri-api";
+import { applyRowsHidden, applyColsHidden, indexRange } from "../../core/lib/hiddenRowsCols";
+import { dispatchGridAction } from "@api/gridDispatch";
 import { DialogExtensions } from "@api/ui";
 import { columnToLetter } from "../../core/types";
 import { DimensionInputDialog, DIMENSION_INPUT_DIALOG_ID, type DimensionInputData } from "../dialogs/DimensionInputDialog";
@@ -456,27 +458,22 @@ export function registerCoreGridContextMenu(): void {
   // -------------------------------------------------------------------------
   // Format Group - Hide/Unhide Rows and Columns
   // -------------------------------------------------------------------------
+  // These four go through core/lib/hiddenRowsCols, which calls the BACKEND
+  // authority (set_rows_hidden / set_cols_hidden): the hide is persisted in the
+  // .cala, recorded as one undo step for the whole range, and marks the document
+  // dirty. They used to dispatch a window CustomEvent into the grid reducer and
+  // nothing else, so the hide was lost on the next save/reload.
   gridExtensions.registerContextMenuItem({
     id: "core:hideRows",
     label: "Hide",
     group: GridMenuGroups.FORMAT,
     order: 30,
     visible: (ctx) => ctx.selection?.type === "rows",
-    onClick: (ctx) => {
+    onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "rows") return;
 
-      const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
-      const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
-      const currentManual = ctx.dimensions.manuallyHiddenRows ?? new Set<number>();
-      const newManual = new Set(currentManual);
-
-      for (let r = minRow; r <= maxRow; r++) {
-        newManual.add(r);
-      }
-
-      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-rows", {
-        detail: { rows: Array.from(newManual) },
-      }));
+      const rows = indexRange(ctx.selection.startRow, ctx.selection.endRow);
+      await applyRowsHidden(rows, true, dispatchGridAction);
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });
@@ -488,39 +485,28 @@ export function registerCoreGridContextMenu(): void {
     order: 31,
     visible: (ctx) => {
       if (ctx.selection?.type !== "rows") return false;
-      const manuallyHidden = ctx.dimensions.manuallyHiddenRows;
-      if (!manuallyHidden || manuallyHidden.size === 0) return false;
+      // Offer Unhide only for USER hides. A filter-hidden or outline-hidden row
+      // is not the user's to unhide here — clearing the filter or expanding the
+      // group is. (ctx.dimensions.manuallyHiddenRows mirrors the backend set.)
+      const userHidden = ctx.dimensions.manuallyHiddenRows;
+      if (!userHidden || userHidden.size === 0) return false;
 
       const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
       const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
 
-      // Show "Unhide" if any manually hidden row exists in the range (inclusive of boundaries)
-      for (let r = minRow; r <= maxRow; r++) {
-        if (manuallyHidden.has(r)) return true;
-      }
-      // Also check rows between the selected rows (e.g., selecting row 1 and 3 to unhide row 2)
-      for (const hr of manuallyHidden) {
+      // Any user-hidden row inside the selected span, including one sandwiched
+      // between two selected rows (select rows 1 and 3 to unhide row 2).
+      for (const hr of userHidden) {
         if (hr >= minRow && hr <= maxRow) return true;
       }
       return false;
     },
     separatorAfter: true,
-    onClick: (ctx) => {
+    onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "rows") return;
 
-      const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
-      const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
-      const currentManual = ctx.dimensions.manuallyHiddenRows ?? new Set<number>();
-      const newManual = new Set(currentManual);
-
-      // Remove all manually hidden rows within the selected range
-      for (let r = minRow; r <= maxRow; r++) {
-        newManual.delete(r);
-      }
-
-      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-rows", {
-        detail: { rows: Array.from(newManual) },
-      }));
+      const rows = indexRange(ctx.selection.startRow, ctx.selection.endRow);
+      await applyRowsHidden(rows, false, dispatchGridAction);
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });
@@ -531,21 +517,11 @@ export function registerCoreGridContextMenu(): void {
     group: GridMenuGroups.FORMAT,
     order: 32,
     visible: (ctx) => ctx.selection?.type === "columns",
-    onClick: (ctx) => {
+    onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "columns") return;
 
-      const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
-      const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
-      const currentManual = ctx.dimensions.manuallyHiddenCols ?? new Set<number>();
-      const newManual = new Set(currentManual);
-
-      for (let c = minCol; c <= maxCol; c++) {
-        newManual.add(c);
-      }
-
-      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-cols", {
-        detail: { cols: Array.from(newManual) },
-      }));
+      const cols = indexRange(ctx.selection.startCol, ctx.selection.endCol);
+      await applyColsHidden(cols, true, dispatchGridAction);
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });
@@ -557,33 +533,23 @@ export function registerCoreGridContextMenu(): void {
     order: 33,
     visible: (ctx) => {
       if (ctx.selection?.type !== "columns") return false;
-      const manuallyHidden = ctx.dimensions.manuallyHiddenCols;
-      if (!manuallyHidden || manuallyHidden.size === 0) return false;
+      const userHidden = ctx.dimensions.manuallyHiddenCols;
+      if (!userHidden || userHidden.size === 0) return false;
 
       const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
       const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
 
-      for (const hc of manuallyHidden) {
+      for (const hc of userHidden) {
         if (hc >= minCol && hc <= maxCol) return true;
       }
       return false;
     },
     separatorAfter: true,
-    onClick: (ctx) => {
+    onClick: async (ctx) => {
       if (!ctx.selection || ctx.selection.type !== "columns") return;
 
-      const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
-      const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
-      const currentManual = ctx.dimensions.manuallyHiddenCols ?? new Set<number>();
-      const newManual = new Set(currentManual);
-
-      for (let c = minCol; c <= maxCol; c++) {
-        newManual.delete(c);
-      }
-
-      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-cols", {
-        detail: { cols: Array.from(newManual) },
-      }));
+      const cols = indexRange(ctx.selection.startCol, ctx.selection.endCol);
+      await applyColsHidden(cols, false, dispatchGridAction);
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });
