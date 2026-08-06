@@ -5,7 +5,10 @@
   "license": "(MIT OR Apache-2.0)",
   "type": "module",
   "scripts": {
+    "dev:kill": "node scripts/kill-stale-dev.mjs",
+    "predev": "node scripts/kill-stale-dev.mjs",
     "dev": "vite",
+    "predev:data": "node scripts/kill-stale-dev.mjs",
     "dev:data": "cross-env VITE_LOAD_MOCK_DATA=true vite",
     "build": "tsc --noEmit -p tsconfig.check.json && vite build",
     "check-types": "tsc --noEmit -p tsconfig.check.json",
